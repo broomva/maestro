@@ -10,6 +10,7 @@ import {
   DATA_TICK_PART,
   isTickDataPart,
   MAESTRO_PROTOCOL_HEADER,
+  MAESTRO_PROTOCOL_VERSION,
   type MaestroDataParts,
   type MaestroMetadata,
   type TickDataPart,
@@ -18,10 +19,13 @@ import {
   UI_MESSAGE_STREAM_VERSION,
   type UIMessageEnvelope,
 } from "./chat";
+import { MAESTRO_PROTOCOL_VERSION as VERSION_SRC, X_MAESTRO_PROTOCOL } from "./version";
 
-// done.check for seam-chat-transport (BRO-1776): `bun test packages/protocol -t
-// transport`. `--filter` is a no-op in bun test (only `-t` filters by name); every
-// describe carries "transport" so `-t transport` isolates the suite.
+// done.check for seam-chat-transport (BRO-1776): `bun run typecheck && bun test
+// packages/protocol -t transport`. `--filter` is a no-op in bun test (only `-t` filters
+// by name); every describe carries "transport" so `-t transport` isolates. typecheck is
+// REQUIRED: `bun test` strips types, so the compile-time witnesses (MaestroDataParts /
+// MaestroMetadata composition) only bite under `tsc --noEmit`, not `bun test` alone.
 //
 // This seam declares Maestro's DELTA over the AI SDK v6 UI Message Stream (adopted
 // wholesale) — the data-part payloads, the control line, the constants. The AI SDK
@@ -36,8 +40,13 @@ describe("chat transport · wire constants", () => {
     expect(UI_MESSAGE_STREAM_HEADER).toBe("x-vercel-ai-ui-message-stream");
     expect(UI_MESSAGE_STREAM_VERSION).toBe("v1");
   });
-  test("the maestro protocol header is set (D-NAME)", () => {
+  test("the maestro protocol header + version are the SINGLE source (re-exported from version.ts, not re-declared)", () => {
     expect(MAESTRO_PROTOCOL_HEADER).toBe("x-maestro-protocol");
+    // Single-source proof: chat's export IS version.ts's constant, not a second literal
+    // that could drift on the next header rename (the header was already renamed once).
+    expect(MAESTRO_PROTOCOL_HEADER).toBe(X_MAESTRO_PROTOCOL);
+    expect(MAESTRO_PROTOCOL_VERSION).toBe(VERSION_SRC);
+    expect(MAESTRO_PROTOCOL_VERSION).toBe(1);
   });
   test("the chat endpoint is session-addressed", () => {
     expect(CHAT_ENDPOINT).toBe("/api/sessions/:id/chat");
@@ -85,6 +94,18 @@ describe("chat transport · the tick data part (the one part this seam owns)", (
     expect(isTickDataPart(gatePart)).toBe(false);
     expect(isTickDataPart(failedTool)).toBe(false);
   });
+
+  test("isTickDataPart is TAG-ONLY — it ACCEPTS a malformed data-tick, so consumers read data.rows defensively", () => {
+    // The guard matches on `type` alone; it narrows the type but does NOT validate `data`.
+    // A malformed data-tick (reachable via the loose `parts: unknown[]` control line) passes
+    // the guard with a bad `data`. This pins the obligation on BRO-1782/BRO-1790: never trust
+    // the narrow blindly, read `part.data?.rows ?? []`.
+    const malformed = { type: "data-tick", id: DATA_TICK_ID, data: "not-a-receipt" };
+    expect(isTickDataPart(malformed)).toBe(true); // tag matched, data NOT validated
+    // the defensive read the contract requires of consumers:
+    const rows = (malformed as { data?: { rows?: unknown[] } }).data?.rows ?? [];
+    expect(rows).toEqual([]);
+  });
 });
 
 describe("chat transport · the two UIMessage type params Maestro owns (METADATA + DATA_PARTS; TOOLS deferred)", () => {
@@ -119,9 +140,11 @@ describe("chat transport · the child stdin control line (HARNESS §2)", () => {
   });
 
   test("an ai-shaped UIMessage (id/role/parts) satisfies the minimal envelope structurally", () => {
-    // Stands in for the real assignability (`ai`'s UIMessage → UIMessageEnvelope),
-    // which apps/runtime asserts with `ai` present. Here we prove the envelope is the
-    // structural subset the harness line needs — id + role + a parts array.
+    // SHAPE-ILLUSTRATION only (a self-satisfying literal, acceptable by design): protocol
+    // is zero-dep, so it cannot import `ai` to prove real assignability. The binding
+    // acceptance criterion — `const _: UIMessageEnvelope = {} as import("ai").UIMessage` —
+    // is asserted in apps/runtime + apps/app (BRO-1790/1782) where `ai` is a dependency.
+    // Here we only illustrate the envelope is the structural subset the harness line needs.
     const aiShaped = {
       id: "m2",
       role: "assistant" as const,

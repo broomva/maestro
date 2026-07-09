@@ -16,7 +16,7 @@
 // So this file declares ONLY Maestro's delta over that third-party protocol:
 //   • the custom `data-*` part PAYLOADS Maestro streams (`data-tick`; `data-gate`
 //     is owned by the gate-queue seam, BRO-1789) and the `MaestroDataParts` map that
-//     parameterizes ai's generic `UIMessage<METADATA, DATA_TYPES>`;
+//     parameterizes the DATA_PARTS slot of ai's `UIMessage<METADATA, DATA_PARTS, TOOLS>`;
 //   • the wire constants (headers, protocol + SDK version pins, endpoint);
 //   • the harness stdin control line (`ChatControlMessage`) that carries a UIMessage
 //     client → runtime → child.
@@ -46,8 +46,15 @@
 export const UI_MESSAGE_STREAM_HEADER = "x-vercel-ai-ui-message-stream" as const;
 /** The UI Message Stream Protocol version literal — the real compatibility anchor. */
 export const UI_MESSAGE_STREAM_VERSION = "v1" as const;
-/** The Maestro protocol header carried on every request/stream; the relay passes it through (D-NAME). */
-export const MAESTRO_PROTOCOL_HEADER = "x-maestro-protocol" as const;
+/**
+ * The Maestro protocol header + version — the SINGLE source is `version.ts` (which owns
+ * protocol identity, D-NAME). RE-EXPORTED here, never re-declared: a chat consumer can
+ * import `MAESTRO_PROTOCOL_HEADER` alongside the other wire constants without a second
+ * string literal that would drift from `version.ts` on the next rename (the header was
+ * already renamed once, `x-broomva` → `x-maestro`). Re-declaring a wire constant is the
+ * exact drift this seam's own MaestroMetadata rationale exists to prevent.
+ */
+export { MAESTRO_PROTOCOL_VERSION, X_MAESTRO_PROTOCOL as MAESTRO_PROTOCOL_HEADER } from "./version";
 /**
  * The AI SDK v6 major whose UI Message Stream Maestro adopts as its chat wire. The
  * runtime's stream producer and the client's `useChat` MUST share it — the child's
@@ -66,10 +73,11 @@ export const CHAT_ENDPOINT = "/api/sessions/:id/chat" as const;
 
 // ── Maestro custom data parts (the delta over ai's UIMessage) ─────────────────
 //
-// ai's `UIMessage<METADATA, DATA_TYPES>` is generic over a DATA_TYPES map; each key
-// NAME yields a `data-${NAME}` part carrying that payload (ai's `DataUIPart`). Maestro's
-// map is `MaestroDataParts`; apps/app composes `UIMessage<MaestroMetadata,
-// MaestroDataParts>` (where `ai` is present). This file owns the PAYLOAD types + the map.
+// ai's `UIMessage<METADATA, DATA_PARTS, TOOLS>` takes a DATA_PARTS map; each key NAME
+// yields a `data-${NAME}` part carrying that payload (ai's `DataUIPart`). Maestro's map
+// is `MaestroDataParts`; apps/app composes `UIMessage<MaestroMetadata, MaestroDataParts>`
+// (leaving TOOLS at ai's default; where `ai` is present). This file owns the PAYLOAD
+// types + the map.
 
 /** The `data-tick` part NAME — ai keys the DATA_TYPES map by the bare name; the part `type` is `data-<name>`. */
 export const DATA_TICK_NAME = "tick" as const;
@@ -93,11 +101,15 @@ export interface TickReceipt {
 }
 
 /**
- * Maestro's DATA_TYPES map for ai's generic `UIMessage<METADATA, DATA_TYPES>`. Each
- * key NAME becomes a `data-${NAME}` part. `tick` is owned here; the gate-queue seam
- * (BRO-1789) adds a `gate: GateCard` member to THIS interface — extending the single
- * canonical map rather than re-declaring a data part elsewhere, so data-part ownership
- * stays single-sourced (this seam leaves the gate payload out, not generic-typed).
+ * Maestro's DATA_PARTS map for ai's generic `UIMessage<METADATA, DATA_PARTS, TOOLS>`.
+ * Each key NAME becomes a `data-${NAME}` part. `tick` is owned here.
+ *
+ * MUST stay an `interface` (not a `type`): the gate-queue seam (BRO-1789) adds its
+ * `gate: GateCard` member by TypeScript MODULE AUGMENTATION from `gate.ts`
+ * (`declare module "./chat" { interface MaestroDataParts { gate: GateCard } }`) — WITHOUT
+ * editing this file (no re-declaration, no chat.ts → gate.ts coupling). Do NOT add `gate`
+ * here in place. For the augmentation to reach the composition site, BRO-1789 must also
+ * add `export * from "./gate"` to the barrel (docs/contracts/chat-transport.md §5).
  */
 export interface MaestroDataParts {
   tick: TickReceipt;
