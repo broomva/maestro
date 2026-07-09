@@ -14,7 +14,7 @@ Conventions every flow obeys:
 1. client → runtime: intent `new_mission { parentPath, title, brief, kind }`.
 2. runtime → FS: create folder + `_work.md` (frontmatter: new UUID, `state: proposed`, defaults from parent's contract).
 3. runtime → FS: git commit ("new work: <title>").
-4. indexer: picks up the file change → upserts `node` row → emits `node.created` on the stream.
+4. indexer: picks up the file change → upserts `node` row → the upsert surfaces as `node.updated` on the stream (the synthetic list is **closed** — no separate `node.created`; API.md §1, **D-DURABILITY**).
 5. All clients see the new card via the stream. No client-local optimistic state is authoritative.
 
 **Failure:** FS write fails → intent returns an error; nothing was half-created (the commit is the transaction).
@@ -58,7 +58,7 @@ Runs inside the agent child, every beat:
 3. client → runtime: intent with the verdict — the four Org-Control-Layer values:
    - **approve** → merge `run/<id>` into the workspace branch, `node.state → done`, event `gate.approved`. The autonomy ledger notes one human look.
    - **revise** (send back) → feedback written to `fix_plan.md`, `node.state → triggered`, redispatch (F2 skipping folder setup).
-   - **block** → `node.state → canceled` or parked; worktree kept for autopsy.
+   - **block** → `node.state → canceled` (terminal — no "parked" state, **D-GATE**); worktree kept for autopsy.
    - **escalate** (point/grant) → reassign `owner` or attach a capability grant; stays at review.
 4. Gate row updated (`decidedBy`, `decidedAt`); `data-gate` part reconciled by id across every open client.
 

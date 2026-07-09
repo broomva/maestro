@@ -126,4 +126,4 @@ Rules: one checkbox per failing check/criterion; each item names the evidence fi
 
 ## 7. Events
 
-`verify.started` · `check.result` (per check, streamed live — the card's Undertow shows checks running) · `judge.result` · `verdict` (frontmatter payload) · `verify.error` (infra). All land in `session.jsonl` first, per the flows convention.
+`verify.started` · `check.result` (per check, streamed live — the card's Undertow shows checks running) · `judge.result` · `check.verdict` (frontmatter payload, **D-EVENTNAMES**) · `verify.error` (infra). All land in `session.jsonl` first, per the flows convention.

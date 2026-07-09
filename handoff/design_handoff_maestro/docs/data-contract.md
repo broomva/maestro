@@ -15,7 +15,7 @@ gate: human | auto      # who must look before Done (D-GATE)
 related: [<paths>]      # knowledge-graph edges
 ```
 
-`kind: routine` + `gate: none` = a standing loop: never closes, spends zero human hours until a run flags something.
+`kind: routine` + `gate: auto` = a standing loop: never closes, spends zero human hours until a run flags something.
 
 ## The state machine
 

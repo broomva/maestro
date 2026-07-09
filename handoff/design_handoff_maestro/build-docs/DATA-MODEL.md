@@ -115,12 +115,12 @@ export const ATTENTION_STATES = ["blocked", "review"] as const;
 
 | OrchState | Plain voice | Dot |
 |---|---|---|
-| `proposed`, `reviewing` | Queued | neutral gray |
-| `triggered`, `running` | Running | live tidepool (DotComet) |
+| `proposed`, `reviewing`, `triggered` | Queued | neutral gray |
+| `running` | Running | live tidepool (DotComet) |
 | `blocked` | Stuck | warning |
 | `review` | **Needs you** | **accent-blue** (the gate, never red) |
 | `done` | Done | success |
-| `canceled` | Canceled | neutral gray |
+| `canceled` | Done | neutral gray |
 | routine between fires | Standing | pulse dot |
 
 ### B.3 Tables

@@ -22,16 +22,16 @@ Broomva orchestrates loops of agentic workflows under structure: control, govern
 - **The orchestrator is an agent.** A session that schedules sessions. It has presence (a live signal in the chrome), a session you can open, and a wake log — never a settings page. Setting a schedule is a sentence.
 - **The tick is a prompt.** Wakes have causes: a worker returning, your message, an interval, a self-set routine. The loop is legible — show why it woke.
 - **The branch is the receipt.** Evidence over claims: `run/<id>`, diffstats, judge verdicts. Never fake progress percentages.
-- **The gate is yours.** No loop can auto-Done. Clean runs wait at "Needs you"; approving is the one human verb. Needing you is a gate, not a failure — mark halts in accent-blue, never red.
+- **The gate is yours.** No loop auto-Dones under `gate: human` (**D-AUTODONE** — under `gate: auto`, a verifier pass merges and enters `done`). Clean runs wait at "Needs you"; approving is the one human verb. Needing you is a gate, not a failure — mark halts in accent-blue, never red.
 - **The look is the transaction.** Hours of agent work compress to: what changed · what it decided · what it asks. Autonomy is bought with good looks — a fast, confident look earns the next longer unsupervised run.
-- **Standing loops never close.** Open-ended problems are folders with a cadence (`kind: routine`); the routine is the deliverable. `gate: none` spends zero human hours until a run flags something.
+- **Standing loops never close.** Open-ended problems are folders with a cadence (`kind: routine`); the routine is the deliverable. `gate: auto` spends zero human hours until a run flags something.
 - **Calm is load-bearing.** Live signals breathe, they don't spin for attention. Motion encodes presence, not urgency.
 
 ## Quick reference
 
 - **Look:** barely-blue ink `oklch(0.175 0.022 265)` on white. Cool monochrome (every gray sits at hue 265). Whisper borders at 7% blue-black. Dark mode is Arcan deep blue-purple `oklch(0.135 0.02 272)`, fully specified.
 - **Type:** system fonts, 12 / 14 / 16 / 18 / 22 / 24 / 28px. Regular (400) default; medium (500) buttons. CalSans is opt-in for hero/marketing headings only (`data-display-font="calsans"`).
-- **Work states:** plain voice is canon — Queued · Running · Stuck · Needs you · Done (plus Standing for routines). System enums (Todo, InProgress, Blocked, InReview) are a developer surface only. The dot carries the color: gray / info / warning / accent-blue / success.
+- **Work states:** plain voice is canon — Queued · Running · Stuck · Needs you · Done (plus Standing for routines). The system enum is the 8-state OrchState (`proposed · reviewing · triggered · running · blocked · review · done · canceled`) — a developer surface only; the six plain-voice states are canon UI (Queued = proposed|reviewing|triggered) (**D-ENUM**). The dot carries the color: gray / info / warning / accent-blue / success.
 - **The inspector pattern:** selection drives both surfaces — the plane shows the work inside, the panel shows the contract and the sessions doing it. Item → look/chat/activity · folder → frontmatter + sessions · routine → frontmatter + runs.
 - **The disclosure ladder:** the substrate is for agents; the user gets signals, verbs, and receipts. Rung 1 ambient (feed, chip, bench, Undertow) → rung 2 the gate (the look; control is verbs — approve, send back, grant, point) → rung 3 receipts (inspector; for verifying, never for operating). Fully operable from rungs 1–2; never show worktrees, index.db, or the engine room. See `guidelines/disclosure.html`.
 - **Keep score in unsupervised hours:** the autonomy scoreboard (hours today, a notch per human look) and per-session unsupervised durations — never percentages.
