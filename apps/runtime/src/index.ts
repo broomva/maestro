@@ -1,17 +1,26 @@
-// @maestro/runtime — the 24/7 supervisor (Bun + Hono, bun build --compile).
+/// <reference types="bun" />
+// @maestro/runtime — the 24/7 supervisor (Bun + Hono, `bun build --compile`).
 // Owns FS + git + sh; schedules agent sessions; libSQL derived index.
-// The Hono app, /health route, and single-binary compile land in
-// BRO-1790 (p0-runtime-skeleton).
+//
+// BRO-1790: the skeleton — a Hono service with `/health` and a single-binary
+// compile (the self-host deliverable from day one). The four loops, the libSQL
+// index, and the guardrails (budget-in-path, kill switch) land later (P0 exit +
+// P1 + P2). The wire contract is imported from @maestro/protocol, never
+// redeclared (the no-codegen-drift guarantee, PATTERNS §10).
 
-// The wire contract the runtime speaks is imported from @maestro/protocol, never
-// redeclared here — the no-codegen-drift guarantee (PATTERNS §10, BRO-1785).
-import { type EventEnvelope, type Intent, PROTOCOL_PACKAGE } from "@maestro/protocol";
+import { MAESTRO_PROTOCOL_VERSION } from "@maestro/protocol";
+import { createApp } from "./app";
+import { loadConfig } from "./config";
 
-export const RUNTIME_APP = "@maestro/runtime" as const;
+const config = loadConfig();
+const app = createApp(config, Date.now());
 
-/** The shared wire contract the runtime imports (PATTERNS §10). */
-export const RUNTIME_PROTOCOL = PROTOCOL_PACKAGE;
+/** Exported for embedding/tests; the binary serves it when run as the entrypoint. */
+export { app, config };
 
-/** Handler signatures the BRO-1790 skeleton will implement — typed by the protocol. */
-export type RuntimeIntentHandler = (intent: Intent) => Promise<void>;
-export type RuntimeEventSink = (event: EventEnvelope) => void;
+if (import.meta.main) {
+  Bun.serve({ port: config.port, fetch: app.fetch });
+  console.log(
+    `maestro runtime · protocol ${MAESTRO_PROTOCOL_VERSION} · http://localhost:${config.port} · workspace ${config.workspace}`,
+  );
+}

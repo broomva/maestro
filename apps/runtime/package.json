@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@maestro/protocol": "workspace:*"
+    "@maestro/protocol": "workspace:*",
+    "hono": "^4.12.28"
   }
 }
