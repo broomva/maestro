@@ -38,9 +38,11 @@ export const WORKER_LOCATIONS = [
 export type RunBranch = `run/${string}`;
 
 /**
- * A node's current-or-most-recent worker — `where` from the run's isolation mode,
- * `name` from the agent id. Both come from the session's `run.started` event
- * payload, NOT from a `session` table column (the row carries no name/location).
+ * A node's current-or-most-recent worker — `name` the agent id, `where` the isolation
+ * mode. A SHAPE pin only: WHICH event payload or index column carries `{ name, where }`
+ * is an upstream runtime/index concern (BRO-1790 / BRO-1754 / BRO-1796) — the canonical
+ * `run.started` sketch (DATA-MODEL §A.3) does not yet enumerate them, and the `session`
+ * row carries no name/location column.
  */
 export interface WorkItemWorker {
   name: string;
@@ -88,8 +90,14 @@ export interface WorkItem {
    * an age on queued/proposed cards too, and those have no `lastEventAt`.
    */
   updatedAt: string;
-  /** frontmatter `created`, ISO date — sourced from `node.createdAt` (an index column BRO-1754/fs-index adds; the base §B.3 sketch has no `created` column). */
-  created: string;
+  /**
+   * frontmatter `created`, ISO date — sourced from `node.createdAt`, which BRO-1754's
+   * merged `NodeRow` DOES carry (the DATA-MODEL §B.3 canon sketch omits it). OPTIONAL:
+   * no read-side surface renders `created` today (a card's age routes through
+   * `updatedAt`), so a consumer need not supply it — the "unconsumed field → optional"
+   * rule (§7). Present it only where a view actually shows a creation date.
+   */
+  created?: string;
 
   // ── derived projections (data-contract §"The work item shape") ────────────
   /**
@@ -106,6 +114,16 @@ export interface WorkItem {
    * timeline (`event where session_id=?`).
    */
   sessionId?: string;
+  /**
+   * The id of the node's OPEN gate when `state ∈ {review, blocked}` (1:1 at the gate),
+   * else undefined. The gate-queue JOIN + verb-DISPATCH key — the counterpart to
+   * `sessionId` (the timeline join key): every gate verb (`approve` / `revise` /
+   * `block` / `escalate` / `grant`) takes a `gateId` (intents.ts), so the rung-2
+   * controls dispatch through THIS, never the node id (the runtime rejects a nodeId as
+   * a gateId). The gate-card composition + queue ordering are BRO-1789's; this field is
+   * only the key. `look` (below) is display-only.
+   */
+  gateId?: string;
   /** Ancestor initiative label — derived from the `parentId` ancestry chain. */
   initiative?: string;
   /** Ancestor project label — derived from the `parentId` ancestry chain. */

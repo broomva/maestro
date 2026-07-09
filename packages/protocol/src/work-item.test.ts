@@ -12,9 +12,12 @@ import {
   type WorkItemExcludedField,
 } from "./work-item";
 
-// done.check for seam-work-item-store (BRO-1764): `bun test packages/protocol
-// --filter work-item`. `--filter` is a no-op in bun test (only `-t` filters by
-// name); every describe carries "work-item" so `-t work-item` isolates the suite.
+// done.check for seam-work-item-store (BRO-1764): `bun run typecheck && bun test
+// packages/protocol -t work-item`. `--filter` is a no-op in bun test (only `-t`
+// filters by name); every describe carries "work-item" so `-t work-item` isolates.
+// typecheck is REQUIRED in the check: `bun test` STRIPS types, so the compile-time
+// witnesses (NoExcludedLeak, RunBranch, proposed-optionality, RequiredHold) only bite
+// under `tsc --noEmit` — running `bun test` alone gives a false green on a broken shape.
 
 // A full fixture exercising the derived surface — the shape the board / feed /
 // inspector all render (START-HERE §5 seam 2).
@@ -30,6 +33,7 @@ const item: WorkItem = {
   updatedAt: "2026-06-25T06:01:10Z",
   created: "2026-06-25",
   sessionId: "7f3a",
+  gateId: "g-7f3a",
   initiative: "Growth",
   project: "SEO refresh",
   lastEventAt: "2026-06-25T06:01:10Z",
@@ -78,8 +82,13 @@ describe("work-item shape — the read-side projection (data-contract §work ite
     expect(bad as string).toBe("feature/nope"); // referenced so it is not an unused binding
   });
 
-  test("look.ran is a receipt string, never a percentage", () => {
-    expect(item.look?.ran).not.toMatch(/%/);
+  test("a review item carries gateId — the verb-dispatch key, distinct from the node id", () => {
+    // The round-5 P20 fix: gate verbs (approve/revise/block/escalate/grant) all take a
+    // gateId (intents.ts). A review/blocked item exposes it so rung-2 controls dispatch
+    // through it, NOT the node id (the runtime rejects a nodeId as a gateId). `look` is
+    // display-only and carries no dispatch key.
+    expect(item.gateId).toBe("g-7f3a");
+    expect(item.gateId).not.toBe(item.id);
   });
 
   test("the join key to the activity timeline is sessionId, not an embedded array", () => {
@@ -108,12 +117,12 @@ describe("work-item shape — the read-side projection (data-contract §work ite
   });
 });
 
-// A COMPILE-TIME WITNESS that the post-dispatch fields are genuinely optional: a
-// never-dispatched `proposed` node has no session, so it MUST construct without
-// sessionId / worker / run / lastEventAt / initiative / project. The moment any of
-// those is tightened to required, THIS declaration fails `tsc --noEmit` — the type
-// error a downstream store or "Queued" board column would otherwise hit only at
-// runtime (unable to build a real proposed row, or back-filling a bogus session id).
+// A COMPILE-TIME WITNESS that the post-dispatch / no-gate fields are genuinely optional:
+// a never-dispatched `proposed` node has no session and no open gate, so it MUST
+// construct without sessionId / gateId / worker / run / lastEventAt / initiative /
+// project. The moment any is tightened to required, THIS declaration fails `tsc --noEmit`
+// — the type error a downstream store or "Queued" board column would otherwise hit only
+// at runtime (unable to build a real proposed row, or back-filling a bogus session/gate id).
 const proposed: WorkItem = {
   id: "p1",
   state: "proposed",
@@ -127,35 +136,35 @@ const proposed: WorkItem = {
 
 // The SYMMETRIC witness (required stays required), mirroring the `proposed` fixture's
 // optional-stays-optional guard. `RequiredKeys` keeps only the keys whose type does NOT
-// admit `undefined`; asserting the 8 server-truth fields are all among them fails
+// admit `undefined`; asserting the required server-truth fields are all among them fails
 // `tsc --noEmit` if ANY is loosened to optional — notably `updatedAt`, whose loosening
 // would let the universal-age derivation (`lastEventAt ?? updatedAt`) silently go
 // undefined on every card. Deterministic (no @ts-expect-error line-positioning).
 type RequiredKeys<T> = { [K in keyof T as undefined extends T[K] ? never : K]: 0 };
-type ServerTruthRequired =
-  | "id"
-  | "state"
-  | "kind"
-  | "title"
-  | "gate"
-  | "path"
-  | "updatedAt"
-  | "created";
+type ServerTruthRequired = "id" | "state" | "kind" | "title" | "gate" | "path" | "updatedAt";
 type RequiredHold = ServerTruthRequired extends keyof RequiredKeys<WorkItem> ? true : never;
 const requiredHold: RequiredHold = true;
 
 describe("work-item optionality — the never-dispatched witness (data-contract §work item shape)", () => {
-  test("the 8 server-truth fields stay required (compile-time witness collapses to never otherwise)", () => {
-    // If `updatedAt` (or any of the 8) is loosened to optional, `RequiredHold` becomes
-    // `never` and `const requiredHold: never = true` fails tsc. The runtime assert only
-    // anchors the type check.
+  test("the required server-truth fields stay required (compile-time witness collapses to never otherwise)", () => {
+    // If `updatedAt` (or any required server-truth field) is loosened to optional,
+    // `RequiredHold` becomes `never` and `const requiredHold: never = true` fails tsc.
+    // The runtime assert only anchors the type check.
     expect(requiredHold).toBe(true);
   });
 
   test("a proposed node carries none of the post-dispatch derived fields", () => {
     // Runtime assertions anchor the compile-time witness above; the type check is the
     // real enforcement (a proposed node cannot name a session that was never born).
-    for (const f of ["sessionId", "worker", "run", "lastEventAt", "initiative", "project"]) {
+    for (const f of [
+      "sessionId",
+      "gateId",
+      "worker",
+      "run",
+      "lastEventAt",
+      "initiative",
+      "project",
+    ]) {
       expect(f in proposed).toBe(false);
     }
   });
