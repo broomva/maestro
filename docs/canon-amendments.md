@@ -73,6 +73,18 @@ assert *absence* of the removed tokens (`gate: none`, `node.created`, bare ` ver
   of this PR's stated scope (the canon lives under `handoff/`; repo-root `CLAUDE.md` is workspace
   governance). Fold into the next governance PR / next L3 window.
 
+## P20 fixes applied during build (BRO-1785)
+
+| Where | Defect the gate caught | Fix |
+|---|---|---|
+| `packages/protocol/src/plain-voice.ts` `plainVoiceForNode` | The routine "Standing" overlay masked the two **attention** states: a routine parked at the gate (`review` → "Needs you") or stuck (`blocked`) rendered as a calm muted "Standing" pulse. A routine node genuinely enters `review`/`blocked` at the node level (FLOWS F5 gate-park, F8 kill, F2 spawn-fail, F3 budget) and stays there until the human acts — Standing is "between fires" (DATA-MODEL §B.2), and `review`+`blocked` are the attention set (D-ORDER). The masking hid "Needs you" (accent-blue), the product's most important signal. | Added `&& !isAttentionState(state)` to the overlay guard — idle routines (`proposed`/`triggered`) still read Standing, `review`/`blocked` fall through to their attention voice. Regression test added (`plain-voice.test.ts`). Caught by the cross-model adversarial gate (the writer had the same blind spot in the code *and* the masking test). |
+
+## Noted discrepancies (surfaced, not resolved this ticket)
+
+| Where | Discrepancy | Owner |
+|---|---|---|
+| `build-docs/specs/VERIFIER.md` §7 vs `DATA-MODEL.md` §A.3 / `API.md` §stream | VERIFIER §7 names the events `verify.started`, `judge.result`, `verify.error`, which fall **outside** the five envelope namespaces (`run.* \| tool.* \| check.* \| gate.* \| budget.*`) that DATA-MODEL / API / the BRO-1785 ticket pin. `packages/protocol` (BRO-1785) types `EventType` to the pinned set + the four closed synthetics, so those three names are **not admitted** by the protocol type. Surfaced here rather than silently widened. | The verifier-implementation ticket resolves it: either fold the three into `check.*` (`check.started` / `check.judge` / `check.error`) or widen the namespace set as a deliberate protocol edit (PATTERNS §10). |
+
 ## Recorded, doc-body edits deferred
 
 | Decision | Status | Owner |
