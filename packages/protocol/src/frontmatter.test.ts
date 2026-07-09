@@ -312,6 +312,19 @@ describe("reject — invalid contracts throw typed errors", () => {
     expect(codeOf(() => parseWorkContract(bad))).toBe("malformed_done");
   });
 
+  test("an empty done.check list is malformed (symmetric with the empty string)", () => {
+    const bad = `---\nid: x\nkind: task\nstate: proposed\ngate: human\ndone:\n  check: []\ncreated: 2026-06-26\nupdated: 2026-06-26\n---\n# x\n`;
+    expect(codeOf(() => parseWorkContract(bad))).toBe("malformed_done");
+  });
+
+  test("reserializeWorkFile enforces the same gate:auto rule as the read path", () => {
+    // The round-trip write path (BRO-1800 scanner) must reject exactly what every
+    // read path rejects — not silently re-emit a VERIFIER §1-violating contract.
+    const bad = `---\nid: x\nkind: task\nstate: proposed\ngate: auto\ncreated: 2026-06-26\nupdated: 2026-06-26\n---\n# x\n`;
+    expect(codeOf(() => reserializeWorkFile(bad))).toBe("gate_auto_no_check");
+    expect(codeOf(() => parseWorkContract(bad))).toBe("gate_auto_no_check");
+  });
+
   test("bad stop_on value", () => {
     const bad = TASK.replace("    - cap", "    - explode");
     expect(codeOf(() => parseWorkContract(bad))).toBe("invalid_enum");

@@ -188,6 +188,13 @@ function parseDoneCheck(raw: unknown): string | DoneCheck[] {
     return raw;
   }
   if (Array.isArray(raw)) {
+    if (raw.length === 0) {
+      throw new WorkContractError(
+        "malformed_done",
+        "done.check list must be non-empty (symmetric with the empty-string rule)",
+        "done.check",
+      );
+    }
     return raw.map((item, i): DoneCheck => {
       if (!isMapping(item)) {
         throw new WorkContractError(
@@ -433,12 +440,14 @@ export function serializeWorkFile(file: WorkFile): string {
 
 /**
  * Round-trip a source `_work.md` preserving comments + key order (the "where
- * feasible" round-trip). Validates the contract first (throws typed errors), then
- * re-emits the ORIGINAL frontmatter via the YAML Document CST so nothing but
- * insignificant whitespace changes.
+ * feasible" round-trip). Fully validates the contract first — including the
+ * VERIFIER §1 gate:auto⇒done.check rule via `materialize`, so the write path
+ * (BRO-1800 scanner) rejects exactly what every read path rejects — then re-emits
+ * the ORIGINAL frontmatter via the YAML Document CST so nothing but insignificant
+ * whitespace changes.
  */
 export function reserializeWorkFile(source: string): string {
-  parseWorkInput(source); // validate — throws WorkContractError on any malformation
+  parseWorkFile(source); // full validation (parse + materialize) — throws on any malformation
   const { yaml, brief } = splitFrontmatter(source);
   const doc = parseDocument(yaml);
   const yamlOut = doc.toString({ lineWidth: 0 }).replace(/\n+$/, "");
