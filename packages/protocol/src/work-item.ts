@@ -37,7 +37,11 @@ export const WORKER_LOCATIONS = [
 /** A run-branch ref — "the branch is the receipt" (data-contract §"The state machine"). */
 export type RunBranch = `run/${string}`;
 
-/** The active worker on a node's live session (derived from the `session` row, DATA-MODEL §B.3). */
+/**
+ * A node's current-or-most-recent worker — `where` from the run's isolation mode,
+ * `name` from the agent id. Both come from the session's `run.started` event
+ * payload, NOT from a `session` table column (the row carries no name/location).
+ */
 export interface WorkItemWorker {
   name: string;
   where: WorkerLocation;
@@ -80,16 +84,19 @@ export interface WorkItem {
   parentId?: string | null;
   /** = node.updatedAt, ISO-8601 on the wire. */
   updatedAt: string;
-  /** frontmatter `created`, ISO date. */
+  /** frontmatter `created`, ISO date — sourced from `node.createdAt` (an index column BRO-1754/fs-index adds; the base §B.3 sketch has no `created` column). */
   created: string;
 
   // ── derived projections (data-contract §"The work item shape") ────────────
   /**
    * The node's current-or-most-recent session id — the session whose receipts the
-   * inspector renders. Present on running / attention / terminal / standing nodes;
-   * undefined only for never-dispatched (`proposed`) work. The join key for the
-   * session timeline (`event where session_id=?`). NOT live-only — a `done` node
-   * keeps its last session id so "the branch is the receipt" survives completion.
+   * inspector renders. A session is born only at dispatch (`triggered → running`),
+   * so this is undefined for ALL never-dispatched states (`proposed`, `reviewing`,
+   * `triggered`) and for work canceled before dispatch; present on `running` /
+   * `blocked` / `review` / `done`, and on a standing routine once it has fired at
+   * least once. NOT live-only — a `done` node keeps its last session id so "the
+   * branch is the receipt" survives completion. The join key for the session
+   * timeline (`event where session_id=?`).
    */
   sessionId?: string;
   /** Ancestor initiative label — derived from the `parentId` ancestry chain. */

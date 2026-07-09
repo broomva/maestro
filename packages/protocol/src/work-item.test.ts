@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { plainVoiceForNode } from "./plain-voice";
 import {
   PLANE_VIEWS,
+  type RunBranch,
   STORE_SLICES,
   UI_PREF_KEYS,
   WORK_ITEM_EXCLUDED_FIELDS,
@@ -65,6 +66,16 @@ describe("work-item shape — the read-side projection (data-contract §work ite
 
   test("the run branch matches the run/ receipt template", () => {
     expect(item.run?.startsWith("run/")).toBe(true);
+  });
+
+  test("RunBranch enforces the run/ receipt prefix at the type level (negative-compile guard)", () => {
+    const ok: RunBranch = "run/7f3a";
+    // @ts-expect-error — a branch without the run/ prefix is not a RunBranch. If
+    // RunBranch is ever loosened to plain `string`, this directive goes unused and
+    // `tsc --noEmit` fails, protecting the "branch is the receipt" prefix invariant.
+    const bad: RunBranch = "feature/nope";
+    expect(ok.startsWith("run/")).toBe(true);
+    expect(bad as string).toBe("feature/nope"); // referenced so it is not an unused binding
   });
 
   test("look.ran is a receipt string, never a percentage", () => {
