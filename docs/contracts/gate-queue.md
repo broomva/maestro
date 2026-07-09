@@ -2,8 +2,9 @@
 
 > **Seam BRO-1789.** A contract-writing ticket: this doc + `gate.ts` are agreed before the board
 > (BRO-1780), the F5 gate slice (BRO-1805), and approve = squash-merge (BRO-1802). It pins the derived
-> attention view, the comparator that orders it (and the board), the `data-gate` card payload, the
-> verdict semantics, the closed `GateKind`, and the grace-window undo machine.
+> attention view, the attention-set comparator (the board reuses the shared `compareByAttention` axis,
+> not this comparator), the `data-gate` card payload, the verdict semantics, the closed `GateKind`, and
+> the grace-window undo machine.
 >
 > **Types:** [`packages/protocol/src/gate.ts`](../../packages/protocol/src/gate.ts) (+ `GateKind` widened
 > in `work.ts`) · **Tests:** [`gate.test.ts`](../../packages/protocol/src/gate.test.ts)
@@ -55,9 +56,15 @@ every open client by `gateId` (FLOWS F5). `look` (the display compression — wh
 · what it asks) is BRO-1764's `GateLook`, **imported not redefined**. This seam OWNS `data-gate`: chat.ts
 (BRO-1776) left `MaestroDataParts.gate` out, and `gate.ts` adds it by **TypeScript module augmentation**
 (`declare module "./chat" { interface MaestroDataParts { gate: GateCard } }`) — no edit to chat.ts, no
-fork. **Precondition:** the barrel `export * from "./gate"` (index.ts) — without it the augmentation never
-loads and `data-gate` fails to typecheck at the composition site (verified: the test's compile-witness
-fails `tsc` when the augmentation is disabled).
+fork. It also pins the wire surface — `DATA_GATE_NAME` / `DATA_GATE_PART` (`"data-gate"`) + the tag-only
+`isGateDataPart` guard + the narrowed `GateDataPart` — mirroring chat.ts's `data-tick`, so BRO-1805 matches
+the constant, never a hand-written `"data-gate"` literal. The part `id` is the `gateId` (the F5
+reconciliation key), not a singleton stable id like the tick's `DATA_TICK_ID`.
+
+**Precondition:** the barrel `export * from "./gate"` (index.ts) — without it the augmentation never loads
+and `data-gate` fails to typecheck at the composition site. The test's compile-witness proves the
+augmentation BINDS (disabling the `declare module` block fails `tsc`); the barrel export itself is a
+same-package re-export, checked by review, not a separate through-barrel test.
 
 ## 4. Gate row lifecycle (resolves the DATA-MODEL ambiguity)
 
@@ -87,8 +94,9 @@ type automatically.
 **`kind` drives which verbs the F5 card SURFACES (BRO-1805), not the verdict set itself.** The four
 `GATE_VERDICT_VERBS` are fixed; a `completion` / `irreversible-action` gate shows all four, but a
 `question`-kind gate resolves on the **answer path** (FLOWS F5) — `revise` carries the answer as feedback,
-and Approve/Block are suppressed or relabelled. A choice-question's options ride `GateLook` (BRO-1764), not
-a new verdict. This keeps BRO-1805 from rendering Approve/Block on a pure question.
+and Approve/Block are suppressed or relabelled. A choice-question's answer options are **not yet modelled**:
+`GateLook` today is `{ ran, decided, ask }` (BRO-1764) with no options field — adding one is a BRO-1764
+follow-up, not a new verdict here. This keeps BRO-1805 from rendering Approve/Block on a pure question.
 
 ## 6. The grace window (the one sanctioned timing component)
 

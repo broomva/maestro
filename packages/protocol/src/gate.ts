@@ -101,6 +101,39 @@ declare module "./chat" {
   }
 }
 
+// The `data-gate` wire surface — the constant + narrowed part + guard this seam owns,
+// mirroring chat.ts's `data-tick` (`DATA_TICK_NAME`/`DATA_TICK_PART`/`isTickDataPart`).
+// Without these BRO-1805 hand-writes the `"data-gate"` magic literal the way `data-tick`
+// pins it — the exact single-source drift this package exists to prevent.
+
+/** The `data-gate` part NAME — the `MaestroDataParts` key the augmentation above adds (ai keys the map by the bare name). */
+export const DATA_GATE_NAME = "gate" as const;
+/** The full part `type` string — `data-gate` (what a guard / renderer matches). Mirrors `DATA_TICK_PART`. */
+export const DATA_GATE_PART = "data-gate" as const;
+
+/**
+ * The gate card as an ai `DataUIPart`: `{ type: "data-gate"; id?; data: GateCard }` — a
+ * Maestro-owned narrowing of ai's data part (not a re-declaration of ai's part union),
+ * mirroring `TickDataPart`. The part `id` is the `gateId`, the reconciliation key across
+ * every open client (FLOWS F5) — NOT a singleton stable id like the tick's `DATA_TICK_ID`
+ * (there is one card per open gate; re-sends at the same `gateId` update it in place).
+ */
+export interface GateDataPart {
+  type: typeof DATA_GATE_PART;
+  /** the reconciliation key — the `gateId` (FLOWS F5). */
+  id?: string;
+  data: GateCard;
+}
+
+/**
+ * True for a `data-gate` part. TAG-ONLY (matches on `type` alone, mirroring
+ * `isTickDataPart`): it narrows the type but does NOT validate `data`, so a consumer MUST
+ * read `data` defensively rather than trust the narrow blindly. Operates structurally
+ * (`{ type: string }`) so it needs no `ai` import.
+ */
+export const isGateDataPart = (part: { type: string }): part is GateDataPart =>
+  part.type === DATA_GATE_PART;
+
 // ── Verdict semantics (D-GATE, FLOWS F5) ───────────────────────────────────────
 
 /**
@@ -114,7 +147,9 @@ declare module "./chat" {
  * `GateCard.kind` (BRO-1805). A `completion` / `irreversible-action` gate shows all four;
  * a `question`-kind gate (HARNESS §4 exit-20) resolves on the ANSWER path (FLOWS F5) —
  * `revise` carries the answer as feedback, and Approve/Block are suppressed or relabelled.
- * A choice-question's options ride `GateLook` (BRO-1764), not a new verdict here.
+ * A choice-question's answer options are NOT yet modelled — `GateLook` today is
+ * `{ ran, decided, ask }` (BRO-1764) with no options field; adding one is a BRO-1764
+ * follow-up, not a new verdict here.
  */
 export const GATE_VERDICT_VERBS = {
   approve: "Approve",

@@ -1,12 +1,16 @@
 /// <reference types="bun" />
 import { describe, expect, test } from "bun:test";
-import type { MaestroDataParts } from "./chat";
+import { DATA_TICK_PART, type MaestroDataParts } from "./chat";
 import {
   compareGateQueue,
+  DATA_GATE_NAME,
+  DATA_GATE_PART,
   GATE_GRACE_WINDOW_MS,
   GATE_VERDICT_VERBS,
   type GateCard,
+  type GateDataPart,
   type GateQueueOrder,
+  isGateDataPart,
   isInGateQueue,
   isTerminatingVerdict,
   isWithinGrace,
@@ -41,7 +45,7 @@ describe("gate-queue · membership is the attention set (single-source, no dupli
   });
 });
 
-describe("gate-queue · the comparator (also orders the board, D-ORDER)", () => {
+describe("gate-queue · the comparator (attention-set total order; reuses the shared board axis, D-ORDER)", () => {
   const at = (state: OrchState, attentionSince: number): GateQueueOrder => ({
     state,
     attentionSince,
@@ -130,6 +134,28 @@ describe("gate-queue · the data-gate card payload + MaestroDataParts augmentati
     };
     const asCard: GateCard = gateData;
     expect(asCard.kind).toBe("question");
+  });
+
+  test("the data-gate wire surface mirrors data-tick — constant + tag-only guard (no magic literal for BRO-1805)", () => {
+    // the part `type` is `data-<NAME>`, exactly like chat.ts's `data-tick` — so BRO-1805
+    // matches the pinned constant, never a hand-written "data-gate".
+    expect(DATA_GATE_NAME).toBe("gate");
+    expect(DATA_GATE_PART).toBe("data-gate");
+    expect(DATA_GATE_PART).toBe(`data-${DATA_GATE_NAME}`);
+    expect(DATA_GATE_PART).not.toBe(DATA_TICK_PART); // distinct part from its sibling
+    const part: GateDataPart = {
+      type: "data-gate",
+      id: "g-7f3a", // the reconciliation key IS the gateId (FLOWS F5)
+      data: {
+        gateId: "g-7f3a",
+        kind: "completion",
+        look: { ran: "1m", decided: [], ask: "Merge?" },
+      },
+    };
+    // tag-only guard narrows on `type` alone (mirrors isTickDataPart)
+    expect(isGateDataPart(part)).toBe(true);
+    expect(isGateDataPart({ type: "data-tick" })).toBe(false);
+    expect(isGateDataPart({ type: "text" })).toBe(false);
   });
 });
 
