@@ -142,8 +142,15 @@ export const SESSION_STATUSES = [
   "canceled",
 ] as const satisfies readonly SessionStatus[];
 
-/** Gate row kind (DATA-MODEL §B.3 gate table). */
-export type GateKind = "completion" | "irreversible-action";
+/**
+ * Gate row kind — the CLOSED enum (DATA-MODEL §B.3 gate table, D-GATE). Widened by
+ * seam-gate-queue (BRO-1789) to add `question` (HARNESS §4 exit-20). Type derived FROM
+ * the const so a new kind can't escape `tsc` (the single-source idiom).
+ */
+export const GATE_KINDS = ["completion", "irreversible-action", "question"] as const;
+export type GateKind = (typeof GATE_KINDS)[number];
+export const isGateKind = (s: string): s is GateKind =>
+  (GATE_KINDS as readonly string[]).includes(s);
 
 /**
  * Child exit reason for exit code 10 (D-EVENTNAMES; `run.exiting {code, reason}`).

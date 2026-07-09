@@ -10,6 +10,7 @@
 
 export * from "./chat";
 export * from "./events";
+export * from "./gate";
 export * from "./index-schema";
 export * from "./intents";
 export * from "./plain-voice";
