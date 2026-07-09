@@ -61,7 +61,7 @@ describe("work-item shape — the read-side projection (data-contract §work ite
 
   test("WORK_ITEM_EXCLUDED_FIELDS names every excluded surface, and the fixture honors it", () => {
     expect([...(WORK_ITEM_EXCLUDED_FIELDS as readonly string[])].sort()).toEqual(
-      ["budget", "chat", "done", "events", "trigger"].sort(),
+      ["budget", "chat", "done", "events", "trigger", "percent", "progress"].sort(),
     );
     for (const f of WORK_ITEM_EXCLUDED_FIELDS) {
       expect(f in item).toBe(false);
@@ -95,8 +95,12 @@ describe("work-item shape — the read-side projection (data-contract §work ite
     expect(item.sessionId).toBe("7f3a");
   });
 
-  test("a blocked item carries reason — the blocking cause, distinct from the gate look", () => {
-    // reason fixture coverage: referenced by name so a rename of the field fails tsc.
+  test("a blocked item carries reason but NO gateId (Stuck is redispatchable, not gated)", () => {
+    // reason fixture coverage (referenced by name so a rename fails tsc). AND the round-8
+    // P20 fix: a blocked node has no gate row — gates surface as `review`, and
+    // `resolveGateVerdict` throws off-review; `blocked` is cleared by a nodeId `dispatch`,
+    // not a verdict. gateId is review-only; the earlier fabricated `gateId: "g-b1"` masked
+    // the wrong pin (the suite stayed green while asserting a shape the runtime can't make).
     const blocked: WorkItem = {
       id: "b1",
       state: "blocked",
@@ -106,10 +110,10 @@ describe("work-item shape — the read-side projection (data-contract §work ite
       path: "ops/deploy",
       updatedAt: "2026-06-26T00:00:00Z",
       sessionId: "b1s",
-      gateId: "g-b1",
       reason: "lease held by another run",
     };
     expect(blocked.reason).toBe("lease held by another run");
+    expect("gateId" in blocked).toBe(false);
   });
 
   test("a completed node keeps its session id + worker so the receipt survives completion", () => {

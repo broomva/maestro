@@ -33,11 +33,12 @@ _work.md frontmatter   =  WorkContract   (authoritative write side — packages/
      WorkItem           (read-side UI/wire shape — THIS contract)
 ```
 
-`WorkItem` carries a **subset** of `WorkContract` (id, state, kind, owner, gate, title, created,
-updated) **plus derived projections** (worker, run, verdict, reason, look, lastEventAt,
-initiative/project, sessionId). It deliberately **omits** `budget` / `done` / `trigger` — those are
-contract internals held off the read surface by the disclosure ladder ("never expose worktrees,
-index.db, or the engine room").
+`WorkItem` carries a **subset** of `WorkContract` (id, state, kind, owner, gate, title, created)
+**plus derived projections** — `updatedAt` (the node index **write-clock / LWW**, NOT frontmatter
+`updated`; see §3 + reconciliation #1), worker, run, verdict, reason, look, lastEventAt,
+initiative/project, sessionId, gateId. It deliberately **omits** `budget` / `done` / `trigger`
+(and `progress` / `percent` — never a percentage) — contract internals held off the read surface by
+the disclosure ladder ("never expose worktrees, index.db, or the engine room").
 
 ## 3. The canonical `WorkItem` shape — field by field
 
@@ -58,7 +59,7 @@ Every field resolved as **store** (mirrors the `node` row) or **derived** (compu
 | `updatedAt` | store | = node.updatedAt, ISO on the wire — **present on every node**, so the universal source for a card's relative age (refined by `lastEventAt` once dispatched) |
 | `created?` | store | frontmatter `created`, ISO — via `node.createdAt` (which BRO-1754's merged `NodeRow` **carries**; only the DATA-MODEL §B.3 sketch omits it). **Optional** — no read surface renders it today (age routes through `updatedAt`), so a consumer supplies it only where a view shows a creation date (§7 "unconsumed → optional") |
 | `sessionId?` | derived | the node's current-or-most-recent session id. **Dispatch-history-keyed, NOT state-keyed:** undefined only if the node has *never* been dispatched (no `session where node_id=? order by started_at desc limit 1` row) — typically `proposed` / `reviewing` / never-fired `triggered` backlog + work canceled before dispatch. Present on any node that has dispatched ≥ once, **including a fired standing routine idling back at `triggered`** (it keeps its last session so the Standing routine's last-run receipts survive) and a `done` node. The session-timeline join key; **not live-only** |
-| `gateId?` | derived | the id of the node's **open gate** when `state ∈ {review, blocked}` (1:1 at the gate), else undefined. The gate-queue join + verb-**dispatch** key: every gate verb (`approve`/`revise`/`block`/`escalate`/`grant`) takes a `gateId` (intents.ts), so rung-2 controls dispatch through THIS, never the node id. `look` is display-only; queue composition/ordering is BRO-1789 (§8) |
+| `gateId?` | derived | the id of the node's **open gate** — present ONLY when `state === "review"` (both gate kinds surface as review; `resolveGateVerdict` throws for non-review). `blocked` is Stuck-and-redispatchable (cleared by a nodeId `dispatch`, not a verdict) ⇒ no gate row, no gateId. The gate-queue join + verb-**dispatch** key: every gate verb (`approve`/`revise`/`block`/`escalate`/`grant`) takes a `gateId` (intents.ts), so rung-2 controls dispatch through THIS, never the node id. `look` is display-only; queue composition/ordering is BRO-1789 (§8) |
 | `initiative?` / `project?` | derived | ancestor labels from the `parentId` ancestry chain |
 | `lastEventAt?` | derived | ISO ts of the last *event* — present only once the node has events (dispatched work). REFINES the card age for live/dispatched items; the **universal** relative age falls back to the always-present `updatedAt` (`lastEventAt ?? updatedAt`), so queued/proposed cards still render an age |
 | `worker?` | derived | `{ name, where }` — a **shape** pin (agent id + isolation mode); WHICH event payload or index column carries them is upstream (BRO-1790/1754/1796) — the `run.started` sketch (DATA-MODEL §A.3) does not yet enumerate them, and the `session` row has no name/location column. Present on completed items too; `where ∈ local worktree \| cloud sandbox` |
@@ -166,7 +167,7 @@ field + its meaning; the adjacent seam owns the behavior behind it.**
 
 | Field / concern | This seam (BRO-1764) pins | Adjacent owner |
 |---|---|---|
-| `gateId` | the field + that it is the verb-**dispatch** key (`state ∈ {review, blocked}` ⇒ the open gate; 1:1 at review) | the five gate **verbs** are `intents.ts` (`approve`/`revise`/`block`/`escalate`/`grant`, each takes `gateId`); the gate **queue** ordering + card composition is **BRO-1789** |
+| `gateId` | the field + that it is the verb-**dispatch** key, present **only at `state === "review"`** (1:1 at the gate; `blocked` has no gate row — `resolveGateVerdict` throws off-review) | the five gate **verbs** are `intents.ts` (`approve`/`revise`/`block`/`escalate`/`grant`, each takes `gateId`); the gate **queue** ordering + card composition is **BRO-1789** |
 | `look` | its **shape** `{ ran, decided[], ask }` (a display compression) | how the gate queue **composes** it from receipts + orders it → **BRO-1789**. `look` is display-only — it carries NO dispatch key; verbs go through `gateId` |
 | `worker` | its **shape** `{ name, where }` | which event payload / index column carries it → BRO-1790 / BRO-1754 / BRO-1796 |
 | `created` | the field (optional), sourced from `node.createdAt` | the `NodeRow.createdAt` column → **BRO-1754** (merged; the column exists) |

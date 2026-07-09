@@ -27,12 +27,11 @@ import type { Kind } from "./intents";
 import type { GateMode, OrchState } from "./state";
 
 /** Where a worker runs (data-contract §"The work item shape"). */
-export type WorkerLocation = "local worktree" | "cloud sandbox";
-
-export const WORKER_LOCATIONS = [
-  "local worktree",
-  "cloud sandbox",
-] as const satisfies readonly WorkerLocation[];
+export const WORKER_LOCATIONS = ["local worktree", "cloud sandbox"] as const;
+// Type DERIVED from the const (not declared separately + `satisfies`): the const is the
+// single source, so a new location can't be added to the type while escaping the const —
+// the exhaustiveness gap a separate `type X = ... satisfies` pair leaves open.
+export type WorkerLocation = (typeof WORKER_LOCATIONS)[number];
 
 /** A run-branch ref — "the branch is the receipt" (data-contract §"The state machine"). */
 export type RunBranch = `run/${string}`;
@@ -120,13 +119,16 @@ export interface WorkItem {
    */
   sessionId?: string;
   /**
-   * The id of the node's OPEN gate when `state ∈ {review, blocked}` (1:1 at the gate),
-   * else undefined. The gate-queue JOIN + verb-DISPATCH key — the counterpart to
-   * `sessionId` (the timeline join key): every gate verb (`approve` / `revise` /
-   * `block` / `escalate` / `grant`) takes a `gateId` (intents.ts), so the rung-2
-   * controls dispatch through THIS, never the node id (the runtime rejects a nodeId as
-   * a gateId). The gate-card composition + queue ordering are BRO-1789's; this field is
-   * only the key. `look` (below) is display-only.
+   * The id of the node's OPEN gate — present ONLY when `state === "review"`. Both gate
+   * kinds (completion + irreversible-action) surface as `review`, and
+   * `resolveGateVerdict` THROWS for any non-review state (state.ts: "verdicts only apply
+   * at the gate"). `blocked` is Stuck-and-redispatchable — cleared by a `dispatch` intent
+   * keyed on the NODE id, NOT a gate verdict — so a blocked node has no gate row and no
+   * gateId. The gate-queue JOIN + verb-DISPATCH key, counterpart to `sessionId`: every
+   * gate verb (`approve` / `revise` / `block` / `escalate` / `grant`) takes a `gateId`
+   * (intents.ts), so the rung-2 controls dispatch through THIS, never the node id.
+   * Gate-card composition + queue ordering are BRO-1789's; this field is only the key.
+   * `look` (below) is display-only.
    */
   gateId?: string;
   /** Ancestor initiative label — derived from the `parentId` ancestry chain. */
@@ -158,7 +160,18 @@ export interface WorkItem {
  * slices; budget/done/trigger are engine-room). Exported so the contract test and
  * downstream reducers can assert the shape stays clean.
  */
-export const WORK_ITEM_EXCLUDED_FIELDS = ["chat", "events", "budget", "done", "trigger"] as const;
+export const WORK_ITEM_EXCLUDED_FIELDS = [
+  "chat",
+  "events",
+  "budget",
+  "done",
+  "trigger",
+  // "Never show progress percentages" is the single loudest design-canon rule (CLAUDE.md):
+  // the read surface shows receipts, never a percent. Excluded so `NoExcludedLeak` forbids
+  // a `progress?`/`percent?` field from ever leaking onto the wire type.
+  "progress",
+  "percent",
+] as const;
 export type WorkItemExcludedField = (typeof WORK_ITEM_EXCLUDED_FIELDS)[number];
 
 // ── Client persisted UI-prefs (porting-notes §State taxonomy) ────────────────
@@ -168,9 +181,8 @@ export type WorkItemExcludedField = (typeof WORK_ITEM_EXCLUDED_FIELDS)[number];
 // `mc4-view` / `bv-nav-open` / `bv-ml-cols`.
 
 /** The mission-plane view mode (was localStorage `mc4-view`; porting-notes). */
-export type PlaneView = "feed" | "board" | "list";
-
-export const PLANE_VIEWS = ["feed", "board", "list"] as const satisfies readonly PlaneView[];
+export const PLANE_VIEWS = ["feed", "board", "list"] as const;
+export type PlaneView = (typeof PLANE_VIEWS)[number];
 
 /** The persisted UI-prefs slice keys — the three ad-hoc localStorage keys, absorbed. */
 export const UI_PREF_KEYS = ["view", "navOpen", "cols"] as const;
@@ -182,10 +194,5 @@ export type UiPrefKey = (typeof UI_PREF_KEYS)[number];
  * Rule of thumb: lose-work-or-context → server-truth; lose-a-layout-pref →
  * persisted; nobody-notices → ephemeral.
  */
-export type StoreSlice = "server-truth" | "persisted-ui-prefs" | "ephemeral";
-
-export const STORE_SLICES = [
-  "server-truth",
-  "persisted-ui-prefs",
-  "ephemeral",
-] as const satisfies readonly StoreSlice[];
+export const STORE_SLICES = ["server-truth", "persisted-ui-prefs", "ephemeral"] as const;
+export type StoreSlice = (typeof STORE_SLICES)[number];
