@@ -104,21 +104,34 @@ export interface MaestroDataParts {
 }
 
 /**
- * Maestro's METADATA type for ai's generic `UIMessage<METADATA, DATA_TYPES>` — the
- * OTHER half of the generic, owned here SYMMETRICALLY with `MaestroDataParts`. It rides
- * the wire: the runtime emits it as the `start` / `message-metadata` chunk's
- * `messageMetadata`, and the client folds it into `message.metadata` (§7). ai types
- * METADATA as `unknown` at that boundary, so it MUST be declared once here — otherwise
- * the emitter (BRO-1790) and the reader (BRO-1782) each assume a shape independently and
- * a name divergence (`model` vs `modelId`) compiles + passes on both sides yet renders
- * the model label blank (the exact "declared twice → projections drift" failure
- * PATTERNS §10 exists to prevent). One flat type (ai carries a single METADATA per
- * message, not per-role): `model` on an assistant message, `time` on a user message.
+ * Maestro's METADATA type — ONE of the two type parameters Maestro pins on ai's
+ * `UIMessage<METADATA, DATA_PARTS, TOOLS>` (the other is `MaestroDataParts`; the third,
+ * TOOLS, is intentionally deferred — see `MaestroTools` note below). It rides the wire:
+ * the runtime emits it as the `start` / `message-metadata` chunk's `messageMetadata`,
+ * and the client folds it into `message.metadata` (§7). ai types METADATA as `unknown`
+ * at that boundary, so it MUST be declared once here — otherwise the emitter (BRO-1790)
+ * and the reader (BRO-1782) each assume a shape independently and a name divergence
+ * (`model` vs `modelId`) compiles + passes on both sides yet renders the model label
+ * blank (the exact "declared twice → projections drift" failure PATTERNS §10 exists to
+ * prevent). One flat type (ai carries a single METADATA per message, not per-role):
+ * `model` on an assistant message, `time` on a user message.
  */
 export interface MaestroMetadata {
   model?: string;
   time?: string;
 }
+
+// The THIRD type parameter of ai's `UIMessage<METADATA, DATA_PARTS, TOOLS>` — TOOLS
+// (the tool-part input/output shapes, `ToolUIPart<TOOLS>`) — is **intentionally
+// DEFERRED** to ai's `UITools` default (dynamic tools), a stated design decision, not
+// silence. Maestro's child agents call an OPEN-ENDED tool set (shell, edit, read,
+// arbitrary MCP tools), so tool parts are `DynamicToolUIPart` with `input` / `output`
+// typed `unknown` — there is no fixed Maestro tool schema to pin, and pinning one would
+// be wrong. This is NOT the METADATA gap above: METADATA has a fixed Maestro shape that
+// WOULD drift if unowned; TOOLS is genuinely dynamic, so `unknown` is the accurate model
+// (BRO-1790 emits, BRO-1782 renders, both read tool output defensively). apps/app
+// composes `UIMessage<MaestroMetadata, MaestroDataParts>` — the two halves Maestro owns,
+// leaving TOOLS at ai's default. No `MaestroTools` type is declared, by design.
 
 /**
  * The tick as an ai `DataUIPart`: `{ type: "data-tick"; id?; data: TickReceipt }`. A
@@ -159,6 +172,11 @@ export interface ChatControlMessage {
  * True for the orchestrator wake-log part (the one data part this seam types).
  * Operates on ai's `UIMessagePart` structurally (`{ type: string }`) so it needs no
  * `ai` import; narrows to Maestro's `TickDataPart`.
+ *
+ * TAG-ONLY: it matches on `type` alone, so it narrows the type but does NOT validate
+ * `data`. A malformed `data-tick` (e.g. one arriving over the loose `parts: unknown[]`
+ * control line) passes the guard with a bad `data`, so a consumer MUST read `data.rows`
+ * defensively (`part.data?.rows ?? []`) rather than trust the narrow blindly.
  */
 export const isTickDataPart = (part: { type: string }): part is TickDataPart =>
   part.type === DATA_TICK_PART;

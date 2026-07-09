@@ -87,7 +87,7 @@ describe("chat transport · the tick data part (the one part this seam owns)", (
   });
 });
 
-describe("chat transport · both halves of ai's UIMessage<METADATA, DATA_TYPES> are owned here", () => {
+describe("chat transport · the two UIMessage type params Maestro owns (METADATA + DATA_PARTS; TOOLS deferred)", () => {
   test("the DATA_TYPES half — MaestroDataParts['tick'] is the TickReceipt payload (compile-checked)", () => {
     // A compile-time assertion: MaestroDataParts["tick"] must be TickReceipt. If the
     // map or the payload drifts apart, this assignment fails `tsc --noEmit`.

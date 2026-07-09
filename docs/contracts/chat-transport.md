@@ -55,12 +55,13 @@ vendored in from `ai`.
 The request body is shaped by the SDK transport's `sendMessages` options (§9), not a bespoke Maestro
 body — the client is the real `useChat` default/custom transport.
 
-## 3. The message shape — ai's `UIMessage`, Maestro's two generic halves
+## 3. The message shape — ai's `UIMessage`, the params Maestro pins
 
-The message is ai's **`UIMessage<METADATA, DATA_TYPES>`** — `{ id, role, metadata?, parts[] }`,
+The message is ai's **`UIMessage<METADATA, DATA_PARTS, TOOLS>`** — `{ id, role, metadata?, parts[] }`,
 `role ∈ user | assistant | system`, with ai's part union (`text`, `reasoning`, `tool-${name}`,
 `data-${name}`, `source-url`, `source-document`, `file`, …). **Maestro does not re-declare `UIMessage`.**
-It owns **both** type parameters, symmetrically — both are wire types, so both live in `protocol`:
+It is a **three-parameter** generic; Maestro pins the two that have a fixed Maestro shape and deliberately
+defers the third:
 
 - **`METADATA`** → Maestro's **`MaestroMetadata`** (`{ model?, time? }`). It **rides the wire**: the
   runtime emits it on the `start` / `message-metadata` chunk's `messageMetadata`, and the client folds it
@@ -69,12 +70,18 @@ It owns **both** type parameters, symmetrically — both are wire types, so both
   (`{ model }` vs `{ modelId }` would compile on both sides yet render the model label blank). `model`
   on an assistant message, `time` on a user message — one flat type (ai carries a single METADATA per
   message, not per-role).
-- **`DATA_TYPES`** → Maestro's **`MaestroDataParts`** map (§5). Each key `NAME` yields a `data-${NAME}`
+- **`DATA_PARTS`** → Maestro's **`MaestroDataParts`** map (§5). Each key `NAME` yields a `data-${NAME}`
   part.
+- **`TOOLS`** → **intentionally deferred** to ai's `UITools` default (dynamic tools) — a stated design
+  decision, not silence. Maestro's child agents call an OPEN-ENDED tool set (shell, edit, read, arbitrary
+  MCP tools), so tool parts are `DynamicToolUIPart` with `input` / `output` typed `unknown` — there is no
+  fixed Maestro tool schema to pin, and `unknown` is the *accurate* model here (unlike METADATA, which
+  has a fixed shape that WOULD drift if left unowned). BRO-1790 emits, BRO-1782 renders, both read tool
+  output defensively.
 
-`apps/app` composes `UIMessage<MaestroMetadata, MaestroDataParts>` from both protocol-owned halves; the
-`UIMessage` container itself is ai's. This keeps PATTERNS §10 whole — every wire type Maestro declares is
-here, neither half punted downstream.
+`apps/app` composes `UIMessage<MaestroMetadata, MaestroDataParts>` (leaving TOOLS at ai's default); the
+`UIMessage` container itself is ai's. This keeps PATTERNS §10 whole — every wire type with a **fixed**
+Maestro shape is declared here; the one genuinely-dynamic parameter is deferred by explicit decision.
 
 ## 4. The chunk vocabulary — ai's `UIMessageChunk` (adopted, not re-declared)
 
@@ -112,6 +119,11 @@ Maestro's `data-*` parts, reconciled across the transcript **by `id`**, are the 
   (`declare module "./chat" { interface MaestroDataParts { gate: GateCard } }`) — so `chat.ts` is **not**
   edited (no `export *` barrel collision, no forked map) and the map stays single-sourced. This seam
   **leaves the gate member out**, so it does not pre-empt that ownership.
+  **Precondition (BRO-1789 must satisfy):** the augmentation only reaches the composition site if `gate.ts`
+  is part of the compiled package — so BRO-1789 MUST also add `export * from "./gate"` to
+  `packages/protocol/src/index.ts`. Without that barrel line the `declare module "./chat"` is dead (the
+  file is never loaded), `MaestroDataParts` keeps only `tick`, and `data-gate` silently fails to typecheck
+  at the composition site in apps/app.
 
 ## 6. Where the transport terminates
 
@@ -161,6 +173,9 @@ dep** — it adopts the SDK by pinning the major, not by importing it, and stays
 The swap joint is ai's own interface (v6):
 
 ```ts
+// Illustrative reproduction (the installed ai@6 .d.ts declares these as property/arrow
+// signatures — `sendMessages: (options) => Promise<...>` — structurally equivalent to
+// the method syntax shown here; apps/app's `satisfies ChatTransport` check is authoritative).
 interface ChatTransport<UI_MESSAGE extends UIMessage> {
   sendMessages(options: {
     trigger: 'submit-message' | 'regenerate-message';
@@ -182,8 +197,8 @@ transport is a Maestro fetch/SSE `ChatTransport` speaking the runtime endpoint (
 (b) `MaestroDataParts` composes a valid `UIMessage` (each `data-${NAME}` is a real `DataUIPart`). Because
 `protocol` re-declares none of these SDK types, there is nothing here to drift — the conformance test
 guards the *composition*, not a mirror. `protocol`'s own `chat.test.ts` covers the Maestro delta:
-constants (incl. the react-major pin), the tick payload + guard, the `MaestroDataParts["tick"]`
-composition, and the control line.
+constants (incl. the react-major pin), the tick payload + guard, both owned generic halves
+(`MaestroDataParts["tick"]` + the `MaestroMetadata` witness), and the control line.
 
 ## 10. Idle-work addressing — dispatch-then-chat (resolves F10)
 
@@ -193,6 +208,14 @@ intent (F2), awaits the session row via the stream (`node.updated` + the new ses
 chat to the new `sessionId`. This keeps the endpoint purely session-addressed (no `nodeId` overload) and
 reuses the intents→events round-trip (PATTERNS §3). The alternative (runtime-side auto-dispatch on a
 `nodeId`-addressed chat) would change the API.md §Chat endpoint contract — not taken.
+
+**Ordering (must, or the message races):** the client MUST be **subscribed to / resuming the event stream
+from its `seq` cursor BEFORE it POSTs the `dispatch` intent** — otherwise the `node.updated` + new-session
+events can arrive before the subscription is live and the client waits forever (or drops the user's
+queued message). Subscribe → dispatch → await session → chat, never dispatch-then-subscribe.
+**Dispatch-rejected path:** if the `dispatch` intent is refused (4xx / a typed `ErrorResponse` —
+`gate_required`, `lease_held`, `budget_exhausted`), the client surfaces the refusal in plain voice and
+**does NOT** POST the chat (there is no session to address); the queued message stays editable, not lost.
 
 ## 11. Child-harness stdin (cross-dep HARNESS §2)
 
