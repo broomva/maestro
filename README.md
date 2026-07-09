@@ -60,6 +60,12 @@ Sequenced so each phase is verifiable before the next depends on it (roadmap pha
 | **P5** Dogfood | Maestro builds Maestro | majority of a week's commits are gated Maestro runs |
 | **P6** Distribution | relay, multi-machine, no-terminal onboarding | second machine through the relay; one account, both runtimes |
 
+## Definition of done
+
+The standing bar every ticket and phase holds — light + dark, reduced-motion safe, tokens-only,
+holding every hard rule in `CLAUDE.md`, with bstack governance green — is written once in
+[`docs/definition-of-done.md`](docs/definition-of-done.md) and referenced by every phase-exit ticket.
+
 ## Governance
 
 Wired from init via **bstack** (BRO-1829) — see [`AGENTS.md`](AGENTS.md), [`METALAYER.md`](METALAYER.md),
