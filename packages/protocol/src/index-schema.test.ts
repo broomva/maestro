@@ -160,13 +160,26 @@ describe("index-schema — compareReplay is a strict total order (rebuild-identi
     }
   });
 
-  test("a non-finite ts degrades gracefully — sorts by (path, line), never returns NaN", () => {
-    // ts should be finite (parser precondition), but the comparator must stay a
-    // defined total order rather than poison seq assignment with NaN.
-    const bad: ReplayKey = { ts: Number.NaN, sourcePath: "runs/run-a/session.jsonl", line: 0 };
-    const good: ReplayKey = { ts: 100, sourcePath: "runs/run-a/session.jsonl", line: 1 };
-    expect(Number.isNaN(compareReplay(bad, good))).toBe(false);
-    expect(sign(compareReplay(bad, good)) === -sign(compareReplay(good, bad))).toBe(true);
+  test("a non-finite ts stays a strict total order — transitive, sorts last, never NaN", () => {
+    // ts should be finite (parser precondition), but the comparator must remain a
+    // GENUINE total order — the earlier `<`/`>`-on-NaN form was non-transitive.
+    const nan: ReplayKey = { ts: Number.NaN, sourcePath: "runs/run-a/session.jsonl", line: 0 };
+    const lo: ReplayKey = { ts: 50, sourcePath: "runs/run-z/session.jsonl", line: 0 };
+    const hi: ReplayKey = { ts: 200, sourcePath: ".maestro/journal.jsonl", line: 0 };
+    const triple = [nan, lo, hi];
+    for (const a of triple) {
+      for (const b of triple) {
+        expect(Number.isNaN(compareReplay(a, b))).toBe(false); // never poisons the result
+        expect(sign(compareReplay(a, b)) === -sign(compareReplay(b, a))).toBe(true); // antisymmetric
+        for (const c of triple) {
+          if (compareReplay(a, b) < 0 && compareReplay(b, c) < 0) {
+            expect(compareReplay(a, c)).toBeLessThan(0); // transitive (the old form failed here)
+          }
+        }
+      }
+    }
+    // a non-finite ts sorts LAST (normalized to +Infinity), never interleaved
+    expect([...triple].sort(compareReplay)).toEqual([lo, hi, nan]);
   });
 
   // The full "cache with teeth" test lands in p1-rebuild-invariant: it asserts two
@@ -212,6 +225,7 @@ describe("index-schema — row shapes compile and carry the sync-ready fields", 
     ts: 1_700_000_000_001, // epoch ms — the storage row; the wire projects this to ISO
     actor: "system",
     type: "node.updated",
+    payload: null, // raw payload_json TEXT (null here); the wire rehydrates it to an object
   };
   const gate: GateRow = {
     id: "g1",

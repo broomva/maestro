@@ -1,7 +1,9 @@
 // Events — the read surface (DATA-MODEL §A.3 + §B.3, API.md §stream + §4).
 //
-// The event envelope is the `event` table row, verbatim on the wire (API.md
-// §stream). `seq` is the index autoincrement — total order, no gaps, the SSE
+// The event envelope is the WIRE shape of an event (API.md §stream); the stored
+// `event` row is `EventRow` (index-schema.ts), which differs in representation
+// (numeric `ts`, JSON-string `payload`) and projects to this envelope at the wire
+// boundary. `seq` is the index autoincrement — total order, no gaps, the SSE
 // resume cursor. Error codes are part of the protocol (API.md §4).
 
 /** Who produced an event (DATA-MODEL §A.3). */
@@ -74,9 +76,11 @@ export const EVENT_TYPES = {
 } as const satisfies Record<string, EventType>;
 
 /**
- * The event envelope — the `event` table row, verbatim on the wire (API.md
- * §stream). `sessionId` is nullable for synthetics (D-DURABILITY). `ts` is
- * ISO-8601 on the wire (session.jsonl uses ISO strings, DATA-MODEL §A.3).
+ * The event envelope — the WIRE shape of an event (API.md §stream). The stored row
+ * is `EventRow` (index-schema.ts): the same fields, but `ts` epoch-ms and `payload`
+ * raw JSON text, projected to this envelope at the wire boundary. `sessionId` is
+ * nullable for synthetics (D-DURABILITY). `ts` here is ISO-8601 on the wire
+ * (session.jsonl uses ISO strings, DATA-MODEL §A.3).
  */
 export interface EventEnvelope<P = unknown> {
   seq: number;

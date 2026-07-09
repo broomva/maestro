@@ -155,16 +155,20 @@ export interface SessionRow extends SyncFields {
  * (matching the DATA-MODEL §B.3 `integer(ts, {mode:"timestamp"})` sketch and the
  * numeric ordering range queries need); the runtime projects it to ISO-8601 at the
  * wire boundary (`EventEnvelope.ts: string`), a projection owned by BRO-1796.
- * `EventEnvelope` stays THE wire type (PATTERNS §10) — `EventRow` reuses it via
- * `Omit` so only the one genuinely-different field is restated, not re-declared.
- * (`payload` is likewise stored as JSON text and rehydrated at the boundary — a
- * storage detail, not a second type.) Append-only + immutable — no `SyncFields`
- * (an event never updates or soft-deletes; it is the log). `seq` is the global
- * total order + the live SSE resume cursor (DATA-MODEL §B.5); its VALUES are
- * rebuild-scoped, not preserved across a rebuild (see `compareReplay`).
- * `sessionId` is null for synthetics (D-DURABILITY).
+ * `EventEnvelope` stays THE wire type (PATTERNS §10); `EventRow` is the STORAGE
+ * row, differing on exactly the two fields the storage representation changes:
+ * `ts` is epoch ms (not the ISO wire string) and `payload` is the raw `payload_json`
+ * TEXT (not the rehydrated object). The runtime parses `payload` + formats `ts` when
+ * it projects a row to the wire envelope — owned by BRO-1796. Append-only + immutable
+ * — no `SyncFields` (an event never updates or soft-deletes; it is the log). `seq` is
+ * the global total order + the live SSE resume cursor (DATA-MODEL §B.5); its VALUES are
+ * rebuild-scoped, not preserved across a rebuild (see `compareReplay`). `sessionId` is
+ * null for synthetics (D-DURABILITY).
  */
-export type EventRow = Omit<EventEnvelope, "ts"> & { ts: number };
+export type EventRow = Omit<EventEnvelope, "ts" | "payload"> & {
+  ts: number;
+  payload: string | null;
+};
 
 /** `gate` — pending + decided human decisions (Org-Control-Layer verdicts). */
 export interface GateRow extends SyncFields {
@@ -278,14 +282,21 @@ export interface ReplayKey {
 /**
  * The canonical replay comparator — a strict total order over journal lines that
  * makes `event.seq` assignment deterministic, hence two rebuilds byte-identical.
- * Returns <0 / 0 / >0; 0 iff the two keys denote the same journal line. Uses
- * ordering operators (not subtraction), so it stays a defined total order even if a
- * `ts` is non-finite: a NaN `ts` sorts by `(sourcePath, line)` rather than
- * poisoning the result with NaN.
+ * Returns <0 / 0 / >0; 0 iff the two keys denote the same journal line.
+ *
+ * A non-finite `ts` (a corrupt line the parser should have rejected) is normalized
+ * to +Infinity, so it sorts LAST and ties only other non-finite keys — which keeps
+ * the comparator a *genuine* total order. (Comparing a raw NaN with `<`/`>` would be
+ * non-transitive: NaN ties every finite `ts` on both sides, so finite keys would
+ * order by `ts` while a NaN ordered only by path — `n < lo < hi` yet `n > hi` — and
+ * `Array.sort` would then make `event.seq` depend on input order, breaking the
+ * byte-identical rebuild.)
  */
 export function compareReplay(a: ReplayKey, b: ReplayKey): number {
-  if (a.ts < b.ts) return -1;
-  if (a.ts > b.ts) return 1;
+  const at = Number.isFinite(a.ts) ? a.ts : Number.POSITIVE_INFINITY;
+  const bt = Number.isFinite(b.ts) ? b.ts : Number.POSITIVE_INFINITY;
+  if (at < bt) return -1;
+  if (at > bt) return 1;
   if (a.sourcePath < b.sourcePath) return -1;
   if (a.sourcePath > b.sourcePath) return 1;
   if (a.line < b.line) return -1;

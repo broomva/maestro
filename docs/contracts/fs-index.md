@@ -68,11 +68,13 @@ than restate them (PATTERNS §10). Physical column names are the DATA-MODEL §B.
   `SyncFields`.
 - **`SessionRow`** — `id` (= run id), `nodeId`, `branch` (`run/<id>`), `status: SessionStatus`,
   `startedAt`, `endedAt`, `diffstatJson` + `SyncFields`.
-- **`EventRow`** — the wire envelope (`EventEnvelope`, events.ts) in every field *except* `ts`, which
-  the stored row holds as **epoch ms** (the wire projects it to ISO at the boundary — §4). Expressed as
-  `Omit<EventEnvelope, "ts"> & { ts: number }` so `EventEnvelope` stays the one wire type (PATTERNS §10)
-  and only the differing field is restated. Append-only + immutable, so **no `SyncFields`** (an event
-  never updates or soft-deletes; it *is* the log). See §4 (`ts`, `seq`), §5, §6.
+- **`EventRow`** — the STORAGE row for an event. It reuses the wire envelope (`EventEnvelope`, events.ts)
+  but differs on the two fields the storage representation changes: `ts` is **epoch ms** (not the ISO wire
+  string) and `payload` is the raw `payload_json` **TEXT** (not the rehydrated object). Expressed as
+  `Omit<EventEnvelope, "ts" | "payload"> & { ts: number; payload: string | null }` so `EventEnvelope`
+  stays the one *wire* type (PATTERNS §10); the runtime parses `payload` + formats `ts` when it projects a
+  row to the wire (BRO-1796). Append-only + immutable, so **no `SyncFields`** (an event never updates or
+  soft-deletes; it *is* the log). See §4, §5, §6.
 - **`GateRow`** — `id`, `sessionId`, `kind: GateKind`, `proposalJson` (the gate-card source),
   `verdict: GateVerdict | null` (null = pending), `decidedBy`, `openedAt`, `decidedAt` + `SyncFields`.
 - **`ScheduleRow`** — `id`, `nodeId`, `triggerKind: TriggerKind`, `spec`, `nextFireAt`, `enabled` +
@@ -104,14 +106,21 @@ carries the last two on every syncable derived row (`node`, `session`, `gate`, `
   (the sketch put it only on `node`); `NodeRow.createdAt` (frontmatter `created`, the age the board
   groups by); `GateRow.openedAt` (gate-row lifecycle start, distinct from `decidedAt`); the `scan_cursor`
   table (§5).
-- **Timestamp representation (a deliberate decision).** Every index **row** stores timestamps as
-  **epoch ms (`number`)** — matching the sketch's `integer(…, {mode:"timestamp"})` and the
-  last-writer-wins / range-query semantics. This includes the `event` row's `ts`
-  (`EventRow = Omit<EventEnvelope,"ts"> & {ts:number}`). The **wire** envelope (`EventEnvelope.ts:
-  string`) carries ISO-8601; the runtime projects row→wire at the boundary (owned by BRO-1796). Because
-  `EventRow` restates only the one differing field, a BRO-1796 `integer(ts)` column's `$inferSelect.ts`
-  matches `EventRow.ts` — no contradiction on the column everything streams through. "Types are the
-  contract, columns a sketch" (DATA-MODEL §B).
+- **Soft-delete narrows the natural-key UNIQUE to a PARTIAL index.** The §B.3 sketch declares
+  `node.path .notNull().unique()` (global). With tombstones retained, a global UNIQUE breaks
+  delete-then-recreate (the retained tombstone collides on re-INSERT of the same path). **BRO-1796 must
+  implement `node.path` as a PARTIAL unique index scoped to `WHERE deleted_at IS NULL`, not `.unique()`.**
+  The same rule applies to any syncable row whose natural key can be reused after a tombstone.
+- **Timestamp representation (a deliberate decision, with an explicit drizzle mode).** Every index **row**
+  stores timestamps as **epoch ms (`number`)** — the last-writer-wins / range-query semantics need ms
+  resolution. **BRO-1796 must use `integer(col, {mode:"number"})` storing `Date.now()`** for every `*At` /
+  `ts` column. Do **not** use `{mode:"timestamp"}` (infers to `Date`, persists Unix **seconds** — loses ms
+  and yields `$inferSelect: Date`, violating the `number` pin) or `{mode:"timestamp_ms"}` (also
+  `Date`-typed). This includes the `event` row's `ts`
+  (`EventRow = Omit<EventEnvelope,"ts"|"payload"> & {ts:number; payload:string|null}`). The **wire**
+  envelope (`EventEnvelope.ts: string`) carries ISO-8601; the runtime projects row→wire at the boundary
+  (BRO-1796). "Types are the contract, columns a sketch" (DATA-MODEL §B) — this pins the mode so the
+  column and the contract agree.
 
 ## 5. The high-water mark (two levels — both pinned)
 
