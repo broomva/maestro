@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# bin/bstack — repo-local dispatcher shim for the vendored bstack CLI.
+#
+# Makes `bstack <cmd>` resolve from anywhere in the repo (add ./bin to PATH,
+# or call ./bin/bstack). The bstack control metalayer is vendored at
+# <repo>/bstack via `git clone` (BRO-1829) — never `npx skills add`, which
+# drops sibling dirs (upstream vercel-labs/skills#1523).
+set -euo pipefail
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec bash "$REPO_ROOT/bstack/bin/bstack" "$@"
