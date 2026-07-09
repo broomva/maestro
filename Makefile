@@ -2,7 +2,7 @@
 # The bstack control metalayer is vendored at ./bstack (BRO-1829).
 BSTACK := ./bin/bstack
 
-.PHONY: help typecheck lint format check bstack-doctor bstack-check control-audit janitor
+.PHONY: help typecheck lint format check bstack-doctor bstack-check control-audit janitor p0-exit
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -32,3 +32,6 @@ control-audit: ## Full metalayer compliance audit
 
 janitor: ## Branch + worktree janitor (dry-run)
 	$(BSTACK) doctor --quiet || true
+
+p0-exit: ## Run the ROADMAP P0 exit gate (BRO-1798) + capture evidence
+	bash scripts/p0-exit.sh
