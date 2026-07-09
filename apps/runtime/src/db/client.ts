@@ -11,6 +11,7 @@
 // those (scanner BRO-1800, read API BRO-1812, SSE BRO-1816, budget guard
 // BRO-1788) hang off the handle this returns.
 
+import { fileURLToPath } from "node:url";
 import { type Client, createClient } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 import { migrate } from "drizzle-orm/libsql/migrator";
@@ -34,7 +35,9 @@ export interface IndexHandle {
  * schema + migrations + the dev/test open path; the runtime still reports the
  * index as a stub (config.ts) and no compiled path imports this module yet.
  */
-export const MIGRATIONS_DIR = new URL("./migrations", import.meta.url).pathname;
+// fileURLToPath (not `.pathname`) so a checkout path with a space or unicode is
+// percent-decoded and Windows drive letters resolve correctly.
+export const MIGRATIONS_DIR = fileURLToPath(new URL("./migrations", import.meta.url));
 
 /**
  * Build a libSQL url for a filesystem index path. `:memory:` is passed through
@@ -64,6 +67,13 @@ export async function applyMigrations(db: IndexDb): Promise<void> {
  */
 export async function openIndex(url: string): Promise<IndexHandle> {
   const handle = createIndexClient(url);
-  await applyMigrations(handle.db);
+  try {
+    await applyMigrations(handle.db);
+  } catch (err) {
+    // A migration failure is fatal, but close the just-opened handle before
+    // rethrowing so a failed open never leaks the libSQL file handle.
+    handle.client.close();
+    throw err;
+  }
   return handle;
 }

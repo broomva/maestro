@@ -14,6 +14,9 @@
 //     types away, so `bun run typecheck` (CI `quality`) is what makes it bite.
 
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   EventRow,
   GateRow,
@@ -25,7 +28,7 @@ import type {
   SessionRow,
 } from "@maestro/protocol";
 import { eq, type InferSelectModel } from "drizzle-orm";
-import { openIndex } from "./client";
+import { indexUrl, openIndex } from "./client";
 import {
   event,
   type gate,
@@ -71,20 +74,35 @@ describe("index schema — migrations apply on an empty db", () => {
     client.close();
   });
 
-  test("opening the same db twice is idempotent (migrations do not re-run)", async () => {
-    // The migrator records applied migrations in its journal table; a second
-    // openIndex over a shared client must not throw "table already exists".
-    const { db, client } = await freshIndex();
-    await db.insert(node).values(makeNode({ id: "n1", path: "/a" }));
-    // A second migrate() call on the same handle is a no-op.
-    const rows = await db.select().from(node);
-    expect(rows.length).toBe(1);
-    client.close();
+  test("re-opening a persisted db re-runs migrations as a no-op (restart idempotency)", async () => {
+    // The real 24/7-runtime-restart invariant: open a FILE db (not :memory:,
+    // which mints a fresh db each open), migrate, write, close — then open the
+    // SAME file with a fresh client. The migrator must see its journal table and
+    // skip, never throwing "table already exists", and the row must survive.
+    const dir = mkdtempSync(join(tmpdir(), "maestro-idem-"));
+    const url = indexUrl(join(dir, "index.db"));
+    try {
+      const first = await openIndex(url);
+      await first.db.insert(node).values(makeNode({ id: "n1", path: "/a" }));
+      first.client.close();
+
+      // Restart: a second openIndex over the same file re-invokes the migrator.
+      const second = await openIndex(url);
+      const rows = await second.db.select().from(node);
+      expect(rows.length).toBe(1);
+      expect(rows[0]?.id).toBe("n1");
+      second.client.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
 describe("event — schema constraints", () => {
-  test("seq is a monotonic, gap-free total order (the SSE cursor)", async () => {
+  test("seq is a strictly monotonic, never-reused total order (the SSE cursor)", async () => {
+    // AUTOINCREMENT: strictly increasing and never reused (what the SSE cursor
+    // needs). Order by seq explicitly so this proves ASSIGNMENT order, not the
+    // storage/return order of an unordered select.
     const { db, client } = await freshIndex();
     for (let i = 0; i < 3; i++) {
       await db.insert(event).values({
@@ -94,7 +112,7 @@ describe("event — schema constraints", () => {
         type: "tool.call",
       });
     }
-    const rows = await db.select().from(event);
+    const rows = await db.select().from(event).orderBy(event.seq);
     const seqs = rows.map((r) => r.seq);
     expect(seqs).toEqual([1, 2, 3]);
     client.close();
@@ -116,13 +134,19 @@ describe("node — path is unique only among LIVE rows (partial index)", () => {
   test("two live rows with the same path collide", async () => {
     const { db, client } = await freshIndex();
     await db.insert(node).values(makeNode({ id: "n1", path: "/growth" }));
-    let threw = false;
+    let caught: unknown;
     try {
       await db.insert(node).values(makeNode({ id: "n2", path: "/growth" }));
-    } catch {
-      threw = true;
+    } catch (err) {
+      caught = err;
     }
-    expect(threw).toBe(true);
+    // Assert it is specifically the UNIQUE constraint (not some unrelated error
+    // masquerading as one). drizzle wraps the driver error — its own `.message` is
+    // the failed query; the SQLite detail ("UNIQUE constraint failed: node.path")
+    // rides on `.cause` (a LibsqlError, code SQLITE_CONSTRAINT).
+    const err = caught as { message?: string; cause?: { message?: string } };
+    const detail = `${err?.message ?? ""} ${err?.cause?.message ?? ""}`;
+    expect(detail).toMatch(/UNIQUE constraint failed/i);
     client.close();
   });
 
@@ -183,11 +207,15 @@ describe("timestamps + defaults", () => {
   });
 });
 
-describe("authoritative rows carry no sync fields", () => {
-  test("run_budget and lease insert with only their operational columns", async () => {
+describe("non-syncable rows insert with only their own columns", () => {
+  test("run_budget, lease, and scan_cursor need no SyncFields", async () => {
     const { db, client } = await freshIndex();
-    // These inserts omit updatedAt/deletedAt — proving those columns do not exist
-    // on the per-runtime authoritative tables (they would be NOT NULL if they did).
+    // The SOUND non-existence proof is the compile-time _BudgetContract /
+    // _LeaseContract / _CursorContract aliases above (a stray updatedAt/deletedAt
+    // column fails Equiv at tsc). This runtime check is the weaker companion: it
+    // only catches a NOT-NULL-without-default regression. run_budget + lease are
+    // per-runtime AUTHORITATIVE (never synced); scan_cursor is INDEX-INTERNAL and
+    // carries its own updatedAt but no deletedAt tombstone.
     await db
       .insert(runBudget)
       .values({ sessionId: "run-1", spentUsd: 1.25, iterations: 3, lastCallAt: 1_700_000_000_000 });
