@@ -24,21 +24,29 @@ It is fully rebuildable, holds no truth of its own.
 cleared by **unblock / redispatch** (a `dispatch` intent keyed on the node id), not a verdict. The card
 for a blocked node offers redispatch; the card for a review node offers the verbs.
 
-## 2. The comparator (also orders the board — BRO-1780)
+## 2. The comparator (reuses the shared board axis — BRO-1780)
 
-`compareGateQueue(a, b)` over `{ state, attentionSince }`:
+`compareGateQueue(a, b)` over `{ state, attentionSince }` — a **total order over the gate queue
+{review, blocked}**, NOT a whole-board sort:
 
 1. **Cross-group** — `compareByAttention` (plain-voice.ts, D-ORDER `WK_GROUP_ORDER`), REFERENCED not
-   re-declared: `review` before `blocked`, then the rest. This is the one board comparator; the gate queue
-   adds no fork.
+   re-declared: `review` before `blocked`, then the rest. This is the **shared board axis** — valid over
+   all 8 states — and the gate queue adds no fork of it.
 2. **Within-group tiebreak** — **oldest-waiting first** (ascending `attentionSince`). `attentionSince` is
    the epoch ms the node ENTERED its attention state (a gate's `openedAt` for review, the block event ts
    for blocked) — **NOT `createdAt`** (sorting the attention queue by creation time buries freshly-
    actionable old work — the BRO-1764 §8 sort-key decoupling). The ticket calls this "age descending": the
    gate that has waited longest for a human sits at the top so no gate rots at the bottom.
 
-Total order on finite `attentionSince` (proven in the test: reflexive → 0, antisymmetric, transitive).
-Non-finite `attentionSince` is out of contract (the runtime emits a real epoch).
+**The board (BRO-1780) reuses the shared `compareByAttention` axis for grouping, then supplies its OWN
+within-group recency key per group** — a `running` node has no gate `openedAt`, so `attentionSince` is not
+its sort key. Do not `nodes.sort(compareGateQueue)` over non-attention nodes: the cross-group order is
+right, but the within-group tiebreak only means anything for {review, blocked}. `attentionSince` is
+defined only for the attention set.
+
+Total order on finite `attentionSince` (proven in the test: reflexive → 0, antisymmetric, transitive — and
+that the shared axis still orders non-attention states after the attention set). Non-finite `attentionSince`
+is out of contract (the runtime emits a real epoch).
 
 ## 3. The `data-gate` card payload (`GateCard`)
 
@@ -75,6 +83,12 @@ fails `tsc` until given a verb).
 HARNESS §4 exit-20) in its home `work.ts`, using the const→type idiom (`GATE_KINDS` → `type` derived) so a
 new kind can't escape `tsc`. `isGateKind` guards it. `GateRow.kind` (index-schema.ts) picks up the widened
 type automatically.
+
+**`kind` drives which verbs the F5 card SURFACES (BRO-1805), not the verdict set itself.** The four
+`GATE_VERDICT_VERBS` are fixed; a `completion` / `irreversible-action` gate shows all four, but a
+`question`-kind gate resolves on the **answer path** (FLOWS F5) — `revise` carries the answer as feedback,
+and Approve/Block are suppressed or relabelled. A choice-question's options ride `GateLook` (BRO-1764), not
+a new verdict. This keeps BRO-1805 from rendering Approve/Block on a pure question.
 
 ## 6. The grace window (the one sanctioned timing component)
 

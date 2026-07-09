@@ -1,10 +1,12 @@
 // Gate queue — the derived attention view + verdict semantics + the grace window.
 //
 // The gate queue is a DERIVED VIEW over nodes in the attention set (state ∈
-// {review, blocked} = `ATTENTION_STATES`) — never a separate store. Its comparator IS
-// the board order (D-ORDER, DATA-MODEL §B.5). This seam pins: the comparator, the
-// `data-gate` card payload, the verdict→verb + terminating semantics, the closed
-// `GateKind`, and the grace-window undo state machine.
+// {review, blocked} = `ATTENTION_STATES`) — never a separate store. Its comparator
+// REUSES the shared board axis (`compareByAttention`, D-ORDER, DATA-MODEL §B.5) for
+// cross-group order — it does NOT re-order the whole board on its own (the board's
+// non-attention groups carry their own within-group recency key; see `compareGateQueue`).
+// This seam pins: the comparator, the `data-gate` card payload, the verdict→verb +
+// terminating semantics, the closed `GateKind`, and the grace-window undo state machine.
 //
 // Cross-seam (single-source, learned from BRO-1764's review):
 //   - membership REFERENCES `ATTENTION_STATES` (state.ts) — never a duplicate set;
@@ -37,29 +39,38 @@ import type { GateLook } from "./work-item";
 export const isInGateQueue = (state: OrchState): boolean =>
   (ATTENTION_STATES as readonly OrchState[]).includes(state);
 
-// ── The comparator (also orders the board, BRO-1780) ───────────────────────────
+// ── The comparator (reuses the shared board axis, BRO-1780) ────────────────────
 
-/** The minimal shape the queue comparator reads. */
+/** The minimal shape the gate-queue comparator reads. */
 export interface GateQueueOrder {
-  /** = node.state — must be in the attention set to appear in the queue. */
+  /** = node.state — must be in the attention set to appear in the gate queue. */
   state: OrchState;
   /**
    * Epoch ms the node ENTERED its attention state — a gate's `openedAt` (review) or the
    * block event ts (blocked). NOT `createdAt`: sorting the attention queue by creation
    * time buries freshly-actionable old work (the BRO-1764 §8 sort-key decoupling). A
-   * finite epoch (ms); the runtime supplies `openedAt ?? blockedAt`.
+   * finite epoch (ms); the runtime supplies `openedAt ?? blockedAt`. Defined ONLY for
+   * the attention set {review, blocked} — the board's other groups (running, done, …)
+   * sort within-group by their own recency key, not this (see `compareGateQueue`).
    */
   attentionSince: number;
 }
 
 /**
- * The gate-queue / board comparator (D-ORDER, DATA-MODEL §B.5). Cross-group order is
- * `compareByAttention` (review before blocked, then the rest — the shipped protocol
- * comparator, NOT re-declared). Within a group, OLDEST-waiting first (ascending
- * `attentionSince`) — the ticket's "age descending": the gate that has waited longest
- * for a human sits at the top so no gate rots at the bottom. Total order on finite
- * `attentionSince` (a real epoch ms; non-finite is out of contract — the runtime never
- * emits it).
+ * The GATE-QUEUE comparator (D-ORDER, DATA-MODEL §B.5) — a total order over the
+ * attention set {review, blocked}, NOT a whole-board sort. Cross-group order is
+ * `compareByAttention` (the shared board axis: review before blocked, then the rest —
+ * the shipped protocol comparator, REFERENCED not re-declared, valid over all 8 states).
+ * Within a group, OLDEST-waiting first (ascending `attentionSince`) — the ticket's "age
+ * descending": the gate that has waited longest for a human sits at the top so no gate
+ * rots at the bottom.
+ *
+ * The board (BRO-1780) REUSES the shared `compareByAttention` axis for grouping and
+ * supplies its OWN within-group recency key per group (a `running` node has no gate
+ * `openedAt`, so `attentionSince` is not its sort key). Do NOT `nodes.sort(compareGateQueue)`
+ * over non-attention nodes — the cross-group order is right, but the within-group tiebreak
+ * is only meaningful for {review, blocked}. Total order on finite `attentionSince` (a real
+ * epoch ms; non-finite is out of contract — the runtime never emits it).
  */
 export const compareGateQueue = (a: GateQueueOrder, b: GateQueueOrder): number =>
   compareByAttention(a.state, b.state) || a.attentionSince - b.attentionSince;
@@ -98,6 +109,12 @@ declare module "./chat" {
  * `escalate` surfaces as "Point" (reassign owner, intents.ts). Exhaustive over
  * `GateVerdict` — a new verdict fails tsc here until given a verb. NOTE: `grant` (attach
  * a capability) is a SEPARATE intent, not a verdict, so it is deliberately not here.
+ *
+ * These four verbs are the verdict vocabulary; the F5 card decides which to SURFACE by
+ * `GateCard.kind` (BRO-1805). A `completion` / `irreversible-action` gate shows all four;
+ * a `question`-kind gate (HARNESS §4 exit-20) resolves on the ANSWER path (FLOWS F5) —
+ * `revise` carries the answer as feedback, and Approve/Block are suppressed or relabelled.
+ * A choice-question's options ride `GateLook` (BRO-1764), not a new verdict here.
  */
 export const GATE_VERDICT_VERBS = {
   approve: "Approve",

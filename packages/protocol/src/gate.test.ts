@@ -70,6 +70,19 @@ describe("gate-queue · the comparator (also orders the board, D-ORDER)", () => 
     ]);
   });
 
+  test("the shared board axis holds for non-attention states — but attentionSince is NOT their key", () => {
+    // compareGateQueue REUSES compareByAttention (valid over all 8 states) for cross-group
+    // order: a non-attention node still sorts AFTER the attention set. This locks the
+    // narrowed contract — the board (BRO-1780) may reuse this cross-group axis, but must
+    // NOT treat attentionSince as the within-group key for non-attention groups.
+    expect(compareGateQueue(at("review", 999), at("running", 1))).toBeLessThan(0); // review before running
+    expect(compareGateQueue(at("blocked", 999), at("running", 1))).toBeLessThan(0); // blocked before running
+    expect(compareGateQueue(at("running", 1), at("done", 1))).toBeLessThan(0); // running before done (WK_GROUP_ORDER)
+    // within a NON-attention group the tiebreak is attentionSince here, but the board owns
+    // that group's real recency key — so this is out-of-contract, only asserted total-order-safe.
+    expect(Number.isFinite(compareGateQueue(at("running", 5), at("running", 9)))).toBe(true);
+  });
+
   test("compareGateQueue is a strict total order over real fixtures (irreflexive, antisymmetric, transitive)", () => {
     const items: GateQueueOrder[] = [
       at("review", 10),
@@ -77,6 +90,8 @@ describe("gate-queue · the comparator (also orders the board, D-ORDER)", () => 
       at("blocked", 5),
       at("blocked", 50),
       at("review", 10), // a duplicate — must compare equal (0)
+      at("running", 7), // non-attention: the mechanism stays a total order (no NaN, no crash)
+      at("done", 7),
     ];
     const sign = (n: number) => (n > 0 ? 1 : n < 0 ? -1 : 0);
     for (const a of items) {
