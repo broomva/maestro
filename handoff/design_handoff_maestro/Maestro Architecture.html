@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maestro architecture</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  html, body { margin: 0; padding: 0; background: var(--bv-canvas-soft, oklch(0.966 0.003 265)); }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; color: var(--bv-ink); }
+  a { color: var(--bv-blue); text-decoration: none; }
+  a:hover { color: var(--bv-ink); text-decoration: underline; }
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+
+  .sheet {
+    width: 1240px; margin: 0 auto; background: var(--bv-white, #fff);
+    padding: 56px 64px 64px; box-sizing: border-box;
+    border-left: 1px solid var(--bv-border-5); border-right: 1px solid var(--bv-border-5);
+  }
+
+  h1 { font-size: 28px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sub { font-size: 14px; color: var(--bv-gray-600); margin: 0 0 12px; max-width: 700px; line-height: 1.5; }
+  .rev { font-size: 12px; color: var(--bv-gray-500); margin: 0 0 36px; max-width: 700px; line-height: 1.5; }
+
+  .lane { position: relative; }
+  .lane-label { font-size: 12px; color: var(--bv-gray-500); margin: 0 0 8px; }
+
+  .box {
+    border: 1px solid var(--bv-border-15); border-radius: 0.75rem; background: var(--bv-white, #fff);
+    box-shadow: var(--bv-shadow-edge); padding: 18px 20px; box-sizing: border-box;
+  }
+  .box.blue { box-shadow: var(--bv-shadow-edge), var(--bv-shadow-glow); }
+  .box.later { border-style: dashed; box-shadow: none; background: transparent; }
+  .box h3 { font-size: 16px; font-weight: 500; margin: 0 0 2px; display: flex; align-items: baseline; gap: 8px; }
+  .box h3 .tech { font-size: 12px; font-weight: 400; color: var(--bv-gray-500); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .box .desc { font-size: 13px; color: var(--bv-gray-600); margin: 0 0 12px; line-height: 1.45; }
+  .box .desc:last-child { margin-bottom: 0; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-size: 12px; padding: 3px 9px; border-radius: 0.25rem;
+    border: 1px solid var(--bv-border-5); background: var(--bv-canvas-soft); color: var(--bv-gray-700);
+  }
+  .chip.live { background: var(--bv-frost-8); border-color: transparent; color: var(--bv-blue); }
+  .chip.gap { border-style: dashed; background: transparent; }
+
+  .modules { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .modules.three { grid-template-columns: repeat(3, 1fr); }
+  .module { border: 1px solid var(--bv-border-5); border-radius: 0.5rem; padding: 10px 12px; background: var(--bv-canvas-soft); }
+  .module.hot { background: var(--bv-frost-4); border-color: var(--bv-frost-12); }
+  .module .m-name { font-size: 13px; font-weight: 500; margin-bottom: 2px; }
+  .module .m-name .tag { font-size: 11px; font-weight: 400; color: var(--bv-blue); margin-left: 4px; }
+  .module .m-desc { font-size: 12px; color: var(--bv-gray-600); line-height: 1.4; }
+
+  .conn { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0; }
+  .conn .stem { width: 1px; height: 14px; background: var(--bv-border-25); }
+  .conn .head-down { width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid var(--bv-gray-500); }
+  .conn .head-up { width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 5px solid var(--bv-gray-500); }
+  .conn .wire { display: flex; flex-direction: column; align-items: center; }
+  .conn .label { font-size: 12px; color: var(--bv-gray-600); text-align: center; padding: 3px 12px; border-radius: 999px; background: var(--bv-frost-4); }
+  .conn .label .mono { color: var(--bv-blue); }
+
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; align-items: stretch; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
+  .row-wide { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: stretch; }
+
+  .note { font-size: 12px; color: var(--bv-gray-600); line-height: 1.5; }
+
+  .authority {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    font-size: 12px; color: var(--bv-gray-600); margin-top: 10px;
+  }
+  .authority .arrow { color: var(--bv-gray-500); }
+
+  .foot { margin-top: 40px; border-top: 1px solid var(--bv-border-5); padding-top: 20px; font-size: 12px; color: var(--bv-gray-500); line-height: 1.6; }
+  .foot strong { color: var(--bv-gray-700); font-weight: 500; }
+</style>
+</head>
+<body>
+<main class="sheet">
+  <h1>Maestro architecture</h1>
+  <p class="sub">A 24/7 runtime owns the workspace and runs the loops. A thin relay brokers connections. Clients are projections that subscribe. Nothing important lives in the client.</p>
+  <p class="rev">The earlier local-daemon shape (a <code>maestrod</code> on the user's machine, OS timers) is retired. The runtime is always-on and off the client; the scheduler and run queue live in its control-plane index. Aligned with <code>ARCHITECTURE.md</code> and <code>AUTONOMY.md</code> in <code>build-docs/</code>.</p>
+
+  <section class="lane" aria-label="Clients" data-screen-label="Clients">
+    <p class="lane-label">Clients · projections, no source-of-truth state</p>
+    <div class="row3">
+      <div class="box">
+        <h3>Web / PWA <span class="tech">Vite + React SPA</span></h3>
+        <p class="desc">The primary surface: check on your runs from anywhere. The PWA is the installable form of the same SPA. Tokens and components come from this design system.</p>
+      </div>
+      <div class="box">
+        <h3>Desktop <span class="tech">Tauri 2 shell</span></h3>
+        <p class="desc">The same SPA in a native shell. Adds tray presence for the orchestrator, native "Needs you" notifications, keychain for the runtime credential. A client, never a runtime.</p>
+      </div>
+      <div class="box later">
+        <h3>Marketing <span class="tech">Next.js on Vercel</span></h3>
+        <p class="desc">Separate build target for the landing site only. The app never uses Next; SSR means nothing to a socket-fed projection.</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="conn" aria-hidden="true">
+    <div class="wire"><div class="head-up"></div><div class="stem"></div></div>
+    <div class="label">event stream down (SSE fan-out) · intents up: <span class="mono">approve · send back · grant · point · new mission · set routine</span></div>
+    <div class="wire"><div class="stem"></div><div class="head-down"></div></div>
+  </div>
+
+  <section class="lane" aria-label="Relay" data-screen-label="Relay">
+    <p class="lane-label">Relay · always-on, thin on purpose</p>
+    <div class="row-wide">
+      <div class="box">
+        <h3>Relay <span class="tech">thin TS service</span></h3>
+        <p class="desc">The only public endpoint and the trust boundary: auth, routing a client to its runtime, stream fan-out. No agent logic, no work state, ever.</p>
+        <div class="chips">
+          <span class="chip">auth: Clerk / WorkOS</span>
+          <span class="chip">client → runtime routing</span>
+          <span class="chip">event-stream fan-out</span>
+        </div>
+      </div>
+      <div class="box later">
+        <h3>Direct / LAN path</h3>
+        <p class="desc">A self-hosted runtime may expose a direct connection that bypasses the relay entirely. Clients stay agnostic to which path they took.</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="conn" aria-hidden="true">
+    <div class="wire"><div class="head-up"></div><div class="stem"></div></div>
+    <div class="label">a runtime is a runtime · self-hosted or managed, same binary</div>
+    <div class="wire"><div class="stem"></div><div class="head-down"></div></div>
+  </div>
+
+  <section class="lane" aria-label="Runtime" data-screen-label="Runtime">
+    <p class="lane-label">Runtime · 24/7, self-host (the trust tier) or managed</p>
+    <div class="box blue">
+      <h3>The runtime <span class="tech">TypeScript (Bun/Node) + Claude Agent SDK</span></h3>
+      <p class="desc">Owns a workspace (FS + git + sh), runs the four nested loops, spawns agents into isolated <code>run/&lt;id&gt;</code> sandboxes, emits the append-only event log. All agent logic lives here and only here. The Anthropic key lives here too, never in the client, never proxied through the relay.</p>
+      <div class="modules">
+        <div class="module"><div class="m-name">Loop 1 · agent <span class="tag">per step</span></div><div class="m-desc">The Agent SDK loop in a worktree. The atomic unit; don't over-build it.</div></div>
+        <div class="module hot"><div class="m-name">Loop 2 · verifier <span class="tag">per attempt · the whole game</span></div><div class="m-desc">Writer never grades its own homework. Deterministic oracle first; LLM judge only for subjective work, never the sole gate. Produces the judge-verdict receipt.</div></div>
+        <div class="module"><div class="m-name">Loop 3 · triggers + the gate <span class="tag">per event</span></div><div class="m-desc">Heartbeat · cron · hook · goal, with idempotency keys. The governance gate maps to the verbs: approve, send back, hold, point/grant.</div></div>
+        <div class="module"><div class="m-name">Loop 4 · hill-climb <span class="tag">per N runs</span></div><div class="m-desc">Trace analysis rewrites the inner loops. Human-reviewed in v1; automate last, change rarely.</div></div>
+        <div class="module"><div class="m-name">Guardrails</div><div class="m-desc">Three stop conditions (iteration cap, no-progress halt, budget), budget checked in-path before each call, kill switch, audit trail.</div></div>
+        <div class="module"><div class="m-name">Scheduler + run queue</div><div class="m-desc">Routines, cron, Standing work. Timers and leases live in the control-plane index, not the OS.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="conn" aria-hidden="true">
+    <div class="wire"><div class="stem"></div><div class="head-down"></div></div>
+    <div class="label">sandbox interface · <span class="mono">a worktree and a container are the same abstraction</span></div>
+  </div>
+
+  <section class="lane" aria-label="Isolation" data-screen-label="Isolation">
+    <div class="row2">
+      <div class="box">
+        <h3>Phase 1 · git worktrees <span class="tech">now</span></h3>
+        <p class="desc">Logical isolation on the runtime host: one worktree per run on a <code>run/&lt;id&gt;</code> branch. Honest limit: runs share the host shell — acceptable when the runtime is the user's own.</p>
+      </div>
+      <div class="box later">
+        <h3>Phase 2 · containers / microVMs <span class="tech">later</span></h3>
+        <p class="desc">Physical isolation per run, behind the same sandbox interface. A swap, not a rewrite.</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="conn" aria-hidden="true">
+    <div class="wire"><div class="head-up"></div><div class="stem"></div></div>
+    <div class="label">reads + writes · the branch is the receipt</div>
+    <div class="wire"><div class="stem"></div><div class="head-down"></div></div>
+  </div>
+
+  <section class="lane" aria-label="State" data-screen-label="State">
+    <p class="lane-label">State · two stores, one direction of authority</p>
+    <div class="row2">
+      <div class="box">
+        <h3>Filesystem <span class="tech">system of record</span></h3>
+        <p class="desc" style="margin-bottom:10px;">Plain files, git-versioned, AI-native. Survives the runtime; rebuild everything else from it.</p>
+        <div class="chips">
+          <span class="chip">frontmatter contracts: kind · state · owner · budget · gate</span>
+          <span class="chip">memory on disk: progress docs, checkpoints</span>
+          <span class="chip">receipts: run/&lt;id&gt; branches, diffstats, evidence</span>
+        </div>
+      </div>
+      <div class="box">
+        <h3>Control-plane index <span class="tech">SQLite-class, derived</span></h3>
+        <p class="desc" style="margin-bottom:10px;">What a filesystem does badly and concurrency needs correct. A cache with teeth, never a database of record.</p>
+        <div class="chips">
+          <span class="chip">budget counters, checked before each call</span>
+          <span class="chip">leases · locks · idempotency keys</span>
+          <span class="chip">run queue + scheduler timers</span>
+          <span class="chip">reactive queries + change feed</span>
+        </div>
+      </div>
+    </div>
+    <div class="authority"><span>filesystem</span> <span class="arrow">→ indexes into →</span> <span>control-plane index</span> <span>· authority never flows back</span></div>
+  </section>
+
+  <p class="foot">
+    <strong>Sync-ready from day one:</strong> stable UUIDs, <code>updated_at</code>, soft deletes, runtime-owned IDs — the team tier becomes additive, not a migration.<br>
+    <strong>Stack detail:</strong> concrete tool choices, the supervisor model, and the Rust boundary are recorded in the build bundle's <code>STACK.md</code>. The earlier Next-vs-Vite inconsistency in <code>BUILD-PLAN.md</code> M0 is resolved: the app scaffolds on Vite.<br>
+    Loop logic: <a href="build-docs/AUTONOMY.md">AUTONOMY.md</a> · topology: <a href="build-docs/ARCHITECTURE.md">ARCHITECTURE.md</a> · deep specs: <a href="build-docs/specs/VERIFIER.md">VERIFIER.md</a> · <a href="build-docs/specs/HARNESS.md">HARNESS.md</a> · <a href="build-docs/specs/ORCHESTRATOR.md">ORCHESTRATOR.md</a> · <a href="build-docs/specs/DECISIONS.md">DECISIONS.md</a>
+  </p>
+</main>
+</body>
+</html>

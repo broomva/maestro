@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Logs / env
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+.turbo/
+
+# Workspace scaffolding — not product (BRO-1758 scope: planning/ is not shipped)
+/planning/
+
+# Runtime index + worktrees (FS-as-truth; index is a rebuildable cache)
+*.db
+*.db-shm
+*.db-wal
+/run/
+
+# Machine-local control telemetry (bstack — wired in BRO-1829)
+.control/audit/*.jsonl
+.control/leverage-state.json
+.control/leverage-metrics.jsonl
