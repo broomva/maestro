@@ -150,16 +150,21 @@ export interface SessionRow extends SyncFields {
 
 /**
  * `event` — the queryable projection of every `session.jsonl` line plus the
- * workspace synthetic journal. The row shape IS the wire envelope
- * (`EventEnvelope`, events.ts); PATTERNS §10 forbids re-declaring a wire type, so
- * this is an alias, not a copy. Append-only and immutable — no `SyncFields`
+ * workspace synthetic journal. It is the wire envelope (`EventEnvelope`,
+ * events.ts) in every field EXCEPT `ts`: the stored row holds `ts` as **epoch ms**
+ * (matching the DATA-MODEL §B.3 `integer(ts, {mode:"timestamp"})` sketch and the
+ * numeric ordering range queries need); the runtime projects it to ISO-8601 at the
+ * wire boundary (`EventEnvelope.ts: string`), a projection owned by BRO-1796.
+ * `EventEnvelope` stays THE wire type (PATTERNS §10) — `EventRow` reuses it via
+ * `Omit` so only the one genuinely-different field is restated, not re-declared.
+ * (`payload` is likewise stored as JSON text and rehydrated at the boundary — a
+ * storage detail, not a second type.) Append-only + immutable — no `SyncFields`
  * (an event never updates or soft-deletes; it is the log). `seq` is the global
- * autoincrement total order and the SSE resume cursor (DATA-MODEL §B.5);
- * `sessionId` is null for synthetics (D-DURABILITY). Storage MAY hold `ts` as
- * epoch ms and project it to ISO-8601 at the wire boundary — a storage detail
- * owned by BRO-1796, not a second protocol type.
+ * total order + the live SSE resume cursor (DATA-MODEL §B.5); its VALUES are
+ * rebuild-scoped, not preserved across a rebuild (see `compareReplay`).
+ * `sessionId` is null for synthetics (D-DURABILITY).
  */
-export type EventRow = EventEnvelope;
+export type EventRow = Omit<EventEnvelope, "ts"> & { ts: number };
 
 /** `gate` — pending + decided human decisions (Org-Control-Layer verdicts). */
 export interface GateRow extends SyncFields {
@@ -244,14 +249,25 @@ export interface ScanCursorRow {
 
 /**
  * A journal event awaiting replay — the minimal key the rebuild orders by. On a
- * full rebuild the runtime assigns `event.seq` in `compareReplay` order, so two
- * rebuilds of the same workspace produce a byte-identical `event` table (the
- * identity guarantee named here, implemented in p1-rebuild-invariant). Ordering
- * by `(ts, sourcePath, line)` is a STRICT TOTAL order because `(sourcePath, line)`
- * is unique across all journal lines and breaks `ts` ties deterministically.
+ * full rebuild the runtime assigns `event.seq` in `compareReplay` order, so **two
+ * rebuilds** of the same workspace produce a byte-identical `event` table — the
+ * rebuild-vs-rebuild identity the property test proves (the full kill/rebuild/diff
+ * is p1-rebuild-invariant).
+ *
+ * This is CANONICAL re-derivation, NOT reproduction of the pre-loss LIVE index:
+ * live `event.seq` is ingest-ordered (byte-arrival — the SSE cursor), and under
+ * concurrent sessions writing separate `run/<id>/session.jsonl` files, ingest
+ * order differs from `(ts, sourcePath, line)` order. So seq VALUES are
+ * rebuild-scoped and an SSE cursor does not survive a rebuild — a rebuild is a
+ * stream reset (docs/contracts/fs-index.md §6). What a rebuild reproduces is every
+ * derived query answer (DATA-MODEL §B.5), not the live seq integers.
+ *
+ * Ordering by `(ts, sourcePath, line)` is a STRICT TOTAL order because
+ * `(sourcePath, line)` is unique across all journal lines and breaks `ts` ties
+ * deterministically.
  */
 export interface ReplayKey {
-  /** epoch ms of the event (parsed from the journal line). */
+  /** epoch ms of the event — a FINITE number (the parser rejects malformed lines before a key is built). */
   ts: number;
   /** the journal file this line came from, workspace-relative. */
   sourcePath: string;
@@ -261,13 +277,20 @@ export interface ReplayKey {
 
 /**
  * The canonical replay comparator — a strict total order over journal lines that
- * makes `event.seq` assignment deterministic, hence the rebuild byte-identical.
- * Returns <0 / 0 / >0. Returns 0 iff the two keys denote the same journal line.
+ * makes `event.seq` assignment deterministic, hence two rebuilds byte-identical.
+ * Returns <0 / 0 / >0; 0 iff the two keys denote the same journal line. Uses
+ * ordering operators (not subtraction), so it stays a defined total order even if a
+ * `ts` is non-finite: a NaN `ts` sorts by `(sourcePath, line)` rather than
+ * poisoning the result with NaN.
  */
 export function compareReplay(a: ReplayKey, b: ReplayKey): number {
-  if (a.ts !== b.ts) return a.ts - b.ts;
-  if (a.sourcePath !== b.sourcePath) return a.sourcePath < b.sourcePath ? -1 : 1;
-  return a.line - b.line;
+  if (a.ts < b.ts) return -1;
+  if (a.ts > b.ts) return 1;
+  if (a.sourcePath < b.sourcePath) return -1;
+  if (a.sourcePath > b.sourcePath) return 1;
+  if (a.line < b.line) return -1;
+  if (a.line > b.line) return 1;
+  return 0;
 }
 
 /** True when two replay keys denote the same journal line (`compareReplay` === 0). */

@@ -160,9 +160,21 @@ describe("index-schema — compareReplay is a strict total order (rebuild-identi
     }
   });
 
-  // The full "cache with teeth" test lands in p1-rebuild-invariant; named here as
-  // the seam skeleton (the ticket: "the property test is named here").
-  test.skip("kill-index → rebuild is byte-identical modulo timestamps (p1-rebuild-invariant)", () => {});
+  test("a non-finite ts degrades gracefully — sorts by (path, line), never returns NaN", () => {
+    // ts should be finite (parser precondition), but the comparator must stay a
+    // defined total order rather than poison seq assignment with NaN.
+    const bad: ReplayKey = { ts: Number.NaN, sourcePath: "runs/run-a/session.jsonl", line: 0 };
+    const good: ReplayKey = { ts: 100, sourcePath: "runs/run-a/session.jsonl", line: 1 };
+    expect(Number.isNaN(compareReplay(bad, good))).toBe(false);
+    expect(sign(compareReplay(bad, good)) === -sign(compareReplay(good, bad))).toBe(true);
+  });
+
+  // The full "cache with teeth" test lands in p1-rebuild-invariant: it asserts two
+  // REBUILDS are byte-identical (canonical (ts,path,line) order) and reproduce every
+  // §B.5 query answer — on a MULTI-FILE journal with a cross-file out-of-ts-order
+  // line (the case that separates ingest order from replay order). Named here as the
+  // seam skeleton (the ticket: "the property test is named here").
+  test.skip("two rebuilds are byte-identical + reproduce every query answer (p1-rebuild-invariant)", () => {});
 });
 
 // ── Row-shape compile + sync-ready invariants ────────────────────────────────
@@ -197,7 +209,7 @@ describe("index-schema — row shapes compile and carry the sync-ready fields", 
   const event: EventRow = {
     seq: 1,
     sessionId: null, // synthetic — nullable (D-DURABILITY)
-    ts: "2026-06-25T06:00:01Z",
+    ts: 1_700_000_000_001, // epoch ms — the storage row; the wire projects this to ISO
     actor: "system",
     type: "node.updated",
   };
@@ -250,10 +262,11 @@ describe("index-schema — row shapes compile and carry the sync-ready fields", 
     }
   });
 
-  test("the append-only event row is the wire envelope with a nullable sessionId", () => {
+  test("the append-only event storage row has a numeric ts and a nullable sessionId", () => {
     expect(event).not.toHaveProperty("deletedAt"); // immutable — no soft delete
     expect(event.sessionId).toBeNull();
     expect(typeof event.seq).toBe("number");
+    expect(typeof event.ts).toBe("number"); // epoch ms in the row (§B.3), not the ISO wire string
   });
 
   test("authoritative operational rows are per-runtime (no sync fields)", () => {

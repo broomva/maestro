@@ -68,8 +68,11 @@ than restate them (PATTERNS §10). Physical column names are the DATA-MODEL §B.
   `SyncFields`.
 - **`SessionRow`** — `id` (= run id), `nodeId`, `branch` (`run/<id>`), `status: SessionStatus`,
   `startedAt`, `endedAt`, `diffstatJson` + `SyncFields`.
-- **`EventRow`** — **is** `EventEnvelope` (events.ts), not a copy. Append-only + immutable, so **no
-  `SyncFields`** (an event never updates or soft-deletes; it *is* the log). See §4 (`seq`), §5.
+- **`EventRow`** — the wire envelope (`EventEnvelope`, events.ts) in every field *except* `ts`, which
+  the stored row holds as **epoch ms** (the wire projects it to ISO at the boundary — §4). Expressed as
+  `Omit<EventEnvelope, "ts"> & { ts: number }` so `EventEnvelope` stays the one wire type (PATTERNS §10)
+  and only the differing field is restated. Append-only + immutable, so **no `SyncFields`** (an event
+  never updates or soft-deletes; it *is* the log). See §4 (`ts`, `seq`), §5, §6.
 - **`GateRow`** — `id`, `sessionId`, `kind: GateKind`, `proposalJson` (the gate-card source),
   `verdict: GateVerdict | null` (null = pending), `decidedBy`, `openedAt`, `decidedAt` + `SyncFields`.
 - **`ScheduleRow`** — `id`, `nodeId`, `triggerKind: TriggerKind`, `spec`, `nextFireAt`, `enabled` +
@@ -96,17 +99,26 @@ carries the last two on every syncable derived row (`node`, `session`, `gate`, `
 - **Soft deletes** — `deletedAt` is an **addition** to the DATA-MODEL sketch. A vanished FS node
   *tombstones* (a peer runtime must learn it is gone, never silently re-learn it as present) rather
   than disappearing. Carried by the syncable derived rows only.
-- **Timestamp representation (a deliberate decision).** Index row timestamps are **epoch ms
-  (`number`)**, matching the sketch's `integer(…, {mode:"timestamp"})` and the last-writer-wins clock
-  semantics of `updatedAt`. The **wire** event envelope keeps ISO-8601 (`EventEnvelope.ts: string`) —
-  the storage↔wire projection happens at the boundary, owned by BRO-1796. This is the storage-row vs
-  wire-envelope split, not an inconsistency: "types are the contract, columns a sketch" (DATA-MODEL §B).
+- **Additions beyond the §B.3 sketch** (each flagged; the drizzle column + migration is BRO-1796's):
+  `deletedAt` (soft-delete tombstone, syncable derived rows); `updatedAt` on `session`/`gate`/`schedule`
+  (the sketch put it only on `node`); `NodeRow.createdAt` (frontmatter `created`, the age the board
+  groups by); `GateRow.openedAt` (gate-row lifecycle start, distinct from `decidedAt`); the `scan_cursor`
+  table (§5).
+- **Timestamp representation (a deliberate decision).** Every index **row** stores timestamps as
+  **epoch ms (`number`)** — matching the sketch's `integer(…, {mode:"timestamp"})` and the
+  last-writer-wins / range-query semantics. This includes the `event` row's `ts`
+  (`EventRow = Omit<EventEnvelope,"ts"> & {ts:number}`). The **wire** envelope (`EventEnvelope.ts:
+  string`) carries ISO-8601; the runtime projects row→wire at the boundary (owned by BRO-1796). Because
+  `EventRow` restates only the one differing field, a BRO-1796 `integer(ts)` column's `$inferSelect.ts`
+  matches `EventRow.ts` — no contradiction on the column everything streams through. "Types are the
+  contract, columns a sketch" (DATA-MODEL §B).
 
 ## 5. The high-water mark (two levels — both pinned)
 
 - **Global consumer cursor: `event.seq`** — integer autoincrement, total order, no gaps. It is the SSE
   resume cursor and the fan-out cursor (DATA-MODEL §B.5, PATTERNS §2, events.ts). Clients resume a
-  stream by replaying events with `seq >` their last-seen value.
+  stream by replaying events with `seq >` their last-seen value. Its values are **rebuild-scoped** — a
+  rebuild renumbers `seq` in canonical order, so a cursor does not carry across one (§6.2).
 - **Per-file ingest cursor: `ScanCursorRow.byteOffset`** — one row per journal file
   (`runs/run-<id>/session.jsonl`, the workspace journal), the byte offset the watcher has consumed, so
   an incremental scan (p1-watcher) tails only new bytes. `lastSeq` records the highest `event.seq`
@@ -133,15 +145,28 @@ monotonic `seq` in `compareReplay` order (§6), then advances `byteOffset`/`last
 5. **Reconcile authoritative.** Re-derive `run_budget.spentUsd` by summing journaled `budget.*`
    (D-DURABILITY, DATA-MODEL open-Q#4); `lease` starts empty (crash-expired).
 
-**Identity guarantee (the "cache with teeth" property, exit-tested in p1-rebuild-invariant):**
-`rebuild(scan(FS))` is byte-identical to the pre-loss index **modulo wall-clock timestamps** for every
-reactive query in DATA-MODEL §B.5 (Needs-you count, the board in D-ORDER, the timeline by `seq`, the
-bench). Value-stability of `event.seq` (not just order-stability) hinges on a **deterministic total
-order** over journal lines — that is `compareReplay((ts, sourcePath, line))`: `ts` first, then file
-path, then line. `(sourcePath, line)` is globally unique, so ties break deterministically and two
-rebuilds assign identical `seq`. The seam's property test proves `compareReplay` is a strict total
-order (irreflexive, antisymmetric, transitive, total); p1-rebuild-invariant builds the full
-kill/rebuild/diff on top of it (named here as a `test.skip` skeleton).
+**Identity guarantee (the "cache with teeth" property).** Two distinct claims — keep them apart:
+
+1. **Rebuild-vs-rebuild is byte-identical.** Two rebuilds of the same workspace produce byte-identical
+   FS-derived tables (modulo wall-clock `updatedAt`). This is what the seam's property test underwrites:
+   `event.seq` is assigned in `compareReplay((ts, sourcePath, line))` order — a strict total order
+   (`ts`, then path, then line; `(sourcePath, line)` is globally unique so ties break deterministically),
+   so two rebuilds assign identical `seq`. The property test proves `compareReplay` is irreflexive,
+   antisymmetric, transitive, and total. p1-rebuild-invariant is the full kill/rebuild/diff (a
+   `test.skip` skeleton is named here) — and it **must use a multi-file journal with a cross-file
+   out-of-`ts`-order line**, the exact case that separates ingest order from replay order.
+
+2. **A rebuild reproduces every query answer, but NOT the live `seq` integers.** A rebuild re-derives
+   the *canonical* order; it does not reproduce the pre-loss LIVE index's `seq` VALUES. Live `seq` is
+   ingest-ordered (byte-arrival — the SSE cursor), and under concurrent sessions writing separate
+   `run/<id>/session.jsonl` files, ingest order differs from `compareReplay` order; that cross-file
+   interleaving lived only in the dropped autoincrement column and is unrecoverable. What **survives**
+   is every reactive query in DATA-MODEL §B.5 — the Needs-you count, the board in D-ORDER, each
+   **per-session** timeline (`event where session_id=? order by seq`; the within-session order is file
+   order, hence stable), the bench. What does **not** survive is the absolute `seq` value: **an SSE
+   cursor does not carry across a rebuild — a rebuild is a stream reset, and clients re-subscribe**
+   (rebuild is a rare recovery event). `run_budget.spentUsd` re-derives from journaled `budget.*`
+   (D-DURABILITY); `lease` starts empty.
 
 ## 7. Decision — why row-shapes in `packages/protocol`, not drizzle
 
