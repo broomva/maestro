@@ -155,7 +155,7 @@ export const session = sqliteTable("session", {
 // ── event: queryable projection of every session.jsonl line (the stream) ────
 export const event = sqliteTable("event", {
   seq:       integer("seq").primaryKey({ autoIncrement: true }), // fan-out cursor
-  sessionId: text("session_id").notNull(),
+  sessionId: text("session_id"),                 // nullable (D-DURABILITY): synthetics (node.updated, schedule.fired, budget.*, gate.decided) have no session — still persisted
   ts:        integer("ts", { mode: "timestamp" }).notNull(),
   actor:     text("actor").$type<"agent"|"user"|"tool"|"system">().notNull(),
   type:      text("type").notNull(),             // run.* | tool.* | check.* | gate.* | budget.*
@@ -204,13 +204,13 @@ export const lease = sqliteTable("lease", {
 ### B.4 How the loops touch the data (`AUTONOMY.md`)
 - **Loop 1 (agent)** appends to `session.jsonl`, rewrites `progress.md`/`fix_plan.md`, commits to `run/<id>`.
 - **Before each model call**: transactional read-modify-write on `run_budget`; refuse if over `per_run/per_day/max_iterations`. This is the budget-in-path guard.
-- **Loop 2 (verify)** runs `done.check`; writes `verdict.md`; emits a `verdict` event; sets `session.status`.
+- **Loop 2 (verify)** runs `done.check`; writes `verdict.md`; emits a `check.verdict` event (**D-EVENTNAMES**); sets `session.status`.
 - **Loop 3 (trigger)** acquires a `lease` on the schedule's idempotency key before firing (kills hook/heartbeat storms); the **governance gate** writes a `gate` row whose `verdict` is one of the four Org-Control-Layer values = Broomva's verbs.
 - **Loop 4 (hill-climbing)** reads `event` history across many sessions; proposes edits to `done`/`budget`/prompts (writes back to `_work.md` frontmatter — FS stays the source of truth).
 
 ### B.5 Reactive queries the clients need
 - **"Needs you" headline** → `count(node where state in ('blocked','review'))`.
-- **The board** → `node` grouped by `state`, attention order (`blocked, review, running, triggered, reviewing, proposed, done, canceled`).
+- **The board** → `node` grouped by `state`, attention order (`review, blocked, running, triggered, reviewing, proposed, done, canceled`) — review first (**D-ORDER**).
 - **Activity timeline** → `event where session_id = ? order by seq`.
 - **The orchestrator's bench** → `schedule where enabled` + their next fire + any live sessions.
 - The change feed for SSE fan-out (`ARCHITECTURE.md` §4) is `event.seq` as the cursor.

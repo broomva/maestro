@@ -8,10 +8,10 @@ A work item is an object with a lifecycle. A folder is work at any scale (questi
 
 ```yaml
 kind: task | routine | project | initiative | question
-state: proposed | queued | running | blocked | review | done
+state: proposed | reviewing | triggered | running | blocked | review | done | canceled
 owner: <agent or person>
 budget: <unsupervised-hours allowance>
-gate: you | none        # who must look before Done
+gate: human | auto      # who must look before Done (D-GATE)
 related: [<paths>]      # knowledge-graph edges
 ```
 
@@ -21,19 +21,24 @@ related: [<paths>]      # knowledge-graph edges
 
 System enums are a developer surface; **plain voice is canon in the UI**:
 
+The 8-state OrchState is canon (**D-ENUM**); the UI collapses it to six plain-voice states. `queued` is removed from the enum — three system states map to the plain "Queued":
+
 | system state | plain voice | tone token | group hint |
 |---|---|---|---|
-| `proposed` | (spec) | `muted` | Specs not yet dispatched |
-| `queued` | Queued | `muted` | Actionable on the next tick |
+| `proposed` | Queued | `muted` | Specs not yet dispatched |
+| `reviewing` | Queued | `muted` | Plan under pre-dispatch review |
+| `triggered` | Queued | `muted` | Actionable on the next tick · dispatch pending |
 | `running` | Running | `active` (`--bv-info`) | Dispatched, live in a worktree |
 | `blocked` | Stuck | `warn` (`--bv-warning`) | A worker is stuck · unblock it |
 | `review` | Needs you | `--bv-blue-accent` | Clean runs waiting at your gate |
 | `done` | Done | `--bv-success` | The branch is the receipt |
+| `canceled` | Done | `muted` | Terminal; renders under the Done group |
 | (routine) | Standing | — | standing pulse, never closes |
 
 Rules:
-- Attention-first ordering: `review, blocked, running, queued, proposed, done` (`WK_GROUP_ORDER`); `review` + `blocked` are the attention set.
-- **No transition auto-enters `done`.** A clean run lands at `review` ("Needs you"); approving is the human verb. Send back returns to `queued` with the feedback attached.
+- Attention-first ordering (**D-ORDER**): `review, blocked, running, triggered, reviewing, proposed, done, canceled` (`WK_GROUP_ORDER`); `review` + `blocked` are the attention set.
+- **No transition auto-enters `done` when `gate: human`** (**D-AUTODONE**). A clean run under a human gate lands at `review` ("Needs you"); approving is the human verb. Under `gate: auto`, a verifier pass merges and enters `done` (F4 branch sanctioned). Send back (`revise`) returns to `triggered` for redispatch (F2), feedback attached.
+- Gate verdicts (**D-GATE**): `approve | revise | block | escalate`. `approve` → done/merge (per gate mode); `revise` → `triggered` (send back); `block` → `canceled` (terminal — no "parked" state); `escalate` → row stays `review`, reassigned (point). `grant`/`point` do not decide a gate (row stays `review`).
 - "Needs you" renders accent-blue (235), never red. `blocked` (Stuck) is the only warning tone.
 - Never render progress percentages. Receipts only: `run/<id>` branch, diffstat, judge verdict, event timeline.
 
@@ -44,7 +49,7 @@ From `WK_ITEMS` (trim demo-only fields as needed):
 ```ts
 {
   id: string,
-  state: "proposed"|"queued"|"running"|"blocked"|"review"|"done",
+  state: "proposed"|"reviewing"|"triggered"|"running"|"blocked"|"review"|"done"|"canceled",
   time: string,                       // relative age of last event
   title: string,
   initiative: string, project: string,

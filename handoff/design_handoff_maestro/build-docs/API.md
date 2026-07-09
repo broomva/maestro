@@ -2,7 +2,7 @@
 
 The wire surface. Three contracts: the **runtime API** (the only one with substance), the **relay protocol** (routing envelope around it), and the **client stream**. Every type here lives in `packages/protocol` and is imported by both sides — the contract is code, not documentation.
 
-Versioning: every request/stream carries `x-broomva-protocol: 1`. Bump on breaking change; the relay passes it through untouched.
+Versioning: every request/stream carries `x-maestro-protocol: 1` (**D-NAME**). Bump on breaking change; the relay passes it through untouched.
 
 ---
 
@@ -33,7 +33,7 @@ GET /api/sessions/:id/stream   SSE, one session
 
 - Envelope: `{ seq, sessionId?, ts, actor, type, payload }` — the `event` table row, verbatim.
 - **Resume cursor:** client sends `Last-Event-ID: <seq>`; runtime replays from there. `seq` is the index's autoincrement — total order, no gaps, no client-side sorting.
-- Synthetic types beyond `session.jsonl`: `node.updated`, `gate.opened`, `gate.decided`, `schedule.fired` — projected by the runtime so clients never poll.
+- Synthetic types beyond `session.jsonl`: `node.updated`, `gate.opened`, `gate.decided`, `schedule.fired` — projected by the runtime so clients never poll. This list is **closed** (**D-DURABILITY**): node creation (F1 `new_mission`) surfaces as `node.updated` — there is no separate `node.created`.
 
 ### Intents (the only writes)
 

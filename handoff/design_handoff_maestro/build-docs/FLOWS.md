@@ -44,10 +44,10 @@ Runs inside the agent child, every beat:
 
 ## F4 — Verification (Loop 2)
 
-1. Agent child exits claiming complete (`run.finished` event).
+1. Agent child exits claiming complete: the child emits `run.exiting {code, reason}` (HARNESS owns this seam); the supervisor derives `run.finished` after reap (**D-EVENTNAMES**) — the verifier is spawned on the supervisor-derived `run.finished`.
 2. runtime: spawn **verifier child** — a different process, ideally a different model/vendor. The writer never grades its own homework.
 3. verifier: run `done.check` (deterministic oracle) in the worktree. If the contract has `done.judge`, run the LLM judge against the rubric — as a supplement, never the sole gate.
-4. verifier → FS: write `verdict.md` (verdict + evidence: test output, diff review). Emit `verdict` event.
+4. verifier → FS: write `verdict.md` (verdict + evidence: test output, diff review). Emit `check.verdict` event (**D-EVENTNAMES**).
 5. **Pass + `gate: human`** → F5. **Pass + `gate: auto`** → runtime merges `run/<id>`, `node.state → done` (allowed only because the contract explicitly waived the gate).
 6. **Fail** → targeted feedback appended to `fix_plan.md`, respawn agent child (back to F3) — counts against `max_iterations`.
 

@@ -76,6 +76,8 @@ An embedded transactional store (**SQLite-class**, local to the runtime) for the
 
 **Authority is one-directional: the index indexes the FS; it never owns truth.** If the index is lost, rebuild it by scanning the workspace + git. Treat it as a cache with teeth, not a database of record.
 
+**Durability addendum (D-DURABILITY).** So the rebuild guarantee holds *unqualified*, the two index-only facts that a plain FS scan can't recover are journaled to the filesystem as events: **`budget.*`** (spend/metering) and **`gate.decided`** (verdicts) are written to `session.jsonl` (or the workspace journal for synthetics). The `event` table stays a pure **projection** of those journals — rebuilding by replaying them recovers spend counters and decided gates, so no state is lost with the index. `run_budget`/`lease` remain the authoritative in-path guards at runtime; the journal is their durable shadow.
+
 ## 4. Realtime — the event stream
 
 The runtime emits an append-only event log (agent/user/tool events). The relay fans it out; clients subscribe over **SSE** (or WebSocket if you need client→runtime streaming beyond plain intents). Because every client is a subscriber and holds no truth, "the same run in a side panel, a thread, and a handoff page" is the default, not plumbing. The event log is also the audit trail the guardrails (`AUTONOMY.md`) require.

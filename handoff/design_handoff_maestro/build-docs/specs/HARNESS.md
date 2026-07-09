@@ -62,7 +62,7 @@ The token is scoped to messages/completions endpoints only. The proxy is also wh
 | `20` | needs input — a question only the human can answer | open a gate (`kind: "question"`), state → `review` |
 | other / signal | crash | `session.status → blocked`, event `run.failed`, worktree preserved |
 
-The exiting child's **last stdout event must be `run.exiting { code, reason }`** — the supervisor cross-checks it against the real exit code; mismatch is logged as `run.exit_mismatch` (Loop-4 signal for harness bugs).
+The exiting child's **last stdout event must be `run.exiting { code, reason }`** (the child terminal event — the supervisor derives `run.finished` after reap, **D-EVENTNAMES**) — the supervisor cross-checks it against the real exit code; mismatch is logged as `run.exit_mismatch` (Loop-4 signal for harness bugs). The exit-`10` `reason` enum is pinned (**D-EVENTNAMES**): `budget | iteration_cap | no_progress | user_stop | fresh_context`.
 
 ## 5. Fresh-context restart
 

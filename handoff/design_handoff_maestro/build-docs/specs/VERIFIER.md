@@ -60,7 +60,7 @@ Each check runs in the worktree via the sandbox interface (`ARCHITECTURE.md` §5
 - Pass = weighted score ≥ rubric threshold.
 
 **Stage 3 — Verdict assembly**
-Write `verdict.md` (§4), emit `verdict` event, hand control back to the supervisor: pass → gate (F5) or auto-merge; fail → feedback (§5) and respawn, counting against `max_iterations`.
+Write `verdict.md` (§4), emit `check.verdict` event (**D-EVENTNAMES**), hand control back to the supervisor: pass → gate (F5) or auto-merge; fail → feedback (§5) and respawn, counting against `max_iterations`.
 
 ## 3. `rubric.md` format
 
@@ -102,7 +102,7 @@ judge: { score: null }             # or { score: 0.85, model: "...", detail: jud
 all three assert `og:image` is absolute; the change writes a relative URL.
 ```
 
-Everything referenced (`checks/*.log`, `judge.json`) lives in `runs/run-<id>/` beside it. The `verdict` event carries the frontmatter as payload; clients render the body via `GET /api/sessions/:id` receipts.
+Everything referenced (`checks/*.log`, `judge.json`) lives in `runs/run-<id>/` beside it. The `check.verdict` event carries the frontmatter as payload; clients render the body via `GET /api/sessions/:id` receipts.
 
 ## 5. Feedback — closing the loop
 
