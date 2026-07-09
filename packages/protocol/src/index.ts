@@ -8,6 +8,7 @@
 // PATTERNS §7/§10, docs/data-contract.md, FLOWS F1–F10, and the amendments in
 // docs/canon-amendments.md (D-ENUM/GATE/AUTODONE/DURABILITY/ORDER/EVENTNAMES/NAME).
 
+export * from "./chat";
 export * from "./events";
 export * from "./intents";
 export * from "./plain-voice";
