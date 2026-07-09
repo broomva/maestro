@@ -54,11 +54,11 @@ Every field resolved as **store** (mirrors the `node` row) or **derived** (compu
 | `gate` | store | = node.gate (`GateMode`) |
 | `path` | store | = node.path (workspace-relative) |
 | `parentId?` | store | = node.parentId (the work tree) |
-| `updatedAt` | store | = node.updatedAt, ISO on the wire |
+| `updatedAt` | store | = node.updatedAt, ISO on the wire — **present on every node**, so the universal source for a card's relative age (refined by `lastEventAt` once dispatched) |
 | `created` | store\* | frontmatter `created`, ISO — via `node.createdAt` (a column BRO-1754/fs-index adds; the base §B.3 node sketch has no `created`) |
 | `sessionId?` | derived | the node's current-or-most-recent session id. **Dispatch-history-keyed, NOT state-keyed:** undefined only if the node has *never* been dispatched (no `session where node_id=? order by started_at desc limit 1` row) — typically `proposed` / `reviewing` / never-fired `triggered` backlog + work canceled before dispatch. Present on any node that has dispatched ≥ once, **including a fired standing routine idling back at `triggered`** (it keeps its last session so the Standing routine's last-run receipts survive) and a `done` node. The session-timeline join key; **not live-only** |
 | `initiative?` / `project?` | derived | ancestor labels from the `parentId` ancestry chain |
-| `lastEventAt?` | derived | ISO ts of the last event; the client formats the relative age |
+| `lastEventAt?` | derived | ISO ts of the last *event* — present only once the node has events (dispatched work). REFINES the card age for live/dispatched items; the **universal** relative age falls back to the always-present `updatedAt` (`lastEventAt ?? updatedAt`), so queued/proposed cards still render an age |
 | `worker?` | derived | `{ name, where }` from the session's `run.started` event payload (agent id + isolation mode) — **not** a `session` column (the row carries no name/location); present on completed items too; `where ∈ local worktree \| cloud sandbox` |
 | `run?` | derived | = session.branch (`run/<id>`) — the receipt |
 | `verdict?` | derived | judge summary string (full `VerdictReceipt` stays on the event / inspector) |
@@ -120,10 +120,15 @@ rung scopes the plane and retunes the inspector"):
 Three deliberate, auditable deviations from the prototype shape (data-contract §"The work item shape";
 `WorkData.jsx WK_ITEMS`):
 
-1. **`time` (relative string) → `lastEventAt` (ISO).** The demo stores a pre-formatted `"12m"`;
-   data-contract itself calls the field "relative age of last event" (a derivation). The wire carries
-   an absolute ISO timestamp; the client formats. Never store the formatted string (mirrors the
-   never-store-a-percentage rule).
+1. **`time` (relative string) → an absolute ISO timestamp the client formats (never a stored string).**
+   The demo renders a per-card age (`12m` / `2h` / `3d`) on **every** card — including queued and
+   proposed backlog. Route that universal age at **`updatedAt`** (a required store field, present on
+   every node), refined by **`lastEventAt`** once the node has events: `lastEventAt ?? updatedAt`.
+   Routing it at `lastEventAt` alone would render blank/NaN on every never-dispatched card (no session
+   ⇒ no `lastEventAt` — see the optionality witness in the test) — a fidelity regression a board/feed
+   ticket (BRO-1789/BRO-1780) would inherit. The data-contract calls the field "relative age of last
+   event"; for backlog work with no events yet, that age is the node's own last update. Never store the
+   formatted string (mirrors the never-store-a-percentage rule).
 2. **`events[]` is not embedded.** The demo embeds an events array per item; DATA-MODEL §B.5 pins the
    timeline as its own query and porting-notes pins the server-truth slice as event-subscription-fed.
    The client joins the **session** timeline by `sessionId` (a first-class field added for exactly this)

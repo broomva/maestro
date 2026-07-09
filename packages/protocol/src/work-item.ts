@@ -82,7 +82,11 @@ export interface WorkItem {
   path: string;
   /** = node.parentId — nesting is the work tree (DATA-MODEL §B.3). */
   parentId?: string | null;
-  /** = node.updatedAt, ISO-8601 on the wire. */
+  /**
+   * = node.updatedAt, ISO-8601 on the wire. Present on EVERY node, so the universal
+   * source for a card's relative age (`lastEventAt ?? updatedAt`) — the demo renders
+   * an age on queued/proposed cards too, and those have no `lastEventAt`.
+   */
   updatedAt: string;
   /** frontmatter `created`, ISO date — sourced from `node.createdAt` (an index column BRO-1754/fs-index adds; the base §B.3 sketch has no `created` column). */
   created: string;
@@ -106,7 +110,12 @@ export interface WorkItem {
   initiative?: string;
   /** Ancestor project label — derived from the `parentId` ancestry chain. */
   project?: string;
-  /** ISO ts of the last event — the client formats the relative age (the demo's `time`). */
+  /**
+   * ISO ts of the last *event* — present only once the node has events (dispatched
+   * work). REFINES the card age for live/dispatched items; the universal relative age
+   * falls back to the always-present `updatedAt` (`lastEventAt ?? updatedAt`), so a
+   * queued/proposed card still renders an age (the demo's per-card `time`).
+   */
   lastEventAt?: string;
   /** The current-or-most-recent session's worker (derived from the `session` row) — present on completed items too, not only live ones. */
   worker?: WorkItemWorker;

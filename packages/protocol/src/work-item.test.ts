@@ -125,13 +125,50 @@ const proposed: WorkItem = {
   created: "2026-06-25",
 };
 
+// The SYMMETRIC witness (required stays required), mirroring the `proposed` fixture's
+// optional-stays-optional guard. `RequiredKeys` keeps only the keys whose type does NOT
+// admit `undefined`; asserting the 8 server-truth fields are all among them fails
+// `tsc --noEmit` if ANY is loosened to optional — notably `updatedAt`, whose loosening
+// would let the universal-age derivation (`lastEventAt ?? updatedAt`) silently go
+// undefined on every card. Deterministic (no @ts-expect-error line-positioning).
+type RequiredKeys<T> = { [K in keyof T as undefined extends T[K] ? never : K]: 0 };
+type ServerTruthRequired =
+  | "id"
+  | "state"
+  | "kind"
+  | "title"
+  | "gate"
+  | "path"
+  | "updatedAt"
+  | "created";
+type RequiredHold = ServerTruthRequired extends keyof RequiredKeys<WorkItem> ? true : never;
+const requiredHold: RequiredHold = true;
+
 describe("work-item optionality — the never-dispatched witness (data-contract §work item shape)", () => {
+  test("the 8 server-truth fields stay required (compile-time witness collapses to never otherwise)", () => {
+    // If `updatedAt` (or any of the 8) is loosened to optional, `RequiredHold` becomes
+    // `never` and `const requiredHold: never = true` fails tsc. The runtime assert only
+    // anchors the type check.
+    expect(requiredHold).toBe(true);
+  });
+
   test("a proposed node carries none of the post-dispatch derived fields", () => {
     // Runtime assertions anchor the compile-time witness above; the type check is the
     // real enforcement (a proposed node cannot name a session that was never born).
     for (const f of ["sessionId", "worker", "run", "lastEventAt", "initiative", "project"]) {
       expect(f in proposed).toBe(false);
     }
+  });
+
+  test("a queued/proposed card still renders an age — the universal source is updatedAt, not lastEventAt", () => {
+    // The blocker the round-4 P20 caught: the demo shows a per-card age on EVERY card,
+    // incl. proposed backlog. A downstream that formats age from `lastEventAt` alone
+    // renders blank/NaN here (no session -> no lastEventAt). The contract routes the
+    // universal age at `updatedAt` (always present), refined by lastEventAt when live.
+    expect("lastEventAt" in proposed).toBe(false);
+    const age = proposed.lastEventAt ?? proposed.updatedAt; // the universal derivation
+    expect(age).toBe(proposed.updatedAt);
+    expect(Number.isNaN(Date.parse(age))).toBe(false); // formattable
   });
 
   test("a fired standing routine idling at triggered keeps its most-recent session (dispatch-history-keyed)", () => {
