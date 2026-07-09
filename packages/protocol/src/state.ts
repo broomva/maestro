@@ -50,6 +50,12 @@ export const isTerminalState = (s: OrchState): s is TerminalState =>
 /** Does *done* require the human gate? (DATA-MODEL §A.2, D-GATE) */
 export type GateMode = "human" | "auto";
 
+/** Both gate modes — the closed set (type derived FROM the const, the single-source idiom). */
+export const GATE_MODES = ["human", "auto"] as const satisfies readonly GateMode[];
+
+export const isGateMode = (s: string): s is GateMode =>
+  (GATE_MODES as readonly string[]).includes(s);
+
 /**
  * The four Org-Control-Layer gate verdicts — Maestro's control verbs (D-GATE,
  * FLOWS F5): approve → done/merge; revise → send back (triggered); block →
