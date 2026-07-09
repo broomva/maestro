@@ -5,10 +5,16 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@libsql/client": "^0.17.4",
     "@maestro/protocol": "workspace:*",
+    "drizzle-orm": "^0.45.2",
     "hono": "^4.12.28"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.10"
   }
 }
