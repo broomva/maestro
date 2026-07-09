@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Maestro</title>
+    <script>
+      // No-flash theme (TOKENS-INTEGRATION §2): resolve data-theme before first
+      // paint so there is no light-to-dark flicker. Light is the default; only an
+      // explicit stored "dark" opts into dark. Keep this in sync with
+      // src/theme.ts resolveInitialTheme().
+      (() => {
+        try {
+          const stored = localStorage.getItem("bv-theme");
+          document.documentElement.dataset.theme = stored === "dark" ? "dark" : "light";
+        } catch {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

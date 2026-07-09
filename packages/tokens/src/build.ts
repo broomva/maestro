@@ -20,6 +20,25 @@ import { DIST, HANDOFF_DS, SOURCE_CSS, SOURCE_FONT } from "./sources";
 const FONT_TTF = "CalSans-SemiBold.ttf";
 const FONT_WOFF2 = "CalSans-SemiBold.woff2";
 
+/**
+ * Rewrite the aggregator's nested imports from the `@import url("tokens/x.css")`
+ * form to explicit relative `@import "./tokens/x.css";`. The bare `url()` form does
+ * not rebase through node_modules under Vite/postcss-import (the empirical
+ * TOKENS-INTEGRATION §1 snag, found wiring @maestro/app in BRO-1782); the
+ * `./`-prefixed string form resolves in every standard bundler. dist is a copy of
+ * the handoff, so this only changes the emitted consumer entry, not the canon.
+ */
+function withResolvableImports(stylesCss: string): string {
+  const before = /@import\s+url\(\s*(['"])tokens\/([^'"]+)\1\s*\)\s*;?/g;
+  const rewritten = stylesCss.replace(before, '@import "./tokens/$2";');
+  if (rewritten.includes("@import url(")) {
+    throw new Error(
+      "build: styles.css still has an unrewritten @import url() after the rebase pass",
+    );
+  }
+  return rewritten;
+}
+
 /** Rewrite the @font-face `src:` to prefer WOFF2 with the TTF as fallback (§4). */
 function withWoff2Src(typographyCss: string): string {
   const ttfSrc =
@@ -47,7 +66,10 @@ export async function build(): Promise<void> {
     const out = resolve(DIST, rel);
     mkdirSync(dirname(out), { recursive: true });
     const src = readFileSync(resolve(HANDOFF_DS, rel), "utf8");
-    writeFileSync(out, rel.endsWith("typography.css") ? withWoff2Src(src) : src);
+    let content = src;
+    if (rel.endsWith("typography.css")) content = withWoff2Src(content);
+    else if (rel.endsWith("styles.css")) content = withResolvableImports(content);
+    writeFileSync(out, content);
   }
 
   // 2. Copy the TTF and build the WOFF2 beside it.

@@ -1,0 +1,21 @@
+/* Broomva token wiring (TOKENS-INTEGRATION section 1 and 3).
+ *
+ * Import order resolved empirically and recorded here (the ticket asks for it):
+ *   1. @maestro/tokens/styles.css - the token @import chain + base element styles
+ *      (body type/color, heading scale, the ai-blue :focus-visible ring, links,
+ *      scrollbars). Loaded FIRST so the tokens own the element defaults.
+ *   2. tailwindcss - utilities + preflight. Preflight does not set body
+ *      color/background, so the token base styles above survive; it only resets
+ *      margins/box-sizing, which is what we want.
+ *   3. @maestro/tokens/theme.css - the generated "@theme inline" map that exposes
+ *      the semantic vars (--background, --ring, --sidebar, the radii ladder, the
+ *      closed 12/14/16/18/22/24/28 type scale) as Tailwind utilities. Loaded AFTER
+ *      Tailwind so it extends Tailwind's theme.
+ *
+ * Never copy raw token values here - the tokens are consumed as a package
+ * (CLAUDE.md canon rule). Glass utilities (.bv-glass and .bv-scrim) arrive via the
+ * styles.css chain and are used on overlays, popovers, and the composer only.
+ */
+@import "@maestro/tokens/styles.css";
+@import "tailwindcss";
+@import "@maestro/tokens/theme.css";
