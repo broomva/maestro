@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — Maestro control-check pre-commit (BRO-1829).
+#
+# Runs three gates on every `git commit`. Each degrades gracefully if its tool
+# is absent; a real finding blocks the commit.
+#   1. Biome  — format + lint on staged files (respects biome.json includes,
+#               which exclude the vendored handoff/ + bstack/ + planning/).
+#   2. gitleaks — secret scan on staged changes.
+#   3. bstack L3 rate gate — RCS stability budget (Gate G1) via the vendored
+#               bstack at ./bstack.
+#
+# Bypass with: git commit --no-verify   (document why in the commit body)
+
+set -uo pipefail
+REPO="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+cd "$REPO" || exit 0
+FAIL=0
+
+# ── 1. Biome (staged) ───────────────────────────────────────────────────────
+if [ -f biome.json ] && command -v bun >/dev/null 2>&1; then
+  if ! bunx biome check --staged --no-errors-on-unmatched >/tmp/maestro-biome.$$ 2>&1; then
+    echo "  [FAIL] Biome: staged files have lint/format errors — commit blocked." >&2
+    echo "         fix: bun run format ; bun run lint" >&2
+    tail -20 /tmp/maestro-biome.$$ >&2
+    FAIL=1
+  fi
+  rm -f /tmp/maestro-biome.$$
+fi
+
+# ── 2. gitleaks (staged) ────────────────────────────────────────────────────
+if command -v gitleaks >/dev/null 2>&1; then
+  if ! gitleaks git --pre-commit --staged --redact --no-banner .; then
+    echo "  [FAIL] gitleaks: staged changes contain a secret — commit blocked." >&2
+    echo "         If this is a false positive, add an allowlist entry in .gitleaks.toml." >&2
+    FAIL=1
+  fi
+fi
+
+# ── 3. bstack L3 rate gate (RCS stability budget) ───────────────────────────
+if [ -x "$REPO/bstack/scripts/l3-rate-gate.sh" ]; then
+  if ! BROOMVA_WORKSPACE="$REPO" bash "$REPO/bstack/scripts/l3-rate-gate.sh" --staged; then
+    echo "  [FAIL] bstack L3 rate gate: mutation rate exceeds the RCS stability budget." >&2
+    echo "         override with: git commit --no-verify  (document reason in body)" >&2
+    FAIL=1
+  fi
+fi
+
+# ── Chain to a project-local pre-commit if present ──────────────────────────
+if [ -x "$REPO/.githooks/pre-commit.local" ]; then
+  "$REPO/.githooks/pre-commit.local" "$@" || FAIL=1
+fi
+
+exit "$FAIL"

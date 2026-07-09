@@ -1,0 +1,143 @@
+{
+  "_comment": "bstack-managed Claude Code hooks for the Maestro repo (BRO-1829). Paths use $CLAUDE_PROJECT_DIR (the repo root) so they are portable across clones. In-repo hook scripts live under scripts/; the vendored bstack CLI and its own hook scripts live under bstack/ (git-cloned, never `npx skills add` which drops sibling dirs). P1 Bridge = Stop/Notification -> conversation-bridge-hook.sh; P2 Gate = PreToolUse -> control-gate-hook.sh; P7 Freshness = SessionStart -> skill-freshness-hook.sh.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bstack/scripts/bstack-autoupdate-hook.sh",
+            "timeout": 10,
+            "_bstack_primitive": "P7"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/skill-freshness-hook.sh",
+            "timeout": 5,
+            "_bstack_primitive": "P7"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bstack/scripts/knowledge-wakeup-hook.sh",
+            "timeout": 10,
+            "_bstack_primitive": "loop-wire",
+            "_purpose": "Actuation wire: inject the self-improvement loop's worst-gap metric + its corrective actuator into the new session (reads .control/leverage-state.json)"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bstack/scripts/auth-preflight-hook.sh",
+            "timeout": 8,
+            "_bstack_primitive": "auth-preflight",
+            "_purpose": "Warn (never block) if gh auth is missing, so an autonomous arc learns it at session start instead of dying on the push/PR step mid-task"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bstack/scripts/autonomous-posture-hook.sh",
+            "timeout": 5,
+            "_bstack_primitive": "P19",
+            "_purpose": "Loop-stall rejection (BRO-1700): self-bootstrap the session arc on /autonomous, then re-stamp the sticky-posture line each turn so the autonomous stance does not decay mid-arc"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/conversation-bridge-hook.sh",
+            "timeout": 5,
+            "_bstack_primitive": "P1"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/knowledge-catalog-refresh-hook.sh",
+            "timeout": 5,
+            "_bstack_primitive": "P6",
+            "_purpose": "Regenerate dense LLM-loadable catalog (LLM-as-index architecture; routes /kg load)"
+          },
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bstack/scripts/arc-continuation-hook.sh",
+            "timeout": 10,
+            "_bstack_primitive": "P19",
+            "_purpose": "Loop-stall rejection (BRO-1700): if an autonomous arc is active and the final turn is a no-op terminal (empty / 'No response requested'), return a Stop-hook block so the arc continues instead of parking. Runs after bridge+catalog so capture still happens; bounded drain-retry for the transcript flush race; guarded by consecutive reconcile_count<2 + auto-release on completion"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bstack/scripts/leverage-sensor.py --throttle 21600",
+            "timeout": 25,
+            "_bstack_primitive": "loop-sensor"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/conversation-bridge-hook.sh",
+            "timeout": 5,
+            "_bstack_primitive": "P1"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/control-gate-hook.sh",
+            "timeout": 5,
+            "_bstack_primitive": "P2"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/control-gate-hook.sh",
+            "timeout": 5,
+            "_bstack_primitive": "P2"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/control-gate-hook.sh",
+            "timeout": 5,
+            "_bstack_primitive": "P2"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/bstack/scripts/l3-stability-pretool-hook.sh",
+            "_bstack_primitive": "L3-G0"
+          }
+        ]
+      }
+    ]
+  }
+}
