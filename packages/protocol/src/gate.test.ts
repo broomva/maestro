@@ -166,6 +166,7 @@ describe("gate-queue · verdict semantics (D-GATE, FLOWS F5)", () => {
     }
     expect(GATE_VERDICT_VERBS.approve).toBe("Approve");
     expect(GATE_VERDICT_VERBS.revise).toBe("Send back");
+    expect(GATE_VERDICT_VERBS.block).toBe("Block");
     expect(GATE_VERDICT_VERBS.escalate).toBe("Point");
   });
 
