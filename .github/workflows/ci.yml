@@ -79,6 +79,11 @@ jobs:
         run: |
           mkdir -p dist
           bun build --compile apps/runtime/src/index.ts --outfile dist/maestro
+      - name: Build app (Vite SPA + tokens)
+        # BRO-1782: the M0 client must build in CI. This regenerates the token
+        # dist (gitignored) then runs `vite build`. Playwright's browser smoke
+        # stays a local P11 gate (no browser install in CI).
+        run: bun run --filter @maestro/app build
       - name: Upload runtime binary (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4

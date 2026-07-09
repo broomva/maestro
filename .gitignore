@@ -6,6 +6,11 @@ dist/
 build/
 *.tsbuildinfo
 
+# Playwright (M0 smoke) — screenshots/reports are P11 evidence, not committed
+test-results/
+playwright-report/
+.playwright/
+
 # Logs / env
 *.log
 .env
