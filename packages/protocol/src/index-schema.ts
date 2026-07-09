@@ -135,7 +135,13 @@ export interface NodeRow extends SyncFields {
   doneJson: string | null;
   /** first heading of `_work.md`. */
   title: string | null;
-  /** epoch ms — frontmatter `created` (the age the board comparator groups by). */
+  /**
+   * epoch ms — frontmatter `created`, the node's creation timestamp. NOT implicitly the
+   * board sort key: the board within-group tiebreak is keyed on RECENCY of attention
+   * (`updatedAt` / a gate's `openedAt`) and owned by seam-gate-queue (BRO-1789) — sorting
+   * the attention board by creation time would bury freshly-actionable old work. A
+   * creation-date display is a separate, optional concern (WorkItem.created).
+   */
   createdAt: number;
 }
 

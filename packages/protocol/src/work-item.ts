@@ -74,7 +74,12 @@ export interface WorkItem {
   state: OrchState;
   /** = node.kind (references Kind) — on the wire because the Standing overlay needs it. */
   kind: Kind;
-  /** = node.title (first heading of `_work.md`). */
+  /**
+   * = node.title (first heading of `_work.md`). Required here though `NodeRow.title` is
+   * `string | null`: the projection MUST fall back when a node has no heading — use the
+   * last path segment (or "Untitled") so the read surface never renders an empty title.
+   * The fallback is the projector's job (BRO-1775); the wire type stays required.
+   */
   title: string;
   /** = node.owner — `@handle` | `agent:name`. */
   owner?: string;

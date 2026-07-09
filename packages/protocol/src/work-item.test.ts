@@ -95,6 +95,23 @@ describe("work-item shape — the read-side projection (data-contract §work ite
     expect(item.sessionId).toBe("7f3a");
   });
 
+  test("a blocked item carries reason — the blocking cause, distinct from the gate look", () => {
+    // reason fixture coverage: referenced by name so a rename of the field fails tsc.
+    const blocked: WorkItem = {
+      id: "b1",
+      state: "blocked",
+      kind: "task",
+      title: "Deploy is failing",
+      gate: "human",
+      path: "ops/deploy",
+      updatedAt: "2026-06-26T00:00:00Z",
+      sessionId: "b1s",
+      gateId: "g-b1",
+      reason: "lease held by another run",
+    };
+    expect(blocked.reason).toBe("lease held by another run");
+  });
+
   test("a completed node keeps its session id + worker so the receipt survives completion", () => {
     // sessionId/worker are current-or-most-recent, NOT live-only — the inspector
     // renders receipts for done/standing items, the ones users inspect most.
@@ -131,7 +148,9 @@ const proposed: WorkItem = {
   gate: "human",
   path: "growth/seo-refresh",
   updatedAt: "2026-06-25T00:00:00Z",
-  created: "2026-06-25",
+  // `created` deliberately OMITTED — it is optional (unconsumed on the read surface),
+  // so this construction also witnesses that `created` can be absent (if it were ever
+  // made required, THIS declaration fails tsc).
 };
 
 // The SYMMETRIC witness (required stays required), mirroring the `proposed` fixture's
