@@ -1,0 +1,20 @@
+# gitleaks config for maestro. Extends the default ruleset and allowlists
+# vendored / non-first-party paths so the secret gate scans OUR code — not the
+# vendored handoff prototype docs, planning artifacts, or vendored tooling.
+# Auto-discovered by gitleaks at the repo root: both the .githooks/pre-commit
+# hook (`gitleaks git --pre-commit --staged`) and CI (`gitleaks dir .`) load it.
+title = "maestro gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "vendored, planning, and build-output paths (not first-party source)"
+paths = [
+  '''^handoff/''',     # vendored design handoff (canon docs + prototype JSX)
+  '''^planning/''',    # gitignored planning artifacts (Linear payloads, id maps)
+  '''^bstack/''',      # vendored bstack governance toolkit
+  '''^schemas/''',     # vendored typed-interface schemas
+  '''(^|/)node_modules/''',
+  '''(^|/)dist/''',
+]
