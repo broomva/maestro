@@ -108,6 +108,54 @@ describe("work-item shape — the read-side projection (data-contract §work ite
   });
 });
 
+// A COMPILE-TIME WITNESS that the post-dispatch fields are genuinely optional: a
+// never-dispatched `proposed` node has no session, so it MUST construct without
+// sessionId / worker / run / lastEventAt / initiative / project. The moment any of
+// those is tightened to required, THIS declaration fails `tsc --noEmit` — the type
+// error a downstream store or "Queued" board column would otherwise hit only at
+// runtime (unable to build a real proposed row, or back-filling a bogus session id).
+const proposed: WorkItem = {
+  id: "p1",
+  state: "proposed",
+  kind: "task",
+  title: "Draft the SEO refresh",
+  gate: "human",
+  path: "growth/seo-refresh",
+  updatedAt: "2026-06-25T00:00:00Z",
+  created: "2026-06-25",
+};
+
+describe("work-item optionality — the never-dispatched witness (data-contract §work item shape)", () => {
+  test("a proposed node carries none of the post-dispatch derived fields", () => {
+    // Runtime assertions anchor the compile-time witness above; the type check is the
+    // real enforcement (a proposed node cannot name a session that was never born).
+    for (const f of ["sessionId", "worker", "run", "lastEventAt", "initiative", "project"]) {
+      expect(f in proposed).toBe(false);
+    }
+  });
+
+  test("a fired standing routine idling at triggered keeps its most-recent session (dispatch-history-keyed)", () => {
+    // The round-3 P20 fix: sessionId is keyed on dispatch history, NOT current state.
+    // `triggered` is never-dispatched backlog OR a fired routine idled back — the
+    // latter retains its receipts, so a state-keyed selector would wrongly drop them.
+    const firedRoutine: WorkItem = {
+      id: "r1",
+      state: "triggered",
+      kind: "routine",
+      title: "Nightly triage",
+      gate: "human",
+      path: "ops/nightly-triage",
+      updatedAt: "2026-06-26T06:00:00Z",
+      created: "2026-06-01",
+      sessionId: "r1-last", // the last fire's session — retained though idle at triggered
+      run: "run/r1-last",
+      worker: { name: "agent:maestro", where: "local worktree" },
+    };
+    expect(plainVoiceForNode(firedRoutine.state, firedRoutine.kind).label).toBe("Standing");
+    expect(firedRoutine.sessionId).toBe("r1-last");
+  });
+});
+
 // A COMPILE-TIME guard, not a fixture tautology: if any excluded field ever becomes
 // a key of WorkItem — e.g. an optional `chat?: UIMessage[]` (the exact conflation
 // this contract prevents) — `NoExcludedLeak` collapses to `never` and this file

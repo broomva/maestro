@@ -90,12 +90,15 @@ export interface WorkItem {
   // ── derived projections (data-contract §"The work item shape") ────────────
   /**
    * The node's current-or-most-recent session id — the session whose receipts the
-   * inspector renders. A session is born only at dispatch (`triggered → running`),
-   * so this is undefined for ALL never-dispatched states (`proposed`, `reviewing`,
-   * `triggered`) and for work canceled before dispatch; present on `running` /
-   * `blocked` / `review` / `done`, and on a standing routine once it has fired at
-   * least once. NOT live-only — a `done` node keeps its last session id so "the
-   * branch is the receipt" survives completion. The join key for the session
+   * inspector renders. A session is born only at dispatch (`triggered → running`).
+   * DISPATCH-HISTORY-KEYED, NOT state-keyed: undefined ONLY if the node has never
+   * been dispatched (no `session where node_id=? order by started_at desc limit 1`
+   * row) — typically `proposed` / `reviewing` / never-fired `triggered` backlog work,
+   * and work canceled before dispatch. Present on any node that has dispatched at
+   * least once, INCLUDING a fired standing routine idling back at `triggered` (which
+   * keeps its most-recent session so the routine's last-run receipts survive — the
+   * receipts a Standing routine exists to surface) and a `done` node (so "the branch
+   * is the receipt" survives completion). NOT live-only. The join key for the session
    * timeline (`event where session_id=?`).
    */
   sessionId?: string;
