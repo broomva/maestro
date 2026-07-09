@@ -1,97 +1,82 @@
-// Chat transport — the UIMessage wire + the UI Message Stream Protocol.
+// Chat transport — Maestro's delta over the AI SDK v6 UI Message Stream.
 //
 // Chat is a PROJECTION of a session, never the owner of work (data-contract
-// §"The work model", FLOWS F10: "closing the tab loses nothing"). The
-// `ChatTransport` is the ONE swappable joint between the AI-SDK `useChat` client
-// and the backend: the prototype ships three mock transports; the real runtime
-// transport replaces them 1:1 behind this same interface (START-HERE §5 seam 1,
-// data-contract §"The wire protocol").
+// §"The work model", FLOWS F10: "closing the tab loses nothing").
 //
-// This mirrors the Vercel AI SDK v6 `UIMessage` + UI-Message-Stream shapes
-// STRUCTURALLY — it does NOT `import … from "ai"`: the wire type lives here so it
-// cannot drift, and `@maestro/protocol` stays zero-runtime-dep (PATTERNS §10). The
-// concrete payloads of custom `data-*` parts that other seams own are left generic
-// here: `data-tick` (the orchestrator wake log) is typed below; the `data-gate`
-// card payload is owned by the gate-queue seam (BRO-1789), which types it via
-// `DataUIPart<GateCard>` — this file keeps data parts generic so it does not
-// pre-empt that ownership.
+// ARCHITECTURE (the correction that makes this seam swappable for real):
+// Maestro does NOT invent a chat wire. It ADOPTS the Vercel AI SDK v6 UI Message
+// Stream wholesale — the same protocol `@ai-sdk/react`'s `useChat` consumes and the
+// runtime produces via the SDK's UI-message-stream helpers. The one swappable joint
+// is therefore the SDK's OWN `ChatTransport`
+// (`sendMessages(options) => Promise<ReadableStream<UIMessageChunk>>` +
+// `reconnectToStream`), not a Maestro interface: the prototype's mock transports
+// become SDK-shaped test doubles, and any transport satisfying ai's `ChatTransport`
+// plugs into `useChat` unchanged.
 //
-// Canon: data-contract §"The wire protocol", API.md §Chat + §Versioning, FLOWS
-// F10, specs/HARNESS.md §2 (the child stdin `chat` line carries this UIMessage),
+// So this file declares ONLY Maestro's delta over that third-party protocol:
+//   • the custom `data-*` part PAYLOADS Maestro streams (`data-tick`; `data-gate`
+//     is owned by the gate-queue seam, BRO-1789) and the `MaestroDataParts` map that
+//     parameterizes ai's generic `UIMessage<METADATA, DATA_TYPES>`;
+//   • the wire constants (headers, protocol + SDK version pins, endpoint);
+//   • the harness stdin control line (`ChatControlMessage`) that carries a UIMessage
+//     client → runtime → child.
+//
+// It deliberately does NOT re-declare `UIMessage` / `UIMessageChunk` /
+// `ChatTransport` / `ToolUIPart`: those are ai's types, imported directly by
+// apps/runtime and apps/app (both depend on `ai`). Re-declaring ai's ~25-variant
+// generic chunk union by hand is the drift trap this seam was REWRITTEN to avoid —
+// a hand-mirror silently omits variants (the first draft omitted `tool-output-error`,
+// so a failed tool call could not even be represented, and pinned the wrong transport
+// shape). Adopting a versioned third-party protocol wholesale (pinned by AI_SDK_MAJOR
+// + a type-level conformance test in apps/app where `ai` is present) is the opposite
+// of drift: there is nothing mirrored to drift from.
+//
+// PATTERNS §10 ("no wire type describing the wire is declared outside this package")
+// is honored: every wire type MAESTRO declares — the tick payload, the data-part
+// map, the control line, the constants — lives here. The AI SDK UI Message Stream is
+// not a Maestro-declared type; it is a dependency, vendored in from `ai`.
+//
+// Canon: data-contract §"The wire protocol", API.md §Chat + §Versioning, FLOWS F10,
+// specs/HARNESS.md §2 (the child stdin `chat` line carries a UIMessage),
 // canon-amendments D-NAME (x-maestro-protocol).
 
 // ── Wire constants ───────────────────────────────────────────────────────────
 
-/** The SSE header the runtime sets on a chat response (data-contract §wire, API.md §Chat). */
+/** The SSE header the runtime sets on a chat response (the AI SDK UI-message-stream marker). */
 export const UI_MESSAGE_STREAM_HEADER = "x-vercel-ai-ui-message-stream" as const;
 /** The UI Message Stream Protocol version literal — the real compatibility anchor. */
 export const UI_MESSAGE_STREAM_VERSION = "v1" as const;
 /** The Maestro protocol header carried on every request/stream; the relay passes it through (D-NAME). */
 export const MAESTRO_PROTOCOL_HEADER = "x-maestro-protocol" as const;
-/** The AI SDK major this wire mirrors — the child's reader + the client's sender must share it (§HARNESS §2). */
+/**
+ * The AI SDK v6 major whose UI Message Stream Maestro adopts as its chat wire. The
+ * runtime's stream producer and the client's `useChat` MUST share it — the child's
+ * reader + the client's sender agree on the stream shape via this pin (HARNESS §2).
+ */
 export const AI_SDK_MAJOR = 6 as const;
+/**
+ * The `@ai-sdk/react` major that ships `useChat` for AI SDK v6. Pinned SEPARATELY
+ * because the React binding versions independently of core `ai`: v6 core pairs with
+ * react-binding v3 — NOT v2 (v2 is the ai@5 hook, and mis-pairing yields a `useChat`
+ * whose transport contract does not match this wire).
+ */
+export const AI_SDK_REACT_MAJOR = 3 as const;
 /** The session-addressed chat endpoint (API.md §Chat). */
 export const CHAT_ENDPOINT = "/api/sessions/:id/chat" as const;
-/** The stable id the orchestrator wake receipt always uses — re-sends update it in place (FLOWS F6.5). */
+
+// ── Maestro custom data parts (the delta over ai's UIMessage) ─────────────────
+//
+// ai's `UIMessage<METADATA, DATA_TYPES>` is generic over a DATA_TYPES map; each key
+// NAME yields a `data-${NAME}` part carrying that payload (ai's `DataUIPart`). Maestro's
+// map is `MaestroDataParts`; apps/app composes `UIMessage<MaestroMetadata,
+// MaestroDataParts>` (where `ai` is present). This file owns the PAYLOAD types + the map.
+
+/** The `data-tick` part NAME — ai keys the DATA_TYPES map by the bare name; the part `type` is `data-<name>`. */
+export const DATA_TICK_NAME = "tick" as const;
+/** The full part `type` string for the tick — `data-tick` (what a guard / renderer matches). */
+export const DATA_TICK_PART = "data-tick" as const;
+/** The stable part `id` the orchestrator wake receipt always uses — re-sends update it in place (FLOWS F6.5). */
 export const DATA_TICK_ID = "tick-log" as const;
-
-// ── UIMessage ────────────────────────────────────────────────────────────────
-
-export type UIMessageRole = "user" | "assistant" | "system";
-
-/** A streaming lifecycle marker on text / reasoning parts (the reducer folds start→delta→end). */
-export type PartState = "streaming" | "done";
-
-export interface TextUIPart {
-  type: "text";
-  id?: string;
-  text: string;
-  state?: PartState;
-}
-
-export interface ReasoningUIPart {
-  type: "reasoning";
-  id?: string;
-  text: string;
-  state?: PartState;
-}
-
-/** The tool part state ladder: input streams in, then the output arrives. `type` is `tool-${toolName}`. */
-export type ToolPartState = "input-streaming" | "input-available" | "output-available";
-
-export interface ToolUIPart {
-  type: `tool-${string}`;
-  toolCallId: string;
-  state: ToolPartState;
-  inputText?: string;
-  input?: unknown;
-  output?: unknown;
-}
-
-/** A gen-UI data part. `type` is `data-${name}`; reconciled across the transcript by `id`. */
-export interface DataUIPart<T = unknown> {
-  type: `data-${string}`;
-  id?: string;
-  data: T;
-}
-
-/** The error part the reducer pushes on an `error` chunk. */
-export interface ErrorUIPart {
-  type: "error";
-  errorText: string;
-}
-
-export type UIMessagePart = TextUIPart | ReasoningUIPart | ToolUIPart | DataUIPart | ErrorUIPart;
-
-/** A chat message — the shape sent to the runtime AND rendered from the stream (metadata stays app-narrowed). */
-export interface UIMessage<M = unknown> {
-  id: string;
-  role: UIMessageRole;
-  metadata?: M;
-  parts: UIMessagePart[];
-}
-
-// ── The one product data-part this seam owns: the tick (orchestrator wake log) ─
 
 /** One row of the orchestrator wake log (data-contract §"The tick"). */
 export interface TickRow {
@@ -102,93 +87,61 @@ export interface TickRow {
   t: string;
 }
 
-/** The `data-tick` payload — always carried at id `DATA_TICK_ID`; re-sends update the card in place (F6.5). */
+/** The `data-tick` payload — carried at id `DATA_TICK_ID`; re-sends update the card in place (F6.5). */
 export interface TickReceipt {
   rows: TickRow[];
 }
 
-export type TickDataPart = DataUIPart<TickReceipt> & { type: "data-tick"; id: typeof DATA_TICK_ID };
-
-// ── The chunk vocabulary (UI Message Stream Protocol) ────────────────────────
-//
-// The closed set the transport yields and the reducer folds. `finish` / `abort` /
-// `start-step` / `finish-step` are lifecycle no-ops in the reducer; a `data-*`
-// chunk with `transient: true` bypasses the transcript entirely (surfaced via
-// onData, never persisted).
-
-export type UIMessageChunk =
-  | { type: "start"; messageId?: string; messageMetadata?: unknown }
-  | { type: "text-start"; id: string }
-  | { type: "text-delta"; id: string; delta: string }
-  | { type: "text-end"; id: string }
-  | { type: "reasoning-start"; id: string }
-  | { type: "reasoning-delta"; id: string; delta: string }
-  | { type: "reasoning-end"; id: string }
-  | { type: "tool-input-start"; toolCallId: string; toolName: string }
-  | { type: "tool-input-delta"; toolCallId: string; inputTextDelta: string }
-  | { type: "tool-input-available"; toolCallId: string; toolName: string; input: unknown }
-  | { type: "tool-output-available"; toolCallId: string; output: unknown }
-  | { type: `data-${string}`; id?: string; data: unknown; transient?: boolean }
-  | { type: "error"; errorText: string }
-  | { type: "finish" }
-  | { type: "abort" }
-  | { type: "start-step" }
-  | { type: "finish-step" };
-
-/** The chunk `type` discriminators the reducer handles — the closed vocabulary, as data (drift guard). */
-export const UI_MESSAGE_CHUNK_TYPES = [
-  "start",
-  "text-start",
-  "text-delta",
-  "text-end",
-  "reasoning-start",
-  "reasoning-delta",
-  "reasoning-end",
-  "tool-input-start",
-  "tool-input-delta",
-  "tool-input-available",
-  "tool-output-available",
-  "data-*",
-  "error",
-  "finish",
-  "abort",
-  "start-step",
-  "finish-step",
-] as const;
-
-// ── The transport interface (the 1:1 swap seam) ──────────────────────────────
+/**
+ * Maestro's DATA_TYPES map for ai's generic `UIMessage<METADATA, DATA_TYPES>`. Each
+ * key NAME becomes a `data-${NAME}` part. `tick` is owned here; the gate-queue seam
+ * (BRO-1789) adds a `gate: GateCard` member to THIS interface — extending the single
+ * canonical map rather than re-declaring a data part elsewhere, so data-part ownership
+ * stays single-sourced (this seam leaves the gate payload out, not generic-typed).
+ */
+export interface MaestroDataParts {
+  tick: TickReceipt;
+}
 
 /**
- * The one swappable joint (START-HERE §5 seam 1). The prototype's
- * `BvAnthropicTransport` / `BvOpenAITransport` / `BvHarnessTransport` become test
- * doubles behind THIS shape; the real transport is an AI-SDK HTTP transport that
- * speaks the runtime SSE. Any transport yielding `UIMessageChunk` plugs into
- * `useChat` unchanged, and the pure reducer (`bvApplyChunk`, ported as-is) folds
- * the stream identically regardless of which transport produced it.
+ * The tick as an ai `DataUIPart`: `{ type: "data-tick"; id?; data: TickReceipt }`. A
+ * Maestro-owned NARROWING of ai's data part for the one part this seam types — not a
+ * re-declaration of ai's part union.
  */
-export interface ChatTransport {
-  stream(messages: UIMessage[]): AsyncIterable<UIMessageChunk>;
+export interface TickDataPart {
+  type: typeof DATA_TICK_PART;
+  id?: string;
+  data: TickReceipt;
 }
 
-// ── Child-harness stdin control (cross-dep HARNESS §2) ───────────────────────
+// ── Harness stdin control line (cross-dep HARNESS §2) ─────────────────────────
 //
-// The same UIMessage travels client → runtime (HTTP) → supervisor → child stdin as
-// an NDJSON control line. HARNESS §2 owns the full control union (`chat`/`stop`/
-// `ping`); this seam contributes only the `chat` variant's `message` typing, which
-// is exactly the protocol UIMessage (both sides agree because the type lives here).
+// The same UIMessage travels client → runtime (HTTP) → supervisor → child stdin as an
+// NDJSON control line. HARNESS §2 owns the full control union (`chat` / `stop` / `ping`);
+// this seam contributes the `chat` variant. Its `message` is an AI SDK `UIMessage`
+// (ai's type, resolved on the runtime side); protocol types it against the MINIMAL
+// structural envelope the control line needs — id / role / parts — NOT a re-declaration
+// of ai's full part union. The runtime narrows `parts` to ai's `UIMessagePart[]`.
 
+/** The minimal UIMessage envelope the harness control line needs; ai's `UIMessage` satisfies it structurally. */
+export interface UIMessageEnvelope {
+  id: string;
+  role: "user" | "assistant" | "system";
+  parts: unknown[];
+}
+
+/** The `chat` harness control line (HARNESS §2) — carries a UIMessage to the child's stdin. */
 export interface ChatControlMessage {
   type: "chat";
-  message: UIMessage;
+  message: UIMessageEnvelope;
 }
 
-// ── Guards ───────────────────────────────────────────────────────────────────
+// ── Guards ────────────────────────────────────────────────────────────────────
 
-/** True for any `data-*` chunk (the gen-UI parts, incl. transient). */
-export const isDataChunk = (
-  c: UIMessageChunk,
-): c is Extract<UIMessageChunk, { type: `data-${string}` }> =>
-  typeof c.type === "string" && c.type.startsWith("data-");
-
-/** True for the orchestrator wake-log part (the one data part this seam types). */
-export const isTickPart = (p: UIMessagePart): p is TickDataPart => p.type === "data-tick";
+/**
+ * True for the orchestrator wake-log part (the one data part this seam types).
+ * Operates on ai's `UIMessagePart` structurally (`{ type: string }`) so it needs no
+ * `ai` import; narrows to Maestro's `TickDataPart`.
+ */
+export const isTickDataPart = (part: { type: string }): part is TickDataPart =>
+  part.type === DATA_TICK_PART;

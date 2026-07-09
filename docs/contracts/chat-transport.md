@@ -1,9 +1,9 @@
-# Contract — the ChatTransport (mock → runtime, 1:1 swap)
+# Contract — the chat transport (mock → runtime, 1:1 swap)
 
 > **Seam BRO-1776.** A contract-writing ticket: this doc + the `chat.ts` types are agreed before the
-> reducer port, the chat endpoint, and the M4 chat surface. It pins the one swappable joint between the
-> AI-SDK `useChat` client and the runtime, so the prototype's mock transports are replaced 1:1 without
-> touching the reducer or the components.
+> chat endpoint, the client transport, and the M4 chat surface. It pins the one swappable joint between
+> the AI-SDK `useChat` client and the runtime, so the prototype's mock transports are replaced 1:1
+> without touching the components.
 >
 > **Types:** [`packages/protocol/src/chat.ts`](../../packages/protocol/src/chat.ts)
 > · **Tests:** [`chat.test.ts`](../../packages/protocol/src/chat.test.ts)
@@ -11,58 +11,98 @@
 > **Canon:** data-contract §"The wire protocol" · API.md §Chat / §Versioning · FLOWS F10 / F6.5 ·
 > specs/HARNESS.md §2 · START-HERE §5 seam 1 · canon-amendments D-NAME.
 
-## 1. What the seam is
+## 1. What the seam is — and the architecture correction
 
 Chat is a **projection** of a session — it never owns the work ("closing the tab loses nothing",
-FLOWS F10.4; data-contract §"The work model"). The `ChatTransport` is the single joint between the
-AI-SDK `useChat` client and the backend. The prototype ships three mock transports
-(`BvAnthropicTransport` / `BvOpenAITransport` / `BvHarnessTransport`); the real runtime transport
-replaces them **1:1** behind the same interface, and the pure reducer (`bvApplyChunk`, ported as-is)
-folds the stream identically regardless of which transport produced it (data-contract §wire; PATTERNS §9).
+FLOWS F10.4; data-contract §"The work model").
+
+**Maestro does not invent a chat wire. It adopts the Vercel AI SDK v6 UI Message Stream wholesale** —
+the same protocol `@ai-sdk/react`'s `useChat` consumes and the runtime produces via the SDK's
+UI-message-stream helpers. The **one swappable joint is therefore the SDK's own `ChatTransport`**
+(`sendMessages` / `reconnectToStream`, §9), not a Maestro-defined interface. The prototype ships three
+mock transports (`BvAnthropicTransport` / `BvOpenAITransport` / `BvHarnessTransport`); they become
+**SDK-shaped test doubles**, and the real runtime transport replaces them **1:1** behind the SDK's
+`ChatTransport` — any transport satisfying it plugs into `useChat` unchanged.
+
+So `packages/protocol` declares **only Maestro's delta** over that third-party protocol: the custom
+`data-*` part payloads, the wire constants, and the harness stdin control line. It deliberately does
+**not** re-declare `UIMessage` / `UIMessageChunk` / `ChatTransport` / `ToolUIPart` — those are ai's,
+imported directly by `apps/runtime` and `apps/app` (both depend on `ai`).
+
+> **Why this replaced the first draft (the drift trap).** The first version hand-mirrored ai's
+> ~25-variant generic chunk union and defined its own `ChatTransport { stream() }`. That mirror
+> **silently omitted `tool-output-error`** (so a failed tool call could not even be represented — the
+> tool part would hang at "running" forever) and pinned the **wrong transport shape** (`stream()` vs the
+> real `sendMessages() → Promise<ReadableStream>`). A hand-mirror of a versioned SDK type is guaranteed
+> to drift. Adopting the protocol wholesale — pinned by `AI_SDK_MAJOR` + a type-level conformance test
+> in `apps/app` (§9) — is the opposite of drift: there is nothing mirrored to drift from.
+
+**PATTERNS §10** ("no wire type describing the wire is declared outside this package") holds: every wire
+type **Maestro** declares — the tick payload, the `MaestroDataParts` map, the control line, the
+constants — lives in `protocol`. The AI SDK stream is not a Maestro-declared type; it is a **dependency**,
+vendored in from `ai`.
 
 ## 2. The HTTP surface
 
-- `POST /api/sessions/:id/chat` — **session-addressed** (`CHAT_ENDPOINT`). Body = a single `UIMessage`;
-  response = an SSE stream (API.md §Chat).
+- `POST /api/sessions/:id/chat` — **session-addressed** (`CHAT_ENDPOINT`). Response = an SSE stream of
+  UI Message Stream chunks (API.md §Chat).
 - Response header `x-vercel-ai-ui-message-stream: v1` (`UI_MESSAGE_STREAM_HEADER` +
   `UI_MESSAGE_STREAM_VERSION`); every request/stream carries `x-maestro-protocol: 1`
   (`MAESTRO_PROTOCOL_HEADER`, D-NAME) which the relay passes through untouched (API.md §Versioning).
 - Auth: `Authorization: Bearer <runtime-credential>` direct/LAN, or a relay-forwarded signed identity
   (API.md §3). The Anthropic key never transits the relay; model calls originate on the runtime.
 
-## 3. The `UIMessage` shape
+The request body is shaped by the SDK transport's `sendMessages` options (§9), not a bespoke Maestro
+body — the client is the real `useChat` default/custom transport.
 
-`{ id, role, metadata?, parts[] }`; `role ∈ user | assistant | system`. Parts (`UIMessagePart`):
-`text`, `reasoning` (both carry a `state: streaming | done`), `tool-${name}` (a state ladder
-`input-streaming → input-available → output-available`), `data-${name}` (gen-UI), and `error`. It
-mirrors the **AI SDK v6** `UIMessage` **structurally** — it is not imported from `ai` (PATTERNS §10: the
-wire type lives here so it cannot drift; the package stays zero-runtime-dep). `metadata` stays generic
-(`UIMessage<M = unknown>`); the app/runtime narrow it (e.g. `{ model }` on assistant, `{ time }` on
-user) — a UI concern kept out of the wire type.
+## 3. The message shape — ai's `UIMessage`, Maestro's data parts
 
-## 4. The chunk vocabulary (the UI Message Stream Protocol)
+The message is ai's **`UIMessage<METADATA, DATA_TYPES>`** — `{ id, role, metadata?, parts[] }`,
+`role ∈ user | assistant | system`, with ai's part union (`text`, `reasoning`, `tool-${name}`,
+`data-${name}`, `source-url`, `source-document`, `file`, …). **Maestro does not re-declare it.** Its two
+contributions parameterize the generic:
 
-`UIMessageChunk` is the **closed** set the transport yields and the reducer folds (`UI_MESSAGE_CHUNK_TYPES`
-lists it as data, so a new member must be added to both — a drift guard):
+- **`METADATA`** — `apps/app` narrows it (e.g. `{ model }` on assistant, `{ time }` on user); a UI
+  concern kept off the wire type here.
+- **`DATA_TYPES`** — Maestro's **`MaestroDataParts`** map (§5). Each key `NAME` yields a `data-${NAME}`
+  part. `apps/app` composes `UIMessage<MaestroMetadata, MaestroDataParts>` where `ai` is present.
 
-`start` · `text-start`/`text-delta`/`text-end` · `reasoning-start`/`reasoning-delta`/`reasoning-end` ·
-`tool-input-start`/`tool-input-delta`/`tool-input-available` · `tool-output-available` · `data-*` ·
-`error` · `finish` · `abort` · `start-step` · `finish-step`.
+`protocol` owns the `data-*` **payload** types + the map; the `UIMessage` container is ai's.
 
-`finish`/`abort`/`start-step`/`finish-step` are lifecycle no-ops in the reducer. A `data-*` chunk with
-`transient: true` **bypasses the transcript entirely** (surfaced via `onData`, never persisted).
+## 4. The chunk vocabulary — ai's `UIMessageChunk` (adopted, not re-declared)
 
-## 5. Custom data parts (gen-UI)
+The stream is ai's **`UIMessageChunk`** union (v6), the closed set the SDK reducer folds. `protocol` does
+**not** re-declare it — a partial hand-copy is the drift trap of §1. The full v6 vocabulary the runtime
+emits and the client folds:
 
-Two product-defined `data-*` parts, reconciled across the transcript **by `id`**:
+- lifecycle — `start` · `start-step` · `finish-step` · `finish` · `abort` · `message-metadata`
+- text — `text-start` / `text-delta` / `text-end`
+- reasoning — `reasoning-start` / `reasoning-delta` / `reasoning-end`
+- tools — `tool-input-start` / `tool-input-delta` / `tool-input-available` / **`tool-input-error`** ·
+  `tool-approval-request` · `tool-output-available` / **`tool-output-error`** / `tool-output-denied`
+- data / sources / files — `data-${name}` · `source-url` · `source-document` · `file`
+- `error` (stream-level)
+
+**A failed tool call is first-class:** `tool-output-error { toolCallId, errorText }` (and
+`tool-input-error` for a malformed call) flips the tool part to ai's `ToolUIPart` state
+**`output-error`** carrying `errorText` — the tool renders as failed, it does not hang at "running". This
+representability is *inherited* by adopting the SDK vocabulary; it was the specific gap the §1 rewrite
+closed. A `data-*` chunk with `transient: true` bypasses the transcript (surfaced via `onData`, never
+persisted).
+
+## 5. Custom data parts (gen-UI) — the `MaestroDataParts` map
+
+Maestro's `data-*` parts, reconciled across the transcript **by `id`**, are the members of
+`MaestroDataParts`:
 
 - **`data-tick`** — the orchestrator wake log (`TickReceipt { rows: TickRow[] }`). Always at the stable
   id `DATA_TICK_ID` (`"tick-log"`); a re-send updates the card **in place** (FLOWS F6.5). **Owned by this
-  seam** (`TickDataPart`).
+  seam** — `MaestroDataParts["tick"] = TickReceipt`, with the `TickDataPart` narrowing + `isTickDataPart`
+  guard and the `DATA_TICK_NAME` / `DATA_TICK_PART` constants.
 - **`data-gate`** — the F5 gate "look" card, reconciled by `id = gateId` across every open client. Its
-  **payload shape is owned by the gate-queue seam (BRO-1789)**, which types it via
-  `DataUIPart<GateCard>`. This seam keeps `data-*` **generic** (`DataUIPart<T = unknown>`) so it does not
-  pre-empt that ownership — the transport machinery is here; the gate card is there.
+  payload is **owned by the gate-queue seam (BRO-1789)**, which adds a `gate: GateCard` member to
+  `MaestroDataParts` (extending the single canonical map — not re-declaring a part elsewhere). This seam
+  **leaves the gate member out**, so it does not pre-empt that ownership.
 
 ## 6. Where the transport terminates
 
@@ -76,47 +116,69 @@ speaker.
 The runtime folds **two** sources into the chat stream (HARNESS §6):
 
 1. **The live model token stream** — `text`/`reasoning` deltas, ephemeral, **not** in the event log
-   (`session.jsonl` stores coalesced *turns*, one event per completed block; per-token deltas go over the
-   chat stream — F10).
-2. **Projected events** — `tool.call` → `tool-input-*`, `tool.result` → `tool-output-available`,
-   `gate.opened` → `data-gate`, orchestrator narrative → `data-tick`, `run.exiting`/`run.finished` →
-   `finish`, `run.failed` → `error`.
+   (`session.jsonl` stores coalesced *turns*; per-token deltas go over the chat stream — F10).
+2. **Projected events** — folded into ai chunks.
 
-The concrete `EventType → chunk` mapping is **runtime logic** (it also folds the ephemeral token stream),
-so it lives in `apps/runtime`, not in the zero-dep protocol package. This table is documentation, not
-code:
+The concrete `EventType → chunk` mapping is **runtime logic** (it also folds the ephemeral token stream
+and produces ai's `UIMessageChunk` via the SDK helpers), so it lives in `apps/runtime`, not in the
+zero-dep protocol package. This table is documentation, not code:
 
 | Source | Chunk |
 |---|---|
-| model text token | `text-delta` (bracketed by `text-start`/`text-end`) |
+| model text token | `text-delta` (bracketed by `text-start` / `text-end`) |
 | model reasoning token | `reasoning-delta` |
 | `tool.call` | `tool-input-start` → `tool-input-available` |
-| `tool.result` | `tool-output-available` |
+| `tool.result` (ok) | `tool-output-available` |
+| `tool.result` (failed) | **`tool-output-error`** (`{ toolCallId, errorText }` → part state `output-error`) |
 | `gate.opened` | `data-gate` (payload = BRO-1789 `GateCard`) |
 | orchestrator narrative | `data-tick` (id `tick-log`) |
 | `run.exiting` / `run.finished` | `finish` |
-| `run.failed` | `error` |
+| `run.failed` | `error` (stream-level) |
 
 ## 8. The AI-SDK version pin
 
-Standardize on **`ai@^6`** (+ `@ai-sdk/react@^2` for `useChat`) — the v6 line, matching the workspace
-(chatOS). No `package.json` under `apps/maestro` pins `ai` yet; the deps land in `apps/app` (client) +
-`apps/runtime` (server stream helpers) when those tickets build. **`packages/protocol` adds no dep** — it
-mirrors the shape structurally. `AI_SDK_MAJOR = 6` and the `v1` stream-protocol literal are recorded as
-consts; the `v1` literal is the real compatibility anchor (the wire contract depends only on the major).
+Standardize on **`ai@^6`** for core, **`@ai-sdk/react@^3`** for `useChat` — the v6 line, matching the
+workspace. **`@ai-sdk/react` versions independently of core `ai`:** v6 core pairs with react-binding
+**v3**, *not* v2 (v2 is the ai@5 hook; mis-pairing yields a `useChat` whose transport contract does not
+match this wire). Recorded as consts: `AI_SDK_MAJOR = 6`, `AI_SDK_REACT_MAJOR = 3`, and the `v1`
+stream-protocol literal (the real compatibility anchor — the wire contract depends only on the major).
 
-## 9. The 1:1 swap guarantee
+No `package.json` under `apps/maestro` pins `ai` yet; the deps land in `apps/app` (client, `@ai-sdk/react`)
++ `apps/runtime` (server stream helpers, `ai`) when those tickets build. **`packages/protocol` adds no
+dep** — it adopts the SDK by pinning the major, not by importing it, and stays zero-runtime-dep.
 
-The interface is `ChatTransport { stream(messages: UIMessage[]): AsyncIterable<UIMessageChunk> }`. Any
-transport yielding the §4 vocabulary plugs into `useChat` unchanged; the reducer ports as-is. The
-prototype's `Bv*Transport` classes become **test doubles** behind this shape; the real transport is an
-AI-SDK HTTP transport that speaks the runtime SSE. `chat.test.ts` proves this: a mock `ChatTransport`
-whose `stream()` yields `start → text-start → text-delta → text-end → finish` reduces to the same
-`UIMessage` the real transport would — the machine-checkable form of "mock and runtime speak one interface".
+## 9. The 1:1 swap guarantee — ai's `ChatTransport`
+
+The swap joint is ai's own interface (v6):
+
+```ts
+interface ChatTransport<UI_MESSAGE extends UIMessage> {
+  sendMessages(options: {
+    trigger: 'submit-message' | 'regenerate-message';
+    chatId: string;
+    messageId: string | undefined;
+    messages: UI_MESSAGE[];
+    abortSignal: AbortSignal | undefined;
+  } & ChatRequestOptions): Promise<ReadableStream<UIMessageChunk>>;
+  reconnectToStream(options: { chatId: string } & ChatRequestOptions): Promise<ReadableStream<UIMessageChunk> | null>;
+}
+```
+
+Any transport implementing it plugs into `useChat({ transport })` unchanged. The prototype's `Bv*Transport`
+classes become **SDK-shaped test doubles** implementing `sendMessages`/`reconnectToStream`; the real
+transport is a Maestro fetch/SSE `ChatTransport` speaking the runtime endpoint (§2).
+
+**Conformance is enforced where `ai` lives, not here.** `apps/app` (BRO-1782) carries a type-level test
+(`ai` is a dep there) asserting (a) the Maestro transport satisfies `ChatTransport<MaestroUIMessage>`, and
+(b) `MaestroDataParts` composes a valid `UIMessage` (each `data-${NAME}` is a real `DataUIPart`). Because
+`protocol` re-declares none of these SDK types, there is nothing here to drift — the conformance test
+guards the *composition*, not a mirror. `protocol`'s own `chat.test.ts` covers the Maestro delta:
+constants (incl. the react-major pin), the tick payload + guard, the `MaestroDataParts["tick"]`
+composition, and the control line.
 
 ## 10. Idle-work addressing — dispatch-then-chat (resolves F10)
 
-The endpoint is session-addressed, but F10.2 says a chat to **idle work** "spawns a session". **Decision
+The endpoint is session-addressed, but F10.2 says a chat to **idle work** "spawns a session." **Decision
 (client-side dispatch-then-chat):** a chat aimed at a node with no live session first POSTs a `dispatch`
 intent (F2), awaits the session row via the stream (`node.updated` + the new session), **then** POSTs the
 chat to the new `sessionId`. This keeps the endpoint purely session-addressed (no `nodeId` overload) and
@@ -125,26 +187,32 @@ reuses the intents→events round-trip (PATTERNS §3). The alternative (runtime-
 
 ## 11. Child-harness stdin (cross-dep HARNESS §2)
 
-The same `UIMessage` travels client → runtime (HTTP) → supervisor → child stdin as an NDJSON control line
+The same UIMessage travels client → runtime (HTTP) → supervisor → child stdin as an NDJSON control line
 `{ "type": "chat", "message": <UIMessage> }` (`ChatControlMessage`). **HARNESS §2 owns the full control
-union** (`chat`/`stop`/`ping`); this seam contributes only the `chat` variant's `message` typing — which
-is exactly the protocol `UIMessage`, so both sides agree by construction. The §8 version pin is
-load-bearing here: the child's Agent-SDK reader and the client's `useChat` sender must be the same AI-SDK
-major.
+union** (`chat` / `stop` / `ping`); this seam contributes only the `chat` variant. Its `message` is an ai
+`UIMessage`; `protocol` types it against the **minimal structural envelope** the control line needs —
+`UIMessageEnvelope { id, role, parts: unknown[] }` — which ai's `UIMessage` satisfies, and which the
+runtime narrows to ai's full `UIMessagePart[]`. Typing it minimally (not re-declaring ai's part union)
+keeps `protocol` zero-dep while still pinning the control-line shape both sides agree on. The §8 version
+pin is load-bearing here: the child's Agent-SDK reader and the client's `useChat` sender must be the same
+AI-SDK major.
 
 ## 12. Reconciliations / boundaries
 
-- **`GateKind` widening to add `"question"`** (HARNESS §4 exit-20) is **BRO-1789's** (the gate-queue
-  seam), not this one. This seam references `GateKind` nowhere directly; the `data-gate` payload it leaves
-  generic carries the gate `kind` via BRO-1789's `GateCard`.
-- **Prototype card `kind: "gate" | "warn"`** is a *display* discriminator, distinct from the `gate` table
-  `GateKind` row value — the gate-queue contract keeps them separate.
-- **`data-gate` payload shape** → BRO-1789 (`GateCard`). **The board-derived `look { ran, decided[], ask }`**
-  → work-item.ts (BRO-1764). Two projections of the same F5 gate, `gateId`-linked.
-- **The full stdin control union** (`stop`/`ping`) → HARNESS §2; this seam types only `chat`.
+- **`data-gate` payload shape** → BRO-1789 adds `gate: GateCard` to `MaestroDataParts` (this seam leaves
+  it out). **The board-derived `look { ran, decided[], ask }`** → work-item.ts (BRO-1764). Two projections
+  of the same F5 gate, `gateId`-linked.
+- **`GateKind` widening to add `"question"`** (HARNESS §4 exit-20) is **BRO-1789's**; this seam references
+  `GateKind` nowhere. **Prototype card `kind: "gate" | "warn"`** is a *display* discriminator, distinct
+  from the `gate` table `GateKind` — the gate-queue contract keeps them separate.
+- **The full stdin control union** (`stop` / `ping`) → HARNESS §2; this seam types only `chat`.
+- **The `EventType → chunk` fold + the transport implementation** → `apps/runtime` (BRO-1790) and
+  `apps/app` (BRO-1782); this seam pins the contract, not the fold.
 
 ---
 
 _Contract for `seam-chat-transport` (BRO-1776). Provenance: data-contract / API / FLOWS / HARNESS /
-START-HERE under `handoff/design_handoff_maestro/`. Structurally mirrors AI SDK v6 without importing it
-(PATTERNS §10); leaves the `data-gate` card payload to BRO-1789 to avoid a cross-seam type collision._
+START-HERE under `handoff/design_handoff_maestro/`. Adopts the AI SDK v6 UI Message Stream wholesale
+(zero-dep: pins the major, does not import it); declares only Maestro's delta — the tick payload, the
+`MaestroDataParts` map, the control line, the constants — and leaves the `data-gate` card payload to
+BRO-1789 to avoid a cross-seam type collision._
