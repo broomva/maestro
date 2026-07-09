@@ -14,3 +14,4 @@ export * from "./plain-voice";
 export * from "./state";
 export * from "./version";
 export * from "./work";
+export * from "./work-item";
