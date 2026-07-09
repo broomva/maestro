@@ -9,6 +9,7 @@
 // docs/canon-amendments.md (D-ENUM/GATE/AUTODONE/DURABILITY/ORDER/EVENTNAMES/NAME).
 
 export * from "./events";
+export * from "./index-schema";
 export * from "./intents";
 export * from "./plain-voice";
 export * from "./state";
