@@ -87,3 +87,17 @@ jobs:
           path: dist/maestro
           if-no-files-found: error
           retention-days: 7
+
+  governance:
+    name: governance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bstack doctor (metalayer compliance)
+        # Non-strict (BRO-1793): exits 0 while the known "grows-organically" gaps
+        # remain (global skills, role-x hooks dropped for the public repo). This
+        # gate catches CATASTROPHIC governance drift — a deleted CLAUDE.md /
+        # .control/policy.yaml, an unwired hook, a corrupt L3 params file. The
+        # Makefile note stands: bstack-check tightens to `--strict` once the CI
+        # skill-install story is settled (follow-up), not a red-by-design gate now.
+        run: make control-audit
