@@ -96,11 +96,14 @@ describe("work-item shape — the read-side projection (data-contract §work ite
   });
 
   test("a blocked item carries reason but NO gateId (Stuck is redispatchable, not gated)", () => {
-    // reason fixture coverage (referenced by name so a rename fails tsc). AND the round-8
-    // P20 fix: a blocked node has no gate row — gates surface as `review`, and
-    // `resolveGateVerdict` throws off-review; `blocked` is cleared by a nodeId `dispatch`,
-    // not a verdict. gateId is review-only; the earlier fabricated `gateId: "g-b1"` masked
-    // the wrong pin (the suite stayed green while asserting a shape the runtime can't make).
+    // reason fixture coverage (referenced by name so a rename fails tsc). This fixture
+    // DOCUMENTS the review-only invariant (a blocked node has no gate row — gates surface
+    // as `review`, `resolveGateVerdict` throws off-review, `blocked` is cleared by a nodeId
+    // `dispatch`); it does NOT compile-ENFORCE it — `gateId?: string` is uncorrelated with
+    // `state`, so a fixture-omission only illustrates intent. The real enforcement is a
+    // discriminated union (BRO-1789 territory) or a projector assertion in BRO-1775 that a
+    // non-review node yields undefined gateId. (What this fixture DOES catch: the earlier
+    // regression where a blocked fixture fabricated `gateId: "g-b1"` to stay green.)
     const blocked: WorkItem = {
       id: "b1",
       state: "blocked",

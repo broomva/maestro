@@ -64,6 +64,11 @@ export interface GateLook {
  * The canonical work item — the read-side projection of a work node. Server-truth
  * fields mirror the `node` row (from `_work.md` frontmatter); derived fields are
  * computed from `session` + `event` and never stored authoritatively.
+ *
+ * Projected ONLY over LIVE node rows (`deletedAt IS NULL`): a tombstoned / vanished FS
+ * node (`NodeRow` soft-delete, index-schema `SyncFields.deletedAt`) yields NO WorkItem,
+ * so the read surface never renders a ghost card. The `deletedAt IS NULL` filter is the
+ * projector's (BRO-1775); this shape carries only live work.
  */
 export interface WorkItem {
   // ── server truth (node row, DATA-MODEL §B.3, from `_work.md` frontmatter) ──

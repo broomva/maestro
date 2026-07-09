@@ -19,6 +19,11 @@ transactional projection; **`WorkItem` is the client wire shape derived from `no
 lost, every work item is rebuildable by re-scanning the workspace + git (DATA-MODEL §B.1) — the work
 item holds **zero** authoritative live state (`run_budget`/`lease` never surface on it).
 
+The projection is over **LIVE node rows only** (`deletedAt IS NULL`): a tombstoned / vanished FS node
+(`NodeRow` soft-delete, `SyncFields.deletedAt`) yields **no** `WorkItem`, so the read surface never
+renders a ghost card. The `deletedAt IS NULL` filter is the projector's (BRO-1775); every field in §3
+describes a live node.
+
 ## 2. Three shapes, one truth — the relationship map
 
 The single most common way to get this wrong is to conflate the three. They are distinct:
