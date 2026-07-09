@@ -11,6 +11,7 @@ import {
   isTickDataPart,
   MAESTRO_PROTOCOL_HEADER,
   type MaestroDataParts,
+  type MaestroMetadata,
   type TickDataPart,
   type TickReceipt,
   UI_MESSAGE_STREAM_HEADER,
@@ -73,27 +74,37 @@ describe("chat transport · the tick data part (the one part this seam owns)", (
     expect(JSON.parse(JSON.stringify(tick))).toEqual(tick);
   });
 
-  test("the guard rejects other data parts and a failed-tool part (guard specificity)", () => {
-    // ai's own parts, shaped structurally (protocol does not import them). The guard
-    // must not mis-fire on a sibling data part or on the `output-error` tool part that
-    // carries a failed tool call — proving the tick guard is the only Maestro claim.
+  test("the tick guard does not mis-fire on a sibling data part or a failed-tool part (guard specificity)", () => {
+    // ai's own parts, shaped structurally (protocol does not import them): a sibling
+    // data part and the `output-error` tool part that carries a failed tool call. The
+    // tick guard must claim ONLY `data-tick`. SDK conformance — that these ARE valid ai
+    // parts, incl. `tool-output-error`'s representability — is apps/app's type-level
+    // test (where `ai` is a dep), not asserted here on a hand-built literal.
     const gatePart = { type: "data-gate", id: "g", data: {} };
     const failedTool = { type: "tool-edit", state: "output-error", errorText: "boom" };
     expect(isTickDataPart(gatePart)).toBe(false);
     expect(isTickDataPart(failedTool)).toBe(false);
-    // the failed-tool shape (ai's `tool-output-error` → `output-error` state) IS
-    // representable — it is ai's, inherited by adopting the SDK vocabulary.
-    expect(failedTool.errorText).toBe("boom");
   });
 });
 
-describe("chat transport · the MaestroDataParts map parameterizes ai's UIMessage", () => {
-  test("the map's `tick` member is the TickReceipt payload (compile-checked)", () => {
+describe("chat transport · both halves of ai's UIMessage<METADATA, DATA_TYPES> are owned here", () => {
+  test("the DATA_TYPES half — MaestroDataParts['tick'] is the TickReceipt payload (compile-checked)", () => {
     // A compile-time assertion: MaestroDataParts["tick"] must be TickReceipt. If the
     // map or the payload drifts apart, this assignment fails `tsc --noEmit`.
     const receipt: MaestroDataParts["tick"] = { rows: [] };
     const asTick: TickReceipt = receipt;
     expect(asTick.rows).toEqual([]);
+  });
+
+  test("the METADATA half — MaestroMetadata carries the wire model/time (compile-checked)", () => {
+    // The symmetric witness: metadata rides the message-metadata chunk (server-emitted,
+    // §7), so protocol owns its shape too — otherwise the emitter (BRO-1790) and reader
+    // (BRO-1782) drift on an `unknown`-typed generic. `model` on assistant, `time` on
+    // user; both optional. If a field is renamed here, apps/app's composition breaks.
+    const assistant: MaestroMetadata = { model: "claude-opus-4-8" };
+    const user: MaestroMetadata = { time: "12m" };
+    expect(assistant.model).toBe("claude-opus-4-8");
+    expect(user.time).toBe("12m");
   });
 });
 

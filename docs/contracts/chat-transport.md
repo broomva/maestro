@@ -55,19 +55,26 @@ vendored in from `ai`.
 The request body is shaped by the SDK transport's `sendMessages` options (§9), not a bespoke Maestro
 body — the client is the real `useChat` default/custom transport.
 
-## 3. The message shape — ai's `UIMessage`, Maestro's data parts
+## 3. The message shape — ai's `UIMessage`, Maestro's two generic halves
 
 The message is ai's **`UIMessage<METADATA, DATA_TYPES>`** — `{ id, role, metadata?, parts[] }`,
 `role ∈ user | assistant | system`, with ai's part union (`text`, `reasoning`, `tool-${name}`,
-`data-${name}`, `source-url`, `source-document`, `file`, …). **Maestro does not re-declare it.** Its two
-contributions parameterize the generic:
+`data-${name}`, `source-url`, `source-document`, `file`, …). **Maestro does not re-declare `UIMessage`.**
+It owns **both** type parameters, symmetrically — both are wire types, so both live in `protocol`:
 
-- **`METADATA`** — `apps/app` narrows it (e.g. `{ model }` on assistant, `{ time }` on user); a UI
-  concern kept off the wire type here.
-- **`DATA_TYPES`** — Maestro's **`MaestroDataParts`** map (§5). Each key `NAME` yields a `data-${NAME}`
-  part. `apps/app` composes `UIMessage<MaestroMetadata, MaestroDataParts>` where `ai` is present.
+- **`METADATA`** → Maestro's **`MaestroMetadata`** (`{ model?, time? }`). It **rides the wire**: the
+  runtime emits it on the `start` / `message-metadata` chunk's `messageMetadata`, and the client folds it
+  into `message.metadata` (§7). ai types METADATA as `unknown` at that boundary, so declaring it **once
+  here** is what stops the emitter (BRO-1790) and the reader (BRO-1782) from drifting on the shape
+  (`{ model }` vs `{ modelId }` would compile on both sides yet render the model label blank). `model`
+  on an assistant message, `time` on a user message — one flat type (ai carries a single METADATA per
+  message, not per-role).
+- **`DATA_TYPES`** → Maestro's **`MaestroDataParts`** map (§5). Each key `NAME` yields a `data-${NAME}`
+  part.
 
-`protocol` owns the `data-*` **payload** types + the map; the `UIMessage` container is ai's.
+`apps/app` composes `UIMessage<MaestroMetadata, MaestroDataParts>` from both protocol-owned halves; the
+`UIMessage` container itself is ai's. This keeps PATTERNS §10 whole — every wire type Maestro declares is
+here, neither half punted downstream.
 
 ## 4. The chunk vocabulary — ai's `UIMessageChunk` (adopted, not re-declared)
 
@@ -101,7 +108,9 @@ Maestro's `data-*` parts, reconciled across the transcript **by `id`**, are the 
   guard and the `DATA_TICK_NAME` / `DATA_TICK_PART` constants.
 - **`data-gate`** — the F5 gate "look" card, reconciled by `id = gateId` across every open client. Its
   payload is **owned by the gate-queue seam (BRO-1789)**, which adds a `gate: GateCard` member to
-  `MaestroDataParts` (extending the single canonical map — not re-declaring a part elsewhere). This seam
+  `MaestroDataParts` via **TypeScript module augmentation** from `gate.ts`
+  (`declare module "./chat" { interface MaestroDataParts { gate: GateCard } }`) — so `chat.ts` is **not**
+  edited (no `export *` barrel collision, no forked map) and the map stays single-sourced. This seam
   **leaves the gate member out**, so it does not pre-empt that ownership.
 
 ## 6. Where the transport terminates

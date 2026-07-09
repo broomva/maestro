@@ -104,6 +104,23 @@ export interface MaestroDataParts {
 }
 
 /**
+ * Maestro's METADATA type for ai's generic `UIMessage<METADATA, DATA_TYPES>` — the
+ * OTHER half of the generic, owned here SYMMETRICALLY with `MaestroDataParts`. It rides
+ * the wire: the runtime emits it as the `start` / `message-metadata` chunk's
+ * `messageMetadata`, and the client folds it into `message.metadata` (§7). ai types
+ * METADATA as `unknown` at that boundary, so it MUST be declared once here — otherwise
+ * the emitter (BRO-1790) and the reader (BRO-1782) each assume a shape independently and
+ * a name divergence (`model` vs `modelId`) compiles + passes on both sides yet renders
+ * the model label blank (the exact "declared twice → projections drift" failure
+ * PATTERNS §10 exists to prevent). One flat type (ai carries a single METADATA per
+ * message, not per-role): `model` on an assistant message, `time` on a user message.
+ */
+export interface MaestroMetadata {
+  model?: string;
+  time?: string;
+}
+
+/**
  * The tick as an ai `DataUIPart`: `{ type: "data-tick"; id?; data: TickReceipt }`. A
  * Maestro-owned NARROWING of ai's data part for the one part this seam types — not a
  * re-declaration of ai's part union.
