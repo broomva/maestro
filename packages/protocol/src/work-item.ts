@@ -16,8 +16,10 @@
 //                ChatTransport seam); "a session renders work, it never owns it"
 //                (data-contract §"The work model").
 //  - `events[]`— the activity timeline is its own event-log subscription
-//                (`event where session_id=?`, DATA-MODEL §B.5); the client joins
-//                it to the focused item by `sessionId`, never embeds it.
+//                (`event where session_id=?`, DATA-MODEL §B.5); the client joins the
+//                SESSION timeline to the focused item by `sessionId`, never embeds
+//                it. (Synthetic events have a null sessionId, so a node-scoped
+//                timeline that includes them needs a nodeId join — see doc §7.)
 //  - `budget`/`done`/`trigger` — engine-room internals kept off the read surface
 //                by the disclosure ladder (CLAUDE.md §disclosure ladder).
 
@@ -82,7 +84,13 @@ export interface WorkItem {
   created: string;
 
   // ── derived projections (data-contract §"The work item shape") ────────────
-  /** The live session's id — the join key for the activity timeline (`event where session_id=?`). */
+  /**
+   * The node's current-or-most-recent session id — the session whose receipts the
+   * inspector renders. Present on running / attention / terminal / standing nodes;
+   * undefined only for never-dispatched (`proposed`) work. The join key for the
+   * session timeline (`event where session_id=?`). NOT live-only — a `done` node
+   * keeps its last session id so "the branch is the receipt" survives completion.
+   */
   sessionId?: string;
   /** Ancestor initiative label — derived from the `parentId` ancestry chain. */
   initiative?: string;
@@ -90,7 +98,7 @@ export interface WorkItem {
   project?: string;
   /** ISO ts of the last event — the client formats the relative age (the demo's `time`). */
   lastEventAt?: string;
-  /** The active session's worker (derived from the `session` row). */
+  /** The current-or-most-recent session's worker (derived from the `session` row) — present on completed items too, not only live ones. */
   worker?: WorkItemWorker;
   /** The run branch — the receipt (= session.branch, DATA-MODEL §B.3). */
   run?: RunBranch;

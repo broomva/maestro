@@ -8,6 +8,7 @@ import {
   WORK_ITEM_EXCLUDED_FIELDS,
   WORKER_LOCATIONS,
   type WorkItem,
+  type WorkItemExcludedField,
 } from "./work-item";
 
 // done.check for seam-work-item-store (BRO-1764): `bun test packages/protocol
@@ -72,6 +73,40 @@ describe("work-item shape — the read-side projection (data-contract §work ite
 
   test("the join key to the activity timeline is sessionId, not an embedded array", () => {
     expect(item.sessionId).toBe("7f3a");
+  });
+
+  test("a completed node keeps its session id + worker so the receipt survives completion", () => {
+    // sessionId/worker are current-or-most-recent, NOT live-only — the inspector
+    // renders receipts for done/standing items, the ones users inspect most.
+    const doneItem: WorkItem = {
+      id: "9b1",
+      state: "done",
+      kind: "task",
+      title: "Ship the thing",
+      gate: "human",
+      path: "growth/ship",
+      updatedAt: "2026-06-26T00:00:00Z",
+      created: "2026-06-25",
+      sessionId: "9b1a", // the ended session — still present
+      run: "run/9b1a",
+      worker: { name: "agent:maestro", where: "local worktree" },
+      verdict: "Checks passed",
+    };
+    expect(doneItem.sessionId).toBe("9b1a");
+    expect(doneItem.worker).toBeDefined();
+  });
+});
+
+// A COMPILE-TIME guard, not a fixture tautology: if any excluded field ever becomes
+// a key of WorkItem — e.g. an optional `chat?: UIMessage[]` (the exact conflation
+// this contract prevents) — `NoExcludedLeak` collapses to `never` and this file
+// FAILS `tsc --noEmit`. The runtime assertion only anchors the type check.
+type NoExcludedLeak = Extract<keyof WorkItem, WorkItemExcludedField> extends never ? true : never;
+
+describe("work-item shape — excluded fields are forbidden at the type level", () => {
+  test("no excluded field can leak into the WorkItem type (compile-time guard)", () => {
+    const enforced: NoExcludedLeak = true;
+    expect(enforced).toBe(true);
   });
 });
 
