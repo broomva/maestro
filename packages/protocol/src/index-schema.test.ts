@@ -184,9 +184,10 @@ describe("index-schema — compareReplay is a strict total order (rebuild-identi
 
   // The full "cache with teeth" test lands in p1-rebuild-invariant: it asserts two
   // REBUILDS are byte-identical (canonical (ts,path,line) order) and reproduce every
-  // §B.5 query answer — on a MULTI-FILE journal with a cross-file out-of-ts-order
-  // line (the case that separates ingest order from replay order). Named here as the
-  // seam skeleton (the ticket: "the property test is named here").
+  // §B.5 query answer — on a MULTI-FILE journal with BOTH a cross-file out-of-ts-order
+  // line (separates ingest order from replay order) AND a within-file out-of-ts-order
+  // line (exercises the harness's monotone-ts precondition, ReplayKey doc). Named here
+  // as the seam skeleton (the ticket: "the property test is named here").
   test.skip("two rebuilds are byte-identical + reproduce every query answer (p1-rebuild-invariant)", () => {});
 });
 

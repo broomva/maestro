@@ -69,12 +69,14 @@ than restate them (PATTERNS §10). Physical column names are the DATA-MODEL §B.
 - **`SessionRow`** — `id` (= run id), `nodeId`, `branch` (`run/<id>`), `status: SessionStatus`,
   `startedAt`, `endedAt`, `diffstatJson` + `SyncFields`.
 - **`EventRow`** — the STORAGE row for an event. It reuses the wire envelope (`EventEnvelope`, events.ts)
-  but differs on the two fields the storage representation changes: `ts` is **epoch ms** (not the ISO wire
-  string) and `payload` is the raw `payload_json` **TEXT** (not the rehydrated object). Expressed as
-  `Omit<EventEnvelope, "ts" | "payload"> & { ts: number; payload: string | null }` so `EventEnvelope`
-  stays the one *wire* type (PATTERNS §10); the runtime parses `payload` + formats `ts` when it projects a
-  row to the wire (BRO-1796). Append-only + immutable, so **no `SyncFields`** (an event never updates or
-  soft-deletes; it *is* the log). See §4, §5, §6.
+  but differs on the **three** fields the storage representation changes: `ts` is **epoch ms** (not the
+  ISO wire string), `payload` is the raw `payload_json` **TEXT** (not the rehydrated object), and
+  `sessionId` is **required-nullable** (`string | null` — a stored row is never `undefined`; the wire type
+  leaves it optional). Expressed as
+  `Omit<EventEnvelope, "ts" | "payload" | "sessionId"> & { sessionId: string | null; ts: number; payload: string | null }`
+  so `EventEnvelope` stays the one *wire* type (PATTERNS §10); the runtime parses `payload` + formats `ts`
+  when it projects a row to the wire (BRO-1796). Append-only + immutable, so **no `SyncFields`** (an event
+  never updates or soft-deletes; it *is* the log). See §4, §5, §6.
 - **`GateRow`** — `id`, `sessionId`, `kind: GateKind`, `proposalJson` (the gate-card source),
   `verdict: GateVerdict | null` (null = pending), `decidedBy`, `openedAt`, `decidedAt` + `SyncFields`.
 - **`ScheduleRow`** — `id`, `nodeId`, `triggerKind: TriggerKind`, `spec`, `nextFireAt`, `enabled` +
@@ -106,6 +108,11 @@ carries the last two on every syncable derived row (`node`, `session`, `gate`, `
   (the sketch put it only on `node`); `NodeRow.createdAt` (frontmatter `created`, the age the board
   groups by); `GateRow.openedAt` (gate-row lifecycle start, distinct from `decidedAt`); the `scan_cursor`
   table (§5).
+- **`updatedAt` provenance (resolve before BRO-1796).** `updatedAt` is the **index-assigned mutation
+  clock** (`Date.now()` at index write), NOT the frontmatter `updated:` field — frontmatter `updated` is
+  intentionally not indexed. This is why it is wall-clock (non-deterministic across rebuilds) and why the
+  §6.1 identity holds only *modulo* `updatedAt`. `NodeRow.createdAt`, by contrast, IS FS-derived
+  (frontmatter `created`), so it is deterministic and part of the identity dump.
 - **Soft-delete narrows the natural-key UNIQUE to a PARTIAL index.** The §B.3 sketch declares
   `node.path .notNull().unique()` (global). With tombstones retained, a global UNIQUE breaks
   delete-then-recreate (the retained tombstone collides on re-INSERT of the same path). **BRO-1796 must
@@ -171,11 +178,19 @@ monotonic `seq` in `compareReplay` order (§6), then advances `byteOffset`/`last
    `run/<id>/session.jsonl` files, ingest order differs from `compareReplay` order; that cross-file
    interleaving lived only in the dropped autoincrement column and is unrecoverable. What **survives**
    is every reactive query in DATA-MODEL §B.5 — the Needs-you count, the board in D-ORDER, each
-   **per-session** timeline (`event where session_id=? order by seq`; the within-session order is file
-   order, hence stable), the bench. What does **not** survive is the absolute `seq` value: **an SSE
-   cursor does not carry across a rebuild — a rebuild is a stream reset, and clients re-subscribe**
-   (rebuild is a rare recovery event). `run_budget.spentUsd` re-derives from journaled `budget.*`
-   (D-DURABILITY); `lease` starts empty.
+   **per-session** timeline (`event where session_id=? order by seq`), the bench. What does **not**
+   survive is the absolute `seq` value: **an SSE cursor does not carry across a rebuild — a rebuild is a
+   stream reset, and clients re-subscribe** (rebuild is a rare recovery event). `run_budget.spentUsd`
+   re-derives from journaled `budget.*` (D-DURABILITY); `lease` starts empty.
+
+   > **Precondition (why the per-session timeline is stable).** The within-session `order by seq` equals
+   > `(ts, line)` order, which equals write/file order **only when the session's `ts` is monotone
+   > non-decreasing**. The Loop-1 append path (BRO-1790) enforces this by clamping each appended event's
+   > `ts` to `max(prev_ts, now)`; absent that, a clock step-back (NTP, tool-stamped events) would re-order
+   > a session's timeline across a rebuild. `sourcePath` must also be **byte-canonical** (one fixed Unicode
+   > normalization form, no `./`/symlink/alias spellings) — `compareReplay` compares it raw, so two
+   > spellings of one file would split into two keys and break §6.1 byte-identity. Both are scanner /
+   > append-path preconditions owned by BRO-1796 / BRO-1790.
 
 ## 7. Decision — why row-shapes in `packages/protocol`, not drizzle
 

@@ -103,7 +103,12 @@ export const TABLE_REBUILD = {
  * events are immutable and the operational rows are per-runtime, never synced.
  */
 export interface SyncFields {
-  /** epoch ms; monotone per row — the last-writer-wins clock for the team tier. */
+  /**
+   * epoch ms — the INDEX-assigned mutation clock (`Date.now()` at index write), NOT
+   * the frontmatter `updated:` field (which is intentionally not indexed). Monotone
+   * per row; the last-writer-wins clock for the team tier. Because it is wall-clock,
+   * the rebuild identity (§6) holds only *modulo* `updatedAt`.
+   */
   updatedAt: number;
   /** epoch ms of soft delete, or null when live. A vanished FS node tombstones. */
   deletedAt: number | null;
@@ -150,22 +155,24 @@ export interface SessionRow extends SyncFields {
 
 /**
  * `event` — the queryable projection of every `session.jsonl` line plus the
- * workspace synthetic journal. It is the wire envelope (`EventEnvelope`,
- * events.ts) in every field EXCEPT `ts`: the stored row holds `ts` as **epoch ms**
- * (matching the DATA-MODEL §B.3 `integer(ts, {mode:"timestamp"})` sketch and the
- * numeric ordering range queries need); the runtime projects it to ISO-8601 at the
- * wire boundary (`EventEnvelope.ts: string`), a projection owned by BRO-1796.
- * `EventEnvelope` stays THE wire type (PATTERNS §10); `EventRow` is the STORAGE
- * row, differing on exactly the two fields the storage representation changes:
- * `ts` is epoch ms (not the ISO wire string) and `payload` is the raw `payload_json`
- * TEXT (not the rehydrated object). The runtime parses `payload` + formats `ts` when
- * it projects a row to the wire envelope — owned by BRO-1796. Append-only + immutable
+ * workspace synthetic journal. `EventRow` is the STORAGE row: it reuses the wire
+ * envelope (`EventEnvelope`, events.ts) but differs on the THREE fields the storage
+ * representation changes:
+ *  - `ts` — epoch ms, not the ISO wire string (BRO-1796 stores it via
+ *    `integer(ts, {mode:"number"})` — see §4; the runtime formats it to ISO at the
+ *    wire boundary, `EventEnvelope.ts: string`);
+ *  - `payload` — the raw `payload_json` TEXT, not the rehydrated object;
+ *  - `sessionId` — required-nullable (`string | null`), because a stored row is
+ *    never `undefined`; the wire type leaves it optional. Null for synthetics
+ *    (D-DURABILITY).
+ * `EventEnvelope` stays THE wire type (PATTERNS §10); the runtime parses `payload` +
+ * formats `ts` when it projects a row to the wire (BRO-1796). Append-only + immutable
  * — no `SyncFields` (an event never updates or soft-deletes; it is the log). `seq` is
- * the global total order + the live SSE resume cursor (DATA-MODEL §B.5); its VALUES are
- * rebuild-scoped, not preserved across a rebuild (see `compareReplay`). `sessionId` is
- * null for synthetics (D-DURABILITY).
+ * the global total order + the live SSE resume cursor (DATA-MODEL §B.5); its VALUES
+ * are rebuild-scoped, not preserved across a rebuild (see `compareReplay`).
  */
-export type EventRow = Omit<EventEnvelope, "ts" | "payload"> & {
+export type EventRow = Omit<EventEnvelope, "ts" | "payload" | "sessionId"> & {
+  sessionId: string | null;
   ts: number;
   payload: string | null;
 };
@@ -269,11 +276,21 @@ export interface ScanCursorRow {
  * Ordering by `(ts, sourcePath, line)` is a STRICT TOTAL order because
  * `(sourcePath, line)` is unique across all journal lines and breaks `ts` ties
  * deterministically.
+ *
+ * Two preconditions BRO-1796's scanner must uphold for the byte-identity + the
+ * per-session query-answer guarantees (fs-index.md §6):
+ *  - `sourcePath` is BYTE-CANONICAL — one fixed Unicode normalization form, no
+ *    `./` / symlink / alias spellings. `compareReplay` compares it raw, so two
+ *    spellings of one physical file split into two keys and break rebuild identity.
+ *  - per-session `ts` is MONOTONE non-decreasing in file order — the Loop-1 append
+ *    path (BRO-1790) clamps each event's `ts` to `max(prev_ts, now)`. Only then
+ *    does the within-session `(ts, line)` order equal write/file order (fs-index.md
+ *    §6.2); without it a clock step-back would re-order a session's timeline.
  */
 export interface ReplayKey {
   /** epoch ms of the event — a FINITE number (the parser rejects malformed lines before a key is built). */
   ts: number;
-  /** the journal file this line came from, workspace-relative. */
+  /** the journal file, BYTE-CANONICAL workspace-relative (fixed Unicode form, no alias/symlink spellings). */
   sourcePath: string;
   /** 0-based line number within `sourcePath`. */
   line: number;
