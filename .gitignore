@@ -25,5 +25,5 @@ build/
 
 # Machine-local control telemetry (bstack — wired in BRO-1829)
 .control/audit/*.jsonl
-.control/leverage-state.json
-.control/leverage-metrics.jsonl
+.control/leverage-*.json
+.control/leverage-*.jsonl

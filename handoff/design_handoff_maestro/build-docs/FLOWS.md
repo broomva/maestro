@@ -14,7 +14,7 @@ Conventions every flow obeys:
 1. client → runtime: intent `new_mission { parentPath, title, brief, kind }`.
 2. runtime → FS: create folder + `_work.md` (frontmatter: new UUID, `state: proposed`, defaults from parent's contract).
 3. runtime → FS: git commit ("new work: <title>").
-4. indexer: picks up the file change → upserts `node` row → emits `node.created` on the stream.
+4. indexer: picks up the file change → upserts `node` row → the upsert surfaces as `node.updated` on the stream (the synthetic list is **closed** — no separate `node.created`; API.md §1, **D-DURABILITY**).
 5. All clients see the new card via the stream. No client-local optimistic state is authoritative.
 
 **Failure:** FS write fails → intent returns an error; nothing was half-created (the commit is the transaction).
@@ -44,10 +44,10 @@ Runs inside the agent child, every beat:
 
 ## F4 — Verification (Loop 2)
 
-1. Agent child exits claiming complete (`run.finished` event).
+1. Agent child exits claiming complete: the child emits `run.exiting {code, reason}` (HARNESS owns this seam); the supervisor derives `run.finished` after reap (**D-EVENTNAMES**) — the verifier is spawned on the supervisor-derived `run.finished`.
 2. runtime: spawn **verifier child** — a different process, ideally a different model/vendor. The writer never grades its own homework.
 3. verifier: run `done.check` (deterministic oracle) in the worktree. If the contract has `done.judge`, run the LLM judge against the rubric — as a supplement, never the sole gate.
-4. verifier → FS: write `verdict.md` (verdict + evidence: test output, diff review). Emit `verdict` event.
+4. verifier → FS: write `verdict.md` (verdict + evidence: test output, diff review). Emit `check.verdict` event (**D-EVENTNAMES**).
 5. **Pass + `gate: human`** → F5. **Pass + `gate: auto`** → runtime merges `run/<id>`, `node.state → done` (allowed only because the contract explicitly waived the gate).
 6. **Fail** → targeted feedback appended to `fix_plan.md`, respawn agent child (back to F3) — counts against `max_iterations`.
 
@@ -58,7 +58,7 @@ Runs inside the agent child, every beat:
 3. client → runtime: intent with the verdict — the four Org-Control-Layer values:
    - **approve** → merge `run/<id>` into the workspace branch, `node.state → done`, event `gate.approved`. The autonomy ledger notes one human look.
    - **revise** (send back) → feedback written to `fix_plan.md`, `node.state → triggered`, redispatch (F2 skipping folder setup).
-   - **block** → `node.state → canceled` or parked; worktree kept for autopsy.
+   - **block** → `node.state → canceled` (terminal — no "parked" state, **D-GATE**); worktree kept for autopsy.
    - **escalate** (point/grant) → reassign `owner` or attach a capability grant; stays at review.
 4. Gate row updated (`decidedBy`, `decidedAt`); `data-gate` part reconciled by id across every open client.
 

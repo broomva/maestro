@@ -46,7 +46,7 @@ Pick your own data/auth layer, but model the domain around **workspace / session
 
 **Motion** — feedback under 300ms (200ms common). Enter `opacity:0, y:8 → 1, 0`; exit `y:-8`. The signature live signal is the **Undertow** (see `LIVE-SIGNALS.md`). Calm is load-bearing: motion encodes presence, not urgency. No bouncy entrances, no scale/rotate on hover. **Everything stops under `prefers-reduced-motion`.**
 
-**Work states** — plain voice is canon: **Queued · Running · Stuck · Needs you · Done** (plus **Standing** for routines). The system enums (Todo, InProgress, Blocked, InReview) are a developer surface only. The dot carries the color: gray / info / warning / accent-blue / success. **Never show progress percentages** — show receipts (branch, diffstat, judge verdict, timeline).
+**Work states** — plain voice is canon: **Queued · Running · Stuck · Needs you · Done** (plus **Standing** for routines). The system enum is the 8-state OrchState (`proposed · reviewing · triggered · running · blocked · review · done · canceled`) — a developer surface only; the six plain-voice states are the canon UI (Queued = proposed|reviewing|triggered) (**D-ENUM**). The dot carries the color: gray / info / warning / accent-blue / success. **Never show progress percentages** — show receipts (branch, diffstat, judge verdict, timeline).
 
 **Voice** — plain-language, second person, lead with the verb. "Needs you," not "In Review." "New mission," not "Create task." Sentence case everywhere; no Title Case buttons, no UPPERCASE eyebrows, no wide letterspacing. **No emoji in chrome. No em dashes in user-facing copy.** No "Welcome!", no celebration, no marketing superlatives.
 

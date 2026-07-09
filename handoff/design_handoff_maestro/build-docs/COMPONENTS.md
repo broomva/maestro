@@ -45,7 +45,7 @@ Circular avatar — initials over an accent, or an image.
 Status pill for work state. **The dot carries the color; the capsule stays gray.**
 
 - **Props:** `status: "success" | "info" | "warning" | "danger" | "neutral"` (default info) · `pulse?` (pulses the dot) · `children` = label.
-- **Style:** soft gray capsule (`--muted`), `--bv-text-xs`, colored dot left of a sentence-case label. Dot color from the status tokens (`--bv-success` / `--bv-info` / `--bv-warning` / `--bv-blue` for "Needs you" / neutral gray). Status colors are the **only** non-blue hues allowed in chrome.
+- **Style:** soft gray capsule (`--muted`), `--bv-text-xs`, colored dot left of a sentence-case label. Dot color from the status tokens (`--bv-success` / `--bv-info` / `--bv-warning` / `--bv-blue-accent` for "Needs you", accent-blue 235 / neutral gray) (**D-COLOR**). Status colors are the **only** non-blue hues allowed in chrome.
 - **Copy:** plain language — "Needs you", not "In Review"; "Running", "Stuck", "Queued", "Done", "Standing".
 - For *running* work, use `DotComet` as the dot (see below) rather than a static pulse.
 
@@ -65,7 +65,7 @@ Matte content card — work items, board cards, settings groups, integration row
 ## Composer — `Composer.d.ts` · `Composer.prompt.md`
 The chat composer — **the one place glass and dramatic depth are allowed.** Bottom of any chat surface.
 
-- **Props:** `placeholder?` (default "Message Broomva" — keep as "Message <agent>") · controlled `value?`/`onChange?` · `onSend?(text)` fired on Enter or send click (trimmed) · `leading?` (e.g. an attach IconButton).
+- **Props:** `placeholder?` (default "Message Maestro" — keep as "Message <agent>") (**D-NAME**) · controlled `value?`/`onChange?` · `onSend?(text)` fired on Enter or send click (trimmed) · `leading?` (e.g. an attach IconButton).
 - **Style:** `.bv-glass-composer` — `rounded-[28px]` glass capsule + the signature frosted-blue **halo** (`--bv-shadow-composer`) + inner light line. This is the single dramatic depth cue in the product; nothing else gets this shadow.
 
 ---
