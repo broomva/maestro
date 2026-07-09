@@ -1,0 +1,572 @@
+schema_version: 1
+# Canonical companion-skill roster. The bstack substrate ships with these
+# skills *checked* (SKILL.md preamble) and *installable* (bin/bstack-skills
+# install) but does not bundle them — each skill ships from its own
+# `broomva/<name>` repo and installs via `npx skills add broomva/<name>`.
+#
+# Conforms to schemas/companion-skills.v1.json. Validated by `bstack doctor`
+# Section 11 (v0.7.0+).
+#
+# Adding a skill:
+#   1. Append an entry below with name + repo + category.
+#   2. Set `primitive` only if the skill embodies a specific bstack primitive.
+#   3. Set `required: true` if the skill is mandatory for full substrate
+#      compliance (default false — optional / domain-specific skills).
+#   4. Bump bstack VERSION (additive — minor pre-1.0, patch otherwise).
+
+skills:
+  # ── Foundation: orchestration + governance modes ────────────────────────
+  - name: autonomous
+    repo: broomva/skills
+    category: orchestration
+    required: true
+    introduced_in: 0.1.0
+    description: "Canonical operating mode that fires the 20-reflex pipeline"
+
+  - name: cross-review
+    repo: broomva/skills
+    category: safety
+    primitive: P20
+    required: true
+    introduced_in: 0.2.0
+    description: "Cross-model adversarial review gate"
+
+  - name: dogfood
+    repo: broomva/skills
+    category: lifecycle
+    primitive: P11
+    required: true
+    introduced_in: 0.28.0
+    description: "P11 — Empirical feedback. Triggers the Dogfood Plan + per-stack cookbook + Dogfood Receipt; auto-detects the stack and validates by interacting, not reasoning."
+
+  - name: role-x
+    repo: broomva/skills
+    category: meta
+    primitive: P17
+    required: true
+    introduced_in: 0.2.0
+    description: "Lens-routed request articulation"
+
+  # ── Control + knowledge stack ───────────────────────────────────────────
+  - name: agentic-control-kernel
+    repo: broomva/skills
+    category: meta
+    required: true
+    introduced_in: 0.1.0
+    description: "Unifying control-systems metalayer kernel"
+
+  - name: harness-engineering-playbook
+    repo: broomva/skills
+    skillPath: skills/harness-engineering-playbook/SKILL.md
+    category: meta
+    required: true
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Patterns for agent harness design — AGENTS.md, smoke/test/lint/typecheck harness, entropy-control checks (migrated 2026-05-25 from broomva/harness-engineering-skill — Phase 4c; renamed)"
+
+  - name: kg
+    repo: broomva/skills
+    category: knowledge
+    required: true
+    introduced_in: 0.14.0
+    min_bstack_version: 0.14.0
+    description: "LLM-as-index loader for research/entities/. Two-tier scoring (catalog tier-1, body-grep tier-2 fallback) routes a topic to top-N entity bodies the agent reasons over. Pairs with bookkeeping's cmd_index (catalog generator) and the workspace's knowledge-catalog-refresh-hook.sh Stop hook (P6)."
+
+  - name: bookkeeping
+    repo: broomva/skills
+    category: knowledge
+    primitive: P6
+    required: true
+    introduced_in: 0.28.0
+    description: "P6 — universal knowledge engine: scores, promotes, and compounds knowledge from all sources into a permanent, query-able entity graph. The catalog generator (cmd_index) behind the knowledge-catalog-refresh Stop hook."
+
+  - name: prompt-library
+    repo: broomva/skills
+    category: meta
+    required: true
+    introduced_in: 0.1.0
+    description: "Prompt management CLI + API"
+
+  # ── Productive-wait + orchestration ─────────────────────────────────────
+  - name: p9
+    repo: broomva/skills
+    category: lifecycle
+    primitive: P9
+    required: true
+    introduced_in: 0.1.0
+    description: "CI watcher + productive-wait"
+
+  - name: persist
+    repo: broomva/skills
+    category: orchestration
+    primitive: P12
+    required: true
+    introduced_in: 0.28.0
+    description: "P12 — Persistent Loop Discipline. Cross-context restart loop where state lives in the filesystem (PROMPT.md + git tree + state.jsonl); each iteration is a fresh agent context. Backpressure from compilers/tests, not model self-grading."
+
+  - name: alkosto-wait-optimizer
+    repo: broomva/skills
+    skillPath: skills/alkosto-wait-optimizer/SKILL.md
+    category: lifecycle
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Probability-based wait-time optimizer for Alkosto promotions — Bayesian estimation (migrated 2026-05-26 from broomva/alkosto-wait-optimizer-skill; renamed)"
+
+  # ── Specialty domain — Phase 4d batch (2026-05-26) ──────────────────────
+  # 17 standalone-repo skills consolidated. Source: broomva/skills PR #7 (merge 1be5fd9)
+
+  # Hardware, robotics, physical systems
+  - name: bitnet
+    repo: broomva/skills
+    skillPath: skills/bitnet/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Microsoft BitNet — 1-bit LLM setup, model download, inference, benchmarking on CPU"
+
+  - name: capx-agentic-robotics
+    repo: broomva/skills
+    skillPath: skills/capx-agentic-robotics/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "CaP-X LLM-driven robot manipulation via code generation — CaP-Gym (187 tasks), CaP-Bench, CaP-Agent0, CaP-RL, sim-to-real"
+
+  - name: orcahand
+    repo: broomva/skills
+    skillPath: skills/orcahand/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.6
+    min_bstack_version: 0.21.0
+    description: "Full-stack ORCA Hand skill — 17-DOF tendon-driven robotic hand: plant interface, safety shields, MuJoCo sim, RL training, teleoperation, sim-to-real, EGRI (Phase 4f; deduplicated broomva/orcahand + broomva/orcahand-skill — both archived)"
+
+  - name: openrocket-sim
+    repo: broomva/skills
+    skillPath: skills/openrocket-sim/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Headless rocket design + simulation + EGRI optimization using OpenRocket"
+
+  - name: sdr-satellite
+    repo: broomva/skills
+    skillPath: skills/sdr-satellite/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Software-defined radio + satellite reception toolkit"
+
+  - name: ocean-genomics
+    repo: broomva/skills
+    skillPath: skills/ocean-genomics/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Deep-ocean genomics research — eDNA, AlphaFold, ESMFold, Evo 2, marine biodiversity, agentic bioinformatics"
+
+  # Compute & remote infrastructure
+  - name: colab-remote
+    repo: broomva/skills
+    skillPath: skills/colab-remote/SKILL.md
+    category: lifecycle
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Colab Remote — SSH-operated GPU training on Google Colab"
+
+  - name: remote-gpu
+    repo: broomva/skills
+    skillPath: skills/remote-gpu/SKILL.md
+    category: lifecycle
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Remote GPU orchestrator — headless GPU servers, jobs, remote sessions over SSH/HTTP"
+
+  - name: claude-code-channels
+    repo: broomva/skills
+    skillPath: skills/claude-code-channels/SKILL.md
+    category: lifecycle
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Telegram + Discord messaging bots for Claude Code with per-channel access control"
+
+  - name: claude-remote-sessions
+    repo: broomva/skills
+    skillPath: skills/claude-remote-sessions/SKILL.md
+    category: lifecycle
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Per-channel Discord + Telegram sessions for Claude Code — isolated tmux + auto-discovery + thread-context injection"
+
+  # Audio, voice, media
+  - name: omnivoice
+    repo: broomva/skills
+    skillPath: skills/omnivoice/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "OmniVoice Studio — local TTS, voice cloning, voice design, video dubbing in 646 languages (renamed from broomva/omnivoice-skill)"
+
+  - name: livecoding
+    repo: broomva/skills
+    skillPath: skills/livecoding/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Algorave-grade livecoded music workflow — TidalCycles patterns + Hydra visuals"
+
+  # Advisory & consulting
+  - name: phronesis
+    repo: broomva/skills
+    skillPath: skills/phronesis/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "AI-native advisory practice — top-firm consulting methodology (Three Horizons, MIT CISR, JTBD, RICE, QuantumBlack ML, Wardley) as runnable typed primitives"
+
+  - name: procurer
+    repo: broomva/skills
+    skillPath: skills/procurer/SKILL.md
+    category: knowledge
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Grounded procurement research — turn any real-world need into a decision-shaped report with cited alternatives, price bands, recommendation"
+
+  # Health & body
+  - name: health
+    repo: broomva/skills
+    skillPath: skills/health/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Personal health knowledge graph — local-first ingest of Garmin/Apple/Whoop/Oura to SQLite, projected to Obsidian frontmatter. Hex architecture"
+
+  - name: founder-mode-oncology
+    repo: broomva/skills
+    skillPath: skills/founder-mode-oncology/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.4
+    min_bstack_version: 0.21.0
+    description: "Personalized cancer-treatment navigation — Sid Sijbrandij founder-mode framework + AlphaFold integration (runtime stays at broomva/founder-mode-cancer)"
+
+  # ── Research + knowledge work ───────────────────────────────────────────
+  # Phase 4c migration 2026-05-25 (broomva/skills PR #6 merge e2bdf14)
+  - name: deep-dive-research-orchestrator
+    repo: broomva/skills
+    skillPath: skills/deep-dive-research-orchestrator/SKILL.md
+    category: knowledge
+    required: true
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Multi-source research with citation tracking — 10+ source synthesis (migrated from broomva/deep-dive-research-skill; renamed)"
+
+  - name: checkit
+    repo: broomva/skills
+    category: knowledge
+    required: false
+    introduced_in: 0.28.0
+    description: "Ingest-and-integrate an artifact shared with a terse directive ('check this out', 'lets research this'): contextualize -> research (verify sources) -> connect -> document -> ranked next steps. A role-x (P17) lens."
+
+  - name: social-intelligence
+    repo: broomva/skills
+    skillPath: skills/social-intelligence/SKILL.md
+    category: knowledge
+    required: false
+    introduced_in: 0.21.3
+    min_bstack_version: 0.21.0
+    description: "Autonomous social engagement + knowledge extraction loop for Moltbook and X — compounds with blog-post and content-creation"
+
+  # ── Neuroscience & BCI — Phase 4e (2026-05-26, broomva/skills PR #8 merge ca7de88) ──
+  - name: tribe-v2-agent-alignment
+    repo: broomva/skills
+    skillPath: skills/tribe-v2-agent-alignment/SKILL.md
+    category: knowledge
+    required: false
+    introduced_in: 0.21.5
+    min_bstack_version: 0.21.0
+    description: "Cortical alignment benchmarking for AI encoders using Meta's TRIBE v2 — neuro-informed model selection for the Life/Arcan stack"
+
+  - name: tribe-v2-bci-applied
+    repo: broomva/skills
+    skillPath: skills/tribe-v2-bci-applied/SKILL.md
+    category: knowledge
+    required: false
+    introduced_in: 0.21.5
+    min_bstack_version: 0.21.0
+    description: "Applied BCI research + neuro-informed content optimization using Meta's TRIBE v2 — predict neural responses to media/UI/content"
+
+  - name: tribe-v2-neuroscience
+    repo: broomva/skills
+    skillPath: skills/tribe-v2-neuroscience/SKILL.md
+    category: knowledge
+    required: false
+    introduced_in: 0.21.5
+    min_bstack_version: 0.21.0
+    description: "In-silico neuroscience experiments using Meta's TRIBE v2 — predict fMRI cortical responses to video, audio & text without brain scanners"
+
+  # ── Discovery + skill management ────────────────────────────────────────
+  - name: skills-catalog
+    repo: broomva/skills
+    category: meta
+    required: true
+    introduced_in: 0.1.0
+    description: "Canonical reference of all available skills"
+
+  - name: skillify
+    repo: broomva/skills
+    category: meta
+    required: false
+    introduced_in: 0.28.0
+    description: "Distill a working session into a permanent, TESTED, registered skill. Its deterministic skillify_check gate (10 steps incl. reference-integrity) makes 'a feature that doesn't pass all ten is not a skill' machine-checkable."
+
+  # ── Design + frontend ───────────────────────────────────────────────────
+  - name: arcan-glass
+    repo: broomva/skills
+    category: design
+    required: false
+    introduced_in: 0.1.0
+    description: "Broomva trademark web styling system"
+
+  - name: brand-icons
+    repo: broomva/skills
+    skillPath: skills/brand-icons/SKILL.md
+    category: design
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Brand icon and visual identity asset generation — favicons, app icons, OG images, social avatars"
+
+  # ── Content + marketing ─────────────────────────────────────────────────
+  # Phase 4a migration 2026-05-25: blog-post + seo-llmeo moved to broomva/skills Tier-2 monorepo.
+  # content-creation pending Phase 4b (substantial repo with shared assets).
+  - name: blog-post
+    repo: broomva/skills
+    skillPath: skills/blog-post/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.21.1
+    min_bstack_version: 0.21.0
+    description: "Full-stack blog post production — research → angle → draft → multi-platform distribution (X, LinkedIn, Instagram, Substack)"
+
+  # Phase 4b migration 2026-05-25 (broomva/skills PR #5 merge e932c7b):
+  # 6 standalone content/media repos consolidated into Tier-2 monorepo.
+  - name: content-creation
+    repo: broomva/skills
+    skillPath: skills/content-creation/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Full-stack content pipeline — research → narrative → visual assets → video → social → deploy; ships bstack-launch + open-source-stack example campaigns"
+
+  - name: content-engine
+    repo: broomva/skills
+    skillPath: skills/content-engine/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.21.2
+    min_bstack_version: 0.21.0
+    description: "Full-stack AI content studio — visual DNA compiler, cinematic generation, browser autopilot, content loop; bundles 4 sub-skills (autopilot, cinema, dna, loop)"
+
+  - name: launch-video
+    repo: broomva/skills
+    skillPath: skills/launch-video/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.21.2
+    min_bstack_version: 0.21.0
+    description: "Liquid Glass product launch video — dark void, 3D floating panels, spring animations via Remotion"
+
+  - name: ltx-video
+    repo: broomva/skills
+    skillPath: skills/ltx-video/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.21.2
+    min_bstack_version: 0.21.0
+    description: "LTX-2.3 video generation — setup, inference, prompting, ComfyUI integration for Lightricks 22B DiT audio-video model"
+
+  - name: creative-review
+    repo: broomva/skills
+    skillPath: skills/creative-review/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.21.2
+    min_bstack_version: 0.21.0
+    description: "Meta creative review — style adherence scoring, feedback loops, self-improving creative pipeline"
+
+  - name: brainrot-for-good
+    repo: broomva/skills
+    skillPath: skills/brainrot-for-good/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.21.2
+    min_bstack_version: 0.21.0
+    description: "High-retention video production using dopamine-aware editing for genuinely valuable content"
+
+  - name: seo-llmeo
+    repo: broomva/skills
+    skillPath: skills/seo-llmeo/SKILL.md
+    category: content
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "SEO and LLM Engine Optimization — audits, meta tags, structured data, llms.txt generation"
+
+  # ── Strategy + decision intelligence ────────────────────────────────────
+  # Migrated 2026-05-25 from per-skill broomva/<name> repos (which never
+  # existed as standalones) to the broomva/skills Tier-2 monorepo
+  # (broomva/skills PR #3 merged af42d83). The bundled install via
+  # broomva/strategy-skills remains available during a 6-month deprecation
+  # window (until 2026-11-25) for backward compat.
+  - name: pre-mortem
+    repo: broomva/skills
+    skillPath: skills/pre-mortem/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Pre-mortem failure-mode analysis (4-category scoring + mitigation plan)"
+
+  - name: premortem
+    repo: broomva/skills
+    skillPath: skills/premortem/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.21.0
+    min_bstack_version: 0.21.0
+    description: "Klein/Kahneman premortem with parallel sub-agent deep-dives + HTML report"
+
+  - name: braindump
+    repo: broomva/skills
+    skillPath: skills/braindump/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Structured idea capture → Obsidian vault with auto-categorization"
+
+  - name: morning-briefing
+    repo: broomva/skills
+    skillPath: skills/morning-briefing/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Daily focused brief from vault priorities + action items"
+
+  - name: drift-check
+    repo: broomva/skills
+    skillPath: skills/drift-check/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Priority drift report (stated priorities vs actual effort via git + vault)"
+
+  - name: strategy-critique
+    repo: broomva/skills
+    skillPath: skills/strategy-critique/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Red-team critique of strategy documents with gaps + missing assumptions"
+
+  - name: stakeholder-update
+    repo: broomva/skills
+    skillPath: skills/stakeholder-update/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Multi-audience communication generator (technical / business / customer)"
+
+  - name: decision-log
+    repo: broomva/skills
+    skillPath: skills/decision-log/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Structured decision capture with context, alternatives, rationale → vault"
+
+  - name: weekly-review
+    repo: broomva/skills
+    skillPath: skills/weekly-review/SKILL.md
+    category: strategy
+    required: false
+    introduced_in: 0.1.0
+    min_bstack_version: 0.21.0
+    description: "Weekly vault change scan + attention flags"
+
+  # ── Workflow & lifecycle (Tier-2 monorepo) ──────────────────────────────
+  - name: handoff
+    repo: broomva/skills
+    skillPath: skills/handoff/SKILL.md
+    category: lifecycle
+    required: false
+    introduced_in: 0.21.0
+    min_bstack_version: 0.21.0
+    description: "Fresh-session handoff doc drafting — compress an arc into a resumable doc for the next agent context"
+
+  - name: make-spec
+    repo: broomva/skills
+    skillPath: skills/make-spec/SKILL.md
+    category: design
+    required: false
+    introduced_in: 0.21.0
+    min_bstack_version: 0.21.0
+    description: "Native-HTML design-doc scaffold (spec / plan / ADR / report / pr-explainer) using the canonical Broomva dark theme — implements P18 Category-C"
+
+  # ── Platform + finance ──────────────────────────────────────────────────
+  - name: finance-substrate
+    repo: broomva/skills
+    category: platform
+    required: false
+    introduced_in: 0.1.0
+    description: "Financial workflow substrate (pending Tier-1 vs Tier-2 lock-in — see workspace Phase-0 decision card)"
+
+  # Phase 4c finance migrations 2026-05-25 (broomva/skills PR #6 merge e2bdf14)
+  - name: investment-management
+    repo: broomva/skills
+    skillPath: skills/investment-management/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.3
+    min_bstack_version: 0.21.0
+    description: "Portfolio construction, factor models, backtesting, multi-platform execution (Alpaca, Coinbase, Polymarket)"
+
+  - name: wealth-management
+    repo: broomva/skills
+    skillPath: skills/wealth-management/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.3
+    min_bstack_version: 0.21.0
+    description: "Wealth planning + Monte Carlo simulations + tax-optimized allocation + net worth forecasting"
+
+  - name: haima
+    repo: broomva/skills
+    skillPath: skills/haima/SKILL.md
+    category: platform
+    required: false
+    introduced_in: 0.21.3
+    min_bstack_version: 0.21.0
+    description: "Agent guide for x402 machine-to-machine payments, secp256k1 wallets, per-task billing, on-chain USDC settlement (renamed from broomva/haima-skill; runtime crate stays at broomva/haima)"

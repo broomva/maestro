@@ -1,0 +1,536 @@
+# maestro — Agent Guidelines
+
+## Self-Meta Definition
+
+This file IS the control harness for agents operating in this workspace. Reading this file is not optional — it is the first action an agent takes. The rules here are enforced by pre-commit hooks, Claude Code hooks, and the control audit (`make control-audit`).
+
+**If you are an agent reading this**: you are part of a self-improving system. Your session will be captured, indexed, and used to improve future agents. The bstack consciousness substrate is always active.
+
+## Development Philosophy
+
+Before the twenty primitives below — which are the *mechanism* — these four principles are the *intent*. They are widely-recognized engineering disciplines, articulated sharply in Andrej Karpathy's observations on where LLM-assisted coding goes wrong. bstack's contribution is to make each one **machine-checkable** instead of a hopeful instruction: a principle that lives only as prose decays into ritual — acknowledged in passing, then ignored. Each principle below therefore names the primitive(s) that back it.
+
+| Principle | What it means | Failure it prevents | Backed by |
+|---|---|---|---|
+| **1. Think before coding** | Surface assumptions and trade-offs *before* writing. Trace what the change depends on and what depends on it. Ask only for what you genuinely cannot derive from the repo. | Hidden assumptions — confidently building the wrong thing. | **Dep-Chain (P14)** + **Snapshot (P15)** |
+| **2. Simplicity first** | Deliver the minimal change that solves the actual problem. No speculative features, no premature abstraction, no scope creep. | Overcomplication — code nobody asked for, harder to maintain than the problem warranted. | **Cross-Review (P20)** anti-slop gate |
+| **3. Surgical changes** | Change only what the task requires. Match the surrounding style. Don't refactor tangentially or reformat untouched lines. | Unintended edits — diffs that touch more than they should, hiding the real change and breaking unrelated things. | **Dep-Chain (P14)** (enumerating what's touched bounds the change surface) + **Cross-Review (P20)** (flags tangential edits / scope creep) |
+| **4. Goal-driven execution** | Define measurable success criteria up front, then loop — building and *verifying by interaction* — until they are met. | No verifiable "done" — work that *looks* complete without evidence it works. | **Empirical (P11)** (interaction evidence for "done") + **Orchestrate (P19)** (the verify-until-met loop) |
+
+**Enforcement strength varies by principle, and that is the point.** P14/P15 are *hard predicates* — a checker reads the response for a dependency enumeration / state snapshot. P20 is an *independent-judgment* gate that blocks a merge below threshold. Both beat prose, because in neither case is the agent the one grading itself — but only the first kind is a literal yes/no predicate. The goal is to push each principle as far down the gradient toward a hard predicate as it will go.
+
+The binding rule across all four:
+
+> **A discipline that recurs as a phrase must map to a concrete, machine-checkable behavior — or it does not count as discipline.**
+
+"Think deeply", "follow best practices", "keep it simple", "make sure it works" are *rituals* until they produce a concrete artifact: a dependency enumeration, a state snapshot, a minimal diff, an interaction receipt. The primitives below are how this workspace converts each principle from intention into enforced behavior.
+
+**This philosophy is yours to extend.** Add project-specific principles to this section so every agent and contributor inherits them by default; the primitives stay the enforcement layer beneath whatever principles you declare here.
+
+## Bstack Core Automation Primitives
+
+This workspace is governed by the **bstack** primitive contract — twenty irreducible building blocks. All are always active. Run `bstack doctor` to verify compliance.
+
+Each primitive carries a **short name** for agent prose. When referencing a primitive in responses, PR bodies, commit messages, or comments, use the `Name (Pn)` form — *"applying Snapshot (P15)"*, *"via Dep-Chain (P14)"*, *"running Bookkeeping (P6)"* — not bare `Pn`. The number is the canonical identifier; the short name is the human-readable handle.
+
+**Short-name index**: Bridge (P1) · Gate (P2) · Tickets (P3) · Pipeline (P4) · Fanout (P5) · Bookkeeping (P6) · Freshness (P7) · Janitor (P8) · Wait (P9) · Hygiene (P10) · Empirical (P11) · Persist (P12) · Dream (P13) · Dep-Chain (P14) · Snapshot (P15) · Crystallize (P16) · Lens (P17) · Audience (P18) · Orchestrate (P19) · Cross-Review (P20).
+
+### P1 — Bridge: Conversation Bridge (Episodic Memory)
+
+**What**: Every Claude Code session is automatically captured as a structured Obsidian doc with YAML frontmatter, tool calls, conversation threads, files touched, and wikilinks.
+
+**How**: Stop hook → `conversation-bridge-hook.sh` → JSONL transcript parsed → written to `*/docs/conversations/` → symlinked into your Obsidian vault.
+
+**Invariant**: Bridge stamp at `~/.cache/broomva-bridge-stamp` < 24h stale. If stale, the agent is silently amnesic — fix immediately.
+
+### P2 — Gate: Control Gate (Safety Shield)
+
+**What**: PreToolUse hook intercepts destructive shell ops before execution.
+
+**How**: `control-gate-hook.sh` evaluates pending tool calls against `.control/policy.yaml` gates G1–G11. Blocks force-pushes, secret commits, `rm -rf` on protected paths, `git reset --hard` without backup, etc.
+
+**Invariant**: G1–G4 are blocking and cannot be overridden. G5–G6 are soft warnings.
+
+### P3 — Tickets: Linear Tickets (Work Tracking)
+
+**What**: Every unit of work maps to a Linear ticket; state transitions Backlog → Todo → In Progress → Done track real progress.
+
+**How**: Linear MCP — agents call `save_issue` directly.
+
+**Invariant**: No significant work without a ticket. Don't mark Done until merged + verified.
+
+### P4 — Pipeline: PR Pipeline (CI/CD Gate)
+
+**What**: All code changes flow through PRs with automated CI checks before merging.
+
+**How**: branch → `gh pr create` → CI runs (lint/typecheck/security/preview) → merge when green → production deploy triggers.
+
+**Invariant**: Never merge with failing checks. Never `--no-verify`.
+
+### P5 — Fanout: Parallel Agent Dispatch (Concurrent Execution)
+
+**What**: Independent work streams execute concurrently via isolated agents (worktrees or background processes).
+
+**How**: `git worktree add` per agent. Multiple `Agent` tool calls in one message run concurrently. Communicate through git branches and Linear tickets, not shared state.
+
+**Invariant**: Agents must not write to the same files. Branch naming unique per agent. Results merge to main only after verification.
+
+### P6 — Bookkeeping: Knowledge Bookkeeping (Knowledge Graph Maintenance)
+
+**What**: Every knowledge item entering the graph is scored, promoted, and lint-validated through a 7-stage pipeline.
+
+**How**: `bookkeeping run` → Ingest → Score → Scatter → Resolve → Promote → Synthesize → Lint. Items < 2/9 discarded. Items ≥ 7 fast-path promote.
+
+**Invariant**: `research/entities/` never contains unscored items. All entity pages must pass lint.
+
+**Reflexive Trigger Rule**: Bookkeeping — and knowledge capture generally — is a reflex, not a request, **and never a question**. Agents must invoke `bookkeeping.py run` and file graph-worthy material without being prompted in any of these situations:
+
+1. Before committing a feature/page that reads from the graph.
+2. Before committing a synced snapshot to a public surface.
+3. At the close of any substantial work session that produced graph-relevant material.
+4. The moment a session surfaces a discrete graph-worthy item (a decision, name, discovered tool/person/paper, recurring pattern, or inferred typed relation) — file it proactively (entity page, `related:` edge, or synthesis note) and report what you filed in one line.
+
+**Never a question.** The interrogative form — *"do you want me to create an entry / file this into the knowledge graph?"* — is forbidden. Capture is the default action, not an opt-in the user approves; the agent files first and reports after (user vetoes after via `git revert`, never gates before). Deferring capture to a user yes/no is the **permission-to-document anti-pattern** — knowledge that waits for permission is knowledge lost. Capture stays bounded by the Nous gate (proactive ≠ indiscriminate).
+
+**Retrieval discipline (`/kg` for discovery, never substrate grep).** Knowledge-graph *discovery* — "what do we know about X", "load context for X", finding the relevant entities before reasoning — goes through **`/kg load <topic>`** (add `--terms <synonyms>` for paraphrase/jargon topics); use `Read` only on a slug confirmed present in `docs/knowledge-index.md`. **Never** `find -name "$slug.md"` / `grep` / `cat` over `research/entities/` as a *discovery* mechanism: a guessed slug that doesn't exist returns nothing **silently** (a no-match is silent by default; often further masked by `2>/dev/null` / `if [ -n "$f" ]`), so the agent reasons over a *false-complete* context, and hand-picked slugs miss the relevant entities the catalog routing surfaces. This bans only *discovery* greps — `find`/`grep`/`cat` stay legitimate for operating on a **confirmed known file**, **tooling/skill internals** (the `/kg` loader's own body-grep, `bookkeeping` lint/index), and **bulk edits or counting** — just never as the step that decides what's relevant.
+
+### P7 — Freshness: Skill Freshness Check (Stale-Install Detector)
+
+**What**: Reports stale installed skills at SessionStart so they get refreshed before causing silent failures.
+
+**How**: SessionStart hook → `skill-freshness-hook.sh` checks the timestamp of `~/.config/broomva/p7/last-skill-update-check`. If ≥ 7 days old, prints a one-line nudge. Always exits 0.
+
+**Invariant**: Hook always exits 0. Threshold via `BROOMVA_P7_THRESHOLD_DAYS` env var (default 7). Dismiss with `npx skills update -g` then `touch ~/.config/broomva/p7/last-skill-update-check`.
+
+### P8 — Janitor: Branch + Worktree Janitor (Hygiene)
+
+**What**: Detects merged branches (including squash-merged) and dead worktrees, removes them safely.
+
+**How**: `make janitor` (wraps `scripts/branch-janitor.sh`). Squash-merge detection via `git commit-tree` synthetic + `git cherry`. Worktrees on dead branches pruned.
+
+**Invariant**: Default `--dry-run` — pass `--apply` to actually delete. Never touches main/master/develop/HEAD/gh-pages or branches in `~/.config/broomva/p8-janitor/protected.txt`.
+
+### P9 — Wait: Productive Wait (Wait-Optimizer / Event-Driven Wait Loop)
+
+**What**: A wait optimizer. Convert any blocking external operation (PR CI, push-triggered deploys, builds, long-running indexing) into work on the next priority. PR CI is the canonical implementation; the primitive is broader.
+
+**How (PR CI canonical)**: `python3 skills/p9/scripts/p9.py watch <pr> --background` spawns `gh pr checks --watch` via `run_in_background`. While watcher runs, agent pulls work via `p9 wait-queue pop`. On bg-task notification: `p9 status` then green → `p9 merge-ready` → metalayer authorizes; red → `p9 heal --classify`.
+
+**How (non-PR waits — today: manual)**: For waits without PR (push-triggered deploys, external builds, long index ops), p9 doesn't track yet. Do *one* direct check on completion after kicking off next-priority work; never `sleep`.
+
+**Invariant**: Never `sleep` on a blocking wait. Every failure produces (a) a `state.jsonl` event, (b) a Linear ticket, or (c) both — silent state drops are forbidden. Heal actions scoped to PR diff. Setpoints in `.control/policy.yaml` `ci_watch:` / `ci_heal:` blocks fail closed if missing.
+
+**Reflexive Trigger Rule**: P9 is a reflex. Agents must apply *productive-wait discipline* without being prompted in any of these situations:
+
+1. Immediately after `git push` opening/updating a PR — `p9 watch <pr> --background`.
+2. After `git push` triggering a non-PR deploy — single direct check after next-priority work; never sleep.
+3. Whenever tempted to `sleep` while a blocking operation runs — hard ban; pull from `p9 wait-queue pop`.
+4. When red CI bg-task notification fires — `p9 heal --classify` first.
+5. When `p9 status` reports `MERGE_READY` — invoke `p9 auto-merge` rather than `gh pr merge` directly.
+
+### P10 — Hygiene: Worktree Hygiene Discipline (Clean-Tree Reset Point)
+
+**What**: Reflexive discipline binding every agent to (a) make a deliberate worktree-or-not decision before writing the first file, (b) keep `git status` clean throughout the PR lifecycle, (c) run P8 janitor immediately after merge.
+
+**How**: Reasoning-enforced rule, not a hook. P5 provides the *mechanism* (git worktrees); P10 provides the *discipline*.
+
+**Invariant**: After every PR merge, both worktree (if any) and branch are gone. Before new substantial work, `git status` is clean (or explicitly noted).
+
+**Reflexive Trigger Rule**: P10 is a reflex. Agents must apply the following without being prompted:
+
+1. Before writing the first file of any new substantial work — decide worktree-or-not, state the choice.
+2. Before pushing to remote — `git status` check; dirty WIP gets committed/stashed/extracted, never pushed past.
+3. After PR merge — immediate `make janitor` (P8).
+4. At SessionStart — audit `git worktree list` + `git branch`; clean orphans before new work.
+
+### P11 — Empirical: Empirical Feedback Loop (Closed-Loop Validation)
+
+**What**: Reflexive discipline binding every agent to *validate by interacting* with what they build — not just by reasoning + lint + CI exit codes. Multi-modal (logs, screenshots, video, audio), multi-level (smoke, unit, integration, regression, E2E, deploy verification).
+
+**How**: Composition of existing tools and skills:
+- Server logs → `run_in_background` tailing dev server output
+- Browser E2E → `gstack` (fast headless) / `agent-browser`
+- Visual diff → `before-and-after` skill
+- Smoke / unit / integration / regression → project test runners + `qa` / `dogfood`
+- Deploy verification → Vercel preview URL → screenshot via `gstack`
+
+The agent picks the right subset, runs as parallel watchers, and **captures evidence**.
+
+**Invariant**: Before claiming any work *complete*, the agent has interacted with the deployed/running version (or stated explicitly why interaction wasn't possible). The interaction is captured and surfaced in the response. *Reasoning isn't validation; interaction is.*
+
+**Reflexive Trigger Rule**: P11 is a reflex. Agents must apply the following without being prompted:
+
+1. Before writing the first file of substantial work — identify validation surfaces. State the validation plan as a contract.
+2. During development of work touching a running process — keep at least one log-tail or watcher in `run_in_background`.
+3. Before claiming complete — exercise the change end-to-end. Capture multi-modal evidence.
+4. After deploy — capture deployed-state evidence. *Compile-time success is not deploy-time correctness.*
+5. When CI or tests fail — capture full context first before attempting a fix.
+6. At session end — produce a *dogfood receipt*.
+7. **Dogfood Plan keyed to detected stack** — before substantive feature work, produce a Dogfood Plan (entry surface · driver · evidence · smoke · end-to-end · receipt anchor) in the response and PR body, citing the per-stack pattern from the bstack cookbook (Tauri+sidecar / Next.js / Expo RN / Rust CLI / REST API / MCP server). Interceptor is mandatory for visual deploy verification; gstack / cliclick / screencapture / curl+jq compose per stack. The plan anchors at `## Dogfood Plan (Stack: <pattern>)` in this AGENTS.md, or `docs/dogfood-plan.md`, or the PR body — `bstack doctor` §13 looks for any of the three.
+
+## Dogfood Plan (Stack: TBD)
+
+<!-- bstack onboard stubs this section the first time the repo is bootstrapped.
+     Detected stack is auto-filled when the repo signals match a known pattern
+     (Cargo.toml + src-tauri/ → Tauri; next.config.* → Next.js; etc.).
+     Fill the rows below for the current substantive work unit; the receipt
+     anchor at session end is the artifact that closes the loop. -->
+
+- **Entry surface**: <URL / window / CLI command the user touches>
+- **Driver**: <Interceptor / gstack / cliclick+screencapture / curl+jq / xcrun simctl>
+- **Evidence**: <screenshot path / response body path / log line>
+- **Smoke**: <one-line "didn't obviously break" check>
+- **End-to-end**: <multi-step user flow that catches regression a smoke test misses>
+- **Receipt anchor**: <file / line / PR comment ID where the receipt lives>
+
+Reference: `bstack/references/dogfood-patterns.md` for the per-stack surfaces matrix, canonical arc, gotchas, and receipt template.
+
+### P12 — Persist: Persistent Loop Discipline (Cross-Context Restart Loop)
+
+**What**: Reflexive discipline binding every agent to *restart the context window when it rots*, while preserving state in the filesystem. Long-horizon work (>1h, the METR 80%-reliability ceiling) decays inside a single conversation as the context window passes ~100K tokens.
+
+**How**: `python3 skills/persist/scripts/persist.py iterate <PROMPT.md>` substrate. Each iteration spawns a fresh agent context; state persists in PROMPT.md + git tree + state.jsonl. Validation backpressure from compilers/tests/linters, not model self-grading.
+
+**Invariant**: state lives in the filesystem. Each iteration is a fresh subprocess. Budget: default 50 iterations / 14400s wall-clock.
+
+**Reflexive Trigger Rule**: P12 is a reflex. Apply without being prompted:
+
+1. Before any work that may exceed ~1h of unsupervised agent time — write PROMPT.md, call `persist iterate`. Don't try >1h work in-context.
+2. When session token usage crosses ~100K — restart, don't continue in the rotted context.
+3. When the same fix has been attempted ≥3 times without convergence — stop in-context; spawn fresh persist loop.
+4. When orchestrating long-horizon work — default to persist + periodic checkpoints; compose with P5 worktrees.
+5. When the user says "run this in the background for an hour" — that's persist territory.
+
+### P13 — Dream: Dream Cycle Discipline (Tier-Crossing Consolidation)
+
+**What**: Reflexive discipline binding every agent to apply the **5-phase dream shape** (*gather → replay → prune → consolidate → index*) for any consolidation that crosses a cadence-tier boundary. Closes the *shadow dream* corruption mode.
+
+**How**: Reasoning-enforced. Composes with P6 (`bookkeeping replay` is the canonical reference instance) and future Life primitives (askesis T1→T2, anamnesis T2→T3, when shipped).
+
+**Invariant**: any consolidation that crosses a cadence-tier boundary MUST replay against a frozen substrate before committing. Without replay, dense lower-tier signal corrupts sparse upper-tier rules.
+
+**Reflexive Trigger Rule**: P13 is a reflex. Apply without being prompted:
+
+1. Before any consolidation that promotes lower-tier signal to upper-tier rules — verify the consolidation primitive has a replay phase.
+2. For knowledge-graph promotion — use `bookkeeping replay` (not `bookkeeping run`) for substantial promotion runs.
+3. For governance changes (L3 tier) — every PR is a dream cycle: gather (PR description), replay (worktree + CI + doctor), prune (CI failures), consolidate (squash merge), index (commit history).
+4. When designing a NEW consolidation primitive — implement the 5-phase shape from day 1; don't ship shadow-dream form.
+5. When you observe a new dream instance shipping — record it for the rule-of-three counter.
+
+The morpheus crate (shared abstraction across implementations) is deferred per rule-of-three until ≥2 dream instances ship beyond P6.
+
+### P14 — Dep-Chain: Dependency-Chain Reasoning Discipline
+
+**What**: Reflexive discipline binding every agent to *explicitly enumerate dependencies* before any substantive write. Closes the "think deeply" ritual failure mode — the phrase recurs without producing concrete behavior change.
+
+**How**: Before any code/doc edit that affects >1 file or any public surface, the agent surfaces:
+
+- **Upstream**: files, functions, types, contracts, deployed state this write depends on
+- **Downstream**: consumers, tests, CI gates, docs, in-flight PRs depending on this
+
+The enumeration is concrete (file paths, function names, contract identifiers) and lives in the response, PR body, or commit message — never the agent's head.
+
+**Invariant**: When the user prompt contains phrases like "think deeply through chain of dependencies", "follow best practices", "consider the implications", the agent's response MUST include a concrete dep-chain block. Phrase acknowledgement without the block is ritual.
+
+**Reflexive Trigger Rule**: P14 is a reflex. Apply without being prompted:
+
+1. Before any write to a file that exports a public API — enumerate downstream callers.
+2. Before any refactor — enumerate both directions.
+3. Before any cross-project change — enumerate which other projects depend on the touched surface.
+4. When user prompt contains a "think deeply"-class phrase — produce the dep-chain block, not the acknowledgement.
+
+### P15 — Snapshot: State-Snapshot Before Action
+
+**What**: Reflexive discipline binding every plan to a *fresh state snapshot* of the workspace. Closes the "help me understand where we stand" failure mode — agents report last-seen state instead of current state.
+
+**How**: Before any plan or significant action, the agent surfaces:
+
+- `git status` + branch + ahead/behind vs upstream
+- In-flight PRs (`gh pr list --json number,title,headRefName,state`)
+- Linear ticket state for the current work unit
+- Bookkeeping / bridge freshness (cache stamps, last pipeline run)
+- Last deploy state (relevant project's preview/production URL + commit)
+
+The snapshot is *part of* the planning response — not deferred to a follow-up call.
+
+**Invariant**: A plan built on stale state fails silently — re-solves solved problems, conflicts with parallel work, misses in-flight PRs. P15 makes state-checking a cheap reflex, not a request the user has to make.
+
+**Reflexive Trigger Rule**: P15 is a reflex. Apply without being prompted:
+
+1. At session start when reviewing prior context.
+2. Before any plan that touches multiple files or cross-project surfaces.
+3. When the user asks "where are we" / "what's left" / "is everything committed" — the answer is the snapshot, not a recollection.
+4. After any long-running background operation completes — re-snapshot before next plan.
+
+### P16 — Crystallize: Crystallization Discipline (the Bstack Engine)
+
+**What**: Meta-primitive — the rule-of-three loop that produces every other primitive. When a pattern recurs ≥3 times across sessions, propose promotion to skill / SKILL.md / AGENTS.md section / `.control/policy.yaml` gate.
+
+**How**: Four gate conditions for promotion:
+
+1. ≥3 distinct instances of the pattern (logged with citations)
+2. Concrete mechanism (not just a description)
+3. Stated invariant (machine-checkable)
+4. Stated failure mode (what goes wrong without it)
+
+Candidates live in `research/entities/pattern/bstack-engine.md` (or equivalent ledger). Promotion is deliberate — L3 stability budget (λ₃ ≈ 0.006) constrains how rapidly governance changes.
+
+**Invariant**: The crystallization loop runs inside the workspace, not in the user's head. Patterns that recur without being named are technical debt at the governance layer.
+
+**Reflexive Trigger Rule**: P16 is a reflex. Apply without being prompted:
+
+1. When you observe the same instruction repeated across ≥3 sessions — log it as a candidate.
+2. When a user prompt phrase recurs without producing concrete behavior change — flag as ritual; queue for promotion or carve-out.
+3. At session end — survey what was learned; promote candidates with all four gates passing.
+4. Before adding any new primitive — verify all four gates, not three.
+
+### P17 — Lens: Lens-Routed Request Articulation (`role/x`)
+
+**What**: Reflexive discipline routing every substantive user input through a typed lens (`role/x` intake). Replaces "act as X" persona prompting (debunked: MMLU drops 71.6% → 66.3% with naive personas) with substantive context loading.
+
+**How**: Lens registry at `roles/<name>.md`. Score signals (paths + prompt keywords + branch + Linear labels) against lens triggers; threshold ≥2 selects. Load substantive context (files, conventions, domain checklist via `extends:` chain). Decide mode: `augment` (default, silent), `rewrite` (surfaced), `decompose` (P5 fan-out, user-approved).
+
+**Invariant**: No `act as X` persona rewrites. Lenses load substantive context only. Lens selection is logged. Mode decision is surfaced unless `augment`.
+
+**Reflexive Trigger Rule**: P17 is a reflex. Apply without being prompted:
+
+1. On every substantive user input — score lens triggers, log the selection (even if `augment`).
+2. When user input matches `decompose` criteria — surface composition tree, request approval before P5 dispatch.
+3. When lens has `status: candidate` — track outcome to feed rule-of-three promotion.
+
+### P18 — Audience: Format-Follows-Audience Discipline
+
+**What**: Reflexive discipline binding format choice to audience:
+
+- **Agent-readable** (LLM, system-prompt loaded, in-repo reference) → **markdown**
+- **Human-readable** (decisions, review, exploration, sharing) → **HTML**
+- **Both** (README, CHANGELOG, GitHub-browseable) → markdown (GitHub renders)
+- **Throwaway interactive UI** → HTML
+
+**How**: Path conventions for substantive deliverables:
+
+- Specs/plans/ADRs/designs → `docs/{specs,plans,adrs,designs}/<topic>.html`
+- PR explainers for substantive PRs → `docs/pr-explainers/PR-<n>.html`
+- Knowledge graph entities (LLM-loaded) → `research/entities/{type}/{slug}.md`
+- README/CHANGELOG/SKILL.md → markdown
+
+**Anti-patterns**: ASCII pseudo-diagrams, unicode-color approximations, >100-line markdown specs without HTML companion.
+
+**Invariant**: Format follows audience, not habit. Markdown's expressiveness ceiling means humans bounce off agent-produced specs at ~100 lines; HTML's information density (tables, SVG, CSS, interactivity) carries the load. The 2-4× HTML generation cost is paid only on artifacts a human will actually read.
+
+**Reflexive Trigger Rule**: P18 is a reflex. Apply without being prompted:
+
+1. Before producing a spec/plan/ADR/design — default HTML.
+2. Before a substantive PR description (>200 LOC OR public API OR multi-file) — produce an HTML PR-explainer at `docs/pr-explainers/PR-<n>.html`.
+3. Before a report/retrospective/research synthesis for human consumption — HTML with embedded SVG diagrams.
+4. When tempted to ASCII-diagram in markdown — STOP. SVG inside HTML is the correct primitive.
+5. When editing `SKILL.md` / `AGENTS.md` / `CLAUDE.md` / `README.md` / `CHANGELOG.md` / entity pages — markdown is correct (LLM-loaded surfaces).
+6. When user asks for "a doc explaining X" — apply the audience test, don't default to markdown.
+
+### P19 — Orchestrate: Orchestration-Mechanism Selection Discipline
+
+**What**: Names the autonomous-continuation family (six mechanisms across the 2×2×2 cube: `/goal` | Wait (P9) | `/loop` | Persist (P12) | Fanout (P5) | `bstack wave`) and the selection discipline. Picks the right mechanism for the work shape; composes dynamically; never returns control mid-arc when a mechanism would keep it closed.
+
+**How**: At pre-flight of substantive autonomous work, apply the **2×2×2 mechanism cube**. Three axes: session-scope (within/across), trigger-source (external-event/internal-condition), agent-count (N=1/N>1).
+
+**N=1 plane** (single-agent work):
+
+|  | Within session | Across sessions |
+|---|---|---|
+| **External trigger** (event-driven) | **Wait (P9)** `p9 watch --background` (CI/deploy/build blocking) | **Persist (P12)** `persist iterate PROMPT.md` (cross-context-rot, >1h) |
+| **Internal trigger** (condition or time) | **`/goal <condition>`** (Haiku evaluator per turn) | **`/loop <interval>`** (Claude Code time-trigger) |
+
+**N>1 plane** (parallel-agent work):
+
+|  | Within session | Across sessions |
+|---|---|---|
+| **External trigger** (event-driven) | **Fanout (P5)** — multiple `Agent` tool calls in one message; each isolated context | **`bstack wave dispatch <plan...>`** — one `claude --bg` per plan, worktree per plan, JSONL state in `~/.cache/bstack/wave/<id>/` |
+| **Internal trigger** (condition or time) | Fanout (P5) + `/goal` per agent (rare; expensive) | (speculative — multiple `persist iterate` loops on a `/loop` interval) |
+
+Decision logic:
+
+1. Verifiable end state + bounded session + condition fits 4000 chars → `/goal <pipeline-completion-condition>`
+2. External completion event blocking (CI, deploy, build) → Wait (P9) `p9 watch --background` + drain wait-queue
+3. Time-triggered recurring routine → `/loop <interval> <slash-command>`
+4. >1h work OR cross-session OR context window approaching ~100K → Persist (P12) `persist iterate PROMPT.md` with budget
+5. Independent in-session subtasks with no shared mutable writes → Fanout (P5) — multiple `Agent` calls in one message
+6. N independent plan files for cross-session parallel fan-out (spec sub-phases, multi-crate work) → `bstack wave dispatch <plan...>` — atomic validate + worktree per plan
+
+Compositions are dynamic: Persist iterations can invoke `/goal` for sub-tasks; `/goal` sessions fire Wait (P9) watchers when CI is blocking; `/loop` schedules can spawn Persist for the long-horizon piece; `bstack wave` is the across-session sibling of Fanout (P5) — escalate to wave when parallel work doesn't fit one in-session message-fan-out.
+
+**Invariant**: No autonomous-continuation work without (a) an explicit mechanism choice surfaced in the response, and (b) a one-line justification matched to a cell of the 2×2×2 cube. Returning control mid-arc when a mechanism would keep it closed is the failure mode P19 prevents.
+
+**Reflexive Trigger Rule**: P19 is a reflex. Apply without being prompted:
+
+1. Pre-flight of substantive autonomous work — state chosen mechanism + cite cube cell (session-scope × trigger-source × agent-count).
+2. Before returning control mid-arc — verify no mechanism would keep the arc closed.
+3. At mechanism boundary crossings (goal hits >1h, context ~100K, in-session N>1 work needs across-session fan-out) — explicit transition, not drift.
+4. When composing mechanisms — surface the composition tree, don't compose silently.
+5. Tempted to type "continue please" or wait for user prompts — STOP. That's the ritual P19 makes impossible.
+
+### P20 — Cross-Review: Cross-Model Adversarial Review Gate
+
+**What**: Names the rule that *the writer cannot be the final judge*. Before substantive PRs merge, fire a cross-model adversarial gate. Single-model planning + implementing + reviewing reproduces the model's systematic biases — what cross-model-agents research calls *slop* (over-engineered abstractions, unnecessary wrappers, template-paste patterns).
+
+**How**: Three strata, ordered by strength:
+
+| Strata | Mechanism | When |
+|---|---|---|
+| **A** True cross-vendor | `codex exec -m gpt-5.4` reads diff + scores | Codex CLI installed |
+| **B** Cross-context same-model | Fresh `Agent` subagent under devil's-advocate brief | Always available |
+| **C** Composed existing skills | `superpowers:constructive-dissent`, `devils-advocate`, `pr-review-toolkit:*`, `critique`, `premortem`, `plan-*-review` | Always — the toolkit P20 makes mandatory |
+
+Scoring: anti-slop ≥7/10 to pass; max 3 fix rounds; verdict logged in PR comments + Linear ticket (if workspace uses Linear). Implementation: `broomva/cross-review` skill. The gate fires *before* P4 auto-merge — not after merge as code review.
+
+**Invariant**: Substantive PRs (>200 LOC OR public API change OR multi-file OR governance-class) cannot merge without cross-model adversarial verdict ≥7/10. Self-review by the writing model is forbidden as the *sole* verdict.
+
+**Reflexive Trigger Rule**: P20 is a reflex. Apply without being prompted:
+
+1. Before pushing substantive PRs — fire the gate (Strata A if Codex, else B+C). Score + verdict precede merge.
+2. When verdict <7 — fix → rescore. Max 3 rounds. Round 3 failure → escalate to user.
+3. When the writer is the only model in the loop — STOP. Strata B at minimum is mandatory.
+4. When tempted to skip P20 because "small PR" — threshold is *substantive* (>200 LOC OR public API OR multi-file OR governance). Trivial (typo, single-file doc) exempt.
+5. P20 sits between Empirical (P11) validation and Pipeline (P4) auto-merge — does not replace either.
+
+---
+
+These twenty primitives compose into the full autonomous development loop:
+
+```
+User intent → Lens (P17) intake → Snapshot (P15) → Orchestrate (P19) mechanism choice → Tickets (P3) → Fanout (P5) dispatch
+  → Prior context via Bridge (P1) [+ Freshness (P7)] [+ Hygiene (P10) audit]
+  → Gate (P2) active
+  → Dep-Chain (P14) trace → Hygiene (P10) worktree decision → Empirical (P11) validation plan
+  → IF long-horizon (per Orchestrate (P19)) → Persist (P12) loop with PROMPT.md + budget
+  → Code written + Empirical (P11) parallel watchers → PR via Pipeline (P4)
+  → Wait (P9) CI watch + heal loop
+  → Empirical (P11) deploy verification (preview URL, screenshots, browser session)
+  → Cross-Review (P20) gate (Strata A or B+C, ≥7/10) → if pass, Pipeline (P4) auto-merge eligible
+  → Merge → Hygiene (P10) post-merge cleanup via Janitor (P8) → Deploy
+  → Dream (P13) for any consolidation (Bookkeeping (P6) replay first)
+  → Empirical (P11) dogfood receipt → Session captured via Bridge (P1) → Knowledge via Bookkeeping (P6)
+  → Audience (P18) check: spec/plan/report → HTML; .md/SKILL.md/CHANGELOG → markdown
+  → Crystallize (P16) gate: did this session produce a new ≥3-instance pattern? → propose primitive
+  → System improved (EGRI)
+```
+
+## Plugin Skill Precedence
+
+Plugin skills (`superpowers:*`, `pr-review-toolkit:*`, `codex:*`, etc.) are **subordinate to bstack primitives**. Where they conflict, bstack wins. This is encoded in `superpowers:using-superpowers` itself: *"User's explicit instructions … highest priority. … If CLAUDE.md says X and a skill says Y, follow the user's instructions."* Reading CLAUDE.md → this file *is* that explicit instruction.
+
+The most common collision: plugin skills that mandate user interaction before action — most notably `superpowers:brainstorming` (discovery interview), `superpowers:writing-plans` ("plan before touching code" even when the task is mechanical), and the meta-rule that prompts the agent to invoke a skill "even if 1% might apply." The bstack answer is **context-first, user-extract last**:
+
+1. Before any "interview-the-user" plugin skill fires, apply **Dep-Chain (P14)** + **Snapshot (P15)** over:
+   - Workspace memory files (auto-memory directory; persona, project state, feedback)
+   - `research/entities/{concept,pattern,tool,person,project}/` — knowledge graph (grep by topic before asking)
+   - `docs/` (per-project) — architecture, specs, plans, conversations
+   - Task-mentioned files (CV, spec, ticket body, PR diff)
+2. Synthesize what's already known from those sources.
+3. **Ask the user only for irreducible residuals** — facts that genuinely cannot be derived from disk.
+4. If steps 1–2 fully determine the task, the plugin interview is skipped. Proceed to execution.
+
+### What this kills
+
+The "form-fill ritual" — agent receives an application/CV/intake form, opens with a numbered table of N+ questions about facts that live in workspace memory + knowledge graph + project docs. The workspace's curated context exists precisely to remove ask-the-user-for-context loops; plugin skills that re-introduce those loops are violating the substrate's intent, not augmenting it.
+
+### What this keeps
+
+The disciplines plugin skills bring that DON'T conflict with bstack:
+
+- `superpowers:test-driven-development` — TDD execution discipline
+- `superpowers:verification-before-completion` — pairs with Empirical (P11)
+- `superpowers:systematic-debugging` — diagnostic flow before proposing fixes
+- `superpowers:requesting-code-review` — two-stage review pattern (spec-compliance + code-quality)
+- `superpowers:executing-plans`, `subagent-driven-development`, `dispatching-parallel-agents` — subagent dispatch substrate
+- `superpowers:using-git-worktrees` — composes with Hygiene (P10)
+- `superpowers:finishing-a-development-branch` — composes with `/ship`
+- `pr-review-toolkit:*`, `codex:*` — orthogonal toolkits
+
+These run as before. The precedence rule is targeted at *plugin-skill rituals that ask before reading* — nothing else.
+
+### Why this isn't a new primitive
+
+Dep-Chain (P14) + Snapshot (P15) already define the required behavior — context-load before action. This section makes their precedence over plugin-skill rituals explicit but adds no new mechanism. The L3 stability budget favors clarifying existing rules over adding new ones.
+
+## Conventions
+
+- **Git**: feature branches, squash merge via PR. Never force push main.
+- **OSS**: every public repo must have `README.md`, MIT `LICENSE`, and GitHub topics.
+- **Skills**: every skill repo must have `SKILL.md` at root with frontmatter (`name`, `description`).
+
+## Harness Commands
+
+From workspace root:
+
+```bash
+bstack doctor             # Verify primitive contract compliance
+bstack repair             # Fix specific gaps surfaced by doctor
+bstack status             # Show installed-vs-missing skills + harness health
+bstack status --aggregate # Federation rollup across registered workspaces
+bstack workspace register # Register this workspace in the host federation registry
+bstack workspace list     # List all registered workspaces
+make control-audit        # Full metalayer compliance audit
+make janitor              # P8 janitor (dry-run by default)
+```
+
+## Substrate Surfaces
+
+### Federation (v0.18.0 — Phase 8)
+
+`bstack workspace` is a substrate surface that maintains an **opt-in**
+host-level registry of bstack-governed workspaces at
+`~/.broomva/global/registry.yaml`. Federation is **read-only aggregation** —
+each workspace remains the source of truth for its own state. The registry
+is the index `bstack status --aggregate` walks to surface the composite
+health of every registered workspace on this host.
+
+Federation is **not a new primitive** (no P21). It composes existing
+primitives: Snapshot (P15) emits the per-workspace audit signal that the
+aggregate rollup reads; Bookkeeping (P6) and the multi-layer composite-ω
+(v0.16.0 §19) feed the per-workspace verdict. The registry is the spine
+that lets a developer see all bstack workspaces at once without inventing
+a new control loop.
+
+Registering is opt-in and idempotent:
+
+```bash
+bstack workspace register             # registers $PWD (name = basename)
+bstack workspace register --tag client-x --tag primary
+bstack workspace list --json          # machine-readable for scripts
+bstack workspace info                 # is this workspace registered?
+bstack workspace deregister --name X  # remove an entry
+```
+
+Doctor §20 reports federation health (informational unless the registry
+file is corrupted with `schema_version != 1`).
+
+## Conversation Capture
+
+Every Claude Code session under this workspace is automatically captured via P1. Session docs land in `*/docs/conversations/`, symlinked into your vault.
+
+## Agent Boundaries
+
+- **Read anything** in the workspace to understand context.
+- **Write only** within the project you're tasked with.
+- **Cross-project changes** require explicit user approval.
+- **Secrets**: Never commit `.env`, credentials, or API keys.
+- **Destructive git**: Never force push, reset --hard, or delete branches without asking.
+- **PRs are checkpoints**: Create PRs for review, don't merge directly without CI green.
+
+## Self-Improvement (EGRI Integration)
+
+bstack supports EGRI (Evaluator-Governed Recursive Improvement):
+
+- **Mutable artifact**: Agent behavior (conversation patterns, tool selection, code quality)
+- **Immutable evaluator**: `bstack doctor` + `make control-audit`
+- **Promotion policy**: Improvements that pass all gates get incorporated into AGENTS.md/policy.yaml
+- **Rollback**: Git history is the safety net
+
+When an agent discovers a better pattern:
+
+1. Validate it works (run harness commands)
+2. Document in conversation log (automatic via hook)
+3. If significant, propose update to AGENTS.md or `.control/policy.yaml`
+4. Future agents inherit the improvement
+
+The L3 stability budget (λ₃ ≈ 0.006) constrains how rapidly governance can change. Observe patterns across multiple sessions before crystallizing rules.
