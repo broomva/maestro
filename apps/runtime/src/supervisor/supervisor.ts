@@ -492,25 +492,32 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     entry: RunEntry | null,
     exitCode: number,
     respawns: number,
+    // Skip the run.killed emit when the tee's failSupervision (BRO-1767) already wrote a terminal
+    // event for this run (a tee-write failure that coincided with the kill) — the park below still runs
+    // (correcting failSupervision's `blocked` to the kill's `canceled`), only the DUPLICATE event is
+    // suppressed. Mirrors the crash branch's skipEmit.
+    skipEmit = false,
   ): Promise<ReapResult> {
-    if (ids.runDir) {
-      const emit = runEmitter(ids.runId, ids.runDir);
-      try {
-        await emit(sys(EVENT_TYPES.RUN_KILLED, { reason: "kill intent" }));
-      } catch {
-        // fall through — the park is the load-bearing change; D5 reconcile re-derives the event
-      }
-    } else {
-      try {
-        await db.insert(event).values({
-          sessionId: ids.runId,
-          ts: now(),
-          actor: "system",
-          type: EVENT_TYPES.RUN_KILLED,
-          payload: JSON.stringify({ reason: "kill intent" }),
-        });
-      } catch {
-        // index unavailable — the park below is what matters
+    if (!skipEmit) {
+      if (ids.runDir) {
+        const emit = runEmitter(ids.runId, ids.runDir);
+        try {
+          await emit(sys(EVENT_TYPES.RUN_KILLED, { reason: "kill intent" }));
+        } catch {
+          // fall through — the park is the load-bearing change; D5 reconcile re-derives the event
+        }
+      } else {
+        try {
+          await db.insert(event).values({
+            sessionId: ids.runId,
+            ts: now(),
+            actor: "system",
+            type: EVENT_TYPES.RUN_KILLED,
+            payload: JSON.stringify({ reason: "kill intent" }),
+          });
+        } catch {
+          // index unavailable — the park below is what matters
+        }
       }
     }
     await park(ids.runId, ids.nodeId, "canceled", "blocked", true);
@@ -536,6 +543,19 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   // `reap` NEVER rejects: any unexpected throw in the routing (an index fault on a read/gate path the
   // inner logic did not already guard) is caught and contained, so the background `reaped` chain always
   // resolves a ReapResult and cleanup (token revoke, registry drop, lease release) is guaranteed.
+  // A fault on a path where a kill may have landed (a reap/respawn await that throws while `cancelled`
+  // is set) must STILL honor the kill: end `canceled`/`run.killed`, not `blocked`/`run.failed`. Route to
+  // terminalKilled when killed-by-intent, else contain as a crash. (BRO-1801 P20 — the F8 classification
+  // must win regardless of a concurrent provision/spawn/index fault.)
+  function containOrKilled(
+    ids: { runId: string; nodeId: string; runDir?: string },
+    reason: string,
+    respawns: number,
+  ): Promise<ReapResult> {
+    if (cancelled.has(ids.runId)) return terminalKilled(ids, null, Number.NaN, respawns);
+    return containCrash(ids, reason, respawns);
+  }
+
   async function reap(
     ctx: RunContext,
     entry: RunEntry,
@@ -545,7 +565,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     try {
       return await reapInner(ctx, entry, watermark, respawns);
     } catch (err) {
-      return containCrash(
+      return containOrKilled(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
         `reap failed: ${msg(err)}`,
         respawns,
@@ -565,11 +585,14 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     // the exit code the SIGKILL produced (it would otherwise route via the crash branch to
     // blocked/run.failed). `cancelled` is set ONLY by kill() — a human chose to stop this run.
     if (cancelled.has(ctx.runId)) {
+      // skipEmit when a tee-write failure already reaped this run in-band (failSupervision wrote a
+      // terminal event) — avoid a DUPLICATE terminal event; the park still corrects blocked→canceled.
       return terminalKilled(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
         entry,
         realCode,
         respawns,
+        entry.supervised.supervisionFailed(),
       );
     }
     // Scoped to THIS attempt (seq > watermark) so a respawn never reads a prior attempt's run.exiting.
@@ -737,7 +760,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     try {
       sandbox = await factory.create(ctx.runId); // idempotent → same worktree
     } catch (err) {
-      return containCrash(
+      // A kill that landed during this await must still win the classification (canceled/run.killed).
+      return containOrKilled(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
         `respawn provision failed: ${msg(err)}`,
         respawns,
@@ -758,7 +782,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     try {
       launched = await launch(nextCtx);
     } catch (err) {
-      return containCrash(
+      // A kill that landed during launch must still win the classification (canceled/run.killed).
+      return containOrKilled(
         { runId: nextCtx.runId, nodeId: nextCtx.nodeId, runDir: nextCtx.sandbox.runDir },
         `respawn spawn failed: ${msg(err)}`,
         respawns,
@@ -877,7 +902,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return true;
   }
 
-  // F8 stop-all — kill every live run (snapshot the list first; kill() mutates the registry).
+  // F8 stop-all — kill every live run. registry.list() already returns a fresh array copy, and kill()
+  // only SIGKILLs + revokes synchronously (registry removal is deferred to the async reap), so iterating
+  // it directly is safe — no live entry is skipped by a concurrent mutation.
   function killAll(): number {
     let killed = 0;
     for (const entry of registry.list()) {

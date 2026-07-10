@@ -360,3 +360,42 @@ test("kill intent missing sessionId → invalid_intent 400", async () => {
   expect(res.status).toBe(400);
   handle.client.close();
 });
+
+test("kill intent is idempotent per key — a same-key retry is a no-op, the seam fires once", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const killed: string[] = [];
+  const app = createApp(cfg(ws), Date.now(), handle.db, undefined, (sid) => {
+    killed.push(sid);
+    return true;
+  });
+  const headers = { "Content-Type": "application/json", "Idempotency-Key": "k-kill-idem" };
+  const body = JSON.stringify({ type: "kill", sessionId: "r1" });
+  const r1 = await app.request("/api/intents", { method: "POST", headers, body });
+  const r2 = await app.request("/api/intents", { method: "POST", headers, body });
+  expect(r1.status).toBe(202);
+  expect(r2.status).toBe(202);
+  expect(killed).toEqual(["r1"]); // the second (same-key) POST did NOT re-invoke the kill seam
+  handle.client.close();
+});
+
+test("a kill 404 (no live run) releases the lease so a same-key retry once live succeeds", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  let live = false;
+  const killed: string[] = [];
+  const app = createApp(cfg(ws), Date.now(), handle.db, undefined, (sid) => {
+    if (!live) return false;
+    killed.push(sid);
+    return true;
+  });
+  const headers = { "Content-Type": "application/json", "Idempotency-Key": "k-kill-retry" };
+  const body = JSON.stringify({ type: "kill", sessionId: "r1" });
+  const first = await app.request("/api/intents", { method: "POST", headers, body });
+  expect(first.status).toBe(404); // no live run → lease released
+  live = true;
+  const second = await app.request("/api/intents", { method: "POST", headers, body });
+  expect(second.status).toBe(202); // the released lease lets the SAME key re-attempt
+  expect(killed).toEqual(["r1"]);
+  handle.client.close();
+});

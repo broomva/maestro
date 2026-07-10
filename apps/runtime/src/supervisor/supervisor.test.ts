@@ -510,6 +510,54 @@ describe("reap containment + attempt-scoping + kill race (P20 fixes)", () => {
     expect(tokens.size).toBe(0);
   });
 
+  test("kill racing a respawn provision THROW still ends canceled + run.killed (not a crash) — P20 fix", async () => {
+    // The containOrKilled catch path: a kill lands during the respawn's factory.create await, and that
+    // create then THROWS (a transient re-attach fault). The catch must still honor the kill (canceled +
+    // run.killed), not mislabel it a crash (blocked + run.failed).
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    const scripted = scriptedSpawner([
+      { lines: [runExiting(10, "fresh_context")], exitCode: 10 },
+      { lines: [runExiting(0)], exitCode: 0 }, // must NEVER spawn
+    ]);
+    const base = createWorktreeSandboxFactory({ workspace: ws });
+    let createN = 0;
+    let signalCreate2 = () => {};
+    const create2Started = new Promise<void>((r) => {
+      signalCreate2 = r;
+    });
+    let proceed = () => {};
+    const create2Proceed = new Promise<void>((r) => {
+      proceed = r;
+    });
+    const factory = {
+      async create(runId: string, opts?: Parameters<typeof base.create>[1]) {
+        if (++createN === 2) {
+          signalCreate2();
+          await create2Proceed;
+          throw new Error("transient worktree re-attach fault");
+        }
+        return base.create(runId, opts);
+      },
+    };
+    const { sup } = makeSupervisor(ws, h, scripted.spawn, { factory });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    await create2Started;
+    expect(sup.kill("r1")).toBe(true); // kill lands mid-create
+    proceed(); // create then throws → catch → containOrKilled → cancelled set → terminalKilled
+    const res = await out.reaped;
+    expect(scripted.calls()).toBe(1);
+    expect(res.event).toBe("run.killed"); // NOT run.failed, despite the provision throw
+    expect(res.sessionStatus).toBe("canceled");
+    const killed = await h.db
+      .select()
+      .from(event)
+      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.RUN_KILLED)));
+    expect(killed).toHaveLength(1);
+  });
+
   test("provision failure (factory.create throws) is contained: blocked + run.failed, lease released", async () => {
     const ws = await makeWorkspace();
     const h = await openMem();
