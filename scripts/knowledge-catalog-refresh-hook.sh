@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bstack/scripts/knowledge-catalog-refresh-hook.sh — P6 catalog refresh (Stop hook).
+# scripts/knowledge-catalog-refresh-hook.sh — P6 catalog refresh (Stop hook).
 #
 # Regenerates the dense, LLM-loadable knowledge index (the catalog that routes
 # `/kg load`) after a session. SHIPPED by bstack and DEPLOYED into each workspace

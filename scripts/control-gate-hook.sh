@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bstack/scripts/control-gate-hook.sh — P2 Control Gate (Claude Code PreToolUse).
+# scripts/control-gate-hook.sh — P2 Control Gate (Claude Code PreToolUse).
 #
 # THE safety shield. Filters the agent's proposed tool call before it acts.
 # This script is SHIPPED by bstack and DEPLOYED into each workspace's scripts/

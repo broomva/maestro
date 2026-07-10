@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bstack/scripts/l3-stability-pretool-hook.sh — Claude Code PreToolUse hook
+# scripts/l3-stability-pretool-hook.sh — Claude Code PreToolUse hook
 # for L3 stability (Gate G0).
 #
 # Fires on Edit/Write/MultiEdit tool calls. Receives the tool input as JSON on
@@ -89,7 +89,7 @@ if [ -w "$(dirname "$LOG_FILE")" ] 2>/dev/null; then
 fi
 
 # Surface warning to the agent (does NOT block; this is informational reflex)
-REASON="L3 governance mutation: editing $MATCHED consumes RCS stability budget (lambda_3 ~ 0.006, tau_a_3 = 1 day). Document the reason in your commit body. Run 'bash \$BSTACK_REPO/scripts/compute-lambda.sh --human' after the edit to confirm lambda_3 > 0."
+REASON="L3 governance mutation: editing $MATCHED consumes RCS stability budget (lambda_3 ~ 0.006, tau_a_3 = 1 day). Document the reason in your commit body. Run './bin/bstack compute-lambda --human' after the edit to confirm lambda_3 > 0."
 
 # Emit approve + reason (Claude Code shows the reason to the agent)
 cat <<EOF

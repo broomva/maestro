@@ -1,10 +1,20 @@
 #!/usr/bin/env bash
-# bin/bstack — repo-local dispatcher shim for the vendored bstack CLI.
+# bin/bstack — dispatcher that resolves the bstack CLI from the ENVIRONMENT.
 #
-# Makes `bstack <cmd>` resolve from anywhere in the repo (add ./bin to PATH,
-# or call ./bin/bstack). The bstack control metalayer is vendored at
-# <repo>/bstack via `git clone` (BRO-1829) — never `npx skills add`, which
-# drops sibling dirs (upstream vercel-labs/skills#1523).
+# bstack is a portable harness metalayer, NOT vendored into this repo (BRO-1842).
+# It lives in the agent's environment; this repo carries only its own governance
+# (CLAUDE.md, AGENTS.md, METALAYER.md, .control/, scripts/). Resolution order:
+#   $BSTACK_HOME → ~/.agents/skills/bstack → ~/.claude/skills/bstack
+# CI clones bstack and sets BSTACK_HOME (see .github/workflows/ci.yml governance job).
+# Install locally: git clone https://github.com/broomva/bstack.git ~/.agents/skills/bstack
 set -euo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec bash "$REPO_ROOT/bstack/bin/bstack" "$@"
+
+for _cand in "${BSTACK_HOME:-}" "$HOME/.agents/skills/bstack" "$HOME/.claude/skills/bstack"; do
+  if [ -n "$_cand" ] && [ -x "$_cand/bin/bstack" ]; then
+    exec bash "$_cand/bin/bstack" "$@"
+  fi
+done
+
+echo "bstack: CLI not found. Set BSTACK_HOME, or install it:" >&2
+echo "  git clone https://github.com/broomva/bstack.git ~/.agents/skills/bstack" >&2
+exit 127

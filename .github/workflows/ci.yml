@@ -98,6 +98,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch bstack (portable harness metalayer — resolved, not vendored)
+        # bstack is NOT committed to this repo (BRO-1842). Clone it and expose it
+        # via BSTACK_HOME so bin/bstack resolves the CLI. Mirrors l3-stability.yml.
+        run: git clone --depth 1 https://github.com/broomva/bstack.git /tmp/bstack
       - name: bstack doctor (metalayer compliance)
         # Non-strict (BRO-1793): exits 0 while the known "grows-organically" gaps
         # remain (global skills, role-x hooks dropped for the public repo). This
@@ -105,4 +109,6 @@ jobs:
         # .control/policy.yaml, an unwired hook, a corrupt L3 params file. The
         # Makefile note stands: bstack-check tightens to `--strict` once the CI
         # skill-install story is settled (follow-up), not a red-by-design gate now.
+        env:
+          BSTACK_HOME: /tmp/bstack
         run: make control-audit

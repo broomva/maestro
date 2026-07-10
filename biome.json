@@ -11,7 +11,6 @@
       "**",
       "!handoff",
       "!planning",
-      "!bstack",
       "!schemas",
       "!**/dist",
       "!**/node_modules",
