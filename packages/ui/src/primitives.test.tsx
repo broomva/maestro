@@ -64,8 +64,11 @@ describe("Button", () => {
     expect(renderToStaticMarkup(<Button size="lg">x</Button>)).toContain("h-11");
   });
 
-  test("disabled is reflected on the element", () => {
-    expect(renderToStaticMarkup(<Button disabled>x</Button>)).toContain("disabled");
+  test("reflects the disabled attribute, and omits it otherwise", () => {
+    // `disabled=""` is the attribute; the `disabled:` utility classes are always in the
+    // class string, so assert the attribute form to avoid a tautology.
+    expect(renderToStaticMarkup(<Button disabled>x</Button>)).toContain('disabled=""');
+    expect(renderToStaticMarkup(<Button>x</Button>)).not.toContain('disabled=""');
   });
 
   test("forwards a type override and merges an extra className", () => {

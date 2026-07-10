@@ -91,7 +91,7 @@ export function KitchenSink() {
           </Section>
 
           <Section title="Input">
-            <Row label="Default, filled, disabled — ai-blue ring on focus">
+            <Row label="Default, filled, disabled: ai-blue ring on focus">
               <Input placeholder="Prompt" />
               <Input defaultValue="A running mission" />
               <Input placeholder="Disabled" disabled />

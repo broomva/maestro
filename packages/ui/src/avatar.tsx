@@ -23,7 +23,8 @@ export const Avatar = React.forwardRef<HTMLSpanElement, AvatarProps>(
     const initials = name
       .trim()
       .split(/\s+/)
-      .map((word) => word[0] ?? "")
+      // Code-point-aware first char: an astral (surrogate-pair) glyph stays whole.
+      .map((word) => [...word][0] ?? "")
       .slice(0, 2)
       .join("")
       .toUpperCase();
