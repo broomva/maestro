@@ -36,7 +36,7 @@ export function Board() {
   return (
     <div className="flex flex-col gap-6" data-testid="board">
       <header className="flex items-baseline justify-between">
-        <h1 className="text-foreground text-h2">Board</h1>
+        <h1 className="text-foreground text-h1">Board</h1>
         {needsYou > 0 ? (
           <span data-testid="needs-you" className="text-[var(--bv-blue-accent)] text-sm">
             {needsYou} {needsYou === 1 ? "thing needs" : "things need"} you

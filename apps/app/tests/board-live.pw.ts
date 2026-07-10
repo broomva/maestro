@@ -89,12 +89,18 @@ test("board shows real nodes review-first, and a disk edit propagates live with 
   await expect(page.getByText("Needs you").first()).toBeVisible();
 
   // LIVE: flip `later` proposed → review on disk. It must move into the review group with NO
-  // navigation/reload — the whole point of the watcher + SSE + store seam.
-  const urlBefore = page.url();
+  // reload — the whole point of the watcher + SSE + store seam. A page reload preserves the URL,
+  // so a URL check can't prove "no reload"; plant a window sentinel a reload would wipe.
+  await page.evaluate(() => {
+    (window as unknown as { __boardAlive?: boolean }).__boardAlive = true;
+  });
   write("later/_work.md", wm({ id: "later", state: "review", title: "Queued task" }));
 
   await expect(page.getByTestId("board-group-review").getByText("Queued task")).toBeVisible({
     timeout: 8_000,
   });
-  expect(page.url(), "no reload/navigation occurred").toBe(urlBefore);
+  const survived = await page.evaluate(
+    () => (window as unknown as { __boardAlive?: boolean }).__boardAlive === true,
+  );
+  expect(survived, "the page must NOT have reloaded — the update is live over SSE").toBe(true);
 });

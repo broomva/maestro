@@ -36,7 +36,9 @@ export function WorkCard({ item, selected, onSelect }: WorkCardProps) {
       className={cn("flex cursor-pointer flex-col gap-2", selected && "ring-2 ring-[var(--ring)]")}
     >
       <div className="flex items-center justify-between gap-2 text-muted-foreground text-xs">
-        <span className="truncate">{crumb || item.path || "—"}</span>
+        {/* crumb is empty for the workspace-root node (path "", no ancestry) — render nothing
+            rather than a placeholder glyph (CLAUDE.md §Voice forbids em dashes in chrome). */}
+        <span className="truncate">{crumb || item.path}</span>
         {age ? <span className="shrink-0 tabular-nums">{age}</span> : null}
       </div>
       <div className="truncate font-medium text-foreground text-sm">{item.title}</div>
