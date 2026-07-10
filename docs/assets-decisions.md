@@ -1,13 +1,17 @@
 # Asset intake — decisions (BRO-1797)
 
 The pinned decisions for brand assets, icons, and PWA icons. This file is the record; the
-`check:icons` audit is the enforcement.
+`check:icons` audit is the machine enforcement of the icon rules — but note it is not yet wired
+into a CI job (that is BRO-1834, `--strict` governance); today it runs on demand and in the
+BRO-1797 test, so a PR that adds a second icon library or a non-canon glyph will only be caught
+once someone runs `check:icons` or 1834 lands.
 
 ## Blackhole logo (brand mark)
 
-- **Today: raster only.** The prototype ships the blackhole mark as a raster tile. On a light
-  surface an opaque `#000` raster reads as a canon violation (see the M2 shell fix, BRO-1771),
-  so the app currently uses an **inline SVG on a cool-axis `--bv-ink` chip** as the brand mark.
+- **No true-SVG asset yet — inline-SVG stand-in today.** The prototype's blackhole mark is a
+  raster tile, and an opaque `#000` raster on a light surface reads as a canon violation (see the
+  M2 shell fix, BRO-1771), so the app currently renders the brand mark as an **inline SVG on a
+  cool-axis `--bv-ink` chip** rather than the raster.
 - **Requested from Broomva:** the blackhole logo as a **true SVG** (single-path, `currentColor`
   or a defined OKLCH token, transparent background). This is an **external dependency and must
   not block any work** (loop note on BRO-1797) — the inline-SVG chip stands in until it arrives.
@@ -20,8 +24,11 @@ The pinned decisions for brand assets, icons, and PWA icons. This file is the re
 
 - **One library: `lucide-react`, pinned EXACT `0.469.0`** — no caret, no float, so the whole
   workspace draws from one icon set (icon drift across minor bumps is a silent visual regression).
-  - `apps/app/package.json` pins it as `npm:lucide-react@0.469.0` (an exact-version spec — the
-    `@version` is baked into the dependency string, not a `^` range).
+  - `apps/app/package.json` pins the plain exact spec `"lucide-react": "0.469.0"` (no `^`), the
+    same idiomatic form `packages/ui` uses — not the `npm:lucide-react@…` self-alias (that alias
+    was only ever a way to satisfy the ticket's `grep 'lucide-react@'` acceptance proxy, which is
+    imprecise: it does not match a plain exact pin. The real invariant is "exact pin, no range,"
+    and the effective check is `grep -q '"lucide-react": "0.469.0"'` — satisfied by both packages).
   - `packages/ui/package.json` pins `0.469.0` in both `peerDependencies` and `devDependencies`.
 - **Conventions** (design canon): sizes **20 (standard) / 16 (inline) / 24 (empty-state)**,
   **stroke 2**, **round caps**, **`currentColor`**. No fill icons, no mixed libraries, no
@@ -35,8 +42,9 @@ The pinned decisions for brand assets, icons, and PWA icons. This file is the re
   under `packages/ui/src/icons/` draws with `currentColor` + `stroke-width="2"` + round caps and
   no hard-coded fill (dormant until BRO-1766 populates that dir, then binding on every glyph).
   Run it with **`bun run --filter @maestro/app check:icons`** — bun's `--filter` matches the
-  package NAME (`@maestro/app`), so the bare `--filter app` in the ticket's done.check resolves
-  nothing (a known bun gotcha, BRO-1782); use the qualified name or run it from `apps/app/`.
+  package NAME (`@maestro/app`), so the bare `--filter app` in the ticket's done.check does not
+  match: it errors `No packages matched the filter` and exits **non-zero** (a known bun gotcha,
+  BRO-1782). Use the qualified name or run it from `apps/app/`.
 
 ## PWA icons
 
