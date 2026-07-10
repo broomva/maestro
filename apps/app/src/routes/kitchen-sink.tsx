@@ -106,6 +106,28 @@ export function KitchenSink() {
               <Avatar name="Ana Diaz" size={40} src={SAMPLE_IMAGE} />
             </Row>
           </Section>
+
+          <Section title="Live signals">
+            <Row label="Running: the tidepool dot (blue to ice weather, 3.2s)">
+              <span className="bv-dot-live" data-testid="dot-live" />
+              <span className="text-muted-foreground text-sm">Running</span>
+            </Row>
+            <Row label="Standing: the pulse dot (1s opacity breath)">
+              <span
+                data-testid="dot-pulse"
+                className="bv-dot--pulse inline-block size-[15px] rounded-full bg-[var(--bv-info)]"
+              />
+              <span className="text-muted-foreground text-sm">Standing</span>
+            </Row>
+            <Row label="Running card: the Undertow halo (the card stays matte)">
+              <div className="bv-undertow" data-testid="undertow">
+                <span className="bv-undertow-orbit" data-testid="undertow-orbit" />
+                <div className="w-[220px] rounded-card border border-border bg-card p-4">
+                  <span className="text-sm">A running mission</span>
+                </div>
+              </div>
+            </Row>
+          </Section>
         </div>
       </div>
     </main>
