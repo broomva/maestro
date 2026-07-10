@@ -29,8 +29,11 @@ bun test packages/protocol   # transition tests (PATTERNS §7) + envelope/type r
 bun run typecheck            # proves apps/runtime + apps/app both import this package
 ```
 
-> Canon discrepancy tracked for a later ticket: VERIFIER §7 names `verify.started`,
-> `judge.result`, `verify.error`, which fall outside the five envelope namespaces
-> this package pins. `EventType` does not admit them; the verifier-implementation
-> ticket owns reconciling them (fold into `check.*` or widen the namespace set as a
-> deliberate protocol edit). Recorded in `docs/canon-amendments.md`.
+> The envelope pins **six** namespaces — `run.* | tool.* | check.* | gate.* | budget.* | agent.*`
+> (`agent.*` added in BRO-1756 to admit `agent.said` per HARNESS §6; a deliberate widening logged
+> in `docs/canon-amendments.md`).
+>
+> Canon discrepancy still tracked for a later ticket: VERIFIER §7 names `verify.started`,
+> `judge.result`, `verify.error`, which fall outside those namespaces. `EventType` does not admit
+> them; the verifier-implementation ticket owns reconciling them (fold into `check.*` or widen the
+> namespace set as a deliberate protocol edit — the same move BRO-1756 made for `agent.*`).
