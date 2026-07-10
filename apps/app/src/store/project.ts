@@ -25,11 +25,12 @@ function toIso(ms: number): string {
   return Number.isNaN(d.getTime()) ? new Date(0).toISOString() : d.toISOString();
 }
 
-/** The card title: node heading, else the last path segment, else "Untitled" (never empty). */
+/** The card title: node heading, else the last path segment, else "Untitled" (never empty, always trimmed). */
 function titleOf(node: LiveNode): string {
-  if (node.title && node.title.trim() !== "") return node.title;
-  const seg = node.path.split("/").filter(Boolean).pop();
-  return seg && seg.trim() !== "" ? seg : "Untitled";
+  const heading = node.title?.trim();
+  if (heading) return heading;
+  const seg = node.path.split("/").filter(Boolean).pop()?.trim();
+  return seg || "Untitled";
 }
 
 /** Walk the `parentId` chain, returning the first ancestor title of `kind`, if any. */
@@ -53,21 +54,26 @@ function ancestorTitle(
  * MUST be live (the caller filters tombstones — the store only holds live rows).
  */
 export function deriveWorkItem(node: LiveNode, s: ServerTruth): WorkItem {
-  // The node's sessions, most-recent first (node ↔ session is 1:many; project the latest).
+  // The node's sessions, most-recent first (node ↔ session is 1:many; project the
+  // latest). A deterministic id secondary key breaks an exact `startedAt` tie so
+  // the choice never depends on `Object.values` iteration order (which is numeric
+  // for all-digit keys), keeping sessionId/run/lastEventAt stable.
   const nodeSessions = Object.values(s.sessions)
     .filter((sess) => sess.nodeId === node.id)
-    .sort((a, b) => b.startedAt - a.startedAt);
+    .sort((a, b) => b.startedAt - a.startedAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   const latest = nodeSessions[0];
   const sessionId = latest?.id;
 
   // The open gate (verdict === null) joined through the node's sessions — surfaced
   // ONLY at `state === "review"` (contract §3: blocked has no gate row; the verb key).
+  // Pick the MOST-RECENTLY-opened open gate: the contract pins 1:1 at the gate, but
+  // a stale never-decided gate on a prior session must not be chosen as the verb key.
   let gateId: string | undefined;
   if (node.state === "review" && nodeSessions.length > 0) {
     const sessionIds = new Set(nodeSessions.map((sess) => sess.id));
-    const openGate = Object.values(s.gates).find(
-      (g) => sessionIds.has(g.sessionId) && g.verdict === null,
-    );
+    const openGate = Object.values(s.gates)
+      .filter((g) => sessionIds.has(g.sessionId) && g.verdict === null)
+      .sort((a, b) => b.openedAt - a.openedAt)[0];
     gateId = openGate?.id;
   }
 

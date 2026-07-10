@@ -64,7 +64,12 @@ function session(o: {
   };
 }
 
-function gate(o: { id: string; sessionId: string; verdict?: "approve" | null }): LiveGate {
+function gate(o: {
+  id: string;
+  sessionId: string;
+  verdict?: "approve" | null;
+  openedAt?: number;
+}): LiveGate {
   return {
     id: o.id,
     sessionId: o.sessionId,
@@ -72,7 +77,7 @@ function gate(o: { id: string; sessionId: string; verdict?: "approve" | null }):
     proposalJson: null,
     verdict: o.verdict ?? null,
     decidedBy: null,
-    openedAt: 200,
+    openedAt: o.openedAt ?? 200,
     decidedAt: o.verdict ? 300 : null,
     updatedAt: 200,
   };
@@ -195,6 +200,29 @@ describe("store: server-truth reducer + projector (replay)", () => {
     expect(item?.project).toBe("Q3 launch");
   });
 
+  test("titleOf trims a whitespace heading", () => {
+    const item = deriveWorkItem(
+      node({ id: "n", path: "n", state: "proposed", title: "  Deploy  " }),
+      emptyServerTruth(),
+    );
+    expect(item.title).toBe("Deploy");
+  });
+
+  test("gateId picks the most-recently-opened open gate (not a stale prior one)", () => {
+    const s = hydrate(emptyServerTruth(), {
+      nodes: [node({ id: "seo", path: "seo", state: "review" })],
+      sessions: [
+        session({ id: "s1", nodeId: "seo", startedAt: 100 }),
+        session({ id: "s2", nodeId: "seo", startedAt: 200 }),
+      ],
+      gates: [
+        gate({ id: "gold", sessionId: "s1", openedAt: 100 }), // a stale open gate
+        gate({ id: "gnew", sessionId: "s2", openedAt: 300 }), // the current one
+      ],
+    });
+    expect(selectWorkItem(s, "seo")?.gateId).toBe("gnew");
+  });
+
   test("deriveWorkItem never emits an excluded field (no chat/events/budget/percent)", () => {
     const item = deriveWorkItem(
       node({ id: "n", path: "n", state: "proposed" }),
@@ -247,7 +275,38 @@ function inspectableStorage() {
   };
 }
 
+function countingStorage() {
+  const map = new Map<string, string>();
+  let writes = 0;
+  return {
+    writes: () => writes,
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      writes++;
+      map.set(k, v);
+    },
+    removeItem: (k: string) => {
+      map.delete(k);
+    },
+  };
+}
+
 describe("store: persistence isolation", () => {
+  test("persist writes only on a real pref change, not on every server-truth event", () => {
+    const storage = countingStorage();
+    const store = createMaestroStore({ storage, name: "wc" });
+    store.getState().setView("board"); // a real pref change → a write
+    const afterPref = storage.writes();
+    expect(afterPref).toBeGreaterThan(0);
+    // A storm of server-truth events must NOT re-write the unchanged prefs blob.
+    for (let i = 1; i <= 5; i++) {
+      store
+        .getState()
+        .applyEvent(ev(i, "node.updated", node({ id: `n${i}`, path: `n${i}`, state: "running" })));
+    }
+    expect(storage.writes()).toBe(afterPref); // no additional writes on the hot path
+  });
+
   test("only the prefs slice is written to storage — never server truth", () => {
     const storage = inspectableStorage();
     const store = createMaestroStore({ storage, name: "test-prefs" });
@@ -332,7 +391,10 @@ describe("store: connectStream", () => {
   test("hydrates /api/tree then applies streamed events; resume cursor rides the URL", async () => {
     const store = createMaestroStore({ storage: inspectableStorage(), name: "cs1" });
     const tree = { nodes: [node({ id: "seed", path: "seed", state: "proposed" })] };
-    const fetchImpl = (async () => ({ json: async () => tree })) as unknown as typeof fetch;
+    const fetchImpl = (async () => ({
+      ok: true,
+      json: async () => tree,
+    })) as unknown as typeof fetch;
     let es: FakeES | undefined;
     const handle = connectStream(store, {
       fetchImpl,
@@ -355,5 +417,30 @@ describe("store: connectStream", () => {
 
     handle.close();
     expect(es?.closed).toBe(true);
+  });
+
+  test("a non-ok /api/tree reports onError and skips hydration but still subscribes", async () => {
+    const store = createMaestroStore({ storage: inspectableStorage(), name: "cs2" });
+    const fetchImpl = (async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ nodes: [] }),
+    })) as unknown as typeof fetch;
+    let err: unknown;
+    let es: FakeES | undefined;
+    connectStream(store, {
+      fetchImpl,
+      onError: (e) => {
+        err = e;
+      },
+      eventSourceFactory: (url) => {
+        es = new FakeES(url);
+        return es;
+      },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(err).toBeInstanceOf(Error); // the 500 surfaced, not swallowed as an empty tree
+    expect(es).toBeDefined(); // subscription still opened (live tail can recover)
+    expect(Object.keys(store.getState().server.nodes)).toEqual([]); // no partial hydrate
   });
 });

@@ -4,12 +4,28 @@
 // ("clients hydrate once, then live off the stream").
 //
 // Resume is the browser-native SSE contract, and it composes with the runtime's
-// cursor precedence: the FIRST open passes `?after=<cursor>` (0 after a fresh
-// `/api/tree` hydrate); on an EventSource auto-reconnect the browser sends
+// cursor precedence: on an EventSource auto-reconnect the browser sends
 // `Last-Event-ID: <last seq>`, which the runtime prioritises over the stale
-// `?after` (the BRO-1816 precedence fix), so the tail resumes with no gap, no dupe.
+// `?after` (the BRO-1816 precedence fix), so a mid-stream reconnect resumes with no
+// gap, no dupe.
 //
-// Injectable `fetchImpl` / `EventSourceImpl` keep it unit-testable without a DOM.
+// KNOWN LIMITATIONS (BRO-1845 — stream resume hardening, out of the P1 skeleton):
+//   1. The FIRST open passes `?after=<cursor>` where the cursor is 0 after a fresh
+//      `/api/tree` hydrate (the tree carries no watermark seq). Until a P2 event
+//      writer exists the event table is empty, so this delivers nothing; once it
+//      does, the client re-replays the whole backlog over the hydrated tree each
+//      load (idempotent — node.updated is a full-row upsert — so it CONVERGES, but
+//      it is wasteful). The fix is a watermark seq on `/api/tree` (or paging events
+//      instead of hydrating the tree).
+//   2. Native EventSource commits `lastEventId` from the `id:` field BEFORE firing
+//      `onmessage`, independent of whether our handler throws. A frame that fails
+//      to apply is thus skipped AND (because the runtime honours the browser's
+//      `Last-Event-ID`) not replayed on reconnect — a gap. Malformed frames do not
+//      occur against a correct runtime; the robust fix is a fetch-based reader that
+//      advances the cursor only on a successful apply (the injected factory already
+//      supports this shape).
+//
+// Injectable `fetchImpl` / `eventSourceFactory` keep it unit-testable without a DOM.
 
 import type { EventEnvelope, LiveNode } from "@maestro/protocol";
 import type { MaestroStoreApi } from "./store";
@@ -33,7 +49,12 @@ export interface ConnectOptions {
   fetchImpl?: typeof fetch;
   /** Injected EventSource factory (default `new EventSource(url)`). */
   eventSourceFactory?: EventSourceFactory;
-  /** Notified on a stream error / a failed hydrate (EventSource then auto-reconnects). */
+  /**
+   * Notified on a stream error / a failed hydrate. Native EventSource then auto-
+   * reconnects on a TRANSIENT drop (after an established connection); a fatal
+   * handshake failure (non-2xx / wrong content-type) closes for good — the caller's
+   * concern, not retried here.
+   */
   onError?: (err: unknown) => void;
 }
 
@@ -87,7 +108,12 @@ export function connectStream(store: MaestroStoreApi, opts: ConnectOptions = {})
 
   if (hydrate) {
     fetchImpl(`${baseUrl}/api/tree`)
-      .then((r) => r.json() as Promise<TreeResponse>)
+      .then((r) => {
+        // fetch() resolves for any HTTP status — guard on r.ok so a 5xx/HTML body
+        // does not reach r.json() and silently skip hydration.
+        if (!r.ok) throw new Error(`hydrate /api/tree failed: ${r.status}`);
+        return r.json() as Promise<TreeResponse>;
+      })
       .then((body) => {
         if (!closed) store.getState().hydrate({ nodes: body.nodes });
       })

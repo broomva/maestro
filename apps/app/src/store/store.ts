@@ -83,6 +83,30 @@ function defaultStorage(): StateStorage {
     : memoryStorage();
 }
 
+/**
+ * Wrap a storage so `setItem` skips a write when the serialized value is unchanged.
+ * Load-bearing: the persisted prefs slice shares this store with the high-churn
+ * server-truth slice, and zustand `persist` re-writes the partialized blob on EVERY
+ * `set` (no diffing). Without this, each streamed SSE event would trigger a
+ * synchronous `localStorage.setItem` of the UNCHANGED `{view,navOpen,cols}` — write
+ * amplification on the hot path. This collapses it to one write per real pref change.
+ */
+function writeIfChanged(inner: StateStorage): StateStorage {
+  let last: string | null = null;
+  return {
+    getItem: (k) => inner.getItem(k),
+    setItem: (k, v) => {
+      if (v === last) return;
+      last = v;
+      inner.setItem(k, v);
+    },
+    removeItem: (k) => {
+      last = null;
+      inner.removeItem(k);
+    },
+  };
+}
+
 /** Build a fresh store; pass `storage`/`name` to isolate persistence (tests, multi-tenant). */
 export function createMaestroStore(opts?: { storage?: StateStorage; name?: string }) {
   return createStore<MaestroStore>()(
@@ -149,7 +173,7 @@ export function createMaestroStore(opts?: { storage?: StateStorage; name?: strin
       }),
       {
         name: opts?.name ?? "maestro-ui-prefs",
-        storage: createJSONStorage(() => opts?.storage ?? defaultStorage()),
+        storage: createJSONStorage(() => writeIfChanged(opts?.storage ?? defaultStorage())),
         // THE invariant: only the three prefs keys are persisted — never server truth.
         partialize: (s) => ({ view: s.view, navOpen: s.navOpen, cols: s.cols }),
         version: 1,
