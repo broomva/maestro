@@ -1,30 +1,36 @@
 /// <reference types="bun" />
-// check:icons (BRO-1797) — the icon-strategy audit.
-// Run it with `bun run --filter @maestro/app check:icons` (bun's --filter matches the package
-// NAME `@maestro/app`, not the dir — a bare `--filter app` errors "No packages matched" and
-// exits 1; the BRO-1782 gotcha), or from apps/app/ as `bun run check:icons`.
+// check:icons — the monorepo icon-strategy audit (BRO-1797 · BRO-1766).
 //
-// Enforces the pinned icon strategy (CLAUDE.md §Icons): exactly ONE icon library — lucide-react —
-// plus hand-drawn glyphs kept as local SVG components in `packages/ui/src/icons/`. Two hard checks:
-//   1. NO MIXED LIBRARIES — no import from any icon package other than lucide-react, anywhere in
-//      the app or ui src. Enforced as a whitelist-of-one (lucide-react is the only allowed icon
-//      package), not a hand-maintained denylist — a denylist fails open on the next new icon set.
+// ONE shared audit for the whole monorepo. Thin per-package entry points delegate here so the
+// logic lives in a single place (no duplication, no drift):
+//   root         `bun run check:icons`                        → --scope all  (both packages)
+//   apps/app     `bun run --filter @maestro/app check:icons`  → --scope app
+//   packages/ui  `bun run --filter @maestro/ui  check:icons`  → --scope ui
+// (bun's --filter matches the package NAME — `@maestro/app` / `@maestro/ui`, not the dir — so a
+//  bare `--filter app` / `--filter ui` errors "No packages matched" and exits 1; the BRO-1782
+//  gotcha. The done.check writes the bare form; use the qualified names above.)
+//
+// Two hard checks (design canon: CLAUDE.md §Icons + handoff porting-notes translation-table row 3):
+//   1. NO MIXED LIBRARIES — lucide-react is the only allowed icon package, anywhere in app/ui src.
+//      Enforced as a whitelist-of-one (not a hand-maintained denylist — a denylist fails open on
+//      the next new icon set).
 //   2. CUSTOM-GLYPH CONVENTIONS — every glyph under `packages/ui/src/icons/` draws with
 //      `currentColor` + `stroke-width` exactly 2 + round caps, and never hard-codes a fill or
-//      stroke color. Dormant until BRO-1766 populates that dir, then it holds every glyph to canon.
+//      stroke color. The blackhole BRAND mark is NOT a UI icon (it rides a fixed dark chip in a
+//      fixed brand color with a filled singularity), so it lives in `packages/ui/src/brand.tsx`,
+//      deliberately outside this audited dir. The check is dormant until a real custom glyph lands.
 //
-// The size ladder (20 / 16 / 24) is a per-usage prop convention Lucide already defaults sanely and
-// is a design-review concern, not statically enforced here. This script owns the machine-checkable
-// invariants (single library + conforming custom glyphs). Import scanning is regex-based, not a
-// full parser — it covers static / side-effect / dynamic / require forms, which is every form an
-// icon library realistically arrives through, but is not an AST and does not claim to be.
+// Import scanning is regex-based (static / side-effect / dynamic / require forms) — every form an
+// icon library realistically arrives through — not a full AST, and does not claim to be.
 
 import { existsSync } from "node:fs";
+import { join, relative } from "node:path";
 import { Glob } from "bun";
 
-// cwd is apps/app. Audit the app AND the shared component library.
-const ROOTS = ["src", "../../packages/ui/src"];
-const ICONS_DIR = "../../packages/ui/src/icons";
+const REPO_ROOT = join(import.meta.dir, "..");
+const APP_SRC = join(REPO_ROOT, "apps/app/src");
+const UI_SRC = join(REPO_ROOT, "packages/ui/src");
+const ICONS_DIR = join(UI_SRC, "icons"); // custom UI glyphs live here (canon)
 
 // The ONE allowed icon library (canon: CLAUDE.md §Icons). lucide-react and its subpaths only.
 const ALLOWED_ICON_LIB = "lucide-react";
@@ -153,17 +159,18 @@ export function glyphViolations(src: string): string[] {
 
 async function tsFiles(root: string): Promise<string[]> {
   const out: string[] = [];
+  if (!existsSync(root)) return out;
   const glob = new Glob("**/*.{ts,tsx}");
   for await (const rel of glob.scan({ cwd: root, onlyFiles: true })) {
     if (rel.includes("node_modules")) continue;
-    out.push(`${root}/${rel}`);
+    out.push(join(root, rel));
   }
   return out;
 }
 
-async function checkNoMixedLibraries(): Promise<Violation[]> {
+async function checkNoMixedLibraries(roots: string[]): Promise<Violation[]> {
   const violations: Violation[] = [];
-  for (const root of ROOTS) {
+  for (const root of roots) {
     for (const file of await tsFiles(root)) {
       const src = await Bun.file(file).text();
       for (const spec of importSpecifiers(src)) {
@@ -181,29 +188,41 @@ async function checkNoMixedLibraries(): Promise<Violation[]> {
 
 async function checkCustomGlyphConventions(): Promise<Violation[]> {
   const violations: Violation[] = [];
-  // Dormant until BRO-1766 creates the local-glyph dir; then it holds every glyph to canon.
+  // Dormant until a custom glyph lands in packages/ui/src/icons; then it holds every glyph to canon.
   if (!existsSync(ICONS_DIR)) return violations;
   const glob = new Glob("**/*.{tsx,svg}");
   for await (const rel of glob.scan({ cwd: ICONS_DIR, onlyFiles: true })) {
-    const file = `${ICONS_DIR}/${rel}`;
+    const file = join(ICONS_DIR, rel);
     const src = await Bun.file(file).text();
     for (const detail of glyphViolations(src)) violations.push({ file, detail });
   }
   return violations;
 }
 
-// Only scan when run directly — importing this module (e.g. from the test) must NOT trigger the
-// filesystem scan or process.exit.
+export type Scope = "app" | "ui" | "all";
+
+/** Run the audit for a scope. Custom-glyph conventions apply only when ui is in scope (glyphs live
+ *  in packages/ui/src/icons). Returns the full violation list. */
+export async function runAudit(scope: Scope): Promise<Violation[]> {
+  const roots: string[] = [];
+  if (scope === "app" || scope === "all") roots.push(APP_SRC);
+  if (scope === "ui" || scope === "all") roots.push(UI_SRC);
+  const mixed = await checkNoMixedLibraries(roots);
+  const glyphs = scope === "app" ? [] : await checkCustomGlyphConventions();
+  return [...mixed, ...glyphs];
+}
+
 if (import.meta.main) {
-  const [mixed, glyphs] = await Promise.all([
-    checkNoMixedLibraries(),
-    checkCustomGlyphConventions(),
-  ]);
-  const all = [...mixed, ...glyphs];
-  if (all.length > 0) {
-    console.error(`check:icons — ${all.length} violation(s):`);
-    for (const v of all) console.error(`  ✗ ${v.file}: ${v.detail}`);
+  const i = Bun.argv.indexOf("--scope");
+  const arg = i >= 0 ? Bun.argv[i + 1] : "all";
+  const scope: Scope = arg === "app" || arg === "ui" ? arg : "all";
+  const violations = await runAudit(scope);
+  if (violations.length > 0) {
+    console.error(`check:icons (${scope}) — ${violations.length} violation(s):`);
+    for (const v of violations) console.error(`  ✗ ${relative(REPO_ROOT, v.file)}: ${v.detail}`);
     process.exit(1);
   }
-  console.log("check:icons — ok (single icon library: lucide-react; custom glyphs conform)");
+  console.log(
+    `check:icons (${scope}) — ok (single icon library: lucide-react; custom glyphs conform)`,
+  );
 }

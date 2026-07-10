@@ -38,6 +38,11 @@ jobs:
         run: bunx @biomejs/biome ci .
       - name: Typecheck (tsc --noEmit)
         run: bun run typecheck
+      - name: Icon strategy audit (BRO-1766)
+        # One icon library (lucide-react) across app + ui; custom glyphs in packages/ui/src/icons
+        # conform to canon. The brand mark is exempt by living outside that dir. Fails the gate on
+        # a mixed library or a non-canon glyph.
+        run: bun run check:icons
       - name: Test
         # --pass-with-no-tests keeps the gate dormant until tests land, then it
         # bites automatically. P2 hook point (D8 layer 1): the mock-model loop
