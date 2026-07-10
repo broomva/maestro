@@ -146,13 +146,19 @@ describe("WorktreeSandbox (phase-1 specifics)", () => {
     await expect(sb.teardown({ preserve: false })).resolves.toBeUndefined();
   });
 
-  test("rejects an unsafe run id (path traversal / branch forgery)", async () => {
+  test("rejects an unsafe run id (path traversal / branch forgery / invalid git ref)", async () => {
     const ws = await trackedWorkspace();
     const f = createWorktreeSandboxFactory({ workspace: ws });
     await expect(f.create("../evil")).rejects.toThrow();
     await expect(f.create("a/b")).rejects.toThrow();
     await expect(f.create("")).rejects.toThrow();
     await expect(f.create(".")).rejects.toThrow();
+    // valid path segments but INVALID git refs — must throw the clean "invalid run id", not a
+    // downstream GitError with a leaked runDir (P20 round-2 minor)
+    await expect(f.create("a..b")).rejects.toThrow(/invalid run id/);
+    await expect(f.create("foo.lock")).rejects.toThrow(/invalid run id/);
+    // and no runDir is leaked for a rejected id
+    expect(await exists(join(ws, "runs", "run-foo.lock"))).toBe(false);
   });
 
   test("spawnContext (phase-1) has an empty commandPrefix + cwd = workdir", async () => {

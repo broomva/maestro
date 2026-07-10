@@ -10,6 +10,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { stat } from "node:fs/promises";
+import { basename } from "node:path";
 import type { SandboxFactory } from "./sandbox";
 
 async function exists(p: string): Promise<boolean> {
@@ -77,6 +78,19 @@ export function registerSandboxConformance(
       // a failing command's non-zero code is captured, not thrown
       const bad = await sb.exec(["git", "rev-parse", "--verify", "refs/heads/no-such-ref-xyz"]);
       expect(bad.code).not.toBe(0);
+      await sb.teardown({ preserve: false });
+    });
+
+    test("exec runs INSIDE the sandbox, not on the host (the containment property this suite exists for)", async () => {
+      // This is the load-bearing conformance assertion: `git --version` above is cwd-agnostic and would
+      // pass from anywhere, so on its own the suite is VACUOUS for a phase-2 container adapter that
+      // forgot its exec prefix and leaked onto the host. `pwd` reports the dir exec actually ran in —
+      // its leaf must be the sandbox's own workdir leaf (portable: phase-1 run-<id>, phase-2 whatever
+      // the container's workdir is), which a host-leaking impl (running in the supervisor's cwd) fails.
+      const sb = await h.factory.create(nextId());
+      const where = await sb.exec(["pwd"]);
+      expect(where.code).toBe(0);
+      expect(basename(where.stdout.trim())).toBe(basename(sb.workdir));
       await sb.teardown({ preserve: false });
     });
 

@@ -38,14 +38,18 @@ export interface WorktreeSandboxConfig {
   runsRoot?: string;
 }
 
-// A run id becomes a path segment AND a git branch component, so it must be a single safe token —
-// no path separators, no `..`, nothing that could escape the worktree root or forge a branch ref.
+// A run id becomes a path segment AND the `run/<id>` git branch component, so it must be BOTH a safe
+// path segment AND a valid git ref component. The charset regex (alnum-bounded [A-Za-z0-9._-]) already
+// bars path separators, spaces, control chars, and leading/trailing punctuation; the two extra
+// predicates close the git-ref rules that charset alone allows — no embedded `..` and no `.lock`
+// suffix (`git check-ref-format` rejects both). Rejecting them HERE yields a clean "invalid run id"
+// instead of a cryptic downstream GitError plus a leaked empty runDir.
 const SAFE_RUN_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 function assertRunId(runId: string): void {
-  if (!SAFE_RUN_ID.test(runId)) {
+  if (!SAFE_RUN_ID.test(runId) || runId.includes("..") || runId.endsWith(".lock")) {
     throw new Error(
-      `invalid run id ${JSON.stringify(runId)} — must be [A-Za-z0-9._-], no path separators or leading/trailing punctuation`,
+      `invalid run id ${JSON.stringify(runId)} — must be a safe path segment + git ref component ([A-Za-z0-9._-], alnum-bounded, no "..", no ".lock" suffix)`,
     );
   }
 }
