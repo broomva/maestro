@@ -18,6 +18,9 @@ import { expect, test } from "@playwright/test";
 
 const RUNTIME_PORT = 4319; // matches the vite-preview default `/api` proxy target
 const RUNTIME_ENTRY = fileURLToPath(new URL("../../runtime/src/index.ts", import.meta.url));
+// The index dump runs in a bun subprocess (Playwright's loader can't import the runtime's bun-only
+// `.sql` modules that openIndex pulls in — same reason the runtime itself is spawned, not imported).
+const DUMP_SCRIPT = fileURLToPath(new URL("../../runtime/scripts/dump-index.ts", import.meta.url));
 const EVIDENCE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "test-results");
 
 let runtime: ChildProcess | undefined;
@@ -68,16 +71,23 @@ function onExit(p: ChildProcess): Promise<number> {
   return new Promise((res) => p.on("exit", (code) => res(code ?? 0)));
 }
 
-// The work tree the app serves, minus the ONE volatile column (`updatedAt` — the scan clock, which
-// a rebuild legitimately re-stamps; exactly what rebuild.ts's dumpIndex strips), sorted by id. A
-// stable, rebuild-invariant snapshot: if this is equal before and after a kill+rebuild, the index
-// rebuilt identical.
-async function stableTree(): Promise<Array<Record<string, unknown>>> {
-  const r = await fetch(`http://localhost:${RUNTIME_PORT}/api/tree`);
-  const body = (await r.json()) as { nodes: Array<Record<string, unknown>> };
-  return body.nodes
-    .map(({ updatedAt: _updatedAt, ...rest }) => rest)
-    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+// The canonical content of an index db file (every node column except the volatile `updatedAt` scan
+// clock, id-sorted), read DIRECTLY from the file via the bun dump helper. Reading the file directly
+// is deliberate: a RESTARTED runtime unconditionally rescans the FS on boot (index.ts
+// `scanIntoIndex`), which would repopulate the index from disk and MASK whatever `--rebuild` actually
+// wrote — so comparing /api/tree across a restart proves nothing about `--rebuild`. Dumping the db
+// file makes `--rebuild`'s output the load-bearing artifact.
+async function dumpIndexFile(indexPath: string): Promise<unknown[]> {
+  const proc = spawn("bun", ["run", DUMP_SCRIPT, indexPath], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  let out = "";
+  proc.stdout?.on("data", (chunk) => {
+    out += chunk;
+  });
+  const code = await onExit(proc);
+  if (code !== 0) throw new Error(`dump-index exited ${code}`);
+  return JSON.parse(out) as unknown[];
 }
 
 test.use({ video: "on" }); // evidence: a screen recording of the exit gate
@@ -129,20 +139,28 @@ test("P1 exit ①: a hand-edit to a _work.md propagates to the board live, with 
   expect(survived, "the page must NOT have reloaded — the update is live over SSE").toBe(true);
 });
 
-// ② The rebuild seam — kill the index file; it rebuilds identical and the app serves the same board.
-test("P1 exit ②: killing the index rebuilds it identical and the app serves the same board", async ({
+// ② The rebuild seam — kill the index file; `--rebuild` rebuilds it identical, and the app comes
+// back up over it. The identity assertion is load-bearing on `--rebuild`'s OUTPUT: both snapshots
+// are dumped from the db FILE directly, so a broken rebuild (0 rows / wrong states) fails here — a
+// restarted runtime's boot rescan cannot mask it (that was the P20 finding this test now closes).
+test("P1 exit ②: killing the index rebuilds it identical (from --rebuild's own output)", async ({
   page,
 }) => {
   await page.goto("/app");
-  await expect(page.getByTestId("board")).toBeVisible();
+  await expect(page.getByTestId("board")).toBeVisible(); // the app is live over the built index
 
-  const before = await stableTree();
-  expect(before.length, "fixture has nodes to compare").toBeGreaterThan(0);
+  const indexPath = join(workspace, ".maestro/index.db");
 
-  // Kill the runtime, delete the index file (+ its WAL/SHM), rebuild it from the FS (truth), restart.
+  // Kill the runtime so nothing holds or rewrites the index while we read + rebuild it.
   runtime?.kill("SIGTERM");
   if (runtime) await onExit(runtime);
-  const indexPath = join(workspace, ".maestro/index.db");
+  runtime = undefined;
+
+  // The index the running runtime built — dumped from the db FILE (the pre-kill truth).
+  const before = await dumpIndexFile(indexPath);
+  expect(before.length, "the built index has nodes to compare").toBeGreaterThan(0);
+
+  // Kill the index file (+ WAL/SHM), rebuild it from the FS (truth) via the `--rebuild` CLI, exit 0.
   for (const p of [indexPath, `${indexPath}-wal`, `${indexPath}-shm`]) rmSync(p, { force: true });
   expect(existsSync(indexPath), "the index file is gone before rebuild").toBe(false);
 
@@ -150,26 +168,25 @@ test("P1 exit ②: killing the index rebuilds it identical and the app serves th
     env: runtimeEnv(),
     stdio: "inherit",
   });
-  const code = await onExit(rebuild);
-  expect(code, "`--rebuild` exits 0").toBe(0);
+  expect(await onExit(rebuild), "`--rebuild` exits 0").toBe(0);
   expect(existsSync(indexPath), "the index rebuilt from the FS").toBe(true);
 
-  runtime = spawn("bun", ["run", RUNTIME_ENTRY], { env: runtimeEnv(), stdio: "inherit" });
-  await waitHealthy();
+  // The REBUILT index — dumped from the db FILE, BEFORE any runtime boots and rescans it. This is
+  // `--rebuild`'s own output; if it wrote nothing or the wrong content, this comparison fails.
+  const after = await dumpIndexFile(indexPath);
+  expect(after, "`--rebuild` produced an identical index").toEqual(before);
 
-  const after = await stableTree();
-  expect(after, "the app serves an identical work tree after a kill + rebuild").toEqual(before);
-
-  // Evidence: the rebuild diff (node counts + verdict + the compared trees) next to the video.
+  // Evidence: the rebuild diff (node counts + verdict + the compared canonical dumps) next to the video.
   const identical = JSON.stringify(before) === JSON.stringify(after);
   mkdirSync(EVIDENCE_DIR, { recursive: true });
   writeFileSync(
     join(EVIDENCE_DIR, "p1-exit-rebuild-diff.txt"),
     [
-      "P1 exit ② — kill the index file; it rebuilds identical (BRO-1823)",
+      "P1 exit ② — kill the index file; --rebuild rebuilds it identical (BRO-1823)",
+      "(both snapshots dumped from the db file directly, so --rebuild's output is load-bearing)",
       `nodes before kill: ${before.length}`,
       `nodes after rebuild: ${after.length}`,
-      `identical (updatedAt-stripped): ${identical}`,
+      `identical (updatedAt-stripped canonical dump): ${identical}`,
       "",
       `before: ${JSON.stringify(before, null, 2)}`,
       "",
@@ -177,9 +194,11 @@ test("P1 exit ②: killing the index rebuilds it identical and the app serves th
       "",
     ].join("\n"),
   );
-  console.log(`P1 exit ②: rebuilt index identical — ${before.length} nodes, before === after`);
+  console.log(`P1 exit ②: --rebuild produced an identical index — ${before.length} nodes`);
 
-  // The app is live again over the REBUILT index — the board still renders.
+  // INTEGRATION: the app comes back up over the REBUILT index and serves the board.
+  runtime = spawn("bun", ["run", RUNTIME_ENTRY], { env: runtimeEnv(), stdio: "inherit" });
+  await waitHealthy();
   await page.goto("/app");
   await expect(page.getByTestId("board")).toBeVisible();
 });
