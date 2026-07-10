@@ -1,4 +1,13 @@
-import { Avatar, Button, IconButton, Input } from "@maestro/ui";
+import type { Kind, OrchState } from "@maestro/protocol";
+import {
+  Avatar,
+  Button,
+  DotComet,
+  IconButton,
+  Input,
+  StatusBadge,
+  workStatusView,
+} from "@maestro/ui";
 import { Paperclip, Plus, Search, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import { ThemeToggle } from "../components/theme-toggle";
@@ -28,6 +37,25 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 }
 
 const BUTTON_VARIANTS = ["primary", "secondary", "soft", "ghost"] as const;
+
+// A work node's plain-voice badge, mapped from its OrchState (BRO-1757). Running work wears
+// the tidepool DotComet as its dot; standing routines pulse; everything else is a static dot.
+function StateBadge({ state, kind }: { state: OrchState; kind?: Kind }) {
+  const v = workStatusView(state, kind);
+  if (v.running) {
+    return (
+      <span className="inline-flex h-[26px] items-center gap-1.5 rounded-full bg-muted px-3 font-medium text-foreground text-xs">
+        <DotComet size={8} />
+        {v.label}
+      </span>
+    );
+  }
+  return (
+    <StatusBadge status={v.tone} pulse={v.pulse}>
+      {v.label}
+    </StatusBadge>
+  );
+}
 
 // A tiny inline avatar image so the src variant renders with no network.
 const SAMPLE_IMAGE =
@@ -104,6 +132,20 @@ export function KitchenSink() {
               <Avatar name="Broomva" size={28} />
               <Avatar name="Needs You" size={40} color="var(--bv-blue-accent)" />
               <Avatar name="Ana Diaz" size={40} src={SAMPLE_IMAGE} />
+            </Row>
+          </Section>
+
+          <Section title="Work states">
+            <Row label="Plain voice, mapped from OrchState. The dot carries the color; Needs you is accent-blue, never red.">
+              <StateBadge state="proposed" />
+              <StateBadge state="running" />
+              <StateBadge state="blocked" />
+              <StateBadge state="review" />
+              <StateBadge state="done" />
+              <StateBadge state="triggered" kind="routine" />
+            </Row>
+            <Row label="The tidepool dot on its own, at the running size (15px)">
+              <DotComet />
             </Row>
           </Section>
 
