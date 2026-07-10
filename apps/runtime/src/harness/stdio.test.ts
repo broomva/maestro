@@ -15,9 +15,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EVENT_TYPES } from "@maestro/protocol";
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { type IndexHandle, openIndex } from "../db/client";
-import { event } from "../db/schema";
+import { event, session } from "../db/schema";
 import { fsJournalSink } from "../proxy/events";
 import type { ChildEmittedEvent } from "./runner";
 import {
@@ -333,6 +333,39 @@ describe("escalateHung", () => {
     });
     expect(child.signals).toEqual(["SIGTERM"]); // graceful exit → no kill switch
   });
+
+  test("parks blocked even when the run.hung append fails, and never throws (P20 MAJOR guard)", async () => {
+    // The journal (FS-first) rejects, so the run.hung append fails — markSessionBlocked MUST still run,
+    // and the whole thing must resolve (it is fired fire-and-forget; an escaped rejection is unhandled).
+    const failingJournal: Journal = {
+      async append() {
+        throw new Error("EIO: journal write failed");
+      },
+    };
+    const blocked: Array<{ sessionId: string; updatedAt: number }> = [];
+    const writer: IndexWriter = {
+      async insertEvent() {}, // never reached — journal fails first (FS-first)
+      async markSessionBlocked(sessionId: string, updatedAt: number) {
+        blocked.push({ sessionId, updatedAt });
+      },
+    };
+    const tee = new SessionTee({ writer, journal: failingJournal, sessionId: "s1", now: fixedNow });
+    const child = fakeChild({ neverExits: true });
+    await expect(
+      escalateHung({
+        child,
+        tee,
+        writer,
+        sessionId: "s1",
+        now: fixedNow,
+        graceMs: 15_000,
+        delay: () => Promise.resolve(),
+      }),
+    ).resolves.toBeUndefined();
+    // the load-bearing state change happened despite the failed event append
+    expect(blocked).toEqual([{ sessionId: "s1", updatedAt: FIXED_MS }]);
+    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
 });
 
 // ── 7. superviseChildStdio — end-to-end over a real :memory: index ──────────────
@@ -379,5 +412,53 @@ describe("superviseChildStdio (integration)", () => {
       actor: "system",
       type: "run.started",
     });
+  });
+
+  test("failure-injection: a rejected tee write REAPS the still-live child and parks it blocked (P20 CRITICAL guard)", async () => {
+    // The P20-caught hole: a tee write failure used to let `done` resolve as a clean finish with the
+    // child still alive, silently ending supervision. Now it must SIGKILL the child and park blocked.
+    const handle = await openIndex(":memory:");
+    handles.push(handle);
+    const runDir = await mkTmp();
+    const sessionId = "s1";
+    await handle.db.insert(session).values({
+      id: sessionId,
+      nodeId: "n1",
+      branch: "run/x",
+      status: "running",
+      startedAt: FIXED_MS,
+      updatedAt: FIXED_MS,
+    });
+    const signals: string[] = [];
+    const port = {
+      // a valid event the tee will try (and fail) to persist; the stream then closes
+      stdout: streamOf(['{"actor":"agent","type":"agent.said","payload":{"text":"hi"}}\n']),
+      stderr: streamOf([]),
+      writeStdin: () => {},
+      kill: (s?: number | NodeJS.Signals) => {
+        signals.push(String(s));
+      },
+      exited: Promise.resolve(0),
+    };
+    // Only the FS journal fails (ENOSPC); the real db writer stays healthy so the park is observable.
+    const failingJournal: Journal = {
+      async append() {
+        throw new Error("ENOSPC: no space left on device");
+      },
+    };
+    const sup = superviseChildStdio(port, {
+      db: handle.db,
+      sessionId,
+      runDir,
+      now: fixedNow,
+      scheduleTick: () => () => {},
+      journal: failingJournal,
+    });
+    await sup.done;
+    // reaped: SIGKILL sent even though the child never hung — the write failure triggered it
+    expect(signals).toContain("SIGKILL");
+    // parked: markSessionBlocked ran on the healthy db writer (only the journal failed)
+    const rows = await handle.db.select().from(session).where(eq(session.id, sessionId));
+    expect(rows[0]?.status).toBe("blocked");
   });
 });

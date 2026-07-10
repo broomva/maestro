@@ -402,13 +402,25 @@ export async function escalateHung(deps: HungEscalationDeps): Promise<void> {
   await Promise.race([exitedP, delay(deps.graceMs)]);
   // 3. still alive after grace → the kill switch (F8), no cooperation assumed
   if (!exited) deps.child.kill("SIGKILL");
-  // 4. record the escalation: a durable run.hung event, then park the session blocked
-  await deps.tee.append({
-    actor: "system",
-    type: EVENT_TYPES.RUN_HUNG,
-    payload: { reason: "child silent past hungMs", graceMs: deps.graceMs },
-  });
-  await deps.writer.markSessionBlocked(deps.sessionId, deps.now());
+  // 4. record the escalation. Both writes are best-effort and INDEPENDENTLY guarded: a failed run.hung
+  // append (disk full, index closed) must NOT skip the park — parking `blocked` is the load-bearing
+  // state change (HARNESS §2), and D5 reconcile re-derives the event log on restart. Nothing throws:
+  // escalateHung is fired fire-and-forget from the liveness tick, so an escaped rejection would be
+  // unhandled (mirrors the internal swallow that makes onPing / ChildControl.#send safe).
+  try {
+    await deps.tee.append({
+      actor: "system",
+      type: EVENT_TYPES.RUN_HUNG,
+      payload: { reason: "child silent past hungMs", graceMs: deps.graceMs },
+    });
+  } catch {
+    // journal/index write failed — the park below is what matters; attempt it regardless
+  }
+  try {
+    await deps.writer.markSessionBlocked(deps.sessionId, deps.now());
+  } catch {
+    // a closed/full index leaves the child killed but the row unparked; D5 re-derives on restart
+  }
 }
 
 // ── 8. superviseChildStdio — wire it all together ──────────────────────────────
@@ -435,6 +447,10 @@ export interface SuperviseDeps {
   scheduleTick?: (fn: () => void, ms: number) => () => void;
   /** Override the grace timer for escalation (threaded to escalateHung). */
   delay?: (ms: number) => Promise<void>;
+  /** Override the index writer (default binds `deps.db`). Tests inject a failing writer. */
+  writer?: IndexWriter;
+  /** Override the FS journal (default `fsJournal(runDir)`). Tests inject a failing journal. */
+  journal?: Journal;
 }
 
 export interface SupervisedChild {
@@ -448,8 +464,8 @@ export interface SupervisedChild {
 }
 
 export function superviseChildStdio(child: ChildStdioPort, deps: SuperviseDeps): SupervisedChild {
-  const writer = bindIndexWriter(deps.db);
-  const journal = fsJournal(deps.runDir);
+  const writer = deps.writer ?? bindIndexWriter(deps.db);
+  const journal = deps.journal ?? fsJournal(deps.runDir);
   const stderrSink = fsStderrLog(deps.runDir);
   const tee = new SessionTee({ writer, journal, sessionId: deps.sessionId, now: deps.now });
   const control = new ChildControl(child.writeStdin);
@@ -466,6 +482,8 @@ export function superviseChildStdio(child: ChildStdioPort, deps: SuperviseDeps):
       void control.ping();
     },
     onHung: () => {
+      // Fire-and-forget from the tick — escalateHung swallows its own write failures, but a `.catch`
+      // here is the belt to that suspenders so a rejection can never escape unhandled.
       void escalateHung({
         child,
         tee,
@@ -474,7 +492,7 @@ export function superviseChildStdio(child: ChildStdioPort, deps: SuperviseDeps):
         now: deps.now,
         graceMs,
         delay: deps.delay,
-      });
+      }).catch(() => {});
     },
   });
 
@@ -496,13 +514,44 @@ export function superviseChildStdio(child: ChildStdioPort, deps: SuperviseDeps):
     cancelTick();
   };
 
+  // A tee write failure means durability is lost (disk full, index closed/busy) — we can no longer
+  // supervise this child safely. REAP it: SIGKILL + best-effort run.failed + park `blocked`. Without
+  // this, a rejected tee.append propagates out of pumpStdout, is swallowed by `.catch(() => {})`, and
+  // `done` resolves as a clean finish while the child is STILL ALIVE — then stop() cancels the tick and
+  // the child silently loses hang detection forever (the P20-caught CRITICAL). Idempotent; skipped once
+  // `stopped` (an intentional teardown, where a late write failing is benign).
+  let supervisionFailed = false;
+  const failSupervision = async (reason: string): Promise<void> => {
+    if (supervisionFailed || stopped) return;
+    supervisionFailed = true;
+    stop(); // we own the failure now — no more liveness ticks / redundant hung-escalation
+    child.kill("SIGKILL"); // cannot durably record its work → do not leave it running unsupervised
+    try {
+      await tee.append({ actor: "system", type: EVENT_TYPES.RUN_FAILED, payload: { reason } });
+    } catch {
+      // the write path is the thing failing — best-effort; the park below is the load-bearing change
+    }
+    try {
+      await writer.markSessionBlocked(deps.sessionId, deps.now());
+    } catch {
+      // closed/full index — the child is killed; D5 reconcile re-derives the row on restart
+    }
+  };
+
   const splitter = createNdjsonSplitter();
   const decoder = new TextDecoder();
 
   const onLine = async (line: string): Promise<void> => {
     liveness.activity(); // any output resets liveness, before we decide what the line is
     const c = classifyLine(line);
-    if (c.kind === "event") await tee.append(c.event);
+    if (c.kind === "event") {
+      try {
+        await tee.append(c.event);
+      } catch (err) {
+        // Durability lost mid-supervision — reap the still-live child instead of ending silently.
+        await failSupervision(`tee write failed: ${String((err as Error)?.message ?? err)}`);
+      }
+    }
     // liveness/drop: nothing else to do — activity already recorded; drops are silently discarded
   };
 
