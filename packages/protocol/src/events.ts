@@ -78,8 +78,12 @@ export const EVENT_TYPES = {
   GATE_OPENED: "gate.opened",
   GATE_DECIDED: "gate.decided",
   GATE_APPROVED: "gate.approved", // FLOWS F5
-  // budget.*
+  // budget.* — the budget-in-path guard (HARNESS §3, F3.1). BRO-1788 named `refused`
+  // (pre-forward refusal) + `metered` (post-response accounting); `exhausted` is the
+  // child's loop-halt event (F3). All three are durable (D-DURABILITY).
   BUDGET_EXHAUSTED: "budget.exhausted",
+  BUDGET_REFUSED: "budget.refused", // HARNESS §3 step 1 — over-limit, request never forwarded
+  BUDGET_METERED: "budget.metered", // HARNESS §3 step 3 — actual usage { usd, tokens }
   // synthetics (projected by the runtime)
   NODE_UPDATED: "node.updated",
   SCHEDULE_FIRED: "schedule.fired",
