@@ -47,6 +47,8 @@ export function createApp(
   index?: IndexDb,
   /** Reconcile trigger for the write path — the watcher's single-flight `nudge` (BRO-1820). */
   reconcile?: () => void,
+  /** Kill seam for the F8 kill intent — the supervisor's `kill` (BRO-1801). Absent → kill intent 501s. */
+  kill?: (sessionId: string) => boolean,
 ) {
   const app = new Hono();
 
@@ -71,7 +73,7 @@ export function createApp(
       pollMs: config.streamPollMs,
       heartbeatMs: config.streamHeartbeatMs,
     });
-    registerIntentRoutes(app, { db: index, workspace: config.workspace, reconcile });
+    registerIntentRoutes(app, { db: index, workspace: config.workspace, reconcile, kill });
   }
 
   return app;

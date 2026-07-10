@@ -43,6 +43,13 @@ export interface IntentDeps {
    * watcher failed to start (the write still lands on disk; it indexes on the next scan/restart).
    */
   reconcile?: () => void;
+  /**
+   * Kill a live run by session id (FLOWS §F8, BRO-1801) — the supervisor's `kill` seam. Returns true
+   * if a live run was killed (SIGKILL + bearer revoked; `run.killed` reaches the client on the stream),
+   * false if no live run has that id. Absent until the supervisor is wired into the runtime (the kill
+   * intent is `unsupported_intent` without it); pure-unit intent tests inject a fake.
+   */
+  kill?: (sessionId: string) => boolean;
 }
 
 /** Idempotency lease TTL — the no-op guard keys on existence, so this only bounds GC. */
@@ -254,7 +261,67 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
     if (typeof type !== "string") {
       return refuse(c, new IntentRefusal("invalid_intent", "intent.type is required", 400));
     }
-    // P1 implements new_mission only; every other (valid or unknown) type is refused typed.
+    // F8 (BRO-1801): kill { sessionId } → SIGKILL the run (canceled + run.killed on the stream). The
+    // seam is `deps.kill`; without it (supervisor not wired) the intent is a typed unsupported_intent.
+    if (type === "kill") {
+      const kill = deps.kill;
+      if (!kill) {
+        return refuse(
+          c,
+          new IntentRefusal(
+            "unsupported_intent",
+            "kill is not available (no supervisor wired)",
+            501,
+          ),
+        );
+      }
+      const sessionId = (body as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId !== "string" || sessionId.trim() === "") {
+        return refuse(
+          c,
+          new IntentRefusal("invalid_intent", "kill.sessionId must be a non-empty string", 400),
+        );
+      }
+      // Idempotency lease (as new_mission) — a retried same-key kill is a no-op 202, not a re-kill.
+      const killNow = Date.now();
+      const killIns = await db
+        .insert(lease)
+        .values({
+          key,
+          holder: RUNTIME_HOLDER,
+          acquiredAt: killNow,
+          expiresAt: killNow + LEASE_TTL_MS,
+        })
+        .onConflictDoNothing({ target: lease.key });
+      if (killIns.rowsAffected === 0) {
+        const ok: IntentAccepted = { accepted: true };
+        return c.json(ok, 202);
+      }
+      // kill is a synchronous seam (SIGKILL + revoke); the run.killed event reaches the client on the
+      // stream, not in this body (intents-in, events-out). Wrap it like new_mission's dispatch — a throw
+      // (e.g. SIGKILL on an already-exited pid) must RELEASE the lease so a retry re-attempts, not leak
+      // it behind a 500. A false = no live run → release + not_found.
+      let killedLive: boolean;
+      try {
+        killedLive = kill(sessionId);
+      } catch (err) {
+        await db.delete(lease).where(eq(lease.key, key));
+        return refuse(
+          c,
+          new IntentRefusal("intent_failed", `kill failed: ${(err as Error).message}`, 500, true),
+        );
+      }
+      if (!killedLive) {
+        await db.delete(lease).where(eq(lease.key, key));
+        return refuse(
+          c,
+          new IntentRefusal("not_found", `no live run for session ${sessionId}`, 404),
+        );
+      }
+      const ok: IntentAccepted = { accepted: true };
+      return c.json(ok, 202);
+    }
+    // P1 implements new_mission (+ kill above); every other (valid or unknown) type is refused typed.
     if (type !== "new_mission") {
       return refuse(
         c,

@@ -135,8 +135,8 @@ export interface SupervisorDeps {
   maxRespawns?: number;
 }
 
-/** The terminal lifecycle event the reap derives (D-EVENTNAMES). */
-export type TerminalEvent = "run.finished" | "run.failed";
+/** The terminal lifecycle event the reap derives (D-EVENTNAMES). `run.killed` = killed by intent (F8). */
+export type TerminalEvent = "run.finished" | "run.failed" | "run.killed";
 
 /** The outcome of a run reaped to terminal (following any fresh-context respawns to the final state). */
 export interface ReapResult {
@@ -171,8 +171,11 @@ export type DispatchOutcome =
 export interface Supervisor {
   /** F2 — dispatch a node into a live run. Idempotent on the node lease (held → no-op). */
   dispatch(nodeId: string): Promise<DispatchOutcome>;
-  /** F8 seam (BRO-1801) — SIGKILL a live run + revoke its token; the reap parks it. True if it was live. */
+  /** F8 (BRO-1801) — SIGKILL a live run by intent + revoke its token; the reap ends it `canceled` +
+   *  `run.killed`, worktree preserved. True if it was live. */
   kill(runId: string): boolean;
+  /** F8 stop-all (BRO-1801) — kill every live run; returns how many were killed. */
+  killAll(): number;
   /** F10 seam (BRO-1822) — the live run's control channel (chat/stop/ping), or null. */
   get(runId: string): RunEntry | null;
   /** Every live run — observability + shutdown sweep. */
@@ -478,10 +481,81 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     };
   }
 
+  // ── Kill-by-intent terminal (F8, BRO-1801) ──────────────────────────────────
+  // A run the human killed ends DISTINCTLY from a crash: session `canceled` (the human chose to stop
+  // it, not a fault) + node `blocked` (a human should look) + `run.killed`, worktree PRESERVED (the
+  // receipt of the partial work, FLOWS §F8). Same cleanup as terminal/containCrash — revoke the token
+  // (already done by kill(), idempotent here), drop the registry entry, clear cancelled, release the
+  // lease. `entry` is null when the kill lands mid-respawn (no live child to stop).
+  async function terminalKilled(
+    ids: { runId: string; nodeId: string; runDir?: string },
+    entry: RunEntry | null,
+    exitCode: number,
+    respawns: number,
+    // Skip the run.killed emit when the tee's failSupervision (BRO-1767) already wrote a terminal
+    // event for this run (a tee-write failure that coincided with the kill) — the park below still runs
+    // (correcting failSupervision's `blocked` to the kill's `canceled`), only the DUPLICATE event is
+    // suppressed. Mirrors the crash branch's skipEmit.
+    skipEmit = false,
+  ): Promise<ReapResult> {
+    if (!skipEmit) {
+      if (ids.runDir) {
+        const emit = runEmitter(ids.runId, ids.runDir);
+        try {
+          await emit(sys(EVENT_TYPES.RUN_KILLED, { reason: "kill intent" }));
+        } catch {
+          // fall through — the park is the load-bearing change; D5 reconcile re-derives the event
+        }
+      } else {
+        try {
+          await db.insert(event).values({
+            sessionId: ids.runId,
+            ts: now(),
+            actor: "system",
+            type: EVENT_TYPES.RUN_KILLED,
+            payload: JSON.stringify({ reason: "kill intent" }),
+          });
+        } catch {
+          // index unavailable — the park below is what matters
+        }
+      }
+    }
+    await park(ids.runId, ids.nodeId, "canceled", "blocked", true);
+    tokens.revoke(ids.runId);
+    registry.delete(ids.runId);
+    cancelled.delete(ids.runId);
+    entry?.supervised.stop();
+    await releaseLease(ids.nodeId);
+    return {
+      runId: ids.runId,
+      exitCode,
+      reason: "killed",
+      sessionStatus: "canceled",
+      nodeState: "blocked",
+      event: "run.killed",
+      crash: false,
+      mismatch: false,
+      respawns,
+    };
+  }
+
   // ── Reap — map the child's real exit code (HARNESS §4) ──────────────────────
   // `reap` NEVER rejects: any unexpected throw in the routing (an index fault on a read/gate path the
   // inner logic did not already guard) is caught and contained, so the background `reaped` chain always
   // resolves a ReapResult and cleanup (token revoke, registry drop, lease release) is guaranteed.
+  // A fault on a path where a kill may have landed (a reap/respawn await that throws while `cancelled`
+  // is set) must STILL honor the kill: end `canceled`/`run.killed`, not `blocked`/`run.failed`. Route to
+  // terminalKilled when killed-by-intent, else contain as a crash. (BRO-1801 P20 — the F8 classification
+  // must win regardless of a concurrent provision/spawn/index fault.)
+  function containOrKilled(
+    ids: { runId: string; nodeId: string; runDir?: string },
+    reason: string,
+    respawns: number,
+  ): Promise<ReapResult> {
+    if (cancelled.has(ids.runId)) return terminalKilled(ids, null, Number.NaN, respawns);
+    return containCrash(ids, reason, respawns);
+  }
+
   async function reap(
     ctx: RunContext,
     entry: RunEntry,
@@ -491,7 +565,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     try {
       return await reapInner(ctx, entry, watermark, respawns);
     } catch (err) {
-      return containCrash(
+      return containOrKilled(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
         `reap failed: ${msg(err)}`,
         respawns,
@@ -507,6 +581,20 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   ): Promise<ReapResult> {
     // Ground truth: the real process exit code (Bun resolves a signal kill to a non-{0,10,20} value).
     const realCode = await entry.child.exited;
+    // Killed by intent (F8, BRO-1801) → a DISTINCT terminal: `canceled` + `run.killed`, regardless of
+    // the exit code the SIGKILL produced (it would otherwise route via the crash branch to
+    // blocked/run.failed). `cancelled` is set ONLY by kill() — a human chose to stop this run.
+    if (cancelled.has(ctx.runId)) {
+      // skipEmit when a tee-write failure already reaped this run in-band (failSupervision wrote a
+      // terminal event) — avoid a DUPLICATE terminal event; the park still corrects blocked→canceled.
+      return terminalKilled(
+        { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
+        entry,
+        realCode,
+        respawns,
+        entry.supervised.supervisionFailed(),
+      );
+    }
     // Scoped to THIS attempt (seq > watermark) so a respawn never reads a prior attempt's run.exiting.
     const declared = await lastRunExiting(ctx.runId, watermark);
     const mismatch =
@@ -652,10 +740,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   async function respawn(ctx: RunContext, respawns: number): Promise<ReapResult> {
     // A kill(runId) that landed while the prior attempt was reaping must WIN — never resurrect a killed
     // run with a fresh child + token. Checked here AND after the create await (a kill can land in it).
+    // A killed run ends `canceled`/`run.killed` (F8), same as a kill caught in reap — not a crash.
     if (cancelled.has(ctx.runId)) {
-      return containCrash(
+      return terminalKilled(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
-        "killed during respawn",
+        null,
+        Number.NaN,
         respawns,
       );
     }
@@ -670,7 +760,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     try {
       sandbox = await factory.create(ctx.runId); // idempotent → same worktree
     } catch (err) {
-      return containCrash(
+      // A kill that landed during this await must still win the classification (canceled/run.killed).
+      return containOrKilled(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
         `respawn provision failed: ${msg(err)}`,
         respawns,
@@ -679,9 +770,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     // Re-check: kill may have landed during the create await (it SIGKILLs the OLD, dead child + revokes,
     // then we must NOT spawn a replacement).
     if (cancelled.has(ctx.runId)) {
-      return containCrash(
+      return terminalKilled(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: sandbox.runDir },
-        "killed during respawn",
+        null,
+        Number.NaN,
         respawns,
       );
     }
@@ -690,7 +782,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     try {
       launched = await launch(nextCtx);
     } catch (err) {
-      return containCrash(
+      // A kill that landed during launch must still win the classification (canceled/run.killed).
+      return containOrKilled(
         { runId: nextCtx.runId, nodeId: nextCtx.nodeId, runDir: nextCtx.sandbox.runDir },
         `respawn spawn failed: ${msg(err)}`,
         respawns,
@@ -794,22 +887,36 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return { dispatched: true, runId, reaped };
   }
 
-  // ── Kill seam (F8, BRO-1801 owns the full switch) ───────────────────────────
+  // ── Kill switch (F8, BRO-1801) ──────────────────────────────────────────────
+  // Intent → SIGKILL the child (no cooperation — this is why runs are processes) → the run ends
+  // `canceled` + `run.killed` (the reap / respawn-check reads `cancelled` and routes to terminalKilled),
+  // worktree + branch PRESERVED. The bearer is revoked HERE so no in-flight model call survives the kill.
   function kill(runId: string): boolean {
     const entry = registry.get(runId);
     if (!entry) return false;
-    // Mark cancelled FIRST — a fresh-context respawn in flight consults this after its awaits and, if
-    // set, parks blocked instead of resurrecting the run with a fresh child + token.
+    // Mark cancelled FIRST — the background reap AND any in-flight respawn consult it: a killed run ends
+    // `canceled`/`run.killed`, and a respawn refuses to resurrect it with a fresh child + token.
     cancelled.add(runId);
     entry.child.kill("SIGKILL");
-    tokens.revoke(runId); // no in-flight model call survives the kill
-    // The background reap observes the exit → crash route → blocked + run.failed + drop + lease release.
+    tokens.revoke(runId); // bearer invalid immediately — a mid-tool-call model request now 401s
     return true;
+  }
+
+  // F8 stop-all — kill every live run. registry.list() already returns a fresh array copy, and kill()
+  // only SIGKILLs + revokes synchronously (registry removal is deferred to the async reap), so iterating
+  // it directly is safe — no live entry is skipped by a concurrent mutation.
+  function killAll(): number {
+    let killed = 0;
+    for (const entry of registry.list()) {
+      if (kill(entry.runId)) killed++;
+    }
+    return killed;
   }
 
   return {
     dispatch,
     kill,
+    killAll,
     get: (runId) => registry.get(runId),
     list: () => registry.list(),
     registry,

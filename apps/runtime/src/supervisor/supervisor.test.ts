@@ -500,12 +500,62 @@ describe("reap containment + attempt-scoping + kill race (P20 fixes)", () => {
     if (!out.dispatched) throw new Error("unreachable");
     await create2Started; // attempt 1 reaped fresh_context; respawn is now awaiting factory.create
     expect(sup.kill("r1")).toBe(true); // kill lands mid-respawn
-    proceed(); // create resolves; respawn re-checks cancelled → contain, NOT re-launch
+    proceed(); // create resolves; respawn re-checks cancelled → terminalKilled, NOT re-launch
     const res = await out.reaped;
     expect(scripted.calls()).toBe(1); // attempt-2 child was NEVER spawned — kill won the race
-    expect(res.crash).toBe(true);
-    expect(res.sessionStatus).toBe("blocked");
+    // F8 (BRO-1801): killed-by-intent ends canceled + run.killed even mid-respawn, not a crash
+    expect(res.crash).toBe(false);
+    expect(res.event).toBe("run.killed");
+    expect(res.sessionStatus).toBe("canceled");
     expect(tokens.size).toBe(0);
+  });
+
+  test("kill racing a respawn provision THROW still ends canceled + run.killed (not a crash) — P20 fix", async () => {
+    // The containOrKilled catch path: a kill lands during the respawn's factory.create await, and that
+    // create then THROWS (a transient re-attach fault). The catch must still honor the kill (canceled +
+    // run.killed), not mislabel it a crash (blocked + run.failed).
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    const scripted = scriptedSpawner([
+      { lines: [runExiting(10, "fresh_context")], exitCode: 10 },
+      { lines: [runExiting(0)], exitCode: 0 }, // must NEVER spawn
+    ]);
+    const base = createWorktreeSandboxFactory({ workspace: ws });
+    let createN = 0;
+    let signalCreate2 = () => {};
+    const create2Started = new Promise<void>((r) => {
+      signalCreate2 = r;
+    });
+    let proceed = () => {};
+    const create2Proceed = new Promise<void>((r) => {
+      proceed = r;
+    });
+    const factory = {
+      async create(runId: string, opts?: Parameters<typeof base.create>[1]) {
+        if (++createN === 2) {
+          signalCreate2();
+          await create2Proceed;
+          throw new Error("transient worktree re-attach fault");
+        }
+        return base.create(runId, opts);
+      },
+    };
+    const { sup } = makeSupervisor(ws, h, scripted.spawn, { factory });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    await create2Started;
+    expect(sup.kill("r1")).toBe(true); // kill lands mid-create
+    proceed(); // create then throws → catch → containOrKilled → cancelled set → terminalKilled
+    const res = await out.reaped;
+    expect(scripted.calls()).toBe(1);
+    expect(res.event).toBe("run.killed"); // NOT run.failed, despite the provision throw
+    expect(res.sessionStatus).toBe("canceled");
+    const killed = await h.db
+      .select()
+      .from(event)
+      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.RUN_KILLED)));
+    expect(killed).toHaveLength(1);
   });
 
   test("provision failure (factory.create throws) is contained: blocked + run.failed, lease released", async () => {
@@ -619,7 +669,7 @@ process.exit(0);`,
     expect(JSON.parse(said[0]?.payload ?? "{}")).toMatchObject({ text: "hi from real child" });
   });
 
-  test("SIGKILL a live real child → blocked + run.failed, and the runtime KEEPS serving /health", async () => {
+  test("kill a live real child (F8) → canceled + run.killed, and the runtime KEEPS serving /health", async () => {
     const ws = await makeWorkspace();
     const h = await openMem();
     await seedNode(h, "n0");
@@ -641,18 +691,24 @@ await new Promise(() => {});`,
     if (!out.dispatched) throw new Error("unreachable");
     // the run is live and registered
     expect(sup.list()).toHaveLength(1);
-    // F8 seam: SIGKILL it
+    // F8: kill by intent → SIGKILL
     expect(sup.kill("r1")).toBe(true);
     const res = await out.reaped;
 
-    // the child crash is CONTAINED — parked, not propagated
-    expect(res.crash).toBe(true);
-    expect(res.sessionStatus).toBe("blocked");
-    const failed = await h.db
+    // F8 (BRO-1801): a human-killed run ends canceled + run.killed (NOT the crash route), CONTAINED
+    expect(res.crash).toBe(false);
+    expect(res.event).toBe("run.killed");
+    expect(res.sessionStatus).toBe("canceled");
+    const killed = await h.db
       .select()
       .from(event)
-      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.RUN_FAILED)));
-    expect(failed).toHaveLength(1);
+      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.RUN_KILLED)));
+    expect(killed).toHaveLength(1);
+    // session canceled + node blocked (a human should look) in the DB
+    const [srow] = await h.db.select().from(session).where(eq(session.id, "r1"));
+    expect(srow?.status).toBe("canceled");
+    const [nrow] = await h.db.select().from(node).where(eq(node.id, "n0"));
+    expect(nrow?.state).toBe("blocked");
     // the worktree receipt is preserved, token cleaned, registry drained
     expect(await exists(join(ws, ".maestro", "worktrees", "run-r1"))).toBe(true);
     expect(tokens.size).toBe(0);
@@ -661,5 +717,50 @@ await new Promise(() => {});`,
     const after = await app.request("/health");
     expect(after.status).toBe(200);
     expect(await after.json()).toMatchObject({ ok: true });
+  });
+
+  test("killAll (F8 stop-all) kills every live run → each canceled + run.killed", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    await seedNode(h, "n1");
+    const scriptPath = await writeFixtureChild(
+      ws,
+      "hang-child2.ts",
+      `await Bun.write(Bun.stdout, JSON.stringify({actor:"system",type:"run.started"}) + "\\n");
+await new Promise(() => {});`,
+    );
+    let n = 0;
+    const { sup, tokens } = makeSupervisor(ws, h, realSpawn(scriptPath), {
+      mintRunId: () => `run${++n}`,
+    });
+    const a = await sup.dispatch("n0");
+    const b = await sup.dispatch("n1");
+    if (!a.dispatched || !b.dispatched) throw new Error("unreachable");
+    expect(sup.list()).toHaveLength(2);
+    // stop-all
+    expect(sup.killAll()).toBe(2);
+    const [ra, rb] = await Promise.all([a.reaped, b.reaped]);
+    for (const r of [ra, rb]) {
+      expect(r.event).toBe("run.killed");
+      expect(r.sessionStatus).toBe("canceled");
+    }
+    expect(sup.list()).toHaveLength(0);
+    expect(tokens.size).toBe(0); // every bearer revoked
+    // both runs emitted run.killed
+    const killed = await h.db.select().from(event).where(eq(event.type, EVENT_TYPES.RUN_KILLED));
+    expect(killed).toHaveLength(2);
+  });
+
+  test("kill / killAll on no live run → false / 0 (no throw)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([{ lines: [runExiting(0)], exitCode: 0 }]).spawn,
+    );
+    expect(sup.kill("ghost")).toBe(false);
+    expect(sup.killAll()).toBe(0);
   });
 });
