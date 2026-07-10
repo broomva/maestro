@@ -4,8 +4,9 @@
 //
 // The three done.check guarantees:
 //   1. The child env has NO key — the runtime key attaches only at forward time inside the proxy.
-//   2. Race: N children racing one budget never overspend — the DOLLAR caps (per_run + per_day) and
-//      the iteration cap are all EXACT under concurrency, because preflight RESERVES against each.
+//   2. Race: N children racing one budget never overspend — preflight RESERVES a per-call cost
+//      CEILING (>= actual) against every cap, so a call that would breach is refused up-front and the
+//      caps are exact under concurrency; the day accounting survives the UTC rollover.
 //   3. A refusal answers 402 budget_exhausted, emits budget.refused, and parks the run blocked.
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
@@ -16,7 +17,12 @@ import { runBudget } from "../db/schema";
 import { buildChildEnv } from "../harness/spawn-contract";
 import { BudgetGuard, deriveDayTotal, deriveSpentBySession, type MeteredRecord } from "./budget";
 import { MemoryEventSink } from "./events";
-import { DEFAULT_MODEL_PINS, resolvePinnedModel } from "./models";
+import {
+  DEFAULT_MODEL_PINS,
+  estimateCallCeilingUsd,
+  MODEL_PRICING,
+  resolvePinnedModel,
+} from "./models";
 import { createModelProxy, type ModelUpstream, PARK_STATE, serveProxy } from "./proxy";
 import { type SessionContext, SessionTokenRegistry } from "./tokens";
 
@@ -34,7 +40,8 @@ function ctx(session: string, budget: SessionContext["budget"]): SessionContext 
   return { session, runDir: `/runs/${session}`, role: "agent", budget };
 }
 
-/** A guard with a pinned clock + an explicit reserve so the arithmetic in tests is exact. */
+/** A guard with a pinned clock + an explicit default reserve so the guard-level arithmetic is exact.
+ *  (The proxy passes a model-priced ceiling per call; these guard tests use the default reserve.) */
 function guardWith(sink: MemoryEventSink, reserveUsd = 0.5, dayTotalUsd = 0): BudgetGuard {
   return new BudgetGuard(handle.db, sink, { now: FIXED_NOW, reserveUsd, dayTotalUsd });
 }
@@ -55,7 +62,7 @@ test("proxy tokens: mint resolves, revoke invalidates, re-mint drops the old tok
   expect(reg.size).toBe(0);
 });
 
-// ── 2. model pinning ─────────────────────────────────────────────────────────
+// ── 2. model pinning + cost ceiling ──────────────────────────────────────────
 
 test("proxy pins a model per role, env override wins, blank override ignored", () => {
   expect(resolvePinnedModel("agent", {})).toBe(DEFAULT_MODEL_PINS.agent);
@@ -67,6 +74,26 @@ test("proxy pins a model per role, env override wins, blank override ignored", (
   );
 });
 
+test("cost ceiling scales with max_tokens, exceeds a real Opus call cost, and is >= 0", () => {
+  const small = estimateCallCeilingUsd("claude-opus-4-8", { messages: [], max_tokens: 100 }, {});
+  const big = estimateCallCeilingUsd("claude-opus-4-8", { messages: [], max_tokens: 64000 }, {});
+  expect(big).toBeGreaterThan(small); // scales with the request
+  // a 64k-output Opus call ceiling must exceed a typical real call (~$1) so the reserve truly bounds spend
+  expect(big).toBeGreaterThan(1);
+  // unknown model → conservative fallback price, never 0/negative
+  expect(estimateCallCeilingUsd("mystery-model", { max_tokens: 1000 }, {})).toBeGreaterThan(0);
+  // env price override is honored
+  const overridden = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    { max_tokens: 1000 },
+    { MAESTRO_PRICE_CLAUDE_OPUS_4_8: "1/1" },
+  );
+  expect(overridden).toBeLessThan(
+    estimateCallCeilingUsd("claude-opus-4-8", { max_tokens: 1000 }, {}),
+  );
+  expect(MODEL_PRICING["claude-opus-4-8"]?.outputPerMtok).toBeGreaterThan(0);
+});
+
 // ── 3. budget guard: reserve / reconcile / release ───────────────────────────
 
 test("budget preflight RESERVES cost + an iteration under caps", async () => {
@@ -75,7 +102,7 @@ test("budget preflight RESERVES cost + an iteration under caps", async () => {
   const v = await guard.preflight(ctx("run-1", { per_run_usd: 5, max_iterations: 3 }));
   expect(v.ok).toBe(true);
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
-  expect(row?.iterations).toBe(1); // reserved
+  expect(row?.iterations).toBe(1);
   expect(row?.spentUsd).toBeCloseTo(0.5, 6); // reservation held
 });
 
@@ -98,11 +125,12 @@ test("budget release refunds the reservation but KEEPS the consumed iteration", 
   const guard = guardWith(new MemoryEventSink(), 0.5);
   await guard.open("run-1");
   const c = ctx("run-1", { per_run_usd: 5, max_iterations: 10 });
-  await guard.preflight(c); // spent 0.5, iter 1
+  await guard.preflight(c);
   await guard.release(c); // failed/non-billable call
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
-  expect(row?.spentUsd).toBeCloseTo(0, 6); // refunded
+  expect(row?.spentUsd).toBeCloseTo(0, 6);
   expect(row?.iterations).toBe(1); // attempt kept — a flaky upstream drains iterations, fail-closed
+  expect(guard.dayTotalUsd).toBeCloseTo(0, 6);
 });
 
 test("budget preflight REFUSES per_run and journals budget.refused (parks blocked)", async () => {
@@ -110,21 +138,35 @@ test("budget preflight REFUSES per_run and journals budget.refused (parks blocke
   const guard = guardWith(sink, 0.5);
   await guard.open("run-1");
   const c = ctx("run-1", { per_run_usd: 1, max_iterations: 100 });
-  await guard.preflight(c); // spent 0.5
+  await guard.preflight(c);
   await guard.meter(c, { usd: 0.5 }); // spent 0.5
-  await guard.preflight(c); // spent 1.0
+  await guard.preflight(c);
   await guard.meter(c, { usd: 0.5 }); // spent 1.0 (full)
   const v = await guard.preflight(c); // 1.0 + 0.5 > 1 → refuse
   expect(v).toEqual({ ok: false, reason: "per_run" });
-  const refused = sink.ofType(EVENT_TYPES.BUDGET_REFUSED);
-  expect(refused.length).toBe(1);
-  expect(refused[0]?.payload).toEqual({ session: "run-1", reason: "per_run" });
+  expect(sink.ofType(EVENT_TYPES.BUDGET_REFUSED)[0]?.payload).toEqual({
+    session: "run-1",
+    reason: "per_run",
+  });
   expect(PARK_STATE).toBe("blocked");
+});
+
+test("budget REFUSES a call whose reserve exceeds the remaining budget (no overspend, actual>reserve)", async () => {
+  // The round-1 disqualifier: a call costing more than the default reserve overspent. With a ceiling
+  // reserve >= actual, such a call is refused UP-FRONT — two concurrent $2-reserve calls on a $1 cap
+  // both refuse and nothing is spent (vs the old code settling $4).
+  const guard = guardWith(new MemoryEventSink(), 0.5);
+  await guard.open("run-1");
+  const c = ctx("run-1", { per_run_usd: 1 });
+  const verdicts = await Promise.all([guard.preflight(c, 2), guard.preflight(c, 2)]);
+  expect(verdicts.every((v) => !v.ok)).toBe(true);
+  const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
+  expect(row?.spentUsd).toBeCloseTo(0, 6); // nothing spent — the calls never forwarded
 });
 
 test("budget preflight REFUSES per_day from the in-memory accumulator", async () => {
   const sink = new MemoryEventSink();
-  const guard = guardWith(sink, 0.5, 20); // dayTotal seeded at 20
+  const guard = guardWith(sink, 0.5, 20);
   await guard.open("run-1");
   const v = await guard.preflight(ctx("run-1", { per_day_usd: 20, per_run_usd: 100 }));
   expect(v).toEqual({ ok: false, reason: "per_day" });
@@ -133,45 +175,71 @@ test("budget preflight REFUSES per_day from the in-memory accumulator", async ()
 
 test("budget preflight REFUSES at the iteration cap (fails closed with no row too)", async () => {
   const guard = guardWith(new MemoryEventSink(), 0.5);
-  // never called open() → no row → fail closed as iteration_cap
-  const v = await guard.preflight(ctx("ghost", { max_iterations: 5 }));
+  const v = await guard.preflight(ctx("ghost", { max_iterations: 5 })); // no open() → no row
   expect(v).toEqual({ ok: false, reason: "iteration_cap" });
+  expect(guard.dayTotalUsd).toBeCloseTo(0, 6); // day reservation rolled back on the failure
 });
+
+test("budget a refused per_run does NOT drive the day accumulator negative", async () => {
+  const guard = guardWith(new MemoryEventSink(), 0.5);
+  await guard.open("run-1");
+  // per_run 0.1 < reserve 0.5 → the SQL reservation fails AFTER the day reserve was taken; the rollback
+  // must be rollover-aware + clamped, never negative.
+  const v = await guard.preflight(ctx("run-1", { per_day_usd: 100, per_run_usd: 0.1 }), 0.5);
+  expect(v).toEqual({ ok: false, reason: "per_run" });
+  expect(guard.dayTotalUsd).toBeGreaterThanOrEqual(0);
+  expect(guard.dayTotalUsd).toBeCloseTo(0, 6);
+});
+
+// ── 4. day rollover (per_day is a DAILY cap, and survives a cross-midnight call) ──
 
 test("budget per_day ROLLS OVER at the day boundary (not a lifetime cap)", async () => {
   let clock = 1_700_000_000_000;
   const guard = new BudgetGuard(handle.db, new MemoryEventSink(), {
     now: () => clock,
     reserveUsd: 0.5,
-    dayTotalUsd: 0,
   });
   await guard.open("run-1");
   const c = ctx("run-1", { per_day_usd: 0.5 });
   await guard.preflight(c);
-  await guard.meter(c, { usd: 0.5 }); // day total now 0.5 (full)
+  await guard.meter(c, { usd: 0.5 }); // day total 0.5 (full)
   expect((await guard.preflight(c)).ok).toBe(false); // same day → refused
   clock += 86_400_000; // cross into the next UTC day
   expect((await guard.preflight(c)).ok).toBe(true); // rolled over → fresh day budget
 });
 
-// ── 4. the race: N children racing one budget, no overspend ───────────────────
+test("budget a call reserved before midnight and metered after books FULL actual to the new day", async () => {
+  // The round-2 fail-open: meter applied a relative delta to a bucket rollover had zeroed, dropping the
+  // crossing call — per_day then admitted more. Booking full actual to the new day closes it.
+  let clock = 1_700_000_000_000;
+  const guard = new BudgetGuard(handle.db, new MemoryEventSink(), {
+    now: () => clock,
+    reserveUsd: 0.5,
+  });
+  await guard.open("run-1");
+  const c = ctx("run-1", { per_day_usd: 1 });
+  await guard.preflight(c, 0.5); // reserved on day D
+  clock += 86_400_000; // cross midnight before the response comes back
+  await guard.meter(c, { usd: 0.5 }, 0.5); // metered on day D+1
+  expect(guard.dayTotalUsd).toBeCloseTo(0.5, 6); // the crossing call is counted on D+1, not lost
+});
+
+// ── 5. the race: N children racing one budget, no overspend ───────────────────
 
 test("RACE: the per_run DOLLAR cap is EXACT under concurrency (reservation, unbounded iters)", async () => {
-  // The old bug: preflight checked but did not RESERVE dollars, so all N passed and overspent. With
-  // reservation, only floor(cap/reserve) can hold the budget at once — even with iterations unbounded.
   const guard = guardWith(new MemoryEventSink(), 0.25);
   await guard.open("run-1");
   const c = ctx("run-1", { per_run_usd: 1 }); // no max_iterations on purpose
   const verdicts = await Promise.all(Array.from({ length: 40 }, () => guard.preflight(c)));
   expect(verdicts.filter((v) => v.ok).length).toBe(4); // 4 × 0.25 = 1.0, no more
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
-  expect(row?.spentUsd).toBeCloseTo(1.0, 6); // reserved spend never exceeds per_run
+  expect(row?.spentUsd).toBeCloseTo(1.0, 6);
 });
 
 test("RACE: the per_day DOLLAR cap is EXACT under concurrency", async () => {
   const guard = guardWith(new MemoryEventSink(), 0.25);
   await guard.open("run-1");
-  const c = ctx("run-1", { per_day_usd: 1, per_run_usd: 100 }); // per_day binds
+  const c = ctx("run-1", { per_day_usd: 1, per_run_usd: 100 });
   const verdicts = await Promise.all(Array.from({ length: 40 }, () => guard.preflight(c)));
   expect(verdicts.filter((v) => v.ok).length).toBe(4);
   expect(guard.dayTotalUsd).toBeCloseTo(1.0, 6);
@@ -203,9 +271,9 @@ test("RACE: concurrent reserve+reconcile cycles keep exact books (no lost update
   expect(row?.spentUsd).toBeCloseTo(N * 0.1, 6); // 5.0 exactly
 });
 
-// ── 5. the proxy handler: key-free child + forward + meter + refusals ─────────
+// ── 6. the proxy handler: key-free child + forward + meter + refusals ─────────
 
-function keyCapturingUpstream(usage: { usd: number; tokens?: number } | undefined = { usd: 0.3 }): {
+function keyCapturingUpstream(usage: { usd: number; tokens?: number }): {
   upstream: ModelUpstream;
   seenKey: () => string | null;
 } {
@@ -251,19 +319,18 @@ test("proxy: the child env is key-free, and the runtime key attaches only at for
   const res = await app.request("/v1/messages", {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ messages: [] }),
+    body: JSON.stringify({ messages: [], max_tokens: 100 }),
   });
   expect(res.status).toBe(200);
   expect(seenKey()).toBe("sk-ant-RUNTIME"); // attached at forward time, from the supervisor
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
-  expect(row?.spentUsd).toBeCloseTo(0.3, 6); // reserve 0.5 reconciled to actual 0.3
+  expect(row?.spentUsd).toBeCloseTo(0.3, 6); // reserve (ceiling) reconciled to actual 0.3
 });
 
 test("proxy: an unknown/absent bearer is 401 and never forwards", async () => {
-  const guard = guardWith(new MemoryEventSink());
-  const { upstream, seenKey } = keyCapturingUpstream();
+  const { upstream, seenKey } = keyCapturingUpstream({ usd: 0.3 });
   const app = createModelProxy({
-    guard,
+    guard: guardWith(new MemoryEventSink()),
     tokens: new SessionTokenRegistry(),
     upstream,
     apiKey: () => "sk",
@@ -281,10 +348,10 @@ test("proxy: an unknown/absent bearer is 401 and never forwards", async () => {
 test("proxy: a revoked bearer is 401 and never forwards", async () => {
   const guard = guardWith(new MemoryEventSink());
   const tokens = new SessionTokenRegistry(() => "bearer-1");
-  const { upstream, seenKey } = keyCapturingUpstream();
+  const { upstream, seenKey } = keyCapturingUpstream({ usd: 0.3 });
   await guard.open("run-1");
   const token = tokens.mint(ctx("run-1", { per_run_usd: 5 }));
-  tokens.revoke("run-1"); // killed
+  tokens.revoke("run-1");
   const app = createModelProxy({ guard, tokens, upstream, apiKey: () => "sk", env: {} });
   const res = await app.request("/v1/messages", {
     method: "POST",
@@ -294,20 +361,20 @@ test("proxy: a revoked bearer is 401 and never forwards", async () => {
   expect(seenKey()).toBeNull();
 });
 
-test("proxy: an exhausted budget answers 402 budget_exhausted and never forwards", async () => {
+test("proxy: an over-budget call answers 402 budget_exhausted and never forwards", async () => {
   const sink = new MemoryEventSink();
   const guard = guardWith(sink, 0.5);
   const tokens = new SessionTokenRegistry(() => "bearer-1");
-  const { upstream, seenKey } = keyCapturingUpstream();
+  const { upstream, seenKey } = keyCapturingUpstream({ usd: 0.3 });
   await guard.open("run-1");
-  await guard.preflight(ctx("run-1", { per_run_usd: 0.5 })); // reserve fills the $0.5 cap
-  const token = tokens.mint(ctx("run-1", { per_run_usd: 0.5, max_iterations: 100 }));
+  // per_run of a fraction of a cent — a real call's ceiling exceeds it → refused up-front.
+  const token = tokens.mint(ctx("run-1", { per_run_usd: 0.0001, max_iterations: 100 }));
   const app = createModelProxy({ guard, tokens, upstream, apiKey: () => "sk", env: {} });
 
   const res = await app.request("/v1/messages", {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ messages: [] }),
+    body: JSON.stringify({ messages: [], max_tokens: 1000 }),
   });
   expect(res.status).toBe(402);
   const body = (await res.json()) as { error: { code: string } };
@@ -330,7 +397,7 @@ test("proxy: an upstream throw RELEASES the reservation and returns a retryable 
   const res = await app.request("/v1/messages", {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ messages: [] }),
+    body: JSON.stringify({ messages: [], max_tokens: 100 }),
   });
   expect(res.status).toBe(502);
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
@@ -341,10 +408,9 @@ test("proxy: an upstream throw RELEASES the reservation and returns a retryable 
 test("proxy: a no-usage response releases the reservation", async () => {
   const guard = guardWith(new MemoryEventSink(), 0.5);
   const tokens = new SessionTokenRegistry(() => "bearer-1");
-  // A 200 with no usage (a default param can't carry `undefined`, so build it inline).
   const upstream: ModelUpstream = {
     async forward(req) {
-      return { status: 200, body: { ok: true, model: req.model } };
+      return { status: 200, body: { ok: true, model: req.model } }; // no usage
     },
   };
   await guard.open("run-1");
@@ -353,19 +419,19 @@ test("proxy: a no-usage response releases the reservation", async () => {
   await app.request("/v1/messages", {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ messages: [] }),
+    body: JSON.stringify({ messages: [], max_tokens: 100 }),
   });
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
   expect(row?.spentUsd).toBeCloseTo(0, 6);
 });
 
-// ── 6. the listener refuses a non-loopback bind (key confinement AS CODE) ──────
+// ── 7. the listener refuses a non-loopback bind (key confinement AS CODE) ──────
 
 test("serveProxy REFUSES a non-loopback hostname", () => {
   const app = createModelProxy({
     guard: guardWith(new MemoryEventSink()),
     tokens: new SessionTokenRegistry(),
-    upstream: keyCapturingUpstream().upstream,
+    upstream: keyCapturingUpstream({ usd: 0.3 }).upstream,
     apiKey: () => "sk",
     env: {},
   });
@@ -376,7 +442,7 @@ test("serveProxy binds loopback and exposes a fetchable url", async () => {
   const app = createModelProxy({
     guard: guardWith(new MemoryEventSink()),
     tokens: new SessionTokenRegistry(),
-    upstream: keyCapturingUpstream().upstream,
+    upstream: keyCapturingUpstream({ usd: 0.3 }).upstream,
     apiKey: () => "sk",
     env: {},
   });
@@ -384,13 +450,13 @@ test("serveProxy binds loopback and exposes a fetchable url", async () => {
   try {
     expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     const res = await fetch(`${server.url}/v1/messages`, { method: "POST" });
-    expect(res.status).toBe(401); // reachable, and unauthenticated calls are refused
+    expect(res.status).toBe(401);
   } finally {
     server.stop();
   }
 });
 
-// ── 7. D5 derivation helpers (BRO-1814 wires these at startup) ─────────────────
+// ── 8. D5 derivation helpers (BRO-1814 wires these at startup) ─────────────────
 
 test("proxy budget derivation: per-session spend and day total from budget.metered", () => {
   const metered: MeteredRecord[] = [
@@ -400,5 +466,5 @@ test("proxy budget derivation: per-session spend and day total from budget.meter
   ];
   expect(deriveSpentBySession(metered).get("a")).toBeCloseTo(1.5, 6);
   expect(deriveSpentBySession(metered).get("b")).toBeCloseTo(2.0, 6);
-  expect(deriveDayTotal(metered, 100)).toBeCloseTo(1.5, 6); // only ts>=100 counts
+  expect(deriveDayTotal(metered, 100)).toBeCloseTo(1.5, 6);
 });

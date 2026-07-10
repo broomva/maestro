@@ -68,6 +68,33 @@ upstream-throw: 502 | type: upstream_unavailable
 - **Model pinning** lives supervisor-side (role → pinned model; `MAESTRO_MODEL_<ROLE>` override) so
   a version bump is one config change and the D8 canary (BRO-1806) can route without the child knowing.
 
+## P20 round-2 fixes (block 4/10 → applied)
+
+Round 2 confirmed D2 (key confinement) closed but found D1 (overspend) still open **at shipped
+defaults**, plus two new fail-open seams the round-1 fix introduced. All closed:
+
+1. **Reserve too small → overspend** (round-1 disqualifier reproduced): a flat `$0.50` reserve is
+   below a real Opus call, so the reservation didn't bound spend. Fixed with a **per-call cost
+   ceiling** (`models.ts estimateCallCeilingUsd`) = model price × request `max_tokens` (+ input
+   over-estimate + safety margin) ≥ actual. A call whose ceiling exceeds the remaining budget is
+   **refused up-front**. The reviewer's exact repro is now closed — live socket dogfood:
+
+   ```
+   ceiling for a 64k-out Opus call: $5.52 (> the $1 cap → must refuse)
+   two concurrent $2 calls on a $1 cap: 402 402 (both refused upfront)
+   spent_usd after the round-1 repro: 0 (0 = NO overspend; was $4.00)
+   right-sized Haiku call: 200 | metered spent: 0.020
+   ```
+
+2. **per_day fail-open across UTC midnight**: meter applied a relative delta to a bucket rollover
+   had zeroed. Fixed — the day accounting is **split into reserved + spent**; meter books the **full
+   actual** to the current day, so a call reserved before midnight and metered after is counted on
+   the new day (regression test: `books FULL actual to the new day`).
+3. **Refusal-path day rollback drove the accumulator negative** → centralized `#releaseDayReservation`
+   (rollover-aware + `Math.max(0,…)`), the one mutation helper so no site drifts.
+4. Plus: preflight rolls back the day reservation if the SQL UPDATE **throws** (not just
+   rowsAffected 0); dropped the dead `token === null ||` disjunct in the revocation re-check.
+
 ## P20 round-1 fixes (block 3/10 → applied)
 
 The cross-model gate BLOCKED the first cut and was right to. Applied:

@@ -1,18 +1,22 @@
 // The budget-in-path guard (HARNESS §3, F3.1, AUTONOMY §4). AUTHORITATIVE state is `run_budget`
-// (per-session `spent_usd` + `iterations`) plus an in-memory day-total accumulator. "On the invoice
-// is too late" — every model call is RESERVED before it forwards and RECONCILED after it returns.
+// (per-session `spent_usd` + `iterations`) plus an in-memory day accounting. "On the invoice is too
+// late" — every model call is RESERVED before it forwards and RECONCILED after it returns.
 //
-// Why reserve-then-reconcile (not check-then-meter): metering only after the response is a race — N
-// concurrent callers all read the same pre-meter spend, all pass the cap, and overspend (an earlier
-// cut did exactly this). Instead, preflight RESERVES a conservative per-call cost against every cap
-// ATOMICALLY (per_run + iterations in one conditional SQL UPDATE; per_day in a synchronous in-memory
-// step the single-threaded event loop makes atomic). meter() reconciles the reservation to the actual
-// cost; a failed/non-billable call releases it. So spent-including-in-flight-reservations never
-// exceeds a cap, as long as the reservation is >= the real per-call cost (see #reserveUsd).
+// Reserve-then-reconcile: preflight RESERVES a per-call cost CEILING (models.ts estimateCallCeilingUsd
+// — output bounded by max_tokens, input over-estimated, so ceiling >= actual) against every cap
+// ATOMICALLY. Because the reservation is >= the real cost, a call that would breach a cap is refused
+// UP-FRONT (the safe answer when one call could overspend), and meter() only ever reconciles DOWNWARD
+// to the actual — so spend can never exceed a cap under any concurrency. A failed/non-billable call
+// releases the reservation. The per-call reserve is threaded from preflight → meter/release by the
+// caller (the proxy), so each call reconciles against exactly what it reserved.
 //
-// Concurrency: the reservation UPDATE is a single statement libSQL serializes as the sole writer, so
-// two callers can never both take the last slot; the day reservation is a synchronous check+increment
+// Concurrency: the per_run + iteration reservation is a single conditional SQL UPDATE libSQL
+// serializes as the sole writer; the per_day reservation is a synchronous in-memory check+increment
 // (no await between), so JS's cooperative scheduling makes it atomic too.
+//
+// Day accounting is SPLIT into reserved (in-flight) + spent (metered) so it survives the UTC day
+// rollover: a call reserved before midnight and metered after books its FULL actual to the new day
+// (never a stale relative delta against a freshly-zeroed bucket — a fail-open seam otherwise).
 
 import type { Budget } from "@maestro/protocol";
 import { EVENT_TYPES } from "@maestro/protocol";
@@ -34,12 +38,8 @@ export interface MeterInput {
   tokens?: number;
 }
 
-/**
- * The conservative per-call cost reserved at preflight (USD). The no-overspend guarantee is exact
- * when this is >= the largest a single model call can cost; below that, an in-flight call can overshoot
- * a cap by at most (actual - reserve) and the reconcile keeps the books exact afterward. Operators set
- * it to their max per-call cost for a hard guarantee.
- */
+/** Fallback per-call reservation when the caller passes none (direct guard use / tests). The proxy
+ *  always passes a model-priced ceiling (models.ts estimateCallCeilingUsd), which is the sound value. */
 export const DEFAULT_RESERVE_USD = 0.5;
 
 const DAY_MS = 86_400_000;
@@ -48,9 +48,9 @@ const dayBucket = (ms: number): number => Math.floor(ms / DAY_MS);
 export interface BudgetGuardOptions {
   /** Injected clock (epoch ms). Defaults to Date.now; tests pin it. */
   now?: () => number;
-  /** Day-total seed — BRO-1814 derives it from `budget.metered` at F9.2 startup (D5) and passes it. */
+  /** Day metered-total seed — BRO-1814 derives it from `budget.metered` at F9.2 startup (D5). */
   dayTotalUsd?: number;
-  /** Per-call reservation (see DEFAULT_RESERVE_USD). */
+  /** Fallback per-call reserve (see DEFAULT_RESERVE_USD). */
   reserveUsd?: number;
 }
 
@@ -58,32 +58,36 @@ export class BudgetGuard {
   readonly #db: IndexDb;
   readonly #sink: BudgetEventSink;
   readonly #now: () => number;
-  readonly #reserveUsd: number;
-  #dayTotalUsd: number;
+  readonly #defaultReserve: number;
+  /** In-flight reservations for the current day (released on meter/reconcile). */
+  #dayReservedUsd = 0;
+  /** Metered actual spend for the current day. */
+  #daySpentUsd: number;
   #dayBucket: number;
 
   constructor(db: IndexDb, sink: BudgetEventSink, opts: BudgetGuardOptions = {}) {
     this.#db = db;
     this.#sink = sink;
     this.#now = opts.now ?? Date.now;
-    this.#reserveUsd = opts.reserveUsd ?? DEFAULT_RESERVE_USD;
-    this.#dayTotalUsd = opts.dayTotalUsd ?? 0;
+    this.#defaultReserve = opts.reserveUsd ?? DEFAULT_RESERVE_USD;
+    this.#daySpentUsd = opts.dayTotalUsd ?? 0;
     this.#dayBucket = dayBucket(this.#now());
   }
 
-  /** The runtime-day total spend so far (workspace scope) — observability + the per-day cap. Rolls
-   *  over at the UTC day boundary so per_day is a DAILY cap, not a lifetime one. */
+  /** The runtime-day total (reserved in-flight + metered), workspace scope — the per_day cap check +
+   *  observability. Rolls over at the UTC day boundary so per_day is a DAILY cap, not a lifetime one. */
   get dayTotalUsd(): number {
     this.#rolloverIfNeeded();
-    return this.#dayTotalUsd;
+    return this.#dayReservedUsd + this.#daySpentUsd;
   }
 
-  /** Reset the day total when the clock crosses into a new UTC day (24/7 runtime, D5). */
+  /** Reset the day accounting when the clock crosses into a new UTC day (24/7 runtime, D5). */
   #rolloverIfNeeded(): void {
     const b = dayBucket(this.#now());
     if (b !== this.#dayBucket) {
       this.#dayBucket = b;
-      this.#dayTotalUsd = 0;
+      this.#dayReservedUsd = 0;
+      this.#daySpentUsd = 0;
     }
   }
 
@@ -93,28 +97,27 @@ export class BudgetGuard {
   }
 
   /**
-   * Pre-forward guard (HARNESS §3 step 1). RESERVES a conservative cost + one iteration against every
-   * cap atomically; refuses if any cap would be exceeded. Reserving up-front (not counting on the
-   * response) is what makes the caps hold under concurrency.
+   * Pre-forward guard (HARNESS §3 step 1). RESERVES `reserveUsd` (the per-call cost ceiling) + one
+   * iteration against every cap atomically; refuses if any cap would be exceeded. Because the reserve
+   * is >= the real cost, a call that would breach is refused here, before it forwards.
    */
-  async preflight(ctx: SessionContext): Promise<BudgetVerdict> {
+  async preflight(ctx: SessionContext, reserveUsd = this.#defaultReserve): Promise<BudgetVerdict> {
     const { budget } = ctx;
-    const reserve = this.#reserveUsd;
+    const reserve = reserveUsd;
 
-    // (a) per-day cap — a synchronous check+reserve on the in-memory accumulator (no await between
-    // them, so two racing preflights can't both take the last day slot). The day total is
-    // WORKSPACE-scope: EVERY session's reservation counts toward it (a session without its own per_day
-    // cap still contributes to the day that other sessions' caps check against), so we always reserve
-    // — the cap is only ENFORCED when this node carries a per_day_usd.
+    // (a) per-day cap — synchronous check+reserve on the in-memory accumulator (no await between, so
+    // racing preflights can't both take the last day slot). Day total is WORKSPACE-scope: every
+    // session's reservation counts toward it (a session without its own per_day cap still contributes
+    // to the day other sessions' caps check against), so always reserve; enforce only when set.
     this.#rolloverIfNeeded();
-    if (budget.per_day_usd !== undefined && this.#dayTotalUsd + reserve > budget.per_day_usd) {
+    if (budget.per_day_usd !== undefined && this.dayTotalUsd + reserve > budget.per_day_usd) {
       await this.#refuse(ctx, "per_day");
       return { ok: false, reason: "per_day" };
     }
-    this.#dayTotalUsd += reserve;
+    this.#dayReservedUsd += reserve;
 
-    // (b) per-run spend + iteration cap — one conditional UPDATE reserving both. rowsAffected 0 means
-    // a cap blocked the reservation (or the row is missing).
+    // (b) per-run spend + iteration cap — one conditional UPDATE reserving both. A throw or a
+    // rowsAffected 0 must roll back the day reservation we just took (fail-closed availability).
     const conds = [eq(runBudget.sessionId, ctx.session)];
     if (budget.per_run_usd !== undefined) {
       conds.push(sql`${runBudget.spentUsd} + ${reserve} <= ${budget.per_run_usd}`);
@@ -122,17 +125,24 @@ export class BudgetGuard {
     if (budget.max_iterations !== undefined) {
       conds.push(lt(runBudget.iterations, budget.max_iterations));
     }
-    const res = await this.#db
-      .update(runBudget)
-      .set({
-        spentUsd: sql`${runBudget.spentUsd} + ${reserve}`,
-        iterations: sql`${runBudget.iterations} + 1`,
-        lastCallAt: this.#now(),
-      })
-      .where(and(...conds));
+    let rowsAffected: number;
+    try {
+      const res = await this.#db
+        .update(runBudget)
+        .set({
+          spentUsd: sql`${runBudget.spentUsd} + ${reserve}`,
+          iterations: sql`${runBudget.iterations} + 1`,
+          lastCallAt: this.#now(),
+        })
+        .where(and(...conds));
+      rowsAffected = res.rowsAffected;
+    } catch (err) {
+      this.#releaseDayReservation(reserve); // never strand a day reservation on a DB error
+      throw err;
+    }
 
-    if (res.rowsAffected === 0) {
-      this.#dayTotalUsd -= reserve; // roll back the day reservation (synchronous)
+    if (rowsAffected === 0) {
+      this.#releaseDayReservation(reserve);
       const reason = await this.#classifyRunRefusal(ctx.session, budget, reserve);
       await this.#refuse(ctx, reason);
       return { ok: false, reason };
@@ -141,19 +151,26 @@ export class BudgetGuard {
   }
 
   /**
-   * Reconcile a reservation to the ACTUAL cost of a completed call (HARNESS §3 step 3). The delta
-   * (actual - reserved) is applied atomically; emits `budget.metered` with the real usage. Must follow
-   * a `preflight` for this call.
+   * Reconcile a reservation to the ACTUAL cost of a completed call (HARNESS §3 step 3). Pass the SAME
+   * `reserveUsd` the matching preflight used. Emits `budget.metered` with the real usage. The day
+   * accounting books the FULL actual to the CURRENT day (rollover-safe), not a relative delta.
    */
-  async meter(ctx: SessionContext, input: MeterInput): Promise<void> {
+  async meter(
+    ctx: SessionContext,
+    input: MeterInput,
+    reserveUsd = this.#defaultReserve,
+  ): Promise<void> {
     const actual = Number.isFinite(input.usd) && input.usd > 0 ? input.usd : 0;
-    const delta = actual - this.#reserveUsd;
     await this.#db
       .update(runBudget)
-      .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} + ${delta})`, lastCallAt: this.#now() })
+      .set({
+        spentUsd: sql`max(0, ${runBudget.spentUsd} + ${actual - reserveUsd})`,
+        lastCallAt: this.#now(),
+      })
       .where(eq(runBudget.sessionId, ctx.session));
     this.#rolloverIfNeeded();
-    this.#dayTotalUsd = Math.max(0, this.#dayTotalUsd + delta);
+    this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reserveUsd); // release the reservation
+    this.#daySpentUsd += actual; // book full actual to the current day (survives a cross-midnight call)
     await this.#sink.emit(ctx.runDir, {
       ts: new Date(this.#now()).toISOString(),
       actor: "system",
@@ -165,15 +182,22 @@ export class BudgetGuard {
   /**
    * Release a reservation for a call that never billed (upstream error / no usage): refund the
    * reserved dollars but KEEP the consumed iteration — a flaky upstream then drains `max_iterations`
-   * and parks the run (fail-closed) rather than retrying free forever. Emits nothing (no spend).
+   * and parks the run (fail-closed) rather than retrying free forever. Emits nothing (no spend). Pass
+   * the SAME `reserveUsd` the matching preflight used.
    */
-  async release(ctx: SessionContext): Promise<void> {
+  async release(ctx: SessionContext, reserveUsd = this.#defaultReserve): Promise<void> {
     await this.#db
       .update(runBudget)
-      .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} - ${this.#reserveUsd})` })
+      .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} - ${reserveUsd})` })
       .where(eq(runBudget.sessionId, ctx.session));
+    this.#releaseDayReservation(reserveUsd);
+  }
+
+  /** Roll back an in-memory day reservation — rollover-aware + clamped, the ONE mutation helper so no
+   *  site drifts (a missing rollover/clamp here drove the accumulator negative in P20 round-2). */
+  #releaseDayReservation(reserve: number): void {
     this.#rolloverIfNeeded();
-    this.#dayTotalUsd = Math.max(0, this.#dayTotalUsd - this.#reserveUsd);
+    this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reserve);
   }
 
   /** Name the run-scoped cap that blocked a reservation (per_run before iteration_cap). */

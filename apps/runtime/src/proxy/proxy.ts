@@ -12,7 +12,7 @@ import type { ErrorResponse } from "@maestro/protocol";
 import { Hono } from "hono";
 import type { ChildRole } from "../harness/spawn-contract";
 import type { BudgetGuard } from "./budget";
-import { resolvePinnedModel } from "./models";
+import { estimateCallCeilingUsd, resolvePinnedModel } from "./models";
 import type { SessionContext, SessionTokenRegistry } from "./tokens";
 
 /** The result of a forwarded model call — the body passed back plus the usage the proxy reconciles. */
@@ -79,8 +79,15 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
       return c.json(body, 401);
     }
 
-    // 2. Budget guard — RESERVE before forwarding. Over any cap → 402, request never reaches Anthropic.
-    const verdict = await deps.guard.preflight(ctx);
+    // 2. Budget guard — RESERVE the per-call cost CEILING (model price × request max_tokens) before
+    // forwarding. Because the reserve is >= the real cost, a call that would breach a cap is refused
+    // here → 402, and the request never reaches Anthropic. The same `reserve` is threaded to
+    // meter/release so the call reconciles against exactly what it reserved.
+    const payload = await c.req.json().catch(() => ({}));
+    const model = resolvePinnedModel(ctx.role, deps.env);
+    const reserve = estimateCallCeilingUsd(model, payload, deps.env);
+
+    const verdict = await deps.guard.preflight(ctx, reserve);
     if (!verdict.ok) {
       const body: ErrorResponse = {
         error: {
@@ -93,20 +100,19 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
     }
 
     // 2b. Revocation is checked AFTER the reserve's await too — a kill mid-preflight must not let one
-    // more call land. Release the reservation we just took.
-    if (token === null || deps.tokens.resolve(token) === null) {
-      await deps.guard.release(ctx);
+    // more call land. Release the reservation we just took. (`token` is non-null here — a null token
+    // already 401'd at step 1.)
+    if (deps.tokens.resolve(token as string) === null) {
+      await deps.guard.release(ctx, reserve);
       const body: ErrorResponse = {
         error: { code: "unauthorized", message: "session token revoked", retryable: false },
       };
       return c.json(body, 401);
     }
 
-    // 3. Forward with the runtime key (attached HERE, never earlier). The child's role resolves the
+    // 3. Forward with the runtime key (attached HERE, never earlier). The child's role resolved the
     // pinned model — the child never names a model id. An upstream throw releases the reservation and
     // becomes a retryable 502, never an unhandled 500.
-    const payload = await c.req.json().catch(() => ({}));
-    const model = resolvePinnedModel(ctx.role, deps.env);
     let result: UpstreamResult;
     try {
       result = await deps.upstream.forward({
@@ -116,7 +122,7 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
         apiKey: deps.apiKey(),
       });
     } catch (err) {
-      await deps.guard.release(ctx);
+      await deps.guard.release(ctx, reserve);
       return c.json(
         {
           error: { type: "upstream_unavailable", message: String((err as Error)?.message ?? err) },
@@ -126,8 +132,8 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
     }
 
     // 4. Reconcile: meter actual usage, or release the reservation when nothing billed.
-    if (result.usage) await deps.guard.meter(ctx, result.usage);
-    else await deps.guard.release(ctx);
+    if (result.usage) await deps.guard.meter(ctx, result.usage, reserve);
+    else await deps.guard.release(ctx, reserve);
 
     return c.json(result.body as never, result.status as never);
   });
