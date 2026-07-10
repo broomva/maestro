@@ -89,13 +89,16 @@ describe("event type namespaces + synthetics", () => {
 });
 
 describe("errors (API.md §4)", () => {
-  test("the five error codes are pinned", () => {
+  test("the error codes are pinned (5 core + 3 intent-surface, BRO-1820)", () => {
     expect(ERROR_CODES).toEqual([
       "budget_exhausted",
       "lease_held",
       "gate_required",
       "not_found",
       "unauthorized",
+      "invalid_intent",
+      "unsupported_intent",
+      "intent_failed",
     ]);
   });
 

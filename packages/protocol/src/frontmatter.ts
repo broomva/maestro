@@ -439,6 +439,34 @@ export function serializeWorkFile(file: WorkFile): string {
 }
 
 /**
+ * Serialize an AUTHORED contract (the input layer) to `_work.md`. Unlike
+ * `serializeWorkContract`, the inheritance-eligible fields (`owner`/`gate`/`budget`)
+ * are OMITTED when absent: the write path (new_mission, FLOWS §F1) authors only what
+ * the user set, and the parent defaults are resolved at scan time
+ * (`resolveWorkContract`, BRO-1800). Writing a resolved `gate` here would freeze a
+ * value that should track the parent — so a child under a `gate: auto` parent must
+ * not be pinned to `gate: human`. Key order matches `serializeWorkContract`.
+ */
+export function serializeWorkInput(input: WorkContractInput, brief = ""): string {
+  const fm: Record<string, unknown> = {
+    id: input.id,
+    kind: input.kind,
+    state: input.state,
+  };
+  if (input.owner !== undefined) fm.owner = input.owner;
+  if (input.gate !== undefined) fm.gate = input.gate;
+  if (input.budget !== undefined) fm.budget = input.budget;
+  if (input.done !== undefined) fm.done = serializeDone(input.done);
+  if (input.trigger !== undefined) fm.trigger = input.trigger;
+  fm.created = input.created;
+  fm.updated = input.updated;
+
+  const yaml = stringifyYaml(fm, { lineWidth: 0 }).replace(/\n+$/, "");
+  const body = brief.trim();
+  return body.length > 0 ? `---\n${yaml}\n---\n\n${body}\n` : `---\n${yaml}\n---\n`;
+}
+
+/**
  * Round-trip a source `_work.md` preserving comments + key order (the "where
  * feasible" round-trip). Fully validates the contract first — including the
  * VERIFIER §1 gate:auto⇒done.check rule via `materialize`, so the write path

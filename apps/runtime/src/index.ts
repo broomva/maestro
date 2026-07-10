@@ -87,7 +87,9 @@ if (!rebuildMode) {
   }
 }
 
-const app = createApp(config, startedAt, index);
+// The watcher's single-flight `nudge` becomes the intent write path's reconcile trigger
+// (BRO-1820) — an intent-driven reconcile and an fs.watch one share one scheduler, never overlap.
+const app = createApp(config, startedAt, index, watcher?.nudge);
 
 /** Exported for embedding/tests; the binary serves it when run as the entrypoint. */
 export { app, config };

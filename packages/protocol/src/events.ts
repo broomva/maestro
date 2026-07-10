@@ -114,7 +114,11 @@ export type ErrorCode =
   | "lease_held"
   | "gate_required"
   | "not_found"
-  | "unauthorized";
+  | "unauthorized"
+  // Intent write-surface refusals (API.md §1 Intents, BRO-1820):
+  | "invalid_intent" // malformed body, unknown type, missing/invalid field, or missing Idempotency-Key
+  | "unsupported_intent" // a valid Intent type whose handler is not wired yet (P1 ships new_mission only)
+  | "intent_failed"; // well-formed intent, its side effect (FS/git) failed; nothing half-created, retryable
 
 export const ERROR_CODES = [
   "budget_exhausted",
@@ -122,6 +126,9 @@ export const ERROR_CODES = [
   "gate_required",
   "not_found",
   "unauthorized",
+  "invalid_intent",
+  "unsupported_intent",
+  "intent_failed",
 ] as const satisfies readonly ErrorCode[];
 
 /** The typed refusal shape (API.md §4). */

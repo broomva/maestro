@@ -99,6 +99,15 @@ export function isWatchedChange(relPath: string): boolean {
 
 export interface WatcherHandle {
   stop: () => void;
+  /**
+   * Request a reconcile through the SAME single-flight scheduler the `fs.watch` events use.
+   * The runtime's own write paths (intents, BRO-1820) call this after mutating the workspace so
+   * their change is indexed + a `node.updated` emitted WITHOUT racing the fs watcher — going
+   * through the shared scheduler is what keeps the two reconcile sources from overlapping (the
+   * collision `createReconcileScheduler` exists to prevent). Debounced + fire-and-forget: the
+   * node.updated lands on the stream shortly after (intents in, events out, PATTERNS §3).
+   */
+  nudge: () => void;
 }
 
 export interface WatcherOptions {
@@ -214,5 +223,8 @@ export function startWatcher(db: IndexDb, root: string, opts: WatcherOptions = {
       scheduler.cancel();
       watcher.close();
     },
+    // The intent write path (BRO-1820) reconciles through this same scheduler, so an
+    // intent-driven write and an fs.watch event can never run two overlapping reconciles.
+    nudge: scheduler.schedule,
   };
 }
