@@ -1,10 +1,10 @@
 # Asset intake — decisions (BRO-1797)
 
 The pinned decisions for brand assets, icons, and PWA icons. This file is the record; the
-`check:icons` audit is the machine enforcement of the icon rules — but note it is not yet wired
-into a CI job (that is BRO-1834, `--strict` governance); today it runs on demand and in the
-BRO-1797 test, so a PR that adds a second icon library or a non-canon glyph will only be caught
-once someone runs `check:icons` or 1834 lands.
+`check:icons` audit is the machine enforcement of the icon rules, and as of BRO-1766 it **is wired
+into the required CI `quality` job** (`bun run check:icons`, scope=all) — so a PR that adds a second
+icon library or a non-canon glyph fails the gate on every PR. (BRO-1834 is a separate, later
+`--strict` governance gate; it is not what enforces the icon rules.)
 
 ## Blackhole logo (brand mark)
 
@@ -33,18 +33,29 @@ once someone runs `check:icons` or 1834 lands.
 - **Conventions** (design canon): sizes **20 (standard) / 16 (inline) / 24 (empty-state)**,
   **stroke 2**, **round caps**, **`currentColor`**. No fill icons, no mixed libraries, no
   emoji-as-icons.
-- **Custom-drawn glyphs** (anything not in Lucide) live as **local SVG components in
-  `packages/ui/src/icons/`** — never a second icon package. BRO-1766 does the prototype port
-  (replace the prototype's `McIcon`/`Ic*` inline paths: stock glyphs → Lucide, custom → local SVG).
-  The current app source is already Lucide-only.
-- **Enforcement: `check:icons`** (`apps/app/scripts/check-icons.ts`) — two hard checks over
-  `apps/app/src` + `packages/ui/src`: (1) no import from any other icon library; (2) every glyph
-  under `packages/ui/src/icons/` draws with `currentColor` + `stroke-width="2"` + round caps and
-  no hard-coded fill (dormant until BRO-1766 populates that dir, then binding on every glyph).
-  Run it with **`bun run --filter @maestro/app check:icons`** — bun's `--filter` matches the
-  package NAME (`@maestro/app`), so the bare `--filter app` in the ticket's done.check does not
-  match: it errors `No packages matched the filter` and exits **non-zero** (a known bun gotcha,
-  BRO-1782). Use the qualified name or run it from `apps/app/`.
+- **Custom-drawn UI glyphs** (anything not in Lucide) live as **local SVG components in
+  `packages/ui/src/icons/`** — never a second icon package — and must follow the stroke-icon canon
+  (currentColor, stroke-width 2, round caps, no hard-coded fill). BRO-1766 did the port: the app
+  source was already Lucide-only, so the only inline custom glyph was the blackhole **brand mark**.
+- **Brand marks are NOT UI glyphs.** The blackhole has a filled singularity in a fixed brand color
+  on a fixed dark chip, so it cannot follow the stroke-icon canon. BRO-1766 extracted it to
+  `packages/ui/src/brand.tsx` as `BlackholeMark` (drawn in `currentColor` so the surface sets the
+  color) — **outside** the audited `packages/ui/src/icons/` dir on purpose. `icons/` is reserved
+  for canon-conforming UI glyphs; logos live in `brand.tsx`.
+- **Enforcement: `check:icons`** — one shared audit at **`scripts/check-icons.ts`** (moved to the
+  repo root in BRO-1766; scope-aware, so no per-package duplication). Two hard checks: (1) no import
+  from any icon library other than lucide-react; (2) every glyph under `packages/ui/src/icons/`
+  draws with `currentColor` + `stroke-width="2"` + round caps and no hard-coded fill/stroke color
+  (dormant until a custom UI glyph lands there). Entry points:
+  - **`bun run check:icons`** (repo root) → `--scope all`, scans app + ui + the glyph dir. **This
+    is the form wired into CI.**
+  - **`bun run --filter @maestro/app check:icons`** → `--scope app` (apps/app/src only).
+  - **`bun run --filter @maestro/ui check:icons`** → `--scope ui` (packages/ui/src + the glyph dir).
+
+  bun's `--filter` matches the package NAME (`@maestro/app` / `@maestro/ui`), so the bare
+  `--filter app` / `--filter ui` in the tickets' done.checks does not match — it errors
+  `No packages matched the filter` and exits **non-zero** (the BRO-1782 gotcha). Use the qualified
+  names above, or just the root `bun run check:icons`.
 
 ## PWA icons
 
