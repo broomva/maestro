@@ -7,7 +7,7 @@ budget check in the request path (HARNESS §3, F3.1, AUTONOMY §4).
 
 ```
 $ bun test apps/runtime --filter proxy
- 157 pass  0 fail  500 expect() calls   (32 proxy/budget tests included)
+ 158 pass  0 fail  502 expect() calls   (33 proxy/budget tests included)
 ```
 
 The three done.check guarantees, each a test:
@@ -67,6 +67,45 @@ upstream-throw: 502 | type: upstream_unavailable
   mid-preflight can't let one more call land.
 - **Model pinning** lives supervisor-side (role → pinned model; `MAESTRO_MODEL_<ROLE>` override) so
   a version bump is one config change and the D8 canary (BRO-1806) can route without the child knowing.
+
+## P20 round-6 fixes (block 4/10 → applied)
+
+Round 6 confirmed the carry-model overspend + key confinement closed, but caught that the round-5
+base64 strip itself introduced a NEW under-price (overspend) regression. Closed, mutation-proven.
+
+1. **Text-source document data stripped → unbounded under-price** (disqualifier, a round-5 regression):
+   `stripModalityData` blanked `source.data` keyed on the BLOCK type (`image`/`document`), but a
+   `{type:"document", source:{type:"text", data:"…"}}` block's `data` IS raw billable text, not a
+   dimension-billed blob. Stripping it and pricing the document at the flat floor under-priced
+   **unboundedly** (a 1MB text-source document reserved a flat ~$5 while truly costing ~$17 → the
+   `meter` books the full actual past the cap). **Fixed by gating the strip on the SOURCE type, not the
+   block type** — only base64/url dimension-billed blobs are blanked+floored; a `text`-source document
+   keeps its text in the byte bound, and a `content`-source document recurses so its inner blocks price
+   themselves. Counting + stripping are now one pass (`priceModality`). Live dogfood:
+
+   ```
+   1MB text as a TEXT block:            $17.25   (byte-bound, sound)
+   1MB text as a TEXT-SOURCE document:  $17.25   (round-5 bug collapsed this to ~$5 → overspend)
+   base64 PDF (unknown pages):          $5.18    (300k-tok worst-case floor, sound)
+   300KB screenshot base64:             $0.1252  (stripped, size-independent vs a tiny image)
+   content-source doc w/ nested image:  $0.1267  (nested base64 stripped, not text-priced)
+   ```
+
+   Anti-vacuity: stripping on block type (dropping the source-type carve-out) fails exactly the new
+   `does NOT strip a TEXT-source document` test — mutation verified.
+
+2. **Binary-document floor too low** (finding #3/#2 follow-up): the 100-page-max bound omitted per-page
+   *extracted text* tokens (Anthropic bills ~1,500–3,000 tok/page), so a dense 100-page PDF (200k–300k
+   tok) still under-priced at 160k. Raised `MAX_DOCUMENT_TOKENS` 160k→**300k** (100 dense pages) — a
+   genuine worst-case ceiling; comment corrected (it now errs high). BRO-1756's live path tightens it
+   with real page metadata.
+
+3. **Test/robustness nits closed:** the modality-magnitude test now asserts ABSOLUTE dollar magnitudes
+   (not `text + CONSTANT` on both sides), so a `MAX_DOCUMENT_TOKENS` VALUE mutation is caught (verified
+   300k→2k fails it); the strip test asserts SIZE-INDEPENDENCE (big image ≈ tiny image) instead of a
+   floor dominated by the output-token cost; `estimateCallCeilingUsd` moved INSIDE the proxy's
+   fail-closed try/catch so a pathological deeply-nested payload returns a retryable 503, never a bare
+   500; content-source documents recurse (nested base64 stripped, no false-402).
 
 ## P20 round-5 fixes (block 3/10 → applied)
 

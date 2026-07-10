@@ -27,8 +27,6 @@ import { MemoryEventSink } from "./events";
 import {
   DEFAULT_MODEL_PINS,
   estimateCallCeilingUsd,
-  MAX_DOCUMENT_TOKENS,
-  MAX_IMAGE_TOKENS,
   MODEL_PRICING,
   resolvePinnedModel,
 } from "./models";
@@ -153,39 +151,72 @@ test("cost ceiling adds a per-image / per-document token bound of the RIGHT magn
     },
     {},
   );
-  // Opus input is $15/Mtok. Assert each block adds AT LEAST its full token bound over the text-only
-  // cost — this PINS the magnitude (finding #6): a full drop of the modality term fails both, and
-  // mutating MAX_DOCUMENT_TOKENS (e.g. 160000→2000) fails the document assertion (it no longer clears
-  // text + 160k-worth). Using the exported constants keeps the test in lockstep with the source.
-  expect(withImage).toBeGreaterThan(text + (MAX_IMAGE_TOKENS * 15) / 1e6);
-  expect(withDoc).toBeGreaterThan(text + (MAX_DOCUMENT_TOKENS * 15) / 1e6);
+  // Opus input is $15/Mtok. Assert ABSOLUTE magnitudes that do NOT reference the constants, so a VALUE
+  // mutation is caught (P20 round-6): an image adds ~2000 tok ≈ $0.034 (fails if MAX_IMAGE_TOKENS
+  // shrinks toward 0); a binary document adds ~300k tok ≈ $5.18 (fails if MAX_DOCUMENT_TOKENS is
+  // mutated to e.g. 2000 → only ~$0.034). The prior "text + CONSTANT" form passed for any value.
+  expect(withImage - text).toBeGreaterThan(0.02);
+  expect(withDoc - text).toBeGreaterThan(3);
 });
 
-test("cost ceiling STRIPS image/document base64 so a big screenshot is not false-refused (P20 round-5 finding #4)", () => {
+test("cost ceiling STRIPS image base64 so a big screenshot is not false-refused (P20 round-5 finding #4)", () => {
   // A ~300KB PNG is ~410KB base64. Pricing that blob as ~410k TEXT tokens yields a ~$7 Opus ceiling and
   // false-refuses a routine screenshot (P11 / agent-browser). Stripping the base64 and bounding the
-  // image by MAX_IMAGE_TOKENS keeps the ceiling small. This FAILS if the base64 is not stripped (the
-  // unstripped ceiling is > $7).
-  const bigBase64 = "A".repeat(410_000);
-  const ceiling = estimateCallCeilingUsd(
+  // image by MAX_IMAGE_TOKENS keeps the ceiling small — and SIZE-INDEPENDENT.
+  const imageOf = (b64: string) =>
+    estimateCallCeilingUsd(
+      "claude-opus-4-8",
+      {
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/png", data: b64 } },
+            ],
+          },
+        ],
+        max_tokens: 1024,
+      },
+      {},
+    );
+  const big = imageOf("A".repeat(410_000)); // ~300KB screenshot
+  const tiny = imageOf("AA=="); // a few bytes
+  expect(big).toBeLessThan(1); // stripped → well under $1; unstripped would be ~$7
+  // SIZE-INDEPENDENCE is the real discriminator: after stripping, the 410KB image prices the SAME as a
+  // few-byte one (both bounded by MAX_IMAGE_TOKENS, not by base64 length). Unstripped, big≈$7 ≫ tiny.
+  expect(Math.abs(big - tiny)).toBeLessThan(0.01);
+});
+
+test("cost ceiling does NOT strip a TEXT-source document — its text is billed by bytes, not the flat floor (P20 round-6)", () => {
+  // A document block can carry raw TEXT (source.type:"text"), whose `data` IS billable text — NOT a
+  // dimension-billed blob. Round-5 blanked it (keyed on block type) and priced the whole document at
+  // the flat MAX_DOCUMENT_TOKENS floor, under-pricing UNBOUNDEDLY (a 1MB text doc reserved a flat ~$5
+  // while truly costing ~$17 → overspend). Gating the strip on SOURCE type keeps the text in the byte
+  // bound, so the ceiling scales with the text size. FAILS if stripping is keyed on block type.
+  const bigText = "word ".repeat(200_000); // ~1MB of natural-language text
+  const asDoc = estimateCallCeilingUsd(
     "claude-opus-4-8",
     {
       messages: [
         {
           role: "user",
           content: [
-            { type: "image", source: { type: "base64", media_type: "image/png", data: bigBase64 } },
+            { type: "document", source: { type: "text", media_type: "text/plain", data: bigText } },
           ],
         },
       ],
-      max_tokens: 1024,
+      max_tokens: 10,
     },
     {},
   );
-  // stripped input ≈ MAX_IMAGE_TOKENS + tiny structure → well under $1; unstripped would be ~$7.
-  expect(ceiling).toBeLessThan(1);
-  // and it is still >= the sound per-image bound (not zero) — the image is priced, just correctly.
-  expect(ceiling).toBeGreaterThan((MAX_IMAGE_TOKENS * 15) / 1e6);
+  const asText = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    { messages: [{ role: "user", content: [{ type: "text", text: bigText }] }], max_tokens: 10 },
+    {},
+  );
+  // Priced ~the same as the identical text block (bytes bound), NOT collapsed to the ~$5 flat floor.
+  expect(asDoc).toBeGreaterThan(asText * 0.9);
+  expect(asDoc).toBeGreaterThan(10); // 1MB text on Opus ≈ $17; the flat floor (~$5) would fail this
 });
 
 test("modelPrice: valid env override wins; NaN / negative / missing-slash fall back to the table", () => {

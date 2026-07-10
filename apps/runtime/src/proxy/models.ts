@@ -68,51 +68,65 @@ const CEILING_SAFETY = 1.15;
  *  byte-length text bound), never adds to them — counting a dimension-billed blob as text tokens
  *  over-priced a routine screenshot into a false 402 (P20 round-5 finding #4). */
 export const MAX_IMAGE_TOKENS = 2000;
-/** Per-document input-token bound. A PDF is rendered per page; Anthropic caps a document at 100 pages
- *  (~1600 tok/page) → ~160k tokens is the sound worst case when page count is unknown. This is loose
- *  (a 1-page PDF reserves the 100-page ceiling and can be refused under a tiny per_run cap) — the price
- *  of not knowing page count up front; a guardrail errs high. BRO-1756's live path carries page
- *  metadata and will tighten this to actual pages. Like images, it REPLACES the (stripped) base64. */
-export const MAX_DOCUMENT_TOKENS = 160_000;
-
-/** Count image/document content blocks anywhere in the payload (they nest in tool_result content). */
-function countModalityBlocks(node: unknown, acc: { images: number; documents: number }): void {
-  if (Array.isArray(node)) {
-    for (const n of node) countModalityBlocks(n, acc);
-    return;
-  }
-  if (node !== null && typeof node === "object") {
-    const t = (node as { type?: unknown }).type;
-    if (t === "image") acc.images++;
-    else if (t === "document") acc.documents++;
-    for (const v of Object.values(node as Record<string, unknown>)) countModalityBlocks(v, acc);
-  }
-}
+/** Per (binary) document input-token bound — the flat reserve for a page-rendered PDF whose page count
+ *  is not in the request (`source.type` base64/url). Anthropic caps a document at 100 pages and bills
+ *  ~1,500-3,000 tokens/page (rendered image + extracted text), so ~300k tokens is the SOUND worst case.
+ *  This is loose (a 1-page PDF reserves the 100-page ceiling and can be refused under a tiny per_run
+ *  cap) — the price of not knowing page count up front; a guardrail errs high. BRO-1756's live path
+ *  carries page metadata and will tighten this. Applies ONLY to binary documents — a TEXT-source
+ *  document's `data` IS billable text and is priced by the byte-length bound, not this flat floor
+ *  (blanking it there under-priced unboundedly, P20 round-6). */
+export const MAX_DOCUMENT_TOKENS = 300_000;
 
 /**
- * Deep-clone the payload with image/document `source.data` (the base64 blob) blanked, so the
- * byte-length TEXT bound doesn't price a dimension-billed modality blob as text tokens. The modality
- * cost is added separately via the per-block token bounds. Non-base64 sources (e.g. `type:"url"`) have
- * no `data` and pass through untouched — the per-block bound still covers them.
+ * One pass that both SANITIZES the payload (blanks dimension-billed binary blobs so they are not priced
+ * as text tokens) and ACCUMULATES the per-block token floors that replace them. The critical rule
+ * (P20 round-6) is that stripping is gated on the SOURCE type, not the block type:
+ *   - `image`: always dimension-billed → +MAX_IMAGE_TOKENS, blank `source.data` if present (base64);
+ *     a url-source image has no data, still floored.
+ *   - `document` with `source.type: "text"`: the `data` is RAW TEXT billed as tokens → keep it, add NO
+ *     floor (the byte-length bound prices it soundly). Blanking it under-priced unboundedly.
+ *   - `document` with `source.type: "content"`: its `source.content` is an array of text/image blocks
+ *     billed individually → recurse (inner images get stripped + floored, inner text counts), add NO
+ *     flat floor for the container.
+ *   - `document` otherwise (base64/url/unknown): page-billed, unknown pages → +MAX_DOCUMENT_TOKENS,
+ *     blank `source.data` if present.
+ * Returns a deep clone — never mutates the input (which the proxy later forwards verbatim).
  */
-function stripModalityData(node: unknown): unknown {
-  if (Array.isArray(node)) return node.map(stripModalityData);
-  if (node !== null && typeof node === "object") {
-    const obj = node as Record<string, unknown>;
-    const t = obj.type;
-    if (
-      (t === "image" || t === "document") &&
-      obj.source !== null &&
-      typeof obj.source === "object"
-    ) {
-      const src = obj.source as Record<string, unknown>;
-      return { ...obj, source: { ...src, data: "" } };
-    }
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj)) out[k] = stripModalityData(v);
-    return out;
+function priceModality(node: unknown, acc: { images: number; documents: number }): unknown {
+  if (Array.isArray(node)) return node.map((n) => priceModality(n, acc));
+  if (node === null || typeof node !== "object") return node;
+  const obj = node as Record<string, unknown>;
+  const source =
+    obj.source !== null && typeof obj.source === "object"
+      ? (obj.source as Record<string, unknown>)
+      : undefined;
+  const srcType = source?.type;
+
+  if (obj.type === "image") {
+    acc.images++; // always dimension-billed
+    if (source && "data" in source) return { ...obj, source: { ...source, data: "" } };
+    return mapChildren(obj, acc); // url-source image: no data to blank; recurse defensively
   }
-  return node;
+  if (obj.type === "document") {
+    if (srcType === "text" || srcType === "content") {
+      return mapChildren(obj, acc); // text/content billed as its own tokens → keep data, no flat floor
+    }
+    acc.documents++; // base64 / url / unknown source: page-billed, unknown page count → flat floor
+    if (source && "data" in source) return { ...obj, source: { ...source, data: "" } };
+    return mapChildren(obj, acc);
+  }
+  return mapChildren(obj, acc);
+}
+
+/** Deep-clone an object, recursing every value through `priceModality`. */
+function mapChildren(
+  obj: Record<string, unknown>,
+  acc: { images: number; documents: number },
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) out[k] = priceModality(v, acc);
+  return out;
 }
 
 /** The price for a model id, honoring a MAESTRO_PRICE_<canonical> `in/out` override, else the table. */
@@ -140,14 +154,15 @@ export function modelPrice(
  * reservation. Sound (`ceiling >= actual`) across modalities, which is what makes "reserve then
  * reconcile" incapable of overspending, while staying tight enough not to false-refuse real calls:
  *   - output is bounded EXACTLY by `max_tokens` (the API never emits more);
- *   - TEXT input tokens are bounded by the UTF-8 BYTE length of the payload WITH image/document base64
- *     stripped: for a byte-level BPE tokenizer every token is >= 1 byte and merges only reduce the
- *     count, so `tokens <= bytes` for TEXT — including dense CJK a chars/token heuristic under-counts
- *     (the P20 round-3 overspend). Stripping the base64 first is what avoids pricing a dimension-billed
- *     blob as text tokens, which false-refused routine screenshots (P20 round-5 finding #4);
- *   - IMAGE / DOCUMENT blocks are billed by DIMENSIONS, so each adds a fixed per-block token bound
- *     (MAX_IMAGE_TOKENS / MAX_DOCUMENT_TOKENS) INSTEAD OF its stripped bytes — sound for images
- *     (<= ~1600 tok each), conservative for documents (100-page worst case; BRO-1756 tightens it).
+ *   - TEXT input tokens are bounded by the UTF-8 BYTE length of the payload with only DIMENSION-BILLED
+ *     binary blobs stripped: for a byte-level BPE tokenizer every token is >= 1 byte and merges only
+ *     reduce the count, so `tokens <= bytes` for TEXT — including dense CJK a chars/token heuristic
+ *     under-counts (P20 round-3), AND a document's raw TEXT `data`, which stays in the byte count
+ *     (blanking it under-priced unboundedly, P20 round-6);
+ *   - only DIMENSION-BILLED blobs (base64 images, base64/url PDFs) are stripped and replaced by a fixed
+ *     per-block token bound (MAX_IMAGE_TOKENS / MAX_DOCUMENT_TOKENS) — sound for images (<= ~1600 tok
+ *     each), conservative for binary documents (100-page worst case; BRO-1756 tightens it). Pricing a
+ *     screenshot's base64 as text tokens is what false-refused it (P20 round-5 finding #4).
  * It over-counts plain text ~4x; erring high is the guardrail's job — a call that could breach a cap
  * is refused, never silently overspent.
  */
@@ -160,11 +175,10 @@ export function estimateCallCeilingUsd(
   const p = (payload ?? {}) as { max_tokens?: unknown };
   const maxTokens =
     typeof p.max_tokens === "number" && p.max_tokens > 0 ? p.max_tokens : DEFAULT_MAX_OUTPUT_TOKENS;
-  // Text bound: byte length of the payload with modality base64 stripped (blobs are priced by the
-  // per-block bounds below, not as text tokens).
-  const byteTokens = Buffer.byteLength(JSON.stringify(stripModalityData(payload ?? {})), "utf8");
+  // One pass: sanitize (blank dimension-billed blobs) AND count the per-block floors that replace them.
   const modality = { images: 0, documents: 0 };
-  countModalityBlocks(payload, modality);
+  const sanitized = priceModality(payload ?? {}, modality);
+  const byteTokens = Buffer.byteLength(JSON.stringify(sanitized), "utf8"); // text bound, blobs excluded
   const inputTokens =
     byteTokens + modality.images * MAX_IMAGE_TOKENS + modality.documents * MAX_DOCUMENT_TOKENS;
   const raw = (inputTokens * price.inputPerMtok + maxTokens * price.outputPerMtok) / 1_000_000;

@@ -85,13 +85,15 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
     // meter/release so the call reconciles against exactly what it reserved.
     const payload = await c.req.json().catch(() => ({}));
     const model = resolvePinnedModel(ctx.role, deps.env);
-    const reserve = estimateCallCeilingUsd(model, payload, deps.env);
 
     let verdict: Awaited<ReturnType<typeof deps.guard.preflight>>;
     try {
+      // Estimate + reserve inside the fail-closed boundary: a pathological payload that overflows the
+      // estimator recursion, or a libSQL throw in the reservation, must refuse (retryable), never
+      // forward unbudgeted or escape as a bare 500.
+      const reserve = estimateCallCeilingUsd(model, payload, deps.env);
       verdict = await deps.guard.preflight(ctx, reserve);
     } catch {
-      // A libSQL throw in the reservation → fail CLOSED: refuse (retryable), never forward unbudgeted.
       return c.json(
         { error: { type: "budget_unavailable", message: "budget reservation failed" } },
         503,
