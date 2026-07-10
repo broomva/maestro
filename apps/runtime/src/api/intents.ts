@@ -30,7 +30,7 @@ import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { IndexDb } from "../db/client";
 import { lease } from "../db/schema";
-import { gitCommit } from "../git/git";
+import { gitCommit, gitUnstage } from "../git/git";
 
 export interface IntentDeps {
   db: IndexDb;
@@ -123,9 +123,17 @@ function requireNewMission(body: unknown): Extract<Intent, { type: "new_mission"
 
 /**
  * FLOWS §F1: create the mission folder + `_work.md`, then commit — the commit is the
- * transaction. On ANY failure the freshly-created folder is removed, so the workspace
- * is left exactly as it was (nothing half-created). Writes MINIMAL frontmatter (no
- * owner/gate/budget) — the scanner resolves those from the parent at index time.
+ * transaction. On ANY failure the freshly-created folder is removed AND its git-index entry
+ * unstaged, so the workspace is left exactly as it was (nothing half-created).
+ *
+ * Frontmatter is minimal — `owner`/`budget` are OMITTED so the scanner inherits them from the
+ * parent at index time (always valid to inherit). `gate` is the exception: it is pinned to
+ * `human`. A fresh mission has no `done.check`, and `gate: auto` is invalid without one
+ * (VERIFIER §1), so inheriting a parent's `gate: auto` would produce a contract that
+ * `resolveWorkContract` → `materialize` rejects — which the scanner drops into a discarded
+ * errors list, so the mission would be committed but never surface as a card (a silent write
+ * loss on the sole write surface). Pinning `gate: human` keeps the child always valid; an
+ * author raises it to `auto` later, once a `done.check` exists.
  */
 async function handleNewMission(
   workspace: string,
@@ -163,6 +171,8 @@ async function handleNewMission(
     id,
     kind: intent.kind,
     state: "proposed",
+    // Pinned, not inherited — a checkless fresh mission cannot be gate:auto (see the doc above).
+    gate: "human",
     created: day,
     updated: day,
   };
@@ -182,15 +192,21 @@ async function handleNewMission(
     );
   }
 
-  // FS transaction: create the folder + file, then commit. Roll back the folder on any failure.
+  // FS transaction: create the folder + file, then commit. Roll back BOTH the working tree
+  // (rm the folder) and the git index (unstage — a failed commit after a successful `git add`
+  // would otherwise leave a phantom staged entry) on any failure.
+  const rel = relative(workspace, targetDir);
   let created = false;
   try {
     await mkdir(targetDir, { recursive: false });
     created = true;
     await writeFile(join(targetDir, "_work.md"), content, "utf8");
-    await gitCommit(workspace, [relative(workspace, targetDir)], `new work: ${intent.title}`);
+    await gitCommit(workspace, [rel], `new work: ${intent.title}`);
   } catch (err) {
-    if (created) await rm(targetDir, { recursive: true, force: true });
+    if (created) {
+      await rm(targetDir, { recursive: true, force: true });
+      await gitUnstage(workspace, [rel]);
+    }
     throw new IntentRefusal(
       "intent_failed",
       `new_mission side effect failed, nothing was created: ${(err as Error).message}`,
@@ -255,6 +271,10 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
 
     // 3. Idempotency lease — atomic insert-or-conflict on the PK. A conflict means the key
     //    was already accepted (a retry or a concurrent duplicate) → no-op 202, no re-dispatch.
+    //    KNOWN EDGE (deferred, follow-up): a TRULY concurrent same-key duplicate whose FIRST
+    //    dispatch then fails yields a "phantom 202" — the second caller was acked but the first
+    //    released the lease, so nothing lands. Under-dispatch (never double-dispatch), recoverable
+    //    by re-post; the shipped SPA posts once. A pending/committed lease state fixes it in P2.
     const now = Date.now();
     const ins = await db
       .insert(lease)

@@ -57,3 +57,14 @@ export async function gitCommit(cwd: string, paths: string[], message: string): 
   const commit = await git(cwd, ["commit", "-m", message, "--", ...paths]);
   if (commit.code !== 0) throw new GitError(["commit", "-m", message], commit.code, commit.stderr);
 }
+
+/**
+ * Best-effort unstage of `paths` (repo-relative) — rolls back a partial `git add` whose commit
+ * then failed, so a failed intent leaves the git INDEX clean too, not just the working tree
+ * ("nothing half-created", FLOWS §F1). `git rm --cached` works on an unborn branch (no HEAD yet)
+ * where `git reset -- <path>` would error; `-r` handles the mission directory, `--ignore-unmatch`
+ * makes it a no-op when nothing was staged (e.g. the `git add` itself failed). Never throws.
+ */
+export async function gitUnstage(cwd: string, paths: string[]): Promise<void> {
+  await git(cwd, ["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", ...paths]);
+}

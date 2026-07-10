@@ -3,19 +3,31 @@
 //
 // done.check, three halves:
 //  1. new_mission (F1) creates folder + `_work.md` + git commit ATOMICALLY (the commit is
-//     the transaction), writing MINIMAL frontmatter (no gate — the scanner inherits it).
+//     the transaction), writing frontmatter with gate PINNED to human (a checkless mission
+//     can't be gate:auto), owner/budget inherited from the parent at scan time.
 //  2. a retried POST with the SAME Idempotency-Key is a NO-OP (one commit, not two).
 //  3. a FAILING new_mission leaves the workspace exactly as it was (nothing half-created).
 // Plus the refusal contract: missing key / unknown type / malformed body / path traversal.
 
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseWorkFile } from "@maestro/protocol";
+import { like } from "drizzle-orm";
 import { createApp } from "../app";
 import { DEFAULT_PORT, type RuntimeConfig } from "../config";
 import { openIndex } from "../db/client";
+import { node } from "../db/schema";
+import { scanIntoIndex } from "../scanner";
 
 const tmps: string[] = [];
 afterAll(() => {
@@ -91,8 +103,9 @@ test("new_mission creates folder + _work.md + a single commit, minimal frontmatt
   expect(wf.contract.state).toBe("proposed");
   expect(wf.brief).toContain("# Ship the board");
   expect(wf.brief).toContain("make it live");
-  // MINIMAL: no gate/owner/budget written — the scanner resolves those from the parent.
-  expect(content).not.toContain("gate:");
+  // gate PINNED to human (a checkless fresh mission can't be auto); owner/budget still inherit.
+  expect(content).toContain("gate: human");
+  expect(wf.contract.gate).toBe("human");
   expect(content).not.toContain("owner:");
   // The commit IS the transaction.
   expect(commitCount(ws)).toBe(1);
@@ -136,6 +149,71 @@ test("a failing new_mission (non-git workspace) leaves nothing half-created", as
   expect(((await res.json()) as { error: { code: string } }).error.code).toBe("intent_failed");
   // The folder that was created mid-transaction is rolled back — workspace is empty.
   expect(readdirSync(ws)).toEqual([]);
+});
+
+test("a commit that fails AFTER `git add` unstages the index (no phantom staged entry)", async () => {
+  // A rejecting pre-commit hook: `git add` stages, `git commit` runs the hook → exit 1 → fails.
+  // This is the add-succeeds/commit-fails path the non-git test can't reach. The rollback must
+  // clean the INDEX too, not just the working tree (P20 minor: "nothing half-created").
+  const ws = mkWorkspace();
+  writeFileSync(join(ws, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const { app } = await mkApp(ws);
+
+  const res = await post(app, NEW_MISSION, "key-hook");
+  expect(res.status).toBe(500);
+  expect(((await res.json()) as { error: { code: string } }).error.code).toBe("intent_failed");
+  // Working tree: folder gone. Index: nothing staged (the `git add` was rolled back).
+  expect(existsSync(join(ws, "ship-the-board"))).toBe(false);
+  const staged = Bun.spawnSync(["git", "diff", "--cached", "--name-only"], { cwd: ws })
+    .stdout.toString()
+    .trim();
+  expect(staged).toBe("");
+});
+
+// ── the P20 MAJOR: a mission under a gate:auto parent must still materialize ────
+test("new_mission under a gate:auto parent is NOT silently dropped by the scanner", async () => {
+  // The parent is legitimately gate:auto (it has a done.check). A child that INHERITED gate:auto
+  // would be invalid (auto needs a check) and the scanner would drop it into a discarded errors
+  // list — 202 accepted but no card ever appears. Pinning the child to gate:human fixes it.
+  const ws = mkWorkspace();
+  mkdirSync(join(ws, "growth"));
+  writeFileSync(
+    join(ws, "growth", "_work.md"),
+    [
+      "---",
+      "id: growth",
+      "kind: project",
+      "state: proposed",
+      "gate: auto",
+      "done:",
+      "  check: bun test",
+      "created: 2026-06-25",
+      "updated: 2026-06-25",
+      "---",
+      "# Growth",
+      "",
+    ].join("\n"),
+  );
+  const { app } = await mkApp(ws);
+
+  const res = await post(
+    app,
+    { type: "new_mission", parentPath: "growth", title: "SEO refresh", brief: "", kind: "task" },
+    "key-auto",
+  );
+  expect(res.status).toBe(202);
+
+  // Scan the workspace into a fresh index — the child must appear (not dropped), gate resolved
+  // to human (it did not inherit the parent's auto), state proposed.
+  const idx = await openIndex(":memory:");
+  const { errors } = await scanIntoIndex(idx.db, ws, 1000);
+  const child = (await idx.db.select().from(node).where(like(node.path, "growth/seo-refresh%")))[0];
+  idx.client.close();
+  expect(child).toBeDefined();
+  expect(child?.gate).toBe("human");
+  expect(child?.state).toBe("proposed");
+  // and no scan error swallowed the child
+  expect(errors.some((e) => e.path.includes("growth/seo-refresh"))).toBe(false);
 });
 
 // ── reconcile wiring (intents in, events out — F1 step 4) ──────────────────────
