@@ -32,15 +32,39 @@ const CANON = [
   { signal: "standing pulse", decl: "animation: bv-dot-pulse 1s" },
 ] as const;
 
-// Every animated live-signal selector — all must be stopped under reduced motion.
-const ANIMATED_SELECTORS = [
-  ".bv-undertow::before",
-  ".bv-undertow::after",
-  ".bv-undertow-orbit",
-  ".bv-dot-live::before",
-  ".bv-dot-comet::before",
-  ".bv-dot--pulse",
-] as const;
+// Balanced { ... } block starting at the first "{" at/after `from` — brace-matched so a
+// nested rule inside the @media doesn't fool the scan, and it stops at the block's close
+// brace rather than running to EOF.
+function blockAt(source: string, from: number): string {
+  const open = source.indexOf("{", from);
+  if (open < 0) return "";
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    else if (source[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  return source.slice(open);
+}
+
+// Derive the animated selectors from the file itself (not a hardcoded list) so a NEW
+// animated rule that isn't gated under reduced-motion fails the test rather than slipping
+// through. Everything before the @media block is the "live" layer that must be stopped.
+const reducedIdx = css.search(/@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)/);
+const beforeReduced = reducedIdx >= 0 ? css.slice(0, reducedIdx) : css;
+const animatedSelectors: string[] = [];
+for (const match of beforeReduced.matchAll(/animation:\s*(?!none)[^;}]+/g)) {
+  const head = beforeReduced.slice(0, match.index);
+  const selector = head
+    .slice(head.lastIndexOf("}") + 1, head.lastIndexOf("{"))
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .trim();
+  for (const part of selector.split(",")) {
+    if (part.trim()) animatedSelectors.push(part.trim());
+  }
+}
 
 describe("live signals · canon periods are unchanged (LIVE-SIGNALS.md)", () => {
   for (const { signal, decl } of CANON) {
@@ -51,45 +75,71 @@ describe("live signals · canon periods are unchanged (LIVE-SIGNALS.md)", () => 
 });
 
 describe("live signals · reduced motion stops everything (hard rule)", () => {
-  test("a prefers-reduced-motion: reduce block exists and zeroes animation", () => {
-    expect(css).toMatch(/@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)/);
+  test("a prefers-reduced-motion: reduce block exists", () => {
+    expect(reducedIdx).toBeGreaterThanOrEqual(0);
   });
 
-  test("every animated live-signal selector is inside the reduced-motion block", () => {
-    const start = css.search(/@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)/);
-    expect(start).toBeGreaterThanOrEqual(0);
-    // The reduced-motion block is the last rule in the file; take from the @media to EOF.
-    const block = css.slice(start);
+  test("the file actually defines live animations to gate (guards the guard)", () => {
+    // If the derivation found nothing, the subset check below would be vacuously true.
+    expect(animatedSelectors.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test("every animated selector is bound to animation: none under reduced motion", () => {
+    const block = blockAt(css, reducedIdx);
     expect(block).toContain("animation: none");
-    for (const selector of ANIMATED_SELECTORS) {
-      expect(block).toContain(selector);
+    // The only animation the reduced-motion block may set is `none`.
+    for (const decl of block.matchAll(/animation:\s*([^;}]+)/g)) {
+      expect(decl[1]?.trim()).toBe("none");
+    }
+    // Every live animation must be gated — a newly-added, un-gated one fails here.
+    for (const selector of animatedSelectors) {
+      expect(block, `${selector} must be stopped under reduced motion`).toContain(selector);
     }
   });
 });
 
-describe("live signals · blue → ice only, never warm, never red (hard rule)", () => {
-  test("every oklch hue sits in the blue → cyan → ice band (220-270)", () => {
-    const hues = [...css.matchAll(/oklch\(\s*[\d.]+\s+[\d.]+\s+([\d.]+)/g)].map((m) =>
+describe("live signals · blue → indigo → cyan → ice only, never warm, never red (hard rule)", () => {
+  // Canon palette spans cyan (hue 220) → ice (240) → blue (258/260) → indigo (280);
+  // the band brackets it while still excluding green (~145) and every warm hue.
+  test("every inline oklch hue sits in the blue → indigo → cyan → ice band (210-290)", () => {
+    const hues = [...css.matchAll(/oklch\(\s*[\d.]+%?\s+[\d.]+\s+([\d.]+)/g)].map((m) =>
       Number(m[1] ?? Number.NaN),
     );
     expect(hues.length).toBeGreaterThan(0);
     for (const hue of hues) {
-      expect(hue).toBeGreaterThanOrEqual(220);
-      expect(hue).toBeLessThanOrEqual(270);
+      expect(hue).toBeGreaterThanOrEqual(210);
+      expect(hue).toBeLessThanOrEqual(290);
     }
   });
 
-  test("only blue / cyan / ice glow tokens are referenced — no warm glow", () => {
+  test("only blue / indigo / cyan / ice glow tokens are referenced — no warm glow", () => {
     const glows = new Set([...css.matchAll(/--bv-glow-([a-z]+)/g)].map((m) => m[1] ?? ""));
     expect(glows.size).toBeGreaterThan(0);
     for (const glow of glows) {
-      expect(["blue", "cyan", "ice"]).toContain(glow);
+      expect(["blue", "indigo", "cyan", "ice"]).toContain(glow);
     }
   });
 
-  test("no warm or red color words leak into the live-signal layer", () => {
-    for (const banned of ["orange", "amber", "yellow", "gold", "crimson", "scarlet"]) {
-      expect(css.toLowerCase()).not.toContain(banned);
+  test("no warm / status color token or color word leaks into the live-signal layer", () => {
+    // Word-boundary match so "red" doesn't false-fire on "prefers-reduced-motion".
+    for (const word of [
+      "orange",
+      "amber",
+      "yellow",
+      "gold",
+      "crimson",
+      "scarlet",
+      "tomato",
+      "coral",
+      "firebrick",
+      "magenta",
+      "red",
+    ]) {
+      expect(css.toLowerCase()).not.toMatch(new RegExp(`\\b${word}\\b`));
+    }
+    // The live signals are blue-family; they must not pull the warm status tokens.
+    for (const token of ["--bv-danger", "--bv-warning", "--bv-success", "--bv-error"]) {
+      expect(css).not.toContain(token);
     }
   });
 });
