@@ -93,6 +93,9 @@ describe("event type namespaces + synthetics", () => {
     // run.* member, so eventNamespace resolves it and the tailer admits it.
     expect(EVENT_TYPES.RUN_HUNG).toBe("run.hung");
     expect(eventNamespace(EVENT_TYPES.RUN_HUNG)).toBe("run");
+    // HARNESS §4 (BRO-1779): run.exiting code vs real exit-code mismatch — a real run.* member
+    expect(EVENT_TYPES.RUN_EXIT_MISMATCH).toBe("run.exit_mismatch");
+    expect(eventNamespace(EVENT_TYPES.RUN_EXIT_MISMATCH)).toBe("run");
     // every catalog value is a valid wire event type
     for (const type of Object.values(EVENT_TYPES)) {
       expect(isWireEventType(type)).toBe(true);
