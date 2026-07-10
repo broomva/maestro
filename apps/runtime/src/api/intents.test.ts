@@ -399,3 +399,23 @@ test("a kill 404 (no live run) releases the lease so a same-key retry once live 
   expect(killed).toEqual(["r1"]);
   handle.client.close();
 });
+
+test("a kill seam that throws → intent_failed 500 and the lease is released (retryable)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  let attempts = 0;
+  const app = createApp(cfg(ws), Date.now(), handle.db, undefined, () => {
+    attempts++;
+    if (attempts === 1) throw new Error("SIGKILL on an already-exited pid");
+    return true;
+  });
+  const headers = { "Content-Type": "application/json", "Idempotency-Key": "k-kill-throw" };
+  const body = JSON.stringify({ type: "kill", sessionId: "r1" });
+  const first = await app.request("/api/intents", { method: "POST", headers, body });
+  expect(first.status).toBe(500);
+  expect(((await first.json()) as { error: { code: string } }).error.code).toBe("intent_failed");
+  // the lease was released → a same-key retry re-attempts (now succeeds)
+  const second = await app.request("/api/intents", { method: "POST", headers, body });
+  expect(second.status).toBe(202);
+  handle.client.close();
+});

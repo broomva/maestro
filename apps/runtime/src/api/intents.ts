@@ -298,9 +298,20 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         return c.json(ok, 202);
       }
       // kill is a synchronous seam (SIGKILL + revoke); the run.killed event reaches the client on the
-      // stream, not in this body (intents-in, events-out). A false = no live run → release the lease so
-      // a retry once the run is live can re-attempt, and refuse not_found.
-      if (!kill(sessionId)) {
+      // stream, not in this body (intents-in, events-out). Wrap it like new_mission's dispatch — a throw
+      // (e.g. SIGKILL on an already-exited pid) must RELEASE the lease so a retry re-attempts, not leak
+      // it behind a 500. A false = no live run → release + not_found.
+      let killedLive: boolean;
+      try {
+        killedLive = kill(sessionId);
+      } catch (err) {
+        await db.delete(lease).where(eq(lease.key, key));
+        return refuse(
+          c,
+          new IntentRefusal("intent_failed", `kill failed: ${(err as Error).message}`, 500, true),
+        );
+      }
+      if (!killedLive) {
         await db.delete(lease).where(eq(lease.key, key));
         return refuse(
           c,
