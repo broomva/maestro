@@ -93,37 +93,110 @@ export interface WatcherOptions {
   onReconcile?: (result: ReconcileResult) => void;
 }
 
+export interface ReconcileScheduler {
+  /** Note a change — (re)arm the debounce; the reconcile runs once the quiet window passes. */
+  schedule: () => void;
+  /** Cancel a pending debounce (does not abort an in-flight reconcile). Idempotent. */
+  cancel: () => void;
+}
+
+export interface SchedulerOptions {
+  reconcile: () => Promise<ReconcileResult>;
+  onReconcile?: (result: ReconcileResult) => void;
+  /** Quiet window (ms) before a burst of `schedule()` calls collapses to one reconcile. */
+  debounceMs: number;
+  /** When true, no new reconcile (incl. the trailing re-run) starts. Default: never closed. */
+  isClosed?: () => boolean;
+}
+
 /**
- * Watch `root` for `_work.md` edits and keep the index live. Returns a handle whose `stop()`
- * closes the OS watcher and cancels any pending debounce (idempotent). A failing reconcile is
- * logged, never thrown — a bad edit must not kill the watcher.
+ * The debounced, single-flight reconcile core of the watcher — separated from `fs.watch` so
+ * its two invariants are testable without OS timing:
+ *   - DEBOUNCE: a burst of `schedule()` calls within `debounceMs` collapses to ONE reconcile.
+ *   - SINGLE-FLIGHT: reconciles never overlap. A real reconcile (recursive scan + N sequential
+ *     db round-trips) can outlast the debounce, and two overlapping passes would collide on the
+ *     `node.id` INSERT — `syncNodes` is deliberately non-transactional (libsql `:memory:` tx
+ *     opens a fresh connection), so the loser throws a UNIQUE violation, its change batch is
+ *     dropped, and (phase 1 already deleted the changed rows) the index silently diverges from
+ *     disk. So at most one reconcile runs at a time; a `schedule()` that lands mid-pass sets a
+ *     `pending` flag and the in-flight pass re-runs exactly once when it finishes (trailing-edge
+ *     coalesce). Bursts collapse to serial single-flight passes, never concurrent ones.
  */
-export function startWatcher(db: IndexDb, root: string, opts: WatcherOptions = {}): WatcherHandle {
-  const { debounceMs = 150, onReconcile } = opts;
+export function createReconcileScheduler(opts: SchedulerOptions): ReconcileScheduler {
+  const { reconcile, onReconcile, debounceMs } = opts;
+  const isClosed = opts.isClosed ?? (() => false);
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let closed = false;
+  let running = false; // a reconcile is in flight (single-flight guard)
+  let pending = false; // a wake landed mid-pass — re-run once when the pass finishes
+
+  const run = () => {
+    running = true;
+    reconcile()
+      .then((result) => onReconcile?.(result))
+      .catch((err) => console.warn(`maestro watcher · reconcile failed: ${(err as Error).message}`))
+      .finally(() => {
+        // Synchronous: no `await` between clearing `running` and the trailing re-run, so a
+        // concurrent `fire()` cannot slip a second reconcile in through the gap.
+        running = false;
+        if (pending && !isClosed()) {
+          pending = false;
+          run();
+        }
+      });
+  };
 
   const fire = () => {
     timer = null;
-    reconcileAndEmit(db, root)
-      .then((result) => onReconcile?.(result))
-      .catch((err) =>
-        console.warn(`maestro watcher · reconcile failed: ${(err as Error).message}`),
-      );
+    if (isClosed()) return;
+    if (running) {
+      pending = true; // coalesce into a single trailing re-run rather than overlap
+      return;
+    }
+    run();
   };
+
+  return {
+    schedule: () => {
+      if (isClosed()) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(fire, debounceMs);
+    },
+    cancel: () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      pending = false;
+    },
+  };
+}
+
+/**
+ * Watch `root` for `_work.md` edits and keep the index live. Wires `fs.watch` events to a
+ * debounced single-flight `createReconcileScheduler` (which owns the concurrency invariants).
+ * Returns a handle whose `stop()` closes the OS watcher and cancels any pending debounce
+ * (idempotent). A failing reconcile is logged, never thrown — a bad edit must not kill the
+ * watcher.
+ */
+export function startWatcher(db: IndexDb, root: string, opts: WatcherOptions = {}): WatcherHandle {
+  const { debounceMs = 150, onReconcile } = opts;
+  let closed = false;
+  const scheduler = createReconcileScheduler({
+    reconcile: () => reconcileAndEmit(db, root),
+    onReconcile,
+    debounceMs,
+    isClosed: () => closed,
+  });
 
   const watcher = watch(root, { recursive: true }, (_type, filename) => {
     if (closed || !filename) return;
     if (!isWatchedChange(filename.toString())) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(fire, debounceMs);
+    scheduler.schedule();
   });
 
   return {
     stop: () => {
       if (closed) return;
       closed = true;
-      if (timer) clearTimeout(timer);
+      scheduler.cancel();
       watcher.close();
     },
   };

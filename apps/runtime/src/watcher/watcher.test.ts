@@ -21,7 +21,13 @@ import { eq } from "drizzle-orm";
 import { openIndex } from "../db/client";
 import { event } from "../db/schema";
 import { scanIntoIndex } from "../scanner";
-import { isWatchedChange, type ReconcileResult, reconcileAndEmit, startWatcher } from "./index";
+import {
+  createReconcileScheduler,
+  isWatchedChange,
+  type ReconcileResult,
+  reconcileAndEmit,
+  startWatcher,
+} from "./index";
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 const roots: string[] = [];
@@ -66,6 +72,12 @@ function wm(o: { id: string; state?: string; brief?: string }): string {
 const fresh = () => openIndex(":memory:");
 const nodeUpdated = (db: Awaited<ReturnType<typeof fresh>>["db"]) =>
   db.select().from(event).where(eq(event.type, EVENT_TYPES.NODE_UPDATED));
+
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const NOOP_RESULT: ReconcileResult = {
+  summary: { inserted: 0, updated: 0, tombstoned: 0, unchanged: 0, changedIds: [] },
+  emitted: 0,
+};
 
 // ── 1. PURE — isWatchedChange ───────────────────────────────────────────────────
 describe("isWatchedChange — the wake filter", () => {
@@ -166,7 +178,77 @@ describe("reconcileAndEmit — scan → index → node.updated", () => {
   });
 });
 
-// ── 3. END-TO-END — startWatcher ─────────────────────────────────────────────────
+// ── 3. createReconcileScheduler — the debounce + single-flight core (P20 major) ──
+// Driven directly (no fs.watch), so both invariants are PROVEN deterministically rather
+// than left to OS event timing. This is the coverage the P20 gate flagged as missing.
+describe("createReconcileScheduler — debounce + single-flight", () => {
+  test("debounce coalesces a burst of schedule() calls into ONE reconcile", async () => {
+    let calls = 0;
+    const sched = createReconcileScheduler({
+      reconcile: async () => {
+        calls += 1;
+        return NOOP_RESULT;
+      },
+      debounceMs: 20,
+    });
+    // A burst inside the quiet window — must collapse to a single pass.
+    sched.schedule();
+    sched.schedule();
+    sched.schedule();
+    await delay(60);
+    expect(calls).toBe(1);
+  });
+
+  test("single-flight: reconciles never overlap; a mid-pass wake triggers exactly one trailing run", async () => {
+    let active = 0;
+    let maxActive = 0;
+    let calls = 0;
+    const sched = createReconcileScheduler({
+      reconcile: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        calls += 1;
+        await delay(50); // a reconcile that OUTLASTS the 5ms debounce
+        active -= 1;
+        return NOOP_RESULT;
+      },
+      debounceMs: 5,
+    });
+    sched.schedule(); // fires ~t=5 → reconcile #1 runs t≈5..55
+    await delay(20); // t=20: #1 in flight
+    sched.schedule(); // fires ~t=25 while #1 runs → sets pending, does NOT overlap
+    await delay(15); // t=35: still #1
+    sched.schedule(); // fires ~t=40 → pending already set
+    await delay(120); // #1 ends ~55 → ONE trailing run ~55..105 → drain
+    expect(maxActive).toBe(1); // the invariant: never two reconciles at once
+    expect(calls).toBe(2); // #1 + exactly one coalesced trailing run
+  });
+
+  test("a closed scheduler runs neither a new nor a trailing reconcile", async () => {
+    let calls = 0;
+    let closed = false;
+    const sched = createReconcileScheduler({
+      reconcile: async () => {
+        calls += 1;
+        await delay(40);
+        return NOOP_RESULT;
+      },
+      debounceMs: 5,
+      isClosed: () => closed,
+    });
+    sched.schedule(); // → run #1 at ~t=5, ends ~45
+    await delay(20); // #1 in flight
+    sched.schedule(); // → pending
+    closed = true; // close mid-flight
+    sched.cancel();
+    await delay(80); // #1 finishes; the trailing run must NOT fire (closed + cancelled)
+    sched.schedule(); // a post-close schedule() is a no-op
+    await delay(20);
+    expect(calls).toBe(1);
+  });
+});
+
+// ── 4. END-TO-END — startWatcher ─────────────────────────────────────────────────
 describe("startWatcher — a disk edit drives a reconcile", () => {
   test("a new `_work.md` reconciles + emits a node.updated within the debounce window", async () => {
     const root = makeFixture({ "_work.md": wm({ id: "root", brief: "# Root" }) });
