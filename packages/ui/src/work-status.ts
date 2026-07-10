@@ -50,8 +50,11 @@ export interface WorkStatusView {
  * "Standing" overlay). This is the mapping the board (BRO-1780) consumes:
  *
  *   const v = workStatusView(node.state, node.kind, { isRunning });
- *   v.running ? <StatusBadge status={v.tone}><DotComet …/> {v.label}</StatusBadge>
+ *   v.running ? <StatusBadge status={v.tone} dot={<DotComet size={8} />}>{v.label}</StatusBadge>
  *             : <StatusBadge status={v.tone} pulse={v.pulse}>{v.label}</StatusBadge>
+ *
+ * The running case uses the `dot` slot so the tidepool replaces the static dot (no double
+ * dot); the board never hand-rolls the capsule.
  */
 export function workStatusView(
   state: OrchState,

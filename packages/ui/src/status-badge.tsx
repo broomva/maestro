@@ -27,8 +27,13 @@ export interface StatusBadgeProps extends React.HTMLAttributes<HTMLSpanElement> 
   /** Dot color. Default "info". `accent` = accent-blue "Needs you". */
   status?: StatusTone;
   /** Pulse the dot (a standing routine listening for its trigger). Uses the canon
-   * `.bv-dot--pulse` breath (1s), not a bespoke keyframe. Default false. */
+   * `.bv-dot--pulse` breath (1s), not a bespoke keyframe. Ignored when `dot` is set.
+   * Default false. */
   pulse?: boolean;
+  /** Replace the static status dot with a custom node — e.g. a `DotComet` for running
+   * work, so running wears the tidepool rather than a flat color (COMPONENTS.md: "Pair
+   * with a DotComet on the status row"). When set, `status`/`pulse` no longer drive the dot. */
+  dot?: React.ReactNode;
   /** The plain-voice label — sentence case, lead with the state (COMPONENTS.md §StatusBadge). */
   children?: React.ReactNode;
 }
@@ -40,7 +45,7 @@ export interface StatusBadgeProps extends React.HTMLAttributes<HTMLSpanElement> 
  * use `DotComet` as the dot rather than `pulse` — running is presence, not a breath.
  */
 export const StatusBadge = React.forwardRef<HTMLSpanElement, StatusBadgeProps>(
-  ({ status = "info", pulse = false, className, children, ...props }, ref) => (
+  ({ status = "info", pulse = false, dot, className, children, ...props }, ref) => (
     <span
       ref={ref}
       className={cn(
@@ -49,11 +54,13 @@ export const StatusBadge = React.forwardRef<HTMLSpanElement, StatusBadgeProps>(
       )}
       {...props}
     >
-      <span
-        aria-hidden="true"
-        className={cn("inline-block size-2 shrink-0 rounded-full", pulse && "bv-dot--pulse")}
-        style={{ background: STATUS_DOT_VAR[status] }}
-      />
+      {dot ?? (
+        <span
+          aria-hidden="true"
+          className={cn("inline-block size-2 shrink-0 rounded-full", pulse && "bv-dot--pulse")}
+          style={{ background: STATUS_DOT_VAR[status] }}
+        />
+      )}
       {children}
     </span>
   ),
