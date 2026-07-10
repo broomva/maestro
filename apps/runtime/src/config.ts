@@ -15,6 +15,14 @@ export interface RuntimeConfig {
   indexPath: string;
   /** Reserved singleton-lock location (D4, lands P2). Not acquired yet. */
   lockPath: string;
+  /**
+   * SSE tail poll interval in ms (MAESTRO_STREAM_POLL_MS). Optional — the stream
+   * routes (BRO-1816) fall back to their own default when unset. Tunable for a
+   * calmer/livelier feed; tests drop it low for prompt delivery assertions.
+   */
+  streamPollMs?: number;
+  /** SSE idle-heartbeat interval in ms (MAESTRO_STREAM_HEARTBEAT_MS). Optional; see above. */
+  streamHeartbeatMs?: number;
 }
 
 /** Default runtime port when MAESTRO_PORT is unset or invalid. */
@@ -34,5 +42,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   // workspace root (never cwd, which a long-lived supervisor does not pin).
   const indexPath = resolve(workspace, env.MAESTRO_INDEX ?? ".maestro/index.db");
   const lockPath = resolve(workspace, ".maestro/runtime.lock");
-  return { port, workspace, indexPath, lockPath };
+  // SSE cadence overrides: a positive integer wins; anything else leaves the field
+  // undefined so the stream route applies its own default (never a 0ms busy-loop).
+  const streamPollMs = positiveInt(env.MAESTRO_STREAM_POLL_MS);
+  const streamHeartbeatMs = positiveInt(env.MAESTRO_STREAM_HEARTBEAT_MS);
+  return { port, workspace, indexPath, lockPath, streamPollMs, streamHeartbeatMs };
+}
+
+/** A strictly-positive integer from an env string, or undefined (use the default). */
+function positiveInt(raw: string | undefined): number | undefined {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
 }

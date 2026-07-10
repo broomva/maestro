@@ -23,7 +23,6 @@ import {
   type BriefResponse,
   DEFAULT_EVENT_PAGE_SIZE,
   type ErrorResponse,
-  type EventEnvelope,
   type EventPage,
   type LiveNode,
   MAESTRO_PROTOCOL_VERSION,
@@ -41,6 +40,7 @@ import type { Context, Hono } from "hono";
 import type { IndexDb } from "../db/client";
 import { event, gate, node, schedule, session } from "../db/schema";
 import { WORK_FILE } from "../scanner";
+import { parseSeqCursor, toEnvelope } from "./event-projection";
 
 /** What the read routes need: the open index handle + the workspace root (briefs). */
 export interface ReadDeps {
@@ -55,46 +55,10 @@ function live<T extends { deletedAt: number | null }>(row: T): Omit<T, "deletedA
   return rest;
 }
 
-/** Parse the numeric `payload_json`, tolerating a corrupt row (raw string, never a 500). */
-function parsePayload(raw: string | null): unknown {
-  if (raw === null) return undefined;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return raw;
-  }
-}
-
-/** Format epoch-ms to ISO, tolerating a corrupt/out-of-range `ts` (a sentinel, never a 500). */
-function toIso(ms: number): string {
-  const d = new Date(ms);
-  return Number.isNaN(d.getTime()) ? new Date(0).toISOString() : d.toISOString();
-}
-
-/** Project a stored `event` row to its wire envelope (numeric ts → ISO, payload rehydrated). */
-function toEnvelope(row: typeof event.$inferSelect): EventEnvelope {
-  return {
-    seq: row.seq,
-    sessionId: row.sessionId,
-    // Guarded like parsePayload: one out-of-range `ts` must not RangeError-500 the whole
-    // page (which would also break the BRO-1816 SSE resume that pages off this route).
-    ts: toIso(row.ts),
-    actor: row.actor,
-    type: row.type,
-    payload: parsePayload(row.payload),
-  };
-}
-
 /** A typed `not_found` refusal (API §4). */
 function notFound(c: Context, message: string) {
   const body: ErrorResponse = { error: { code: "not_found", message, retryable: false } };
   return c.json(body, 404);
-}
-
-/** Parse the `?after=<seq>` cursor — a non-negative integer, defaulting to 0. */
-function parseAfter(raw: string | undefined): number {
-  const n = Number(raw ?? 0);
-  return Number.isInteger(n) && n >= 0 ? n : 0;
 }
 
 /**
@@ -225,7 +189,7 @@ export function registerReadRoutes(app: Hono, deps: ReadDeps): void {
   // sessionId) belong to the global stream, not a session timeline (DATA-MODEL §B.5).
   app.get("/api/sessions/:id/events", async (c) => {
     const id = c.req.param("id");
-    const after = parseAfter(c.req.query("after"));
+    const after = parseSeqCursor(c.req.query("after"));
     const rows = await db
       .select()
       .from(event)

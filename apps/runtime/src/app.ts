@@ -1,12 +1,14 @@
 // The runtime's Hono app (BRO-1790 skeleton). A pure factory — no globals — so
 // it is unit-testable via `app.request()` without binding a socket. The reads
-// (`/api/tree`, `/api/board`, …), intents, and the SSE stream (API.md) land on
-// top of this in P1; today it serves only `/health`.
+// (`/api/tree`, `/api/board`, …) and the SSE stream (`/api/stream`,
+// `/api/sessions/:id/stream`) land on top of this in P1; intents follow in P2.
+// Without an index handle it serves only `/health` (the compiled-binary path).
 
 import { MAESTRO_PROTOCOL_VERSION, X_MAESTRO_PROTOCOL } from "@maestro/protocol";
 import { Hono } from "hono";
 import pkg from "../package.json";
 import { registerReadRoutes } from "./api/reads";
+import { registerStreamRoutes } from "./api/stream";
 import type { RuntimeConfig } from "./config";
 import type { IndexDb } from "./db/client";
 
@@ -32,9 +34,9 @@ export interface HealthReport {
 /**
  * Build the runtime's Hono app. `startedAt` is an epoch-ms stamp used for the
  * `uptime_s` field. When `index` is supplied (the open libSQL handle), the API §1
- * read routes are mounted over it and `/health` reports the index as `open`;
- * without it the app serves only `/health` (the pure-unit path). The caller
- * decides whether to bind a socket (see index.ts).
+ * read routes AND the SSE stream routes are mounted over it and `/health` reports
+ * the index as `open`; without it the app serves only `/health` (the pure-unit
+ * path). The caller decides whether to bind a socket (see index.ts).
  */
 export function createApp(config: RuntimeConfig, startedAt: number, index?: IndexDb) {
   const app = new Hono();
@@ -55,6 +57,11 @@ export function createApp(config: RuntimeConfig, startedAt: number, index?: Inde
 
   if (index) {
     registerReadRoutes(app, { db: index, workspace: config.workspace });
+    registerStreamRoutes(app, {
+      db: index,
+      pollMs: config.streamPollMs,
+      heartbeatMs: config.streamHeartbeatMs,
+    });
   }
 
   return app;
