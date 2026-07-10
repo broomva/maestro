@@ -6,7 +6,7 @@
 // temp git repo as the workspace and exercises real `git worktree` — no mocks (P11).
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git } from "../git/git";
@@ -22,9 +22,12 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-/** A fresh temp git repo (with one commit — `git worktree add` needs a born HEAD). */
+/** A fresh temp git repo (with one commit — `git worktree add` needs a born HEAD). The dir is
+ *  realpath'd so the workspace is CANONICAL, as a real runtime workspace is (e.g. /Users/…, not a
+ *  symlink) — on macOS mkdtemp returns /var/folders which symlinks to /private/var, and the
+ *  prunable-respawn bug (P20 MAJOR-1) only reproduces on a canonical workspace. */
 async function makeWorkspace(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "maestro-sandbox-"));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "maestro-sandbox-")));
   await git(dir, ["init", "-q"]);
   await git(dir, ["config", "user.email", "t@t.co"]);
   await git(dir, ["config", "user.name", "t"]);
@@ -113,6 +116,34 @@ describe("WorktreeSandbox (phase-1 specifics)", () => {
     expect(respawn.workdir).toBe(first.workdir);
     expect(respawn.branch).toBe(first.branch);
     expect(await exists(join(respawn.workdir, "in-progress.txt"))).toBe(true); // not re-created
+  });
+
+  test("respawn after the checkout is deleted (prunable) re-provisions a LIVE workdir (P20 MAJOR-1)", async () => {
+    const ws = await trackedWorkspace();
+    const f = createWorktreeSandboxFactory({ workspace: ws });
+    const first = await f.create("gg");
+    expect(await exists(first.workdir)).toBe(true);
+    // Simulate `rm -rf .maestro/` (the design's documented rebuildable cache) behind git's back: the
+    // checkout vanishes but the `.git/worktrees/run-gg` admin entry survives → registered-but-missing
+    // (prunable). The OLD idempotency check trusted `git worktree list` and would reuse this dead
+    // entry, handing back a Sandbox whose cwd does not exist (ENOENT on first spawn).
+    await rm(first.workdir, { recursive: true, force: true });
+    const respawn = await f.create("gg");
+    expect(respawn.workdir).toBe(first.workdir);
+    expect(await exists(respawn.workdir)).toBe(true); // LIVE, not a phantom
+    const head = await respawn.exec(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
+    expect(head.code).toBe(0);
+    expect(head.stdout.trim()).toBe("run/gg"); // re-attached to the kept branch (the receipt)
+  });
+
+  test("teardown(preserve=false) is idempotent — a second teardown does not throw (P20 MAJOR-2)", async () => {
+    const ws = await trackedWorkspace();
+    const sb = await createWorktreeSandboxFactory({ workspace: ws }).create("hh");
+    await sb.teardown({ preserve: false });
+    expect(await exists(sb.workdir)).toBe(false);
+    // The reap path (BRO-1779) may call teardown more than once; an already-removed worktree is a
+    // no-op, not an uncaught `git worktree remove` exit-128 throw.
+    await expect(sb.teardown({ preserve: false })).resolves.toBeUndefined();
   });
 
   test("rejects an unsafe run id (path traversal / branch forgery)", async () => {

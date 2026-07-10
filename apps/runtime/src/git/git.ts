@@ -74,18 +74,23 @@ export async function gitUnstage(cwd: string, paths: string[]): Promise<void> {
 // (ARCHITECTURE §5). These are the raw git ops the sandbox adapter (sandbox/worktree.ts) composes;
 // BRO-1779 (reap) and eventual cleanup reuse them, so they live here in the git surface.
 
-/** One entry of `git worktree list --porcelain` — path plus the branch it has checked out (if any). */
+/** One entry of `git worktree list --porcelain` — path, branch, and whether git deems it prunable
+ *  (its checkout dir has vanished — the admin entry under `.git/worktrees/` outlived the working tree,
+ *  e.g. after `rm -rf .maestro/`; such an entry looks "registered" but points at nothing). */
 export interface Worktree {
-  /** Absolute worktree path. */
+  /** Absolute worktree path (as git recorded it — may no longer exist on disk if `prunable`). */
   path: string;
   /** Short branch name (refs/heads/ stripped), or null for a detached-HEAD worktree. */
   branch: string | null;
+  /** True when git flagged the entry `prunable` (working dir gone) — a stale, not-live registration. */
+  prunable: boolean;
 }
 
 /**
  * List the repo's worktrees. Parses the stable `--porcelain` format (blank-line-separated blocks,
- * each starting `worktree <path>`), so it never breaks on the human format's alignment. Used by the
- * sandbox factory to make `create` idempotent (a fresh-context respawn reuses the SAME worktree).
+ * each starting `worktree <path>`), so it never breaks on the human format's alignment. Captures the
+ * `prunable` annotation — a registered-but-missing worktree is NOT a live one, and a caller that
+ * treats it as live (skipping a needed re-add) hands back a Sandbox whose cwd does not exist.
  */
 export async function gitWorktreeList(cwd: string): Promise<Worktree[]> {
   const r = await git(cwd, ["worktree", "list", "--porcelain"]);
@@ -93,10 +98,12 @@ export async function gitWorktreeList(cwd: string): Promise<Worktree[]> {
   const out: Worktree[] = [];
   let path: string | null = null;
   let branch: string | null = null;
+  let prunable = false;
   const flush = () => {
-    if (path !== null) out.push({ path, branch });
+    if (path !== null) out.push({ path, branch, prunable });
     path = null;
     branch = null;
+    prunable = false;
   };
   for (const line of r.stdout.split("\n")) {
     if (line.startsWith("worktree ")) {
@@ -104,31 +111,44 @@ export async function gitWorktreeList(cwd: string): Promise<Worktree[]> {
       path = line.slice("worktree ".length);
     } else if (line.startsWith("branch ")) {
       branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+    } else if (line === "prunable" || line.startsWith("prunable ")) {
+      prunable = true;
     }
-    // "HEAD <sha>", "detached", "bare", "locked", blank — not needed here
+    // "HEAD <sha>", "detached", "bare", "locked" — not needed here
   }
   flush();
   return out;
 }
 
+/** Prune stale worktree admin entries (registered dirs that no longer exist). Idempotent, never a
+ *  no-op error — clears the `.git/worktrees/<id>` entries a `rm -rf` left behind so a re-add succeeds. */
+export async function gitWorktreePrune(cwd: string): Promise<void> {
+  await git(cwd, ["worktree", "prune"]);
+}
+
 /**
- * Add a worktree at `path` checked out to `branch`. Creates the branch (`-b`) for a fresh run; if
- * that branch already exists (a re-dispatch of a run id whose worktree was removed but branch kept —
- * "the branch is the receipt"), attaches the existing branch instead. Throws {@link GitError} if
- * neither works (e.g. the path is occupied — the factory guards that case by checking the list first).
+ * Add a worktree at `path` checked out to `branch`. Creates the branch (`-b`) for a fresh run; if that
+ * branch already exists (a re-dispatch of a run id whose worktree was removed but branch kept — "the
+ * branch is the receipt"), attaches it instead. SELF-HEALS: a stale `.git/worktrees/` admin entry (a
+ * prunable/registered-but-missing worktree) blocks BOTH forms with exit 128 ("already used by
+ * worktree at <gone path>"); on that failure it prunes and retries once. Throws {@link GitError} only
+ * if the add still fails after a clean prune.
  */
 export async function gitWorktreeAdd(cwd: string, path: string, branch: string): Promise<void> {
-  const fresh = await git(cwd, ["worktree", "add", path, "-b", branch]);
-  if (fresh.code === 0) return;
-  // -b failed — most likely the branch already exists; retry attaching it (no -b).
-  const attach = await git(cwd, ["worktree", "add", path, branch]);
-  if (attach.code !== 0) {
-    throw new GitError(
-      ["worktree", "add", path, branch],
-      attach.code,
-      attach.stderr || fresh.stderr,
-    );
-  }
+  const attempt = async (): Promise<GitResult | null> => {
+    const fresh = await git(cwd, ["worktree", "add", path, "-b", branch]);
+    if (fresh.code === 0) return null;
+    // -b failed — most likely the branch already exists; retry attaching it (no -b).
+    const attach = await git(cwd, ["worktree", "add", path, branch]);
+    return attach.code === 0 ? null : attach;
+  };
+  const first = await attempt();
+  if (first === null) return;
+  // A stale admin entry (prunable worktree) can block both forms — prune and retry once.
+  await gitWorktreePrune(cwd);
+  const second = await attempt();
+  if (second === null) return;
+  throw new GitError(["worktree", "add", path, branch], second.code, second.stderr);
 }
 
 /**

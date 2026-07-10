@@ -15,9 +15,9 @@
 // create() is idempotent: a fresh-context respawn (HARNESS §5 — exit 10, same session id, same
 // worktree, same budget) re-attaches the existing worktree instead of failing.
 
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { gitWorktreeAdd, gitWorktreeList, gitWorktreeRemove } from "../git/git";
+import { gitWorktreeAdd, gitWorktreeList, gitWorktreePrune, gitWorktreeRemove } from "../git/git";
 import type {
   ResourceLimits,
   Sandbox,
@@ -61,6 +61,31 @@ async function canonical(p: string): Promise<string> {
   }
 }
 
+/** True if a path exists on disk. */
+async function exists(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Is `workdir` a git worktree that is BOTH registered AND present on disk? A registered-but-missing
+ *  (prunable) entry — the `.git/worktrees/<id>/` that outlives a `rm -rf .maestro/` — is NOT live: a
+ *  reuse would hand back a Sandbox whose cwd does not exist. Checked by both create (reuse guard) and
+ *  teardown (idempotency). */
+async function isLiveWorktree(workspace: string, workdir: string): Promise<boolean> {
+  if (!(await exists(workdir))) return false;
+  const target = await canonical(workdir);
+  const list = await gitWorktreeList(workspace);
+  for (const w of list) {
+    if (w.prunable) continue; // stale registration, not live
+    if ((await canonical(w.path)) === target) return true;
+  }
+  return false;
+}
+
 /** The phase-1 Sandbox: a git worktree. Constructed by the factory once paths are provisioned. */
 class WorktreeSandbox implements Sandbox {
   constructor(
@@ -96,10 +121,19 @@ class WorktreeSandbox implements Sandbox {
 
   // TEARDOWN: preserve (default) keeps everything — the receipt. `preserve: false` frees only the
   // worktree working dir (force: a completed run's uncommitted delta is not a receipt; the branch
-  // commits + runDir are). The branch and runDir are NEVER removed here.
+  // commits + runDir are). The branch and runDir are NEVER removed here. IDEMPOTENT: the reap path
+  // (BRO-1779) may call teardown more than once (double-stop, crash-then-cleanup), so an already-gone
+  // worktree is a no-op, not a throw — `git worktree remove` exits 128 on an unregistered path. Mirror
+  // gitUnstage's "never throws on an already-clean state" philosophy.
   async teardown(opts?: { preserve?: boolean }): Promise<void> {
     const preserve = opts?.preserve ?? true;
     if (preserve) return; // keep the worktree receipt (crash/kill, or a pending verify/review)
+    if (!(await isLiveWorktree(this.workspace, this.workdir))) {
+      // already removed (a prior teardown) or registered-but-missing (prunable) — clear any stale
+      // admin entry so the slate is clean for a future re-dispatch, then no-op.
+      await gitWorktreePrune(this.workspace).catch(() => {});
+      return;
+    }
     await gitWorktreeRemove(this.workspace, this.workdir, { force: true });
   }
 }
@@ -121,16 +155,13 @@ export function createWorktreeSandboxFactory(cfg: WorktreeSandboxConfig): Sandbo
       // git worktree add creates the leaf, but the parent must exist first.
       await mkdir(worktreesRoot, { recursive: true });
 
-      // Idempotent: a fresh-context respawn reuses the SAME worktree (HARNESS §5). Only add when the
-      // path is not already a registered worktree — otherwise `git worktree add` would fail on it.
-      // Compare via realpath: `git worktree list` reports canonical paths (e.g. macOS resolves
-      // /var/folders → /private/var/folders), so a plain resolve() would miss the existing worktree.
-      // On a first create the workdir does not exist yet, so canonical() falls back to resolve() and
-      // never spuriously matches; on respawn it exists and canonicalizes to git's reported path.
-      const existing = await gitWorktreeList(cfg.workspace);
-      const target = await canonical(workdir);
-      const listed = await Promise.all(existing.map((w) => canonical(w.path)));
-      if (!listed.includes(target)) {
+      // Idempotent: a fresh-context respawn reuses the SAME worktree (HARNESS §5) — but ONLY if it is
+      // LIVE (registered AND present on disk). A registered-but-missing (prunable) entry — the
+      // `.git/worktrees/<id>/` that survives a `rm -rf .maestro/` (the design invites this: .maestro/
+      // is a documented rebuildable cache) — must NOT be reused: that would hand back a Sandbox whose
+      // cwd does not exist and ENOENT-crash the first child spawn. When not live, re-add;
+      // gitWorktreeAdd self-heals a stale admin entry (prune + retry) and attaches the kept branch.
+      if (!(await isLiveWorktree(cfg.workspace, workdir))) {
         await gitWorktreeAdd(cfg.workspace, workdir, branch);
       }
 
