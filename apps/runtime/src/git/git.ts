@@ -68,3 +68,80 @@ export async function gitCommit(cwd: string, paths: string[], message: string): 
 export async function gitUnstage(cwd: string, paths: string[]): Promise<void> {
   await git(cwd, ["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", ...paths]);
 }
+
+// ── Worktree primitives (BRO-1746) ─────────────────────────────────────────────
+// The runtime runs each agent in a `git worktree` on a `run/<id>` branch — phase-1 isolation
+// (ARCHITECTURE §5). These are the raw git ops the sandbox adapter (sandbox/worktree.ts) composes;
+// BRO-1779 (reap) and eventual cleanup reuse them, so they live here in the git surface.
+
+/** One entry of `git worktree list --porcelain` — path plus the branch it has checked out (if any). */
+export interface Worktree {
+  /** Absolute worktree path. */
+  path: string;
+  /** Short branch name (refs/heads/ stripped), or null for a detached-HEAD worktree. */
+  branch: string | null;
+}
+
+/**
+ * List the repo's worktrees. Parses the stable `--porcelain` format (blank-line-separated blocks,
+ * each starting `worktree <path>`), so it never breaks on the human format's alignment. Used by the
+ * sandbox factory to make `create` idempotent (a fresh-context respawn reuses the SAME worktree).
+ */
+export async function gitWorktreeList(cwd: string): Promise<Worktree[]> {
+  const r = await git(cwd, ["worktree", "list", "--porcelain"]);
+  if (r.code !== 0) throw new GitError(["worktree", "list", "--porcelain"], r.code, r.stderr);
+  const out: Worktree[] = [];
+  let path: string | null = null;
+  let branch: string | null = null;
+  const flush = () => {
+    if (path !== null) out.push({ path, branch });
+    path = null;
+    branch = null;
+  };
+  for (const line of r.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      flush();
+      path = line.slice("worktree ".length);
+    } else if (line.startsWith("branch ")) {
+      branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+    }
+    // "HEAD <sha>", "detached", "bare", "locked", blank — not needed here
+  }
+  flush();
+  return out;
+}
+
+/**
+ * Add a worktree at `path` checked out to `branch`. Creates the branch (`-b`) for a fresh run; if
+ * that branch already exists (a re-dispatch of a run id whose worktree was removed but branch kept —
+ * "the branch is the receipt"), attaches the existing branch instead. Throws {@link GitError} if
+ * neither works (e.g. the path is occupied — the factory guards that case by checking the list first).
+ */
+export async function gitWorktreeAdd(cwd: string, path: string, branch: string): Promise<void> {
+  const fresh = await git(cwd, ["worktree", "add", path, "-b", branch]);
+  if (fresh.code === 0) return;
+  // -b failed — most likely the branch already exists; retry attaching it (no -b).
+  const attach = await git(cwd, ["worktree", "add", path, branch]);
+  if (attach.code !== 0) {
+    throw new GitError(
+      ["worktree", "add", path, branch],
+      attach.code,
+      attach.stderr || fresh.stderr,
+    );
+  }
+}
+
+/**
+ * Remove a worktree's working directory. `force` is needed when it holds uncommitted/untracked
+ * changes — safe for a completed run because the receipt lives in the branch commits + `runs/run-<id>/`,
+ * not the ephemeral working tree. NEVER deletes the branch (that is the receipt). Throws on failure.
+ */
+export async function gitWorktreeRemove(
+  cwd: string,
+  path: string,
+  opts: { force?: boolean } = {},
+): Promise<void> {
+  const args = ["worktree", "remove", ...(opts.force ? ["--force"] : []), path];
+  const r = await git(cwd, args);
+  if (r.code !== 0) throw new GitError(args, r.code, r.stderr);
+}

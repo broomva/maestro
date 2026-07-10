@@ -22,11 +22,15 @@ playwright-report/
 # Workspace scaffolding — not product (BRO-1758 scope: planning/ is not shipped)
 /planning/
 
-# Runtime index + worktrees (FS-as-truth; index is a rebuildable cache)
+# Runtime index + worktrees + receipts (FS-as-truth; index is a rebuildable cache)
 *.db
 *.db-shm
 *.db-wal
 /run/
+# BRO-1746: run worktrees live under .maestro/worktrees/ (also in the scanner SKIP_DIRS, so the
+# checkout's _work.md copies are never indexed as duplicate nodes); receipts live under runs/run-<id>/.
+/.maestro/
+/runs/
 
 # Machine-local control telemetry (bstack — wired in BRO-1829)
 .control/audit/*.jsonl
