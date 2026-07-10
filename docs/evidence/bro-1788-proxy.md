@@ -7,7 +7,7 @@ budget check in the request path (HARNESS §3, F3.1, AUTONOMY §4).
 
 ```
 $ bun test apps/runtime --filter proxy
- 138 pass  0 fail  455 expect() calls   (13 proxy/budget tests included)
+ 156 pass  0 fail  498 expect() calls   (31 proxy/budget tests included)
 ```
 
 The three done.check guarantees, each a test:
@@ -67,6 +67,46 @@ upstream-throw: 502 | type: upstream_unavailable
   mid-preflight can't let one more call land.
 - **Model pinning** lives supervisor-side (role → pinned model; `MAESTRO_MODEL_<ROLE>` override) so
   a version bump is one config change and the D8 canary (BRO-1806) can route without the child knowing.
+
+## P20 round-4 fixes (block 5/10 → applied)
+
+Round 4 confirmed key-confinement closed but reopened the overspend (Finding 2, active) plus a latent
+modality under-price (Finding 1). Both closed, each with a **mutation-proven** discriminating test.
+
+1. **per_day rollover erased in-flight reservations → overspend** (the disqualifier): `#dayReservedUsd`
+   was a single scalar, so a call that RESERVED before UTC midnight and METERED after decremented the
+   *new* day's live reservations — freeing a slot still in flight and admitting an over-cap call. The
+   single-rollover round-2 test missed it (masked by `Math.max(0,…)`). Fixed by **tagging every
+   reservation with its day bucket** (`Reservation {reserveUsd, bucket}`): `#releaseDayReservation`
+   only decrements when the reservation's bucket is still the current day; a rolled-over reservation
+   was already dropped by `#rolloverIfNeeded`. Live guard dogfood of the multi-call straddle
+   (`$1/day` cap, `$0.5` each, A reserves day D and meters D+1 while B/C run on D+1):
+
+   ```
+   B reserve (D+1):  admitted
+   A meter (D→D+1):  booked full actual to D+1
+   C reserve (D+1):  refused (per_day)        ← pre-fix scalar code ADMITS C, settling $1.5 on a $1 cap
+   day total:        $1.0000 (cap $1 — never exceeded)
+   ```
+
+   Anti-vacuity: dropping the `reservation.bucket === this.#dayBucket` guard fails exactly the new
+   `MULTI-CALL cross-midnight straddle` test (mutation verified: 155 pass / 1 fail), green when restored.
+
+2. **byte-length ceiling under-prices image/PDF input** (latent): images/documents are billed by
+   DIMENSIONS, not their (compressible) base64 bytes, so a large-dimension highly-compressible blob can
+   under-run the byte bound. Fixed with a per-block token **FLOOR** on top of the bytes
+   (`MAX_IMAGE_TOKENS = 2000`, `MAX_DOCUMENT_TOKENS = 20000`, counted recursively so nested
+   `tool_result` content is caught). The docstring no longer claims `tokens <= bytes` for ANY input —
+   it holds for byte-level-BPE TEXT; modalities add explicit token terms. Live dogfood:
+
+   ```
+   text-only ceiling:  $0.0023
+   +image ceiling:     $0.0383  (+$0.0359, ~2000-token floor)
+   +document ceiling:  $0.3484  (20000-token floor >> image)
+   ```
+
+   Anti-vacuity: dropping the modality term fails exactly the new `per-image / per-document token
+   FLOOR` test (mutation verified), green when restored.
 
 ## P20 round-3 fixes (block 4/10 → applied)
 

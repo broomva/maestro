@@ -62,6 +62,29 @@ export const FALLBACK_PRICE: ModelPrice = { inputPerMtok: 15, outputPerMtok: 75 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 /** Safety multiplier on the whole ceiling — headroom against price staleness / framing tokens. */
 const CEILING_SAFETY = 1.15;
+/** Per-image input-token FLOOR. Images are billed by DIMENSIONS (~W·H/750, capped ~1600 by the
+ *  1568px resize), NOT by their (compressible) base64 bytes — so a large-dimension, highly-
+ *  compressible image can under-run the byte-length bound. This floor (on top of the bytes) keeps the
+ *  ceiling >= actual for any image. */
+export const MAX_IMAGE_TOKENS = 2000;
+/** Per-document input-token FLOOR. A PDF is rendered per page (each ~an image); page count is not in
+ *  the request, so this is a conservative floor. NOTE: a very large PDF can still exceed it — precise
+ *  document pricing lands with the live upstream (BRO-1756), which has page metadata. */
+export const MAX_DOCUMENT_TOKENS = 20000;
+
+/** Count image/document content blocks anywhere in the payload (they nest in tool_result content). */
+function countModalityBlocks(node: unknown, acc: { images: number; documents: number }): void {
+  if (Array.isArray(node)) {
+    for (const n of node) countModalityBlocks(n, acc);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    const t = (node as { type?: unknown }).type;
+    if (t === "image") acc.images++;
+    else if (t === "document") acc.documents++;
+    for (const v of Object.values(node as Record<string, unknown>)) countModalityBlocks(v, acc);
+  }
+}
 
 /** The price for a model id, honoring a MAESTRO_PRICE_<canonical> `in/out` override, else the table. */
 export function modelPrice(
@@ -84,15 +107,19 @@ export function modelPrice(
 }
 
 /**
- * The per-call cost CEILING in USD — a true UPPER BOUND on what this call can cost, used as the
- * budget reservation. Two bounds make it sound (`ceiling >= actual` always), which is what makes
- * "reserve then reconcile" incapable of overspending:
+ * The per-call cost CEILING in USD — an UPPER BOUND on what this call can cost, used as the budget
+ * reservation. Sound (`ceiling >= actual`) across modalities, which is what makes "reserve then
+ * reconcile" incapable of overspending:
  *   - output is bounded EXACTLY by `max_tokens` (the API never emits more);
- *   - input tokens are bounded by the payload's UTF-8 BYTE length. For a byte-level BPE tokenizer
- *     (Claude's family) every token represents >= 1 byte and merges only reduce the count, so
- *     `tokens <= bytes` for ANY input — including dense CJK / base64 that a chars/token heuristic
- *     under-counts (the P20 round-3 overspend). It over-counts plain text ~4x; erring high is the
- *     guardrail's job (a call that could breach a cap is refused, never silently overspent).
+ *   - TEXT input tokens are bounded by the payload's UTF-8 BYTE length: for a byte-level BPE
+ *     tokenizer every token represents >= 1 byte and merges only reduce the count, so `tokens <=
+ *     bytes` for any TEXT input — including dense CJK / base64 that a chars/token heuristic
+ *     under-counts (the P20 round-3 overspend);
+ *   - IMAGE / DOCUMENT blocks are billed by DIMENSIONS, not their (compressible) base64 bytes, so a
+ *     per-block token FLOOR is added on top of the bytes (the P20 round-4 modality under-count).
+ * It over-counts plain text ~4x; erring high is the guardrail's job — a call that could breach a cap
+ * is refused, never silently overspent. (Precise image/document dimension pricing lands with the live
+ * upstream, BRO-1756, which carries the metadata; until then these conservative floors bound it.)
  */
 export function estimateCallCeilingUsd(
   model: string,
@@ -103,7 +130,11 @@ export function estimateCallCeilingUsd(
   const p = (payload ?? {}) as { max_tokens?: unknown };
   const maxTokens =
     typeof p.max_tokens === "number" && p.max_tokens > 0 ? p.max_tokens : DEFAULT_MAX_OUTPUT_TOKENS;
-  const inputTokens = Buffer.byteLength(JSON.stringify(payload ?? {}), "utf8"); // hard upper bound
+  const byteTokens = Buffer.byteLength(JSON.stringify(payload ?? {}), "utf8"); // text hard upper bound
+  const modality = { images: 0, documents: 0 };
+  countModalityBlocks(payload, modality);
+  const inputTokens =
+    byteTokens + modality.images * MAX_IMAGE_TOKENS + modality.documents * MAX_DOCUMENT_TOKENS;
   const raw = (inputTokens * price.inputPerMtok + maxTokens * price.outputPerMtok) / 1_000_000;
   return raw * CEILING_SAFETY;
 }

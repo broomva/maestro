@@ -29,8 +29,22 @@ import type { SessionContext } from "./tokens";
 /** Which cap a refusal hit — the `budget.refused` reason + the child's park classification. */
 export type RefusalReason = "per_run" | "per_day" | "iteration_cap";
 
+/**
+ * A held reservation — the amount reserved AND the day bucket it was reserved in. The bucket is
+ * load-bearing: a call reserved before UTC midnight and metered after must NOT decrement the NEW
+ * day's live reservations (which would free a slot still in flight and admit an over-cap call). meter
+ * and release only release the day reservation when the bucket still matches; a rolled-over
+ * reservation was already dropped by `#rolloverIfNeeded`.
+ */
+export interface Reservation {
+  reserveUsd: number;
+  bucket: number;
+}
+
 /** The pre-forward verdict. `ok:false` → the proxy answers 402 and the run parks `blocked` (F3.1). */
-export type BudgetVerdict = { ok: true } | { ok: false; reason: RefusalReason };
+export type BudgetVerdict =
+  | { ok: true; reservation: Reservation }
+  | { ok: false; reason: RefusalReason };
 
 /** Actual usage metered from a completed model call (HARNESS §3 step 3). */
 export interface MeterInput {
@@ -137,36 +151,33 @@ export class BudgetGuard {
         .where(and(...conds));
       rowsAffected = res.rowsAffected;
     } catch (err) {
-      this.#releaseDayReservation(reserve); // never strand a day reservation on a DB error
+      // never strand the day reservation on a DB error (bucket-tagged like every other release)
+      this.#releaseDayReservation({ reserveUsd: reserve, bucket: this.#dayBucket });
       throw err;
     }
 
     if (rowsAffected === 0) {
-      this.#releaseDayReservation(reserve);
+      this.#releaseDayReservation({ reserveUsd: reserve, bucket: this.#dayBucket });
       const reason = await this.#classifyRunRefusal(ctx.session, budget, reserve);
       await this.#refuse(ctx, reason);
       return { ok: false, reason };
     }
-    return { ok: true };
+    return { ok: true, reservation: { reserveUsd: reserve, bucket: this.#dayBucket } };
   }
 
   /**
-   * Reconcile a reservation to the ACTUAL cost of a completed call (HARNESS §3 step 3). Pass the SAME
-   * `reserveUsd` the matching preflight used. Emits `budget.metered` with the real usage. The day
-   * accounting books the FULL actual to the CURRENT day (rollover-safe), not a relative delta.
+   * Reconcile a reservation to the ACTUAL cost of a completed call (HARNESS §3 step 3). Pass the
+   * `reservation` the matching preflight returned. Emits `budget.metered` with the real usage. The
+   * day accounting books the FULL actual to the CURRENT day and only releases the day reservation if
+   * it belongs to the current bucket — a reservation from a rolled-over day was already dropped, so
+   * decrementing here would erase a NEW day's live reservation (the P20 round-4 per_day overspend).
    */
-  async meter(
-    ctx: SessionContext,
-    input: MeterInput,
-    reserveUsd = this.#defaultReserve,
-  ): Promise<void> {
+  async meter(ctx: SessionContext, input: MeterInput, reservation: Reservation): Promise<void> {
     const actual = Number.isFinite(input.usd) && input.usd > 0 ? input.usd : 0;
     // In-memory reconcile FIRST — it can't throw, so a subsequent failure never strands the day
-    // reservation (the availability DoS P20 round-3 flagged). Book the FULL actual to the current day
-    // so a call reserved before midnight and metered after is counted on the new day (rollover-safe).
-    this.#rolloverIfNeeded();
-    this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reserveUsd);
-    this.#daySpentUsd += actual;
+    // reservation (the availability DoS P20 round-3 flagged).
+    this.#releaseDayReservation(reservation); // bucket-checked release of the held reservation
+    this.#daySpentUsd += actual; // book the full actual to the current day (rollover-safe)
     // Durable event (D-DURABILITY: the event is truth; run_budget is a rebuildable cache).
     await this.#sink.emit(ctx.runDir, {
       ts: new Date(this.#now()).toISOString(),
@@ -180,7 +191,7 @@ export class BudgetGuard {
       await this.#db
         .update(runBudget)
         .set({
-          spentUsd: sql`max(0, ${runBudget.spentUsd} + ${actual - reserveUsd})`,
+          spentUsd: sql`max(0, ${runBudget.spentUsd} + ${actual - reservation.reserveUsd})`,
           lastCallAt: this.#now(),
         })
         .where(eq(runBudget.sessionId, ctx.session));
@@ -193,26 +204,32 @@ export class BudgetGuard {
    * Release a reservation for a call that never billed (upstream error / no usage): refund the
    * reserved dollars but KEEP the consumed iteration — a flaky upstream then drains `max_iterations`
    * and parks the run (fail-closed) rather than retrying free forever. Emits nothing (no spend). Pass
-   * the SAME `reserveUsd` the matching preflight used.
+   * the `reservation` the matching preflight returned.
    */
-  async release(ctx: SessionContext, reserveUsd = this.#defaultReserve): Promise<void> {
+  async release(ctx: SessionContext, reservation: Reservation): Promise<void> {
     // In-memory refund FIRST so a DB throw can't strand the day reservation (availability DoS).
-    this.#releaseDayReservation(reserveUsd);
+    this.#releaseDayReservation(reservation);
     try {
       await this.#db
         .update(runBudget)
-        .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} - ${reserveUsd})` })
+        .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} - ${reservation.reserveUsd})` })
         .where(eq(runBudget.sessionId, ctx.session));
     } catch {
       // cache-only refund; nothing was durably spent (no budget.metered emitted), so nothing to reconcile
     }
   }
 
-  /** Roll back an in-memory day reservation — rollover-aware + clamped, the ONE mutation helper so no
-   *  site drifts (a missing rollover/clamp here drove the accumulator negative in P20 round-2). */
-  #releaseDayReservation(reserve: number): void {
+  /**
+   * Roll back an in-memory day reservation — rollover-aware + clamped, the ONE mutation helper so no
+   * site drifts. Only decrements when the reservation's bucket is still the current day: a reservation
+   * from a rolled-over day was already zeroed by `#rolloverIfNeeded`, so decrementing again would eat a
+   * live NEW-day reservation (P20 round-4). The rollover call also advances `#dayBucket` first.
+   */
+  #releaseDayReservation(reservation: Reservation): void {
     this.#rolloverIfNeeded();
-    this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reserve);
+    if (reservation.bucket === this.#dayBucket) {
+      this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reservation.reserveUsd);
+    }
   }
 
   /** Name the run-scoped cap that blocked a reservation (per_run before iteration_cap). */

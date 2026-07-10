@@ -112,7 +112,7 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
     // more call land. Release the reservation we just took. (`token` is non-null here — a null token
     // already 401'd at step 1.)
     if (deps.tokens.resolve(token as string) === null) {
-      await deps.guard.release(ctx, reserve);
+      await deps.guard.release(ctx, verdict.reservation);
       const body: ErrorResponse = {
         error: { code: "unauthorized", message: "session token revoked", retryable: false },
       };
@@ -131,7 +131,7 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
         apiKey: deps.apiKey(),
       });
     } catch (err) {
-      await deps.guard.release(ctx, reserve);
+      await deps.guard.release(ctx, verdict.reservation);
       return c.json(
         {
           error: { type: "upstream_unavailable", message: String((err as Error)?.message ?? err) },
@@ -144,8 +144,8 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
     // the upstream call already succeeded, so a reconcile hiccup must not turn a 200 into a 500 (the
     // guard reconciles in-memory first, and the durable budget.metered event is the source of truth).
     try {
-      if (result.usage) await deps.guard.meter(ctx, result.usage, reserve);
-      else await deps.guard.release(ctx, reserve);
+      if (result.usage) await deps.guard.meter(ctx, result.usage, verdict.reservation);
+      else await deps.guard.release(ctx, verdict.reservation);
     } catch {
       // reconcile is best-effort post-success; D5 rebuilds spend from the durable event
     }

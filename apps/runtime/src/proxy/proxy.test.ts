@@ -15,7 +15,14 @@ import { eq } from "drizzle-orm";
 import { type IndexHandle, indexUrl, openIndex } from "../db/client";
 import { runBudget } from "../db/schema";
 import { buildChildEnv } from "../harness/spawn-contract";
-import { BudgetGuard, deriveDayTotal, deriveSpentBySession, type MeteredRecord } from "./budget";
+import {
+  BudgetGuard,
+  deriveDayTotal,
+  deriveSpentBySession,
+  type MeteredRecord,
+  type RefusalReason,
+  type Reservation,
+} from "./budget";
 import { MemoryEventSink } from "./events";
 import {
   DEFAULT_MODEL_PINS,
@@ -44,6 +51,18 @@ function ctx(session: string, budget: SessionContext["budget"]): SessionContext 
  *  (The proxy passes a model-priced ceiling per call; these guard tests use the default reserve.) */
 function guardWith(sink: MemoryEventSink, reserveUsd = 0.5, dayTotalUsd = 0): BudgetGuard {
   return new BudgetGuard(handle.db, sink, { now: FIXED_NOW, reserveUsd, dayTotalUsd });
+}
+
+/** Preflight and assert it passed, returning the held Reservation to thread into meter/release. The
+ *  reservation is now REQUIRED by meter/release (bucket-tagged, P20 round-4), so tests capture it. */
+async function reserve(
+  guard: BudgetGuard,
+  c: SessionContext,
+  reserveUsd?: number,
+): Promise<Reservation> {
+  const v = await guard.preflight(c, reserveUsd);
+  if (!v.ok) throw new Error(`preflight refused unexpectedly: ${v.reason}`);
+  return v.reservation;
 }
 
 // ── 1. tokens: mint / resolve / revoke ───────────────────────────────────────
@@ -102,6 +121,45 @@ test("cost ceiling uses BYTE length, so dense input is not under-counted (P20 ro
   expect(cjk).toBeGreaterThan(ascii * 2); // byte length captures the 3x density; char count would not
 });
 
+test("cost ceiling adds a per-image / per-document token FLOOR (modality billed by dimensions, not bytes) — P20 round-4", async () => {
+  // Images/PDFs are billed by DIMENSIONS, not their (compressible) base64 bytes — a large-dimension,
+  // highly-compressible block can under-run the byte-length bound. A per-block FLOOR keeps the ceiling
+  // >= actual. Reverting the modality term in estimateCallCeilingUsd makes these fail (anti-vacuity).
+  const tinyImg = {
+    type: "image",
+    source: { type: "base64", media_type: "image/png", data: "AA==" },
+  };
+  const tinyDoc = {
+    type: "document",
+    source: { type: "base64", media_type: "application/pdf", data: "AA==" },
+  };
+  const text = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    { messages: [{ role: "user", content: [{ type: "text", text: "x" }] }], max_tokens: 10 },
+    {},
+  );
+  const withImage = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    {
+      messages: [{ role: "user", content: [{ type: "text", text: "x" }, tinyImg] }],
+      max_tokens: 10,
+    },
+    {},
+  );
+  const withDoc = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    {
+      messages: [{ role: "user", content: [{ type: "text", text: "x" }, tinyDoc] }],
+      max_tokens: 10,
+    },
+    {},
+  );
+  // Opus input is $15/Mtok. The tiny base64 is a few bytes; the floor (2000 img / 20000 doc tokens)
+  // dominates. Both assertions FAIL if the modality term is dropped (ceiling would be ~byte-equal).
+  expect(withImage).toBeGreaterThan(text + (2000 * 15) / 1e6); // >= per-image floor over the text-only cost
+  expect(withDoc).toBeGreaterThan(withImage); // the document floor (20k) dwarfs the image floor (2k)
+});
+
 test("modelPrice: valid env override wins; NaN / negative / missing-slash fall back to the table", () => {
   const base = estimateCallCeilingUsd("claude-opus-4-8", { max_tokens: 1000 }, {});
   expect(
@@ -139,8 +197,8 @@ test("budget meter reconciles a reservation to the actual cost, journals budget.
   const guard = guardWith(sink, 0.5);
   await guard.open("run-1");
   const c = ctx("run-1", { per_run_usd: 5 });
-  await guard.preflight(c); // reserves 0.5
-  await guard.meter(c, { usd: 0.3, tokens: 1200 }); // reconcile 0.5 → 0.3
+  const r = await reserve(guard, c); // reserves 0.5
+  await guard.meter(c, { usd: 0.3, tokens: 1200 }, r); // reconcile 0.5 → 0.3
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
   expect(row?.spentUsd).toBeCloseTo(0.3, 6);
   expect(guard.dayTotalUsd).toBeCloseTo(0.3, 6);
@@ -153,8 +211,8 @@ test("budget release refunds the reservation but KEEPS the consumed iteration", 
   const guard = guardWith(new MemoryEventSink(), 0.5);
   await guard.open("run-1");
   const c = ctx("run-1", { per_run_usd: 5, max_iterations: 10 });
-  await guard.preflight(c);
-  await guard.release(c); // failed/non-billable call
+  const r = await reserve(guard, c);
+  await guard.release(c, r); // failed/non-billable call
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
   expect(row?.spentUsd).toBeCloseTo(0, 6);
   expect(row?.iterations).toBe(1); // attempt kept — a flaky upstream drains iterations, fail-closed
@@ -166,10 +224,8 @@ test("budget preflight REFUSES per_run and journals budget.refused (parks blocke
   const guard = guardWith(sink, 0.5);
   await guard.open("run-1");
   const c = ctx("run-1", { per_run_usd: 1, max_iterations: 100 });
-  await guard.preflight(c);
-  await guard.meter(c, { usd: 0.5 }); // spent 0.5
-  await guard.preflight(c);
-  await guard.meter(c, { usd: 0.5 }); // spent 1.0 (full)
+  await guard.meter(c, { usd: 0.5 }, await reserve(guard, c)); // spent 0.5
+  await guard.meter(c, { usd: 0.5 }, await reserve(guard, c)); // spent 1.0 (full)
   const v = await guard.preflight(c); // 1.0 + 0.5 > 1 → refuse
   expect(v).toEqual({ ok: false, reason: "per_run" });
   expect(sink.ofType(EVENT_TYPES.BUDGET_REFUSED)[0]?.payload).toEqual({
@@ -229,8 +285,7 @@ test("budget per_day ROLLS OVER at the day boundary (not a lifetime cap)", async
   });
   await guard.open("run-1");
   const c = ctx("run-1", { per_day_usd: 0.5 });
-  await guard.preflight(c);
-  await guard.meter(c, { usd: 0.5 }); // day total 0.5 (full)
+  await guard.meter(c, { usd: 0.5 }, await reserve(guard, c)); // day total 0.5 (full)
   expect((await guard.preflight(c)).ok).toBe(false); // same day → refused
   clock += 86_400_000; // cross into the next UTC day
   expect((await guard.preflight(c)).ok).toBe(true); // rolled over → fresh day budget
@@ -246,10 +301,42 @@ test("budget a call reserved before midnight and metered after books FULL actual
   });
   await guard.open("run-1");
   const c = ctx("run-1", { per_day_usd: 1 });
-  await guard.preflight(c, 0.5); // reserved on day D
+  const r = await reserve(guard, c, 0.5); // reserved on day D (bucket D)
   clock += 86_400_000; // cross midnight before the response comes back
-  await guard.meter(c, { usd: 0.5 }, 0.5); // metered on day D+1
+  await guard.meter(c, { usd: 0.5 }, r); // metered on day D+1 — books full actual, no stale delta
   expect(guard.dayTotalUsd).toBeCloseTo(0.5, 6); // the crossing call is counted on D+1, not lost
+});
+
+test("budget MULTI-CALL cross-midnight straddle does NOT overspend per_day (bucket-scoped reservation)", async () => {
+  // The P20 round-4 overspend, closed. A single scalar #dayReservedUsd let a call that RESERVED on day
+  // D and METERED on D+1 decrement D+1's LIVE reservations — freeing a slot still in flight, so an
+  // over-cap call slipped through. Tagging each reservation with its day bucket closes it: A's D-bucket
+  // reservation no longer touches D+1's accounting.
+  //
+  // Anti-vacuity (mutation-proven): drop the `reservation.bucket === this.#dayBucket` guard in
+  // #releaseDayReservation and call C is ADMITTED (200) — the day settles $1.5 against a $1 cap. With
+  // the guard, C is refused. per_day is workspace-scope, so A/B/C share the day total.
+  let clock = 1_700_000_000_000;
+  const guard = new BudgetGuard(handle.db, new MemoryEventSink(), {
+    now: () => clock,
+    reserveUsd: 0.5,
+  });
+  const A = ctx("run-A", { per_day_usd: 1, per_run_usd: 100 });
+  const B = ctx("run-B", { per_day_usd: 1, per_run_usd: 100 });
+  const C = ctx("run-C", { per_day_usd: 1, per_run_usd: 100 });
+  await guard.open("run-A");
+  await guard.open("run-B");
+  await guard.open("run-C");
+
+  const rA = await reserve(guard, A, 0.5); // day D: A reserves (bucket D)
+  clock += 86_400_000; // cross into day D+1 before A's response returns
+  const vB = await guard.preflight(B, 0.5); // D+1: B reserves → day reserved 0.5
+  expect(vB.ok).toBe(true);
+  await guard.meter(A, { usd: 0.5 }, rA); // D+1: A's D-bucket reservation meters; must NOT free a D+1 slot
+  const vC = await guard.preflight(C, 0.5); // D+1: A(0.5 spent) + B(0.5 reserved) = full → C must refuse
+  expect(vC.ok).toBe(false); // pre-fix scalar code ADMITS C here and overspends $1.5 on a $1 cap
+  expect((vC as { reason: RefusalReason }).reason).toBe("per_day");
+  expect(guard.dayTotalUsd).toBeLessThanOrEqual(1 + 1e-9); // day total never exceeds the cap
 });
 
 // ── 5. the race: N children racing one budget, no overspend ───────────────────
@@ -292,7 +379,7 @@ test("RACE: concurrent reserve+reconcile cycles keep exact books (no lost update
   await Promise.all(
     Array.from({ length: N }, async () => {
       const v = await guard.preflight(c);
-      if (v.ok) await guard.meter(c, { usd: 0.1 }); // actual == reserve
+      if (v.ok) await guard.meter(c, { usd: 0.1 }, v.reservation); // actual == reserve
     }),
   );
   const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
