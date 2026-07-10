@@ -67,6 +67,7 @@ export const EVENT_TYPES = {
   RUN_KILLED: "run.killed",
   RUN_ORPHANED: "run.orphaned",
   RUN_HUNG: "run.hung", // supervisor liveness escalation — child silent > hungMs (HARNESS §2, BRO-1767)
+  RUN_EXIT_MISMATCH: "run.exit_mismatch", // run.exiting code ≠ real exit code — Loop-4 harness-bug signal (HARNESS §4, BRO-1779)
   // agent.* — the child's own utterances (HARNESS §6; BRO-1756 widening)
   AGENT_SAID: "agent.said", // coalesced assistant turn (one per completed text block, not per token)
   // tool.*
