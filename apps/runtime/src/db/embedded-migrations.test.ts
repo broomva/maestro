@@ -57,6 +57,40 @@ describe("applyEmbeddedMigrations — apply + idempotency", () => {
     }
   });
 
+  test("self-heals a crash-interrupted partial apply (some tables, user_version still 0)", async () => {
+    // Simulate a first apply that created SOME tables then crashed before the version
+    // stamp: run only the first statements of migration 0000, leaving user_version 0.
+    const client = createClient({ url: ":memory:" });
+    const m0 = EMBEDDED_MIGRATIONS[0];
+    if (!m0) throw new Error("expected at least one embedded migration");
+    try {
+      const firstThree = m0.sql
+        .split("--> statement-breakpoint")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .slice(0, 3);
+      for (const stmt of firstThree) await client.execute(stmt);
+      const uvBefore = await client.execute("PRAGMA user_version");
+      expect(Number(uvBefore.rows[0]?.user_version)).toBe(0); // partial, unstamped
+
+      // Recovery: applyEmbeddedMigrations must create the MISSING tables (skipping the
+      // present ones), not wedge on "table already exists".
+      const applied = await applyEmbeddedMigrations(client);
+      expect(applied).toBe(EMBEDDED_MIGRATIONS.length);
+
+      const tables = await client.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
+      );
+      const names = new Set(tables.rows.map((r) => String(r.name)));
+      for (const t of INDEX_TABLES) expect(names.has(t)).toBe(true);
+      expect(Number((await client.execute("PRAGMA user_version")).rows[0]?.user_version)).toBe(
+        EMBEDDED_MIGRATIONS.length,
+      );
+    } finally {
+      client.close();
+    }
+  });
+
   test("re-applying to an already-migrated file is a no-op (no 'table exists' throw)", async () => {
     // A FILE db (not :memory:, which mints a fresh db per connection) proves the
     // user_version stamp persists across a reconnect — the 24/7 restart path.

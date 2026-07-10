@@ -36,7 +36,7 @@ import {
   WK_GROUP_ORDER,
   X_MAESTRO_PROTOCOL,
 } from "@maestro/protocol";
-import { and, asc, desc, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { IndexDb } from "../db/client";
 import { event, gate, node, schedule, session } from "../db/schema";
@@ -65,12 +65,20 @@ function parsePayload(raw: string | null): unknown {
   }
 }
 
+/** Format epoch-ms to ISO, tolerating a corrupt/out-of-range `ts` (a sentinel, never a 500). */
+function toIso(ms: number): string {
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? new Date(0).toISOString() : d.toISOString();
+}
+
 /** Project a stored `event` row to its wire envelope (numeric ts → ISO, payload rehydrated). */
 function toEnvelope(row: typeof event.$inferSelect): EventEnvelope {
   return {
     seq: row.seq,
     sessionId: row.sessionId,
-    ts: new Date(row.ts).toISOString(),
+    // Guarded like parsePayload: one out-of-range `ts` must not RangeError-500 the whole
+    // page (which would also break the BRO-1816 SSE resume that pages off this route).
+    ts: toIso(row.ts),
     actor: row.actor,
     type: row.type,
     payload: parsePayload(row.payload),
@@ -132,12 +140,15 @@ export function registerReadRoutes(app: Hono, deps: ReadDeps): void {
   });
 
   // GET /api/schedules — the orchestrator's bench: enabled routines, soonest first.
+  // NULLS LAST explicitly: a hook/goal routine has no `nextFireAt`, and SQLite sorts
+  // NULLs first on a plain ASC — which would float a no-scheduled-fire routine above an
+  // imminent cron fire. Push nulls to the end so "soonest first" holds.
   app.get("/api/schedules", async (c) => {
     const rows = await db
       .select()
       .from(schedule)
       .where(and(eq(schedule.enabled, true), isNull(schedule.deletedAt)))
-      .orderBy(asc(schedule.nextFireAt));
+      .orderBy(sql`${schedule.nextFireAt} is null`, asc(schedule.nextFireAt));
     const body: SchedulesResponse = { schedules: rows.map(live) };
     return c.json(body);
   });

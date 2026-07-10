@@ -36,18 +36,47 @@ export const EMBEDDED_MIGRATIONS: readonly EmbeddedMigration[] = [
   { tag: "0000_shallow_cassandra_nova", sql: migration0000 },
 ];
 
+/** Split a drizzle migration script into its statements (breakpoint-delimited). */
+function splitStatements(sql: string): string[] {
+  return sql
+    .split("--> statement-breakpoint")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** True for a benign "table/index already exists" — a statement a partial prior apply already ran. */
+function isAlreadyExists(err: unknown): boolean {
+  return /already exists/i.test((err as { message?: string })?.message ?? "");
+}
+
+/**
+ * Apply one migration statement-by-statement, tolerating "already exists". This is the
+ * self-heal: `PRAGMA user_version` is a header write that SQLite does NOT roll back with
+ * DDL, so a crash after some `CREATE TABLE`s committed but before the version stamp
+ * leaves a PARTIAL schema at version 0. Re-running the whole script per-statement then
+ * re-creates only the MISSING objects and skips the present ones — the derived index
+ * heals on the next open instead of wedging on a "table already exists" (the failure
+ * `executeMultiple` in one shot would produce, aborting the whole script on the first
+ * present table and leaving the rest uncreated forever).
+ */
+async function applyMigrationStatements(client: Client, sql: string): Promise<void> {
+  for (const stmt of splitStatements(sql)) {
+    try {
+      await client.execute(stmt);
+    } catch (err) {
+      if (!isAlreadyExists(err)) throw err;
+    }
+  }
+}
+
 /**
  * Bring a libSQL database up to the embedded schema, idempotently. Reads
  * `PRAGMA user_version` (0 on a fresh db), applies every migration at or beyond the
- * stored version, then stamps `user_version` to the migration count. A reopen finds
- * `user_version` already at the count and applies nothing — so a restarted 24/7
- * supervisor never re-runs `CREATE TABLE` and never throws "table already exists".
- *
- * Each migration's DDL is a `;`-separated script (drizzle's `--> statement-
- * breakpoint` markers are `--` line comments), so `executeMultiple` runs the whole
- * script in one call. Not wrapped in a transaction: libSQL auto-commits DDL, and a
- * half-applied fresh derived index is simply re-derived on the next open (the
- * "cache with teeth" contract). Returns how many migrations it applied.
+ * stored version (see {@link applyMigrationStatements} — per-statement, already-exists-
+ * tolerant, so a crash-interrupted first apply self-heals), then stamps `user_version`
+ * to the migration count. A reopen finds `user_version` already at the count and applies
+ * nothing — so a restarted 24/7 supervisor never re-runs `CREATE TABLE` needlessly.
+ * Returns how many migrations it applied.
  */
 export async function applyEmbeddedMigrations(client: Client): Promise<number> {
   const res = await client.execute("PRAGMA user_version");
@@ -55,7 +84,7 @@ export async function applyEmbeddedMigrations(client: Client): Promise<number> {
   const current = row ? Number(row.user_version) : 0;
   let applied = 0;
   for (const migration of EMBEDDED_MIGRATIONS.slice(current)) {
-    await client.executeMultiple(migration.sql);
+    await applyMigrationStatements(client, migration.sql);
     applied++;
   }
   if (applied > 0) {

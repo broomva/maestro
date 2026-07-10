@@ -158,6 +158,45 @@ describe("read routes — seeded index", () => {
       deletedAt: null,
     });
 
+    // A SECOND node's two sessions + a gate — proves node/:id scoping does not leak
+    // across nodes and that sessions come back newest-first (desc startedAt).
+    await h.db.insert(session).values([
+      {
+        id: "s-run",
+        nodeId: "run",
+        branch: "run/s-run",
+        status: "done",
+        startedAt: 300,
+        endedAt: 350,
+        diffstatJson: null,
+        updatedAt: 300,
+        deletedAt: null,
+      },
+      {
+        id: "s-run2",
+        nodeId: "run",
+        branch: "run/s-run2",
+        status: "running",
+        startedAt: 400,
+        endedAt: null,
+        diffstatJson: null,
+        updatedAt: 400,
+        deletedAt: null,
+      },
+    ]);
+    await h.db.insert(gate).values({
+      id: "g2",
+      sessionId: "s-run",
+      kind: "completion",
+      proposalJson: null,
+      verdict: null,
+      decidedBy: null,
+      openedAt: 320,
+      decidedAt: null,
+      updatedAt: 320,
+      deletedAt: null,
+    });
+
     // Schedules — one enabled routine (the bench), one disabled (excluded).
     await h.db.insert(schedule).values([
       {
@@ -237,14 +276,29 @@ describe("read routes — seeded index", () => {
     expect(running?.nodes.map((n) => n.id)).toEqual(["run2", "run"]);
   });
 
-  test("GET /api/node/:id returns the node with its sessions and gates", async () => {
+  test("GET /api/node/:id returns the node with ITS sessions and gates (scoped, no leak)", async () => {
     const res = await h.app.request("/api/node/rev");
     expect(res.status).toBe(200);
     const body = (await res.json()) as NodeDetail;
     expect(body.node.id).toBe("rev");
     expect(body.node).not.toHaveProperty("deletedAt");
+    // Only rev's session/gate — `run`'s s-run/s-run2/g2 must NOT leak in.
     expect(body.sessions.map((s) => s.id)).toEqual(["s-rev"]);
     expect(body.gates.map((g) => g.id)).toEqual(["g1"]);
+  });
+
+  test("GET /api/node/:id returns sessions newest-first and only the node's own gate", async () => {
+    const body = (await (await h.app.request("/api/node/run")).json()) as NodeDetail;
+    // desc(startedAt): s-run2 (400) before s-run (300).
+    expect(body.sessions.map((s) => s.id)).toEqual(["s-run2", "s-run"]);
+    // Only run's gate (g2), never rev's g1.
+    expect(body.gates.map((g) => g.id)).toEqual(["g2"]);
+  });
+
+  test("GET /api/node/:id returns empty sessions + gates for a never-dispatched node", async () => {
+    const body = (await (await h.app.request("/api/node/blk")).json()) as NodeDetail;
+    expect(body.sessions).toEqual([]);
+    expect(body.gates).toEqual([]);
   });
 
   test("GET /api/node/:id 404s a missing node with the typed error shape", async () => {
@@ -305,6 +359,14 @@ describe("read routes — session events paging", () => {
     await h.db
       .insert(event)
       .values({ sessionId: null, ts: 5_000, actor: "system", type: "node.updated", payload: null });
+    // A corrupt row on its own session: a `ts` beyond JS Date range (|ts| > 8.64e15).
+    await h.db.insert(event).values({
+      sessionId: "sbad",
+      ts: 8_640_000_000_000_001,
+      actor: "agent",
+      type: "tool.call",
+      payload: null,
+    });
   });
 
   afterEach(() => h.client.close());
@@ -343,6 +405,14 @@ describe("read routes — session events paging", () => {
     const page = (await res.json()) as EventPage;
     expect(page.events).toEqual([]);
     expect(page.nextAfter).toBeNull();
+  });
+
+  test("a corrupt out-of-range ts yields a sentinel ISO, never a 500", async () => {
+    const res = await h.app.request("/api/sessions/sbad/events");
+    expect(res.status).toBe(200); // not a RangeError-500
+    const page = (await res.json()) as EventPage;
+    expect(page.events).toHaveLength(1);
+    expect(page.events[0]?.ts).toBe(new Date(0).toISOString());
   });
 });
 
@@ -388,10 +458,51 @@ describe("GET /api/node/:id/brief — scanned workspace", () => {
     expect(body.brief).not.toContain("id: seo"); // frontmatter stripped
   });
 
+  test('returns the ROOT node\'s brief (path "")', async () => {
+    const root = makeWorkspace({ "_work.md": workMd("root", "# Growth\nroot brief") });
+    h = await mkApp(root);
+    await scanIntoIndex(h.db, root);
+    const res = await h.app.request("/api/node/root/brief");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as BriefResponse;
+    expect(body.path).toBe("");
+    expect(body.brief).toContain("# Growth");
+  });
+
+  test("404s the brief when the node exists in the index but its _work.md vanished", async () => {
+    const root = makeWorkspace({
+      "_work.md": workMd("root", "# Root"),
+      "seo/_work.md": workMd("seo", "# SEO"),
+    });
+    h = await mkApp(root);
+    await scanIntoIndex(h.db, root);
+    // The index still has the `seo` node; delete the file so the read hits the catch.
+    rmSync(join(root, "seo/_work.md"));
+    expect((await h.app.request("/api/node/seo/brief")).status).toBe(404);
+  });
+
   test("404s the brief of an unknown node", async () => {
     const root = makeWorkspace({ "_work.md": workMd("root", "# Root") });
     h = await mkApp(root);
     await scanIntoIndex(h.db, root);
     expect((await h.app.request("/api/node/nope/brief")).status).toBe(404);
+  });
+});
+
+// ── No-index degradation contract (the compiled-binary path) ───────────────────
+
+describe("read routes — no index (compiled-binary degradation)", () => {
+  test("without an index handle, /health is a 200 stub and every read 404s", async () => {
+    // Mirrors index.ts's catch path: createApp with no index → reads never mounted.
+    const app = createApp(cfg("/tmp/ws"), Date.now());
+    const health = await app.request("/health");
+    expect(health.status).toBe(200);
+    const hb = (await health.json()) as { ok: boolean; index: { status: string } };
+    expect(hb.ok).toBe(true);
+    expect(hb.index.status).toBe("stub");
+    // The `if (index)` mount gate — reads are absent, not erroring.
+    expect((await app.request("/api/tree")).status).toBe(404);
+    expect((await app.request("/api/board")).status).toBe(404);
+    expect((await app.request("/api/schedules")).status).toBe(404);
   });
 });
