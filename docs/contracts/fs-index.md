@@ -172,6 +172,18 @@ monotonic `seq` in `compareReplay` order (§6), then advances `byteOffset`/`last
    `test.skip` skeleton is named here) — and it **must use a multi-file journal with a cross-file
    out-of-`ts`-order line**, the exact case that separates ingest order from replay order.
 
+   > **Shipped (BRO-1808 · P1 slice).** `apps/runtime/src/db/rebuild.ts` (`rebuildIndex` + the
+   > `dumpIndex` canonical, `updatedAt`-stripped dump) and the operator command `maestro-runtime
+   > --rebuild` (algorithm steps 1–2: clear + walk-the-workspace → `node` rows). The kill/rebuild/diff
+   > identity test is `apps/runtime/src/db/rebuild.test.ts` — build a file index over a fixture, delete
+   > it, rebuild at a *different* clock, and the derived `node` rows are byte-identical modulo
+   > `updatedAt` (the clock genuinely moves, so the timestamp-strip is load-bearing, not vacuous). It
+   > also proves a rebuild *deletes* the prior file (an unjustified ghost row does not survive) and
+   > creates the `.maestro/` parent dir on a first-ever rebuild. **Steps 3–5 (journal replay →
+   > `session`/`event`/`gate`/`schedule` + `run_budget` re-derivation) land with the tables that carry
+   > that data (P2+: budget/gate journaling, BRO-1788 onward)** — at P1 the only populated FS-derived
+   > table is `node`, so the identity guarantee is proven where it currently has teeth.
+
 2. **A rebuild reproduces every query answer, but NOT the live `seq` integers.** A rebuild re-derives
    the *canonical* order; it does not reproduce the pre-loss LIVE index's `seq` VALUES. Live `seq` is
    ingest-ordered (byte-arrival — the SSE cursor), and under concurrent sessions writing separate
