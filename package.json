@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit && bun run --filter @maestro/ui typecheck && bun run --filter @maestro/app typecheck",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "check": "biome check . && bun run typecheck"
+    "check:icons": "bun run scripts/check-icons.ts",
+    "check": "biome check . && bun run typecheck && bun run check:icons"
   },
   "devDependencies": {
     "@biomejs/biome": "^2",

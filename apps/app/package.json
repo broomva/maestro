@@ -8,7 +8,7 @@
     "build": "bun run --filter @maestro/tokens build && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "check:icons": "bun run scripts/check-icons.ts",
+    "check:icons": "bun run ../../scripts/check-icons.ts --scope app",
     "test:m0": "bun run build && bun test src/m0.test.ts && playwright test"
   },
   "dependencies": {

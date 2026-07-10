@@ -8,7 +8,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "test:signals": "bun test src/signals.test.ts"
+    "test:signals": "bun test src/signals.test.ts",
+    "check:icons": "bun run ../../scripts/check-icons.ts --scope ui"
   },
   "dependencies": {
     "@maestro/protocol": "workspace:*",

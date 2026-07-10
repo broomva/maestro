@@ -5,6 +5,7 @@
 // Prop names track the design-system contracts in
 // handoff/design_handoff_maestro/build-docs/design-system/components/core/*.d.ts.
 export { Avatar, type AvatarProps } from "./avatar";
+export { BlackholeMark, type BlackholeMarkProps } from "./brand";
 export { Button, type ButtonProps, buttonVariants } from "./button";
 export { Card, type CardProps } from "./card";
 export { Composer, type ComposerProps, composerSendText } from "./composer";

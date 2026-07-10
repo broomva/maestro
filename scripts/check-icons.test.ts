@@ -1,6 +1,6 @@
 /// <reference types="bun" />
-// Adversarial fixtures for the check:icons audit (BRO-1797). Every case here would have passed the
-// original fail-open gate that P20 flagged — the point of the test is that they now FAIL.
+// Adversarial fixtures for the check:icons audit (BRO-1797 · BRO-1766). Every glyph/import case
+// here would have passed the original fail-open gate that P20 flagged — the point is they now FAIL.
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -8,6 +8,7 @@ import {
   importSpecifiers,
   isForbiddenIconImport,
   packageOf,
+  runAudit,
 } from "./check-icons.ts";
 
 describe("packageOf", () => {
@@ -63,7 +64,7 @@ describe("isForbiddenIconImport — mixed-library guard (whitelist-of-one)", () 
       "iconoir-react",
       "@remixicon/react",
       "@fortawesome/fontawesome-svg-core", // family prefix, name has no "icon"
-      "@mdi/react", // Material Design Icons — no "icon" in the name
+      "@mdi/react", //             Material Design Icons — no "icon" in the name
       "@mdi/js",
       "css.gg",
     ]) {
@@ -85,7 +86,6 @@ describe("importSpecifiers — covers every import form", () => {
     expect(specs).toContain("boxicons/css/boxicons.min.css");
     expect(specs).toContain("@carbon/icons-react");
     expect(specs).toContain("react-feather");
-    // and the guard flags the three forbidden ones
     expect(specs.filter(isForbiddenIconImport).sort()).toEqual(
       ["@carbon/icons-react", "boxicons/css/boxicons.min.css", "react-feather"].sort(),
     );
@@ -134,7 +134,6 @@ describe("glyphViolations — custom-glyph conventions", () => {
     const brace = `<svg stroke="currentColor" stroke-width="2" stroke-linecap="round" fill={"#ff0000"}><path/></svg>`;
     expect(glyphViolations(hex).some((v) => v.includes("fill"))).toBe(true);
     expect(glyphViolations(brace).some((v) => v.includes("fill"))).toBe(true);
-    // theme-safe fills are allowed
     const cc = `<svg stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="currentColor"><path/></svg>`;
     expect(glyphViolations(cc).some((v) => v.includes("fill"))).toBe(false);
   });
@@ -144,20 +143,24 @@ describe("glyphViolations — custom-glyph conventions", () => {
   });
   test("rejects a hard-coded stroke color, allows none/currentColor, ignores stroke-width/linecap", () => {
     const hex = `<svg stroke="#111827" stroke-width="2" stroke-linecap="round" fill="none"><path/></svg>`;
-    // currentColor is still absent here, so this fixture also trips the currentColor gate — assert
-    // specifically that the per-occurrence stroke-COLOR check fires.
     expect(glyphViolations(hex).some((v) => v.includes("stroke color"))).toBe(true);
     const brace = `<svg stroke={"#111827"} stroke-width="2" stroke-linecap="round" fill="none"><path stroke="currentColor"/></svg>`;
     expect(glyphViolations(brace).some((v) => v.includes("stroke color"))).toBe(true);
-    // a multi-element glyph with one hard-coded stroke is caught (not just "currentColor appears")
     const multi = `<svg stroke-width="2" stroke-linecap="round" fill="none"><path stroke="currentColor"/><circle stroke="#ff0000"/></svg>`;
     expect(glyphViolations(multi).some((v) => v.includes("stroke color"))).toBe(true);
-    // theme-safe stroke, and stroke-width="2" / stroke-linecap must NOT be read as a stroke color
     const ok = `<svg stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"><path/></svg>`;
     expect(glyphViolations(ok).some((v) => v.includes("stroke color"))).toBe(false);
   });
   test("accepts round caps in brace form", () => {
     const src = `<svg stroke="currentColor" stroke-width="2" strokeLinecap={"round"} fill="none"><path/></svg>`;
     expect(glyphViolations(src).some((v) => v.includes("line caps"))).toBe(false);
+  });
+});
+
+describe("runAudit — integration over the real monorepo", () => {
+  test("the shipped app + ui src pass every scope (lucide-only, brand mark outside icons/)", async () => {
+    expect(await runAudit("app")).toEqual([]);
+    expect(await runAudit("ui")).toEqual([]);
+    expect(await runAudit("all")).toEqual([]);
   });
 });

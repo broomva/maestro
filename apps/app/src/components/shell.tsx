@@ -1,4 +1,4 @@
-import { Avatar, cn, DotComet } from "@maestro/ui";
+import { Avatar, BlackholeMark, cn, DotComet } from "@maestro/ui";
 import { Boxes, FileText, History, type LucideIcon, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import { ThemeToggle } from "./theme-toggle";
@@ -38,22 +38,20 @@ function NavItem({ icon: Icon, label, active }: (typeof NAV)[number]) {
 
 /**
  * The blackhole brand mark on its own dark cool-axis chip (BUILD-PLAN §M2: the mark rides a
- * dark/frosted surface, never a bare tile). Rendered inline — not the raster asset, which was
+ * dark/frosted surface, never a bare tile). The glyph is the shared `BlackholeMark` from
+ * `@maestro/ui` (BRO-1766 extracted it out of this inline SVG) — not the raster asset, which was
  * an opaque baseline JPEG that painted a pure-#000 square on the light sidebar (BRO-1771 P20).
  * `--bv-ink` is the barely-blue near-black (stable across themes, cool-axis, never #000 per
- * CLAUDE.md §Color), so the chip stays a consistent dark brand tile in light and dark.
+ * CLAUDE.md §Color), so the chip stays a consistent dark brand tile in light and dark; the chip's
+ * `text-[var(--bv-white)]` sets the mark's `currentColor` to brand-white.
  */
 function BrandMark() {
   return (
     <span
       data-testid="brand-mark"
-      className="grid size-6 shrink-0 place-items-center rounded-lg bg-[var(--bv-ink)] ring-1 ring-[var(--bv-border-15)] ring-inset"
+      className="grid size-6 shrink-0 place-items-center rounded-lg bg-[var(--bv-ink)] text-[var(--bv-white)] ring-1 ring-[var(--bv-border-15)] ring-inset"
     >
-      <svg viewBox="0 0 24 24" fill="none" className="size-4" aria-hidden="true">
-        {/* accretion ring + singularity — a blackhole */}
-        <circle cx="12" cy="12" r="7.5" stroke="var(--bv-white)" strokeWidth="1.75" />
-        <circle cx="12" cy="12" r="3" fill="var(--bv-white)" />
-      </svg>
+      <BlackholeMark size={16} />
     </span>
   );
 }
