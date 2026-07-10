@@ -8,6 +8,7 @@
     "build": "bun run --filter @maestro/tokens build && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check:icons": "bun run scripts/check-icons.ts",
     "test:m0": "bun run build && bun test src/m0.test.ts && playwright test"
   },
   "dependencies": {
@@ -17,7 +18,7 @@
     "@tanstack/react-router": "^1.95.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^0.469.0",
+    "lucide-react": "0.469.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.6.0",
