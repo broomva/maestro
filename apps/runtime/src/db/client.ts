@@ -11,10 +11,9 @@
 // those (scanner BRO-1800, read API BRO-1812, SSE BRO-1816, budget guard
 // BRO-1788) hang off the handle this returns.
 
-import { fileURLToPath } from "node:url";
 import { type Client, createClient } from "@libsql/client";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
-import { migrate } from "drizzle-orm/libsql/migrator";
+import { applyEmbeddedMigrations } from "./embedded-migrations";
 import { indexSchema } from "./schema";
 
 /** The drizzle handle, typed with the full index schema for relational queries. */
@@ -25,19 +24,6 @@ export interface IndexHandle {
   db: IndexDb;
   client: Client;
 }
-
-/**
- * The generated migrations folder, resolved relative to this module so it works
- * from `src/` and from `bun run`. NOTE (downstream): a `bun build --compile`
- * binary does not carry this folder on disk — the ticket that first opens the
- * index from the compiled supervisor must embed the migration SQL (import as
- * text, or ship the folder alongside the binary). This ticket only provides the
- * schema + migrations + the dev/test open path; the runtime still reports the
- * index as a stub (config.ts) and no compiled path imports this module yet.
- */
-// fileURLToPath (not `.pathname`) so a checkout path with a space or unicode is
-// percent-decoded and Windows drive letters resolve correctly.
-export const MIGRATIONS_DIR = fileURLToPath(new URL("./migrations", import.meta.url));
 
 /**
  * Build a libSQL url for a filesystem index path. `:memory:` is passed through
@@ -56,9 +42,14 @@ export function createIndexClient(url: string): IndexHandle {
   return { db, client };
 }
 
-/** Apply every pending migration from {@link MIGRATIONS_DIR} to an open handle. */
-export async function applyMigrations(db: IndexDb): Promise<void> {
-  await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+/**
+ * Bring an open handle up to the current schema via the compiled-safe embedded
+ * migrator (embedded-migrations.ts) — the ONE schema path for dev, test, and the
+ * `bun build --compile` binary alike. Idempotent: a reopened file skips already-
+ * applied migrations.
+ */
+export async function applyMigrations(handle: IndexHandle): Promise<void> {
+  await applyEmbeddedMigrations(handle.client);
 }
 
 /**
@@ -68,7 +59,7 @@ export async function applyMigrations(db: IndexDb): Promise<void> {
 export async function openIndex(url: string): Promise<IndexHandle> {
   const handle = createIndexClient(url);
   try {
-    await applyMigrations(handle.db);
+    await applyMigrations(handle);
   } catch (err) {
     // A migration failure is fatal, but close the just-opened handle before
     // rethrowing so a failed open never leaks the libSQL file handle.

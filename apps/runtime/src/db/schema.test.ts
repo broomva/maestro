@@ -77,8 +77,9 @@ describe("index schema — migrations apply on an empty db", () => {
   test("re-opening a persisted db re-runs migrations as a no-op (restart idempotency)", async () => {
     // The real 24/7-runtime-restart invariant: open a FILE db (not :memory:,
     // which mints a fresh db each open), migrate, write, close — then open the
-    // SAME file with a fresh client. The migrator must see its journal table and
-    // skip, never throwing "table already exists", and the row must survive.
+    // SAME file with a fresh client. The embedded migrator must read the file's
+    // stamped `PRAGMA user_version` and skip, never throwing "table already
+    // exists", and the row must survive.
     const dir = mkdtempSync(join(tmpdir(), "maestro-idem-"));
     const url = indexUrl(join(dir, "index.db"));
     try {
