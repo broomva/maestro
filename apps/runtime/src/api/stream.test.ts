@@ -73,17 +73,20 @@ async function seedEvents(h: IndexHandle, specs: EventSeed[]): Promise<void> {
 
 // ── SSE frame reading ──────────────────────────────────────────────────────────
 
-type Frame = { id?: string; data?: string; comment: boolean };
+// A comment frame carries its text (`: hb` → "hb") so tests can assert the
+// heartbeat content, not merely that *some* comment arrived; a data frame leaves
+// `comment` undefined.
+type Frame = { id?: string; data?: string; comment?: string };
 
-const nonComment = (frames: Frame[]) => frames.filter((f) => !f.comment);
+const nonComment = (frames: Frame[]) => frames.filter((f) => f.comment === undefined);
 
 /** Parse one raw SSE frame (the text between `\n\n` delimiters). */
 function parseFrame(raw: string): Frame {
   let id: string | undefined;
+  let comment: string | undefined;
   const dataParts: string[] = [];
-  let comment = false;
   for (const line of raw.split("\n")) {
-    if (line.startsWith(":")) comment = true;
+    if (line.startsWith(":")) comment = line.slice(1).replace(/^ /, "");
     else if (line.startsWith("id:")) id = line.slice(3).replace(/^ /, "");
     else if (line.startsWith("data:")) dataParts.push(line.slice(5).replace(/^ /, ""));
   }
@@ -92,12 +95,13 @@ function parseFrame(raw: string): Frame {
 
 const TIMED_OUT = Symbol("timed-out");
 
-/** Race a promise against a timeout, resolving to a sentinel if it wins. */
+/** Race a promise against a timeout, resolving to a sentinel if it wins (timer cleared). */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
-  return Promise.race([
-    p,
-    new Promise<typeof TIMED_OUT>((r) => setTimeout(() => r(TIMED_OUT), Math.max(0, ms))),
-  ]);
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<typeof TIMED_OUT>((r) => {
+    timer = setTimeout(() => r(TIMED_OUT), Math.max(0, ms));
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -197,6 +201,21 @@ describe("sse stream", () => {
     expect(seqsOf(frames)).toEqual([4, 5]);
   });
 
+  test("an empty Last-Event-ID is treated as absent — ?after wins, no backlog re-delivery", async () => {
+    const h = await mkApp();
+    await seedEvents(
+      h,
+      Array.from({ length: 5 }, () => ({})),
+    ); // seq 1..5
+    // A non-native client / proxy sends an empty `Last-Event-ID:` while opening at
+    // ?after=3. Empty must NOT reset the cursor to 0 (which would re-deliver 1..5).
+    const { frames } = await collect(h.app, "/api/stream?after=3", {
+      headers: { "Last-Event-ID": "" },
+      until: (f) => nonComment(f).length >= 2,
+    });
+    expect(seqsOf(frames)).toEqual([4, 5]);
+  });
+
   test("per-session stream scopes to the session and excludes synthetics", async () => {
     const h = await mkApp();
     await seedEvents(h, [
@@ -279,10 +298,27 @@ describe("sse stream", () => {
     const h = await mkApp({ streamHeartbeatMs: 10 });
     // No events → the stream is immediately idle and should heartbeat.
     const { frames } = await collect(h.app, "/api/stream", {
-      until: (f) => f.some((x) => x.comment),
+      until: (f) => f.some((x) => x.comment !== undefined),
       timeoutMs: 1000,
     });
-    expect(frames.some((f) => f.comment)).toBe(true);
+    // Assert the comment CONTENT (`: hb`), not merely that some comment arrived.
+    expect(frames.find((f) => f.comment !== undefined)?.comment).toBe("hb");
+  });
+
+  test("the backlog is delivered exactly once — the cursor advances, no duplicate seq", async () => {
+    const h = await mkApp(); // streamPollMs 5, heartbeat effectively off
+    await seedEvents(
+      h,
+      Array.from({ length: 3 }, () => ({})),
+    ); // seq 1..3
+    // Read across MANY poll intervals: a stuck cursor (a missing `cursor = row.seq`)
+    // would re-query `seq > 0` every poll and re-deliver 1..3 repeatedly. `until`
+    // never fires, so we read the full window and assert no re-delivery.
+    const { frames } = await collect(h.app, "/api/stream", {
+      until: () => false,
+      timeoutMs: 200,
+    });
+    expect(seqsOf(frames)).toEqual([1, 2, 3]);
   });
 
   test("the stream response carries the protocol + no-buffer headers", async () => {

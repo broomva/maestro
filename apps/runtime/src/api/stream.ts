@@ -40,6 +40,15 @@
 // concurrent writers, this tailer needs a committed-watermark (min in-flight seq),
 // not a raw MAX — flagged here so the invariant is not lost.
 //
+// KNOWN LIMITATION — rebuild-scoped seq (BRO-1844 follow-up): `seq` values are
+// rebuild-scoped and renumber on an index rebuild (schema.ts). A client that
+// reconnects with a `Last-Event-ID` from BEFORE a rebuild carries a cursor above
+// the new max seq, so its tail silently delivers nothing (only heartbeats) until
+// seq climbs past the stale cursor. It is indistinguishable here from the normal
+// "caught up, waiting at the tip" case without a stream generation/epoch marker —
+// out of P1 scope (there are no event writers or rebuilds in the live path yet). A
+// full client reload recovers (a fresh EventSource carries no Last-Event-ID).
+//
 // A shared single-poller hub that fans one query out to N subscribers is the
 // obvious scale optimization (fewer DB polls), but it is not needed for P1
 // correctness and it reintroduces the boundary-dedup this design avoids — deferred
@@ -77,19 +86,25 @@ export interface StreamDeps {
  * disconnect ends the tail promptly instead of after a full `pollMs`. On current
  * Bun, `streamSSE` does NOT wire the request-abort signal into `stream.aborted`
  * (only on old Bun), so the tail loop watches the raw request signal directly.
+ *
+ * The abort listener is removed on BOTH exit paths — `{ once: true }` only auto-
+ * removes it *after* it fires, so the common timer-completes path must remove it
+ * explicitly. Without this, a 24/7 connection accretes one dead listener per poll
+ * on the request-lifetime signal (MaxListeners warning + O(n) eventual abort).
  */
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
     if (signal.aborted) return resolve();
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -161,13 +176,22 @@ async function tailEvents(
 
 /** Open an SSE tail on `c`, stamping the protocol + no-buffer headers first. */
 function openStream(c: Context, deps: StreamDeps, sessionId: string | undefined) {
-  const { db, pollMs = DEFAULT_STREAM_POLL_MS, heartbeatMs = DEFAULT_STREAM_HEARTBEAT_MS } = deps;
+  const { db } = deps;
+  // A non-positive cadence (or one omitted) falls back to the default rather than
+  // busy-looping: `pollMs: 0` on the programmatic path would `setTimeout(0)`-spin
+  // (the env path is already guarded in loadConfig).
+  const pollMs = deps.pollMs && deps.pollMs > 0 ? deps.pollMs : DEFAULT_STREAM_POLL_MS;
+  const heartbeatMs =
+    deps.heartbeatMs && deps.heartbeatMs > 0 ? deps.heartbeatMs : DEFAULT_STREAM_HEARTBEAT_MS;
   // Last-Event-ID (set automatically by EventSource on reconnect) WINS over an
   // explicit `?after=` — otherwise a reconnect that reuses the opening URL would
-  // replay from the stale initial cursor and double-deliver the gap.
+  // replay from the stale initial cursor and double-deliver the gap. An EMPTY
+  // header (a non-native client or a proxy injecting `Last-Event-ID:`) is treated
+  // as ABSENT — otherwise `parseSeqCursor("")` → 0 would re-deliver the whole
+  // backlog, the exact double-delivery this precedence rule prevents.
   const resume = c.req.header("Last-Event-ID");
   const startCursor =
-    resume != null ? parseSeqCursor(resume) : parseSeqCursor(c.req.query("after"));
+    resume != null && resume !== "" ? parseSeqCursor(resume) : parseSeqCursor(c.req.query("after"));
   const signal = c.req.raw.signal;
   // Set before streamSSE builds the Response: version parity with the read API, and
   // X-Accel-Buffering:no so an nginx/relay hop forwards the stream unbuffered
