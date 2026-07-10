@@ -48,21 +48,30 @@ try {
   const { summary, errors } = await scanIntoIndex(handle.db, config.workspace);
   indexNodes = summary.inserted + summary.updated + summary.unchanged;
   scanErrorCount = errors.length;
-  // Keep the index live (BRO-1804): an FS `_work.md` edit → reconcile → a `node.updated`
-  // synthetic on the SSE change feed (BRO-1816). Dynamic import behind the same try, so the
-  // compiled /health-only stub never loads it. The stop handle is retained for shutdown.
-  const { startWatcher } = await import("./watcher");
-  watcher = startWatcher(handle.db, config.workspace);
-  // Publish the handle only after the scan succeeds — so a scan failure leaves the
-  // runtime in the clean /health-only stub state, never a half-populated index.
+  // Publish the handle now that the scan succeeded — reads are live from here. A scan
+  // failure (above) still leaves the clean /health-only stub, never a half-populated index.
   index = handle.db;
+  // Keep the index live (BRO-1804): an FS `_work.md` edit → reconcile → a `node.updated`
+  // synthetic on the SSE change feed (BRO-1816). Dynamic import (the compiled /health-only
+  // stub never loads it) INSIDE ITS OWN try — starting the watcher is a LIVENESS init, and a
+  // liveness failure must not cost the read API. `fs.watch(root,{recursive:true})` throws
+  // synchronously on registration failure (inotify ENOSPC/EMFILE on a large workspace), so
+  // without this guard a watcher-start failure would fall to the outer catch and disable ALL
+  // reads despite a healthy index. Degrade to "reads work, no live updates" instead. (Bounding
+  // the recursive-watch footprint so it does not exhaust inotify in the first place is BRO-1846.)
+  try {
+    const { startWatcher } = await import("./watcher");
+    watcher = startWatcher(handle.db, config.workspace);
+  } catch (watchErr) {
+    console.warn(
+      `maestro runtime · live watcher unavailable, reads stay up (no live updates): ${(watchErr as Error).message}`,
+    );
+  }
 } catch (err) {
-  // A watcher started before the throw must be stopped so it does not leak the OS handle.
-  watcher?.stop();
-  watcher = undefined;
-  // The index driver is unavailable (compiled binary without the native addon, or a
-  // disk failure). If openIndex SUCCEEDED but a later step threw, close the handle so
-  // the failed startup does not leak the libSQL client/fd. Then stay alive on /health.
+  // The index driver is unavailable (compiled binary without the native addon, or a disk
+  // failure) — this fires only BEFORE `index` is published (the watcher has its own guard
+  // above), so `index` is still undefined here. Close the handle if openIndex SUCCEEDED but a
+  // later step threw, so the failed startup does not leak the libSQL client/fd.
   handle?.client.close();
   console.warn(
     `maestro runtime · index unavailable, serving /health only (reads disabled): ${(err as Error).message}`,

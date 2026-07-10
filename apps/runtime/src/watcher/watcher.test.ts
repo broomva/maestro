@@ -287,4 +287,50 @@ describe("startWatcher — a disk edit drives a reconcile", () => {
     handle.stop(); // idempotent
     client.close();
   });
+
+  test("recursion is in effect — a node DEEP under a pre-existing dir wakes the watcher", async () => {
+    // The regression guard the P20 review demanded: the test above writes `child/_work.md`, a
+    // DIRECT child of root, which fires even under a non-recursive watch. Here the new node is
+    // two levels down, inside a pre-existing `projects/` dir — a non-recursive watch of root
+    // never sees events under `projects/`, so `recursive:true → false` would fail THIS test.
+    const root = makeFixture({
+      "_work.md": wm({ id: "root", brief: "# Root" }),
+      "projects/_work.md": wm({ id: "projects", brief: "# Projects" }),
+    });
+    const { db, client } = await fresh();
+    await scanIntoIndex(db, root, 1000); // seed root + projects without emitting
+
+    let resolveReconcile: (r: ReconcileResult) => void = () => {};
+    const reconciled = new Promise<ReconcileResult>((res) => {
+      resolveReconcile = res;
+    });
+    const handle = startWatcher(db, root, {
+      debounceMs: 30,
+      onReconcile: (r) => {
+        if (r.summary.changedIds.includes("deep")) resolveReconcile(r);
+      },
+    });
+
+    // A NEW node two levels down, inside the pre-existing `projects/` subtree.
+    write(root, "projects/deep/_work.md", wm({ id: "deep", brief: "# Deep" }));
+
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      reconciled,
+      new Promise<never>((_, rej) => {
+        timeout = setTimeout(
+          () => rej(new Error("recursive watcher did not see the deep edit")),
+          4000,
+        );
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+
+    expect(result.summary.changedIds).toContain("deep");
+    const payloads = (await nodeUpdated(db)).map((e) => JSON.parse(e.payload ?? "null"));
+    expect(payloads.some((p) => p.id === "deep")).toBe(true);
+
+    handle.stop();
+    client.close();
+  });
 });
