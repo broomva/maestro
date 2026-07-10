@@ -39,7 +39,9 @@ export interface SandboxSpawnContext {
 
 /** Options for a one-shot command run inside the sandbox. */
 export interface SandboxExecOptions {
-  /** Run relative to this dir instead of the sandbox root (must stay inside the sandbox). */
+  /** Run in this dir instead of the sandbox root. Resolved against the sandbox workdir and ENFORCED
+   *  to stay inside it (realpath-checked, so a `../` or symlink escape is refused, not honored) — the
+   *  contract is a hard boundary, not a comment. */
   cwd?: string;
   /** Extra env for this command only. */
   env?: Record<string, string>;

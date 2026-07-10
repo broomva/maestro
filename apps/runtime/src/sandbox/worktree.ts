@@ -16,7 +16,7 @@
 // worktree, same budget) re-attaches the existing worktree instead of failing.
 
 import { mkdir, realpath, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { gitWorktreeAdd, gitWorktreeList, gitWorktreePrune, gitWorktreeRemove } from "../git/git";
 import type {
   ResourceLimits,
@@ -110,9 +110,11 @@ class WorktreeSandbox implements Sandbox {
   // EXEC: run a command inside the worktree and capture output (verifier checks, git). Inherits the
   // host env (this is the SUPERVISOR running trusted checks — NOT the untrusted agent child, which
   // gets the allowlisted env from buildChildEnv). An empty command is a caller bug, not a spawn.
+  // The `cwd` option is CONTAINED to the sandbox (#containedCwd) — the whole point of a sandbox is
+  // that work stays inside it, so a cwd that escapes the worktree is refused, not silently honored.
   async exec(command: readonly string[], opts?: SandboxExecOptions): Promise<SandboxExecResult> {
     if (command.length === 0) throw new Error("sandbox.exec requires a non-empty command");
-    const cwd = opts?.cwd ?? this.workdir;
+    const cwd = await this.#containedCwd(opts?.cwd);
     const env = opts?.env ? { ...process.env, ...opts.env } : undefined;
     const proc = Bun.spawn([...command], { cwd, env, stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, code] = await Promise.all([
@@ -121,6 +123,25 @@ class WorktreeSandbox implements Sandbox {
       proc.exited,
     ]);
     return { code, stdout, stderr };
+  }
+
+  // Resolve an exec `cwd` to a path GUARANTEED to be inside the worktree. `rel` is interpreted against
+  // workdir (an absolute path is checked as-is); the result is realpath'd so a symlink cannot escape,
+  // then required to be workdir itself or a descendant. Anything outside is refused — enforcing the
+  // SandboxExecOptions.cwd contract instead of trusting the caller (CodeRabbit / isolation boundary).
+  async #containedCwd(rel?: string): Promise<string> {
+    if (rel === undefined) return this.workdir;
+    const root = await realpath(this.workdir);
+    const candidate = resolve(this.workdir, rel);
+    // realpath to defeat symlink escapes; a not-yet-existing path falls back to its lexical resolve
+    // (Bun.spawn will then fail on the missing cwd — we only must guarantee it cannot ESCAPE).
+    const real = await realpath(candidate).catch(() => candidate);
+    if (real !== root && !real.startsWith(root + sep)) {
+      throw new Error(
+        `sandbox.exec cwd ${JSON.stringify(rel)} escapes the sandbox workdir (${this.workdir})`,
+      );
+    }
+    return candidate;
   }
 
   // TEARDOWN: preserve (default) keeps everything — the receipt. `preserve: false` frees only the

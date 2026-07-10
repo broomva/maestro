@@ -6,9 +6,9 @@
 // temp git repo as the workspace and exercises real `git worktree` — no mocks (P11).
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { git } from "../git/git";
 import { registerSandboxConformance } from "./conformance";
 import { createWorktreeSandboxFactory } from "./worktree";
@@ -159,6 +159,24 @@ describe("WorktreeSandbox (phase-1 specifics)", () => {
     await expect(f.create("foo.lock")).rejects.toThrow(/invalid run id/);
     // and no runDir is leaked for a rejected id
     expect(await exists(join(ws, "runs", "run-foo.lock"))).toBe(false);
+  });
+
+  test("exec cwd is CONTAINED to the sandbox — escapes are refused, sub-dirs allowed (CodeRabbit)", async () => {
+    const ws = await trackedWorkspace();
+    const sb = await createWorktreeSandboxFactory({ workspace: ws }).create("cwd1");
+    // an absolute host path and a ../ escape both throw — exec cannot run outside the worktree
+    await expect(sb.exec(["pwd"], { cwd: tmpdir() })).rejects.toThrow(/escapes the sandbox/);
+    await expect(sb.exec(["pwd"], { cwd: ".." })).rejects.toThrow(/escapes the sandbox/);
+    await expect(sb.exec(["pwd"], { cwd: "../../../../etc" })).rejects.toThrow(
+      /escapes the sandbox/,
+    );
+    // the workdir itself and a real sub-dir inside it are allowed
+    const atRoot = await sb.exec(["git", "rev-parse", "--abbrev-ref", "HEAD"], { cwd: "." });
+    expect(atRoot.code).toBe(0);
+    await mkdir(join(sb.workdir, "sub"), { recursive: true });
+    const inSub = await sb.exec(["pwd"], { cwd: "sub" });
+    expect(inSub.code).toBe(0);
+    expect(basename(inSub.stdout.trim())).toBe("sub");
   });
 
   test("spawnContext (phase-1) has an empty commandPrefix + cwd = workdir", async () => {
