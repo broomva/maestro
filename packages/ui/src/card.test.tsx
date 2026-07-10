@@ -50,7 +50,9 @@ describe("Card", () => {
 
   test("running wraps the card in the Undertow (orbit + halo); the card stays matte", () => {
     const html = renderToStaticMarkup(<Card running>x</Card>);
-    expect(html).toContain("bv-undertow");
+    // class-boundary match: `bv-undertow` alone is substring-satisfied by `bv-undertow-orbit`,
+    // so assert the wrapper actually carries the halo class (BRO-1762 P20 nit).
+    expect(html).toContain('class="bv-undertow"');
     expect(html).toContain("bv-undertow-orbit");
     // the wrapped card is still the matte surface
     expect(html).toContain("bg-card");

@@ -67,13 +67,21 @@ export const Composer = React.forwardRef<HTMLDivElement, ComposerProps>(
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            // Enter sends — but never while an IME candidate is composing (CJK/JP/KR).
+            // Committing a candidate dispatches Enter with isComposing=true; sending then
+            // would swallow the half-composed text and clear the input.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
               send();
             }
           }}
           placeholder={placeholder}
-          className="min-w-0 border-none bg-transparent px-2.5 py-2 text-base text-foreground outline-none placeholder:text-muted-foreground focus-visible:outline-none"
+          // The ai-blue focus ring rides the capsule (focus-within), not the input. The global
+          // :focus-visible ring (@maestro/tokens base.css) is emitted UNLAYERED, so a layered
+          // `focus-visible:outline-none` utility can't suppress it (unlayered beats @layer
+          // regardless of specificity) — only an inline style wins.
+          style={{ outline: "none" }}
+          className="min-w-0 border-none bg-transparent px-2.5 py-2 text-base text-foreground placeholder:text-muted-foreground"
         />
         <button
           type="button"
