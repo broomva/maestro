@@ -47,8 +47,14 @@ describe("event envelope (API.md §stream)", () => {
 });
 
 describe("event type namespaces + synthetics", () => {
-  test("the five namespaces are pinned", () => {
-    expect(EVENT_NAMESPACES).toEqual(["run", "tool", "check", "gate", "budget"]);
+  test("the six namespaces are pinned (agent added in BRO-1756 for agent.said)", () => {
+    expect(EVENT_NAMESPACES).toEqual(["run", "tool", "check", "gate", "budget", "agent"]);
+  });
+
+  test("agent.* is a real namespace (agent.said), not a synthetic", () => {
+    expect(eventNamespace("agent.said")).toBe("agent");
+    expect(isSyntheticEventType("agent.said")).toBe(false);
+    expect(isWireEventType("agent.said")).toBe(true);
   });
 
   test("eventNamespace extracts the family prefix", () => {

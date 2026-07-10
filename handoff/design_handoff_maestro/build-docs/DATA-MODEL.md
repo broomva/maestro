@@ -85,7 +85,7 @@ Append-only JSONL, one event per line — the **durable truth** for what happene
 {"ts":"2026-06-25T06:01:10Z","actor":"system","type":"gate.opened","gate":"human","reason":"clean, awaiting approval"}
 ```
 
-`actor` is always one of `agent | user | tool | system`. `type` is namespaced (`run.* | tool.* | check.* | gate.* | budget.*`). This log is the audit trail the guardrails require and the source the UI's activity timeline renders.
+`actor` is always one of `agent | user | tool | system`. `type` is namespaced (`run.* | tool.* | check.* | gate.* | budget.* | agent.*` — `agent.*` admits `agent.said`, HARNESS §6; widened from the original five in BRO-1756, logged in `docs/canon-amendments.md`). This log is the audit trail the guardrails require and the source the UI's activity timeline renders.
 
 ---
 
@@ -158,7 +158,7 @@ export const event = sqliteTable("event", {
   sessionId: text("session_id"),                 // nullable (D-DURABILITY): synthetics (node.updated, schedule.fired, budget.*, gate.decided) have no session — still persisted
   ts:        integer("ts", { mode: "timestamp" }).notNull(),
   actor:     text("actor").$type<"agent"|"user"|"tool"|"system">().notNull(),
-  type:      text("type").notNull(),             // run.* | tool.* | check.* | gate.* | budget.*
+  type:      text("type").notNull(),             // run.* | tool.* | check.* | gate.* | budget.* | agent.* (BRO-1756)
   payload:   text("payload_json"),
 });
 

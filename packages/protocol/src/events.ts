@@ -11,17 +11,22 @@ export type Actor = "agent" | "user" | "tool" | "system";
 
 export const ACTORS = ["agent", "user", "tool", "system"] as const satisfies readonly Actor[];
 
-/** The namespaced event families (DATA-MODEL §A.3, §B.3; pinned by the ticket). */
-export const EVENT_NAMESPACES = ["run", "tool", "check", "gate", "budget"] as const;
+/**
+ * The namespaced event families (DATA-MODEL §A.3, §B.3). `agent` was added in BRO-1756 to admit
+ * `agent.said` (HARNESS §6 maps coalesced assistant turns to it, and `agent` is already a first-class
+ * actor) — a deliberate widening of the original five, logged in docs/canon-amendments.md.
+ */
+export const EVENT_NAMESPACES = ["run", "tool", "check", "gate", "budget", "agent"] as const;
 export type EventNamespace = (typeof EVENT_NAMESPACES)[number];
 
-/** An event type inside one of the five namespaces. */
+/** An event type inside one of the six namespaces. */
 export type NamespacedEventType =
   | `run.${string}`
   | `tool.${string}`
   | `check.${string}`
   | `gate.${string}`
-  | `budget.${string}`;
+  | `budget.${string}`
+  | `agent.${string}`;
 
 /**
  * Synthetic event types the runtime projects beyond session.jsonl (API.md
@@ -47,20 +52,25 @@ export type EventType = NamespacedEventType | SyntheticEventType;
  *
  * Note (canon discrepancy, tracked in docs/canon-amendments.md): VERIFIER §7
  * also names `verify.started`, `judge.result`, `verify.error`, which fall
- * OUTSIDE the five namespaces the envelope pins. They are not admitted by
+ * OUTSIDE the six namespaces the envelope pins. They are not admitted by
  * EventType here; the verifier-implementation ticket owns reconciling them
- * (fold into `check.*` or widen the namespace set — a deliberate protocol edit).
+ * (fold into `check.*` or widen the namespace set — a deliberate protocol edit,
+ * the same move BRO-1756 made for `agent.*`).
  */
 export const EVENT_TYPES = {
   // run.* — lifecycle (FLOWS F2/F4/F8/F9, HARNESS, D-EVENTNAMES)
   RUN_STARTED: "run.started",
+  RUN_BEAT: "run.beat", // loop-beat summary {iteration, diffstat} — HARNESS §6
   RUN_EXITING: "run.exiting", // child seam {code, reason} — HARNESS owns it
   RUN_FINISHED: "run.finished", // supervisor-derived after reap (D-EVENTNAMES)
   RUN_FAILED: "run.failed",
   RUN_KILLED: "run.killed",
   RUN_ORPHANED: "run.orphaned",
+  // agent.* — the child's own utterances (HARNESS §6; BRO-1756 widening)
+  AGENT_SAID: "agent.said", // coalesced assistant turn (one per completed text block, not per token)
   // tool.*
   TOOL_CALL: "tool.call",
+  TOOL_RESULT: "tool.result", // HARNESS §6 — { tool, ok, summary }
   // check.* — verification (VERIFIER §7, the namespaced subset)
   CHECK_RESULT: "check.result",
   CHECK_VERDICT: "check.verdict", // D-EVENTNAMES: renamed from bare `verdict`
