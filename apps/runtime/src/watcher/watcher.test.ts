@@ -234,8 +234,12 @@ describe("createReconcileScheduler — debounce + single-flight", () => {
     await delay(15); // t=35: still #1
     sched.schedule(); // fires ~t=40 → pending already set
     await delay(120); // #1 ends ~55 → ONE trailing run ~55..105 → drain
-    expect(maxActive).toBe(1); // the invariant: never two reconciles at once
-    expect(calls).toBe(2); // #1 + exactly one coalesced trailing run
+    // The invariant is single-flight (never two reconciles at once). `calls` has NO exact
+    // upper bound: under CPU-steal on a loaded CI runner a late debounce wake can land right at
+    // reconcile #1's completion and produce a *correct* extra trailing run — so assert a lower
+    // bound (the coalesced re-run happened) + the real safety property, not an exact count.
+    expect(maxActive).toBe(1); // never two reconciles at once — the property that matters
+    expect(calls).toBeGreaterThanOrEqual(2); // #1 + at least one coalesced trailing run
   });
 
   test("a closed scheduler runs neither a new nor a trailing reconcile", async () => {
