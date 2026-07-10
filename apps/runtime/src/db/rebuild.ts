@@ -99,10 +99,17 @@ export async function rebuildIndex(
   // 14 ("unable to open database file"). Mirrors the startup path in index.ts.
   await mkdir(dirname(indexPath), { recursive: true });
   const handle = await openIndex(indexUrl(indexPath));
-  const { summary, errors } = await scanIntoIndex(handle.db, root, opts.now);
-  return {
-    handle,
-    nodeCount: summary.inserted + summary.updated + summary.unchanged,
-    errors: errors.map((e) => e.message),
-  };
+  try {
+    const { summary, errors } = await scanIntoIndex(handle.db, root, opts.now);
+    return {
+      handle,
+      nodeCount: summary.inserted + summary.updated + summary.unchanged,
+      errors: errors.map((e) => e.message),
+    };
+  } catch (err) {
+    // Symmetric with the index.ts startup catch: if the scan throws AFTER openIndex succeeded,
+    // close the handle before rethrowing so the failed rebuild does not leak the libSQL client/fd.
+    handle.client.close();
+    throw err;
+  }
 }

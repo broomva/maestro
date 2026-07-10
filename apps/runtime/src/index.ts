@@ -96,15 +96,26 @@ if (import.meta.main) {
   if (rebuildMode) {
     // Kill + rescan, then exit — the "rebuild command" (BRO-1808). Dynamic import keeps the
     // native libSQL addon out of the compiled binary's static graph (same reason as startup).
-    const { rebuildIndex } = await import("./db/rebuild");
-    const result = await rebuildIndex(config.indexPath, config.workspace);
-    result.handle.client.close();
-    const errNote = result.errors.length ? ` (${result.errors.length} scan errors)` : "";
-    console.log(
-      `maestro runtime · index rebuilt · ${result.nodeCount} nodes${errNote} · ${config.indexPath}`,
-    );
-    for (const e of result.errors) console.warn(`  scan error: ${e}`);
-    process.exit(result.errors.length ? 1 : 0);
+    try {
+      const { rebuildIndex } = await import("./db/rebuild");
+      const result = await rebuildIndex(config.indexPath, config.workspace);
+      result.handle.client.close();
+      const errNote = result.errors.length ? ` (${result.errors.length} scan errors)` : "";
+      console.log(
+        `maestro runtime · index rebuilt · ${result.nodeCount} nodes${errNote} · ${config.indexPath}`,
+      );
+      for (const e of result.errors) console.warn(`  scan error: ${e}`);
+      process.exit(result.errors.length ? 1 : 0);
+    } catch (err) {
+      // Symmetric with the startup catch (BRO-1841): in a compiled binary without the native
+      // libSQL addon, the dynamic import / openIndex throws — surface a clean message + nonzero
+      // exit, not a raw unhandled rejection. The throw precedes rebuildIndex's rm (rebuild.ts
+      // statically imports the driver), so nothing is deleted on this path.
+      console.error(
+        `maestro runtime · index rebuild failed (index driver unavailable?): ${(err as Error).message}`,
+      );
+      process.exit(1);
+    }
   }
 
   const server = Bun.serve({ port: config.port, fetch: app.fetch });
