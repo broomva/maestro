@@ -2,6 +2,8 @@ import type { Kind, OrchState } from "@maestro/protocol";
 import {
   Avatar,
   Button,
+  Card,
+  Composer,
   DotComet,
   IconButton,
   Input,
@@ -9,7 +11,7 @@ import {
   workStatusView,
 } from "@maestro/ui";
 import { Paperclip, Plus, Search, Settings } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { ThemeToggle } from "../components/theme-toggle";
 
 /**
@@ -39,19 +41,16 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 const BUTTON_VARIANTS = ["primary", "secondary", "soft", "ghost"] as const;
 
 // A work node's plain-voice badge, mapped from its OrchState (BRO-1757). Running work wears
-// the tidepool DotComet as its dot; standing routines pulse; everything else is a static dot.
+// the tidepool DotComet via the StatusBadge `dot` slot; standing routines pulse; everything
+// else is a static dot. One capsule, no hand-rolled duplicate (BRO-1762 folds the P20 nit).
 function StateBadge({ state, kind }: { state: OrchState; kind?: Kind }) {
   const v = workStatusView(state, kind);
-  if (v.running) {
-    return (
-      <span className="inline-flex h-[26px] items-center gap-1.5 rounded-full bg-muted px-3 font-medium text-foreground text-xs">
-        <DotComet size={8} />
-        {v.label}
-      </span>
-    );
-  }
   return (
-    <StatusBadge status={v.tone} pulse={v.pulse}>
+    <StatusBadge
+      status={v.tone}
+      pulse={v.pulse}
+      dot={v.running ? <DotComet size={8} /> : undefined}
+    >
       {v.label}
     </StatusBadge>
   );
@@ -65,6 +64,8 @@ const SAMPLE_IMAGE =
   );
 
 export function KitchenSink() {
+  const [sent, setSent] = useState<{ id: number; text: string }[]>([]);
+  const onSend = (text: string) => setSent((s) => [...s, { id: s.length, text }]);
   return (
     <main className="flex min-h-dvh flex-col bg-background text-foreground">
       <header className="flex h-[52px] shrink-0 items-center justify-between border-border border-b px-5">
@@ -147,6 +148,58 @@ export function KitchenSink() {
             <Row label="The tidepool dot on its own, at the running size (15px)">
               <DotComet />
             </Row>
+          </Section>
+
+          <Section title="Card">
+            <Row label="Matte content card. Never glass, never pill-radius; radius 0.75rem, whisper border.">
+              <Card className="w-[240px]">
+                <span className="font-medium text-sm">Draft the launch note</span>
+                <StateBadge state="proposed" />
+              </Card>
+            </Row>
+            <Row label="Interactive: hover lifts to a diffuse blue-tinted shadow. It never scales.">
+              <Card interactive className="w-[240px]">
+                <span className="font-medium text-sm">Review the migration plan</span>
+                <StateBadge state="review" />
+              </Card>
+            </Row>
+            <Row label="Running: the card stays matte and wears the Undertow; pair with a DotComet on the status row.">
+              <Card running className="w-[240px]">
+                <span className="font-medium text-sm">Porting the parser</span>
+                <StateBadge state="running" />
+              </Card>
+            </Row>
+          </Section>
+
+          <Section title="Composer">
+            <Row label="The one glass surface: rounded-28 capsule, frosted-blue halo, inner light line. Enter or send fires onSend (trimmed); empty never sends.">
+              <div className="w-full max-w-[520px]">
+                <Composer onSend={onSend} />
+              </div>
+            </Row>
+            <Row label="With a leading attach button">
+              <div className="w-full max-w-[520px]">
+                <Composer
+                  leading={
+                    <IconButton label="Attach">
+                      <Paperclip size={20} strokeWidth={2} />
+                    </IconButton>
+                  }
+                  onSend={onSend}
+                />
+              </div>
+            </Row>
+            {sent.length > 0 && (
+              <Row label="Sent (dogfood echo)">
+                <ul className="flex flex-col gap-1" data-testid="composer-sent">
+                  {sent.map((item) => (
+                    <li key={item.id} className="text-muted-foreground text-sm">
+                      {item.text}
+                    </li>
+                  ))}
+                </ul>
+              </Row>
+            )}
           </Section>
 
           <Section title="Live signals">

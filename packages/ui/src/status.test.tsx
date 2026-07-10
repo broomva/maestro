@@ -136,6 +136,18 @@ describe("StatusBadge", () => {
   test("the dot is aria-hidden (the label is the accessible name)", () => {
     expect(renderToStaticMarkup(<StatusBadge>Done</StatusBadge>)).toContain('aria-hidden="true"');
   });
+
+  test("a custom dot slot replaces the internal status dot (running wears the tidepool)", () => {
+    const html = renderToStaticMarkup(
+      <StatusBadge status="info" dot={<DotComet size={8} />}>
+        Running
+      </StatusBadge>,
+    );
+    expect(html).toContain("bv-dot-live"); // the DotComet is the dot now
+    expect(html).not.toContain("size-2 shrink-0"); // the internal static status dot is gone
+    expect(html).toContain("Running"); // and the capsule is not hand-rolled
+    expect(html).toContain("bg-muted");
+  });
 });
 
 describe("DotComet", () => {
