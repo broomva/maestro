@@ -33,7 +33,7 @@ import type {
   WorkContract,
 } from "@maestro/protocol";
 import { EVENT_TYPES } from "@maestro/protocol";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gt, max } from "drizzle-orm";
 import type { RuntimeConfig } from "../config";
 import type { IndexDb } from "../db/client";
 import { event, gate, lease, node, runBudget, session } from "../db/schema";
@@ -228,6 +228,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     maxRespawns = DEFAULT_MAX_RESPAWNS,
   } = deps;
   const registry = new RunRegistry();
+  // Run ids a `kill` landed on. A fresh-context respawn consults this after each await so a kill that
+  // races the respawn WINS — it must not resurrect a killed run with a fresh child + token. Cleared on
+  // terminal (the run id is unique per run, so this only bounds the set between kill and reap).
+  const cancelled = new Set<string>();
 
   // A per-run event emitter over the run's journal + the index — the same FS-first, single-writer
   // serialization the tee uses (so a supervisor-derived run.finished lands byte-identically alongside
@@ -248,16 +252,49 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       : { actor: "system" satisfies Actor, type, payload };
   }
 
-  /** The child's declared terminal `run.exiting {code, reason}`, read from the durable event log after
-   *  the tee has drained (or null if the child crashed before emitting it). */
-  async function lastRunExiting(runId: string): Promise<{ code?: number; reason?: string } | null> {
-    const rows = await db
-      .select()
-      .from(event)
-      .where(and(eq(event.sessionId, runId), eq(event.type, EVENT_TYPES.RUN_EXITING)))
-      .orderBy(desc(event.seq))
-      .limit(1);
-    const row = rows[0];
+  /** The highest `event.seq` for this session RIGHT NOW — captured just before each (re)launch so the
+   *  next attempt's `run.exiting` is discriminated from a prior attempt's by `seq > watermark`. Guarded:
+   *  a read fault yields 0 (the whole session is then in scope, the pre-fix behavior — never worse). */
+  async function currentWatermark(runId: string): Promise<number> {
+    try {
+      const rows = await db
+        .select({ m: max(event.seq) })
+        .from(event)
+        .where(eq(event.sessionId, runId));
+      return rows[0]?.m ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** The child's declared terminal `run.exiting {code, reason}` for the CURRENT attempt, read from the
+   *  durable event log after the tee has drained. Scoped to `seq > watermark` so a fresh-context respawn
+   *  (same session id, append-only `event` table with no attempt column) never reads the PRIOR attempt's
+   *  row — an attempt that exits without re-declaring resolves to null (→ parks blocked, not respawns).
+   *  Guarded: an index read fault resolves to null (reap then routes on the real exit code) — the same
+   *  fail-safe the JSON.parse fallback gives, extended to the whole select so reap can never reject. */
+  async function lastRunExiting(
+    runId: string,
+    watermark: number,
+  ): Promise<{ code?: number; reason?: string } | null> {
+    let row: typeof event.$inferSelect | undefined;
+    try {
+      const rows = await db
+        .select()
+        .from(event)
+        .where(
+          and(
+            eq(event.sessionId, runId),
+            eq(event.type, EVENT_TYPES.RUN_EXITING),
+            gt(event.seq, watermark),
+          ),
+        )
+        .orderBy(desc(event.seq))
+        .limit(1);
+      row = rows[0];
+    } catch {
+      return null; // index closed/busy on the read path — declared unknown, route on the real code
+    }
     if (!row) return null;
     let payload: unknown = {};
     try {
@@ -325,19 +362,25 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       gateId?: string;
       mismatch: boolean;
       respawns: number;
+      /** Skip the terminal-event emit — set when the tee's own failSupervision (BRO-1767) already
+       *  emitted run.failed + parked, so the supervisor reap does not write a DUPLICATE terminal event. */
+      skipEmit?: boolean;
     },
   ): Promise<ReapResult> {
-    const emit = runEmitter(ctx.runId, ctx.sandbox.runDir);
-    const payload: Record<string, unknown> = { code: opts.exitCode };
-    if (opts.reason !== undefined) payload.reason = opts.reason;
-    try {
-      await emit(sys(opts.event, payload));
-    } catch {
-      // the durable event failed to append — parking below is the load-bearing change; D5 re-derives
+    if (!opts.skipEmit) {
+      const emit = runEmitter(ctx.runId, ctx.sandbox.runDir);
+      const payload: Record<string, unknown> = { code: opts.exitCode };
+      if (opts.reason !== undefined) payload.reason = opts.reason;
+      try {
+        await emit(sys(opts.event, payload));
+      } catch {
+        // the durable event failed to append — parking below is the load-bearing change; D5 re-derives
+      }
     }
     await park(ctx.runId, ctx.nodeId, opts.sessionStatus, opts.nodeState, true);
     tokens.revoke(ctx.runId);
     registry.delete(ctx.runId);
+    cancelled.delete(ctx.runId);
     entry?.supervised.stop();
     await releaseLease(ctx.nodeId);
     return {
@@ -354,26 +397,33 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     };
   }
 
-  /** Open a pending `question` gate on exit 20 (HARNESS §4), returning its id. Emits `gate.opened`. */
+  /** Open a pending `question` gate on exit 20 (HARNESS §4), returning its id — or `undefined` if the
+   *  index insert faults (the run still parks review for a human; no gate row, no `gate.opened`). The
+   *  guard is what keeps a reap on the exit-20 path from rejecting and skipping cleanup. */
   async function openQuestionGate(
     ctx: RunContext,
     declared: { reason?: string } | null,
     emit: (ev: ChildEmittedEvent) => Promise<void>,
-  ): Promise<string> {
+  ): Promise<string | undefined> {
     const gateId = randomUUID();
     const at = now();
-    await db.insert(gate).values({
-      id: gateId,
-      sessionId: ctx.runId,
-      kind: "question",
-      proposalJson: declared ? JSON.stringify(declared) : null,
-      verdict: null,
-      decidedBy: null,
-      openedAt: at,
-      decidedAt: null,
-      updatedAt: at,
-      deletedAt: null,
-    });
+    try {
+      await db.insert(gate).values({
+        id: gateId,
+        sessionId: ctx.runId,
+        kind: "question",
+        proposalJson: declared ? JSON.stringify(declared) : null,
+        verdict: null,
+        decidedBy: null,
+        openedAt: at,
+        decidedAt: null,
+        updatedAt: at,
+        deletedAt: null,
+      });
+    } catch {
+      // index closed/busy — park review without a gate row rather than reject the reap (cleanup must run)
+      return undefined;
+    }
     try {
       await emit(sys(EVENT_TYPES.GATE_OPENED, { gateId, kind: "question" }));
     } catch {
@@ -414,6 +464,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     await park(ctx.runId, ctx.nodeId, "blocked", "blocked", true);
     tokens.revoke(ctx.runId);
     registry.delete(ctx.runId);
+    cancelled.delete(ctx.runId);
     await releaseLease(ctx.nodeId);
     return {
       runId: ctx.runId,
@@ -428,10 +479,36 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   }
 
   // ── Reap — map the child's real exit code (HARNESS §4) ──────────────────────
-  async function reap(ctx: RunContext, entry: RunEntry, respawns: number): Promise<ReapResult> {
+  // `reap` NEVER rejects: any unexpected throw in the routing (an index fault on a read/gate path the
+  // inner logic did not already guard) is caught and contained, so the background `reaped` chain always
+  // resolves a ReapResult and cleanup (token revoke, registry drop, lease release) is guaranteed.
+  async function reap(
+    ctx: RunContext,
+    entry: RunEntry,
+    watermark: number,
+    respawns: number,
+  ): Promise<ReapResult> {
+    try {
+      return await reapInner(ctx, entry, watermark, respawns);
+    } catch (err) {
+      return containCrash(
+        { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
+        `reap failed: ${msg(err)}`,
+        respawns,
+      );
+    }
+  }
+
+  async function reapInner(
+    ctx: RunContext,
+    entry: RunEntry,
+    watermark: number,
+    respawns: number,
+  ): Promise<ReapResult> {
     // Ground truth: the real process exit code (Bun resolves a signal kill to a non-{0,10,20} value).
     const realCode = await entry.child.exited;
-    const declared = await lastRunExiting(ctx.runId);
+    // Scoped to THIS attempt (seq > watermark) so a respawn never reads a prior attempt's run.exiting.
+    const declared = await lastRunExiting(ctx.runId, watermark);
     const mismatch =
       declared?.code !== undefined && Number.isInteger(realCode) && declared.code !== realCode;
     if (mismatch) {
@@ -497,7 +574,11 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
 
     // Any other code / a signal kill (SIGKILL, segfault) → crash. Park blocked + run.failed; the
-    // worktree is preserved and the runtime keeps serving (the containment invariant).
+    // worktree is preserved and the runtime keeps serving (the containment invariant). If the tee's own
+    // failSupervision (BRO-1767) already emitted run.failed + parked (a mid-run durability loss that
+    // SIGKILLed the child), skip a DUPLICATE run.failed — the cleanup below (revoke/drop/release) still
+    // runs, since failSupervision does not own those.
+    const supFailed = entry.supervised.supervisionFailed();
     return terminal(ctx, entry, {
       exitCode: realCode,
       sessionStatus: "blocked",
@@ -507,6 +588,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       reason: `unexpected exit code ${realCode}`,
       mismatch,
       respawns,
+      skipEmit: supFailed,
     });
   }
 
@@ -514,8 +596,11 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   // Shared by dispatch (first launch) and respawn (fresh-context). Returns the live entry, or THROWS
   // if the spawn seam throws (ENOENT) — the caller contains that as a crash. `factory.create` is
   // idempotent, so a respawn re-attaches the SAME worktree.
-  async function launch(ctx: RunContext): Promise<RunEntry> {
+  async function launch(ctx: RunContext): Promise<{ entry: RunEntry; watermark: number }> {
     const { sandbox } = ctx;
+    // The event-seq high-water mark BEFORE this attempt speaks — so reap reads only THIS attempt's
+    // run.exiting (seq > watermark), never a prior attempt's on a fresh-context respawn.
+    const watermark = await currentWatermark(ctx.runId);
     // Freeze the child's contract snapshot (its frozen "what am I working on").
     const contractPath = await writeContractSnapshot(sandbox.runDir, {
       session: ctx.runId,
@@ -559,12 +644,21 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       supervised,
     };
     registry.set(entry); // overwrites on a respawn (same run id)
-    return entry;
+    return { entry, watermark };
   }
 
   /** Re-launch a fresh-context run (same run id / worktree / budget). A re-provision or re-spawn throw
    *  is contained as a crash. The safety bound stops an infinite `fresh_context` loop. */
   async function respawn(ctx: RunContext, respawns: number): Promise<ReapResult> {
+    // A kill(runId) that landed while the prior attempt was reaping must WIN — never resurrect a killed
+    // run with a fresh child + token. Checked here AND after the create await (a kill can land in it).
+    if (cancelled.has(ctx.runId)) {
+      return containCrash(
+        { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
+        "killed during respawn",
+        respawns,
+      );
+    }
     if (respawns > maxRespawns) {
       return containCrash(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
@@ -582,10 +676,19 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         respawns,
       );
     }
+    // Re-check: kill may have landed during the create await (it SIGKILLs the OLD, dead child + revokes,
+    // then we must NOT spawn a replacement).
+    if (cancelled.has(ctx.runId)) {
+      return containCrash(
+        { runId: ctx.runId, nodeId: ctx.nodeId, runDir: sandbox.runDir },
+        "killed during respawn",
+        respawns,
+      );
+    }
     const nextCtx: RunContext = { ...ctx, sandbox };
-    let entry: RunEntry;
+    let launched: { entry: RunEntry; watermark: number };
     try {
-      entry = await launch(nextCtx);
+      launched = await launch(nextCtx);
     } catch (err) {
       return containCrash(
         { runId: nextCtx.runId, nodeId: nextCtx.nodeId, runDir: nextCtx.sandbox.runDir },
@@ -593,8 +696,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         respawns,
       );
     }
-    await entry.supervised.done;
-    return reap(nextCtx, entry, respawns);
+    await launched.entry.supervised.done;
+    return reap(nextCtx, launched.entry, launched.watermark, respawns);
   }
 
   // ── Dispatch (F2) ────────────────────────────────────────────────────────
@@ -621,15 +724,27 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     const budget: Budget = row.budgetJson ? (JSON.parse(row.budgetJson) as Budget) : {};
 
     // 4. Insert the session (running) + a ZEROED run_budget. The branch is `run/<id>` (the receipt).
-    await db.insert(session).values({
-      id: runId,
-      nodeId,
-      branch: `run/${runId}`,
-      status: "running",
-      startedAt: at,
-      updatedAt: at,
-    });
-    await db.insert(runBudget).values({ sessionId: runId, spentUsd: 0, iterations: 0 });
+    //    Guarded: a transient index fault here (post-lease, pre-child) must RELEASE the just-acquired
+    //    lease and park anything half-created, never orphan the node lease for the 24h TTL nor leave a
+    //    running-state session with no process (the step-5 comment's invariant, extended upstream).
+    try {
+      await db.insert(session).values({
+        id: runId,
+        nodeId,
+        branch: `run/${runId}`,
+        status: "running",
+        startedAt: at,
+        updatedAt: at,
+      });
+      await db.insert(runBudget).values({ sessionId: runId, spentUsd: 0, iterations: 0 });
+    } catch (err) {
+      const reaped = containCrash(
+        { runId, nodeId },
+        `session/budget insert failed: ${msg(err)}`,
+        0,
+      );
+      return { dispatched: true, runId, reaped };
+    }
 
     // 5. Provision the sandbox (worktree). A provision failure is contained as a crash — the session
     //    exists, so it parks blocked and never orphans as running-with-no-process.
@@ -643,9 +758,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     const ctx: RunContext = { runId, nodeId, contract, budget, sandbox };
 
     // 6. Launch the child. A spawn throw (ENOENT: broomva-child) → crash, worktree preserved.
-    let entry: RunEntry;
+    let launched: { entry: RunEntry; watermark: number };
     try {
-      entry = await launch(ctx);
+      launched = await launch(ctx);
     } catch (err) {
       const reaped = containCrash(
         { runId, nodeId, runDir: sandbox.runDir },
@@ -654,6 +769,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       );
       return { dispatched: true, runId, reaped };
     }
+    const { entry, watermark } = launched;
 
     // 7. node.state → running. (The CHILD emits run.started per HARNESS §6 — the supervisor does NOT,
     //    to avoid a double run.started.)
@@ -663,8 +779,18 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       // index hiccup — the session row already records the run; a rescan reconciles node.state
     }
 
-    // 8. Start the reap in the background (do NOT await — dispatch returns once the child is LIVE).
-    const reaped = entry.supervised.done.then(() => reap(ctx, entry, 0));
+    // 8. Start the reap in the background (do NOT await — dispatch returns once the child is LIVE). reap
+    //    never rejects (it contains its own throws), but the `.catch` is the belt to that suspenders so a
+    //    truly-unexpected rejection on the fire-and-forget chain can never surface unhandled.
+    const reaped = entry.supervised.done
+      .then(() => reap(ctx, entry, watermark, 0))
+      .catch((err) =>
+        containCrash(
+          { runId, nodeId, runDir: sandbox.runDir },
+          `reap chain failed: ${msg(err)}`,
+          0,
+        ),
+      );
     return { dispatched: true, runId, reaped };
   }
 
@@ -672,6 +798,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   function kill(runId: string): boolean {
     const entry = registry.get(runId);
     if (!entry) return false;
+    // Mark cancelled FIRST — a fresh-context respawn in flight consults this after its awaits and, if
+    // set, parks blocked instead of resurrecting the run with a fresh child + token.
+    cancelled.add(runId);
     entry.child.kill("SIGKILL");
     tokens.revoke(runId); // no in-flight model call survives the kill
     // The background reap observes the exit → crash route → blocked + run.failed + drop + lease release.

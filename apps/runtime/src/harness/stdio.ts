@@ -461,6 +461,9 @@ export interface SupervisedChild {
   done: Promise<void>;
   /** Stop the liveness tick interval (idempotent). Call on reap. */
   stop(): void;
+  /** True once a tee-write failure REAPED the child in-band (SIGKILL + run.failed + park blocked). The
+   *  supervisor's reap reads this to avoid emitting a DUPLICATE run.failed terminal event (BRO-1779). */
+  supervisionFailed(): boolean;
 }
 
 export function superviseChildStdio(child: ChildStdioPort, deps: SuperviseDeps): SupervisedChild {
@@ -595,7 +598,7 @@ export function superviseChildStdio(child: ChildStdioPort, deps: SuperviseDeps):
     .then(() => tee.drain())
     .then(() => stop());
 
-  return { control, liveness, tee, done, stop };
+  return { control, liveness, tee, done, stop, supervisionFailed: () => supervisionFailed };
 }
 
 /** Adapt a Bun subprocess (stdout/stderr piped, stdin piped) to the narrow `ChildStdioPort`. */

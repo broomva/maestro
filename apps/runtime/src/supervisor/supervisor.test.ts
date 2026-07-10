@@ -219,10 +219,17 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
       expect(res.nodeState).toBe("blocked");
       expect(res.reason).toBe(reason);
       expect(res.crash).toBe(false);
+      expect(res.event).toBe("run.finished"); // a clean stop is finished, NOT failed
       const [srow] = await h.db.select().from(session).where(eq(session.id, "r1"));
       expect(srow?.status).toBe("blocked");
       const [nrow] = await h.db.select().from(node).where(eq(node.id, "n0"));
       expect(nrow?.state).toBe("blocked");
+      // the durable terminal event is RUN_FINISHED, not RUN_FAILED
+      const finished = await h.db
+        .select()
+        .from(event)
+        .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.RUN_FINISHED)));
+      expect(finished).toHaveLength(1);
     });
   }
 
@@ -286,6 +293,7 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     const res = await out.reaped;
     expect(res.sessionStatus).toBe("review");
     expect(res.nodeState).toBe("review");
+    expect(res.event).toBe("run.finished");
     expect(res.gateId).toBeTruthy();
     // a pending question gate row
     const gates = await h.db.select().from(gate).where(eq(gate.sessionId, "r1"));
@@ -408,6 +416,144 @@ describe("dispatch guards", () => {
     // token minted-then-revoked → none live; worktree preserved for the crash receipt
     expect(tokens.size).toBe(0);
     expect(await exists(join(ws, ".maestro", "worktrees", "run-r1"))).toBe(true);
+  });
+});
+
+// ── P20 fixes: reap-fault containment · attempt-scoping · kill-race · dispatch guards ──
+
+describe("reap containment + attempt-scoping + kill race (P20 fixes)", () => {
+  test("BLOCKER: an index fault during reap still cleans up (token revoked, registry drained, reaped resolves)", async () => {
+    const ws = await makeWorkspace();
+    // NOT tracked in `handles` — this test closes the client itself to simulate the index fault.
+    const h = await openIndex(":memory:");
+    await seedNode(h, "n0");
+    // A child that emits nothing and whose exit we control — so the db is closed BEFORE reap reads it.
+    let resolveExit: (code: number) => void = () => {};
+    const exited = new Promise<number>((r) => {
+      resolveExit = r;
+    });
+    const { sup, tokens } = makeSupervisor(ws, h, () => fakePort({ lines: [], exitCode: exited }));
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    // Simulate the exact index-closed/busy fault the module guards against, THEN let the child exit so
+    // reap runs every db read/write against a closed handle.
+    h.client.close();
+    resolveExit(0);
+    // The reap must RESOLVE (no unhandled rejection) and still free the in-memory resources it owns.
+    const res = await out.reaped;
+    expect(res).toBeTruthy();
+    expect(tokens.size).toBe(0); // token revoked despite the db fault (the blast-radius invariant)
+    expect(sup.list()).toHaveLength(0); // registry entry dropped
+  });
+
+  test("MAJOR: a respawned attempt that does not re-declare run.exiting parks blocked (attempt-scoped read)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    // Attempt 1 stops fresh_context (respawn); attempt 2 exits 10 emitting NO run.exiting of its own.
+    // Without per-attempt scoping, attempt 2 would read attempt 1's fresh_context row and respawn-loop.
+    const scripted = scriptedSpawner([
+      { lines: [runExiting(10, "fresh_context")], exitCode: 10 },
+      { lines: [], exitCode: 10 },
+    ]);
+    const { sup } = makeSupervisor(ws, h, scripted.spawn, { maxRespawns: 3 });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const res = await out.reaped;
+    // fixed: exactly ONE respawn, then park blocked (attempt 2's absent run.exiting → reason undefined)
+    expect(scripted.calls()).toBe(2); // broken (stale read) would loop to maxRespawns+1 calls
+    expect(res.respawns).toBe(1);
+    expect(res.sessionStatus).toBe("blocked");
+    expect(res.crash).toBe(false);
+  });
+
+  test("MAJOR: kill during a fresh_context respawn WINS — no resurrection (no new child / token)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    const scripted = scriptedSpawner([
+      { lines: [runExiting(10, "fresh_context")], exitCode: 10 }, // attempt 1 → respawn
+      { lines: [runExiting(0)], exitCode: 0 }, // attempt 2 (must NEVER spawn — kill wins)
+    ]);
+    // Interpose on the respawn's factory.create so the test can fire kill() mid-await.
+    const base = createWorktreeSandboxFactory({ workspace: ws });
+    let createN = 0;
+    let signalCreate2 = () => {};
+    const create2Started = new Promise<void>((r) => {
+      signalCreate2 = r;
+    });
+    let proceed = () => {};
+    const create2Proceed = new Promise<void>((r) => {
+      proceed = r;
+    });
+    const factory = {
+      async create(runId: string, opts?: Parameters<typeof base.create>[1]) {
+        if (++createN === 2) {
+          signalCreate2();
+          await create2Proceed;
+        }
+        return base.create(runId, opts);
+      },
+    };
+    const { sup, tokens } = makeSupervisor(ws, h, scripted.spawn, { factory });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    await create2Started; // attempt 1 reaped fresh_context; respawn is now awaiting factory.create
+    expect(sup.kill("r1")).toBe(true); // kill lands mid-respawn
+    proceed(); // create resolves; respawn re-checks cancelled → contain, NOT re-launch
+    const res = await out.reaped;
+    expect(scripted.calls()).toBe(1); // attempt-2 child was NEVER spawned — kill won the race
+    expect(res.crash).toBe(true);
+    expect(res.sessionStatus).toBe("blocked");
+    expect(tokens.size).toBe(0);
+  });
+
+  test("provision failure (factory.create throws) is contained: blocked + run.failed, lease released", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    const factory = {
+      create(): Promise<never> {
+        throw new Error("worktree provision failed");
+      },
+    };
+    const { sup, tokens } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([{ lines: [runExiting(0)], exitCode: 0 }]).spawn,
+      { factory },
+    );
+    const out = await sup.dispatch("n0");
+    expect(out.dispatched).toBe(true);
+    if (!out.dispatched) throw new Error("unreachable");
+    const res = await out.reaped;
+    expect(res.crash).toBe(true);
+    expect(res.sessionStatus).toBe("blocked");
+    // run.failed emitted (index-only path, no runDir), session parked, lease released, no live token
+    const failed = await h.db
+      .select()
+      .from(event)
+      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.RUN_FAILED)));
+    expect(failed).toHaveLength(1);
+    const [srow] = await h.db.select().from(session).where(eq(session.id, "r1"));
+    expect(srow?.status).toBe("blocked");
+    expect(await h.db.select().from(lease).where(eq(lease.key, "n0"))).toHaveLength(0);
+    expect(tokens.size).toBe(0);
+  });
+
+  test("a tombstoned node → node_not_found (no lease, no session)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0", { deletedAt: FIXED_MS }); // soft-deleted
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([{ lines: [runExiting(0)], exitCode: 0 }]).spawn,
+    );
+    const out = await sup.dispatch("n0");
+    expect(out).toEqual({ dispatched: false, reason: "node_not_found" });
+    expect(await h.db.select().from(lease)).toHaveLength(0);
+    expect(await h.db.select().from(session)).toHaveLength(0);
   });
 });
 
