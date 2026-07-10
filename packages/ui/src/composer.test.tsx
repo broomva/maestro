@@ -65,8 +65,11 @@ describe("Composer", () => {
     );
   });
 
-  test("the focus ring rides the capsule, not the bare input", () => {
+  test("the focus ring rides the capsule; the input suppresses its own (unlayered-beating inline)", () => {
     const html = renderToStaticMarkup(<Composer />);
     expect(html).toContain("focus-within:[outline:2px_solid_var(--ring)]");
+    // Inline `outline:none` on the input — a layered utility can't beat the unlayered global
+    // :focus-visible ring, so this must be inline to avoid a double ring (BRO-1762 P20).
+    expect(html).toContain("outline:none");
   });
 });
