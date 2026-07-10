@@ -7,7 +7,7 @@ budget check in the request path (HARNESS §3, F3.1, AUTONOMY §4).
 
 ```
 $ bun test apps/runtime --filter proxy
- 156 pass  0 fail  498 expect() calls   (31 proxy/budget tests included)
+ 157 pass  0 fail  500 expect() calls   (32 proxy/budget tests included)
 ```
 
 The three done.check guarantees, each a test:
@@ -68,7 +68,53 @@ upstream-throw: 502 | type: upstream_unavailable
 - **Model pinning** lives supervisor-side (role → pinned model; `MAESTRO_MODEL_<ROLE>` override) so
   a version bump is one config change and the D8 canary (BRO-1806) can route without the child knowing.
 
-## P20 round-4 fixes (block 5/10 → applied)
+## P20 round-5 fixes (block 3/10 → applied)
+
+Round 5 confirmed key confinement + the per_run/iteration race closed, but proved round-4's
+bucket-tagging was the WRONG fix — the overspend was still open (a SECOND new-day call overspends),
+plus a MAJOR availability defect. Both closed; the day-accounting model was replaced with a simpler,
+correct one.
+
+1. **Cross-midnight straddle STILL overspent per_day** (disqualifier, reproduced 5/5): round-4 tagged
+   reservations with their day bucket, but `#rolloverIfNeeded` still ZEROED `#dayReservedUsd`. So a
+   call A that reserved on day D and was in flight across midnight had its commitment erased at
+   rollover; on D+1, B AND C both reserved (the day looked empty) before A metered — both admitted —
+   then A's actual booked on top settled **$1.5 on a $1 cap**. Round-4's test only let ONE new-day
+   call reserve before A metered (landing exactly at cap), so it missed it. **Fixed by the correct
+   model: outstanding reservations CARRY across the rollover** — only settled spend resets. A
+   straddler stays visible, so C is refused. This also drops the round-4 bucket field entirely
+   (simpler) and aligns the live day total with the D5 derivation (both attribute a call to its
+   settlement/meter timestamp). Live guard dogfood of the reviewer's exact repro:
+
+   ```
+   B reserve (D+1):        admitted
+   C reserve (D+1):        refused (per_day)   ← pre-fix (zeroing rollover) ADMITS C → $1.5 on a $1 cap
+   A meter (settles D+1):  booked
+   day total:              $1.0000 (cap $1 — never exceeded)
+   ```
+
+   Anti-vacuity: making `#rolloverIfNeeded` also zero `#dayReservedUsd` (drop the carry) fails exactly
+   the new `MULTI-CALL cross-midnight straddle` test (`vC.ok` becomes true) — mutation verified.
+
+2. **Image base64 priced as text tokens → false 402 on screenshots** (MAJOR availability): the whole
+   payload (including a screenshot's ~410KB base64) went through `JSON.stringify` → byte length, so a
+   routine 300KB PNG yielded a ~$7 Opus ceiling and was refused under any small `per_run` cap —
+   breaking a core modality (P11 / agent-browser screenshots). **Fixed by stripping image/document
+   `source.data` before the byte-length bound** and pricing each block by its per-block token bound
+   (images ≤ ~1600 tok, sound; documents bounded to Anthropic's 100-page max, `MAX_DOCUMENT_TOKENS`
+   raised 20k→160k — the round-5 finding #3). Live dogfood: the screenshot ceiling drops to **$0.13**
+   (admitted under a $5 cap). Anti-vacuity: NOT stripping fails exactly the new `STRIPS … big
+   screenshot` test (ceiling > $7) — mutation verified. Plus the modality-magnitude test now pins the
+   floor (asserts ≥ text + full `MAX_DOCUMENT_TOKENS`-worth) so a floor mutation is caught (finding #6),
+   and the straddle test's discriminator is `vC.ok===false`, not the under-reporting `dayTotalUsd`
+   (finding #7).
+
+## P20 round-4 fixes (block 5/10 → superseded by round-5)
+
+Round-4 introduced day-bucket-tagged reservations to close the straddle overspend. Round-5 proved this
+incomplete (a second new-day call still overspent) and REPLACED it with the carry-across-rollover model
+above; the bucket field is gone. The round-4 modality floors survive (corrected: base64 stripped, doc
+floor raised). Retained here for provenance:
 
 Round 4 confirmed key-confinement closed but reopened the overspend (Finding 2, active) plus a latent
 modality under-price (Finding 1). Both closed, each with a **mutation-proven** discriminating test.

@@ -3,20 +3,27 @@
 // late" — every model call is RESERVED before it forwards and RECONCILED after it returns.
 //
 // Reserve-then-reconcile: preflight RESERVES a per-call cost CEILING (models.ts estimateCallCeilingUsd
-// — output bounded by max_tokens, input over-estimated, so ceiling >= actual) against every cap
-// ATOMICALLY. Because the reservation is >= the real cost, a call that would breach a cap is refused
-// UP-FRONT (the safe answer when one call could overspend), and meter() only ever reconciles DOWNWARD
-// to the actual — so spend can never exceed a cap under any concurrency. A failed/non-billable call
-// releases the reservation. The per-call reserve is threaded from preflight → meter/release by the
-// caller (the proxy), so each call reconciles against exactly what it reserved.
+// — output bounded by max_tokens, text input bounded by bytes, image/document input bounded by a
+// per-block token floor, so ceiling >= actual) against every cap ATOMICALLY. Because the reservation
+// is >= the real cost, a call that would breach a cap is refused UP-FRONT (the safe answer when one
+// call could overspend), and meter() only ever reconciles DOWNWARD to the actual — so spend can never
+// exceed a cap under any concurrency. A failed/non-billable call releases the reservation. The per-call
+// reserve is threaded from preflight → meter/release by the caller (the proxy), so each call reconciles
+// against exactly what it reserved.
 //
 // Concurrency: the per_run + iteration reservation is a single conditional SQL UPDATE libSQL
 // serializes as the sole writer; the per_day reservation is a synchronous in-memory check+increment
 // (no await between), so JS's cooperative scheduling makes it atomic too.
 //
-// Day accounting is SPLIT into reserved (in-flight) + spent (metered) so it survives the UTC day
-// rollover: a call reserved before midnight and metered after books its FULL actual to the new day
-// (never a stale relative delta against a freshly-zeroed bucket — a fail-open seam otherwise).
+// Day accounting is SPLIT into reserved (in-flight, committed-but-unsettled) + spent (metered today).
+// The load-bearing rule that survives the UTC day rollover: OUTSTANDING reservations CARRY FORWARD
+// across midnight — only the SETTLED spend resets. A call reserved before midnight settles (meters) on
+// the new day and must count against it, so its committed dollars stay in #dayReservedUsd until it
+// meters/releases. Zeroing them at rollover was the round-4/round-5 fail-open: it dropped in-flight
+// commitments, so new-day calls overfilled the cap before the straddler booked its actual on top
+// (per_day $1 settled $1.5 with two new-day calls racing one straddler). Carrying the reservation
+// makes the guard see the straddler and refuse the over-cap call — and it aligns the LIVE day total
+// with the D5 derivation (both attribute a call to the day it SETTLES, i.e. its meter timestamp).
 
 import type { Budget } from "@maestro/protocol";
 import { EVENT_TYPES } from "@maestro/protocol";
@@ -30,15 +37,13 @@ import type { SessionContext } from "./tokens";
 export type RefusalReason = "per_run" | "per_day" | "iteration_cap";
 
 /**
- * A held reservation — the amount reserved AND the day bucket it was reserved in. The bucket is
- * load-bearing: a call reserved before UTC midnight and metered after must NOT decrement the NEW
- * day's live reservations (which would free a slot still in flight and admit an over-cap call). meter
- * and release only release the day reservation when the bucket still matches; a rolled-over
- * reservation was already dropped by `#rolloverIfNeeded`.
+ * A held reservation — the amount reserved for one in-flight call, threaded from `preflight` to the
+ * matching `meter`/`release` so the call reconciles against exactly what it reserved. No day bucket is
+ * carried: outstanding reservations follow the runtime across the UTC rollover (they settle on the new
+ * day), so a plain amount is sufficient and the round-4 bucket-tag is gone.
  */
 export interface Reservation {
   reserveUsd: number;
-  bucket: number;
 }
 
 /** The pre-forward verdict. `ok:false` → the proxy answers 402 and the run parks `blocked` (F3.1). */
@@ -73,9 +78,11 @@ export class BudgetGuard {
   readonly #sink: BudgetEventSink;
   readonly #now: () => number;
   readonly #defaultReserve: number;
-  /** In-flight reservations for the current day (released on meter/reconcile). */
+  /** In-flight reservations (committed-but-unsettled). CARRIES across the UTC rollover — a straddling
+   *  call settles on the new day, so its commitment must remain visible to new-day cap checks. */
   #dayReservedUsd = 0;
-  /** Metered actual spend for the current day. */
+  /** Metered actual spend for the CURRENT day. Resets at the UTC rollover (yesterday's settled spend
+   *  does not count against today's cap). */
   #daySpentUsd: number;
   #dayBucket: number;
 
@@ -89,19 +96,24 @@ export class BudgetGuard {
   }
 
   /** The runtime-day total (reserved in-flight + metered), workspace scope — the per_day cap check +
-   *  observability. Rolls over at the UTC day boundary so per_day is a DAILY cap, not a lifetime one. */
+   *  observability. Reserved carries across the UTC rollover; only settled spend resets, so per_day is
+   *  a DAILY cap that still bounds a call straddling midnight. */
   get dayTotalUsd(): number {
     this.#rolloverIfNeeded();
     return this.#dayReservedUsd + this.#daySpentUsd;
   }
 
-  /** Reset the day accounting when the clock crosses into a new UTC day (24/7 runtime, D5). */
+  /**
+   * Advance the day bucket when the clock crosses into a new UTC day (24/7 runtime, D5). ONLY the
+   * settled spend resets; OUTSTANDING reservations carry forward — a call reserved before midnight
+   * settles on the new day and must count against it. Dropping them here was the round-4/round-5
+   * fail-open seam (a straddler's commitment vanished, letting new-day calls overfill the cap).
+   */
   #rolloverIfNeeded(): void {
     const b = dayBucket(this.#now());
     if (b !== this.#dayBucket) {
       this.#dayBucket = b;
-      this.#dayReservedUsd = 0;
-      this.#daySpentUsd = 0;
+      this.#daySpentUsd = 0; // yesterday's settled spend is done; reservations stay (they settle today)
     }
   }
 
@@ -151,33 +163,32 @@ export class BudgetGuard {
         .where(and(...conds));
       rowsAffected = res.rowsAffected;
     } catch (err) {
-      // never strand the day reservation on a DB error (bucket-tagged like every other release)
-      this.#releaseDayReservation({ reserveUsd: reserve, bucket: this.#dayBucket });
+      this.#releaseDayReservation(reserve); // never strand a day reservation on a DB error
       throw err;
     }
 
     if (rowsAffected === 0) {
-      this.#releaseDayReservation({ reserveUsd: reserve, bucket: this.#dayBucket });
+      this.#releaseDayReservation(reserve);
       const reason = await this.#classifyRunRefusal(ctx.session, budget, reserve);
       await this.#refuse(ctx, reason);
       return { ok: false, reason };
     }
-    return { ok: true, reservation: { reserveUsd: reserve, bucket: this.#dayBucket } };
+    return { ok: true, reservation: { reserveUsd: reserve } };
   }
 
   /**
    * Reconcile a reservation to the ACTUAL cost of a completed call (HARNESS §3 step 3). Pass the
    * `reservation` the matching preflight returned. Emits `budget.metered` with the real usage. The
-   * day accounting books the FULL actual to the CURRENT day and only releases the day reservation if
-   * it belongs to the current bucket — a reservation from a rolled-over day was already dropped, so
-   * decrementing here would erase a NEW day's live reservation (the P20 round-4 per_day overspend).
+   * call SETTLES today: its reservation is released from the in-flight pool and its actual is booked to
+   * today's spend — so a call reserved before midnight and metered after correctly counts on the new
+   * day (its reservation carried across the rollover, so no slot was ever double-freed).
    */
   async meter(ctx: SessionContext, input: MeterInput, reservation: Reservation): Promise<void> {
     const actual = Number.isFinite(input.usd) && input.usd > 0 ? input.usd : 0;
     // In-memory reconcile FIRST — it can't throw, so a subsequent failure never strands the day
     // reservation (the availability DoS P20 round-3 flagged).
-    this.#releaseDayReservation(reservation); // bucket-checked release of the held reservation
-    this.#daySpentUsd += actual; // book the full actual to the current day (rollover-safe)
+    this.#releaseDayReservation(reservation.reserveUsd); // release the held reservation
+    this.#daySpentUsd += actual; // book the actual to today (the settlement day)
     // Durable event (D-DURABILITY: the event is truth; run_budget is a rebuildable cache).
     await this.#sink.emit(ctx.runDir, {
       ts: new Date(this.#now()).toISOString(),
@@ -208,7 +219,7 @@ export class BudgetGuard {
    */
   async release(ctx: SessionContext, reservation: Reservation): Promise<void> {
     // In-memory refund FIRST so a DB throw can't strand the day reservation (availability DoS).
-    this.#releaseDayReservation(reservation);
+    this.#releaseDayReservation(reservation.reserveUsd);
     try {
       await this.#db
         .update(runBudget)
@@ -220,16 +231,14 @@ export class BudgetGuard {
   }
 
   /**
-   * Roll back an in-memory day reservation — rollover-aware + clamped, the ONE mutation helper so no
-   * site drifts. Only decrements when the reservation's bucket is still the current day: a reservation
-   * from a rolled-over day was already zeroed by `#rolloverIfNeeded`, so decrementing again would eat a
-   * live NEW-day reservation (P20 round-4). The rollover call also advances `#dayBucket` first.
+   * Refund an in-flight day reservation — rollover-aware + clamped, the ONE mutation helper so no site
+   * drifts. Because outstanding reservations CARRY across the rollover (they are not zeroed), the
+   * amount a call reserved is still present when it meters/releases on a later day, so a plain
+   * decrement is correct with no bucket bookkeeping.
    */
-  #releaseDayReservation(reservation: Reservation): void {
+  #releaseDayReservation(reserveUsd: number): void {
     this.#rolloverIfNeeded();
-    if (reservation.bucket === this.#dayBucket) {
-      this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reservation.reserveUsd);
-    }
+    this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reserveUsd);
   }
 
   /** Name the run-scoped cap that blocked a reservation (per_run before iteration_cap). */
@@ -284,7 +293,8 @@ export function deriveSpentBySession(metered: readonly MeteredRecord[]): Map<str
 
 /**
  * The runtime-day total spend (workspace scope) — the sum of `budget.metered.usd` at or after
- * `dayStartMs` (D5). Recomputed at startup and used to seed `BudgetGuard.dayTotalUsd`.
+ * `dayStartMs` (D5). Recomputed at startup and used to seed `BudgetGuard.dayTotalUsd`. A call is
+ * attributed to the day it METERED (its event timestamp), which matches the live accounting.
  */
 export function deriveDayTotal(metered: readonly MeteredRecord[], dayStartMs: number): number {
   let total = 0;

@@ -62,15 +62,18 @@ export const FALLBACK_PRICE: ModelPrice = { inputPerMtok: 15, outputPerMtok: 75 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 /** Safety multiplier on the whole ceiling — headroom against price staleness / framing tokens. */
 const CEILING_SAFETY = 1.15;
-/** Per-image input-token FLOOR. Images are billed by DIMENSIONS (~W·H/750, capped ~1600 by the
- *  1568px resize), NOT by their (compressible) base64 bytes — so a large-dimension, highly-
- *  compressible image can under-run the byte-length bound. This floor (on top of the bytes) keeps the
- *  ceiling >= actual for any image. */
+/** Per-image input-token bound. Anthropic bills an image by DIMENSIONS (~W·H/750), and resizes so the
+ *  longest edge is <= 1568px and total <= ~1.15 MP → at most ~1600 tokens per image. So this fixed
+ *  bound is a SOUND per-image ceiling. It REPLACES the base64 bytes (which are stripped before the
+ *  byte-length text bound), never adds to them — counting a dimension-billed blob as text tokens
+ *  over-priced a routine screenshot into a false 402 (P20 round-5 finding #4). */
 export const MAX_IMAGE_TOKENS = 2000;
-/** Per-document input-token FLOOR. A PDF is rendered per page (each ~an image); page count is not in
- *  the request, so this is a conservative floor. NOTE: a very large PDF can still exceed it — precise
- *  document pricing lands with the live upstream (BRO-1756), which has page metadata. */
-export const MAX_DOCUMENT_TOKENS = 20000;
+/** Per-document input-token bound. A PDF is rendered per page; Anthropic caps a document at 100 pages
+ *  (~1600 tok/page) → ~160k tokens is the sound worst case when page count is unknown. This is loose
+ *  (a 1-page PDF reserves the 100-page ceiling and can be refused under a tiny per_run cap) — the price
+ *  of not knowing page count up front; a guardrail errs high. BRO-1756's live path carries page
+ *  metadata and will tighten this to actual pages. Like images, it REPLACES the (stripped) base64. */
+export const MAX_DOCUMENT_TOKENS = 160_000;
 
 /** Count image/document content blocks anywhere in the payload (they nest in tool_result content). */
 function countModalityBlocks(node: unknown, acc: { images: number; documents: number }): void {
@@ -84,6 +87,32 @@ function countModalityBlocks(node: unknown, acc: { images: number; documents: nu
     else if (t === "document") acc.documents++;
     for (const v of Object.values(node as Record<string, unknown>)) countModalityBlocks(v, acc);
   }
+}
+
+/**
+ * Deep-clone the payload with image/document `source.data` (the base64 blob) blanked, so the
+ * byte-length TEXT bound doesn't price a dimension-billed modality blob as text tokens. The modality
+ * cost is added separately via the per-block token bounds. Non-base64 sources (e.g. `type:"url"`) have
+ * no `data` and pass through untouched — the per-block bound still covers them.
+ */
+function stripModalityData(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(stripModalityData);
+  if (node !== null && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    const t = obj.type;
+    if (
+      (t === "image" || t === "document") &&
+      obj.source !== null &&
+      typeof obj.source === "object"
+    ) {
+      const src = obj.source as Record<string, unknown>;
+      return { ...obj, source: { ...src, data: "" } };
+    }
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) out[k] = stripModalityData(v);
+    return out;
+  }
+  return node;
 }
 
 /** The price for a model id, honoring a MAESTRO_PRICE_<canonical> `in/out` override, else the table. */
@@ -109,17 +138,18 @@ export function modelPrice(
 /**
  * The per-call cost CEILING in USD — an UPPER BOUND on what this call can cost, used as the budget
  * reservation. Sound (`ceiling >= actual`) across modalities, which is what makes "reserve then
- * reconcile" incapable of overspending:
+ * reconcile" incapable of overspending, while staying tight enough not to false-refuse real calls:
  *   - output is bounded EXACTLY by `max_tokens` (the API never emits more);
- *   - TEXT input tokens are bounded by the payload's UTF-8 BYTE length: for a byte-level BPE
- *     tokenizer every token represents >= 1 byte and merges only reduce the count, so `tokens <=
- *     bytes` for any TEXT input — including dense CJK / base64 that a chars/token heuristic
- *     under-counts (the P20 round-3 overspend);
- *   - IMAGE / DOCUMENT blocks are billed by DIMENSIONS, not their (compressible) base64 bytes, so a
- *     per-block token FLOOR is added on top of the bytes (the P20 round-4 modality under-count).
+ *   - TEXT input tokens are bounded by the UTF-8 BYTE length of the payload WITH image/document base64
+ *     stripped: for a byte-level BPE tokenizer every token is >= 1 byte and merges only reduce the
+ *     count, so `tokens <= bytes` for TEXT — including dense CJK a chars/token heuristic under-counts
+ *     (the P20 round-3 overspend). Stripping the base64 first is what avoids pricing a dimension-billed
+ *     blob as text tokens, which false-refused routine screenshots (P20 round-5 finding #4);
+ *   - IMAGE / DOCUMENT blocks are billed by DIMENSIONS, so each adds a fixed per-block token bound
+ *     (MAX_IMAGE_TOKENS / MAX_DOCUMENT_TOKENS) INSTEAD OF its stripped bytes — sound for images
+ *     (<= ~1600 tok each), conservative for documents (100-page worst case; BRO-1756 tightens it).
  * It over-counts plain text ~4x; erring high is the guardrail's job — a call that could breach a cap
- * is refused, never silently overspent. (Precise image/document dimension pricing lands with the live
- * upstream, BRO-1756, which carries the metadata; until then these conservative floors bound it.)
+ * is refused, never silently overspent.
  */
 export function estimateCallCeilingUsd(
   model: string,
@@ -130,7 +160,9 @@ export function estimateCallCeilingUsd(
   const p = (payload ?? {}) as { max_tokens?: unknown };
   const maxTokens =
     typeof p.max_tokens === "number" && p.max_tokens > 0 ? p.max_tokens : DEFAULT_MAX_OUTPUT_TOKENS;
-  const byteTokens = Buffer.byteLength(JSON.stringify(payload ?? {}), "utf8"); // text hard upper bound
+  // Text bound: byte length of the payload with modality base64 stripped (blobs are priced by the
+  // per-block bounds below, not as text tokens).
+  const byteTokens = Buffer.byteLength(JSON.stringify(stripModalityData(payload ?? {})), "utf8");
   const modality = { images: 0, documents: 0 };
   countModalityBlocks(payload, modality);
   const inputTokens =

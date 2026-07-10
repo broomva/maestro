@@ -27,6 +27,8 @@ import { MemoryEventSink } from "./events";
 import {
   DEFAULT_MODEL_PINS,
   estimateCallCeilingUsd,
+  MAX_DOCUMENT_TOKENS,
+  MAX_IMAGE_TOKENS,
   MODEL_PRICING,
   resolvePinnedModel,
 } from "./models";
@@ -53,8 +55,8 @@ function guardWith(sink: MemoryEventSink, reserveUsd = 0.5, dayTotalUsd = 0): Bu
   return new BudgetGuard(handle.db, sink, { now: FIXED_NOW, reserveUsd, dayTotalUsd });
 }
 
-/** Preflight and assert it passed, returning the held Reservation to thread into meter/release. The
- *  reservation is now REQUIRED by meter/release (bucket-tagged, P20 round-4), so tests capture it. */
+/** Preflight and assert it passed, returning the held Reservation to thread into meter/release, which
+ *  now REQUIRE it so each call reconciles against exactly what it reserved. */
 async function reserve(
   guard: BudgetGuard,
   c: SessionContext,
@@ -121,10 +123,7 @@ test("cost ceiling uses BYTE length, so dense input is not under-counted (P20 ro
   expect(cjk).toBeGreaterThan(ascii * 2); // byte length captures the 3x density; char count would not
 });
 
-test("cost ceiling adds a per-image / per-document token FLOOR (modality billed by dimensions, not bytes) — P20 round-4", async () => {
-  // Images/PDFs are billed by DIMENSIONS, not their (compressible) base64 bytes — a large-dimension,
-  // highly-compressible block can under-run the byte-length bound. A per-block FLOOR keeps the ceiling
-  // >= actual. Reverting the modality term in estimateCallCeilingUsd makes these fail (anti-vacuity).
+test("cost ceiling adds a per-image / per-document token bound of the RIGHT magnitude (modality billed by dimensions) — P20 round-5", () => {
   const tinyImg = {
     type: "image",
     source: { type: "base64", media_type: "image/png", data: "AA==" },
@@ -154,10 +153,39 @@ test("cost ceiling adds a per-image / per-document token FLOOR (modality billed 
     },
     {},
   );
-  // Opus input is $15/Mtok. The tiny base64 is a few bytes; the floor (2000 img / 20000 doc tokens)
-  // dominates. Both assertions FAIL if the modality term is dropped (ceiling would be ~byte-equal).
-  expect(withImage).toBeGreaterThan(text + (2000 * 15) / 1e6); // >= per-image floor over the text-only cost
-  expect(withDoc).toBeGreaterThan(withImage); // the document floor (20k) dwarfs the image floor (2k)
+  // Opus input is $15/Mtok. Assert each block adds AT LEAST its full token bound over the text-only
+  // cost — this PINS the magnitude (finding #6): a full drop of the modality term fails both, and
+  // mutating MAX_DOCUMENT_TOKENS (e.g. 160000→2000) fails the document assertion (it no longer clears
+  // text + 160k-worth). Using the exported constants keeps the test in lockstep with the source.
+  expect(withImage).toBeGreaterThan(text + (MAX_IMAGE_TOKENS * 15) / 1e6);
+  expect(withDoc).toBeGreaterThan(text + (MAX_DOCUMENT_TOKENS * 15) / 1e6);
+});
+
+test("cost ceiling STRIPS image/document base64 so a big screenshot is not false-refused (P20 round-5 finding #4)", () => {
+  // A ~300KB PNG is ~410KB base64. Pricing that blob as ~410k TEXT tokens yields a ~$7 Opus ceiling and
+  // false-refuses a routine screenshot (P11 / agent-browser). Stripping the base64 and bounding the
+  // image by MAX_IMAGE_TOKENS keeps the ceiling small. This FAILS if the base64 is not stripped (the
+  // unstripped ceiling is > $7).
+  const bigBase64 = "A".repeat(410_000);
+  const ceiling = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    {
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/png", data: bigBase64 } },
+          ],
+        },
+      ],
+      max_tokens: 1024,
+    },
+    {},
+  );
+  // stripped input ≈ MAX_IMAGE_TOKENS + tiny structure → well under $1; unstripped would be ~$7.
+  expect(ceiling).toBeLessThan(1);
+  // and it is still >= the sound per-image bound (not zero) — the image is priced, just correctly.
+  expect(ceiling).toBeGreaterThan((MAX_IMAGE_TOKENS * 15) / 1e6);
 });
 
 test("modelPrice: valid env override wins; NaN / negative / missing-slash fall back to the table", () => {
@@ -307,15 +335,17 @@ test("budget a call reserved before midnight and metered after books FULL actual
   expect(guard.dayTotalUsd).toBeCloseTo(0.5, 6); // the crossing call is counted on D+1, not lost
 });
 
-test("budget MULTI-CALL cross-midnight straddle does NOT overspend per_day (bucket-scoped reservation)", async () => {
-  // The P20 round-4 overspend, closed. A single scalar #dayReservedUsd let a call that RESERVED on day
-  // D and METERED on D+1 decrement D+1's LIVE reservations — freeing a slot still in flight, so an
-  // over-cap call slipped through. Tagging each reservation with its day bucket closes it: A's D-bucket
-  // reservation no longer touches D+1's accounting.
+test("budget MULTI-CALL cross-midnight straddle does NOT overspend per_day (reservations carry across rollover)", async () => {
+  // The P20 round-5 CRITICAL, closed. A single scalar #dayReservedUsd ZEROED at rollover dropped a
+  // straddler's in-flight commitment: A reserves on day D, the clock crosses UTC midnight, then B AND C
+  // both reserve on D+1 *before* A meters — with A's commitment invisible both were admitted, then A's
+  // actual booked on top settled $1.5 on a $1 cap. Carrying outstanding reservations across the
+  // rollover keeps A visible, so the SECOND new-day call (C) is refused.
   //
-  // Anti-vacuity (mutation-proven): drop the `reservation.bucket === this.#dayBucket` guard in
-  // #releaseDayReservation and call C is ADMITTED (200) — the day settles $1.5 against a $1 cap. With
-  // the guard, C is refused. per_day is workspace-scope, so A/B/C share the day total.
+  // Anti-vacuity (mutation-proven): make #rolloverIfNeeded also zero #dayReservedUsd (drop the carry)
+  // and C is ADMITTED — expect(vC.ok).toBe(false) fails. The vC REFUSAL is the discriminator; the
+  // dayTotalUsd assertion alone can't catch it, because the buggy guard UNDER-reports its own total
+  // (finding #7). per_day is workspace-scope, so A/B/C share the day total.
   let clock = 1_700_000_000_000;
   const guard = new BudgetGuard(handle.db, new MemoryEventSink(), {
     now: () => clock,
@@ -328,15 +358,15 @@ test("budget MULTI-CALL cross-midnight straddle does NOT overspend per_day (buck
   await guard.open("run-B");
   await guard.open("run-C");
 
-  const rA = await reserve(guard, A, 0.5); // day D: A reserves (bucket D)
-  clock += 86_400_000; // cross into day D+1 before A's response returns
-  const vB = await guard.preflight(B, 0.5); // D+1: B reserves → day reserved 0.5
+  const rA = await reserve(guard, A, 0.5); // day D: A reserves, in flight
+  clock += 86_400_000; // cross into day D+1 before A settles
+  const vB = await guard.preflight(B, 0.5); // D+1: B reserves; A(carried) + B == cap
   expect(vB.ok).toBe(true);
-  await guard.meter(A, { usd: 0.5 }, rA); // D+1: A's D-bucket reservation meters; must NOT free a D+1 slot
-  const vC = await guard.preflight(C, 0.5); // D+1: A(0.5 spent) + B(0.5 reserved) = full → C must refuse
-  expect(vC.ok).toBe(false); // pre-fix scalar code ADMITS C here and overspends $1.5 on a $1 cap
+  const vC = await guard.preflight(C, 0.5); // D+1: A(carried) + B fill the cap → C must refuse
+  expect(vC.ok).toBe(false); // pre-fix (zeroing rollover) ADMITS C here → $1.5 on a $1 cap
   expect((vC as { reason: RefusalReason }).reason).toBe("per_day");
-  expect(guard.dayTotalUsd).toBeLessThanOrEqual(1 + 1e-9); // day total never exceeds the cap
+  await guard.meter(A, { usd: 0.5 }, rA); // A settles on D+1 (its carried reservation releases)
+  expect(guard.dayTotalUsd).toBeLessThanOrEqual(1 + 1e-9); // secondary sanity: never over the cap
 });
 
 // ── 5. the race: N children racing one budget, no overspend ───────────────────
