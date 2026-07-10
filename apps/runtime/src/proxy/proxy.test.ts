@@ -82,16 +82,44 @@ test("cost ceiling scales with max_tokens, exceeds a real Opus call cost, and is
   expect(big).toBeGreaterThan(1);
   // unknown model → conservative fallback price, never 0/negative
   expect(estimateCallCeilingUsd("mystery-model", { max_tokens: 1000 }, {})).toBeGreaterThan(0);
-  // env price override is honored
-  const overridden = estimateCallCeilingUsd(
-    "claude-opus-4-8",
-    { max_tokens: 1000 },
-    { MAESTRO_PRICE_CLAUDE_OPUS_4_8: "1/1" },
-  );
-  expect(overridden).toBeLessThan(
-    estimateCallCeilingUsd("claude-opus-4-8", { max_tokens: 1000 }, {}),
-  );
   expect(MODEL_PRICING["claude-opus-4-8"]?.outputPerMtok).toBeGreaterThan(0);
+});
+
+test("cost ceiling uses BYTE length, so dense input is not under-counted (P20 round-3 overspend)", () => {
+  // Same CHARACTER count, different byte count: '文' is 3 UTF-8 bytes, 'a' is 1. A chars/token estimate
+  // (the round-3 under-count) prices these equally and admits a call it can't afford; byte length
+  // prices the CJK input ~3x higher. This assertion FAILS against a chars/token ceiling.
+  const ascii = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    { messages: [{ role: "user", content: "a".repeat(3000) }], max_tokens: 10 },
+    {},
+  );
+  const cjk = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    { messages: [{ role: "user", content: "文".repeat(3000) }], max_tokens: 10 },
+    {},
+  );
+  expect(cjk).toBeGreaterThan(ascii * 2); // byte length captures the 3x density; char count would not
+});
+
+test("modelPrice: valid env override wins; NaN / negative / missing-slash fall back to the table", () => {
+  const base = estimateCallCeilingUsd("claude-opus-4-8", { max_tokens: 1000 }, {});
+  expect(
+    estimateCallCeilingUsd(
+      "claude-opus-4-8",
+      { max_tokens: 1000 },
+      { MAESTRO_PRICE_CLAUDE_OPUS_4_8: "1/1" },
+    ),
+  ).toBeLessThan(base); // valid override (cheaper) → smaller ceiling
+  for (const bad of ["abc", "5", "-1/-1", "1/x"]) {
+    expect(
+      estimateCallCeilingUsd(
+        "claude-opus-4-8",
+        { max_tokens: 1000 },
+        { MAESTRO_PRICE_CLAUDE_OPUS_4_8: bad },
+      ),
+    ).toBeCloseTo(base, 6); // malformed → table price, never a NaN/negative ceiling
+  }
 });
 
 // ── 3. budget guard: reserve / reconcile / release ───────────────────────────
@@ -381,6 +409,28 @@ test("proxy: an over-budget call answers 402 budget_exhausted and never forwards
   expect(body.error.code).toBe("budget_exhausted");
   expect(seenKey()).toBeNull();
   expect(sink.ofType(EVENT_TYPES.BUDGET_REFUSED).length).toBe(1);
+});
+
+test("proxy: a big-max_tokens call is refused when its CEILING exceeds the budget (anti-vacuity)", async () => {
+  // per_run = $1 sits BETWEEN the old flat reserve ($0.5) and this call's ceiling (~$5.5 for a 64k
+  // Opus call). The ceiling reserve → 402. A flat $0.5 reserve would ADMIT it (200) — so reverting
+  // proxy.ts to the round-2 flat reserve makes THIS test fail. It is what proves the ceiling is live.
+  const sink = new MemoryEventSink();
+  const guard = guardWith(sink, 0.5);
+  const tokens = new SessionTokenRegistry(() => "bearer-1");
+  const { upstream, seenKey } = keyCapturingUpstream({ usd: 2 });
+  await guard.open("run-1");
+  const token = tokens.mint(ctx("run-1", { per_run_usd: 1, max_iterations: 100 }));
+  const app = createModelProxy({ guard, tokens, upstream, apiKey: () => "sk", env: {} });
+  const res = await app.request("/v1/messages", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ messages: [], max_tokens: 64000 }),
+  });
+  expect(res.status).toBe(402); // ceiling > $1 → refused; a flat $0.5 reserve would 200 here
+  expect(seenKey()).toBeNull();
+  const [row] = await handle.db.select().from(runBudget).where(eq(runBudget.sessionId, "run-1"));
+  expect(row?.spentUsd).toBeCloseTo(0, 6);
 });
 
 test("proxy: an upstream throw RELEASES the reservation and returns a retryable 502", async () => {

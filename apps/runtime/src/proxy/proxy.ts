@@ -87,7 +87,16 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
     const model = resolvePinnedModel(ctx.role, deps.env);
     const reserve = estimateCallCeilingUsd(model, payload, deps.env);
 
-    const verdict = await deps.guard.preflight(ctx, reserve);
+    let verdict: Awaited<ReturnType<typeof deps.guard.preflight>>;
+    try {
+      verdict = await deps.guard.preflight(ctx, reserve);
+    } catch {
+      // A libSQL throw in the reservation → fail CLOSED: refuse (retryable), never forward unbudgeted.
+      return c.json(
+        { error: { type: "budget_unavailable", message: "budget reservation failed" } },
+        503,
+      );
+    }
     if (!verdict.ok) {
       const body: ErrorResponse = {
         error: {
@@ -131,9 +140,15 @@ export function createModelProxy(deps: ModelProxyDeps): Hono {
       );
     }
 
-    // 4. Reconcile: meter actual usage, or release the reservation when nothing billed.
-    if (result.usage) await deps.guard.meter(ctx, result.usage, reserve);
-    else await deps.guard.release(ctx, reserve);
+    // 4. Reconcile: meter actual usage, or release the reservation when nothing billed. Best-effort —
+    // the upstream call already succeeded, so a reconcile hiccup must not turn a 200 into a 500 (the
+    // guard reconciles in-memory first, and the durable budget.metered event is the source of truth).
+    try {
+      if (result.usage) await deps.guard.meter(ctx, result.usage, reserve);
+      else await deps.guard.release(ctx, reserve);
+    } catch {
+      // reconcile is best-effort post-success; D5 rebuilds spend from the durable event
+    }
 
     return c.json(result.body as never, result.status as never);
   });

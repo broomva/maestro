@@ -161,22 +161,32 @@ export class BudgetGuard {
     reserveUsd = this.#defaultReserve,
   ): Promise<void> {
     const actual = Number.isFinite(input.usd) && input.usd > 0 ? input.usd : 0;
-    await this.#db
-      .update(runBudget)
-      .set({
-        spentUsd: sql`max(0, ${runBudget.spentUsd} + ${actual - reserveUsd})`,
-        lastCallAt: this.#now(),
-      })
-      .where(eq(runBudget.sessionId, ctx.session));
+    // In-memory reconcile FIRST — it can't throw, so a subsequent failure never strands the day
+    // reservation (the availability DoS P20 round-3 flagged). Book the FULL actual to the current day
+    // so a call reserved before midnight and metered after is counted on the new day (rollover-safe).
     this.#rolloverIfNeeded();
-    this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reserveUsd); // release the reservation
-    this.#daySpentUsd += actual; // book full actual to the current day (survives a cross-midnight call)
+    this.#dayReservedUsd = Math.max(0, this.#dayReservedUsd - reserveUsd);
+    this.#daySpentUsd += actual;
+    // Durable event (D-DURABILITY: the event is truth; run_budget is a rebuildable cache).
     await this.#sink.emit(ctx.runDir, {
       ts: new Date(this.#now()).toISOString(),
       actor: "system",
       type: EVENT_TYPES.BUDGET_METERED,
       payload: { session: ctx.session, usd: actual, tokens: input.tokens ?? null },
     });
+    // Reconcile the run_budget CACHE. A libSQL throw is swallowed — the metered event already
+    // recorded the spend, and D5 (BRO-1814) rebuilds spent_usd from it at startup.
+    try {
+      await this.#db
+        .update(runBudget)
+        .set({
+          spentUsd: sql`max(0, ${runBudget.spentUsd} + ${actual - reserveUsd})`,
+          lastCallAt: this.#now(),
+        })
+        .where(eq(runBudget.sessionId, ctx.session));
+    } catch {
+      // cache stale; the durable budget.metered event is the source of truth (D-DURABILITY, D5)
+    }
   }
 
   /**
@@ -186,11 +196,16 @@ export class BudgetGuard {
    * the SAME `reserveUsd` the matching preflight used.
    */
   async release(ctx: SessionContext, reserveUsd = this.#defaultReserve): Promise<void> {
-    await this.#db
-      .update(runBudget)
-      .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} - ${reserveUsd})` })
-      .where(eq(runBudget.sessionId, ctx.session));
+    // In-memory refund FIRST so a DB throw can't strand the day reservation (availability DoS).
     this.#releaseDayReservation(reserveUsd);
+    try {
+      await this.#db
+        .update(runBudget)
+        .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} - ${reserveUsd})` })
+        .where(eq(runBudget.sessionId, ctx.session));
+    } catch {
+      // cache-only refund; nothing was durably spent (no budget.metered emitted), so nothing to reconcile
+    }
   }
 
   /** Roll back an in-memory day reservation — rollover-aware + clamped, the ONE mutation helper so no

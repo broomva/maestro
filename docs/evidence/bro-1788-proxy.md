@@ -68,6 +68,34 @@ upstream-throw: 502 | type: upstream_unavailable
 - **Model pinning** lives supervisor-side (role → pinned model; `MAESTRO_MODEL_<ROLE>` override) so
   a version bump is one config change and the D8 canary (BRO-1806) can route without the child knowing.
 
+## P20 round-3 fixes (block 4/10 → applied)
+
+Round 3 confirmed key-confinement closed but found the overspend **still open**: the cost ceiling
+could UNDER-estimate, and — critically — the fix was **vacuously tested** (reverting to a flat
+reserve left all tests green). Both closed:
+
+1. **Ceiling under-count → overspend** (the disqualifier, reopened): `chars / 3.5` is an upper bound
+   only for Latin text; dense CJK / base64 packs more tokens per char, so `ceiling < actual`. Fixed
+   by bounding input tokens with the payload's **UTF-8 byte length** — for a byte-level BPE tokenizer
+   `tokens <= bytes` for ANY input, so `ceiling >= actual` is now guaranteed. Live dogfood of the
+   round-3 repro (150K CJK chars, Opus, `per_run $2`, real cost $2.9):
+
+   ```
+   byteLength ceiling for 150K-CJK Opus call: $8.12 (round-3 char/3.5 gave $1.45 < actual $2.9)
+   dense CJK call on $2 cap: 402 (refused, ceiling > cap) | spent: 0 (round-3 settled $2.9)
+   ```
+
+2. **VACUOUS TEST** (the [[self-hosting-vacuous-pass]] failure again): no test discriminated the
+   ceiling from a flat reserve. Added two mutation-proven discriminating tests — reverting `proxy.ts`
+   to `reserve = 0.5` fails `refused when its CEILING exceeds the budget`; reverting `models.ts` to
+   `chars/3.5` fails `uses BYTE length … dense input`. Both mutations verified to fail exactly their
+   test, green when restored.
+3. **meter()/release() DB throw stranded the day reservation** (availability DoS): both now do the
+   in-memory reconcile FIRST (can't strand) with the SQL cache update in try/catch; the durable
+   `budget.metered` event is the source of truth (D5 rebuilds the cache). preflight fails CLOSED on a
+   DB throw (proxy → retryable 503); step-4 reconcile is best-effort (a 200 never turns into a 500).
+   Plus price-override validation edge cases (NaN/negative/missing-slash → table fallback) tested.
+
 ## P20 round-2 fixes (block 4/10 → applied)
 
 Round 2 confirmed D2 (key confinement) closed but found D1 (overspend) still open **at shipped
