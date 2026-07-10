@@ -63,6 +63,9 @@ describe("isForbiddenIconImport — mixed-library guard (whitelist-of-one)", () 
       "iconoir-react",
       "@remixicon/react",
       "@fortawesome/fontawesome-svg-core", // family prefix, name has no "icon"
+      "@mdi/react", // Material Design Icons — no "icon" in the name
+      "@mdi/js",
+      "css.gg",
     ]) {
       expect(isForbiddenIconImport(lib)).toBe(true);
     }
@@ -101,11 +104,11 @@ describe("glyphViolations — custom-glyph conventions", () => {
 
   // The stroke-width fail-open major: "24"/"20"/"2.5"/{24}/{2.5} used to pass.
   test.each([
-    ['stroke-width="24"', "24"],
-    ['stroke-width="20"', "20"],
-    ['stroke-width="2.5"', "2.5"],
-    ["strokeWidth={24}", "{24}"],
-    ["strokeWidth={2.5}", "{2.5}"],
+    'stroke-width="24"',
+    'stroke-width="20"',
+    'stroke-width="2.5"',
+    "strokeWidth={24}",
+    "strokeWidth={2.5}",
   ])("rejects stroke-width %s (leading-2 fail-open)", (attr) => {
     const src = `<svg stroke="currentColor" ${attr} stroke-linecap="round" fill="none"><path/></svg>`;
     expect(glyphViolations(src).some((v) => v.includes("stroke-width"))).toBe(true);
@@ -138,6 +141,20 @@ describe("glyphViolations — custom-glyph conventions", () => {
   test("does not mistake data-fill / fill-rule for a fill color (false-positive fix)", () => {
     const src = `<svg stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none" data-fill="x" fill-rule="evenodd"><path/></svg>`;
     expect(glyphViolations(src).some((v) => v.includes("fill"))).toBe(false);
+  });
+  test("rejects a hard-coded stroke color, allows none/currentColor, ignores stroke-width/linecap", () => {
+    const hex = `<svg stroke="#111827" stroke-width="2" stroke-linecap="round" fill="none"><path/></svg>`;
+    // currentColor is still absent here, so this fixture also trips the currentColor gate — assert
+    // specifically that the per-occurrence stroke-COLOR check fires.
+    expect(glyphViolations(hex).some((v) => v.includes("stroke color"))).toBe(true);
+    const brace = `<svg stroke={"#111827"} stroke-width="2" stroke-linecap="round" fill="none"><path stroke="currentColor"/></svg>`;
+    expect(glyphViolations(brace).some((v) => v.includes("stroke color"))).toBe(true);
+    // a multi-element glyph with one hard-coded stroke is caught (not just "currentColor appears")
+    const multi = `<svg stroke-width="2" stroke-linecap="round" fill="none"><path stroke="currentColor"/><circle stroke="#ff0000"/></svg>`;
+    expect(glyphViolations(multi).some((v) => v.includes("stroke color"))).toBe(true);
+    // theme-safe stroke, and stroke-width="2" / stroke-linecap must NOT be read as a stroke color
+    const ok = `<svg stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"><path/></svg>`;
+    expect(glyphViolations(ok).some((v) => v.includes("stroke color"))).toBe(false);
   });
   test("accepts round caps in brace form", () => {
     const src = `<svg stroke="currentColor" stroke-width="2" strokeLinecap={"round"} fill="none"><path/></svg>`;

@@ -10,8 +10,8 @@
 //      the app or ui src. Enforced as a whitelist-of-one (lucide-react is the only allowed icon
 //      package), not a hand-maintained denylist — a denylist fails open on the next new icon set.
 //   2. CUSTOM-GLYPH CONVENTIONS — every glyph under `packages/ui/src/icons/` draws with
-//      `currentColor` + `stroke-width` exactly 2 + round caps, and never hard-codes a fill color.
-//      Dormant until BRO-1766 populates that dir, then it holds every glyph to canon.
+//      `currentColor` + `stroke-width` exactly 2 + round caps, and never hard-codes a fill or
+//      stroke color. Dormant until BRO-1766 populates that dir, then it holds every glyph to canon.
 //
 // The size ladder (20 / 16 / 24) is a per-usage prop convention Lucide already defaults sanely and
 // is a design-review concern, not statically enforced here. This script owns the machine-checkable
@@ -38,6 +38,9 @@ const FORBIDDEN_STRAGGLERS = new Set([
   "phosphor-react", // old package name of @phosphor-icons/react
   "react-feather",
   "lucide", // the framework-agnostic core — not the React binding we standardize on
+  "@mdi/react", // Material Design Icons — no "icon" in the name
+  "@mdi/js",
+  "css.gg",
 ]);
 
 interface Violation {
@@ -103,6 +106,20 @@ export function glyphViolations(src: string): string[] {
     if (val !== "none" && val !== "currentcolor") {
       out.push(
         `glyph must not hard-code a fill color (found fill=${m[1]}; use "none" or "currentColor")`,
+      );
+      break;
+    }
+  }
+
+  // No hard-coded stroke color either — same rule as fill, checked per-occurrence (not a file-wide
+  // "currentColor appears somewhere" test, which would fail open on a multi-element glyph). The
+  // (?<![\w-]) boundary + bare `stroke=` isolates the stroke color attr from stroke-width /
+  // stroke-linecap / strokeWidth / data-stroke, none of which are `stroke` immediately before `=`.
+  for (const m of src.matchAll(/(?<![\w-])stroke\s*=\s*(\{[^}]*\}|["'][^"']*["'])/gi)) {
+    const val = m[1].replace(/[{}"'\s]/g, "").toLowerCase();
+    if (val !== "none" && val !== "currentcolor") {
+      out.push(
+        `glyph must not hard-code a stroke color (found stroke=${m[1]}; use "currentColor")`,
       );
       break;
     }
