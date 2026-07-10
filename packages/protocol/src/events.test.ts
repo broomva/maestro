@@ -89,6 +89,10 @@ describe("event type namespaces + synthetics", () => {
     expect(EVENT_TYPES.NODE_UPDATED).toBe("node.updated");
     expect(EVENT_TYPES.BUDGET_REFUSED).toBe("budget.refused"); // HARNESS §3 (BRO-1788)
     expect(EVENT_TYPES.BUDGET_METERED).toBe("budget.metered");
+    // HARNESS §2 (BRO-1767): the supervisor's liveness escalation event — a real
+    // run.* member, so eventNamespace resolves it and the tailer admits it.
+    expect(EVENT_TYPES.RUN_HUNG).toBe("run.hung");
+    expect(eventNamespace(EVENT_TYPES.RUN_HUNG)).toBe("run");
     // every catalog value is a valid wire event type
     for (const type of Object.values(EVENT_TYPES)) {
       expect(isWireEventType(type)).toBe(true);
