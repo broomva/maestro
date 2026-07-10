@@ -13,6 +13,7 @@
   "dependencies": {
     "@maestro/protocol": "workspace:*",
     "@maestro/tokens": "workspace:*",
+    "@maestro/ui": "workspace:*",
     "@tanstack/react-router": "^1.95.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

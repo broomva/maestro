@@ -7,5 +7,5 @@
     "apps/*/src/**/*.ts",
     "apps/*/src/**/*.tsx"
   ],
-  "exclude": ["node_modules", "dist", "handoff", "planning", "apps/app"]
+  "exclude": ["node_modules", "dist", "handoff", "planning", "apps/app", "packages/ui"]
 }

@@ -19,3 +19,10 @@
 @import "@maestro/tokens/styles.css";
 @import "tailwindcss";
 @import "@maestro/tokens/theme.css";
+
+/* The component library lives in a sibling workspace package (@maestro/ui). Tailwind v4
+ * auto-detection does not reach across the package boundary, so the primitives' utility
+ * classes (frost/ink hover, pill radius, etc.) must be scanned explicitly or they never
+ * reach the app bundle (verified: without this the classes are absent). Path is relative
+ * to this file. Biome parses this via css.parser.tailwindDirectives. */
+@source "../../../../packages/ui/src";
