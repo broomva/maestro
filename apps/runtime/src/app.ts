@@ -6,7 +6,9 @@
 import { MAESTRO_PROTOCOL_VERSION, X_MAESTRO_PROTOCOL } from "@maestro/protocol";
 import { Hono } from "hono";
 import pkg from "../package.json";
+import { registerReadRoutes } from "./api/reads";
 import type { RuntimeConfig } from "./config";
+import type { IndexDb } from "./db/client";
 
 /** The runtime's own version — the self-host binary's version, from package.json. */
 export const RUNTIME_VERSION = pkg.version;
@@ -19,17 +21,22 @@ export interface HealthReport {
   /** The wire protocol version the runtime speaks (imported from @maestro/protocol). */
   protocol: number;
   workspace: string;
-  /** The derived index — located, not yet opened (P0 exit). */
-  index: { path: string; status: "stub" };
+  /**
+   * The derived index — `stub` until a handle is wired in (pure-unit createApp),
+   * `open` once the runtime has opened + scanned it (index.ts startup, BRO-1812).
+   */
+  index: { path: string; status: "stub" | "open" };
   uptime_s: number;
 }
 
 /**
  * Build the runtime's Hono app. `startedAt` is an epoch-ms stamp used for the
- * `uptime_s` field. Pure and side-effect-free — the caller decides whether to
- * bind a socket (see index.ts).
+ * `uptime_s` field. When `index` is supplied (the open libSQL handle), the API §1
+ * read routes are mounted over it and `/health` reports the index as `open`;
+ * without it the app serves only `/health` (the pure-unit path). The caller
+ * decides whether to bind a socket (see index.ts).
  */
-export function createApp(config: RuntimeConfig, startedAt: number) {
+export function createApp(config: RuntimeConfig, startedAt: number, index?: IndexDb) {
   const app = new Hono();
 
   app.get("/health", (c) => {
@@ -39,12 +46,16 @@ export function createApp(config: RuntimeConfig, startedAt: number) {
       version: RUNTIME_VERSION,
       protocol: MAESTRO_PROTOCOL_VERSION,
       workspace: config.workspace,
-      index: { path: config.indexPath, status: "stub" },
+      index: { path: config.indexPath, status: index ? "open" : "stub" },
       uptime_s: Math.max(0, Math.round((Date.now() - startedAt) / 1000)),
     };
     c.header(X_MAESTRO_PROTOCOL, String(MAESTRO_PROTOCOL_VERSION));
     return c.json(report);
   });
+
+  if (index) {
+    registerReadRoutes(app, { db: index, workspace: config.workspace });
+  }
 
   return app;
 }
