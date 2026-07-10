@@ -1,12 +1,18 @@
 // The budget-in-path guard (HARNESS §3, F3.1, AUTONOMY §4). AUTHORITATIVE state is `run_budget`
-// (per-session `spent_usd` + `iterations`, atomic single-statement RMW) plus an in-memory day-total
-// accumulator (the runtime is single-writer, so an in-process counter is safe and avoids a per-call
-// aggregate query on the hot path). "On the invoice is too late" — every model call is gated BEFORE
-// it forwards, and metered AFTER it returns.
+// (per-session `spent_usd` + `iterations`) plus an in-memory day-total accumulator. "On the invoice
+// is too late" — every model call is RESERVED before it forwards and RECONCILED after it returns.
 //
-// Concurrency: both writes are single-statement (a conditional UPDATE reserving an iteration; an
-// atomic `spent += usd`), which libSQL serializes as the single writer — so N children racing one
-// budget never lose an update and never reserve past a cap.
+// Why reserve-then-reconcile (not check-then-meter): metering only after the response is a race — N
+// concurrent callers all read the same pre-meter spend, all pass the cap, and overspend (an earlier
+// cut did exactly this). Instead, preflight RESERVES a conservative per-call cost against every cap
+// ATOMICALLY (per_run + iterations in one conditional SQL UPDATE; per_day in a synchronous in-memory
+// step the single-threaded event loop makes atomic). meter() reconciles the reservation to the actual
+// cost; a failed/non-billable call releases it. So spent-including-in-flight-reservations never
+// exceeds a cap, as long as the reservation is >= the real per-call cost (see #reserveUsd).
+//
+// Concurrency: the reservation UPDATE is a single statement libSQL serializes as the sole writer, so
+// two callers can never both take the last slot; the day reservation is a synchronous check+increment
+// (no await between), so JS's cooperative scheduling makes it atomic too.
 
 import type { Budget } from "@maestro/protocol";
 import { EVENT_TYPES } from "@maestro/protocol";
@@ -28,29 +34,57 @@ export interface MeterInput {
   tokens?: number;
 }
 
+/**
+ * The conservative per-call cost reserved at preflight (USD). The no-overspend guarantee is exact
+ * when this is >= the largest a single model call can cost; below that, an in-flight call can overshoot
+ * a cap by at most (actual - reserve) and the reconcile keeps the books exact afterward. Operators set
+ * it to their max per-call cost for a hard guarantee.
+ */
+export const DEFAULT_RESERVE_USD = 0.5;
+
+const DAY_MS = 86_400_000;
+const dayBucket = (ms: number): number => Math.floor(ms / DAY_MS);
+
 export interface BudgetGuardOptions {
   /** Injected clock (epoch ms). Defaults to Date.now; tests pin it. */
   now?: () => number;
   /** Day-total seed — BRO-1814 derives it from `budget.metered` at F9.2 startup (D5) and passes it. */
   dayTotalUsd?: number;
+  /** Per-call reservation (see DEFAULT_RESERVE_USD). */
+  reserveUsd?: number;
 }
 
 export class BudgetGuard {
   readonly #db: IndexDb;
   readonly #sink: BudgetEventSink;
   readonly #now: () => number;
+  readonly #reserveUsd: number;
   #dayTotalUsd: number;
+  #dayBucket: number;
 
   constructor(db: IndexDb, sink: BudgetEventSink, opts: BudgetGuardOptions = {}) {
     this.#db = db;
     this.#sink = sink;
     this.#now = opts.now ?? Date.now;
+    this.#reserveUsd = opts.reserveUsd ?? DEFAULT_RESERVE_USD;
     this.#dayTotalUsd = opts.dayTotalUsd ?? 0;
+    this.#dayBucket = dayBucket(this.#now());
   }
 
-  /** The runtime-day total spend so far (workspace scope) — observability + the per-day cap check. */
+  /** The runtime-day total spend so far (workspace scope) — observability + the per-day cap. Rolls
+   *  over at the UTC day boundary so per_day is a DAILY cap, not a lifetime one. */
   get dayTotalUsd(): number {
+    this.#rolloverIfNeeded();
     return this.#dayTotalUsd;
+  }
+
+  /** Reset the day total when the clock crosses into a new UTC day (24/7 runtime, D5). */
+  #rolloverIfNeeded(): void {
+    const b = dayBucket(this.#now());
+    if (b !== this.#dayBucket) {
+      this.#dayBucket = b;
+      this.#dayTotalUsd = 0;
+    }
   }
 
   /** Ensure a `run_budget` row exists for a session (called at spawn). Idempotent. */
@@ -59,34 +93,47 @@ export class BudgetGuard {
   }
 
   /**
-   * Pre-forward guard (HARNESS §3 step 1). Refuses if any cap is hit; otherwise RESERVES one
-   * iteration atomically and allows the call. Reserving up-front (rather than counting on response)
-   * is what makes the iteration cap hold under concurrency — two racing calls can't both slip past
-   * the last slot.
+   * Pre-forward guard (HARNESS §3 step 1). RESERVES a conservative cost + one iteration against every
+   * cap atomically; refuses if any cap would be exceeded. Reserving up-front (not counting on the
+   * response) is what makes the caps hold under concurrency.
    */
   async preflight(ctx: SessionContext): Promise<BudgetVerdict> {
     const { budget } = ctx;
+    const reserve = this.#reserveUsd;
 
-    // (a) per-day cap — the in-memory accumulator is authoritative for the workspace-day.
-    if (budget.per_day_usd !== undefined && this.#dayTotalUsd >= budget.per_day_usd) {
+    // (a) per-day cap — a synchronous check+reserve on the in-memory accumulator (no await between
+    // them, so two racing preflights can't both take the last day slot). The day total is
+    // WORKSPACE-scope: EVERY session's reservation counts toward it (a session without its own per_day
+    // cap still contributes to the day that other sessions' caps check against), so we always reserve
+    // — the cap is only ENFORCED when this node carries a per_day_usd.
+    this.#rolloverIfNeeded();
+    if (budget.per_day_usd !== undefined && this.#dayTotalUsd + reserve > budget.per_day_usd) {
       await this.#refuse(ctx, "per_day");
       return { ok: false, reason: "per_day" };
     }
+    this.#dayTotalUsd += reserve;
 
-    // (b) per-run spend + iteration cap — one conditional UPDATE. rowsAffected 0 means a cap blocked
-    // the reservation (or the row is missing); read back to name which, so the refusal is precise.
+    // (b) per-run spend + iteration cap — one conditional UPDATE reserving both. rowsAffected 0 means
+    // a cap blocked the reservation (or the row is missing).
     const conds = [eq(runBudget.sessionId, ctx.session)];
-    if (budget.per_run_usd !== undefined) conds.push(lt(runBudget.spentUsd, budget.per_run_usd));
+    if (budget.per_run_usd !== undefined) {
+      conds.push(sql`${runBudget.spentUsd} + ${reserve} <= ${budget.per_run_usd}`);
+    }
     if (budget.max_iterations !== undefined) {
       conds.push(lt(runBudget.iterations, budget.max_iterations));
     }
     const res = await this.#db
       .update(runBudget)
-      .set({ iterations: sql`${runBudget.iterations} + 1`, lastCallAt: this.#now() })
+      .set({
+        spentUsd: sql`${runBudget.spentUsd} + ${reserve}`,
+        iterations: sql`${runBudget.iterations} + 1`,
+        lastCallAt: this.#now(),
+      })
       .where(and(...conds));
 
     if (res.rowsAffected === 0) {
-      const reason = await this.#classifyRunRefusal(ctx.session, budget);
+      this.#dayTotalUsd -= reserve; // roll back the day reservation (synchronous)
+      const reason = await this.#classifyRunRefusal(ctx.session, budget, reserve);
       await this.#refuse(ctx, reason);
       return { ok: false, reason };
     }
@@ -94,33 +141,56 @@ export class BudgetGuard {
   }
 
   /**
-   * Post-response metering (HARNESS §3 step 3). Atomic `spent += usd` so concurrent meters never lose
-   * an update; also advances the in-memory day total. Emits `budget.metered`.
+   * Reconcile a reservation to the ACTUAL cost of a completed call (HARNESS §3 step 3). The delta
+   * (actual - reserved) is applied atomically; emits `budget.metered` with the real usage. Must follow
+   * a `preflight` for this call.
    */
   async meter(ctx: SessionContext, input: MeterInput): Promise<void> {
-    const usd = Number.isFinite(input.usd) && input.usd > 0 ? input.usd : 0;
+    const actual = Number.isFinite(input.usd) && input.usd > 0 ? input.usd : 0;
+    const delta = actual - this.#reserveUsd;
     await this.#db
       .update(runBudget)
-      .set({ spentUsd: sql`${runBudget.spentUsd} + ${usd}`, lastCallAt: this.#now() })
+      .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} + ${delta})`, lastCallAt: this.#now() })
       .where(eq(runBudget.sessionId, ctx.session));
-    this.#dayTotalUsd += usd;
+    this.#rolloverIfNeeded();
+    this.#dayTotalUsd = Math.max(0, this.#dayTotalUsd + delta);
     await this.#sink.emit(ctx.runDir, {
       ts: new Date(this.#now()).toISOString(),
       actor: "system",
       type: EVENT_TYPES.BUDGET_METERED,
-      payload: { session: ctx.session, usd, tokens: input.tokens ?? null },
+      payload: { session: ctx.session, usd: actual, tokens: input.tokens ?? null },
     });
   }
 
+  /**
+   * Release a reservation for a call that never billed (upstream error / no usage): refund the
+   * reserved dollars but KEEP the consumed iteration — a flaky upstream then drains `max_iterations`
+   * and parks the run (fail-closed) rather than retrying free forever. Emits nothing (no spend).
+   */
+  async release(ctx: SessionContext): Promise<void> {
+    await this.#db
+      .update(runBudget)
+      .set({ spentUsd: sql`max(0, ${runBudget.spentUsd} - ${this.#reserveUsd})` })
+      .where(eq(runBudget.sessionId, ctx.session));
+    this.#rolloverIfNeeded();
+    this.#dayTotalUsd = Math.max(0, this.#dayTotalUsd - this.#reserveUsd);
+  }
+
   /** Name the run-scoped cap that blocked a reservation (per_run before iteration_cap). */
-  async #classifyRunRefusal(session: string, budget: Budget): Promise<RefusalReason> {
+  async #classifyRunRefusal(
+    session: string,
+    budget: Budget,
+    reserve: number,
+  ): Promise<RefusalReason> {
     const [row] = await this.#db
       .select({ spentUsd: runBudget.spentUsd, iterations: runBudget.iterations })
       .from(runBudget)
       .where(eq(runBudget.sessionId, session));
     // No row (spawn skipped `open`) is treated as an iteration refusal — the guard fails closed.
     if (row === undefined) return "iteration_cap";
-    if (budget.per_run_usd !== undefined && row.spentUsd >= budget.per_run_usd) return "per_run";
+    if (budget.per_run_usd !== undefined && row.spentUsd + reserve > budget.per_run_usd) {
+      return "per_run";
+    }
     return "iteration_cap";
   }
 
