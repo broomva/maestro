@@ -36,3 +36,18 @@ test("the top bar presence reads as an agent — a tidepool dot, not a menu", as
   await expect(page.locator("header .bv-dot-live")).toBeVisible();
   await expect(page.getByRole("button", { name: /maestro/i })).toBeVisible();
 });
+
+test("the brand mark is an inline cool-axis chip, never a pure-#000 raster (BRO-1771 P20)", async ({
+  page,
+}) => {
+  // Default (light) theme — the failure mode was an opaque #000 JPEG tile on the near-white
+  // sidebar. Guard: no raster in the sidebar, and the chip's computed background is a
+  // cool-axis near-black (--bv-ink), never pure rgb(0,0,0).
+  await page.goto("/app");
+  await page.waitForLoadState("networkidle");
+  await expect(page.locator("aside img")).toHaveCount(0);
+  const chip = page.getByTestId("brand-mark");
+  await expect(chip).toBeVisible();
+  const bg = await chip.evaluate((el) => getComputedStyle(el).backgroundColor);
+  expect(bg, "brand chip must not be pure black").not.toBe("rgb(0, 0, 0)");
+});

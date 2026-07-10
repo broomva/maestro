@@ -37,6 +37,28 @@ function NavItem({ icon: Icon, label, active }: (typeof NAV)[number]) {
 }
 
 /**
+ * The blackhole brand mark on its own dark cool-axis chip (BUILD-PLAN §M2: the mark rides a
+ * dark/frosted surface, never a bare tile). Rendered inline — not the raster asset, which was
+ * an opaque baseline JPEG that painted a pure-#000 square on the light sidebar (BRO-1771 P20).
+ * `--bv-ink` is the barely-blue near-black (stable across themes, cool-axis, never #000 per
+ * CLAUDE.md §Color), so the chip stays a consistent dark brand tile in light and dark.
+ */
+function BrandMark() {
+  return (
+    <span
+      data-testid="brand-mark"
+      className="grid size-6 shrink-0 place-items-center rounded-lg bg-[var(--bv-ink)] ring-1 ring-[var(--bv-border-15)] ring-inset"
+    >
+      <svg viewBox="0 0 24 24" fill="none" className="size-4" aria-hidden="true">
+        {/* accretion ring + singularity — a blackhole */}
+        <circle cx="12" cy="12" r="7.5" stroke="var(--bv-white)" strokeWidth="1.75" />
+        <circle cx="12" cy="12" r="3" fill="var(--bv-white)" />
+      </svg>
+    </span>
+  );
+}
+
+/**
  * The orchestrator's presence — an agent, not a settings button. The tidepool DotComet is the
  * presence signal; the chip opens the orchestrator's session (wired in a later milestone).
  */
@@ -88,11 +110,7 @@ export function Shell({ children }: { children?: ReactNode }) {
           title="Switch workspace"
           className="flex items-center gap-2 rounded-row px-1.5 py-1 text-left transition-colors hover:bg-[var(--bv-frost-8)]"
         >
-          <img
-            src="/broomva-blackhole-logo.png"
-            alt=""
-            className="size-6 shrink-0 object-contain"
-          />
+          <BrandMark />
           <span className="flex-1 truncate font-medium text-sm">Broomva</span>
         </button>
 

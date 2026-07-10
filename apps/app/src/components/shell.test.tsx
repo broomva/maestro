@@ -17,9 +17,13 @@ describe("Shell — the M2 chrome", () => {
     expect(html).toContain("overflow-hidden");
   });
 
-  test("the sidebar is matte with the brand mark and a sentence-case Lucide nav", () => {
+  test("the sidebar is matte with the inline brand mark (no #000 raster) and a Lucide nav", () => {
     expect(html).toContain("bg-sidebar");
-    expect(html).toContain("broomva-blackhole-logo.png");
+    // The brand mark is an inline SVG on a cool-axis --bv-ink chip — never the opaque raster
+    // that painted a pure-#000 tile on the light sidebar (BRO-1771 P20).
+    expect(html).toContain("bg-[var(--bv-ink)]");
+    expect(html).not.toContain("broomva-blackhole-logo");
+    expect(html).not.toContain("<img");
     for (const label of ["Board", "Knowledge", "History", "Settings"]) {
       expect(html).toContain(label);
     }
@@ -31,8 +35,9 @@ describe("Shell — the M2 chrome", () => {
   });
 
   test("the main panel owns the scroll", () => {
-    expect(html).toContain('data-testid="shell-main"');
-    expect(html).toContain("overflow-y-auto");
+    // Couple the assertion to <main> — `overflow-y-auto` is also on <aside>, so a bare
+    // toContain would stay green even if <main> lost its scroll (BRO-1771 P20 nit).
+    expect(html).toContain('overflow-y-auto p-6" data-testid="shell-main"');
   });
 
   test("the active nav item is marked for assistive tech", () => {
