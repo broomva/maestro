@@ -213,13 +213,20 @@ describe("syncNodes — reconciliation", () => {
     const scan = await scanWorkspace(root);
 
     const s1 = await syncNodes(db, scan.nodes, 1000);
-    expect(s1).toEqual({ inserted: 2, updated: 0, tombstoned: 0, unchanged: 0 });
+    expect(s1).toEqual({
+      inserted: 2,
+      updated: 0,
+      tombstoned: 0,
+      unchanged: 0,
+      changedIds: expect.arrayContaining(["root", "x"]),
+    });
     const after1 = await db.select().from(node);
     expect(after1.every((r) => r.updatedAt === 1000)).toBe(true);
 
     // Re-scan the unchanged workspace at a LATER clock — nothing should be rewritten.
     const s2 = await syncNodes(db, (await scanWorkspace(root)).nodes, 2000);
-    expect(s2).toEqual({ inserted: 0, updated: 0, tombstoned: 0, unchanged: 2 });
+    // An unchanged re-sync emits nothing — the change feed must not wake on a no-op scan.
+    expect(s2).toEqual({ inserted: 0, updated: 0, tombstoned: 0, unchanged: 2, changedIds: [] });
     const after2 = await db.select().from(node);
     expect(after2.every((r) => r.updatedAt === 1000)).toBe(true); // clock NOT churned
     client.close();
@@ -263,7 +270,8 @@ describe("syncNodes — reconciliation", () => {
       "q/_work.md": wm({ id: "q", brief: "# Q" }), // unchanged
     });
     const s = await syncNodes(db, (await scanWorkspace(v2)).nodes, 2000);
-    expect(s).toEqual({ inserted: 0, updated: 1, tombstoned: 0, unchanged: 1 });
+    // Only the changed node `p` is in changedIds; the untouched `q` is not.
+    expect(s).toEqual({ inserted: 0, updated: 1, tombstoned: 0, unchanged: 1, changedIds: ["p"] });
     const m = byId(await db.select().from(node));
     expect(m.get("p")?.state).toBe("running");
     expect(m.get("p")?.updatedAt).toBe(2000);
@@ -301,7 +309,9 @@ describe("syncNodes — reconciliation", () => {
     await syncNodes(db, (await scanWorkspace(v1)).nodes, 1000);
     const v2 = makeFixture({ "b/_work.md": wm({ id: "A" }) }); // B gone, A now at "b"
     const s = await syncNodes(db, (await scanWorkspace(v2)).nodes, 2000);
-    expect(s).toEqual({ inserted: 0, updated: 1, tombstoned: 1, unchanged: 0 });
+    // The resurrected/moved `A` is in changedIds; the tombstoned `B` is NOT (tombstones
+    // never cross the wire — the node.updated projection would skip it anyway).
+    expect(s).toEqual({ inserted: 0, updated: 1, tombstoned: 1, unchanged: 0, changedIds: ["A"] });
     const m = byId(await db.select().from(node));
     expect(m.get("A")?.path).toBe("b");
     expect(m.get("A")?.deletedAt).toBeNull();

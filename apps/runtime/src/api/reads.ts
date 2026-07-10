@@ -38,6 +38,7 @@ import {
 import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { IndexDb } from "../db/client";
+import { projectLiveNode as live } from "../db/project";
 import { event, gate, node, schedule, session } from "../db/schema";
 import { WORK_FILE } from "../scanner";
 import { parseSeqCursor, toEnvelope } from "./event-projection";
@@ -47,12 +48,6 @@ export interface ReadDeps {
   db: IndexDb;
   /** Workspace root — `/api/node/:id/brief` reads `<workspace>/<path>/_work.md`. */
   workspace: string;
-}
-
-/** Drop the internal `deletedAt` from a derived row — the wire carries only live rows. */
-function live<T extends { deletedAt: number | null }>(row: T): Omit<T, "deletedAt"> {
-  const { deletedAt: _tombstone, ...rest } = row;
-  return rest;
 }
 
 /** A typed `not_found` refusal (API §4). */

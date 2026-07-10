@@ -23,12 +23,16 @@ import { MAESTRO_PROTOCOL_VERSION } from "@maestro/protocol";
 import { createApp } from "./app";
 import { loadConfig } from "./config";
 import type { IndexDb, IndexHandle } from "./db/client";
+// Type-only — erased at compile time, so the compiled /health-only stub never references
+// the watcher module (which is dynamically imported below, native-addon-safe).
+import type { WatcherHandle } from "./watcher";
 
 const config = loadConfig();
 const startedAt = Date.now();
 
 let index: IndexDb | undefined;
 let handle: IndexHandle | undefined;
+let watcher: WatcherHandle | undefined;
 let indexNodes = 0;
 let scanErrorCount = 0;
 try {
@@ -44,13 +48,30 @@ try {
   const { summary, errors } = await scanIntoIndex(handle.db, config.workspace);
   indexNodes = summary.inserted + summary.updated + summary.unchanged;
   scanErrorCount = errors.length;
-  // Publish the handle only after the scan succeeds — so a scan failure leaves the
-  // runtime in the clean /health-only stub state, never a half-populated index.
+  // Publish the handle now that the scan succeeded — reads are live from here. A scan
+  // failure (above) still leaves the clean /health-only stub, never a half-populated index.
   index = handle.db;
+  // Keep the index live (BRO-1804): an FS `_work.md` edit → reconcile → a `node.updated`
+  // synthetic on the SSE change feed (BRO-1816). Dynamic import (the compiled /health-only
+  // stub never loads it) INSIDE ITS OWN try — starting the watcher is a LIVENESS init, and a
+  // liveness failure must not cost the read API. `fs.watch(root,{recursive:true})` throws
+  // synchronously on registration failure (inotify ENOSPC/EMFILE on a large workspace), so
+  // without this guard a watcher-start failure would fall to the outer catch and disable ALL
+  // reads despite a healthy index. Degrade to "reads work, no live updates" instead. (Bounding
+  // the recursive-watch footprint so it does not exhaust inotify in the first place is BRO-1846.)
+  try {
+    const { startWatcher } = await import("./watcher");
+    watcher = startWatcher(handle.db, config.workspace);
+  } catch (watchErr) {
+    console.warn(
+      `maestro runtime · live watcher unavailable, reads stay up (no live updates): ${(watchErr as Error).message}`,
+    );
+  }
 } catch (err) {
-  // The index driver is unavailable (compiled binary without the native addon, or a
-  // disk failure). If openIndex SUCCEEDED but a later step threw, close the handle so
-  // the failed startup does not leak the libSQL client/fd. Then stay alive on /health.
+  // The index driver is unavailable (compiled binary without the native addon, or a disk
+  // failure) — this fires only BEFORE `index` is published (the watcher has its own guard
+  // above), so `index` is still undefined here. Close the handle if openIndex SUCCEEDED but a
+  // later step threw, so the failed startup does not leak the libSQL client/fd.
   handle?.client.close();
   console.warn(
     `maestro runtime · index unavailable, serving /health only (reads disabled): ${(err as Error).message}`,
@@ -64,11 +85,25 @@ const app = createApp(config, startedAt, index);
 export { app, config };
 
 if (import.meta.main) {
-  Bun.serve({ port: config.port, fetch: app.fetch });
+  const server = Bun.serve({ port: config.port, fetch: app.fetch });
   const indexStatus = index
     ? `index ${indexNodes} nodes${scanErrorCount ? ` (${scanErrorCount} scan errors)` : ""}`
     : "index unavailable (reads disabled)";
   console.log(
     `maestro runtime · protocol ${MAESTRO_PROTOCOL_VERSION} · http://localhost:${config.port} · workspace ${config.workspace} · ${indexStatus}`,
   );
+
+  // Graceful shutdown — release the OS file watcher and the libSQL handle, then stop
+  // accepting connections. Without this the recursive watcher keeps the process alive.
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    watcher?.stop();
+    handle?.client.close();
+    server.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }

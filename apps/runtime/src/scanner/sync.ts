@@ -23,6 +23,12 @@ export interface SyncSummary {
   tombstoned: number;
   /** Nodes present and byte-identical (modulo the index clock) — not rewritten. */
   unchanged: number;
+  /**
+   * IDs of the live nodes inserted or content-changed by this sync (the `toClaim` set).
+   * This is the set a `node.updated` projection emits (BRO-1804) — tombstoned/vanished
+   * nodes are NOT here, because tombstones never cross the wire (store/types.ts).
+   */
+  changedIds: string[];
 }
 
 /** The FS-derived columns — everything except the index-assigned `updatedAt`/`deletedAt`. */
@@ -92,7 +98,13 @@ export async function syncNodes(
   const existing = await db.select().from(node);
   const existingById = new Map(existing.map((r) => [r.id, r]));
   const scannedIds = new Set(scanned.map((s) => s.id));
-  const summary: SyncSummary = { inserted: 0, updated: 0, tombstoned: 0, unchanged: 0 };
+  const summary: SyncSummary = {
+    inserted: 0,
+    updated: 0,
+    tombstoned: 0,
+    unchanged: 0,
+    changedIds: [],
+  };
 
   const toClaim: ScannedNode[] = []; // new + changed → inserted in phase 2
   const toFree: string[] = []; // ids of changed rows to delete in phase 1 (frees old path)
@@ -123,6 +135,8 @@ export async function syncNodes(
   // Phase 2 — CLAIM: every conflicting old occupant was freed above, so no collision.
   for (const s of toClaim) await db.insert(node).values({ ...s, updatedAt: now, deletedAt: null });
 
+  // The inserted + content-changed live set — what a node.updated projection emits.
+  summary.changedIds = toClaim.map((s) => s.id);
   return summary;
 }
 
