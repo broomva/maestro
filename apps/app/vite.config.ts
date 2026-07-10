@@ -10,7 +10,7 @@ import { defineConfig } from "vite";
 // `/api` proxy (BRO-1780): the SPA reaches the runtime via same-origin `/api/*`
 // (connectStream uses relative paths, so SSE resume stays on the browser-native
 // contract). Target defaults to the runtime's default port and is overridable
-// (MAESTRO_RUNTIME_URL) so the board-live pw spec can point at a test runtime port.
+// (MAESTRO_RUNTIME_URL) so the p1-exit pw spec can point at a test runtime port.
 const runtimeUrl = process.env.MAESTRO_RUNTIME_URL ?? "http://localhost:4319";
 const proxy = {
   "/api": { target: runtimeUrl, changeOrigin: true },
