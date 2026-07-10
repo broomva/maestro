@@ -439,6 +439,38 @@ export function serializeWorkFile(file: WorkFile): string {
 }
 
 /**
+ * Serialize an AUTHORED contract (the input layer) to `_work.md`. Unlike
+ * `serializeWorkContract`, the inheritance-eligible fields (`owner`/`gate`/`budget`)
+ * are OMITTED when absent: the write path (new_mission, FLOWS §F1) authors only what
+ * it sets, and the parent defaults are resolved at scan time (`resolveWorkContract`,
+ * BRO-1800). Omitting `owner`/`budget` lets them track the parent.
+ *
+ * `gate` is the exception the CALLER must weigh, not omit blindly: a checkless contract
+ * cannot be `gate: auto` (VERIFIER §1), so new_mission PINS `gate: human` rather than
+ * leave it to inherit — an inherited `gate: auto` (from an auto parent) would make the
+ * checkless child invalid and get it SILENTLY DROPPED at scan (the BRO-1820 write-loss).
+ * Do not "restore" gate to track the parent here. Key order matches `serializeWorkContract`.
+ */
+export function serializeWorkInput(input: WorkContractInput, brief = ""): string {
+  const fm: Record<string, unknown> = {
+    id: input.id,
+    kind: input.kind,
+    state: input.state,
+  };
+  if (input.owner !== undefined) fm.owner = input.owner;
+  if (input.gate !== undefined) fm.gate = input.gate;
+  if (input.budget !== undefined) fm.budget = input.budget;
+  if (input.done !== undefined) fm.done = serializeDone(input.done);
+  if (input.trigger !== undefined) fm.trigger = input.trigger;
+  fm.created = input.created;
+  fm.updated = input.updated;
+
+  const yaml = stringifyYaml(fm, { lineWidth: 0 }).replace(/\n+$/, "");
+  const body = brief.trim();
+  return body.length > 0 ? `---\n${yaml}\n---\n\n${body}\n` : `---\n${yaml}\n---\n`;
+}
+
+/**
  * Round-trip a source `_work.md` preserving comments + key order (the "where
  * feasible" round-trip). Fully validates the contract first — including the
  * VERIFIER §1 gate:auto⇒done.check rule via `materialize`, so the write path
