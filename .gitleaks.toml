@@ -13,7 +13,6 @@ description = "vendored, planning, and build-output paths (not first-party sourc
 paths = [
   '''^handoff/''',     # vendored design handoff (canon docs + prototype JSX)
   '''^planning/''',    # gitignored planning artifacts (Linear payloads, id maps)
-  '''^bstack/''',      # vendored bstack governance toolkit
   '''^schemas/''',     # vendored typed-interface schemas
   '''(^|/)node_modules/''',
   '''(^|/)dist/''',

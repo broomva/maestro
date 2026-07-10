@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bstack/scripts/l3-rate-gate.sh — Governance commit rate limiter (Gate G1/G2).
+# scripts/l3-rate-gate.sh — Governance commit rate limiter (Gate G1/G2).
 #
 # Enforces the τ_a₃ assumption from the RCS stability budget: governance-class
 # mutations (L3 paths) must not exceed one commit per τ_a₃ window (default
@@ -193,7 +193,7 @@ else
         echo "  Why this matters:"
         echo "    The RCS stability budget assumes one L3 mutation per tau_a_3 = ${TAU_A_L3_INT}s."
         echo "    Faster churn pushes lambda_3 negative and destabilizes the whole hierarchy."
-        echo "    See: bstack/references/primitives.md \"L3 stability constraint\""
+        echo "    See: bstack references/primitives.md (github.com/broomva/bstack) \"L3 stability constraint\""
         echo ""
         echo "  Recommended:"
         echo "    - Postpone non-urgent governance changes until $(date -r "$((CUTOFF + TAU_A_L3_INT))" 2>/dev/null || echo "the next window")"

@@ -1,5 +1,6 @@
 # Maestro — governance + build make targets.
-# The bstack control metalayer is vendored at ./bstack (BRO-1829).
+# bstack is resolved from the environment via bin/bstack (BRO-1842) — the repo is
+# NOT a bstack vendor. CI clones bstack and sets BSTACK_HOME for `make control-audit`.
 BSTACK := ./bin/bstack
 
 .PHONY: help typecheck lint format check bstack-doctor bstack-check control-audit janitor p0-exit

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bstack/scripts/l3-stability-pretool-hook.sh — Claude Code PreToolUse hook
+# scripts/l3-stability-pretool-hook.sh — Claude Code PreToolUse hook
 # for L3 stability (Gate G0).
 #
 # Fires on Edit/Write/MultiEdit tool calls. Receives the tool input as JSON on
