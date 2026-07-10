@@ -22,12 +22,13 @@ import { dirname } from "node:path";
 import { MAESTRO_PROTOCOL_VERSION } from "@maestro/protocol";
 import { createApp } from "./app";
 import { loadConfig } from "./config";
-import type { IndexDb } from "./db/client";
+import type { IndexDb, IndexHandle } from "./db/client";
 
 const config = loadConfig();
 const startedAt = Date.now();
 
 let index: IndexDb | undefined;
+let handle: IndexHandle | undefined;
 let indexNodes = 0;
 let scanErrorCount = 0;
 try {
@@ -37,16 +38,20 @@ try {
   // (a static import would evaluate — and crash — at binary init, before this try).
   const { indexUrl, openIndex } = await import("./db/client");
   const { scanIntoIndex } = await import("./scanner");
-  const opened = await openIndex(indexUrl(config.indexPath));
-  index = opened.db;
+  handle = await openIndex(indexUrl(config.indexPath));
   // FLOWS §F9 step 1 — reconcile the workspace into the `node` table before the API
   // opens, so a client's first `/api/tree` sees the current work, not an empty index.
-  const { summary, errors } = await scanIntoIndex(index, config.workspace);
+  const { summary, errors } = await scanIntoIndex(handle.db, config.workspace);
   indexNodes = summary.inserted + summary.updated + summary.unchanged;
   scanErrorCount = errors.length;
+  // Publish the handle only after the scan succeeds — so a scan failure leaves the
+  // runtime in the clean /health-only stub state, never a half-populated index.
+  index = handle.db;
 } catch (err) {
   // The index driver is unavailable (compiled binary without the native addon, or a
-  // disk failure). Stay alive on /health so liveness never depends on the index.
+  // disk failure). If openIndex SUCCEEDED but a later step threw, close the handle so
+  // the failed startup does not leak the libSQL client/fd. Then stay alive on /health.
+  handle?.client.close();
   console.warn(
     `maestro runtime · index unavailable, serving /health only (reads disabled): ${(err as Error).message}`,
   );
