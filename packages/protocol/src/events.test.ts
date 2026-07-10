@@ -87,6 +87,8 @@ describe("event type namespaces + synthetics", () => {
     expect(EVENT_TYPES.RUN_FINISHED).toBe("run.finished");
     expect(EVENT_TYPES.CHECK_VERDICT).toBe("check.verdict"); // not bare `verdict`
     expect(EVENT_TYPES.NODE_UPDATED).toBe("node.updated");
+    expect(EVENT_TYPES.BUDGET_REFUSED).toBe("budget.refused"); // HARNESS §3 (BRO-1788)
+    expect(EVENT_TYPES.BUDGET_METERED).toBe("budget.metered");
     // every catalog value is a valid wire event type
     for (const type of Object.values(EVENT_TYPES)) {
       expect(isWireEventType(type)).toBe(true);
