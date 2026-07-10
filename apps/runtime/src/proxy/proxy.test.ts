@@ -219,6 +219,31 @@ test("cost ceiling does NOT strip a TEXT-source document — its text is billed 
   expect(asDoc).toBeGreaterThan(10); // 1MB text on Opus ≈ $17; the flat floor (~$5) would fail this
 });
 
+test("cost ceiling applies the prompt-cache WRITE premium so a cached block is not under-reserved (P20 round-7)", () => {
+  // A cache_control block is billed 1.25x input (5-min ephemeral default) / 2x (ttl:"1h") on the WRITE.
+  // Pricing it at the base rate under-reserved a low-compressibility cached block (r→1, no byte
+  // cushion). The ceiling must scale with the cache multiplier — the input dominates here (50k text,
+  // max_tokens 10) so the multiplier shows through nearly 1:1. FAILS if cacheMult is not applied (the
+  // three ceilings would be equal).
+  const call = (extra: object) => ({
+    messages: [{ role: "user", content: [{ type: "text", text: "x".repeat(50_000), ...extra }] }],
+    max_tokens: 10,
+  });
+  const uncached = estimateCallCeilingUsd("claude-opus-4-8", call({}), {});
+  const cached5m = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    call({ cache_control: { type: "ephemeral" } }),
+    {},
+  );
+  const cached1h = estimateCallCeilingUsd(
+    "claude-opus-4-8",
+    call({ cache_control: { type: "ephemeral", ttl: "1h" } }),
+    {},
+  );
+  expect(cached5m).toBeGreaterThan(uncached * 1.2); // ~1.25x input (5-min write premium)
+  expect(cached1h).toBeGreaterThan(uncached * 1.9); // ~2x input (1h write premium)
+});
+
 test("modelPrice: valid env override wins; NaN / negative / missing-slash fall back to the table", () => {
   const base = estimateCallCeilingUsd("claude-opus-4-8", { max_tokens: 1000 }, {});
   expect(

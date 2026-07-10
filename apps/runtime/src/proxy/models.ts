@@ -78,10 +78,20 @@ export const MAX_IMAGE_TOKENS = 2000;
  *  (blanking it there under-priced unboundedly, P20 round-6). */
 export const MAX_DOCUMENT_TOKENS = 300_000;
 
+/** What one `priceModality` pass accumulates: the per-block modality floors, and the max prompt-cache
+ *  WRITE multiplier any block opts into (input is billed 1.25x for the default 5-min ephemeral cache,
+ *  2x for `ttl:"1h"`; 1 = no cache_control). */
+interface ModalityAcc {
+  images: number;
+  documents: number;
+  cacheMult: number;
+}
+
 /**
  * One pass that both SANITIZES the payload (blanks dimension-billed binary blobs so they are not priced
- * as text tokens) and ACCUMULATES the per-block token floors that replace them. The critical rule
- * (P20 round-6) is that stripping is gated on the SOURCE type, not the block type:
+ * as text tokens) and ACCUMULATES the per-block token floors that replace them + the max cache-write
+ * multiplier. The critical rule (P20 round-6) is that stripping is gated on the SOURCE type, not the
+ * block type:
  *   - `image`: always dimension-billed → +MAX_IMAGE_TOKENS, blank `source.data` if present (base64);
  *     a url-source image has no data, still floored.
  *   - `document` with `source.type: "text"`: the `data` is RAW TEXT billed as tokens → keep it, add NO
@@ -91,12 +101,20 @@ export const MAX_DOCUMENT_TOKENS = 300_000;
  *     flat floor for the container.
  *   - `document` otherwise (base64/url/unknown): page-billed, unknown pages → +MAX_DOCUMENT_TOKENS,
  *     blank `source.data` if present.
- * Returns a deep clone — never mutates the input (which the proxy later forwards verbatim).
+ * Any block carrying `cache_control` raises `acc.cacheMult` (P20 round-7: input is billed at the cache
+ * WRITE premium, which the base rate under-reserved). Returns a deep clone — never mutates the input.
  */
-function priceModality(node: unknown, acc: { images: number; documents: number }): unknown {
+function priceModality(node: unknown, acc: ModalityAcc): unknown {
   if (Array.isArray(node)) return node.map((n) => priceModality(n, acc));
   if (node === null || typeof node !== "object") return node;
   const obj = node as Record<string, unknown>;
+
+  // Prompt-cache WRITE premium — any block (text/image/document/tool) can opt in via cache_control.
+  const cc = obj.cache_control;
+  if (cc !== null && typeof cc === "object") {
+    acc.cacheMult = Math.max(acc.cacheMult, (cc as { ttl?: unknown }).ttl === "1h" ? 2 : 1.25);
+  }
+
   const source =
     obj.source !== null && typeof obj.source === "object"
       ? (obj.source as Record<string, unknown>)
@@ -120,10 +138,7 @@ function priceModality(node: unknown, acc: { images: number; documents: number }
 }
 
 /** Deep-clone an object, recursing every value through `priceModality`. */
-function mapChildren(
-  obj: Record<string, unknown>,
-  acc: { images: number; documents: number },
-): Record<string, unknown> {
+function mapChildren(obj: Record<string, unknown>, acc: ModalityAcc): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(obj)) out[k] = priceModality(v, acc);
   return out;
@@ -162,9 +177,15 @@ export function modelPrice(
  *   - only DIMENSION-BILLED blobs (base64 images, base64/url PDFs) are stripped and replaced by a fixed
  *     per-block token bound (MAX_IMAGE_TOKENS / MAX_DOCUMENT_TOKENS) — sound for images (<= ~1600 tok
  *     each), conservative for binary documents (100-page worst case; BRO-1756 tightens it). Pricing a
- *     screenshot's base64 as text tokens is what false-refused it (P20 round-5 finding #4).
+ *     screenshot's base64 as text tokens is what false-refused it (P20 round-5 finding #4);
+ *   - a `cache_control` breakpoint makes the WHOLE input bound bill at the prompt-cache WRITE premium
+ *     (1.25x for the 5-min ephemeral default, 2x for `ttl:"1h"`) — the base rate under-reserved a
+ *     low-compressibility cached block (P20 round-7). Applying it to the whole input over-reserves
+ *     uncached blocks; the ~4x byte over-count on natural language absorbs that.
  * It over-counts plain text ~4x; erring high is the guardrail's job — a call that could breach a cap
- * is refused, never silently overspent.
+ * is refused, never silently overspent. LIMITATION: server-tool surcharges (web_search / code_execution
+ * billed per-call on top of tokens) are NOT modeled here — the meter() reconcile is the backstop, and
+ * BRO-1756's live path prices them; a run that leans on server tools should carry headroom in per_run.
  */
 export function estimateCallCeilingUsd(
   model: string,
@@ -175,12 +196,16 @@ export function estimateCallCeilingUsd(
   const p = (payload ?? {}) as { max_tokens?: unknown };
   const maxTokens =
     typeof p.max_tokens === "number" && p.max_tokens > 0 ? p.max_tokens : DEFAULT_MAX_OUTPUT_TOKENS;
-  // One pass: sanitize (blank dimension-billed blobs) AND count the per-block floors that replace them.
-  const modality = { images: 0, documents: 0 };
+  // One pass: sanitize (blank dimension-billed blobs), count the per-block floors, and pick up the max
+  // cache-write multiplier any block opts into.
+  const modality: ModalityAcc = { images: 0, documents: 0, cacheMult: 1 };
   const sanitized = priceModality(payload ?? {}, modality);
   const byteTokens = Buffer.byteLength(JSON.stringify(sanitized), "utf8"); // text bound, blobs excluded
   const inputTokens =
     byteTokens + modality.images * MAX_IMAGE_TOKENS + modality.documents * MAX_DOCUMENT_TOKENS;
-  const raw = (inputTokens * price.inputPerMtok + maxTokens * price.outputPerMtok) / 1_000_000;
+  // Cache write premium applies to INPUT only (output is billed normally, never cached).
+  const raw =
+    (inputTokens * price.inputPerMtok * modality.cacheMult + maxTokens * price.outputPerMtok) /
+    1_000_000;
   return raw * CEILING_SAFETY;
 }

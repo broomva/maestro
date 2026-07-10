@@ -7,7 +7,7 @@ budget check in the request path (HARNESS §3, F3.1, AUTONOMY §4).
 
 ```
 $ bun test apps/runtime --filter proxy
- 158 pass  0 fail  502 expect() calls   (33 proxy/budget tests included)
+ 159 pass  0 fail  504 expect() calls   (34 proxy/budget tests included)
 ```
 
 The three done.check guarantees, each a test:
@@ -67,6 +67,37 @@ upstream-throw: 502 | type: upstream_unavailable
   mid-preflight can't let one more call land.
 - **Model pinning** lives supervisor-side (role → pinned model; `MAESTRO_MODEL_<ROLE>` override) so
   a version bump is one config change and the D8 canary (BRO-1806) can route without the child knowing.
+
+## P20 round-7 fix (block 7/10 → applied)
+
+Round 7 confirmed the modality rewrite SOUND (source-gating probe-verified: unknown/missing/string
+source docs all floor; content-source recursion floors nested images; no input mutation; recursion
+caught as 503), the carry model + key confinement intact, and the round-6 tests strongly discriminate.
+One under-reserve remained — the last unmodeled billing dimension:
+
+1. **Prompt-cache WRITE premium omitted → under-reserve** (the same overspend class): a `cache_control`
+   block is billed at 1.25x input (5-min ephemeral default) / 2x (`ttl:"1h"`) on the WRITE, but the
+   ceiling priced input at the base rate. For low-compressibility cached content (r→1, no byte cushion)
+   the reserve fell below the true cost (probe: a 400KB base64 block with `ttl:"1h"` reserved ~$6.90 <
+   ~$8.60 true). **Fixed**: `priceModality` now picks up the max cache-write multiplier any block opts
+   into (`cache_control` → 1.25x, `ttl:"1h"` → 2x) and it multiplies the input term of the ceiling
+   (input-only — output is never cached). Applying it to the whole input over-reserves uncached blocks,
+   which the ~4x natural-language byte over-count absorbs. Live dogfood:
+
+   ```
+   50k text, no cache:     $0.8648
+   50k text, 5-min cache:  $1.0816  (1.251x ≈ 1.25x input)
+   50k text, 1h cache:     $1.7304  (2.001x ≈ 2x input)
+   round-7 repro (400KB base64, 1h):  no-cache $7.08 → cached $14.15  (now covers the 2x write premium)
+   ```
+
+   Anti-vacuity: dropping the `* cacheMult` factor fails exactly the new `applies the prompt-cache WRITE
+   premium` test (the three ceilings collapse to equal) — mutation verified.
+
+Documented limitation (not modeled, by decision): server-tool surcharges (web_search / code_execution
+billed per-call on top of tokens) — the `meter()` reconcile is the backstop and BRO-1756's live path
+prices them; a server-tool-heavy run should carry per_run headroom. Noted in the estimateCallCeilingUsd
+header.
 
 ## P20 round-6 fixes (block 4/10 → applied)
 
