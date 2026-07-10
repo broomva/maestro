@@ -81,13 +81,13 @@ async function dumpIndexFile(indexPath: string): Promise<unknown[]> {
   const proc = spawn("bun", ["run", DUMP_SCRIPT, indexPath], {
     stdio: ["ignore", "pipe", "inherit"],
   });
-  let out = "";
-  proc.stdout?.on("data", (chunk) => {
-    out += chunk;
-  });
-  const code = await onExit(proc);
+  const chunks: Buffer[] = [];
+  proc.stdout?.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+  // Wait for "close", not "exit": "exit" can fire before stdout is fully drained, so reading the
+  // buffer on "exit" risks a truncated read. "close" fires only after all stdio streams are closed.
+  const code = await new Promise<number>((res) => proc.on("close", (c) => res(c ?? 0)));
   if (code !== 0) throw new Error(`dump-index exited ${code}`);
-  return JSON.parse(out) as unknown[];
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown[];
 }
 
 test.use({ video: "on" }); // evidence: a screen recording of the exit gate
