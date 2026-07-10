@@ -15,5 +15,6 @@ export {
   SKIP_DIRS,
   scanWorkspace,
   WORK_FILE,
+  type WorkDirsResult,
 } from "./scanner";
 export { type ScanIntoIndexResult, type SyncSummary, scanIntoIndex, syncNodes } from "./sync";

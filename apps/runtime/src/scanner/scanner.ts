@@ -64,6 +64,12 @@ export interface ScanResult {
   nodes: ScannedNode[];
   /** Files that failed to parse/derive, sorted by path. One bad file never aborts the scan. */
   errors: ScanError[];
+  /**
+   * True when every directory was read. False when a dir was unreadable (permissions,
+   * a race) so the scan may be MISSING nodes — the reconcile then skips tombstoning, so
+   * an unreadable dir cannot mass-soft-delete a subtree it simply failed to see.
+   */
+  complete: boolean;
 }
 
 /** First markdown heading (`# … ` through `###### … `) of the brief, or null. */
@@ -73,11 +79,20 @@ export function firstHeading(brief: string): string | null {
 }
 
 /**
- * `created` (frontmatter ISO date) → epoch ms. A date-only string parses as UTC
- * midnight (deterministic across machines). Throws a typed error on an unparseable
- * value so the scan records it against the file instead of writing a NaN row.
+ * `created` (frontmatter ISO date) → epoch ms. Only a date-only `YYYY-MM-DD` is
+ * accepted: it parses as UTC midnight, so `createdAt` is deterministic across
+ * machines (part of the rebuild-identity dump, fs-index.md §4). A zone-less datetime
+ * (`2026-06-25T10:00:00`) or any other string is rejected — `Date.parse` would read
+ * it in the host's LOCAL timezone, making the derived node set machine-dependent.
  */
 export function createdToEpochMs(created: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(created)) {
+    throw new WorkContractError(
+      "invalid_type",
+      `created must be an ISO date (YYYY-MM-DD): ${created}`,
+      "created",
+    );
+  }
   const ms = Date.parse(created);
   if (!Number.isFinite(ms)) {
     throw new WorkContractError(
@@ -89,39 +104,58 @@ export function createdToEpochMs(created: string): number {
   return ms;
 }
 
-/** Normalize an OS-relative path to workspace-canonical form (`/` separators). */
+/**
+ * Normalize an OS-relative path to workspace-canonical form: `/` separators and a
+ * single Unicode normalization form (NFC), so a non-ASCII folder yields the same
+ * path bytes on macOS (NFD-native) and Linux (NFC) — the byte-canonical `sourcePath`
+ * the journal + rebuild identity require (fs-index.md §6).
+ */
 function toPosix(rel: string): string {
-  return sep === "/" ? rel : rel.split(sep).join("/");
+  return (sep === "/" ? rel : rel.split(sep).join("/")).normalize("NFC");
 }
 
 /**
- * The nearest proper-ancestor work dir of `dir` within `workDirs`, or null. Walks
- * segments up from `dir`; the first ancestor that is itself a work folder is the
- * parent (the tree is by nesting, not by every intermediate folder).
+ * The nearest proper-ancestor of `dir` that RESOLVED successfully (a key of
+ * `resolved`), or null. Walks segments up from `dir`; the tree is by nesting, and a
+ * malformed/duplicate ancestor is skipped so its child re-attaches to the nearest
+ * VALID ancestor (and inherits that ancestor's defaults) instead of orphaning to null.
  */
-function parentDirOf(dir: string, workDirs: ReadonlySet<string>): string | null {
+function parentDirOf(dir: string, resolved: ReadonlyMap<string, unknown>): string | null {
   if (dir === "") return null;
   const parts = dir.split("/");
   for (let i = parts.length - 1; i > 0; i--) {
     const anc = parts.slice(0, i).join("/");
-    if (workDirs.has(anc)) return anc;
+    if (resolved.has(anc)) return anc;
   }
   // The root work folder ("") is the parent of any top-level work folder.
-  return workDirs.has("") ? "" : null;
+  return resolved.has("") ? "" : null;
+}
+
+/** The dirs a walk found, plus any it could not read. */
+export interface WorkDirsResult {
+  /** workspace-relative dirs containing a `_work.md`, shallowest-first then lexicographic. */
+  dirs: string[];
+  /** dirs whose contents could not be read — the scan is incomplete under these. */
+  unreadable: string[];
 }
 
 /**
- * Recursively collect the workspace-relative dirs that contain a `_work.md`,
- * sorted (shallowest first, then lexicographic) so a parent is always visited
- * before its children and the walk is order-deterministic.
+ * Recursively collect the workspace-relative dirs that contain a `_work.md`, sorted
+ * (shallowest first, then lexicographic) so a parent is always visited before its
+ * children and the walk is order-deterministic. Symlinked dirs are NOT followed
+ * (`Dirent.isDirectory()` is false for a symlink), which also rules out walk cycles.
+ * A dir that cannot be read is recorded in `unreadable`, never silently dropped.
  */
-export async function findWorkDirs(root: string): Promise<string[]> {
+export async function findWorkDirs(root: string): Promise<WorkDirsResult> {
   const found: string[] = [];
+  const unreadable: string[] = [];
 
   async function walk(absDir: string, relDir: string): Promise<void> {
-    // .catch → null so an unreadable dir (permissions, race) is skipped, never aborts.
     const entries = await readdir(absDir, { withFileTypes: true }).catch(() => null);
-    if (entries === null) return;
+    if (entries === null) {
+      unreadable.push(relDir);
+      return;
+    }
     let hasWork = false;
     const subdirs: string[] = [];
     for (const e of entries) {
@@ -139,12 +173,12 @@ export async function findWorkDirs(root: string): Promise<string[]> {
   }
 
   await walk(root, "");
-  // Depth then lexicographic — parents before children.
-  return found.sort((a, b) => {
+  const byDepthThenName = (a: string, b: string) => {
     const da = a === "" ? 0 : a.split("/").length;
     const db = b === "" ? 0 : b.split("/").length;
     return da - db || (a < b ? -1 : a > b ? 1 : 0);
-  });
+  };
+  return { dirs: found.sort(byDepthThenName), unreadable: unreadable.sort() };
 }
 
 /**
@@ -155,12 +189,14 @@ export async function findWorkDirs(root: string): Promise<string[]> {
  * and the offending file is skipped — the rest of the workspace still scans.
  */
 export async function scanWorkspace(root: string): Promise<ScanResult> {
-  const dirs = await findWorkDirs(root);
-  const workDirSet = new Set(dirs);
+  const { dirs, unreadable } = await findWorkDirs(root);
   const resolvedByDir = new Map<string, WorkContract>();
   const idToDir = new Map<string, string>();
   const nodes: ScannedNode[] = [];
   const errors: ScanError[] = [];
+  for (const d of unreadable) {
+    errors.push({ path: d, code: "unreadable_dir", message: "directory could not be read" });
+  }
 
   for (const dir of dirs) {
     const absFile = join(root, dir === "" ? WORK_FILE : join(dir, WORK_FILE));
@@ -174,7 +210,9 @@ export async function scanWorkspace(root: string): Promise<ScanResult> {
 
     try {
       const { input, brief } = parseWorkInput(source);
-      const parentDir = parentDirOf(dir, workDirSet);
+      // Resolve against the nearest ALREADY-RESOLVED ancestor (top-down guarantees it
+      // is present) so a malformed ancestor does not orphan its subtree.
+      const parentDir = parentDirOf(dir, resolvedByDir);
       const parent = parentDir === null ? undefined : resolvedByDir.get(parentDir);
       const contract = resolveWorkContract(input, parent);
       const createdAt = createdToEpochMs(contract.created);
@@ -215,5 +253,5 @@ export async function scanWorkspace(root: string): Promise<ScanResult> {
 
   nodes.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   errors.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return { nodes, errors };
+  return { nodes, errors, complete: unreadable.length === 0 };
 }

@@ -47,59 +47,81 @@ function sameContent(existing: typeof node.$inferSelect, scanned: ScannedNode): 
   return true;
 }
 
+export interface SyncOptions {
+  /**
+   * Soft-delete live nodes the scan no longer sees. Default true. Pass false for an
+   * INCOMPLETE scan (a dir was unreadable) so a transient read failure cannot
+   * mass-tombstone a subtree it merely failed to see — `scanIntoIndex` wires this to
+   * `ScanResult.complete`.
+   */
+  tombstone?: boolean;
+}
+
 /**
- * Apply a scan to the `node` table. Ordering matters for the partial-unique
- * `node.path` (live rows only): updates + tombstones run BEFORE inserts, so a node
- * that moved to a new path (or vanished) frees its old path before a different node
- * claims it in the same scan. (A pure path *swap* between two retained ids in a
- * single scan — extraordinarily rare — is the one case this order can't resolve; the
- * incremental watcher, BRO-1804, avoids it by processing one FS event at a time.)
+ * Apply a scan to the `node` table in two phases — FREE, then CLAIM — so the
+ * partial-unique `node.path` (live rows only) never transiently collides:
  *
- * The passes run sequentially, NOT inside `db.transaction()`: libsql's transaction
- * API opens a separate connection, and a `:memory:` db is per-connection, so a
- * transaction there operates on an empty database (breaks tests + any in-memory
- * runtime). Atomicity is not required for the startup scan anyway — F9 step 4 opens
- * the API only AFTER reconcile completes (no reader sees a partial index), and the
- * sync is idempotent, so a scan interrupted by a crash is fully healed by the next
- * startup scan (fs-index.md "cache with teeth").
+ *   Phase 1 (free)   delete every changed row (re-inserted below, so its old path is
+ *                    vacated) and tombstone every vanished row (deletedAt leaves it out
+ *                    of the live index).
+ *   Phase 2 (claim)  insert the new + changed rows.
+ *
+ * After phase 1 every path a phase-2 insert claims is free, and scanned paths are
+ * distinct per folder, so an ARBITRARY offline reorg — a rename onto a vanished or
+ * moved sibling's path, a move-chain, even a pure two-node swap — reconciles with no
+ * UNIQUE violation and no dependence on statement order. (An earlier update-then-
+ * tombstone ordering wedged on exactly these reorgs.)
+ *
+ * The reconciliation is idempotent — an unchanged re-scan writes NOTHING, so
+ * `updatedAt` (the team-tier LWW clock, fs-index.md §4) is never churned.
+ *
+ * NOT wrapped in `db.transaction()`: libsql's transaction API opens a separate
+ * connection, and a `:memory:` db is per-connection, so a tx there hits an empty
+ * database. Atomicity is not required — F9 step 4 opens the API only AFTER reconcile
+ * completes (no reader sees a partial index), and because phase 2 never collides the
+ * reconcile cannot wedge; a crash mid-reconcile leaves a subset written that the next
+ * idempotent scan completes (fs-index.md "cache with teeth").
  */
 export async function syncNodes(
   db: IndexDb,
   scanned: ScannedNode[],
   now: number = Date.now(),
+  opts: SyncOptions = {},
 ): Promise<SyncSummary> {
+  const { tombstone = true } = opts;
   const existing = await db.select().from(node);
   const existingById = new Map(existing.map((r) => [r.id, r]));
   const scannedIds = new Set(scanned.map((s) => s.id));
   const summary: SyncSummary = { inserted: 0, updated: 0, tombstoned: 0, unchanged: 0 };
 
-  // Pass 1 — update changed/resurrected rows (frees + moves paths).
+  const toClaim: ScannedNode[] = []; // new + changed → inserted in phase 2
+  const toFree: string[] = []; // ids of changed rows to delete in phase 1 (frees old path)
   for (const s of scanned) {
     const ex = existingById.get(s.id);
-    if (!ex) continue;
-    if (ex.deletedAt === null && sameContent(ex, s)) {
+    if (!ex) {
+      toClaim.push(s);
+      summary.inserted++;
+    } else if (ex.deletedAt === null && sameContent(ex, s)) {
       summary.unchanged++;
-      continue;
-    }
-    await db
-      .update(node)
-      .set({ ...s, updatedAt: now, deletedAt: null })
-      .where(eq(node.id, s.id));
-    summary.updated++;
-  }
-  // Pass 2 — tombstone live rows the scan no longer sees.
-  for (const ex of existing) {
-    if (ex.deletedAt === null && !scannedIds.has(ex.id)) {
-      await db.update(node).set({ deletedAt: now, updatedAt: now }).where(eq(node.id, ex.id));
-      summary.tombstoned++;
+    } else {
+      // changed content, or a resurrected tombstone — delete the stale row, re-insert.
+      toFree.push(s.id);
+      toClaim.push(s);
+      summary.updated++;
     }
   }
-  // Pass 3 — insert new rows (paths freed by passes 1-2 are now available).
-  for (const s of scanned) {
-    if (existingById.has(s.id)) continue;
-    await db.insert(node).values({ ...s, updatedAt: now, deletedAt: null });
-    summary.inserted++;
+  const vanished = tombstone
+    ? existing.filter((ex) => ex.deletedAt === null && !scannedIds.has(ex.id))
+    : [];
+  summary.tombstoned = vanished.length;
+
+  // Phase 1 — FREE: delete changed rows (paths vacated) + tombstone vanished rows.
+  for (const id of toFree) await db.delete(node).where(eq(node.id, id));
+  for (const ex of vanished) {
+    await db.update(node).set({ deletedAt: now, updatedAt: now }).where(eq(node.id, ex.id));
   }
+  // Phase 2 — CLAIM: every conflicting old occupant was freed above, so no collision.
+  for (const s of toClaim) await db.insert(node).values({ ...s, updatedAt: now, deletedAt: null });
 
   return summary;
 }
@@ -119,7 +141,9 @@ export async function scanIntoIndex(
   root: string,
   now: number = Date.now(),
 ): Promise<ScanIntoIndexResult> {
-  const { nodes, errors } = await scanWorkspace(root);
-  const summary = await syncNodes(db, nodes, now);
+  const { nodes, errors, complete } = await scanWorkspace(root);
+  // An incomplete scan (a dir was unreadable) must not tombstone — the missing nodes
+  // may simply not have been seen, not deleted.
+  const summary = await syncNodes(db, nodes, now, { tombstone: complete });
   return { summary, errors };
 }

@@ -123,9 +123,37 @@ describe("scanWorkspace — derivation", () => {
     const { nodes } = await scanWorkspace(root);
     const m = byId(nodes);
     expect(m.get("child")?.owner).toBe("@alex"); // inherited
+    expect(m.get("child")?.gate).toBe("human"); // inherited
+    expect(m.get("child")?.kind).toBe("task");
+    expect(m.get("child")?.state).toBe("running"); // its own
     expect(m.get("child")?.budgetJson).toBe(JSON.stringify({ per_run_usd: 5 }));
     expect(m.get("grand")?.owner).toBe("@bea"); // overridden
     expect(m.get("grand")?.budgetJson).toBe(JSON.stringify({ per_run_usd: 5 })); // inherited through chain
+  });
+
+  test("renders done to doneJson but never inherits it (only owner/gate/budget cascade)", async () => {
+    const root = makeFixture({
+      "p/_work.md": wm({ id: "p", extraYaml: 'done:\n  check: "bun test"', brief: "# P" }),
+      "p/c/_work.md": wm({ id: "c", brief: "# C" }),
+    });
+    const { nodes } = await scanWorkspace(root);
+    const m = byId(nodes);
+    expect(m.get("p")?.doneJson).toBe(JSON.stringify({ check: "bun test" }));
+    expect(m.get("c")?.doneJson).toBeNull(); // done is per-unit-of-work, not inherited
+  });
+
+  test("re-attaches a child to the nearest RESOLVED ancestor when its parent is malformed", async () => {
+    const root = makeFixture({
+      "_work.md": wm({ id: "root", owner: "@alex", brief: "# Root" }),
+      "mid/_work.md": "---\nkind: task\n---\n# malformed — missing id/state/dates\n",
+      "mid/leaf/_work.md": wm({ id: "leaf", brief: "# Leaf" }),
+    });
+    const { nodes, errors } = await scanWorkspace(root);
+    const m = byId(nodes);
+    expect(errors.some((e) => e.path === "mid")).toBe(true);
+    // `mid` failed, so `leaf` attaches to `root` (nearest resolved) and inherits its owner.
+    expect(m.get("leaf")?.parentId).toBe("root");
+    expect(m.get("leaf")?.owner).toBe("@alex");
   });
 
   test("skips .git / node_modules / .maestro / dist", async () => {
@@ -261,6 +289,49 @@ describe("syncNodes — reconciliation", () => {
     const m = byId(await db.select().from(node));
     expect(m.get("a")?.path).toBe("moved");
     expect(m.get("b")?.path).toBe("p");
+    client.close();
+  });
+
+  test("reconciles a rename onto a VANISHED sibling's path (no UNIQUE wedge)", async () => {
+    // The regression the P20 review caught: A@a, B@b live; b is deleted and a renamed
+    // to path "b". Update-before-tombstone would set A.path="b" while B still held it →
+    // UNIQUE violation. Free-before-claim tombstones B and deletes A before re-inserting.
+    const v1 = makeFixture({ "a/_work.md": wm({ id: "A" }), "b/_work.md": wm({ id: "B" }) });
+    const { db, client } = await fresh();
+    await syncNodes(db, (await scanWorkspace(v1)).nodes, 1000);
+    const v2 = makeFixture({ "b/_work.md": wm({ id: "A" }) }); // B gone, A now at "b"
+    const s = await syncNodes(db, (await scanWorkspace(v2)).nodes, 2000);
+    expect(s).toEqual({ inserted: 0, updated: 1, tombstoned: 1, unchanged: 0 });
+    const m = byId(await db.select().from(node));
+    expect(m.get("A")?.path).toBe("b");
+    expect(m.get("A")?.deletedAt).toBeNull();
+    expect(m.get("B")?.deletedAt).toBe(2000);
+    client.close();
+  });
+
+  test("reconciles a pure two-node path swap (previously called unresolvable)", async () => {
+    const v1 = makeFixture({ "a/_work.md": wm({ id: "A" }), "b/_work.md": wm({ id: "B" }) });
+    const { db, client } = await fresh();
+    await syncNodes(db, (await scanWorkspace(v1)).nodes, 1000);
+    const v2 = makeFixture({ "b/_work.md": wm({ id: "A" }), "a/_work.md": wm({ id: "B" }) });
+    const s = await syncNodes(db, (await scanWorkspace(v2)).nodes, 2000);
+    expect(s.updated).toBe(2);
+    const m = byId(await db.select().from(node));
+    expect(m.get("A")?.path).toBe("b");
+    expect(m.get("B")?.path).toBe("a");
+    client.close();
+  });
+
+  test("an incomplete scan (tombstone:false) does not soft-delete unseen nodes", async () => {
+    const v1 = makeFixture({ "a/_work.md": wm({ id: "A" }), "b/_work.md": wm({ id: "B" }) });
+    const { db, client } = await fresh();
+    const all = (await scanWorkspace(v1)).nodes;
+    await syncNodes(db, all, 1000);
+    // A scan that only saw A (b's dir was unreadable) must not tombstone B.
+    const onlyA = all.filter((n) => n.id === "A");
+    const s = await syncNodes(db, onlyA, 2000, { tombstone: false });
+    expect(s.tombstoned).toBe(0);
+    expect(byId(await db.select().from(node)).get("B")?.deletedAt).toBeNull();
     client.close();
   });
 
