@@ -111,6 +111,20 @@ describe("isWatchedChange — the wake filter", () => {
     // startup full scan still indexes a real `run` node; only live edits to it are skipped.
     expect(isWatchedChange("run/_work.md")).toBe(false);
   });
+
+  test("ignores `runs/run-<id>/` session-receipt churn (PLURAL runs — the real high-freq source)", () => {
+    // The P20 r3 catch: the receipt dir is `runs/run-<id>/` (DATA-MODEL §A.1), NOT `run/`.
+    // It churns hard (session.jsonl per event, progress.md per iteration) and holds no _work.md.
+    expect(isWatchedChange("runs")).toBe(false); // Bun-truncated top segment
+    expect(isWatchedChange("runs/run-7f3a/session.jsonl")).toBe(false);
+    expect(isWatchedChange("runs/run-7f3a/progress.md")).toBe(false);
+    expect(isWatchedChange("runs/run-7f3a/checks/build.log")).toBe(false);
+    // Nested under a work folder (full-path platforms) — still suppressed by the `runs` segment.
+    expect(isWatchedChange("growth/seo/runs/run-7f3a/child.stderr.log")).toBe(false);
+    // Sanity: the SINGULAR `run` worktree suppression did NOT accidentally start matching a
+    // legit work folder whose name merely starts with "run".
+    expect(isWatchedChange("running-tasks/_work.md")).toBe(true);
+  });
 });
 
 // ── 2. reconcileAndEmit ─────────────────────────────────────────────────────────

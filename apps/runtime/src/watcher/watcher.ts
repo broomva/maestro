@@ -19,6 +19,16 @@ import { SKIP_DIRS, type SyncSummary, scanWorkspace, syncNodes } from "../scanne
 
 /** git worktrees for `run/<id>` branches — their `_work.md` copies must never re-index. */
 const WORKTREE_SEGMENT = "run";
+/**
+ * Session-receipt dir `runs/run-<id>/` (DATA-MODEL §A.1). During an active run this churns
+ * hard — session.jsonl appended per event, progress.md rewritten per iteration, checks/*.log —
+ * and holds NO `_work.md` (produces no nodes), so it must never wake a reconcile. NOTE this is
+ * PLURAL `runs`, distinct from the singular `run/<id>` worktree branch above; suppressing only
+ * `run` (an earlier bug) left the real receipt churn unfiltered. The scanner still descends into
+ * `runs/` (it is not in SKIP_DIRS — a deliberate BRO-1800 choice); trimming that scan footprint
+ * is tracked in BRO-1846.
+ */
+const RECEIPTS_DIR = "runs";
 
 export interface ReconcileResult {
   summary: SyncSummary;
@@ -65,15 +75,20 @@ export async function reconcileAndEmit(
  * The reconcile, not the filename, decides what actually changed.
  *
  * Suppressed (never wake): a skipped dir (`.git`/`node_modules`/`.maestro`/`dist` — index
- * internals, deps, build output) and a `run/<id>` worktree (the runtime's high-frequency agent
- * churn — the one source we must not re-scan on). Bun gives us only the top segment, so a
- * top-level `run` is treated as worktree churn; a user folder literally named `run` still gets
- * indexed by the startup full scan, just not on a live edit.
+ * internals, deps, build output); the `runs/run-<id>/` session-receipt churn (DATA-MODEL §A.1 —
+ * high-frequency session.jsonl/progress.md writes, and NO `_work.md`); and a `run/<id>`
+ * git-worktree branch. `runs/` never holds a node, so it is suppressed at ANY depth. For the
+ * worktree, Bun gives us only the top segment, so a top-level `run` is treated as churn; a user
+ * folder literally named `run`/`runs` still gets indexed by the startup full scan, just not on
+ * a live edit.
  */
 export function isWatchedChange(relPath: string): boolean {
   const parts = relPath.split(/[/\\]/).filter(Boolean);
   if (parts.length === 0) return false;
   if (parts.some((seg) => SKIP_DIRS.has(seg))) return false; // under a skipped dir
+  // Session receipts hold no node — ignore `runs/…` at any depth (the real run-churn source,
+  // PLURAL `runs`, distinct from the singular `run/<id>` worktree below).
+  if (parts.some((seg) => seg === RECEIPTS_DIR)) return false;
   if (parts[0] === WORKTREE_SEGMENT) return false; // top-level `run` (Bun-truncated worktree)
   // On a platform that gives full paths, catch a nested `run/<id>/…` worktree too.
   for (let i = 1; i < parts.length - 1; i += 1) {
