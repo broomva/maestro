@@ -33,9 +33,18 @@ export interface ChildInvocation {
 export function parseChildArgv(argv: readonly string[]): ChildInvocation {
   let role: string | undefined;
   let session: string | undefined;
+  // A flag's value must exist, must not be another flag (a `--`-prefixed token means the value was
+  // omitted), and must not have been set already — all three are supervisor-argv bugs, so throw loudly.
+  const take = (flag: string, prev: string | undefined, value: string | undefined): string => {
+    if (prev !== undefined) throw new SpawnContractError(`${flag} given more than once`);
+    if (value === undefined || value.startsWith("--")) {
+      throw new SpawnContractError(`${flag} requires a value (got ${value ?? "nothing"})`);
+    }
+    return value;
+  };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--role") role = argv[++i];
-    else if (argv[i] === "--session") session = argv[++i];
+    if (argv[i] === "--role") role = take("--role", role, argv[++i]);
+    else if (argv[i] === "--session") session = take("--session", session, argv[++i]);
   }
   if (role === undefined || !CHILD_ROLES.includes(role as ChildRole)) {
     throw new SpawnContractError(
@@ -77,7 +86,7 @@ const PASSTHROUGH_ENV = new Set([
 // NAME looks like a secret never reaches a child. The allowlist above already excludes them; this is
 // the belt to that suspenders, and the predicate the test asserts against.
 const SECRET_NAME =
-  /(?:_KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|ANTHROPIC|OPENAI|_PAT|BEARER|SESSION_?SECRET)/i;
+  /(?:_KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|ANTHROPIC|OPENAI|_PAT|BEARER)/i;
 
 /** True if an env var name looks like a secret and must never enter a child env. */
 export function isSecretEnvName(name: string): boolean {

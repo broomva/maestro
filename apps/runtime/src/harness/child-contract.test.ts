@@ -12,7 +12,7 @@
 //   4. The §6 SDK→session.jsonl translation maps each occurrence to the right event (or drops it).
 
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkContract } from "@maestro/protocol";
@@ -60,6 +60,17 @@ test("argv parse REFUSES a bad role, loudly", () => {
 test("argv parse REFUSES a missing/empty session, loudly", () => {
   expect(() => parseChildArgv(["--role", "agent"])).toThrow(SpawnContractError);
   expect(() => parseChildArgv(["--role", "agent", "--session", "   "])).toThrow(SpawnContractError);
+});
+
+test("argv parse REFUSES a duplicated flag, loudly", () => {
+  expect(() =>
+    parseChildArgv(["--role", "agent", "--role", "verifier", "--session", "s1"]),
+  ).toThrow(SpawnContractError);
+});
+
+test("argv parse REFUSES a flag whose value was omitted (next token is another flag)", () => {
+  // `--role --session s1` — the role value is missing; a `--`-prefixed token is not a value.
+  expect(() => parseChildArgv(["--role", "--session", "s1"])).toThrow(SpawnContractError);
 });
 
 // ── 2. env is secret-free (the security invariant) ───────────────────────────
@@ -186,6 +197,17 @@ test("contract snapshot round-trips through the filesystem", async () => {
   }
 });
 
+test("readContractSnapshot REFUSES a malformed snapshot at the child's first act", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "maestro-child-contract-bad-"));
+  try {
+    // A shape missing `node` (e.g. an older schema) must fail loudly here, not deep in the run.
+    writeFileSync(contractPath(dir), JSON.stringify({ session: "s1", dispatchedAt: "t" }));
+    await expect(readContractSnapshot(dir)).rejects.toThrow(/malformed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── 4. §6 SDK → session.jsonl translation ────────────────────────────────────
 
 test("§6: an assistant turn becomes agent.said", () => {
@@ -238,6 +260,16 @@ test("§6: a tool result is authored by the tool, not the agent", () => {
     type: EVENT_TYPES.TOOL_RESULT,
     payload: { tool: "bash", ok: false, summary: "exit 1" },
   });
+});
+
+test("§6: a non-serializable tool input does NOT crash the audit-trail translation (HARNESS §5)", () => {
+  // A circular object would throw JSON.stringify; a bigint would too. Neither may crash the child.
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  const circEv = translateSdkOccurrence({ kind: "tool_use", tool: "eval", input: circular });
+  expect(typeof circEv?.payload?.input).toBe("string");
+  const bigEv = translateSdkOccurrence({ kind: "tool_use", tool: "eval", input: 10n });
+  expect(bigEv?.payload?.input).toBe("10");
 });
 
 test("§6: a model call completing is NOT logged (the proxy meters it)", () => {

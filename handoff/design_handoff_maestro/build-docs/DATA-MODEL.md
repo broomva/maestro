@@ -158,7 +158,7 @@ export const event = sqliteTable("event", {
   sessionId: text("session_id"),                 // nullable (D-DURABILITY): synthetics (node.updated, schedule.fired, budget.*, gate.decided) have no session — still persisted
   ts:        integer("ts", { mode: "timestamp" }).notNull(),
   actor:     text("actor").$type<"agent"|"user"|"tool"|"system">().notNull(),
-  type:      text("type").notNull(),             // run.* | tool.* | check.* | gate.* | budget.*
+  type:      text("type").notNull(),             // run.* | tool.* | check.* | gate.* | budget.* | agent.* (BRO-1756)
   payload:   text("payload_json"),
 });
 

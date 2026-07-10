@@ -45,7 +45,19 @@ function pruneUndefined(o: Record<string, unknown>): Record<string, unknown> {
 /** A short, log-safe summary of a tool input (the audit trail stores decisions, not payloads). */
 function summarizeInput(input: unknown): string | undefined {
   if (input === undefined || input === null) return undefined;
-  const s = typeof input === "string" ? input : JSON.stringify(input);
+  let s: string;
+  if (typeof input === "string") {
+    s = input;
+  } else {
+    // HARNESS §5: the §6 audit-trail translation must NOT crash the child. A circular, bigint, or
+    // otherwise non-serializable tool input degrades to String(...) — it never throws. (JSON.stringify
+    // returns undefined for a top-level function; the ?? catches that too.)
+    try {
+      s = JSON.stringify(input) ?? String(input);
+    } catch {
+      s = String(input);
+    }
+  }
   return s.length > 200 ? `${s.slice(0, 197)}...` : s;
 }
 
@@ -119,12 +131,12 @@ export interface Runner {
 export class ClaudeSdkRunner implements Runner {
   readonly role: ChildRole = "agent";
 
-  /** The §6 mapping this adapter applies to its (normalized) SDK stream. */
-  translate(occ: SdkOccurrence): ChildEmittedEvent | null {
-    return translateSdkOccurrence(occ);
-  }
-
-  start(_invocation: ChildInvocation, _env: Record<string, string>): Promise<RunnerHandle> {
+  // `async` so the deferral REJECTS rather than throwing synchronously — honoring the declared
+  // Promise<RunnerHandle> contract before the F2 dispatcher codes against the seam (a sync throw
+  // would silently change the caller's error handling at swap-in). The live loop (which drives the
+  // §6 `translateSdkOccurrence` mapping over the normalized SDK stream) lands with dispatch: it needs
+  // the metered model proxy (baseURL + per-session bearer, HARNESS §3) that BRO-1788 builds.
+  async start(_invocation: ChildInvocation, _env: Record<string, string>): Promise<RunnerHandle> {
     throw new Error(
       "ClaudeSdkRunner.start() lands with dispatch (F2): the live SDK loop needs the metered model " +
         "proxy (baseURL + per-session bearer, HARNESS §3) that BRO-1788 builds. This ticket ships the " +

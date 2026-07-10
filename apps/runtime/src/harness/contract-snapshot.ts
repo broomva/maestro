@@ -34,8 +34,28 @@ export async function writeContractSnapshot(
   return path;
 }
 
-/** Read a run's frozen contract snapshot (the child's first act, HARNESS §5). */
+/** Read a run's frozen contract snapshot (the child's first act, HARNESS §5). Validates the shape
+ *  rather than blind-casting — a wrong-shape or older-schema snapshot fails loudly HERE, at the
+ *  child's first act, not deep inside the run where the cause is unrecoverable. */
 export async function readContractSnapshot(runDir: string): Promise<ContractSnapshot> {
-  const raw = await readFile(contractPath(runDir), "utf8");
-  return JSON.parse(raw) as ContractSnapshot;
+  const path = contractPath(runDir);
+  const raw = await readFile(path, "utf8");
+  return assertContractSnapshot(JSON.parse(raw), path);
+}
+
+/** Runtime guard: the on-disk snapshot must carry the fields the child depends on. */
+function assertContractSnapshot(v: unknown, path: string): ContractSnapshot {
+  const bad = (why: string): never => {
+    throw new Error(`contract snapshot at ${path} is malformed: ${why}`);
+  };
+  if (typeof v !== "object" || v === null) return bad("not an object");
+  const o = v as Record<string, unknown>;
+  if (typeof o.session !== "string" || o.session === "") bad("session must be a non-empty string");
+  if (typeof o.dispatchedAt !== "string") bad("dispatchedAt must be a string");
+  if (typeof o.node !== "object" || o.node === null) bad("node must be an object");
+  const node = o.node as Record<string, unknown>;
+  for (const key of ["id", "kind", "state", "gate"]) {
+    if (typeof node[key] !== "string") bad(`node.${key} must be a string`);
+  }
+  return v as ContractSnapshot;
 }
