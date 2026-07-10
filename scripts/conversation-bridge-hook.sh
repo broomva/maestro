@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bstack/scripts/conversation-bridge-hook.sh — P1 Conversation Bridge (Stop hook).
+# scripts/conversation-bridge-hook.sh — P1 Conversation Bridge (Stop hook).
 #
 # Captures the session to the workspace knowledge graph. SHIPPED by bstack and
 # DEPLOYED into each workspace by `bstack bootstrap`. Self-contained + graceful:

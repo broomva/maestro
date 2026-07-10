@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bstack/scripts/skill-freshness-hook.sh — P7 Skill Freshness (Claude Code SessionStart).
+# scripts/skill-freshness-hook.sh — P7 Skill Freshness (Claude Code SessionStart).
 #
 # Nudges the user when installed skills are stale (>= 7d since the last update
 # check). Never blocks; stdout from a SessionStart hook is injected as context.
