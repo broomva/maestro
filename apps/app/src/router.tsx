@@ -1,4 +1,5 @@
 import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
+import { Shell } from "./components/shell";
 import { KitchenSink } from "./routes/kitchen-sink";
 import { Landing } from "./routes/landing";
 
@@ -19,7 +20,15 @@ const kitchenSinkRoute = createRoute({
   component: KitchenSink,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, kitchenSinkRoute]);
+// /app — the M2 shell (BRO-1771): sidebar + top bar + never-scroll main. Real product routes
+// mount inside it in BRO-1824; for now it renders the shell's placeholder panel.
+const appRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/app",
+  component: Shell,
+});
+
+const routeTree = rootRoute.addChildren([indexRoute, kitchenSinkRoute, appRoute]);
 
 export const router = createRouter({ routeTree });
 
