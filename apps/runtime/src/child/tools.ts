@@ -15,7 +15,7 @@
 //   • bounded READS — shell stdout/stderr and file reads stop at MAX_OUTPUT *bytes* (streamed, never
 //     buffered whole), so a `yes` / gigabyte file can't OOM the child before the clip.
 
-import { realpath, stat } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 /** One tool request the model made — an Anthropic `tool_use` content block. */
@@ -53,8 +53,9 @@ export const DEFAULT_SHELL_TIMEOUT_MS = 120_000;
 
 /** Cap a string to `cap` UTF-16 units, WITHOUT splitting a surrogate pair at the boundary (a lone high
  *  surrogate would decode to U+FFFD in the model's view). Returns only the capped text; the caller
- *  appends any truncation marker so the marker tracks the real clipped decision, not just `s.length`. */
-function capText(s: string, cap: number): string {
+ *  appends any truncation marker so the marker tracks the real clipped decision, not just `s.length`.
+ *  Exported for a direct surrogate-boundary unit test (the sole reason this exists over String.slice). */
+export function capText(s: string, cap: number): string {
   if (s.length <= cap) return s;
   let end = cap;
   const last = s.charCodeAt(end - 1);
@@ -172,6 +173,11 @@ async function realInsideJail(cwd: string, abs: string): Promise<boolean> {
   const base = await realpath(cwd).catch(() => resolve(cwd)); // real cwd; lexical fallback if unresolved
   const real = await realpath(abs).catch(() => null);
   if (real !== null) return insideJail(base, real); // target exists — check where it really points
+  // realpath failed. A DANGLING symlink (an entry exists at `abs` but its target does not) also ENOENTs
+  // here — but `Bun.write` would FOLLOW it and create the target outside the jail. Fail closed: if lstat
+  // sees anything at `abs`, refuse. Only a truly-absent path (lstat ENOENTs too) is a fresh create.
+  const entry = await lstat(abs).catch(() => null);
+  if (entry !== null) return false;
   // Target does not exist yet (a fresh edit, possibly into new nested dirs `Bun.write` will create). Walk
   // up to the nearest EXISTING ancestor and check THAT: a symlinked ancestor (`d/link/new`, link → /etc)
   // is still caught, while a legitimate deep create (`a/b/c.txt`) is allowed — any dirs created under a
@@ -254,20 +260,25 @@ export async function executeTool(
       // clipped flag is honest about the COMBINED cut, not just each stream's own cap. The `…(truncated)`
       // marker is appended from `clipped` (not from length) so it also fires at the exact-cap boundary —
       // the model reads `content`, never the summary, so the clip signal must live in the content.
-      const raw = [out.text, err.text].filter(Boolean).join("\n").trim();
+      // Do NOT trim: the model treats this as the command's authoritative bytes, so leading indentation
+      // and trailing newlines must survive verbatim (a `cat file.py` / `git diff` the model reconstructs).
+      // Emptiness is decided on a trimmed COPY so a whitespace-only run still gets the readable fallback.
+      const raw = [out.text, err.text].filter(Boolean).join("\n");
       const clipped = out.clipped || err.clipped || raw.length > MAX_OUTPUT;
       const body = clipped ? `${capText(raw, MAX_OUTPUT)}\n…(truncated)` : raw;
+      const hasOutput = body.trim() !== "";
       if (didTimeout) {
+        const notice = `(timed out after ${timeoutMs}ms)`;
         return {
           ok: false,
           summary: `shell \`${command.slice(0, 60)}\` → timed out (${timeoutMs}ms)`,
-          content: `${body}\n(timed out after ${timeoutMs}ms)`.trim(),
+          content: hasOutput ? `${body}\n${notice}` : notice,
         };
       }
       return {
         ok: code === 0,
         summary: `shell \`${command.slice(0, 60)}\` → exit ${code}${clipped ? " (clipped)" : ""}`,
-        content: body || `(no output; exit ${code})`,
+        content: hasOutput ? body : `(no output; exit ${code})`,
       };
     }
     if (name === "read") {
