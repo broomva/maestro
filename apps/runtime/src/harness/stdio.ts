@@ -46,61 +46,17 @@ import {
 } from "../config";
 import type { IndexDb } from "../db/client";
 import { event, session } from "../db/schema";
+import { createNdjsonSplitter, DEFAULT_MAX_LINE_BYTES, type NdjsonSplitter } from "./ndjson";
 import type { ChildEmittedEvent } from "./runner";
 
 /** An over-liveness run parks `blocked` (F3.1) — the one place that mapping lives for HARNESS §2. */
 const PARK_STATE = "blocked" satisfies SessionStatus;
 
 // ── 1. Line splitter ─────────────────────────────────────────────────────────
-// Bun's `proc.stdout` is a `ReadableStream<Uint8Array>` that hands us arbitrary byte chunks — a
-// single read may carry half a line, or several lines plus a partial. This buffers across chunks and
-// yields only COMPLETE lines, retaining the trailing partial for the next push. A pathological child
-// that streams megabytes with no newline must not grow the buffer without bound — past `maxLineBytes`
-// the buffer is dropped and counted (an `overflow`), so the pump can never OOM the supervisor.
-
-/** Guard against an unbounded partial line (a child streaming bytes with no `\n`). 16 MiB is far
- *  above any real event — a coalesced `agent.said` turn is kilobytes — so a trip means abuse/bug. */
-const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
-
-export interface NdjsonSplitter {
-  /** Feed a decoded chunk; return every complete line it completes (newline-delimited, `\n` stripped). */
-  push(chunk: string): string[];
-  /** Any trailing partial with no final newline (a child that exits mid-line), or null. */
-  flush(): string | null;
-  /** How many times the buffer overflowed `maxLineBytes` and was dropped. */
-  overflows(): number;
-}
-
-export function createNdjsonSplitter(maxLineBytes = DEFAULT_MAX_LINE_BYTES): NdjsonSplitter {
-  let buf = "";
-  let overflowCount = 0;
-  return {
-    push(chunk: string): string[] {
-      buf += chunk;
-      const lines: string[] = [];
-      let idx = buf.indexOf("\n");
-      while (idx !== -1) {
-        // strip an optional trailing `\r` so a CRLF child never yields a corrupt fragment
-        const line = buf.slice(0, idx);
-        lines.push(line.endsWith("\r") ? line.slice(0, -1) : line);
-        buf = buf.slice(idx + 1);
-        idx = buf.indexOf("\n");
-      }
-      // No newline in a buffer this large means an abusive/broken line — drop it, keep the pump alive.
-      if (buf.length > maxLineBytes) {
-        buf = "";
-        overflowCount++;
-      }
-      return lines;
-    },
-    flush(): string | null {
-      const rest = buf;
-      buf = "";
-      return rest.length > 0 ? rest : null;
-    },
-    overflows: () => overflowCount,
-  };
-}
+// The NDJSON byte-stream→lines primitive now lives in ./ndjson (extracted in BRO-1862 so the child's stdin
+// control reader can reuse it without importing this supervisor-side module). Imported at the top for the
+// stdout pump below and RE-EXPORTED here so this module's other consumers (stdio.test.ts) are unchanged.
+export { createNdjsonSplitter, DEFAULT_MAX_LINE_BYTES, type NdjsonSplitter };
 
 // ── 2. Line classification ─────────────────────────────────────────────────────
 // Three kinds of stdout line: a SESSION EVENT (`{actor, type, payload?}`, a wire type) to persist; a

@@ -128,6 +128,20 @@ describe("createNdjsonSplitter", () => {
     // the pump keeps working after a drop
     expect(s.push('{"a":1}\n')).toEqual(['{"a":1}']);
   });
+
+  test("extracts a COMPLETE line before the overflow drop — a valid line co-resident with an over-cap prefix is not lost", () => {
+    // BRO-1862 P20 anti-vacuity backstop: the overflow drop must run AFTER line extraction, so a runaway
+    // (over-cap, no-newline) prefix that shares one push with a following complete line does NOT eat that
+    // line. This is the invariant the child's stdin control reader relies on (a dropped `stop` would keep a
+    // run beating after the human hit stop). Asserted DETERMINISTICALLY here — a single push, no stdin pipe
+    // — so a drop-before-extract regression reds regardless of any Bun stdin chunk-size change.
+    const s = createNdjsonSplitter(16);
+    const junk = "A".repeat(20); // a COMPLETE line longer than the 16-byte cap
+    // one push: the over-cap complete line + a valid partial after its newline.
+    expect(s.push(`${junk}\n{"ok":1}`)).toEqual([junk]); // the complete line is returned (extract first)
+    expect(s.overflows()).toBe(0); // nothing dropped — a drop-before-extract bug would trip overflow here
+    expect(s.push("\n")).toEqual(['{"ok":1}']); // the buffered partial SURVIVED and completes next push
+  });
 });
 
 // ── 2. Classification ──────────────────────────────────────────────────────────

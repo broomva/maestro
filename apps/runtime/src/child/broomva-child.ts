@@ -23,6 +23,7 @@ import { join } from "node:path";
 import type { Budget, WorkContract } from "@maestro/protocol";
 import { DEFAULT_CONTEXT_CEILING_TOKENS } from "../config";
 import { readContractSnapshot } from "../harness/contract-snapshot";
+import { createNdjsonSplitter } from "../harness/ndjson";
 import type { ChildEmittedEvent } from "../harness/runner";
 import { parseChildArgv } from "../harness/spawn-contract";
 import {
@@ -283,6 +284,102 @@ async function callProxy(messages: readonly Msg[]): Promise<ProxyTurn> {
   }
 }
 
+// ── Stdin control channel (HARNESS §2) ──────────────────────────────────────
+// The supervisor writes NDJSON control lines to the child's stdin CONCURRENTLY with the beat loop:
+//   {"type":"ping"}         → liveness: the child echoes {"type":"pong"} (the supervisor classifies pong
+//                             as a liveness signal — never persisted — and resets its hung-gate), without
+//                             touching the loop.
+//   {"type":"stop",reason}  → a GRACEFUL halt: the loop finishes the CURRENT beat (never mid-executeTool),
+//                             then exits 10 with reason "user_stop" at the next beat boundary. The
+//                             supervisor parks the node blocked (supervisor.ts: every exit-10 reason except
+//                             fresh_context parks blocked) — DISTINCT from the F8 SIGKILL path (canceled).
+//   {"type":"chat",message} → inject a user turn (a UIMessage envelope, ChatControlMessage) into the running
+//                             conversation so the NEXT beat sees it (the seam F10's chat endpoint feeds).
+// The reader NEVER blocks a beat and NEVER throws — a malformed / partial / oversized line is skipped, not
+// fatal (the tool layer's never-throw discipline). Shared state is read only at the beat boundary, so the
+// single-threaded event loop needs no locking: the reader mutates at its await points, the loop reads at
+// the top of each iteration.
+
+/** A control line longer than this (still no newline) is a hostile/runaway input — drop the buffer rather
+ *  than grow it unbounded (mirrors tools.ts MAX_OUTPUT). Generous: a real chat UIMessage is far under it. */
+const MAX_CONTROL_LINE = 1_000_000;
+
+interface ControlState {
+  /** User turns injected via `chat`, drained into `messages` at the next beat boundary. */
+  pendingChat: Msg[];
+  /** Set by the FIRST `stop` — the loop exits 10 (user_stop) at the next beat boundary. */
+  stopRequested: boolean;
+}
+
+/** Fold a `chat` control line's UIMessage envelope (`{parts:[{type:"text",text}]}`) into an Anthropic user
+ *  turn — the text parts, joined. Returns null when there is no text (never inject an empty turn: it wastes
+ *  a beat and adds nothing). Defensive against a malformed envelope arriving over the loose control line. */
+function userTurnFromChat(message: unknown): Msg | null {
+  if (message === null || typeof message !== "object") return null;
+  const parts = (message as { parts?: unknown }).parts;
+  if (!Array.isArray(parts)) return null;
+  const text = parts
+    .filter(
+      (p): p is { type: string; text: string } =>
+        p !== null &&
+        typeof p === "object" &&
+        (p as { type?: unknown }).type === "text" &&
+        typeof (p as { text?: unknown }).text === "string",
+    )
+    .map((p) => p.text)
+    .join("");
+  return text === "" ? null : { role: "user", content: text };
+}
+
+/** Echo the liveness pong — a bare `{"type":"pong"}` line. The supervisor's parser matches the reserved
+ *  `pong` type BEFORE the actor check, so it is a liveness reset, never a persisted event. */
+async function pong(): Promise<void> {
+  await Bun.write(Bun.stdout, '{"type":"pong"}\n');
+}
+
+/** Handle one control line. NEVER throws — a malformed / unknown line is skipped. */
+async function handleControlLine(line: string, state: ControlState): Promise<void> {
+  const trimmed = line.trim();
+  if (trimmed === "") return;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(trimmed);
+  } catch {
+    return; // malformed JSON — skip
+  }
+  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return;
+  const type = (obj as { type?: unknown }).type;
+  if (type === "ping") {
+    await pong();
+  } else if (type === "stop") {
+    state.stopRequested = true; // first stop wins; the loop reads it at the beat boundary
+  } else if (type === "chat") {
+    const turn = userTurnFromChat((obj as { message?: unknown }).message);
+    if (turn !== null) state.pendingChat.push(turn);
+  }
+  // unknown type → skip
+}
+
+/** Consume the NDJSON control channel from stdin, mutating `state`, until stdin closes. FIRE-AND-FORGET:
+ *  runs concurrently with the beat loop and swallows everything — a control-channel fault must never crash
+ *  the run (the reap + the loop own the real lifecycle). Reuses the shared `createNdjsonSplitter` (the same
+ *  primitive the supervisor's stdout pump uses) so partial lines across chunk boundaries, CRLF, and the
+ *  runaway-line overflow drop are handled identically — and, crucially, complete lines are extracted BEFORE
+ *  the overflow drop, so a valid control line co-resident with an over-cap partial is never lost. */
+async function readControlChannel(state: ControlState): Promise<void> {
+  try {
+    const splitter = createNdjsonSplitter(MAX_CONTROL_LINE);
+    const decoder = new TextDecoder();
+    for await (const chunk of Bun.stdin.stream()) {
+      for (const line of splitter.push(decoder.decode(chunk, { stream: true }))) {
+        await handleControlLine(line, state);
+      }
+    }
+  } catch {
+    // stdin errored / closed — control is best-effort; the loop + reap own the lifecycle.
+  }
+}
+
 async function main(): Promise<never> {
   // Emit run.started FIRST so EVERY exit — including a malformed-argv failure below — is preceded by a
   // child receipt (the every-exit-emits-a-run.exiting invariant), not a receiptless crash the supervisor
@@ -339,7 +436,26 @@ async function main(): Promise<never> {
   const base = await gitHead(cwd); // the run base — beat signatures diff vs this, so commits count
   let prevSig = (await beatSignal(cwd, base)).sig;
 
+  // Start the stdin control reader CONCURRENTLY with the loop (fire-and-forget, never throws). It mutates
+  // `control`; the loop reads it at the beat boundary below (never mid-beat, so a stop lands cleanly).
+  const control: ControlState = { pendingChat: [], stopRequested: false };
+  void readControlChannel(control);
+
   for (let beat = resumedFrom + 1; beat <= resumedFrom + MAX_BEATS; beat++) {
+    // BEAT BOUNDARY — the one place stdin control is applied (so a stop never interrupts an in-flight
+    // executeTool, and an injected chat turn joins the conversation as a clean user message):
+    //   • stop → finish here with a user_stop receipt → exit 10 (supervisor parks blocked).
+    //   • chat → drain the queued user turns into the conversation the next callProxy sends.
+    if (control.stopRequested) {
+      await emit({
+        actor: "system",
+        type: "run.exiting",
+        payload: { code: 10, reason: "user_stop" },
+      });
+      process.exit(10);
+    }
+    for (const injected of control.pendingChat.splice(0)) messages.push(injected);
+
     const turn = await callProxy(messages);
     if (turn.kind === "error") {
       await emit({
@@ -447,6 +563,20 @@ async function main(): Promise<never> {
       process.exit(10);
     }
     if (decision.action === "restart") {
+      // An explicit stop that RACED this ceiling-crossing beat WINS over the automatic restart. Otherwise the
+      // child would exit fresh_context, the supervisor would respawn a fresh child that boots
+      // stopRequested:false (the stop is stdin-only, not tracked across the respawn), and the human's stop
+      // would be silently lost — a run that keeps going after "stop" breaks the "gate is the human's"
+      // invariant. So honor the stop here (park blocked) instead of restarting. (A halt already parks blocked
+      // regardless of reason, so only the restart branch needs this precedence check.)
+      if (control.stopRequested) {
+        await emit({
+          actor: "system",
+          type: "run.exiting",
+          payload: { code: 10, reason: "user_stop" },
+        });
+        process.exit(10);
+      }
       // Context ceiling → lossless restart: checkpoint progress.md (so the respawn resumes — slice 2b-ii),
       // then run.restart_requested + exit 10 fresh_context; the supervisor respawns same session/worktree.
       // prepareRestart does file I/O (writeProgress); guard it so a checkpoint-write failure (ENOSPC /

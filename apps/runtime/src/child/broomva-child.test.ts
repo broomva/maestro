@@ -130,6 +130,26 @@ async function harness(
   });
   const server = serveProxy(proxyApp, { port: 0 });
   servers.push(server);
+  // Wrap the spawn to (1) CAPTURE the child's stdin writer — the test drives control lines directly
+  // through it (HARNESS §2, the seam F10 uses) — and (2) TEE the child's stdout so the test can observe
+  // raw liveness lines (pong) that the supervisor's tee classifies but never persists.
+  let capturedWrite: ((b: string) => void) | null = null;
+  const rawChunks: string[] = [];
+  const baseSpawn = makeChildSpawn(opts.childEnvExtra);
+  const spawnChild = (args: Parameters<typeof baseSpawn>[0]): ChildStdioPort => {
+    const port = baseSpawn(args);
+    capturedWrite = port.writeStdin;
+    const [supStream, testStream] = port.stdout.tee();
+    void (async () => {
+      const dec = new TextDecoder();
+      try {
+        for await (const c of testStream) rawChunks.push(dec.decode(c, { stream: true }));
+      } catch {
+        // the child died / stream closed — the test's assertions own the outcome
+      }
+    })();
+    return { ...port, stdout: supStream };
+  };
   const sup = createSupervisor({
     db: h.db,
     factory: createWorktreeSandboxFactory({ workspace: ws }),
@@ -137,12 +157,22 @@ async function harness(
     // A dead override points the child at an unreachable proxy (the fetch-throw path); default = the
     // real served proxy.
     proxy: { url: opts.proxyUrlOverride ?? server.url },
-    spawnChild: makeChildSpawn(opts.childEnvExtra),
+    spawnChild,
     mintRunId: () => "r1",
     hostEnv: { PATH: process.env.PATH },
     config: opts.config,
   });
-  return { h, sup, mock };
+  return {
+    h,
+    sup,
+    mock,
+    /** Write one NDJSON control line to the live child's stdin (ping / stop / chat). */
+    writeControl: (obj: unknown) => capturedWrite?.(`${JSON.stringify(obj)}\n`),
+    /** Write raw bytes to the child's stdin (for the overflow / partial-line edge cases). */
+    writeRaw: (s: string) => capturedWrite?.(s),
+    /** The child's raw stdout so far (for observing the non-persisted pong liveness line). */
+    rawStdout: () => rawChunks.join(""),
+  };
 }
 
 /** An Anthropic Messages response body carrying `text` — what the mock returns as the assistant reply. */
@@ -188,6 +218,32 @@ async function eventsOf(h: IndexHandle, sessionId: string, type: string) {
     .select()
     .from(event)
     .where(and(eq(event.sessionId, sessionId), eq(event.type, type as never)));
+}
+
+/** Poll the durable event table until a session's first event of `type` lands (bounded — the child + tee
+ *  run async). True once seen; false on timeout. */
+async function waitForEvent(
+  h: IndexHandle,
+  sessionId: string,
+  type: string,
+  timeoutMs = 5000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await eventsOf(h, sessionId, type)).length > 0) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return false;
+}
+
+/** Poll a predicate until true or timeout (for the non-DB observables: raw stdout, mock.calls). */
+async function pollUntil(pred: () => boolean, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pred()) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return false;
 }
 
 describe("broomva-child slice 1 — one model turn through the proxy (zero tokens)", () => {
@@ -886,5 +942,141 @@ describe("broomva-child pure helpers", () => {
     expect(p).toContain("project");
     expect(p).toContain("n7");
     expect(promptFor(null, "sess-1")).toContain("sess-1");
+  });
+});
+
+// The keep-alive script: the model appends to a file every beat — a GROWING diff, so the no-progress
+// engine never fires. A high context ceiling keeps the run off the fresh-context restart path, and a large
+// max_iterations keeps it off the iteration_cap halt — so the loop runs UNTIL stop/kill, not to an implicit
+// ~30-beat (DEFAULT_MAX_ITERATIONS) deadline. This lets a control line land WHILE the loop is running.
+const KEEPALIVE = {
+  budgetJson: JSON.stringify({ max_iterations: 1_000_000 }),
+  config: { ...loadConfig({}), contextCeilingTokens: 1_000_000 },
+  mock: {
+    fallback: { body: anthropicToolUse("ka", "shell", { command: "echo x >> keepalive.txt" }) },
+  },
+} as const;
+
+describe("broomva-child slice 3 — stdin control (chat / stop / ping), zero tokens", () => {
+  test("ping → the child echoes a pong liveness line while the loop runs", async () => {
+    const { h, sup, writeControl, rawStdout } = await harness(KEEPALIVE);
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    // the child is live + looping (first tool.call teed) before we probe.
+    expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true);
+    writeControl({ type: "ping" });
+    // the pong is a LIVENESS line, not a persisted event — observe it on the child's raw stdout.
+    expect(await pollUntil(() => rawStdout().includes('"type":"pong"'))).toBe(true);
+    // graceful end for the reaper; the pong assertion above is the point of this test.
+    expect(sup.kill("r1")).toBe(true);
+    await out.reaped;
+  });
+
+  test("stop → graceful halt at the beat boundary → user_stop → blocked (distinct from a kill)", async () => {
+    const { h, sup, writeControl } = await harness(KEEPALIVE);
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    // live + looping, then ask it to stop.
+    expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true);
+    writeControl({ type: "stop", reason: "test asked to stop" });
+    const res = await out.reaped;
+
+    // exit 10 with the child's canonical graceful-stop reason → the supervisor parks BLOCKED (every exit-10
+    // reason except fresh_context parks blocked). NOT a crash, NOT a kill.
+    expect(res.exitCode).toBe(10);
+    expect(res.reason).toBe("user_stop");
+    expect(res.sessionStatus).toBe("blocked");
+    expect(res.crash).toBe(false);
+    // exactly one run.exiting, carrying the stop reason (the child exits once, at the beat boundary).
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
+    expect(exiting).toHaveLength(1);
+    expect(JSON.parse(exiting[0]?.payload ?? "{}")).toMatchObject({
+      code: 10,
+      reason: "user_stop",
+    });
+    // a graceful stop is NOT a kill: no run.killed (that path is F8 SIGKILL → canceled).
+    expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_KILLED)).toHaveLength(0);
+  });
+
+  test("chat → an injected user turn appears in the NEXT beat's model request", async () => {
+    const { h, sup, writeControl, mock } = await harness(KEEPALIVE);
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    // beat 1 has already reached the model — capture the call count BEFORE injecting.
+    expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true);
+    const callsBefore = mock.calls.length;
+    const MARKER = "INJECTED_CHAT_9f3a2b";
+    writeControl({
+      type: "chat",
+      message: { id: "u1", role: "user", parts: [{ type: "text", text: MARKER }] },
+    });
+    // a subsequent model request (drained at the beat boundary) carries the injected user turn.
+    expect(
+      await pollUntil(() =>
+        mock.calls.slice(callsBefore).some((c) => JSON.stringify(c.payload ?? {}).includes(MARKER)),
+      ),
+    ).toBe(true);
+    // Sanity guard (not the anti-vacuity proof — the forward pollUntil above IS, and it is mutation-proven
+    // by userTurnFromChat→null reddening this test): the marker is a fresh unique literal, so its ABSENCE
+    // before injection documents that the match above is the injection, not a pre-existing prompt artifact.
+    const before = JSON.stringify(mock.calls.slice(0, callsBefore).map((c) => c.payload));
+    expect(before).not.toContain(MARKER);
+    expect(sup.kill("r1")).toBe(true);
+    await out.reaped;
+  });
+
+  test("a valid control line surviving an over-cap prefix is NOT lost (splitter extracts before dropping)", async () => {
+    // P20 regression (BRO-1862): the reader must extract complete lines BEFORE the overflow-drop, so a
+    // runaway (> MAX_CONTROL_LINE, no newline) prefix immediately followed by a real `stop` line does not
+    // discard the stop. A drop-before-extract reader (the pre-fix bug) would nuke the whole buffer — stop
+    // included — and the run would keep beating. Reusing the shared createNdjsonSplitter guarantees the
+    // correct order; this proves it end-to-end through the real child.
+    const { h, sup, writeRaw } = await harness(KEEPALIVE);
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true); // live + looping
+    // an over-cap junk prefix (no newline), then a terminating newline, then a REAL stop line — the stop
+    // must still be honored despite sharing the buffer with the overflow-triggering prefix.
+    const junk = "A".repeat(1_000_005); // > MAX_CONTROL_LINE (1_000_000)
+    writeRaw(`${junk}\n${JSON.stringify({ type: "stop", reason: "after overflow" })}\n`);
+    const res = await out.reaped;
+    expect(res.exitCode).toBe(10);
+    expect(res.reason).toBe("user_stop");
+    expect(res.sessionStatus).toBe("blocked");
+    expect(res.crash).toBe(false);
+  });
+
+  test("stop WINS over a racing fresh_context restart — the human's gate is honored, no respawn", async () => {
+    // P20 regression (BRO-1862): a stop that lands mid-beat on a beat that ALSO crosses the context ceiling
+    // must win over the automatic fresh_context restart — else the child exits fresh_context, the supervisor
+    // respawns a fresh child that boots stopRequested:false, and the human's stop is lost ("the gate is the
+    // human's"). Determinism (no timing race — the first cut of this test flaked in CI): a LOW ceiling makes
+    // beat 1 always want to restart, and a SLOW tool (`sleep 2`) is what removes the race — we send the stop
+    // after beat 1's tool.call (PAST the top-of-loop check), and the child then sits in executeTool for ~2s,
+    // which deterministically outlasts the (sub-ms) stdin read, so stopRequested is set BEFORE the beat's
+    // restart branch runs. So ONLY the restart-branch check (not the top check) can catch it: exit user_stop,
+    // respawns 0, no restart_requested. Without that branch check the child restarts and, with max_iterations
+    // bounded, halts iteration_cap (respawns > 0, reason != user_stop) — which is exactly what reds the test.
+    const { h, sup, writeControl } = await harness({
+      budgetJson: JSON.stringify({ max_iterations: 3 }), // bounds the no-fix respawn chain (fast mutation-proof)
+      config: { ...loadConfig({}), contextCeilingTokens: 10 }, // low → beat 1 always wants to restart
+      mock: { fallback: { body: anthropicToolUse("sr", "shell", { command: "sleep 2" }) } }, // slow → the stop
+      // is reliably processed during executeTool, BEFORE the restart branch (deterministic, not a timing race)
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    // wait until beat 1 is PAST its top-of-loop check (tool.call is emitted mid-beat, after that check), then
+    // send the stop — during the ~2s executeTool it is processed, so only the restart-branch check can catch it.
+    expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true);
+    writeControl({ type: "stop", reason: "stop racing the ceiling restart" });
+    const res = await out.reaped;
+
+    expect(res.exitCode).toBe(10);
+    expect(res.reason).toBe("user_stop"); // the stop won, NOT fresh_context
+    expect(res.respawns).toBe(0); // the restart was pre-empted — no respawn
+    expect(res.sessionStatus).toBe("blocked");
+    expect(res.crash).toBe(false);
+    // the restart branch was pre-empted by the stop → no restart was ever requested.
+    expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_RESTART_REQUESTED)).toHaveLength(0);
   });
 });
