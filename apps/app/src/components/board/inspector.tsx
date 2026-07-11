@@ -59,28 +59,29 @@ export function Inspector({ item }: { item: WorkItem | null }) {
       {/* The gate "look" — what ran · what it decided · what it asks. The one card a "Needs you" item
           leads with (FLOWS §F5); rendered as receipts, never as a control (verbs are M5's). */}
       {item.look ? (
-        <section
-          data-testid="inspector-look"
-          className="flex flex-col gap-2 border-border border-t pt-3"
-        >
-          <Receipt label="Ran">{item.look.ran}</Receipt>
-          {item.look.decided.length > 0 ? (
-            <div className="flex flex-col gap-0.5">
-              <dt className="text-muted-foreground text-xs">Decided</dt>
-              <dd>
-                <ul className="flex flex-col gap-0.5 text-foreground text-sm">
-                  {item.look.decided.map((d, i) => (
-                    // `decided` is a free-form string[] (duplicates possible, so the string itself is not
-                    // a safe key), and it is a render-only list of stateless text with no reordering
-                    // semantics — the index is the correct key here (React docs).
-                    // biome-ignore lint/suspicious/noArrayIndexKey: render-only list, no reorder/state
-                    <li key={i}>{d}</li>
-                  ))}
-                </ul>
-              </dd>
-            </div>
-          ) : null}
-          {item.look.ask ? <Receipt label="Asks">{item.look.ask}</Receipt> : null}
+        // The Receipt rows emit <dt>/<dd>, so the look receipts live in a <dl> (dt/dd must be within a
+        // dl; dl > div(dt,dd) is valid HTML5) — else screen readers do not pair them.
+        <section data-testid="inspector-look" className="border-border border-t pt-3">
+          <dl className="flex flex-col gap-2">
+            <Receipt label="Ran">{item.look.ran}</Receipt>
+            {item.look.decided.length > 0 ? (
+              <div className="flex flex-col gap-0.5">
+                <dt className="text-muted-foreground text-xs">Decided</dt>
+                <dd>
+                  <ul className="flex flex-col gap-0.5 text-foreground text-sm">
+                    {item.look.decided.map((d, i) => (
+                      // `decided` is a free-form string[] (duplicates possible, so the string itself is
+                      // not a safe key), and it is a render-only list of stateless text with no reordering
+                      // semantics — the index is the correct key here (React docs).
+                      // biome-ignore lint/suspicious/noArrayIndexKey: render-only list, no reorder/state
+                      <li key={i}>{d}</li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+            ) : null}
+            {item.look.ask ? <Receipt label="Asks">{item.look.ask}</Receipt> : null}
+          </dl>
         </section>
       ) : null}
 
