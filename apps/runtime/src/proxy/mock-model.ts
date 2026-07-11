@@ -71,6 +71,43 @@ function defaultBody(text: string): unknown {
 const realSleep = (ms: number): Promise<void> =>
   ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve();
 
+/** True if the response body contains any `tool_use` content block. */
+function hasToolUse(body: unknown): boolean {
+  if (body && typeof body === "object") {
+    const c = (body as { content?: unknown }).content;
+    if (Array.isArray(c)) {
+      return c.some(
+        (b) => b && typeof b === "object" && (b as { type?: unknown }).type === "tool_use",
+      );
+    }
+  }
+  return false;
+}
+
+/** True if the forwarded request advertised a non-empty `tools` array — the Anthropic precondition for a
+ *  model to be ALLOWED to return `tool_use`. */
+function advertisesTools(payload: unknown): boolean {
+  if (payload && typeof payload === "object") {
+    const t = (payload as { tools?: unknown }).tools;
+    return Array.isArray(t) && t.length > 0;
+  }
+  return false;
+}
+
+/** The body a real Anthropic model returns when it wants to act but the request advertised NO tools: it
+ *  cannot emit tool_use, so it falls back to text + end_turn. This is the fidelity that catches a child
+ *  which forgot to send `tools` ([[mock-fidelity-gap-false-green]]). */
+function degradedNoTools(): unknown {
+  return {
+    id: "msg_no_tools",
+    type: "message",
+    role: "assistant",
+    content: [{ type: "text", text: "(no tools were provided, so I cannot call one)" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 8, output_tokens: 12 },
+  };
+}
+
 /**
  * Build a scripted mock upstream. Responses come from `script` in order; after it is exhausted every
  * further call returns `fallback` (default: a 200 with `usagePerCallUsd` billed), so a loop that keeps
@@ -92,7 +129,13 @@ export function createMockModel(opts: MockModelOptions = {}): MockModel {
       i++;
       if (r.delayMs) await sleep(r.delayMs);
       const status = r.status ?? 200;
-      const body = r.body ?? defaultBody(status >= 200 && status < 300 ? "ok" : "error");
+      let body = r.body ?? defaultBody(status >= 200 && status < 300 ? "ok" : "error");
+      // FIDELITY: a real model cannot return tool_use unless the request advertised `tools`. If a scripted
+      // 2xx body wants to call a tool but the child forgot to send `tools`, degrade to text — so a child
+      // that drops the tools schema turns the tool tests RED instead of silently passing on the mock.
+      if (status >= 200 && status < 300 && hasToolUse(body) && !advertisesTools(req.payload)) {
+        body = degradedNoTools();
+      }
       // `usage` is honored as given (incl. explicitly omitted for a non-billable call); when the field is
       // absent entirely, default to the per-call cost so the budget scenario accrues spend.
       const usage = "usage" in r ? r.usage : { usd: usagePerCall };
