@@ -51,8 +51,8 @@ describe("mock-model — scripted upstream", () => {
     await mock.forward(req(1));
     await mock.forward({ ...req(2), role: "verifier" });
     expect(mock.calls).toEqual([
-      { model: "claude-opus-4-8", role: "agent" },
-      { model: "claude-opus-4-8", role: "verifier" },
+      { model: "claude-opus-4-8", role: "agent", payload: { beat: 1 } },
+      { model: "claude-opus-4-8", role: "verifier", payload: { beat: 2 } },
     ]);
   });
 

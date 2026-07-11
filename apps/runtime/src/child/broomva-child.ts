@@ -10,20 +10,20 @@
 // resolves the session's pinned model + meters in-path), §6 (child utterances: run.started / agent.said /
 // run.exiting on stdout as NDJSON).
 
-import { readFile } from "node:fs/promises";
 import type { WorkContract } from "@maestro/protocol";
+import { readContractSnapshot } from "../harness/contract-snapshot";
 import type { ChildEmittedEvent } from "../harness/runner";
 import { parseChildArgv } from "../harness/spawn-contract";
 import { beatExitEvents } from "../harness/stop-conditions";
 
-// Validate the supervisor argv (--role agent --session <id>) — a malformed argv is a supervisor bug, so
-// parseChildArgv throws loudly. `role` resolves the model PROXY-side (from the session token's context),
-// so the child never sends a model id; only `session` is used here (the prompt attribution).
-const { session } = parseChildArgv(Bun.argv.slice(2));
+/** A stalled proxy (accepts the connection, never responds) must not tie up a live run to the
+ *  supervisor's coarse ~5-min liveness watchdog — a per-call abort turns it into a fast child-declared
+ *  receipt (P20 BRO-1854). Sized to a single local-proxy call, well under the run-silence window. */
+const MODEL_CALL_TIMEOUT_MS = 120_000;
 
 const proxyUrl = process.env.BROOMVA_MODEL_PROXY ?? "";
 const token = process.env.BROOMVA_MODEL_TOKEN ?? "";
-const contractPath = process.env.BROOMVA_CONTRACT ?? "";
+const runDir = process.env.BROOMVA_RUN_DIR ?? "";
 
 /** Emit one NDJSON event to stdout, FLUSHED before exit — `Bun.write(Bun.stdout, …)`, not
  *  process.stdout.write: a child killed before an OS flush loses un-flushed lines (the BRO-1767 lesson). */
@@ -32,19 +32,19 @@ async function emit(ev: ChildEmittedEvent): Promise<void> {
 }
 
 /** Read the frozen contract snapshot (HARNESS §1) → the resolved WorkContract, or null if unreadable —
- *  a missing/torn contract must not crash the child before it can report; it degrades to a bare prompt. */
+ *  a missing/torn/invalid snapshot must not crash the child before it can report; it degrades to a bare
+ *  prompt. Reuses the VALIDATED reader (assertContractSnapshot) rather than a hand-rolled JSON.parse. */
 async function readContract(): Promise<WorkContract | null> {
-  if (contractPath === "") return null;
+  if (runDir === "") return null;
   try {
-    const snap = JSON.parse(await readFile(contractPath, "utf8")) as { node?: WorkContract };
-    return snap.node ?? null;
+    return (await readContractSnapshot(runDir)).node;
   } catch {
     return null;
   }
 }
 
 /** The turn's user prompt, derived from the contract — what am I working on + the success condition. */
-function promptFor(contract: WorkContract | null): string {
+export function promptFor(contract: WorkContract | null, session: string): string {
   if (contract === null) {
     return `You are a Maestro agent (session ${session}). Describe your first step.`;
   }
@@ -55,7 +55,7 @@ function promptFor(contract: WorkContract | null): string {
 /** Pull the assistant text out of an Anthropic Messages response body — the `content[]` text blocks,
  *  joined. Defensive: a null / primitive / non-array-content body yields "" rather than throwing (a JSON
  *  `null` body parses fine, so the null guard is load-bearing — without it `null.content` throws). */
-function textOf(body: unknown): string {
+export function textOf(body: unknown): string {
   if (body === null || typeof body !== "object") return "";
   const content = (body as { content?: unknown }).content;
   if (!Array.isArray(content)) return "";
@@ -70,6 +70,11 @@ function textOf(body: unknown): string {
 }
 
 async function main(): Promise<never> {
+  // Validate the supervisor argv (--role agent --session <id>) — a malformed argv is a supervisor bug, so
+  // parseChildArgv throws loudly. `role` resolves the model PROXY-side (from the session token's context),
+  // so the child never sends a model id; only `session` is used here (the prompt attribution). Read INSIDE
+  // main so importing this module (for the pure textOf/promptFor helpers, in tests) has no side effect.
+  const { session } = parseChildArgv(Bun.argv.slice(2));
   await emit({ actor: "system", type: "run.started" });
 
   const contract = await readContract();
@@ -87,8 +92,11 @@ async function main(): Promise<never> {
       // pre-forward budget reservation (HARNESS §3 / BRO-1788).
       body: JSON.stringify({
         max_tokens: 1024,
-        messages: [{ role: "user", content: promptFor(contract) }],
+        messages: [{ role: "user", content: promptFor(contract, session) }],
       }),
+      // Abort a stalled proxy call so it reports a fast receipt (via the catch) instead of hanging to the
+      // supervisor's coarse liveness watchdog.
+      signal: AbortSignal.timeout(MODEL_CALL_TIMEOUT_MS),
     });
   } catch (err) {
     await emit({
@@ -142,4 +150,6 @@ function msg(err: unknown): string {
   return String((err as Error)?.message ?? err);
 }
 
-await main();
+// Run ONLY as the spawned entrypoint (`bun broomva-child.ts`). Importing this module (for the pure
+// textOf/promptFor helpers in tests) must NOT run the turn.
+if (import.meta.main) await main();

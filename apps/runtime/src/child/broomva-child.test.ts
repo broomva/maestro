@@ -24,6 +24,8 @@ import { createModelProxy, type ProxyServer, serveProxy } from "../proxy/proxy";
 import { SessionTokenRegistry } from "../proxy/tokens";
 import { createWorktreeSandboxFactory } from "../sandbox/worktree";
 import { createSupervisor } from "../supervisor/supervisor";
+// Pure helpers — importable because broomva-child.ts guards `main()` behind `import.meta.main`.
+import { promptFor, textOf } from "./broomva-child";
 
 const BROOMVA_CHILD = join(import.meta.dir, "broomva-child.ts");
 const FIXED_MS = 1_700_000_000_000;
@@ -82,25 +84,34 @@ async function openMem(): Promise<IndexHandle> {
   return h;
 }
 
-async function seedNode(h: IndexHandle, id: string, budgetJson?: string): Promise<void> {
+async function seedNode(
+  h: IndexHandle,
+  id: string,
+  opts: { kind?: string; budgetJson?: string } = {},
+): Promise<void> {
   await h.db.insert(node).values({
     id,
     path: `work/${id}`,
-    kind: "task",
+    kind: (opts.kind ?? "task") as never,
     state: "triggered",
     gate: "human",
-    budgetJson: budgetJson ?? null,
+    budgetJson: opts.budgetJson ?? null,
     createdAt: FIXED_MS,
     updatedAt: FIXED_MS,
   });
 }
 
 async function harness(
-  opts: { budgetJson?: string; mock?: MockModelOptions; proxyUrlOverride?: string } = {},
+  opts: {
+    budgetJson?: string;
+    mock?: MockModelOptions;
+    proxyUrlOverride?: string;
+    kind?: string;
+  } = {},
 ) {
   const ws = await makeWorkspace();
   const h = await openMem();
-  await seedNode(h, "n0", opts.budgetJson);
+  await seedNode(h, "n0", { budgetJson: opts.budgetJson, kind: opts.kind });
   const tokens = new SessionTokenRegistry(() => "tok-1");
   const guard = new BudgetGuard(h.db, new MemoryEventSink());
   const mock = createMockModel(opts.mock);
@@ -162,6 +173,13 @@ describe("broomva-child slice 1 — one model turn through the proxy (zero token
 
     // Exactly ONE model call reached the upstream, and it was the MOCK (not Anthropic) — zero tokens.
     expect(mock.calls).toHaveLength(1);
+
+    // The child READ the contract and folded it into the OUTBOUND prompt (proves it did NOT ignore the
+    // contract — a regression returning a constant prompt would fail here). The proxy forwarded the
+    // child's request body verbatim; it references the seeded contract (kind "task", id "n0").
+    const sentPrompt = JSON.stringify(mock.calls[0]?.payload ?? {});
+    expect(sentPrompt).toContain("task");
+    expect(sentPrompt).toContain("n0");
 
     // The child READ the response and teed the model's ACTUAL text as agent.said (not a fabricated line).
     const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
@@ -255,5 +273,66 @@ describe("broomva-child slice 1 — one model turn through the proxy (zero token
     const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
     expect(said).toHaveLength(1);
     expect(JSON.parse(said[0]?.payload ?? "{}")).toEqual({ text: "" });
+  });
+
+  test("the outbound prompt reflects the contract — a different kind yields a different prompt", async () => {
+    // Discriminates "child read the contract" from "child sends a constant prompt": a `project` contract
+    // must flow into the forwarded prompt, NOT the default "task"/bare wording.
+    const { sup, mock } = await harness({
+      kind: "project",
+      mock: { script: [{ body: anthropicBody("ok") }] },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    await out.reaped;
+    expect(mock.calls).toHaveLength(1);
+    const sent = JSON.stringify(mock.calls[0]?.payload ?? {});
+    expect(sent).toContain("project");
+    expect(sent).not.toContain("Work on this task");
+  });
+});
+
+describe("broomva-child pure helpers", () => {
+  test("textOf joins content[] text blocks and guards null/non-object/non-text without throwing", () => {
+    expect(
+      textOf({
+        content: [
+          { type: "text", text: "a" },
+          { type: "text", text: "b" },
+        ],
+      }),
+    ).toBe("ab");
+    expect(
+      textOf({
+        content: [
+          { type: "text", text: "x" },
+          { type: "tool_use", id: "t" },
+        ],
+      }),
+    ).toBe("x");
+    // Load-bearing: `typeof null === "object"` in JS, so the explicit `=== null` guard is what stops
+    // `null.content` from throwing — a body the mock can't produce, so this direct unit test is its cover.
+    expect(textOf(null)).toBe("");
+    expect(textOf("a string body")).toBe("");
+    expect(textOf(42)).toBe("");
+    expect(textOf({ content: "not an array" })).toBe("");
+    expect(textOf({})).toBe("");
+  });
+
+  test("promptFor folds the contract kind + id; a null contract degrades to a bare prompt", () => {
+    const p = promptFor(
+      {
+        id: "n7",
+        kind: "project",
+        state: "triggered",
+        gate: "human",
+        created: "2026-01-01",
+        updated: "2026-01-01",
+      },
+      "sess-1",
+    );
+    expect(p).toContain("project");
+    expect(p).toContain("n7");
+    expect(promptFor(null, "sess-1")).toContain("sess-1");
   });
 });
