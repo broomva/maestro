@@ -11,7 +11,7 @@
 // liveness stays visible, and `release()` on shutdown (delete the file, only if it is still ours).
 
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 /** Heartbeat cadence: refresh the lock's timestamp this often (well under STALE). */
@@ -92,36 +92,61 @@ export async function acquireRuntimeLock(
   const staleMs = opts.staleMs ?? DEFAULT_LOCK_STALE_MS;
   await mkdir(dirname(lockPath), { recursive: true });
 
-  const write = (flag: "wx" | "w"): Promise<void> =>
-    writeFile(lockPath, JSON.stringify({ id, heartbeat: now() } satisfies LockRecord), {
-      encoding: "utf8",
-      flag,
-    });
+  const record = (): string => JSON.stringify({ id, heartbeat: now() } satisfies LockRecord);
+  const tmpPath = (): string => `${lockPath}.${id}.${randomBytes(4).toString("hex")}.tmp`;
 
+  // ATOMIC acquire: write the FULL content to a unique temp, then hard-`link` it onto lockPath. `link`
+  // is atomic + fails EEXIST if the lock is held — and because the content is written to the temp BEFORE
+  // the link, a concurrent reader never sees a half-written / empty lock (the create-then-write window
+  // that `writeFile(flag:"wx")` leaves open, which let a racing loser read `null` and double-acquire).
+  const tmp = tmpPath();
+  await writeFile(tmp, record(), "utf8");
   try {
-    // Happy path: atomic exclusive create — no lock existed, we own it. Wins any fresh-start race.
-    await write("wx");
-  } catch {
-    // A lock file already exists — inspect it.
-    const existing = await readLock(lockPath);
-    if (existing !== null) {
-      const age = now() - existing.heartbeat;
-      if (existing.id !== id && age < staleMs) {
-        // A DIFFERENT runtime, heartbeat still fresh → it is live. Refuse (D4).
-        throw new RuntimeLockedError(existing.id, age);
+    try {
+      await link(tmp, lockPath); // won the (possibly-racing) fresh acquire
+    } catch {
+      // lockPath already exists — inspect the (fully-written) holder.
+      const existing = await readLock(lockPath);
+      if (existing !== null && existing.id !== id && now() - existing.heartbeat < staleMs) {
+        throw new RuntimeLockedError(existing.id, now() - existing.heartbeat); // fresh + other → refuse
       }
-      // Ours (idempotent re-acquire) or STALE (prior runtime died) → steal by overwriting.
+      // STALE (dead prior runtime), OURS (idempotent), or unreadable → steal: remove + retry the link.
+      await rm(lockPath, { force: true });
+      try {
+        await link(tmp, lockPath);
+      } catch {
+        // A racing stealer linked between our rm and link. Refuse if it is a fresh other; else surface a
+        // retryable contention error rather than risk a double-acquire by forcing.
+        const raced = await readLock(lockPath);
+        if (raced !== null && raced.id !== id && now() - raced.heartbeat < staleMs) {
+          throw new RuntimeLockedError(raced.id, now() - raced.heartbeat);
+        }
+        throw new Error("runtime lock contended during steal — retry startup");
+      }
     }
-    await write("w");
+  } finally {
+    // The link left a second name for the temp inode; unlink the temp (lockPath keeps the content). On a
+    // refuse/throw this just cleans the orphaned temp.
+    await rm(tmp, { force: true });
   }
 
   return {
     id,
     async heartbeat(): Promise<void> {
+      // ATOMIC refresh: write a temp then `rename` over lockPath (atomic replace — no truncate window a
+      // concurrent acquire could read as empty + steal). Best-effort: a failure is swallowed, next tick
+      // retries. (A heartbeat that lands AFTER we were stale-stolen could clobber the stealer — bounded
+      // by staleMs > max pause, the standard file-lock limit; D4 is mutual exclusion, not consensus.)
+      const t = tmpPath();
       try {
-        await write("w");
+        await writeFile(t, record(), "utf8");
+        await rename(t, lockPath);
       } catch {
-        // best-effort — a transient FS failure must not crash the runtime; the next tick retries
+        try {
+          await rm(t, { force: true });
+        } catch {
+          // temp already gone — nothing to clean
+        }
       }
     },
     async release(): Promise<void> {

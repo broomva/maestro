@@ -5,7 +5,7 @@
 // tables. Anti-vacuity [[self-hosting-vacuous-pass]]: exact counts / statuses / spend, not "it ran".
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EVENT_TYPES } from "@maestro/protocol";
@@ -32,13 +32,41 @@ async function makeWorkspace(): Promise<string> {
   return dir;
 }
 
-/** One flattened journal line, byte-shaped exactly like SessionTee.#write ({...payload, ts, actor, type}). */
+/** One flattened journal line, byte-shaped exactly like SessionTee.#write ({...payload, ts, actor, type})
+ *  AND fsJournalSink ({...payload, ts, actor, type}) — the co-writer. `actor` defaults to the tee's
+ *  "agent"; budget co-writer lines pass "system". */
 function journalLine(
   type: string,
   payload: Record<string, unknown> = {},
   tsMs = 1_700_000_000_000,
+  actor = "agent",
 ): string {
-  return JSON.stringify({ ...payload, ts: new Date(tsMs).toISOString(), actor: "agent", type });
+  return JSON.stringify({ ...payload, ts: new Date(tsMs).toISOString(), actor, type });
+}
+/** Seed an index `event` row that byte-matches a `journalLine(type,payload,ts,actor)` — the tee's live
+ *  insert (payload re-nested as a JSON string, numeric ts). Used to model "already indexed before crash". */
+async function seedIndexed(
+  h: IndexHandle,
+  sessionId: string,
+  type: string,
+  payload: Record<string, unknown> = {},
+  tsMs = 1_700_000_000_000,
+  actor = "agent",
+): Promise<void> {
+  await h.db.insert(event).values({
+    sessionId,
+    ts: tsMs,
+    actor: actor as never,
+    type: type as never,
+    payload: Object.keys(payload).length > 0 ? JSON.stringify(payload) : null,
+  });
+}
+async function typeCount(h: IndexHandle, sessionId: string, type: string): Promise<number> {
+  const rows = await h.db
+    .select({ t: event.type })
+    .from(event)
+    .where(and(eq(event.sessionId, sessionId), eq(event.type, type as never)));
+  return rows.length;
 }
 /** Write a run's session.jsonl (creating runs/run-<id>/). */
 async function writeRunJournal(
@@ -69,99 +97,105 @@ async function eventCount(h: IndexHandle, sessionId: string): Promise<number> {
   return row?.n ?? 0;
 }
 
-describe("recovery — journal replay (F9.1, no event loss)", () => {
-  test("replays only the tail the index was missing (per-session high-water mark)", async () => {
+describe("recovery — journal replay (F9.1, no event loss; the CO-WRITER reality)", () => {
+  test("inserts the crash-tail AND the journal-only budget events, dedup by content, no dup", async () => {
     const ws = await makeWorkspace();
     const h = await openMem();
     await seedSession(h, "a", "blocked");
-    // The index already has 2 of the session's events (the pre-crash committed prefix).
-    for (let i = 0; i < 2; i++) {
-      await h.db
-        .insert(event)
-        .values({ sessionId: "a", ts: 1, actor: "agent", type: "run.beat", payload: null });
-    }
-    // The journal (FS-first → ahead) has 5 events; recovery must re-insert the missing 3.
+    const T = 1_700_000_000_000;
+    // Pre-crash INDEX state: the tee indexed 2 child events. The proxy's budget lines are journal-ONLY
+    // (fsJournalSink never inserts them into the index), so the index is a SUBSEQUENCE of the journal.
+    await seedIndexed(h, "a", "run.beat", { i: 0 }, T);
+    await seedIndexed(h, "a", "agent.said", { text: "hi" }, T);
+    // The journal (complete truth): the 2 indexed tee events, INTERLEAVED with 2 journal-only budget
+    // lines (actor system), plus a tee crash-tail the index never got.
     await writeRunJournal(ws, "a", [
-      journalLine("run.beat", { i: 0 }),
-      journalLine("run.beat", { i: 1 }),
-      journalLine("run.beat", { i: 2 }),
-      journalLine("agent.said", { text: "hi" }),
-      journalLine("run.exiting", { code: 0, reason: "done" }),
+      journalLine("run.beat", { i: 0 }, T),
+      journalLine("budget.metered", { session: "a", usd: 0.3 }, T, "system"),
+      journalLine("agent.said", { text: "hi" }, T),
+      journalLine("budget.metered", { session: "a", usd: 0.4 }, T, "system"),
+      journalLine("run.exiting", { code: 0, reason: "done" }, T),
     ]);
-    const r = await recoverOnStartup(h.db, { workspace: ws, now: () => 2 });
+    const r = await recoverOnStartup(h.db, { workspace: ws, now: () => T });
+    // The 2 already-indexed tee events are CONSUMED (not re-inserted); the 2 budget + the run.exiting
+    // crash-tail are inserted. A count-based watermark would have dropped budget + duplicated a tee event.
     expect(r.replayedEvents).toBe(3);
-    expect(await eventCount(h, "a")).toBe(5); // no loss: index now matches the journal length
+    expect(await eventCount(h, "a")).toBe(5); // exactly the journal multiset — no loss, no dup
+    expect(await typeCount(h, "a", "run.beat")).toBe(1); // NOT duplicated
+    expect(await typeCount(h, "a", "budget.metered")).toBe(2); // journal-only events now indexed (D5 can read them)
   });
 
   test("replays across rotated segments in order (.1 → session.jsonl)", async () => {
     const ws = await makeWorkspace();
     const h = await openMem();
     await seedSession(h, "b", "blocked");
+    const T = 1_700_000_000_000;
     await writeRunJournal(
       ws,
       "b",
-      [journalLine("run.beat", { i: 0 }), journalLine("run.beat", { i: 1 })],
+      [journalLine("run.beat", { i: 0 }, T), journalLine("run.beat", { i: 1 }, T)],
       "session.jsonl.1",
     );
-    await writeRunJournal(ws, "b", [journalLine("run.beat", { i: 2 })], "session.jsonl");
+    await writeRunJournal(ws, "b", [journalLine("run.beat", { i: 2 }, T)], "session.jsonl");
     const r = await recoverOnStartup(h.db, { workspace: ws, now: () => 2 });
-    expect(r.replayedEvents).toBe(3); // .1 (2) + live (1)
+    expect(r.replayedEvents).toBe(3); // .1 (2) + live (1) — nothing indexed yet
     expect(await eventCount(h, "b")).toBe(3);
   });
 
-  test("is idempotent — a second recovery replays nothing", async () => {
+  test("is idempotent — a second recovery over the same co-writer journal inserts nothing", async () => {
     const ws = await makeWorkspace();
     const h = await openMem();
     await seedSession(h, "c", "blocked");
-    await writeRunJournal(ws, "c", [journalLine("run.beat"), journalLine("run.beat")]);
-    expect((await recoverOnStartup(h.db, { workspace: ws, now: () => 2 })).replayedEvents).toBe(2);
-    expect((await recoverOnStartup(h.db, { workspace: ws, now: () => 2 })).replayedEvents).toBe(0);
+    const T = 1_700_000_000_000;
+    await writeRunJournal(ws, "c", [
+      journalLine("run.beat", { i: 0 }, T),
+      journalLine("budget.metered", { session: "c", usd: 0.5 }, T, "system"),
+    ]);
+    expect((await recoverOnStartup(h.db, { workspace: ws, now: () => T })).replayedEvents).toBe(2);
+    expect((await recoverOnStartup(h.db, { workspace: ws, now: () => T })).replayedEvents).toBe(0);
     expect(await eventCount(h, "c")).toBe(2);
+  });
+
+  test("never DELETES an index-only event — a prior recovery's run.orphaned survives a re-recovery", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedSession(h, "d", "blocked");
+    const T = 1_700_000_000_000;
+    // The index holds a run.orphaned from a prior recovery (index-only — recovery does not journal it).
+    await seedIndexed(h, "d", "run.orphaned", {}, T, "system");
+    await writeRunJournal(ws, "d", [journalLine("run.beat", { i: 0 }, T)]); // journal lacks run.orphaned
+    await recoverOnStartup(h.db, { workspace: ws, now: () => T });
+    // The multiset-diff only INSERTS journal events; it never deletes → run.orphaned is untouched.
+    expect(await typeCount(h, "d", "run.orphaned")).toBe(1);
+    expect(await typeCount(h, "d", "run.beat")).toBe(1); // the journal event was inserted
   });
 });
 
-describe("recovery — budget reconcile (D5 derive-and-max)", () => {
-  test("corrects stale spend UP to the derived total; leaves higher stored spend alone; ignores refused", async () => {
+describe("recovery — budget reconcile (D5 derive-and-max, through the journal→index path)", () => {
+  test("derives from budget.metered that recovery REPLAYS out of the journal (not pre-seeded)", async () => {
     const ws = await makeWorkspace();
     const h = await openMem();
-    // Session A: derived 0.3+0.4 = 0.7 > stored 0.5 → corrected to 0.7.
+    // A: budget.metered live only in the JOURNAL (journal-only co-writer) → replay indexes them → D5
+    // derives 0.3+0.4=0.7 > stored 0.5 → corrected. This is the path the first cut's test bypassed.
+    await seedSession(h, "A", "blocked");
     await h.db.insert(runBudget).values({ sessionId: "A", spentUsd: 0.5, iterations: 1 });
-    await h.db.insert(event).values({
-      sessionId: "A",
-      ts: 1,
-      actor: "system",
-      type: EVENT_TYPES.BUDGET_METERED,
-      payload: JSON.stringify({ session: "A", usd: 0.3 }),
-    });
-    await h.db.insert(event).values({
-      sessionId: "A",
-      ts: 2,
-      actor: "system",
-      type: EVENT_TYPES.BUDGET_METERED,
-      payload: JSON.stringify({ session: "A", usd: 0.4 }),
-    });
-    await h.db.insert(event).values({
-      sessionId: "A",
-      ts: 3,
-      actor: "system",
-      type: EVENT_TYPES.BUDGET_REFUSED,
-      payload: JSON.stringify({ session: "A", reason: "per_run" }),
-    });
-    // Session B: derived 1.0 < stored 2.0 → unchanged (a crash-window under-count never lowers spend).
+    await writeRunJournal(ws, "A", [
+      journalLine("budget.metered", { session: "A", usd: 0.3 }, 1, "system"),
+      journalLine("budget.metered", { session: "A", usd: 0.4 }, 2, "system"),
+      journalLine("budget.refused", { session: "A", reason: "per_run" }, 3, "system"),
+    ]);
+    // B: derived 1.0 < stored 2.0 → unchanged (a crash-window under-count never lowers spend).
+    await seedSession(h, "B", "blocked");
     await h.db.insert(runBudget).values({ sessionId: "B", spentUsd: 2.0, iterations: 3 });
-    await h.db.insert(event).values({
-      sessionId: "B",
-      ts: 1,
-      actor: "system",
-      type: EVENT_TYPES.BUDGET_METERED,
-      payload: JSON.stringify({ session: "B", usd: 1.0 }),
-    });
+    await writeRunJournal(ws, "B", [
+      journalLine("budget.metered", { session: "B", usd: 1.0 }, 1, "system"),
+    ]);
 
     const r = await recoverOnStartup(h.db, { workspace: ws, now: () => 10 });
     expect(r.budgetReconciled).toBe(1); // only A corrected
     const [a] = await h.db.select().from(runBudget).where(eq(runBudget.sessionId, "A"));
     const [b] = await h.db.select().from(runBudget).where(eq(runBudget.sessionId, "B"));
-    expect(a?.spentUsd).toBeCloseTo(0.7, 6); // derived (refused excluded)
+    expect(a?.spentUsd).toBeCloseTo(0.7, 6); // derived (budget.refused excluded)
     expect(b?.spentUsd).toBeCloseTo(2.0, 6); // stored wins
   });
 });
@@ -212,6 +246,17 @@ describe("recovery — D4 singleton lock", () => {
     await expect(
       acquireRuntimeLock(lockPath, { id: "rt-2", now: () => 1000 }),
     ).rejects.toBeInstanceOf(RuntimeLockedError);
+  });
+
+  test("the acquired lock file is always FULLY WRITTEN (atomic link — no empty-file window to double-acquire)", async () => {
+    const ws = await makeWorkspace();
+    const lockPath = join(ws, ".maestro", "runtime.lock");
+    await acquireRuntimeLock(lockPath, { id: "rt-1", now: () => 1000 });
+    // link()-of-a-pre-written-temp means lockPath, once present, carries the FULL record — never the
+    // empty file writeFile(flag:"wx")'s create-then-write window exposed to a racing reader (→ double-acquire).
+    expect(JSON.parse(await readFile(lockPath, "utf8"))).toEqual({ id: "rt-1", heartbeat: 1000 });
+    // No leftover .tmp (the link's second name was unlinked).
+    expect((await readdir(join(ws, ".maestro"))).filter((n) => n.endsWith(".tmp"))).toEqual([]);
   });
 
   test("a STALE lock (dead prior runtime) is stealable", async () => {
