@@ -234,4 +234,45 @@ describe("RuntimeChatTransport — the F10 chat wire", () => {
     for await (const c of parseUiMessageStream(body)) seen.push(c);
     expect(seen.map((c) => c.type)).toEqual(["start", "finish"]);
   });
+
+  test("a genuine (non-abort) fetch error propagates — the swallow is abort-ONLY", async () => {
+    // The abort path returns cleanly; a real network failure must NOT be swallowed by the same catch.
+    const fetchImpl: FetchLike = async () => {
+      throw new Error("network down");
+    };
+    const t = new RuntimeChatTransport({ sessionId: "n0", fetchImpl });
+    let caught: unknown;
+    try {
+      for await (const _ of t.stream([])) {
+        /* none */
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect((caught as Error)?.message).toBe("network down");
+  });
+
+  test("a genuine (non-abort) read error mid-stream propagates", async () => {
+    const enc = new TextEncoder();
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls === 1)
+          return controller.enqueue(enc.encode(frame({ type: "start", messageId: "r1" })));
+        throw new Error("read exploded"); // the SECOND read fails with a non-abort error
+      },
+    });
+    const fetchImpl: FetchLike = async () => new Response(body, { status: 200 });
+    const t = new RuntimeChatTransport({ sessionId: "n0", fetchImpl });
+    let caught: unknown;
+    const seen: StreamChunk[] = [];
+    try {
+      for await (const c of t.stream([])) seen.push(c);
+    } catch (e) {
+      caught = e;
+    }
+    expect(seen.map((c) => c.type)).toEqual(["start"]); // the first frame streamed before the failure
+    expect((caught as Error)?.message).toBe("read exploded");
+  });
 });
