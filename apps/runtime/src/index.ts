@@ -23,6 +23,9 @@ import { MAESTRO_PROTOCOL_VERSION } from "@maestro/protocol";
 import { createApp } from "./app";
 import { loadConfig } from "./config";
 import type { IndexDb, IndexHandle } from "./db/client";
+// Type-only — the D4 lock handle; the value (acquireRuntimeLock) is dynamically imported in the
+// entrypoint block so mere `import ./index` (embedding/tests) never acquires a workspace lock.
+import type { RuntimeLock } from "./runtime-lock";
 // Type-only — erased at compile time, so the compiled /health-only stub never references
 // the watcher module (which is dynamically imported below, native-addon-safe).
 import type { WatcherHandle } from "./watcher";
@@ -120,6 +123,48 @@ if (import.meta.main) {
     }
   }
 
+  // D4 (BRO-1814): one runtime per workspace. Acquire the lock BEFORE recovery — a second runtime must
+  // refuse before it touches the shared index's authoritative tables (else its orphan-parking would park
+  // the LIVE runtime's running sessions). runtime-lock is driver-free but dynamic-imported so a bare
+  // `import ./index` never grabs a lock. A fresh lock held by a live runtime → refuse + exit(1).
+  let lock: RuntimeLock | undefined;
+  let lockHeartbeat: ReturnType<typeof setInterval> | undefined;
+  {
+    const { acquireRuntimeLock, DEFAULT_LOCK_HEARTBEAT_MS, RuntimeLockedError } = await import(
+      "./runtime-lock"
+    );
+    try {
+      lock = await acquireRuntimeLock(config.lockPath);
+    } catch (err) {
+      if (err instanceof RuntimeLockedError) {
+        console.error(`maestro runtime · refusing to start: ${err.message}`);
+        handle?.client.close();
+        watcher?.stop();
+        process.exit(1);
+      }
+      throw err;
+    }
+    lockHeartbeat = setInterval(() => void lock?.heartbeat(), DEFAULT_LOCK_HEARTBEAT_MS);
+  }
+
+  // F9 (BRO-1814): reconcile the persisted index BEFORE serving (F9.4). Replay journal tails the index
+  // missed (FS-first crash gap), D5 budget derive-and-max, expire dead leases, park orphaned runs. The
+  // top-level node-scan already ran; this reconciles events/budget/lease/session-status. Guarded — a
+  // recovery failure logs + serves anyway (degraded but up), never crashes the runtime.
+  if (index) {
+    try {
+      const { recoverOnStartup } = await import("./db/recovery");
+      const r = await recoverOnStartup(index, { workspace: config.workspace });
+      console.log(
+        `maestro runtime · recovery · replayed ${r.replayedEvents} events · reconciled ${r.budgetReconciled} budgets · expired ${r.leasesExpired} leases · parked ${r.orphansParked} orphans`,
+      );
+    } catch (err) {
+      console.warn(
+        `maestro runtime · recovery incomplete, serving anyway: ${(err as Error).message}`,
+      );
+    }
+  }
+
   const server = Bun.serve({ port: config.port, fetch: app.fetch });
   const indexStatus = index
     ? `index ${indexNodes} nodes${scanErrorCount ? ` (${scanErrorCount} scan errors)` : ""}`
@@ -134,6 +179,8 @@ if (import.meta.main) {
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (lockHeartbeat) clearInterval(lockHeartbeat);
+    void lock?.release(); // best-effort — a stale lock is stealable anyway; don't block exit on the unlink
     watcher?.stop();
     handle?.client.close();
     server.stop();

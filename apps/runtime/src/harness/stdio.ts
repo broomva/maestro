@@ -209,6 +209,36 @@ export interface RotateOptions {
   maxLines?: number;
 }
 
+/**
+ * Read a run's `session.jsonl` segments in APPEND (replay) order — the rotated `.1 → .2 → … →
+ * session.jsonl` sequence (BRO-1811). Returns each segment's full text; concatenating their lines
+ * reproduces the gapless append stream a crash-recovery replay (F9, BRO-1814) or a rebuild consumes.
+ * A missing run dir / no segments yields `[]`.
+ */
+export async function readSegmentsInOrder(runDir: string): Promise<string[]> {
+  let names: string[];
+  try {
+    names = await readdir(runDir);
+  } catch {
+    return [];
+  }
+  const numbered = names
+    .map((n) => /^session\.jsonl\.(\d+)$/.exec(n))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .sort((a, b) => Number(a[1]) - Number(b[1]))
+    .map((m) => m[0]);
+  const order = [...numbered, ...(names.includes("session.jsonl") ? ["session.jsonl"] : [])];
+  const out: string[] = [];
+  for (const name of order) {
+    try {
+      out.push(await readFile(join(runDir, name), "utf8"));
+    } catch {
+      // a segment vanished between readdir and read (concurrent teardown) — skip it
+    }
+  }
+  return out;
+}
+
 /** Count the newlines in a buffer — the segment's committed line count (each append writes one `\n`). */
 function countLines(buf: string): number {
   let n = 0;
