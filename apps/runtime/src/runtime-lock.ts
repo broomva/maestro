@@ -50,23 +50,34 @@ export interface RuntimeLock {
   release(): Promise<void>;
 }
 
-/** Read + parse the lock file, or null if absent/malformed. */
-async function readLock(lockPath: string): Promise<LockRecord | null> {
+/** The outcome of reading the lock file. DISTINGUISHES a confirmed-absent lock (ENOENT, stealable) from a
+ *  transient read error (EIO/EMFILE/EACCES/EISDIR…) — the latter must NOT be treated as a missing lock, or
+ *  a flaky fs would let a runtime steal a possibly-LIVE holder (CodeRabbit BRO-1814, fail-closed). */
+type LockRead =
+  | { kind: "held"; record: LockRecord } // a valid lock is present
+  | { kind: "absent" } // ENOENT — confirmed missing → stealable
+  | { kind: "malformed" } // present but unparseable/invalid — a torn write → overwritable
+  | { kind: "error" }; // transient/unexpected read error — NOT stealable (fail closed)
+
+/** Read + classify the lock file. Only "absent" (ENOENT) and "malformed" (unparseable body) are stealable;
+ *  any other read failure is a transient "error" callers refuse/skip on rather than steal a live lock. */
+async function readLock(lockPath: string): Promise<LockRead> {
   let raw: string;
   try {
     raw = await readFile(lockPath, "utf8");
-  } catch {
-    return null;
+  } catch (e) {
+    if ((e as { code?: string }).code === "ENOENT") return { kind: "absent" };
+    return { kind: "error" }; // transient/unexpected (EIO/EMFILE/EACCES/EISDIR…) — do NOT steal
   }
   try {
     const o = JSON.parse(raw) as Partial<LockRecord>;
     if (typeof o.id === "string" && typeof o.heartbeat === "number") {
-      return { id: o.id, heartbeat: o.heartbeat };
+      return { kind: "held", record: { id: o.id, heartbeat: o.heartbeat } };
     }
   } catch {
-    // malformed lock (a torn write / hand edit) — treat as absent, overwritable
+    // fall through — present but not valid JSON
   }
-  return null;
+  return { kind: "malformed" }; // present but not a valid record — torn write / hand edit, overwritable
 }
 
 export interface AcquireOptions {
@@ -116,8 +127,16 @@ export async function acquireRuntimeLock(
     } catch {
       // lockPath already exists — inspect the (fully-written) holder.
       const existing = await readLock(lockPath);
-      if (existing !== null && existing.id !== id && now() - existing.heartbeat < staleMs) {
-        throw new RuntimeLockedError(existing.id, now() - existing.heartbeat); // fresh + other → refuse
+      if (existing.kind === "error") {
+        // unreadable via a transient fs error — the lock may be LIVE; fail closed, never steal it.
+        throw new Error("runtime lock unreadable (transient fs error) — refusing to start");
+      }
+      if (
+        existing.kind === "held" &&
+        existing.record.id !== id &&
+        now() - existing.record.heartbeat < staleMs
+      ) {
+        throw new RuntimeLockedError(existing.record.id, now() - existing.record.heartbeat); // fresh + other → refuse
       }
       // STALE (dead prior runtime), OURS (idempotent), or unreadable → steal it ATOMICALLY. `rm`-then-
       // `link` is a non-atomic TOCTOU (P20 BRO-1814): two runtimes both observing the SAME stale lock each
@@ -135,8 +154,12 @@ export async function acquireRuntimeLock(
         // Lost the capture race (another stealer moved lockPath first) or it vanished. Re-inspect: a fresh
         // other holder → refuse; otherwise a stealer is mid-capture → retryable contention.
         const raced = await readLock(lockPath);
-        if (raced !== null && raced.id !== id && now() - raced.heartbeat < staleMs) {
-          throw new RuntimeLockedError(raced.id, now() - raced.heartbeat);
+        if (
+          raced.kind === "held" &&
+          raced.record.id !== id &&
+          now() - raced.record.heartbeat < staleMs
+        ) {
+          throw new RuntimeLockedError(raced.record.id, now() - raced.record.heartbeat);
         }
         throw new Error("runtime lock contended during steal — retry startup");
       }
@@ -146,14 +169,23 @@ export async function acquireRuntimeLock(
       // is frozen at `dead` (we hold its only name) so this freshness re-check is stable. Fresh + other →
       // RESTORE it (link it back, non-clobbering) and refuse; null/ours/stale → genuinely stealable.
       const captured = await readLock(dead);
-      if (captured !== null && captured.id !== id && now() - captured.heartbeat < staleMs) {
+      const capturedFreshOther =
+        captured.kind === "held" &&
+        captured.record.id !== id &&
+        now() - captured.record.heartbeat < staleMs;
+      if (capturedFreshOther || captured.kind === "error") {
+        // Fresh other (a racer stole+refreshed in the TOCTOU window) OR unreadable (can't confirm it is
+        // stealable) → do NOT steal: RESTORE the captured record (non-clobbering) and refuse (fail closed).
         try {
-          await link(dead, lockPath); // put the fresh holder's record back (EEXIST if a newer one exists)
+          await link(dead, lockPath); // put the record back (EEXIST if a newer holder exists)
         } catch {
           // a newer holder already occupies lockPath — leave it; our captured copy is superseded
         }
         await rm(dead, { force: true });
-        throw new RuntimeLockedError(captured.id, now() - captured.heartbeat);
+        if (captured.kind === "held") {
+          throw new RuntimeLockedError(captured.record.id, now() - captured.record.heartbeat);
+        }
+        throw new Error("runtime lock capture unreadable (transient fs error) — retry startup");
       }
       try {
         await link(tmp, lockPath); // lockPath is free (we captured it) — link our fresh lock atomically
@@ -162,8 +194,12 @@ export async function acquireRuntimeLock(
         // fresh+other, else retryable contention. Clean up the stale inode we captured either way.
         await rm(dead, { force: true });
         const raced = await readLock(lockPath);
-        if (raced !== null && raced.id !== id && now() - raced.heartbeat < staleMs) {
-          throw new RuntimeLockedError(raced.id, now() - raced.heartbeat);
+        if (
+          raced.kind === "held" &&
+          raced.record.id !== id &&
+          now() - raced.record.heartbeat < staleMs
+        ) {
+          throw new RuntimeLockedError(raced.record.id, now() - raced.record.heartbeat);
         }
         throw new Error("runtime lock contended during steal — retry startup");
       }
@@ -188,9 +224,10 @@ export async function acquireRuntimeLock(
       // close the read→rename window; true fencing needs monotonic tokens at the resource layer — the
       // documented D4 scope is best-effort mutual exclusion under staleMs > max-pause, not consensus.)
       const cur = await readLock(lockPath);
-      if (cur !== null && cur.id !== id) {
+      if (cur.kind === "error") return; // transient read error — skip this tick, don't risk clobbering
+      if (cur.kind === "held" && cur.record.id !== id) {
         lost = true;
-        opts.onOwnershipLost?.(cur.id);
+        opts.onOwnershipLost?.(cur.record.id);
         return;
       }
       // ATOMIC refresh: write a temp then `rename` over lockPath (atomic replace — no truncate window a
@@ -221,8 +258,13 @@ export async function acquireRuntimeLock(
         return;
       }
       const cur = await readLock(grave);
-      if (cur !== null && cur.id !== id) {
-        // A stealer owns it now — restore their lock (non-clobbering) rather than dropping it.
+      const safeToDrop =
+        cur.kind === "absent" ||
+        cur.kind === "malformed" ||
+        (cur.kind === "held" && cur.record.id === id);
+      if (!safeToDrop) {
+        // A stealer's lock, or unreadable (can't confirm it is ours) — restore it (non-clobbering), never
+        // delete it.
         try {
           await link(grave, lockPath);
         } catch {

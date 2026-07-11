@@ -7,7 +7,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { EVENT_TYPES } from "@maestro/protocol";
 import { and, eq, sql } from "drizzle-orm";
 import { acquireRuntimeLock, DEFAULT_LOCK_STALE_MS, RuntimeLockedError } from "../runtime-lock";
@@ -327,6 +327,20 @@ describe("recovery — D4 singleton lock", () => {
     expect(JSON.parse(await readFile(lockPath, "utf8"))).toEqual({ id: "rt-1", heartbeat: 1000 });
     // No leftover .tmp (the link's second name was unlinked).
     expect((await readdir(join(ws, ".maestro"))).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  test("fails closed on an UNREADABLE lock (non-ENOENT fs error) — never steals a possibly-live lock", async () => {
+    const ws = await makeWorkspace();
+    const lockPath = join(ws, ".maestro", "runtime.lock");
+    await mkdir(dirname(lockPath), { recursive: true });
+    // Make lockPath a DIRECTORY → readFile(lockPath) throws EISDIR, a non-ENOENT (transient-class) error.
+    // readLock must classify that as "error" (NOT "absent"), so acquire refuses rather than stealing what
+    // could be a live lock. Without the fail-closed guard the old null-collapse would treat it as missing
+    // and steal (rename the dir aside, link a fresh lock) — a double-acquire on a flaky fs.
+    await mkdir(lockPath);
+    await expect(acquireRuntimeLock(lockPath, { id: "rt-1", now: () => 1000 })).rejects.toThrow(
+      /unreadable|transient/,
+    );
   });
 
   test("a STALE lock (dead prior runtime) is stealable", async () => {
