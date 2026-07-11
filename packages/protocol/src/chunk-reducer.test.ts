@@ -14,8 +14,8 @@ import {
 } from "./chunk-reducer";
 
 /** Fold a whole recorded sequence from an initial transcript. */
-function fold(init: ChatMessage[], chunks: StreamChunk[]): ChatMessage[] {
-  return chunks.reduce<ChatMessage[]>((s, c) => bvApplyChunk(s, c), init);
+function fold(init: ChatMessage[], chunks: StreamChunk[]): readonly ChatMessage[] {
+  return chunks.reduce<readonly ChatMessage[]>((s, c) => bvApplyChunk(s, c), init);
 }
 
 describe("chunk-reducer — start / lifecycle", () => {
@@ -71,6 +71,19 @@ describe("chunk-reducer — start / lifecycle", () => {
       errorText: "boom",
     });
     expect(s[0]?.parts).toEqual([{ type: "error", errorText: "boom" }]);
+  });
+
+  test("a no-op chunk returns the SAME array reference (memoized consumers don't re-render)", () => {
+    const start: ChatMessage[] = [{ id: "m1", role: "assistant", parts: [] }];
+    // Framing chunks, a transient data chunk, and a pre-start chunk all fold nothing → identical ref.
+    expect(bvApplyChunk(start, { type: "finish" })).toBe(start);
+    expect(bvApplyChunk(start, { type: "start-step" })).toBe(start);
+    expect(bvApplyChunk(start, { type: "data-tick", id: "x", data: {}, transient: true })).toBe(
+      start,
+    );
+    expect(bvApplyChunk([], { type: "text-delta", id: "t", delta: "hi" })).toEqual([]);
+    // A real mutation returns a NEW reference (so setState does re-render).
+    expect(bvApplyChunk(start, { type: "text-start", id: "t" })).not.toBe(start);
   });
 });
 

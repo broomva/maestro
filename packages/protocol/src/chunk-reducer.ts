@@ -90,10 +90,32 @@ function isDataChunk(chunk: StreamChunk): chunk is DataChunk {
  * `output-error`/`input-error` state carrying `errorText`, so it renders as failed rather than hanging
  * at "running"; this closes the §1 drift-trap gap the prototype predated).
  */
-export function bvApplyChunk(state: readonly ChatMessage[], chunk: StreamChunk): ChatMessage[] {
+export function bvApplyChunk(
+  state: readonly ChatMessage[],
+  chunk: StreamChunk,
+): readonly ChatMessage[] {
+  const li = state.length - 1;
+
+  // ── No-op chunks return the SAME array reference ─────────────────────────────
+  // Reference stability on no-ops is the load-bearing property of a reducer feeding React: a memoized
+  // consumer (a zustand selector, a React.memo'd list) must NOT re-render on the FREQUENT chunks that
+  // change nothing — the lifecycle framing (finish, step markers, message-metadata), a transient data
+  // chunk (surfaced via onData, never persisted), or any content/data chunk before the first `start`
+  // (nothing to attach to). Cloning upfront (as the prototype did) would churn a new array every chunk.
+  switch (chunk.type) {
+    case "finish":
+    case "abort":
+    case "start-step":
+    case "finish-step":
+    case "message-metadata":
+      return state;
+  }
+  if (isDataChunk(chunk) && chunk.transient) return state;
+  if (chunk.type !== "start" && li < 0) return state;
+
+  // ── Mutating paths: clone (copy-on-write; the input is never mutated) ────────
   const msgs = state.slice();
-  /** Clone message `i` (and its parts array) for an in-place edit — copy-on-write, never mutate input.
-   *  Callers only pass an in-range `i` (li >= 0, or a loop index) — the guard is for the type checker. */
+  /** Clone message `i` (and its parts array) for an in-place edit — `i` is always in range here. */
   const touch = (i: number): ChatMessage => {
     const cur = msgs[i];
     if (cur === undefined) throw new RangeError(`bvApplyChunk.touch(${i}): out of range`);
@@ -106,7 +128,6 @@ export function bvApplyChunk(state: readonly ChatMessage[], chunk: StreamChunk):
     const part = m.parts[j];
     if (part !== undefined) m.parts[j] = fn(part);
   };
-  const li = msgs.length - 1;
 
   // start → open a new assistant message. A missing messageId falls back to a DETERMINISTIC id derived
   // from the transcript length (pure; the runtime normally supplies messageId).
@@ -119,22 +140,11 @@ export function bvApplyChunk(state: readonly ChatMessage[], chunk: StreamChunk):
     });
     return msgs;
   }
-  // Pure lifecycle framing — nothing to fold into the transcript.
-  if (
-    chunk.type === "finish" ||
-    chunk.type === "abort" ||
-    chunk.type === "start-step" ||
-    chunk.type === "finish-step" ||
-    chunk.type === "message-metadata"
-  ) {
-    return msgs;
-  }
 
   // data-${name} — gen-UI parts reconciled across the WHOLE transcript by (type, id). A re-send at the
-  // same id updates the card IN PLACE (data-tick at "tick-log" F6.5; data-gate at its gateId F5); a
-  // transient chunk bypasses the transcript entirely (surfaced via onData, never persisted).
+  // same id updates the card IN PLACE (data-tick at "tick-log" F6.5; data-gate at its gateId F5). A
+  // pre-start / transient data chunk already returned above.
   if (isDataChunk(chunk)) {
-    if (chunk.transient) return msgs;
     for (let i = 0; i < msgs.length; i++) {
       const parts = msgs[i]?.parts ?? [];
       const j = parts.findIndex(
@@ -146,14 +156,12 @@ export function bvApplyChunk(state: readonly ChatMessage[], chunk: StreamChunk):
         return msgs;
       }
     }
-    if (li < 0) return msgs; // no message to attach to yet (a data part before any start) — drop, AS-IS-safe
     const m = touch(li);
     m.parts.push({ type: chunk.type, id: chunk.id, data: chunk.data });
     return msgs;
   }
 
-  // Everything else appends to / updates the LAST message's parts.
-  if (li < 0) return msgs; // a content chunk before any start — nothing to fold onto
+  // Everything else appends to / updates the LAST message's parts (li >= 0 guaranteed above).
   const m = touch(li);
   const findBlock = (type: string, id: string): number =>
     m.parts.findIndex((p) => p.type === type && p.id === id);
@@ -238,8 +246,9 @@ export function bvApplyChunk(state: readonly ChatMessage[], chunk: StreamChunk):
 // ── Selectors — derived UI state from the transcript (pure; ported AS-IS) ──
 
 /** An open gate card, structurally — the fields `bvSelectGate` reads (the full payload is the gate-queue
- *  seam's `GateCard`, BRO-1789; this reads it structurally so the selector stays zero-dep). */
-interface GateCardLike {
+ *  seam's `GateCard`, BRO-1789; this reads it structurally so the selector stays zero-dep). Exported so
+ *  a consumer can name `bvSelectGate`'s element type. */
+export interface GateCardLike {
   id?: string;
   resolved?: boolean;
 }
