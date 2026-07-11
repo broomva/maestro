@@ -1,4 +1,5 @@
-import { Avatar, BlackholeMark, cn, DotComet } from "@maestro/ui";
+import { Avatar, BlackholeMark, DotComet } from "@maestro/ui";
+import { Link } from "@tanstack/react-router";
 import { Boxes, FileText, History, type LucideIcon, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import { ThemeToggle } from "./theme-toggle";
@@ -7,32 +8,35 @@ import { ThemeToggle } from "./theme-toggle";
  * Shell — the chrome the whole product lives in (BRO-1771, BUILD-PLAN §M2, CLAUDE.md §Layout).
  * 200px fixed matte sidebar + 52px top bar + flex main. **The shell never scrolls — only the
  * inner panels do** (the sidebar and the main both own their overflow; the shell is h-dvh +
- * overflow-hidden). Real routing lands the router into `children` in BRO-1824; until then the
- * `/app` route renders the placeholder below.
+ * overflow-hidden). It is the layout route (BRO-1824): the nav is TanStack `<Link>`s to the product
+ * views and the matched view renders into `children` (the layout's `<Outlet/>`). The placeholder below
+ * only shows when the shell is rendered with no child (a standalone/test render).
  */
 
-const NAV: { icon: LucideIcon; label: string; active?: boolean }[] = [
-  { icon: Boxes, label: "Board", active: true },
-  { icon: FileText, label: "Knowledge" },
-  { icon: History, label: "History" },
-  { icon: Settings, label: "Settings" },
+const NAV: { icon: LucideIcon; label: string; to: string }[] = [
+  { icon: Boxes, label: "Board", to: "/" },
+  { icon: FileText, label: "Knowledge", to: "/knowledge" },
+  { icon: History, label: "History", to: "/history" },
+  { icon: Settings, label: "Settings", to: "/settings" },
 ];
 
-function NavItem({ icon: Icon, label, active }: (typeof NAV)[number]) {
+function NavItem({ icon: Icon, label, to }: (typeof NAV)[number]) {
   return (
-    <button
-      type="button"
-      aria-current={active ? "page" : undefined}
-      className={cn(
-        "flex h-9 items-center gap-2 rounded-row px-2.5 text-left text-sm transition-colors",
-        active
-          ? "bg-[var(--bv-frost-8)] font-medium text-foreground"
-          : "text-muted-foreground hover:bg-[var(--bv-frost-8)] hover:text-foreground",
-      )}
+    <Link
+      to={to}
+      // `/` is a prefix of every path, so match it EXACTLY (else Board reads active on every view).
+      activeOptions={{ exact: to === "/" }}
+      className="flex h-9 items-center gap-2 rounded-row px-2.5 text-left text-sm transition-colors"
+      // TanStack merges these onto the base className by active state (mutually exclusive → no
+      // conflicting text-color classes) and sets aria-current="page" on the active link.
+      activeProps={{ className: "bg-[var(--bv-frost-8)] font-medium text-foreground" }}
+      inactiveProps={{
+        className: "text-muted-foreground hover:bg-[var(--bv-frost-8)] hover:text-foreground",
+      }}
     >
       <Icon size={16} strokeWidth={2} className="shrink-0" />
       <span className="flex-1 truncate">{label}</span>
-    </button>
+    </Link>
   );
 }
 
@@ -120,13 +124,15 @@ export function Shell({ children }: { children?: ReactNode }) {
 
         <div className="flex-1" />
 
-        <button
-          type="button"
-          className="flex h-9 items-center gap-2 rounded-row px-1.5 text-left text-sm transition-colors hover:bg-[var(--bv-frost-8)]"
+        <Link
+          to="/account"
+          className="flex h-9 items-center gap-2 rounded-row px-1.5 text-left text-sm transition-colors"
+          activeProps={{ className: "bg-[var(--bv-frost-8)] font-medium" }}
+          inactiveProps={{ className: "hover:bg-[var(--bv-frost-8)]" }}
         >
           <Avatar name="Ana Diaz" size={22} color="var(--bv-gray-600)" />
           <span className="flex-1 truncate">Ana Diaz</span>
-        </button>
+        </Link>
       </aside>
 
       <div className="grid grid-rows-[52px_1fr] overflow-hidden">

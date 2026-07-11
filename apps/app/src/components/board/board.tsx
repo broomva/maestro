@@ -12,6 +12,7 @@ import { X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "zustand";
 import { maestroStore, selectBoard, selectNeedsYouCount } from "@/store";
+import { ErrorBoundary } from "../error-boundary";
 import { toSections } from "./board-view";
 import { Inspector } from "./inspector";
 import { WorkCard } from "./work-card";
@@ -140,7 +141,15 @@ export function Board() {
               <X size={16} strokeWidth={2} />
             </button>
           </div>
-          <Inspector item={selectedItem} />
+          {/* A crashed inspector must not take down the board (porting-notes §Production hardening).
+              Keyed by id AND updatedAt so the boundary remounts fresh on (a) a direct A→B switch and
+              (b) a live node.updated that FIXES a transient crash — else the fallback would wedge on a
+              now-healthy item (the class boundary does not self-reset on a prop change). A still-crashing
+              item just re-errors on its fresh mount. Inspector is presentational (no local state to lose
+              on remount). */}
+          <ErrorBoundary key={`${selectedItem.id}:${selectedItem.updatedAt}`} label="The inspector">
+            <Inspector item={selectedItem} />
+          </ErrorBoundary>
         </div>
       ) : null}
     </div>

@@ -73,7 +73,7 @@ test.beforeEach(async ({ page }) => {
 test("Needs you is surfaced first in accent-blue; a running card wears the Undertow", async ({
   page,
 }) => {
-  await page.goto("/app");
+  await page.goto("/");
   await expect(page.getByTestId("board")).toBeVisible();
 
   // Attention-first: the FIRST board group is review ("Needs you"), never a failure tone.
@@ -106,7 +106,7 @@ test("Needs you is surfaced first in accent-blue; a running card wears the Under
 test("selection drives the inspector — a selected card opens the receipts panel", async ({
   page,
 }) => {
-  await page.goto("/app");
+  await page.goto("/");
   await expect(page.getByTestId("board")).toBeVisible();
 
   // No inspector until something is selected (board is the primary surface).
