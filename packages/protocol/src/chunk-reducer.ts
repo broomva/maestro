@@ -8,9 +8,10 @@
 // this operates on MINIMAL STRUCTURAL shapes — a `ChatMessage`/`ChatPart` container and a `StreamChunk`
 // input contract covering ONLY the variants this fold handles. This is NOT a re-declaration of ai's full
 // ~25-variant `UIMessageChunk` union (the §1 drift trap): an unhandled variant is a clean no-op (the
-// reducer simply doesn't fold it until extended — PATTERNS §9), and `apps/app` (where `ai` is a dep)
-// carries the type-level conformance test asserting ai's real `UIMessage`/`UIMessageChunk` are assignable
-// to these shapes (§9). Pinned to the v6 wire by `AI_SDK_MAJOR` (chat.ts).
+// reducer simply doesn't fold it until extended — PATTERNS §9). `apps/app` does not yet depend on `ai`;
+// when it does (BRO-1782/1826, the chat wiring), it WILL carry the type-level conformance test asserting
+// ai's real `UIMessage`/`UIMessageChunk` are assignable to these shapes (§9) — that test is the guard,
+// not this comment. Pinned to the v6 wire by `AI_SDK_MAJOR` (chat.ts).
 //
 // PURITY: the reducer is a pure `(state, chunk) → state` with no ambient clock — the only id it ever has
 // to synthesize (a `start` chunk that omits `messageId`, which the runtime normally sets) is derived
@@ -246,15 +247,19 @@ interface GateCardLike {
 /**
  * The open gates in the transcript — every `data-gate` part reconciled by `id` (last write wins), then
  * filtered to the unresolved. This is the "attention" derivation the board/inspector read (F5).
+ *
+ * DEVIATION from the AS-IS prototype: an id-LESS `data-gate` part is skipped rather than collapsed under
+ * a single `undefined` key. This is both a typed-Map necessity (the key is `string`, `ChatPart.id` is
+ * `string | undefined`) and more correct — F5 keys every gate by its `gateId`, so an id-less gate is
+ * out-of-contract input the reconciliation can't address anyway.
  */
 export function bvSelectGate(messages: readonly ChatMessage[]): GateCardLike[] {
   const map = new Map<string, GateCardLike>();
   for (const m of messages) {
     for (const p of m.parts) {
-      if (p.type === "data-gate" && p.data != null) {
-        const g = p.data as GateCardLike;
+      if (p.type === "data-gate" && p.data != null && p.id != null) {
         // Keyed by the part id (the gateId), so a re-sent gate card overwrites its prior state in place.
-        if (p.id != null) map.set(p.id, g);
+        map.set(p.id, p.data as GateCardLike);
       }
     }
   }

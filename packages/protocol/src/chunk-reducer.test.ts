@@ -57,6 +57,21 @@ describe("chunk-reducer — start / lifecycle", () => {
   test("a content chunk before any start is dropped (nothing to fold onto)", () => {
     expect(bvApplyChunk([], { type: "text-delta", id: "t", delta: "hi" })).toEqual([]);
   });
+
+  test("a data-* chunk before any start is dropped, never throws (the data-branch li<0 guard)", () => {
+    // Distinct branch from the content guard above — without the guard, touch(-1) would throw.
+    expect(bvApplyChunk([], { type: "data-tick", id: "tick-log", data: { rows: [1] } })).toEqual(
+      [],
+    );
+  });
+
+  test("a stream-level error chunk pushes an error part onto the last message", () => {
+    const s = bvApplyChunk([{ id: "m1", role: "assistant", parts: [] }], {
+      type: "error",
+      errorText: "boom",
+    });
+    expect(s[0]?.parts).toEqual([{ type: "error", errorText: "boom" }]);
+  });
 });
 
 describe("chunk-reducer — text + reasoning lifecycle", () => {
