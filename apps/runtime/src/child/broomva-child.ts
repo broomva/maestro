@@ -29,7 +29,15 @@ import {
   evaluateBeat,
   prepareRestart,
 } from "../harness/stop-conditions";
-import { executeTool, parseToolUses, toolResultBlock } from "./tools";
+import { executeTool, parseToolUses, TOOL_SCHEMAS, type ToolUse, toolResultBlock } from "./tools";
+
+/** The agent system prompt — sets the loop's contract with the model: use the tools to make real
+ *  progress, and STOP (reply with no tool call) only when the work is genuinely done. Kept terse; the
+ *  work specifics come from the contract-derived user prompt. */
+const SYSTEM_PROMPT =
+  "You are a Maestro agent working autonomously in a git worktree. Use the provided tools (shell, read, " +
+  "edit) to make real progress on the work item, one step per turn. Verify your changes. When the work " +
+  "is genuinely complete, reply with a short summary and NO tool call; do not stop early.";
 
 /** A stalled proxy (accepts the connection, never responds) must not tie up a live run to the
  *  supervisor's coarse ~5-min liveness watchdog — a per-call abort turns it into a fast child-declared
@@ -111,14 +119,23 @@ export function textOf(body: unknown): string {
   return parts.join("");
 }
 
-/** The assistant turn to append to `messages` — the response's `content[]` verbatim (text + tool_use
- *  blocks) so the next turn's `tool_result` blocks reference the same tool_use ids. `[]` if malformed. */
-function assistantContent(body: unknown): unknown[] {
+/** The assistant turn to append to `messages`: the response's TEXT blocks verbatim + a tool_use block for
+ *  each ACCEPTED tool call (`uses`, from parseToolUses). Reconstructing the tool_use blocks from the
+ *  accepted set — rather than echoing `content[]` verbatim — guarantees every tool_use the next turn
+ *  references has a matching tool_result: a malformed tool_use that parseToolUses dropped can't survive as
+ *  an unpaired echo that a conformant Anthropic endpoint would 400 on. */
+function assistantContent(body: unknown, uses: readonly ToolUse[]): unknown[] {
+  const blocks: unknown[] = [];
   if (body && typeof body === "object") {
     const c = (body as { content?: unknown }).content;
-    if (Array.isArray(c)) return c;
+    if (Array.isArray(c)) {
+      for (const b of c) {
+        if (b && typeof b === "object" && (b as { type?: unknown }).type === "text") blocks.push(b);
+      }
+    }
   }
-  return [];
+  for (const u of uses) blocks.push({ type: "tool_use", id: u.id, name: u.name, input: u.input });
+  return blocks;
 }
 
 /** The Anthropic `stop_reason` of a response body, or undefined if absent/malformed. */
@@ -218,10 +235,17 @@ async function callProxy(messages: readonly Msg[]): Promise<ProxyTurn> {
     resp = await fetch(`${proxyUrl}/v1/messages`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      // No model id — the proxy resolves the role-pinned model. max_tokens is required for the proxy's
-      // pre-forward budget reservation (HARNESS §3 / BRO-1788). Sized for a real agent turn (narration +
-      // a tool call) — too low a cap truncates the turn mid-thought before any tool_use lands.
-      body: JSON.stringify({ max_tokens: 8192, messages }),
+      // No model id — the proxy resolves the role-pinned model. `tools` is LOAD-BEARING: without it a
+      // real Anthropic model can never emit a tool_use block, so the whole agentic loop degenerates to a
+      // single narration turn (the [[mock-fidelity-gap-false-green]] the mock used to hide). `system` sets
+      // the loop contract. max_tokens is required for the proxy's pre-forward budget reservation
+      // (HARNESS §3 / BRO-1788), sized for a real turn (narration + a tool call) so it isn't truncated.
+      body: JSON.stringify({
+        max_tokens: 8192,
+        system: SYSTEM_PROMPT,
+        tools: TOOL_SCHEMAS,
+        messages,
+      }),
       signal: AbortSignal.timeout(MODEL_CALL_TIMEOUT_MS),
     });
   } catch (err) {
@@ -300,7 +324,7 @@ async function main(): Promise<never> {
     const uses = parseToolUses(body);
     const text = textOf(body);
     if (text !== "") await emit({ actor: "agent", type: "agent.said", payload: { text } });
-    messages.push({ role: "assistant", content: assistantContent(body) });
+    messages.push({ role: "assistant", content: assistantContent(body, uses) });
 
     let worstError = "";
     if (uses.length === 0) {

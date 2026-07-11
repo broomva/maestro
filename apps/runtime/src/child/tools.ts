@@ -43,6 +43,45 @@ export interface ToolOpts {
 /** The tools this slice ships — the minimal agentic set. Broader / MCP tools land later. */
 export const TOOL_NAMES = ["shell", "read", "edit"] as const;
 
+/** The Anthropic `tools` array the child MUST advertise in every request — without it a real Anthropic
+ *  model can never return a `tool_use` block, so the whole agentic loop degenerates to one narration turn
+ *  (the [[mock-fidelity-gap-false-green]] the mock hid). Schemas mirror `executeTool`'s inputs exactly. */
+export const TOOL_SCHEMAS = [
+  {
+    name: "shell",
+    description:
+      "Run a shell command in the run worktree (cwd). Returns combined stdout+stderr and exit.",
+    input_schema: {
+      type: "object",
+      properties: { command: { type: "string", description: "The command to run via `sh -c`." } },
+      required: ["command"],
+    },
+  },
+  {
+    name: "read",
+    description:
+      "Read a UTF-8 file inside the worktree (path relative to cwd; escapes are refused).",
+    input_schema: {
+      type: "object",
+      properties: { path: { type: "string", description: "File path within the worktree." } },
+      required: ["path"],
+    },
+  },
+  {
+    name: "edit",
+    description:
+      "Write a UTF-8 file inside the worktree (path relative to cwd; escapes are refused).",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path within the worktree." },
+        content: { type: "string", description: "The full new file contents." },
+      },
+      required: ["path", "content"],
+    },
+  },
+] as const;
+
 /** Cap tool output fed back to the model — a runaway `cat` must not blow the context window. Exported so
  *  tests assert the boundary against the real constant, not a copy. */
 export const MAX_OUTPUT = 16_000;

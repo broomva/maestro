@@ -634,6 +634,43 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     });
   });
 
+  test("no-progress via IDENTICAL errors: a tool failing the same way each beat halts (stalledOnErrors)", async () => {
+    // Each beat appends to a log (so the DIFF grows — no stalledOnDiffs) but exits non-zero with the SAME
+    // command → the same terminal-error signature → the engine's stalledOnErrors ("agreeing with itself")
+    // halts no_progress. Isolates the error-based trigger from the diff-based one.
+    const { h, sup, mock } = await harness({
+      mock: {
+        fallback: {
+          body: anthropicToolUse("e", "shell", { command: "echo x >> log.txt && exit 1" }),
+        },
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(10);
+    expect(reaped.reason).toBe("no_progress");
+    expect(mock.calls).toHaveLength(3); // DEFAULT_NO_PROGRESS_N identical errors → halt
+    const results = await eventsOf(h, "r1", EVENT_TYPES.TOOL_RESULT);
+    expect(results.every((r) => JSON.parse(r.payload ?? "{}").ok === false)).toBe(true);
+  });
+
+  test("REPEATED truncation is bounded — a model that keeps hitting max_tokens without acting halts", async () => {
+    // The nudge-and-continue on max_tokens must not loop forever: each truncated beat runs no tool → the
+    // worktree is unchanged → empty beat effect → after DEFAULT_NO_PROGRESS_N empty beats, no_progress halts.
+    const { sup, mock } = await harness({
+      mock: { fallback: { body: anthropicTruncated("still thinking…") } },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(10);
+    expect(reaped.reason).toBe("no_progress"); // bounded, not an infinite nudge loop
+    expect(mock.calls).toHaveLength(3);
+  });
+
   test("a turn carrying BOTH text and a tool_use → the text is said AND the tool runs", async () => {
     // The common real-model shape: the assistant narrates ("let me check …") AND calls a tool in one turn.
     // Both must surface — agent.said for the text, tool.call/tool.result for the tool.
