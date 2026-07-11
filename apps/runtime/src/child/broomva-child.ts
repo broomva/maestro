@@ -16,9 +16,10 @@
 // conditions), §6 (child utterances: run.started / agent.said / tool.call / tool.result / run.beat /
 // run.exiting on stdout as NDJSON; the proxy owns budget.metered/refused, the child owns budget.exhausted).
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Budget, WorkContract } from "@maestro/protocol";
 import { DEFAULT_CONTEXT_CEILING_TOKENS } from "../config";
-import { git } from "../git/git";
 import { readContractSnapshot } from "../harness/contract-snapshot";
 import type { ChildEmittedEvent } from "../harness/runner";
 import { parseChildArgv } from "../harness/spawn-contract";
@@ -38,6 +39,10 @@ const MODEL_CALL_TIMEOUT_MS = 120_000;
 /** Paranoid backstop on the beat count — the stop-engine's iteration_cap (default 30) halts the loop
  *  first; this only guards against a misconfigured engine that never halts (it never should be reached). */
 const MAX_BEATS = 10_000;
+
+/** How many recent per-beat signatures to retain — the no_progress halt reads only the last N
+ *  (DEFAULT_NO_PROGRESS_N=3), so a generous window bounds memory without truncating what the halt needs. */
+const RECENT_WINDOW = 16;
 
 const proxyUrl = process.env.BROOMVA_MODEL_PROXY ?? "";
 const token = process.env.BROOMVA_MODEL_TOKEN ?? "";
@@ -116,15 +121,45 @@ function assistantContent(body: unknown): unknown[] {
   return [];
 }
 
-/** The per-beat change signature — `git status --porcelain` of the worktree (cwd). "" on git failure: a
- *  worktree where git can't run can't show trackable progress, so the loop then converges via no_progress
- *  / iteration_cap rather than spinning. The CALLER diffs this against the previous beat to decide empty. */
-async function porcelain(cwd: string): Promise<string> {
+/** The per-beat worktree signature — CONTENT-sensitive, not just file-status. `git status --porcelain`
+ *  shows only status (added/modified/deleted), so a beat that edits the CONTENT of an already-dirty file
+ *  would read as no change → a FALSE no_progress halt on the common "refine the same file" pattern. Here
+ *  we stage the whole worktree into a THROWAWAY index (GIT_INDEX_FILE, so the real index/worktree are
+ *  untouched; .gitignore still applies) and hash the diff vs HEAD → the hash moves iff any file's content
+ *  moved. Returns `{sig, stat}`: `sig` (compared beat-to-beat to detect change) + a human `stat` for the
+ *  run.beat receipt. On git failure (non-git worktree / no HEAD / missing binary) → sig "" + "(unmeasured)":
+ *  a worktree git can't read can't show trackable progress, so the loop converges via no_progress /
+ *  iteration_cap rather than spinning (an accepted degradation — the worktree is broken anyway). */
+async function beatSignal(cwd: string): Promise<{ sig: string; stat: string }> {
+  const env = { ...process.env, GIT_INDEX_FILE: join(tmpdir(), `maestro-beat-${process.pid}.idx`) };
   try {
-    const r = await git(cwd, ["status", "--porcelain"]);
-    return r.code === 0 ? r.stdout : "";
+    const add = Bun.spawn(["git", "add", "-A"], { cwd, env, stdout: "ignore", stderr: "ignore" });
+    if ((await add.exited) !== 0) return { sig: "", stat: "(unmeasured)" };
+    const diff = Bun.spawn(["git", "diff", "--cached", "HEAD"], {
+      cwd,
+      env,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(diff.stdout).text();
+    if ((await diff.exited) !== 0) return { sig: "", stat: "(unmeasured)" };
+    // Count +/- CONTENT lines (skip the +++/--- file headers) for a cheap human diffstat.
+    let changed = 0;
+    for (const line of out.split("\n")) {
+      if (
+        (line.startsWith("+") || line.startsWith("-")) &&
+        !line.startsWith("+++") &&
+        !line.startsWith("---")
+      ) {
+        changed++;
+      }
+    }
+    return {
+      sig: String(Bun.hash(out)),
+      stat: changed === 0 ? "(no change)" : `${changed} line(s)`,
+    };
   } catch {
-    return "";
+    return { sig: "", stat: "(unmeasured)" };
   }
 }
 
@@ -183,14 +218,19 @@ async function main(): Promise<never> {
   const state: BeatState = {
     iterations: 0,
     budget,
+    // spentUsd/dayUsd stay 0: the child has no channel to the running spend in this slice, so the
+    // engine's end-of-beat `budget` backstop is inert — the IN-PATH proxy guard (402, BRO-1788) is the
+    // budget enforcement (tested), and it cannot be disabled. Feeding real spend here is a follow-up.
     spentUsd: 0,
     dayUsd: 0,
     recentDiffs: [],
     recentErrors: [],
     contextTokens: 0,
     ceiling: resolveCeiling(),
+    // Honor a contract that narrows the halts (Done.stop_on); undefined keeps the safe default (all three).
+    stopOn: contract?.done?.stop_on,
   };
-  let prevPorcelain = await porcelain(cwd);
+  let prevSig = (await beatSignal(cwd)).sig;
 
   for (let beat = 1; beat <= MAX_BEATS; beat++) {
     const turn = await callProxy(messages);
@@ -254,18 +294,20 @@ async function main(): Promise<never> {
     }
     messages.push({ role: "user", content: results });
 
-    // VERIFY + LOG: the beat effect (did the worktree change?) → the BRO-1795 stop-engine.
-    const cur = await porcelain(cwd);
-    const diffSig = cur === prevPorcelain ? "" : cur; // "" ⇒ this beat changed nothing (no_progress input)
-    prevPorcelain = cur;
+    // VERIFY + LOG: the beat effect (did the worktree CONTENT change?) → the BRO-1795 stop-engine.
+    const cur = await beatSignal(cwd);
+    const diffSig = cur.sig === prevSig ? "" : cur.sig; // "" ⇒ this beat changed nothing (no_progress input)
+    prevSig = cur.sig;
     state.iterations = beat;
-    state.recentDiffs = [...state.recentDiffs, diffSig];
-    state.recentErrors = [...state.recentErrors, worstError];
+    // Keep only the recent window the engine reads (no_progress looks at the last N) — the arrays must
+    // not grow with the run.
+    state.recentDiffs = [...state.recentDiffs, diffSig].slice(-RECENT_WINDOW);
+    state.recentErrors = [...state.recentErrors, worstError].slice(-RECENT_WINDOW);
     state.contextTokens = estimateTokens(messages);
     await emit({
       actor: "system",
       type: "run.beat",
-      payload: { iteration: beat, diffstat: diffSig === "" ? "(no change)" : diffSig },
+      payload: { iteration: beat, diffstat: cur.stat },
     });
 
     const decision = evaluateBeat(state);
@@ -276,15 +318,28 @@ async function main(): Promise<never> {
     if (decision.action === "restart") {
       // Context ceiling → lossless restart: checkpoint progress.md (so the respawn resumes — slice 2b-ii),
       // then run.restart_requested + exit 10 fresh_context; the supervisor respawns same session/worktree.
-      const events = await prepareRestart(runDir, {
-        progress: {
-          session,
-          iteration: beat,
-          updated: new Date().toISOString(),
-          stateOfTheWorld: `hit the context ceiling at beat ${beat}`,
-          whatsLeft: state.recentErrors.filter((e) => e !== ""),
-        },
-      });
+      // prepareRestart does file I/O (writeProgress); guard it so a checkpoint-write failure (ENOSPC /
+      // EROFS / unset run dir) still lands a receipt rather than crashing receiptless — the every-exit-
+      // emits-a-run.exiting invariant every other branch upholds.
+      let events: ChildEmittedEvent[];
+      try {
+        events = await prepareRestart(runDir, {
+          progress: {
+            session,
+            iteration: beat,
+            updated: new Date().toISOString(),
+            stateOfTheWorld: `hit the context ceiling at beat ${beat}`,
+            whatsLeft: state.recentErrors.filter((e) => e !== ""),
+          },
+        });
+      } catch (err) {
+        await emit({
+          actor: "system",
+          type: "run.exiting",
+          payload: { code: 1, reason: `checkpoint failed: ${msg(err)}` },
+        });
+        process.exit(1);
+      }
       for (const ev of events) await emit(ev);
       process.exit(10);
     }

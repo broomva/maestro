@@ -336,13 +336,15 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     expect(JSON.parse(calls[0]?.payload ?? "{}")).toMatchObject({ tool: "shell" });
     const toolResults = await eventsOf(h, "r1", EVENT_TYPES.TOOL_RESULT);
     expect(toolResults).toHaveLength(1);
-    expect(JSON.parse(toolResults[0]?.payload ?? "{}")).toMatchObject({ tool: "shell", ok: true });
+    const tr = JSON.parse(toolResults[0]?.payload ?? "{}");
+    expect(tr).toMatchObject({ tool: "shell", ok: true });
+    expect(tr.summary).toContain("out.txt"); // the EXACT command ran (summary carries it)
 
-    // The beat's effect was REAL: the run.beat diffstat shows the file the tool wrote in the worktree
-    // (proves executeTool ran IN cwd, not a no-op) — the whole point of the tool layer.
+    // The beat's effect was REAL: the run.beat diffstat is not "(no change)" — the content-sensitive
+    // signal saw the worktree move, proving executeTool ran the write IN cwd (not a no-op).
     const beats = await eventsOf(h, "r1", EVENT_TYPES.RUN_BEAT);
     expect(beats).toHaveLength(1);
-    expect(JSON.parse(beats[0]?.payload ?? "{}").diffstat).toContain("out.txt");
+    expect(JSON.parse(beats[0]?.payload ?? "{}").diffstat).not.toBe("(no change)");
 
     // The finishing turn's text landed as agent.said and the run completed.
     const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
@@ -385,6 +387,34 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     expect(await eventsOf(h, "r1", EVENT_TYPES.TOOL_CALL)).toHaveLength(4);
   });
 
+  test("iterative CONTENT edits to the same file are progress (content-sensitive), not a false no_progress", async () => {
+    // The common refine pattern: the model edits ONE file's content across many beats. `git status
+    // --porcelain` (file STATUS) reads these as no-change → a FALSE no_progress halt; the CONTENT
+    // signature sees each edit, so the loop keeps making progress and completes. MUTATION-PROOF: revert
+    // the signal to porcelain and this halts no_progress at beat 4 (exit 10) instead of completing.
+    const { h, sup, mock } = await harness({
+      mock: {
+        script: [
+          { body: anthropicToolUse("t1", "edit", { path: "a.txt", content: "v1" }) },
+          { body: anthropicToolUse("t2", "edit", { path: "a.txt", content: "v2" }) },
+          { body: anthropicToolUse("t3", "edit", { path: "a.txt", content: "v3" }) },
+          { body: anthropicToolUse("t4", "edit", { path: "a.txt", content: "v4" }) },
+          { body: anthropicBody("done") },
+        ],
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0); // completed — NOT a no_progress halt
+    expect(reaped.sessionStatus).toBe("review");
+    expect(mock.calls).toHaveLength(5); // 4 content edits + the finishing text (no early halt)
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
+    expect(exiting).toHaveLength(1);
+    expect(JSON.parse(exiting[0]?.payload ?? "{}")).toEqual({ code: 0 });
+  });
+
   test("context ceiling → child checkpoints + requests a fresh-context restart → supervisor respawns", async () => {
     // A tiny ceiling (via the injected env — 2b-ii wires it through the supervisor's allowlist) forces the
     // restart branch on beat 1 (the accumulated conversation exceeds 50 tokens after one tool turn). The
@@ -409,6 +439,107 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     // attempt 1 asked for the restart → prepareRestart wrote progress.md THEN emitted this (so the
     // checkpoint exists), and the supervisor read exit-10 fresh_context to respawn.
     expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_RESTART_REQUESTED)).toHaveLength(1);
+  });
+
+  test("a turn with 2 tool_use blocks → BOTH execute → 2 tool.call + 2 tool.result → one combined reply", async () => {
+    // The Anthropic contract: a turn can request multiple tools; every tool_use MUST get a tool_result in
+    // ONE following user turn. The fan-out loop executes both and returns both results before the next turn.
+    const { h, sup, mock } = await harness({
+      mock: {
+        script: [
+          {
+            body: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tu1",
+                  name: "shell",
+                  input: { command: "echo a > a.txt" },
+                },
+                {
+                  type: "tool_use",
+                  id: "tu2",
+                  name: "shell",
+                  input: { command: "echo b > b.txt" },
+                },
+              ],
+              stop_reason: "tool_use",
+            },
+          },
+          { body: anthropicBody("both done") },
+        ],
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0);
+    expect(mock.calls).toHaveLength(2); // beat 1 (two tools) + beat 2 (finishing text)
+    // Both tools ran, in order, each with its own tool.call + tool.result.
+    expect(await eventsOf(h, "r1", EVENT_TYPES.TOOL_CALL)).toHaveLength(2);
+    const results = await eventsOf(h, "r1", EVENT_TYPES.TOOL_RESULT);
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => JSON.parse(r.payload ?? "{}").ok === true)).toBe(true);
+  });
+
+  test("a tool that FAILS (ok:false) → is_error propagates, worstError feeds the engine, loop continues", async () => {
+    // A failing shell command → tool.result {ok:false}; the child sends the error result back (it does NOT
+    // wedge) and the model finishes on the next turn → clean exit 0. Proves the failure-path wiring.
+    const { h, sup, mock } = await harness({
+      mock: {
+        script: [
+          { body: anthropicToolUse("tu1", "shell", { command: "exit 7" }) },
+          { body: anthropicBody("recovered") },
+        ],
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0); // the loop CONTINUED past the failing tool and completed
+    expect(mock.calls).toHaveLength(2);
+    const results = await eventsOf(h, "r1", EVENT_TYPES.TOOL_RESULT);
+    expect(results).toHaveLength(1);
+    expect(JSON.parse(results[0]?.payload ?? "{}")).toMatchObject({ tool: "shell", ok: false });
+  });
+
+  test("a turn carrying BOTH text and a tool_use → the text is said AND the tool runs", async () => {
+    // The common real-model shape: the assistant narrates ("let me check …") AND calls a tool in one turn.
+    // Both must surface — agent.said for the text, tool.call/tool.result for the tool.
+    const { h, sup } = await harness({
+      mock: {
+        script: [
+          {
+            body: {
+              content: [
+                { type: "text", text: "let me check the tree" },
+                {
+                  type: "tool_use",
+                  id: "tu1",
+                  name: "shell",
+                  input: { command: "echo x > x.txt" },
+                },
+              ],
+              stop_reason: "tool_use",
+            },
+          },
+          { body: anthropicBody("done") },
+        ],
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0);
+    // The combined turn's text landed (agent.said "let me check…") AND the tool ran (tool.call).
+    const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
+    expect(
+      said.some((r) => (JSON.parse(r.payload ?? "{}").text ?? "").includes("let me check")),
+    ).toBe(true);
+    expect(await eventsOf(h, "r1", EVENT_TYPES.TOOL_CALL)).toHaveLength(1);
   });
 });
 
