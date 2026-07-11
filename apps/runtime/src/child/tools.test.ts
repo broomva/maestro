@@ -1,0 +1,372 @@
+/// <reference types="bun" />
+// tools.test.ts — BRO-1856 slice-2a done.check. The child's tool layer, unit-tested with a real temp
+// worktree (no child/proxy): shell captures output + exit code, read/edit round-trip, a `..`/absolute
+// escape is REFUSED (not executed), and parseToolUses/toolResultBlock map the Anthropic tool shape.
+
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { capText, executeTool, MAX_OUTPUT, parseToolUses, toolResultBlock } from "./tools";
+
+const tmps: string[] = [];
+afterEach(async () => {
+  for (const d of tmps.splice(0)) await rm(d, { recursive: true, force: true });
+});
+async function ws(): Promise<string> {
+  const d = await mkdtemp(join(tmpdir(), "maestro-tools-"));
+  tmps.push(d);
+  return d;
+}
+
+describe("child tools — shell", () => {
+  test("captures stdout + exit 0 = ok", async () => {
+    const r = await executeTool("shell", { command: "echo hello" }, await ws());
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("hello");
+    expect(r.summary).toContain("exit 0");
+  });
+
+  test("runs IN the given cwd", async () => {
+    const d = await ws();
+    const r = await executeTool("shell", { command: "pwd" }, d);
+    const base = d.split("/").pop() as string; // mkdtemp basename is always defined
+    expect(r.content.trim().endsWith(base)).toBe(true); // exact cwd, not a loose substring
+  });
+
+  test("non-zero exit = ok:false with the code in the summary", async () => {
+    const r = await executeTool("shell", { command: "exit 3" }, await ws());
+    expect(r.ok).toBe(false);
+    expect(r.summary).toContain("exit 3");
+  });
+
+  test("missing command = ok:false, no crash", async () => {
+    const r = await executeTool("shell", {}, await ws());
+    expect(r.ok).toBe(false);
+  });
+
+  test("a successful command with no output reports the fallback, not an empty string", async () => {
+    const r = await executeTool("shell", { command: "true" }, await ws());
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("no output");
+  });
+
+  test("captures stderr too, kept separate from stdout (no glued tokens)", async () => {
+    // Unterminated stdout + stderr in one call: the two must not fuse into one ambiguous token.
+    const r = await executeTool("shell", { command: "printf out; printf err >&2" }, await ws());
+    expect(r.content).toContain("out");
+    expect(r.content).toContain("err");
+    expect(r.content).not.toContain("outerr"); // a newline separates the streams
+  });
+
+  test("a command that dies by its OWN signal is ok:false and NOT mislabeled a timeout", async () => {
+    const r = await executeTool("shell", { command: "kill -9 $$" }, await ws());
+    expect(r.ok).toBe(false); // signal death → non-zero/null exit code → not ok
+    expect(r.summary).not.toContain("timed out"); // our watchdog never fired — it's the command's own death
+    expect(r.summary).toContain("exit"); // reported on the normal exit path, distinct from the timeout path
+  });
+
+  test("output bytes are preserved verbatim — no trim of leading indentation / trailing newline", async () => {
+    // The model reconstructs from this text, so exact bytes matter. A whole-blob .trim() would drop the
+    // leading spaces and the trailing newline the command actually produced.
+    const r = await executeTool(
+      "shell",
+      { command: `printf '  leading\\ntrailing  \\n'` },
+      await ws(),
+    );
+    expect(r.content.startsWith("  leading")).toBe(true); // leading indentation survived
+    expect(r.content.endsWith("\n")).toBe(true); // trailing newline survived
+  });
+
+  test("binary / invalid-UTF-8 output is delivered (decoded), not dropped", async () => {
+    // printf emits raw bytes 0xFF 0xFE 0xFD (not valid UTF-8); TextDecoder yields replacement chars.
+    const r = await executeTool("shell", { command: `printf '\\377\\376\\375'` }, await ws());
+    expect(r.ok).toBe(true); // printf exits 0; the invalid bytes must not throw
+    expect(r.content).toContain("�"); // the bytes reach content (not silently dropped to the fallback)
+  });
+});
+
+describe("child tools — resource bounds (never hang, never buffer unbounded)", () => {
+  // Each of these is a MUTATION-PROOF tied to the TEST's own timeout: revert the fix and the command
+  // runs for the full shellTimeoutMs, blowing the (shorter) bun test budget below.
+
+  test("a hanging command is SIGKILLed at the per-tool timeout, not run forever", async () => {
+    const t0 = performance.now();
+    const r = await executeTool("shell", { command: "sleep 30" }, await ws(), {
+      shellTimeoutMs: 200,
+    });
+    // Without the timeout, `sleep 30` blocks executeTool for 30s and this test's 4s budget fails.
+    expect(performance.now() - t0).toBeLessThan(3000);
+    expect(r.ok).toBe(false);
+    expect(r.summary).toContain("timed out");
+  }, 4000);
+
+  test("a command that CLOSES its fds but keeps running still times out (watchdog not disarmed)", async () => {
+    // `exec 1>&- 2>&-` closes stdout+stderr → the reads hit EOF at ~0ms → if the timer were cleared
+    // before awaiting exit, `await proc.exited` on the still-running `sleep 30` would hang forever.
+    // Bounding the exit wait by the same abort keeps the SIGKILL live. Reverting to clear-then-await
+    // hangs 30s and blows this 4s budget.
+    const t0 = performance.now();
+    const r = await executeTool(
+      "shell",
+      { command: "echo hi; exec 1>&- 2>&-; sleep 30" },
+      await ws(),
+      {
+        shellTimeoutMs: 300,
+      },
+    );
+    expect(performance.now() - t0).toBeLessThan(3000);
+    expect(r.ok).toBe(false);
+    expect(r.summary).toContain("timed out");
+  }, 4000);
+
+  test("a DETACHED grandchild holding the pipe cannot outlast the timeout", async () => {
+    // `sleep 30 &` backgrounds a grandchild that inherits stdout, then `sh` exits. SIGKILL only reaps
+    // the (already-gone) direct child, so the read would block on the grandchild's pipe for 30s — the
+    // AbortSignal cancels the reads so executeTool still returns at the deadline. Reverting `ac.abort()`
+    // blows this 4s budget.
+    const t0 = performance.now();
+    const r = await executeTool("shell", { command: "sleep 30 & echo started" }, await ws(), {
+      shellTimeoutMs: 300,
+    });
+    expect(performance.now() - t0).toBeLessThan(3000);
+    expect(r.ok).toBe(false);
+    expect(r.summary).toContain("timed out");
+  }, 4000);
+
+  test("infinite output stays bounded in memory and times out (never buffers the whole stream)", async () => {
+    // `yes` never ends. readCapped KEEPS at most MAX_OUTPUT and drains-and-discards the rest, so memory
+    // is bounded; the drain of an infinite stream can't finish, so the timeout returns it. Reverting the
+    // memory bound to `new Response(stream).text()` buffers infinitely → OOM/hang → this 4s budget fails.
+    const r = await executeTool("shell", { command: "yes maestro" }, await ws(), {
+      shellTimeoutMs: 500,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.summary).toContain("timed out");
+    expect(r.content).toContain("maestro"); // the captured prefix is REAL output, not dropped
+    expect(r.content.length).toBeLessThanOrEqual(MAX_OUTPUT + 64); // captured prefix stays bounded
+  }, 4000);
+
+  test("a large SUCCESSFUL command is reported ok:true + clipped (not a spurious failure)", async () => {
+    // `seq 1 100000` writes ~580KB and exits 0. It must be ok:true with the clip signal IN the content
+    // (the model reads content, not the summary). Guards against a `clipped ⇒ ok:false` or drop-the-
+    // marker regression; the infinite-`yes` test above is the drain-vs-cancel discriminator.
+    const r = await executeTool("shell", { command: "seq 1 100000" }, await ws());
+    expect(r.ok).toBe(true);
+    expect(r.summary).toContain("(clipped)");
+    expect(r.content).toContain("1\n2\n3\n"); // the REAL output prefix is present, not just the marker
+    expect(r.content).toContain("…(truncated)"); // the clip signal lives in the content the model reads
+    expect(r.content.length).toBeLessThanOrEqual(MAX_OUTPUT + 32);
+  });
+
+  test("combined stdout+stderr over the cap is clipped even when NEITHER stream alone is", async () => {
+    // Each stream is ~10k (< MAX_OUTPUT) but the joined body is ~20k > MAX_OUTPUT — only the combined
+    // `raw.length > MAX_OUTPUT` term catches this. Deleting that term returns the full ~20k unmarked.
+    const r = await executeTool(
+      "shell",
+      { command: "yes A | head -c 10000; yes B | head -c 10000 >&2" },
+      await ws(),
+    );
+    expect(r.content.length).toBeLessThanOrEqual(MAX_OUTPUT + 32);
+    expect(r.content).toContain("…(truncated)");
+    expect(r.summary).toContain("(clipped)");
+  }, 4000);
+
+  test("a huge file read is clipped, not read whole", async () => {
+    const d = await ws();
+    await Bun.write(join(d, "big.txt"), "a".repeat(MAX_OUTPUT * 4));
+    const r = await executeTool("read", { path: "big.txt" }, d);
+    expect(r.ok).toBe(true);
+    expect(r.content.startsWith("aaaaaaaaaa")).toBe(true); // the REAL bytes are present, not just the marker
+    expect(r.content.length).toBeLessThanOrEqual(MAX_OUTPUT + 32);
+    expect(r.content).toContain("…(truncated)");
+    expect(r.summary).toContain("(clipped)");
+  });
+
+  test("read of a FIFO is refused (stat guard), it does NOT block on the reader-less pipe", async () => {
+    const d = await ws();
+    // A model could `mkfifo p` inside cwd (the jail permits it); reading it would block forever on
+    // open() with no writer. The stat+isFile guard refuses it fast instead of hanging the beat.
+    const mk = await executeTool("shell", { command: "mkfifo fifo" }, d);
+    expect(mk.ok).toBe(true);
+    const r = await executeTool("read", { path: "fifo" }, d);
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("regular file");
+  }, 4000);
+
+  test("edit onto a FIFO is refused by the stat guard (not a raw ENXIO surprise)", async () => {
+    const d = await ws();
+    await executeTool("shell", { command: "mkfifo fifo" }, d);
+    const r = await executeTool("edit", { path: "fifo", content: "x" }, d);
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("regular file"); // the guard's message, not a raw write error
+  }, 4000);
+});
+
+describe("child tools — read/edit round-trip + path jail", () => {
+  test("edit writes, read reads it back", async () => {
+    const d = await ws();
+    expect((await executeTool("edit", { path: "out.txt", content: "the data" }, d)).ok).toBe(true);
+    const r = await executeTool("read", { path: "out.txt" }, d);
+    expect(r.ok).toBe(true);
+    expect(r.content).toBe("the data");
+  });
+
+  test("read of a missing file = ok:false, no crash", async () => {
+    expect((await executeTool("read", { path: "nope.txt" }, await ws())).ok).toBe(false);
+  });
+
+  test("edit with non-string content is REFUSED — it does NOT truncate the target to empty", async () => {
+    const d = await ws();
+    await executeTool("edit", { path: "keep.txt", content: "original" }, d);
+    // Non-string content (schema drift / hallucination) must be rejected, not coerced to "".
+    const bad = await executeTool(
+      "edit",
+      { path: "keep.txt", content: 42 as unknown as string },
+      d,
+    );
+    expect(bad.ok).toBe(false);
+    // The pre-existing file is untouched — the old coerce-to-"" path would have zeroed it.
+    expect(await Bun.file(join(d, "keep.txt")).text()).toBe("original");
+  });
+
+  test("edit reports the true UTF-8 byte count, not UTF-16 code units", async () => {
+    const d = await ws();
+    // "€😀" = 3 + 4 = 7 UTF-8 bytes on disk, but only 3 UTF-16 code units (content.length).
+    const r = await executeTool("edit", { path: "u.txt", content: "€😀" }, d);
+    expect(r.ok).toBe(true);
+    expect(r.content).toContain("wrote 7 bytes");
+    expect(await Bun.file(join(d, "u.txt")).text()).toBe("€😀");
+  });
+
+  test("a .. / absolute escape is REFUSED, not executed", async () => {
+    const d = await ws();
+    const sub = join(d, "sub");
+    await Bun.write(join(sub, ".keep"), ""); // create the subdir (cwd)
+    // From cwd=sub, "../secret.txt" resolves into d (sub's parent) — outside the jail.
+    const e = await executeTool("edit", { path: "../secret.txt", content: "x" }, sub);
+    expect(e.ok).toBe(false);
+    expect(e.summary).toContain("refused");
+    // d is a fresh mkdtemp, so this is a reliable "the refused edit wrote NOTHING" check.
+    expect(await Bun.file(join(d, "secret.txt")).exists()).toBe(false);
+    expect((await executeTool("read", { path: "../secret.txt" }, sub)).ok).toBe(false);
+    expect((await executeTool("read", { path: "/etc/hosts" }, sub)).ok).toBe(false);
+  });
+
+  test("a SIBLING dir sharing the cwd's name prefix is REFUSED (the jail's trailing slash)", async () => {
+    const d = await ws();
+    const sub = join(d, "sub");
+    await Bun.write(join(sub, ".keep"), ""); // cwd = d/sub
+    await Bun.write(join(d, "subX", "secret.txt"), "leaked"); // sibling d/subX shares the prefix "sub"
+    // From cwd=d/sub, "../subX/secret.txt" → d/subX/secret.txt — OUTSIDE the jail. Only the trailing
+    // slash in `${base}/` refuses it: base "…/sub" must not admit "…/subX". Drop the slash and it leaks.
+    expect((await executeTool("read", { path: "../subX/secret.txt" }, sub)).ok).toBe(false);
+    const e = await executeTool("edit", { path: "../subX/secret.txt", content: "x" }, sub);
+    expect(e.ok).toBe(false);
+    expect(await Bun.file(join(d, "subX", "secret.txt")).text()).toBe("leaked"); // the edit wrote nothing
+  });
+
+  test("a SYMLINK inside cwd pointing outside is refused (the lexical jail is symlink-blind)", async () => {
+    const d = await ws();
+    const outside = await ws(); // a separate temp dir, NOT under d
+    await Bun.write(join(outside, "secret.txt"), "exfil");
+    // The agent creates the symlink via its free shell; the lexical jail sees only "link" (inside cwd).
+    const q = (p: string) => JSON.stringify(p);
+    await executeTool("shell", { command: `ln -s ${q(join(outside, "secret.txt"))} link` }, d);
+    const r = await executeTool("read", { path: "link" }, d);
+    expect(r.ok).toBe(false); // realInsideJail follows the link and refuses
+    expect(r.content).not.toContain("exfil");
+    // edit THROUGH the symlink must not overwrite the outside target.
+    const e = await executeTool("edit", { path: "link", content: "z" }, d);
+    expect(e.ok).toBe(false);
+    expect(await Bun.file(join(outside, "secret.txt")).text()).toBe("exfil");
+    // edit creating a NEW file under a symlinked PARENT dir is refused too (parent-realpath branch).
+    await executeTool("shell", { command: `ln -s ${q(outside)} linkdir` }, d);
+    const e2 = await executeTool("edit", { path: "linkdir/new.txt", content: "z" }, d);
+    expect(e2.ok).toBe(false);
+    expect(await Bun.file(join(outside, "new.txt")).exists()).toBe(false);
+  });
+
+  test("a DANGLING symlink (target does not exist yet) cannot tunnel an edit outside the worktree", async () => {
+    const d = await ws();
+    const outside = await ws();
+    const q = (p: string) => JSON.stringify(p);
+    // link → a path OUTSIDE cwd that does NOT exist yet. realpath(link) ENOENTs (dangling); the fix must
+    // fail closed (lstat sees the link) rather than treating it as a fresh in-jail create.
+    await executeTool("shell", { command: `ln -s ${q(join(outside, "evil.txt"))} link` }, d);
+    const e = await executeTool("edit", { path: "link", content: "ESCAPED" }, d);
+    expect(e.ok).toBe(false);
+    expect(await Bun.file(join(outside, "evil.txt")).exists()).toBe(false); // Bun.write must not follow it
+  });
+
+  test("edit CREATES a file in a new NESTED subdir (ancestor walk, not just one dirname level)", async () => {
+    const d = await ws();
+    // `a/b` does not exist; Bun.write auto-creates it. The symlink re-check must walk up to the nearest
+    // EXISTING ancestor (cwd) — a single-dirname check would realpath(cwd/a/b)=null and falsely refuse.
+    const r = await executeTool("edit", { path: "a/b/c.txt", content: "deep" }, d);
+    expect(r.ok).toBe(true);
+    expect(await Bun.file(join(d, "a", "b", "c.txt")).text()).toBe("deep");
+  });
+});
+
+describe("capText — surrogate-safe cap", () => {
+  test("does not split a surrogate pair at the boundary (no lone U+D83D)", () => {
+    const s = `${"a".repeat(9)}😀`; // 9 units + a 2-unit emoji = 11 UTF-16 units
+    const capped = capText(s, 10); // the cap lands between the emoji's high and low surrogate
+    expect(capped).toBe("a".repeat(9)); // the whole emoji is dropped, not a lone high surrogate kept
+    const last = capped.charCodeAt(capped.length - 1);
+    expect(last < 0xd800 || last > 0xdbff).toBe(true); // never ends on a lone high surrogate
+  });
+
+  test("returns the string unchanged when within the cap", () => {
+    expect(capText("hello", 10)).toBe("hello");
+  });
+});
+
+describe("child tools — unknown tool", () => {
+  test("unknown tool = ok:false, no crash", async () => {
+    const r = await executeTool("teleport", {}, await ws());
+    expect(r.ok).toBe(false);
+    expect(r.content).toContain("unknown tool");
+  });
+});
+
+describe("child tools — Anthropic tool_use <-> tool_result mapping", () => {
+  test("parseToolUses extracts tool_use blocks; ignores text/incomplete; null-safe", () => {
+    const body = {
+      content: [
+        { type: "text", text: "let me run this" },
+        { type: "tool_use", id: "tu_1", name: "shell", input: { command: "ls" } },
+        { type: "tool_use", id: "tu_2", name: "read", input: { path: "a.txt" } },
+        { type: "tool_use", name: "bad" }, // missing id → skipped
+        { type: "tool_use", id: "tu_3" }, // missing name → skipped
+        { type: "tool_use", id: "tu_4", name: "shell", input: "not-an-object" }, // input → {}
+        { type: "tool_use", id: "tu_5", name: "shell", input: ["echo"] }, // array input → {} (typeof []==="object")
+      ],
+    };
+    expect(parseToolUses(body)).toEqual([
+      { id: "tu_1", name: "shell", input: { command: "ls" } },
+      { id: "tu_2", name: "read", input: { path: "a.txt" } },
+      { id: "tu_4", name: "shell", input: {} }, // non-object input normalized; tu_3 (no name) dropped
+      { id: "tu_5", name: "shell", input: {} }, // array input normalized to {}, not kept verbatim
+    ]);
+    expect(parseToolUses(null)).toEqual([]);
+    expect(parseToolUses({ content: "not array" })).toEqual([]);
+    expect(parseToolUses({ content: [{ type: "text", text: "no tools" }] })).toEqual([]);
+  });
+
+  test("toolResultBlock builds the Anthropic shape; is_error mirrors !ok", () => {
+    expect(toolResultBlock("tu_1", { ok: true, summary: "s", content: "done" })).toEqual({
+      type: "tool_result",
+      tool_use_id: "tu_1",
+      content: "done",
+      is_error: false,
+    });
+    expect(toolResultBlock("tu_2", { ok: false, summary: "s", content: "boom" })).toEqual({
+      type: "tool_result",
+      tool_use_id: "tu_2",
+      content: "boom",
+      is_error: true,
+    });
+  });
+});
