@@ -117,6 +117,10 @@ async function harness(
   h: IndexHandle;
   sup: ReturnType<typeof createSupervisor>;
   tokens: SessionTokenRegistry;
+  /** The scripted upstream — `mock.calls` records every forward the proxy made (a refused call never
+   *  forwards), which is how a scenario pins "how many beats reached the model" AND proves the mock (not
+   *  Anthropic) served every call = zero tokens. */
+  mock: ReturnType<typeof createMockModel>;
 }> {
   const ws = await makeWorkspace();
   const h = await openMem();
@@ -144,7 +148,7 @@ async function harness(
     mintRunId: () => "r1",
     hostEnv: { PATH: process.env.PATH },
   });
-  return { h, sup, tokens };
+  return { h, sup, tokens, mock };
 }
 
 /** Poll the durable event table for a session's first event of `type` (bounded — the child + tee run
@@ -176,13 +180,15 @@ async function eventsOf(h: IndexHandle, sessionId: string, type: EventType) {
 }
 
 describe("loops (D8 layer 1) — deterministic F2→F3 flows, zero tokens", () => {
-  test("NO ANTHROPIC_API_KEY is present — the mock is the upstream (the zero-token guarantee)", () => {
-    expect(process.env.ANTHROPIC_API_KEY ?? "").toBe("");
-  });
+  // The zero-token guarantee is STRUCTURAL, not an env check: the proxy's upstream is the injected mock
+  // and the child dials the proxy, so no real Anthropic call is ever made regardless of the environment.
+  // Each scenario asserts `mock.calls.length` — proof the MOCK (not Anthropic) served every call. (An
+  // `expect(ANTHROPIC_API_KEY).toBe("")` assertion would prove nothing about the mechanism AND red the
+  // whole gate for any developer who runs the suite with a key exported — the near-universal case here.)
 
   test("budget refusal mid-run → proxy 402 → child halts budget → session blocked", async () => {
-    // per_run 1.5 with a $1.0/call mock cost → the 3rd call's reservation breaches the cap → 402.
-    const { h, sup } = await harness("budget", {
+    // per_run 1.5 with a $1.0/call mock cost → the child's 3rd call's reservation breaches the cap → 402.
+    const { h, sup, mock } = await harness("budget", {
       budgetJson: JSON.stringify({ per_run_usd: 1.5 }),
       mock: { usagePerCallUsd: 1.0 },
     });
@@ -201,13 +207,15 @@ describe("loops (D8 layer 1) — deterministic F2→F3 flows, zero tokens", () =
     const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
     expect(exiting).toHaveLength(1);
     expect(JSON.parse(exiting[0]?.payload ?? "{}")).toMatchObject({ code: 10, reason: "budget" });
-    // it got a couple beats in before the refusal (mid-run, not up-front).
-    const started = await eventsOf(h, "r1", EVENT_TYPES.RUN_STARTED);
-    expect(started).toHaveLength(1);
+    // MID-RUN, not up-front: EXACTLY two calls reached the model (spent 0→1.0→2.0), and the child's 3rd
+    // call was refused at preflight (2.0 + reserve > 1.5) BEFORE forwarding — so the upstream saw two.
+    // A regression that refused up-front on call 1 leaves mock.calls empty and fails here. (mock.calls
+    // being non-empty also proves the MOCK, not Anthropic, served every call: zero tokens, no key.)
+    expect(mock.calls).toHaveLength(2);
   });
 
   test("no-progress exit → 3 consecutive empty diffs → engine halt → session blocked", async () => {
-    const { h, sup } = await harness("no_progress");
+    const { h, sup, mock } = await harness("no_progress");
     const out = await sup.dispatch("n0");
     if (!out.dispatched) throw new Error("dispatch failed");
     const res = await out.reaped;
@@ -224,6 +232,9 @@ describe("loops (D8 layer 1) — deterministic F2→F3 flows, zero tokens", () =
     });
     // no budget.exhausted on this path (the halt is the engine's, not the proxy's).
     expect(await eventsOf(h, "r1", EVENT_TYPES.BUDGET_EXHAUSTED)).toHaveLength(0);
+    // THREE consecutive empty diffs, not one: the child calls the model once per beat, so exactly 3
+    // calls reached the upstream before the halt (a 1-empty-diff regression would show only 1 call).
+    expect(mock.calls).toHaveLength(3);
   });
 
   test("fresh-context restart → checkpoint + respawn → resumes skipping done work → review", async () => {
