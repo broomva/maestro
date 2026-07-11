@@ -168,6 +168,8 @@ async function harness(
     mock,
     /** Write one NDJSON control line to the live child's stdin (ping / stop / chat). */
     writeControl: (obj: unknown) => capturedWrite?.(`${JSON.stringify(obj)}\n`),
+    /** Write raw bytes to the child's stdin (for the overflow / partial-line edge cases). */
+    writeRaw: (s: string) => capturedWrite?.(s),
     /** The child's raw stdout so far (for observing the non-persisted pong liveness line). */
     rawStdout: () => rawChunks.join(""),
   };
@@ -1018,5 +1020,26 @@ describe("broomva-child slice 3 — stdin control (chat / stop / ping), zero tok
     expect(before).not.toContain(MARKER);
     expect(sup.kill("r1")).toBe(true);
     await out.reaped;
+  });
+
+  test("a valid control line surviving an over-cap prefix is NOT lost (splitter extracts before dropping)", async () => {
+    // P20 regression (BRO-1862): the reader must extract complete lines BEFORE the overflow-drop, so a
+    // runaway (> MAX_CONTROL_LINE, no newline) prefix immediately followed by a real `stop` line does not
+    // discard the stop. A drop-before-extract reader (the pre-fix bug) would nuke the whole buffer — stop
+    // included — and the run would keep beating. Reusing the shared createNdjsonSplitter guarantees the
+    // correct order; this proves it end-to-end through the real child.
+    const { h, sup, writeRaw } = await harness(KEEPALIVE);
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true); // live + looping
+    // an over-cap junk prefix (no newline), then a terminating newline, then a REAL stop line — the stop
+    // must still be honored despite sharing the buffer with the overflow-triggering prefix.
+    const junk = "A".repeat(1_000_005); // > MAX_CONTROL_LINE (1_000_000)
+    writeRaw(`${junk}\n${JSON.stringify({ type: "stop", reason: "after overflow" })}\n`);
+    const res = await out.reaped;
+    expect(res.exitCode).toBe(10);
+    expect(res.reason).toBe("user_stop");
+    expect(res.sessionStatus).toBe("blocked");
+    expect(res.crash).toBe(false);
   });
 });

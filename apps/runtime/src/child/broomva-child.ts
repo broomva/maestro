@@ -23,6 +23,7 @@ import { join } from "node:path";
 import type { Budget, WorkContract } from "@maestro/protocol";
 import { DEFAULT_CONTEXT_CEILING_TOKENS } from "../config";
 import { readContractSnapshot } from "../harness/contract-snapshot";
+import { createNdjsonSplitter } from "../harness/ndjson";
 import type { ChildEmittedEvent } from "../harness/runner";
 import { parseChildArgv } from "../harness/spawn-contract";
 import {
@@ -361,21 +362,17 @@ async function handleControlLine(line: string, state: ControlState): Promise<voi
 
 /** Consume the NDJSON control channel from stdin, mutating `state`, until stdin closes. FIRE-AND-FORGET:
  *  runs concurrently with the beat loop and swallows everything — a control-channel fault must never crash
- *  the run (the reap + the loop own the real lifecycle). Buffers partial lines across chunk boundaries. */
+ *  the run (the reap + the loop own the real lifecycle). Reuses the shared `createNdjsonSplitter` (the same
+ *  primitive the supervisor's stdout pump uses) so partial lines across chunk boundaries, CRLF, and the
+ *  runaway-line overflow drop are handled identically — and, crucially, complete lines are extracted BEFORE
+ *  the overflow drop, so a valid control line co-resident with an over-cap partial is never lost. */
 async function readControlChannel(state: ControlState): Promise<void> {
   try {
-    let buf = "";
+    const splitter = createNdjsonSplitter(MAX_CONTROL_LINE);
     const decoder = new TextDecoder();
     for await (const chunk of Bun.stdin.stream()) {
-      buf += decoder.decode(chunk, { stream: true });
-      // Runaway line with no newline: drop what we have (bounded memory) and keep reading.
-      if (buf.length > MAX_CONTROL_LINE) buf = "";
-      let nl = buf.indexOf("\n");
-      while (nl !== -1) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
+      for (const line of splitter.push(decoder.decode(chunk, { stream: true }))) {
         await handleControlLine(line, state);
-        nl = buf.indexOf("\n");
       }
     }
   } catch {
