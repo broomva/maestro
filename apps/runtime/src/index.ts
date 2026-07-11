@@ -23,6 +23,9 @@ import { MAESTRO_PROTOCOL_VERSION } from "@maestro/protocol";
 import { createApp } from "./app";
 import { loadConfig } from "./config";
 import type { IndexDb, IndexHandle } from "./db/client";
+// Type-only — the dispatch runtime handle. The value (mountDispatch) is dynamically imported in the
+// entrypoint block so a bare `import ./index` (embedding/tests) never mounts a proxy server or supervisor.
+import type { DispatchRuntime } from "./dispatch";
 // Type-only — the D4 lock handle; the value (acquireRuntimeLock) is dynamically imported in the
 // entrypoint block so mere `import ./index` (embedding/tests) never acquires a workspace lock.
 import type { RuntimeLock } from "./runtime-lock";
@@ -90,9 +93,22 @@ if (!rebuildMode) {
   }
 }
 
+// The dispatch loop (supervisor + model proxy) is MOUNTED in the entrypoint block below (BRO-1822), after
+// recovery, and only in mock-model mode (the only upstream today). It is forward-declared so `createApp`'s
+// F8 kill seam can resolve to it lazily — createApp runs at module load (before the mount), so the kill
+// closure reads `dispatch` at call time; until the mount (or in a bare `import ./index`) kill finds no
+// live run rather than dispatching over an unmounted supervisor.
+let dispatch: DispatchRuntime | undefined;
+
 // The watcher's single-flight `nudge` becomes the intent write path's reconcile trigger
 // (BRO-1820) — an intent-driven reconcile and an fs.watch one share one scheduler, never overlap.
-const app = createApp(config, startedAt, index, watcher?.nudge);
+const app = createApp(
+  config,
+  startedAt,
+  index,
+  watcher?.nudge,
+  (runId) => dispatch?.kill(runId) ?? false,
+);
 
 /** Exported for embedding/tests; the binary serves it when run as the entrypoint. */
 export { app, config };
@@ -171,6 +187,30 @@ if (import.meta.main) {
     }
   }
 
+  // F2/F3 (BRO-1822): mount the dispatch loop AFTER recovery (so the supervisor never dispatches over
+  // un-reconciled state) and ONLY in mock-model mode — the sole model upstream today is the mock, so
+  // without it there is nothing to forward to and the runtime stays read-only (the kill seam then finds no
+  // live run). Guarded + dynamic-imported like the index open (a mount failure must degrade to reads-only,
+  // never crash a healthy read runtime). Needs the open index; skipped when reads are disabled.
+  if (index && config.mockModel) {
+    try {
+      const { mountDispatch } = await import("./dispatch");
+      dispatch = mountDispatch({ db: index, config, hostEnv: process.env });
+      console.log(
+        `maestro runtime · dispatch mounted (mock-model) · proxy ${dispatch.proxyServer.url}`,
+      );
+    } catch (err) {
+      console.warn(
+        `maestro runtime · dispatch unavailable, serving reads only: ${(err as Error).message}`,
+      );
+      dispatch = undefined;
+    }
+  } else if (index && !config.mockModel) {
+    console.log(
+      "maestro runtime · dispatch not mounted (set MAESTRO_MOCK_MODEL=1 for the token-free mock loop; no real model upstream yet)",
+    );
+  }
+
   const server = Bun.serve({ port: config.port, fetch: app.fetch });
   const indexStatus = index
     ? `index ${indexNodes} nodes${scanErrorCount ? ` (${scanErrorCount} scan errors)` : ""}`
@@ -187,6 +227,7 @@ if (import.meta.main) {
     shuttingDown = true;
     if (lockHeartbeat) clearInterval(lockHeartbeat);
     void lock?.release(); // best-effort — a stale lock is stealable anyway; don't block exit on the unlink
+    dispatch?.shutdown(); // SIGKILL live runs + stop the proxy server (BRO-1822)
     watcher?.stop();
     handle?.client.close();
     server.stop();
