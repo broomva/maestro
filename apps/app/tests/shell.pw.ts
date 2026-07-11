@@ -10,7 +10,7 @@ test("the shell never scrolls; the main panel does; the chrome holds when small"
 }) => {
   await page.setViewportSize({ width: 380, height: 480 });
   await page.goto("/");
-  // NOT networkidle — /app holds a live SSE connection open, so the network is never idle.
+  // NOT networkidle — / holds a live SSE connection open, so the network is never idle.
   // Wait for the shell chrome to mount instead.
   await expect(page.getByTestId("shell-main")).toBeVisible();
 

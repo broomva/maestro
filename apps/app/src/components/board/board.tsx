@@ -142,11 +142,12 @@ export function Board() {
             </button>
           </div>
           {/* A crashed inspector must not take down the board (porting-notes §Production hardening).
-              Keyed by the selected id so switching directly A→B remounts a fresh boundary — else a
-              caught crash on A would wedge the fallback for a healthy B (the boundary does not self-reset
-              on a prop change, and the panel stays mounted across an A→B switch). A genuinely-crashing
-              item simply re-errors on its own fresh mount. */}
-          <ErrorBoundary key={selectedItem.id} label="The inspector">
+              Keyed by id AND updatedAt so the boundary remounts fresh on (a) a direct A→B switch and
+              (b) a live node.updated that FIXES a transient crash — else the fallback would wedge on a
+              now-healthy item (the class boundary does not self-reset on a prop change). A still-crashing
+              item just re-errors on its fresh mount. Inspector is presentational (no local state to lose
+              on remount). */}
+          <ErrorBoundary key={`${selectedItem.id}:${selectedItem.updatedAt}`} label="The inspector">
             <Inspector item={selectedItem} />
           </ErrorBoundary>
         </div>

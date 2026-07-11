@@ -9,6 +9,7 @@
 // end-to-end navigation is dogfooded in routing.pw.ts.
 
 import { describe, expect, test } from "bun:test";
+import { type ComponentType, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ErrorBoundary, PaneErrorFallback } from "./components/error-boundary";
 import { router } from "./router";
@@ -89,5 +90,17 @@ describe("routing — every product view wires its own error boundary", () => {
         `${id} wires an errorComponent`,
       ).toBeTruthy();
     }
+  });
+
+  test("a view's errorComponent actually RENDERS the calm fallback (not merely registered)", () => {
+    // Registration (toBeTruthy above) is not enough — render the board's errorComponent and confirm it
+    // produces the pane-error fallback, so a mis-wired errorComponent (registered but rendering nothing
+    // or a stack) is caught.
+    const board = router.routesById["/shell/" as keyof typeof router.routesById];
+    const EC = board?.options.errorComponent;
+    expect(EC).toBeTruthy();
+    const html = renderToStaticMarkup(createElement(EC as ComponentType));
+    expect(html).toContain('data-testid="pane-error"');
+    expect(html).toContain("The board hit a snag.");
   });
 });

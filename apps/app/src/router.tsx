@@ -37,13 +37,17 @@ const historyRoute = view("/history", HistoryView, "History");
 const settingsRoute = view("/settings", SettingsView, "Settings");
 const accountRoute = view("/account", AccountView, "Account");
 
-// Test-fixture route (BRO-1824 done-check): a view that DELIBERATELY throws on render, so routing.pw.ts
-// can prove at RUNTIME that a crashed view falls back within the shell (chrome survives) — React 19 SSR
-// rethrows boundary errors, so the client catch is only observable in a real browser. Harmless in prod
-// (an obscure, undocumented path that just shows the calm fallback), same class of dev surface as
-// /kitchen-sink. It is a child of the shell so its errorComponent renders inside the shell's Outlet.
-const CrashProbe = (): never => {
-  throw new Error("crash probe (BRO-1824 test fixture)");
+// Test-fixture route (BRO-1824 done-check): routing.pw.ts proves at RUNTIME that a crashed view falls
+// back within the shell (chrome survives) — React 19 SSR rethrows boundary errors, so the client catch
+// is only observable in a real browser. INERT BY DEFAULT: it throws ONLY when explicitly triggered with
+// `?crash` (the test navigates to /__crash-probe?crash=1), so mere navigation in a real build never
+// errors — no accidental prod error / console noise (P20 BRO-1824). A child of the shell, so its
+// errorComponent renders inside the shell's Outlet.
+const CrashProbe = (): ReactNode => {
+  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("crash")) {
+    throw new Error("crash probe (BRO-1824 test trigger)");
+  }
+  return null;
 };
 const crashRoute = view("/__crash-probe", CrashProbe, "This view");
 

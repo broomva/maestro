@@ -70,10 +70,11 @@ test("the sidebar nav routes between product views while the shell chrome persis
 test("a crashed view falls back within the shell — the chrome never blanks (done-check)", async ({
   page,
 }) => {
-  // The /__crash-probe fixture view throws on render. Its errorComponent must render the calm fallback
-  // in the shell's Outlet while the shell chrome (brand mark + nav) survives — the runtime proof of
-  // "a thrown render error in one pane never blanks the shell".
-  await page.goto("/__crash-probe");
+  // The /__crash-probe fixture view throws on render ONLY when triggered with ?crash (inert otherwise,
+  // so it is harmless in a real build). Its errorComponent must render the calm fallback in the shell's
+  // Outlet while the shell chrome (brand mark + nav) survives — the runtime proof of "a thrown render
+  // error in one pane never blanks the shell".
+  await page.goto("/__crash-probe?crash=1");
   await expect(page.getByTestId("pane-error")).toBeVisible();
   await expect(page.getByTestId("pane-error")).toContainText("hit a snag");
   // The shell SURVIVED: chrome + nav are still there, and you can navigate away to a healthy view.
