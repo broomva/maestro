@@ -25,7 +25,7 @@
 // type})`. The index projection re-nests payload at the wire boundary (event-projection.ts
 // `toEnvelope`); the on-disk line stays flat.
 
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   ACTORS,
@@ -40,6 +40,8 @@ import {
   DEFAULT_CHILD_GRACE_MS,
   DEFAULT_CHILD_HEARTBEAT_MS,
   DEFAULT_CHILD_HUNG_MS,
+  DEFAULT_ROTATE_MAX_BYTES,
+  DEFAULT_ROTATE_MAX_LINES,
   type RuntimeConfig,
 } from "../config";
 import type { IndexDb } from "../db/client";
@@ -195,6 +197,151 @@ export function fsJournal(runDir: string): Journal {
       if (ensured === null) ensured = mkdir(dirname(path), { recursive: true });
       await ensured;
       await appendFile(path, `${line}\n`, "utf8");
+    },
+  };
+}
+
+/** Rotation thresholds — a segment is bounded at whichever it reaches first (DECISIONS §D3). */
+export interface RotateOptions {
+  /** Bytes ceiling for a session.jsonl segment (default DEFAULT_ROTATE_MAX_BYTES = 5 MB). */
+  maxBytes?: number;
+  /** Line ceiling for a segment (default DEFAULT_ROTATE_MAX_LINES = 5,000). */
+  maxLines?: number;
+}
+
+/** Count the newlines in a buffer — the segment's committed line count (each append writes one `\n`). */
+function countLines(buf: string): number {
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) if (buf.charCodeAt(i) === 10) n++;
+  return n;
+}
+
+/** The highest existing `session.jsonl.<n>` suffix in `runDir` (0 if none) — so a respawn (which reuses
+ *  the run dir, HARNESS §5) continues the suffix sequence rather than clobbering an earlier segment. */
+async function highestRotationSuffix(runDir: string): Promise<number> {
+  let max = 0;
+  try {
+    for (const name of await readdir(runDir)) {
+      const m = /^session\.jsonl\.(\d+)$/.exec(name);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+  } catch {
+    // run dir not created yet — no prior segments
+  }
+  return max;
+}
+
+/**
+ * Digest a just-rotated segment into `summary.md` — the "summarize every 10–20 steps" rule applied at
+ * the file layer (DECISIONS §D3). v1 is a MECHANICAL digest (no model call, pinned): the segment's line/
+ * byte totals + an event-type histogram parsed from its lines. Appended (never rewritten), so the digest
+ * accretes across rotations — the FS keeps the tail + summaries while the index keeps the full archive.
+ */
+async function appendRotationSummary(
+  runDir: string,
+  n: number,
+  rotatedPath: string,
+  lineCount: number,
+  byteCount: number,
+): Promise<void> {
+  const histogram = new Map<string, number>();
+  try {
+    const buf = await readFile(rotatedPath, "utf8");
+    for (const line of buf.split("\n")) {
+      if (line === "") continue;
+      let type = "(unparseable)";
+      try {
+        const t = (JSON.parse(line) as { type?: unknown }).type;
+        if (typeof t === "string") type = t;
+      } catch {
+        // a non-JSON line (should not occur on our own append path) still counts, bucketed
+      }
+      histogram.set(type, (histogram.get(type) ?? 0) + 1);
+    }
+  } catch {
+    // the rotated file vanished (a concurrent teardown) — record the totals without a histogram
+  }
+  const rows = [...histogram.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([type, count]) => `- ${type}: ${count}`)
+    .join("\n");
+  const section = `## session.jsonl.${n} — ${lineCount} lines, ${byteCount} bytes\n${rows || "- (empty)"}\n\n`;
+  try {
+    await appendFile(join(runDir, "summary.md"), section, "utf8");
+  } catch {
+    // The digest is ADVISORY + best-effort (D3: the FS keeps the tail + summaries, the index keeps the
+    // full archive; summary.md is never replayed). A failed summary write must NEVER reject the
+    // load-bearing rotate/append path — else a digest-only failure (e.g. summary.md unwritable) would
+    // reap a healthy child. Same guard-every-best-effort-write discipline as the readFile above.
+  }
+}
+
+/**
+ * A ROTATING FS journal (DECISIONS §D3, BRO-1811). Appends to `session.jsonl` like `fsJournal`, but
+ * bounds each segment: when the next line would push the CURRENT segment over `maxBytes` OR `maxLines`,
+ * it rotates `session.jsonl` → `session.jsonl.<n>` (n increments — segments are never re-renamed, so
+ * reading `.1 → .2 → … → session.jsonl` reproduces the append order gaplessly for F9 replay), digests the
+ * rotated segment into `summary.md`, and resumes on a fresh `session.jsonl`. The index `event` table
+ * keeps the full archive (seq is the archive); this only bounds the on-disk tail.
+ *
+ * Counters seed LAZILY from the existing file on first append (a fresh-context respawn reuses the run
+ * dir, so a new journal instance must continue the running segment's size — not restart at zero). A
+ * single line larger than `maxBytes` never triggers a rotate on an EMPTY segment (it would loop
+ * rotating forever) — it is written whole, and the NEXT line rotates.
+ */
+export function fsRotatingJournal(runDir: string, opts: RotateOptions = {}): Journal {
+  const maxBytes = opts.maxBytes ?? DEFAULT_ROTATE_MAX_BYTES;
+  const maxLines = opts.maxLines ?? DEFAULT_ROTATE_MAX_LINES;
+  const path = join(runDir, "session.jsonl");
+  let init: Promise<void> | null = null;
+  let bytes = 0;
+  let lines = 0;
+  let rotations = 0;
+
+  async function ensureInit(): Promise<void> {
+    await mkdir(dirname(path), { recursive: true });
+    rotations = await highestRotationSuffix(runDir);
+    try {
+      const buf = await readFile(path, "utf8");
+      bytes = Buffer.byteLength(buf, "utf8");
+      lines = countLines(buf);
+    } catch {
+      bytes = 0;
+      lines = 0; // no current segment yet
+    }
+  }
+
+  async function rotate(): Promise<void> {
+    const n = rotations + 1;
+    const rotatedPath = `${path}.${n}`;
+    const segLines = lines;
+    const segBytes = bytes;
+    await rename(path, rotatedPath);
+    // Advance state on the LOAD-BEARING op (the rename succeeded — the segment is durable in `.n`).
+    // This MUST happen before the advisory digest: if it lagged, a summary-write failure would leave
+    // `rotations` un-advanced, and a retry would recompute the same `n` and rename-CLOBBER the durable
+    // `.n` segment — a gap in the F9 replay stream (P20 BRO-1811). `appendRotationSummary` is internally
+    // guarded (never throws), so the digest is purely additive after state is already consistent.
+    rotations = n;
+    bytes = 0;
+    lines = 0;
+    await appendRotationSummary(runDir, n, rotatedPath, segLines, segBytes);
+  }
+
+  return {
+    async append(line: string): Promise<void> {
+      if (init === null) init = ensureInit();
+      await init;
+      const chunk = `${line}\n`;
+      const chunkBytes = Buffer.byteLength(chunk, "utf8");
+      // Rotate BEFORE appending if this line would push a NON-EMPTY segment over either threshold. The
+      // non-empty guard means a lone oversized line lands in its own segment rather than rotating forever.
+      if (lines > 0 && (bytes + chunkBytes > maxBytes || lines + 1 > maxLines)) {
+        await rotate();
+      }
+      await appendFile(path, chunk, "utf8");
+      bytes += chunkBytes;
+      lines += 1;
     },
   };
 }
@@ -468,7 +615,15 @@ export interface SupervisedChild {
 
 export function superviseChildStdio(child: ChildStdioPort, deps: SuperviseDeps): SupervisedChild {
   const writer = deps.writer ?? bindIndexWriter(deps.db);
-  const journal = deps.journal ?? fsJournal(deps.runDir);
+  // The bulk session.jsonl writer ROTATES at the D3 thresholds (BRO-1811). The supervisor's terminal-
+  // event journal (a handful of run.finished/killed/failed lines at reap) stays plain fsJournal — it
+  // appends to whatever segment is current, too few lines to warrant its own rotation bookkeeping.
+  const journal =
+    deps.journal ??
+    fsRotatingJournal(deps.runDir, {
+      maxBytes: deps.config?.rotateMaxBytes,
+      maxLines: deps.config?.rotateMaxLines,
+    });
   const stderrSink = fsStderrLog(deps.runDir);
   const tee = new SessionTee({ writer, journal, sessionId: deps.sessionId, now: deps.now });
   const control = new ChildControl(child.writeStdin);
