@@ -69,11 +69,14 @@
 .bv-reasoning {
   display: flex;
   gap: 7px;
-  align-items: baseline;
+  align-items: flex-start; /* pin the leading icon to the first line for multi-line reasoning */
   font-size: 12px;
   font-style: italic;
   color: var(--muted-foreground);
   max-width: 100%;
+}
+.bv-reasoning > svg {
+  margin-top: 1px; /* optical align the icon cap with the italic first line */
 }
 
 /* ── A tool part — a matte card (never glass); the head names the tool, the lines show io ── */
@@ -92,7 +95,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 12.5px;
+  font-size: 12px; /* on the tight scale (CLAUDE.md §Type: 12/14/16/18/22/24/28, nothing else) */
 }
 .bv-toolpart-head > svg {
   color: var(--muted-foreground);
@@ -123,8 +126,8 @@
   align-self: flex-start;
   display: flex;
   gap: 7px;
-  align-items: baseline;
-  font-size: 13px;
+  align-items: center;
+  font-size: 12px; /* on the tight scale (CLAUDE.md §Type) */
   color: var(--muted-foreground);
 }
 

@@ -96,3 +96,48 @@ test("the same session renders in both the thread and the side panel (one reduce
   await expect(page.locator('section[aria-label="Thread"] .bv-glass-composer')).toHaveCount(1);
   await expect(page.locator('[data-testid="session-panel"] .bv-glass-composer')).toHaveCount(0);
 });
+
+test("a CLIENT-SIDE session switch tears the old one down — the new session never inherits the old transcript (P20 MAJOR fix)", async ({
+  page,
+}) => {
+  // Session alpha: stream a reply (fixture).
+  await page.goto("/session/alpha?fixture=1");
+  await page.getByPlaceholder("Message Maestro").fill("session alpha message");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByTestId("chat-assistant-text").first()).toContainText(
+    "queued it to your gate.",
+  );
+
+  // CLIENT-SIDE param change alpha → orchestrator (the presence chip is a TanStack Link, not a reload).
+  // Both match /session/$sessionId, so TanStack reuses the route component across the param change —
+  // SessionChat is keyed by sessionId, so it fully remounts with a fresh useBvChat (and alpha's unmount
+  // cleanup aborts its turn). WITHOUT the key the component is reused and orchestrator shows alpha's
+  // transcript: this assertion fails in that unfixed world (verified by mutation — removing the key
+  // makes this test red).
+  await page.getByRole("link", { name: /maestro/i }).click();
+  await expect(page).toHaveURL(/\/session\/orchestrator/);
+  await expect(page.getByTestId("chat-empty").first()).toContainText("A fresh session");
+  await expect(page.getByTestId("session-view")).not.toContainText("session alpha message");
+  await expect(page.getByTestId("session-view")).not.toContainText("queued it to your gate.");
+});
+
+test("navigating away mid-session and back yields a fresh mount, no stale bleed, no crash", async ({
+  page,
+}) => {
+  await page.goto("/session/orchestrator?fixture=1");
+  await page.getByPlaceholder("Message Maestro").fill("hello there");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByTestId("chat-assistant-text").first()).toContainText(
+    "queued it to your gate.",
+  );
+
+  // Leave the session view (unmounts SessionChat → its cleanup aborts the turn + closes the stream).
+  await page.getByRole("link", { name: "Knowledge" }).click();
+  await expect(page.getByTestId("view-knowledge")).toBeVisible();
+
+  // Back via the presence chip → a fresh mount: empty greeting, a working composer, no crash.
+  await page.getByRole("link", { name: /maestro/i }).click();
+  await expect(page.getByTestId("chat-empty").first()).toContainText("A fresh session");
+  await expect(page.getByPlaceholder("Message Maestro")).toBeVisible();
+  await expect(page.getByTestId("session-view")).not.toContainText("hello there");
+});

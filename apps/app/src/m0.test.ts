@@ -36,7 +36,9 @@ describe("M0 · glass is earned (§6.4)", () => {
   test("no M0 app surface wears glass (the page is matte)", () => {
     const srcDir = new URL("./", import.meta.url);
     for (const entry of readdirSync(srcDir, { recursive: true, encoding: "utf8" })) {
-      if (!/\.(tsx?|css)$/.test(entry) || entry.endsWith(".test.ts")) continue;
+      // Skip non-source and ANY test file (.test.ts / .test.tsx) — a test that ASSERTS a surface is
+      // matte legitimately contains the "bv-glass" literal in its assertion, and must not self-trip.
+      if (!/\.(tsx?|css)$/.test(entry) || /\.test\.tsx?$/.test(entry)) continue;
       // Strip comments so a doc reference to glass (like this file's own prose)
       // is not mistaken for glass being applied to a surface.
       const code = readFileSync(new URL(entry, srcDir), "utf8")

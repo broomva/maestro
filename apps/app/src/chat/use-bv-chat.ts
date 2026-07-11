@@ -9,7 +9,7 @@
 // history the next send builds on.
 
 import type { ChatMessage } from "@maestro/protocol";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type ChatStatus,
   type RunChatTurnOptions,
@@ -46,8 +46,12 @@ export interface UseBvChatResult {
 
 /** Render a transport failure as an assistant error part appended to the transcript, so the feed shows
  *  an honest, specific message (slice A's `ChatTransportError` carries the endpoint's code/message)
- *  rather than a silent stall. Uses the reducer's `error` part shape. */
-function withError(messages: readonly ChatMessage[], err: unknown): readonly ChatMessage[] {
+ *  rather than a silent stall. Uses the reducer's `error` part shape. Exported for unit testing (the
+ *  error-render path is otherwise only reachable through a live failing transport). */
+export function appendErrorMessage(
+  messages: readonly ChatMessage[],
+  err: unknown,
+): readonly ChatMessage[] {
   const errorText =
     err instanceof ChatTransportError
       ? err.message
@@ -104,7 +108,7 @@ export function useBvChat({
       } catch (err) {
         // A genuine transport failure (not an abort — slice A returns cleanly on abort). Keep the user
         // turn (runChatTurn yielded `submitted` first), append an error part, settle to ready.
-        setMessages((m) => withError(m, err));
+        setMessages((m) => appendErrorMessage(m, err));
         setStatus("ready");
       } finally {
         // Only clear the controller if it is still the current one (a superseding send owns its own).
@@ -119,6 +123,20 @@ export function useBvChat({
     // The stream returns cleanly on abort; settle the UI immediately (don't wait for the loop to unwind).
     setStatus("ready");
   }, []);
+
+  // Abort the in-flight turn on unmount (P20 slice-B MAJOR). Without this, navigating away mid-stream
+  // (e.g. clicking a sidebar Link) leaves the fetch open and the runtime's F10 agent turn generating
+  // unread — a leaked, un-observable, metered child run that cuts against the "gate is the human's"
+  // thesis. The abort closes the connection, so the runtime sees the client disconnect and stops. A
+  // per-session remount (SessionView is keyed by sessionId) makes this cleanup also fire on a session
+  // switch, so turn A never bleeds into session B's transcript.
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    },
+    [],
+  );
 
   return {
     messages,

@@ -5,7 +5,7 @@
 // nothing here: data-gate is the gate queue's (BRO-1789), data-tick is deferred F6.5 gen-UI.
 
 import type { ChatMessage, ChatPart } from "@maestro/protocol";
-import { SquareCheck } from "lucide-react";
+import { CircleAlert, Sparkles, SquareCheck } from "lucide-react";
 import type { ReactNode } from "react";
 import type { ChatStatus } from "./chat-turn";
 import { emptySessionGreeting, tokenizeAssistantText } from "./format";
@@ -89,7 +89,7 @@ function AssistantPart({ part }: { part: ChatPart }): ReactNode {
   if (part.type === "reasoning") {
     return (
       <div className="bv-reasoning" data-testid="chat-reasoning">
-        <span aria-hidden="true">✦</span>
+        <Sparkles size={13} strokeWidth={2} aria-hidden="true" className="shrink-0" />
         <span>{part.text}</span>
       </div>
     );
@@ -97,7 +97,7 @@ function AssistantPart({ part }: { part: ChatPart }): ReactNode {
   if (part.type === "error") {
     return (
       <div className="bv-msg--error" data-testid="chat-error">
-        <span aria-hidden="true">!</span>
+        <CircleAlert size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
         <span>{part.errorText}</span>
       </div>
     );

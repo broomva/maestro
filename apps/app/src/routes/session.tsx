@@ -12,16 +12,15 @@ import { useParams } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { ChatFeed } from "@/chat/chat-feed";
 import { FixtureChatTransport, fixtureRequested } from "@/chat/fixture-transport";
-import type { ChatTransport } from "@/chat/transport";
-import { RuntimeChatTransport } from "@/chat/transport";
+import { type ChatTransport, RuntimeChatTransport } from "@/chat/transport";
 import { useBvChat } from "@/chat/use-bv-chat";
 
-export function SessionView() {
-  // Loose param read (the route is registered in router.tsx; `strict:false` avoids a config import cycle).
-  const params = useParams({ strict: false }) as { sessionId?: string };
-  const sessionId = params.sessionId ?? "orchestrator";
-
-  // Bind the transport once per session id. Fixture mode is a demo/test seam (query-triggered), inert
+/** The chat surface for ONE session. Split out from the param-reading route so it can be KEYED by
+ *  sessionId (P20 slice-B MAJOR): a `$sessionId` change fully remounts this, giving the new session a
+ *  fresh `useBvChat` while the prior instance's unmount cleanup aborts its in-flight turn — session A's
+ *  stream can never bleed into session B's transcript. */
+function SessionChat({ sessionId }: { sessionId: string }) {
+  // Bind the transport once per mount. Fixture mode is a demo/test seam (query-triggered), inert
   // otherwise — production streams over the real F10 endpoint.
   const transport = useMemo<ChatTransport>(
     () =>
@@ -38,7 +37,7 @@ export function SessionView() {
           footer matches). This is the primary surface. */}
       <section className="flex min-w-0 flex-1 flex-col" aria-label="Thread">
         <ChatFeed messages={messages} status={status} label="Conversation" />
-        <div className="mx-auto w-full max-w-[768px] shrink-0 px-4 pb-4 pt-2">
+        <div className="mx-auto w-full max-w-[768px] shrink-0 px-4 pt-2 pb-4">
           <Composer
             placeholder="Message Maestro"
             busy={busy}
@@ -63,4 +62,13 @@ export function SessionView() {
       </aside>
     </div>
   );
+}
+
+export function SessionView() {
+  // Loose param read (the route is registered in router.tsx; `strict:false` avoids a config import cycle).
+  const params = useParams({ strict: false }) as { sessionId?: string };
+  const sessionId = params.sessionId ?? "orchestrator";
+  // KEY the chat by the session id so switching sessions tears the old one down (fresh state + the old
+  // instance's abort-on-unmount cleanup) rather than reusing the component across a param change.
+  return <SessionChat key={sessionId} sessionId={sessionId} />;
 }
