@@ -37,14 +37,20 @@ type EmittedChunkType =
 type AiEmittedChunk = Extract<UIMessageChunk, { type: EmittedChunkType }>;
 type _ChunkConforms = Expect<Assignable<AiEmittedChunk, StreamChunk>>;
 
+// `Extract<>` above SILENTLY shrinks if ai renames/removes an emitted variant (the literal becomes
+// uninhabited → `never` drops out of the union → the smaller union is still assignable). So assert every
+// emitted type NAME is still a member of ai's chunk-type union: this fails tsc if ai drops or renames a
+// variant the endpoint emits (the drift `_ChunkConforms` alone cannot see).
+type _EmittedNamesExist = Expect<Assignable<EmittedChunkType, UIMessageChunk["type"]>>;
+
 // Reference the assertions so the file self-documents (a bare `type _X` is elided by the compiler).
-const _conformance: [_MsgConforms, _ChunkConforms] = [true, true];
+const _conformance: [_MsgConforms, _ChunkConforms, _EmittedNamesExist] = [true, true, true];
 
 describe("chat wire conformance (BRO-1826 M4) — ai v6 types satisfy the reducer's structural shapes", () => {
   test("apps/app is pinned to the AI SDK majors the runtime's stream producer emits (chat-transport.md §1)", () => {
     expect(AI_SDK_MAJOR).toBe(6);
     expect(AI_SDK_REACT_MAJOR).toBe(3);
-    // The [true, true] tuple only typechecks if both conformance assertions above hold.
-    expect(_conformance).toEqual([true, true]);
+    // The [true, true, true] tuple only typechecks if all three conformance assertions above hold.
+    expect(_conformance).toEqual([true, true, true]);
   });
 });

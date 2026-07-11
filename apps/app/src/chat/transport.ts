@@ -114,6 +114,11 @@ export async function* parseUiMessageStream(
       let nl: number;
       // biome-ignore lint/suspicious/noAssignInExpressions: idiomatic line-buffer drain
       while ((nl = buf.indexOf("\n")) >= 0) {
+        // Honor abort BETWEEN buffered frames, not only between network reads. One read routinely
+        // coalesces many frames (Bun+Hono emits tool call/result back-to-back; loopback TCP merges them),
+        // so without this an abort after folding frame N still yields every remaining buffered frame — the
+        // stop verb would be a no-op for a short reply (P20 slice-A MAJOR).
+        if (signal?.aborted) return;
         const parsed = parseDataLine(buf.slice(0, nl));
         buf = buf.slice(nl + 1);
         if (parsed === DONE) return;
@@ -170,13 +175,23 @@ export class RuntimeChatTransport implements ChatTransport {
     messages: readonly ChatMessage[],
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<StreamChunk, void, unknown> {
+    // Abort is a clean stop everywhere, including the request window: a pre-aborted signal or an abort
+    // in-flight during the POST returns without yielding, matching the body-read path (so a consumer that
+    // stops during the F10 dispatch-then-chat latency never sees an uncaught AbortError).
+    if (opts?.signal?.aborted) return;
     const path = CHAT_ENDPOINT.replace(":id", encodeURIComponent(this.#sessionId));
-    const res = await this.#fetch(`${this.#baseUrl}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages }),
-      signal: opts?.signal,
-    });
+    let res: Response;
+    try {
+      res = await this.#fetch(`${this.#baseUrl}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages }),
+        signal: opts?.signal,
+      });
+    } catch (err) {
+      if (opts?.signal?.aborted || (err as { name?: string })?.name === "AbortError") return;
+      throw err;
+    }
     if (!res.ok) throw await chatHttpError(res);
     if (!res.body) return; // no stream body (shouldn't happen for a 200) — a clean, empty reply
     yield* parseUiMessageStream(res.body, opts?.signal);

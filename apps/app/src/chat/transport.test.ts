@@ -35,24 +35,6 @@ function streamResponse(slices: string[], status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "text/event-stream" } });
 }
 
-/** A body that yields one frame per `pull` (backpressure), then waits for abort — for the abort test. */
-function backpressuredResponse(frames: string[], signal: AbortSignal): Response {
-  const enc = new TextEncoder();
-  let i = 0;
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (signal.aborted) return controller.close();
-      if (i < frames.length) return controller.enqueue(enc.encode(frames[i++] ?? ""));
-      await new Promise<void>((resolve) => {
-        if (signal.aborted) return resolve();
-        signal.addEventListener("abort", () => resolve(), { once: true });
-      });
-      controller.close();
-    },
-  });
-  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
-}
-
 // The chunk sequence the F10 endpoint emits for a run that runs one tool then answers (chat.ts
 // streamSession: start → tool.call → tool.result → agent.said → run.finished).
 const RUN_CHUNKS: StreamChunk[] = [
@@ -141,30 +123,68 @@ describe("RuntimeChatTransport — the F10 chat wire", () => {
     });
   });
 
-  test("abort mid-stream stops cleanly (no throw), preserving what was already folded", async () => {
+  test("abort between frames buffered in ONE network read stops delivery (the coalesced-read case)", async () => {
+    // ALL frames arrive in a single network read — the common case: Bun+Hono emits them back-to-back and
+    // loopback TCP coalesces them, so the whole tail sits in `buf` after one reader.read(). The consumer
+    // folds the FIRST delta then aborts; the remaining BUFFERED frames MUST NOT be delivered (the stop verb
+    // is not a no-op). A one-frame-per-read fixture would make this pass vacuously — the missing inner-loop
+    // abort check is only exercised when `buf` holds more than one frame at abort time.
+    const all =
+      frame({ type: "start", messageId: "r1" }) +
+      frame({ type: "text-start", id: "t" }) +
+      frame({ type: "text-delta", id: "t", delta: "AA" }) +
+      frame({ type: "text-delta", id: "t", delta: "BB" }) +
+      frame({ type: "text-end", id: "t" }) +
+      frame({ type: "finish" }) +
+      DONE_FRAME;
     const ac = new AbortController();
-    // 6 content frames, but delivered one-per-pull; we abort after folding 2 → frames 3-6 are never pulled.
-    const frames = [
-      frame({ type: "start", messageId: "r1" }),
-      frame({ type: "text-start", id: "t" }),
-      frame({ type: "text-delta", id: "t", delta: "partial" }),
-      frame({ type: "text-delta", id: "t", delta: " MORE" }),
-      frame({ type: "text-end", id: "t" }),
-      frame({ type: "finish" }),
-    ];
-    const fetchImpl: FetchLike = async () => backpressuredResponse(frames, ac.signal);
+    const fetchImpl: FetchLike = async () => streamResponse([all]); // one enqueue → one reader.read()
     const t = new RuntimeChatTransport({ sessionId: "n0", fetchImpl });
 
     let msgs: readonly ChatMessage[] = [];
-    let count = 0;
+    const seen: string[] = [];
     for await (const c of t.stream([], { signal: ac.signal })) {
+      seen.push(c.type);
       msgs = bvApplyChunk(msgs, c);
-      if (++count === 2) ac.abort(); // after start + text-start; the delta frames are not pulled
+      if (c.type === "text-delta") ac.abort(); // after the FIRST delta ("AA"); "BB"/end/finish are buffered
     }
-    // Stopped early: only start + text-start folded → the text part exists but never received its delta.
-    expect(count).toBe(2);
+    // Stopped mid-buffer: start + text-start + the first delta only — the rest of the coalesced read dropped.
+    expect(seen).toEqual(["start", "text-start", "text-delta"]);
     const text = msgs[0]?.parts.find((p) => p.type === "text");
-    expect(text).toMatchObject({ text: "", state: "streaming" });
+    expect(text).toMatchObject({ text: "AA", state: "streaming" }); // never got "BB" nor text-end
+  });
+
+  test("a pre-aborted signal returns cleanly, never even POSTing", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    let called = false;
+    const fetchImpl: FetchLike = async () => {
+      called = true;
+      return streamResponse([frame({ type: "start" }), DONE_FRAME]);
+    };
+    const t = new RuntimeChatTransport({ sessionId: "n0", fetchImpl });
+    const seen: StreamChunk[] = [];
+    for await (const c of t.stream([], { signal: ac.signal })) seen.push(c);
+    expect(seen).toEqual([]);
+    expect(called).toBe(false);
+  });
+
+  test("an abort that rejects the in-flight POST returns cleanly (no uncaught AbortError)", async () => {
+    const ac = new AbortController();
+    const fetchImpl: FetchLike = async () => {
+      ac.abort();
+      throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    };
+    const t = new RuntimeChatTransport({ sessionId: "n0", fetchImpl });
+    let threw = false;
+    try {
+      for await (const _ of t.stream([], { signal: ac.signal })) {
+        /* no frames expected */
+      }
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
   });
 
   test("a non-OK response throws a typed ChatTransportError with the endpoint's code + message", async () => {
