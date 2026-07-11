@@ -53,8 +53,10 @@ function promptFor(contract: WorkContract | null): string {
 }
 
 /** Pull the assistant text out of an Anthropic Messages response body — the `content[]` text blocks,
- *  joined. Defensive: a non-array / non-text body yields "" rather than throwing. */
+ *  joined. Defensive: a null / primitive / non-array-content body yields "" rather than throwing (a JSON
+ *  `null` body parses fine, so the null guard is load-bearing — without it `null.content` throws). */
 function textOf(body: unknown): string {
+  if (body === null || typeof body !== "object") return "";
   const content = (body as { content?: unknown }).content;
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
@@ -71,16 +73,31 @@ async function main(): Promise<never> {
   await emit({ actor: "system", type: "run.started" });
 
   const contract = await readContract();
-  const resp = await fetch(`${proxyUrl}/v1/messages`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    // No model id — the proxy resolves the role-pinned model. max_tokens is required for the proxy's
-    // pre-forward budget reservation (HARNESS §3 / BRO-1788).
-    body: JSON.stringify({
-      max_tokens: 1024,
-      messages: [{ role: "user", content: promptFor(contract) }],
-    }),
-  });
+
+  // The model call is guarded so EVERY failure path emits a `run.exiting` receipt (HARNESS §6) —
+  // symmetric with the 402/non-2xx branches below. A transport error (proxy unreachable/reset, an unset
+  // BROOMVA_MODEL_PROXY → a relative-URL fetch throw) would otherwise crash the child after run.started
+  // with no receipt, leaving the supervisor to route a generic run.failed with no child-declared reason.
+  let resp: Response;
+  try {
+    resp = await fetch(`${proxyUrl}/v1/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      // No model id — the proxy resolves the role-pinned model. max_tokens is required for the proxy's
+      // pre-forward budget reservation (HARNESS §3 / BRO-1788).
+      body: JSON.stringify({
+        max_tokens: 1024,
+        messages: [{ role: "user", content: promptFor(contract) }],
+      }),
+    });
+  } catch (err) {
+    await emit({
+      actor: "system",
+      type: "run.exiting",
+      payload: { code: 1, reason: `model unreachable: ${msg(err)}` },
+    });
+    process.exit(1);
+  }
 
   // Budget refused in-path (BRO-1788): the proxy 402'd before forwarding → halt-budget + exit 10, so the
   // supervisor parks the run blocked (F3.1). beatExitEvents emits budget.exhausted + run.exiting.
@@ -101,10 +118,28 @@ async function main(): Promise<never> {
     process.exit(1);
   }
 
-  const body = await resp.json().catch(() => ({}));
+  // A 2xx with an unparseable body is a FAILED turn (not an empty success) → exit 1 with a receipt. A
+  // body that parses to null/empty content is a valid-but-empty turn → agent.said "" + exit 0 (textOf
+  // guards it). Both stay symmetric with the error branches: a run.exiting always lands.
+  let body: unknown;
+  try {
+    body = await resp.json();
+  } catch (err) {
+    await emit({
+      actor: "system",
+      type: "run.exiting",
+      payload: { code: 1, reason: `model response unreadable: ${msg(err)}` },
+    });
+    process.exit(1);
+  }
   await emit({ actor: "agent", type: "agent.said", payload: { text: textOf(body) } });
   await emit({ actor: "system", type: "run.exiting", payload: { code: 0 } });
   process.exit(0);
+}
+
+/** A short message from an unknown thrown value (mirrors the supervisor's `msg`). */
+function msg(err: unknown): string {
+  return String((err as Error)?.message ?? err);
 }
 
 await main();

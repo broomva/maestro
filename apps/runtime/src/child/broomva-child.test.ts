@@ -95,7 +95,9 @@ async function seedNode(h: IndexHandle, id: string, budgetJson?: string): Promis
   });
 }
 
-async function harness(opts: { budgetJson?: string; mock?: MockModelOptions } = {}) {
+async function harness(
+  opts: { budgetJson?: string; mock?: MockModelOptions; proxyUrlOverride?: string } = {},
+) {
   const ws = await makeWorkspace();
   const h = await openMem();
   await seedNode(h, "n0", opts.budgetJson);
@@ -115,7 +117,9 @@ async function harness(opts: { budgetJson?: string; mock?: MockModelOptions } = 
     db: h.db,
     factory: createWorktreeSandboxFactory({ workspace: ws }),
     tokens,
-    proxy: { url: server.url },
+    // A dead override points the child at an unreachable proxy (the fetch-throw path); default = the
+    // real served proxy.
+    proxy: { url: opts.proxyUrlOverride ?? server.url },
     spawnChild: realChildSpawn,
     mintRunId: () => "r1",
     hostEnv: { PATH: process.env.PATH },
@@ -164,9 +168,16 @@ describe("broomva-child slice 1 — one model turn through the proxy (zero token
     expect(said).toHaveLength(1);
     expect(JSON.parse(said[0]?.payload ?? "{}")).toEqual({ text: REPLY });
 
-    // The lifecycle bookends are present.
-    expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_STARTED)).toHaveLength(1);
-    expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING)).toHaveLength(1);
+    // Bookends carry the right code + order, not just counts: run.exiting {code:0}, the child-declared
+    // code matches the real exit (no mismatch), and the seq order is run.started < agent.said < exiting.
+    const started = await eventsOf(h, "r1", EVENT_TYPES.RUN_STARTED);
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
+    expect(started).toHaveLength(1);
+    expect(exiting).toHaveLength(1);
+    expect(JSON.parse(exiting[0]?.payload ?? "{}")).toEqual({ code: 0 });
+    expect(reaped.mismatch).toBe(false);
+    expect((started[0]?.seq ?? -1) < (said[0]?.seq ?? -1)).toBe(true);
+    expect((said[0]?.seq ?? -1) < (exiting[0]?.seq ?? -1)).toBe(true);
   });
 
   test("proxy 402 (budget refused in-path) → child halts budget → exit 10 → session blocked", async () => {
@@ -188,5 +199,61 @@ describe("broomva-child slice 1 — one model turn through the proxy (zero token
     // The child emitted the budget halt, not an agent.said (it never got a model reply).
     expect(await eventsOf(h, "r1", EVENT_TYPES.BUDGET_EXHAUSTED)).toHaveLength(1);
     expect(await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID)).toHaveLength(0);
+  });
+
+  test("non-2xx (502 upstream) → child exits 1 with a run.exiting receipt → crash-contained blocked", async () => {
+    // The mock returns 502; the proxy forwards it (mock.calls===1) → the child can't proceed → exit 1
+    // WITH a run.exiting {code:1} receipt (not a bare crash) → supervisor crash-routes blocked + run.failed.
+    const { h, sup, mock } = await harness({ mock: { script: [{ status: 502 }] } });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(1);
+    expect(reaped.crash).toBe(true);
+    expect(reaped.sessionStatus).toBe("blocked");
+    expect(mock.calls).toHaveLength(1);
+    expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_FAILED)).toHaveLength(1); // supervisor crash event
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING); // the child's own receipt
+    expect(exiting).toHaveLength(1);
+    expect(JSON.parse(exiting[0]?.payload ?? "{}").code).toBe(1);
+    expect(await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID)).toHaveLength(0);
+  });
+
+  test("proxy unreachable (fetch throws) → child exits 1 with a receipt, not a bare crash", async () => {
+    // Point the child at a dead proxy so fetch rejects (ECONNREFUSED). The guard must emit a run.exiting
+    // {code:1, reason: model unreachable} receipt (HARNESS §6) before exiting — never a receiptless crash.
+    const { h, sup, mock } = await harness({ proxyUrlOverride: "http://127.0.0.1:1" });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(1);
+    expect(reaped.sessionStatus).toBe("blocked");
+    expect(mock.calls).toHaveLength(0); // never reached the served proxy/mock
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
+    expect(exiting).toHaveLength(1); // the receipt landed despite the transport crash
+    const payload = JSON.parse(exiting[0]?.payload ?? "{}");
+    expect(payload.code).toBe(1);
+    expect(String(payload.reason)).toContain("unreachable");
+    expect(await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID)).toHaveLength(0);
+  });
+
+  test("a non-object (string) 200 body → empty agent.said, no crash → session review", async () => {
+    // textOf must NOT throw on a non-object body (its no-throw contract). A string body → text "" → a
+    // valid-but-empty turn (exit 0 / review), not a receiptless crash on `body.content`.
+    const { h, sup, mock } = await harness({
+      mock: { script: [{ body: "unexpected string body" }] },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0);
+    expect(reaped.sessionStatus).toBe("review");
+    expect(mock.calls).toHaveLength(1);
+    const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
+    expect(said).toHaveLength(1);
+    expect(JSON.parse(said[0]?.payload ?? "{}")).toEqual({ text: "" });
   });
 });
