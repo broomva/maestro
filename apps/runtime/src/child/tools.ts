@@ -190,15 +190,22 @@ export async function executeTool(
       let out: { text: string; clipped: boolean };
       let err: { text: string; clipped: boolean };
       let code: number;
+      let didTimeout = false;
       try {
         // Bounded, streamed, cancellable reads: neither memory nor wall-clock can run away.
         [out, err] = await Promise.all([
           readCapped(proc.stdout as ReadableStream<Uint8Array>, MAX_OUTPUT, ac.signal),
           readCapped(proc.stderr as ReadableStream<Uint8Array>, MAX_OUTPUT, ac.signal),
         ]);
-        code = timedOut ? -1 : await proc.exited; // don't await a detached parent once we've timed out
-      } finally {
+        // Stop the timer and snapshot the flag ONCE, synchronously, before the next await — otherwise a
+        // command that finishes ~exactly at the deadline could let the timer fire DURING `await exited`
+        // and flip `timedOut` between the code-decision read and the return-decision read (a success
+        // spuriously reported as timed-out).
         clearTimeout(timer);
+        didTimeout = timedOut;
+        code = didTimeout ? -1 : await proc.exited; // don't await a detached parent once we've timed out
+      } finally {
+        clearTimeout(timer); // idempotent — covers an early throw before the inline clear above
       }
       // Join the two streams with a newline so an unterminated stdout can't be glued onto stderr; the
       // clipped flag is honest about the COMBINED cut, not just each stream's own cap. The `…(truncated)`
@@ -207,7 +214,7 @@ export async function executeTool(
       const raw = [out.text, err.text].filter(Boolean).join("\n").trim();
       const clipped = out.clipped || err.clipped || raw.length > MAX_OUTPUT;
       const body = clipped ? `${capText(raw, MAX_OUTPUT)}\n…(truncated)` : raw;
-      if (timedOut) {
+      if (didTimeout) {
         return {
           ok: false,
           summary: `shell \`${command.slice(0, 60)}\` → timed out (${timeoutMs}ms)`,
