@@ -516,6 +516,11 @@ describe("stop-conditions — P20 robustness", () => {
     expect(
       parseProgress(good.replace("updated: 2026-07-11T02:00:00.000Z", "updated: ")),
     ).toBeNull();
+    // A NEGATIVE iteration (corrupt / hand-edit) must be rejected — else it seeds a negative resumedFrom
+    // into a resume loop and loosens iteration_cap. A non-integer is rejected too; 0 is a valid fresh seed.
+    expect(parseProgress(good.replace("iteration: 3", "iteration: -5"))).toBeNull();
+    expect(parseProgress(good.replace("iteration: 3", "iteration: 1.5"))).toBeNull();
+    expect(parseProgress(good.replace("iteration: 3", "iteration: 0"))?.iteration).toBe(0);
   });
 });
 

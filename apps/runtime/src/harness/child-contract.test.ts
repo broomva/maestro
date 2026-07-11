@@ -149,6 +149,13 @@ test("buildChildEnv passes the allowlist through and sets the contract vars", ()
   // deliberately here — proof the child gets the proxy bearer without any host secret riding along.
   expect(env.BROOMVA_MODEL_TOKEN).toBe("proxy-bearer-minted-at-spawn");
   expect(isSecretEnvName("BROOMVA_MODEL_TOKEN")).toBe(true);
+  // The optional context ceiling is absent when the spec omits it (the child falls back to its default).
+  expect(env.BROOMVA_CONTEXT_CEILING).toBeUndefined();
+});
+
+test("buildChildEnv sets BROOMVA_CONTEXT_CEILING when the spec carries a contextCeilingTokens", () => {
+  const env = buildChildEnv(HOSTILE_HOST_ENV, { ...ENV_SPEC, contextCeilingTokens: 42_000 });
+  expect(env.BROOMVA_CONTEXT_CEILING).toBe("42000"); // stringified, passed via the allowlist
 });
 
 test("isSecretEnvName flags secrets and clears the allowlist", () => {

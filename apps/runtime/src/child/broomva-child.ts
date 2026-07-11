@@ -28,7 +28,9 @@ import {
   type BeatState,
   beatExitEvents,
   evaluateBeat,
+  type ProgressDoc,
   prepareRestart,
+  readProgress,
 } from "../harness/stop-conditions";
 import { executeTool, parseToolUses, TOOL_SCHEMAS, type ToolUse, toolResultBlock } from "./tools";
 
@@ -101,6 +103,16 @@ export function promptFor(contract: WorkContract | null, session: string): strin
   }
   const done = contract.done ? ` Done when: ${JSON.stringify(contract.done)}.` : "";
   return `Work on this ${contract.kind} (id ${contract.id}).${done} Describe your first step.`;
+}
+
+/** On a fresh-context RESPAWN, fold the checkpoint (progress.md) into the opening prompt so the model
+ *  CONTINUES from the recorded state instead of restarting the work — the disk-memory continuity that
+ *  makes a restart lossless (AUTONOMY §3). Empty string on a fresh run (no checkpoint). */
+function resumeSuffix(checkpoint: ProgressDoc | null): string {
+  if (checkpoint === null) return "";
+  const left =
+    checkpoint.whatsLeft.length > 0 ? ` Remaining: ${JSON.stringify(checkpoint.whatsLeft)}.` : "";
+  return ` You are RESUMING after a fresh-context restart (from beat ${checkpoint.iteration}). State so far: ${checkpoint.stateOfTheWorld}.${left} Continue from there; do not restart completed work.`;
 }
 
 /** Pull the assistant text out of an Anthropic Messages response body — the `content[]` text blocks,
@@ -296,9 +308,20 @@ async function main(): Promise<never> {
 
   const contract = await readContract();
   const budget: Budget = contract?.budget ?? {};
-  const messages: Msg[] = [{ role: "user", content: promptFor(contract, session) }];
+  // On a fresh-context RESPAWN the run dir already holds a progress.md checkpoint the prior attempt wrote
+  // (prepareRestart). Resume from it: fold its state into the opening prompt so the model continues, and
+  // seed the iteration counter so the run's iteration_cap accumulates ACROSS respawns (it spans attempts,
+  // not processes — BRO-1795). A fresh run has no checkpoint → resumedFrom 0, bare prompt.
+  // Guard the empty run dir (like readContract): `readProgress("")` would resolve progress.md against cwd.
+  const checkpoint = runDir === "" ? null : await readProgress(runDir);
+  // Clamp defensively — parseProgress already rejects a negative iteration, but a non-negative resumedFrom
+  // is a hard invariant of the beat-loop bounds, so belt-and-suspenders here too.
+  const resumedFrom = Math.max(0, checkpoint?.iteration ?? 0);
+  const messages: Msg[] = [
+    { role: "user", content: promptFor(contract, session) + resumeSuffix(checkpoint) },
+  ];
   const state: BeatState = {
-    iterations: 0,
+    iterations: resumedFrom,
     budget,
     // spentUsd/dayUsd stay 0: the child has no channel to the running spend in this slice, so the
     // engine's end-of-beat `budget` backstop is inert — the IN-PATH proxy guard (402, BRO-1788) is the
@@ -315,7 +338,7 @@ async function main(): Promise<never> {
   const base = await gitHead(cwd); // the run base — beat signatures diff vs this, so commits count
   let prevSig = (await beatSignal(cwd, base)).sig;
 
-  for (let beat = 1; beat <= MAX_BEATS; beat++) {
+  for (let beat = resumedFrom + 1; beat <= resumedFrom + MAX_BEATS; beat++) {
     const turn = await callProxy(messages);
     if (turn.kind === "error") {
       await emit({
@@ -428,6 +451,16 @@ async function main(): Promise<never> {
       // prepareRestart does file I/O (writeProgress); guard it so a checkpoint-write failure (ENOSPC /
       // EROFS / unset run dir) still lands a receipt rather than crashing receiptless — the every-exit-
       // emits-a-run.exiting invariant every other branch upholds.
+      // stateOfTheWorld is an HONEST narrative — the real work carryover is the preserved worktree, so the
+      // resumed child is told to inspect it; recent tool errors are surfaced as CONTEXT, NOT as tasks.
+      // whatsLeft is the remaining-TASK list (ProgressDoc contract) — empty in this slice: the child has no
+      // model-authored task list yet (fix_plan.md wiring is later), and folding errors here would mislabel
+      // them as outstanding work to the resumed model. So [] rather than a fabricated task list.
+      const recentErrs = [...new Set(state.recentErrors.filter((e) => e !== ""))];
+      const errNote =
+        recentErrs.length > 0
+          ? ` Recent tool errors (context, not tasks): ${JSON.stringify(recentErrs)}.`
+          : "";
       let events: ChildEmittedEvent[];
       try {
         events = await prepareRestart(runDir, {
@@ -435,8 +468,8 @@ async function main(): Promise<never> {
             session,
             iteration: beat,
             updated: new Date().toISOString(),
-            stateOfTheWorld: `hit the context ceiling at beat ${beat}`,
-            whatsLeft: state.recentErrors.filter((e) => e !== ""),
+            stateOfTheWorld: `Reached the context ceiling at beat ${beat}; the work so far is in the worktree — inspect it and continue.${errNote}`,
+            whatsLeft: [],
           },
         });
       } catch (err) {

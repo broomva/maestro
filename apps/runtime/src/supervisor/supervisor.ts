@@ -708,6 +708,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       contractPath,
       modelProxyUrl: proxy.url,
       modelToken: token,
+      // The child restarts fresh past this token ceiling (HARNESS §5). Resolved from the runtime config so
+      // it is a real production knob, not a test-only env — the child falls back to its own default if unset.
+      contextCeilingTokens: config?.contextCeilingTokens,
     });
     const spawnCtx = sandbox.spawnContext();
     // A spawn THROW here (broomva-child missing, cwd gone) propagates to the caller's crash path.

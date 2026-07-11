@@ -103,6 +103,9 @@ export interface ChildEnvSpec {
   modelProxyUrl: string;
   /** BROOMVA_MODEL_TOKEN — the per-session bearer, minted at spawn, revoked on kill. */
   modelToken: string;
+  /** BROOMVA_CONTEXT_CEILING — token ceiling past which the child restarts fresh (HARNESS §5). Optional;
+   *  omitted → the child falls back to its own DEFAULT_CONTEXT_CEILING_TOKENS. */
+  contextCeilingTokens?: number;
 }
 
 /**
@@ -127,5 +130,8 @@ export function buildChildEnv(
   env.BROOMVA_CONTRACT = spec.contractPath;
   env.BROOMVA_MODEL_PROXY = spec.modelProxyUrl;
   env.BROOMVA_MODEL_TOKEN = spec.modelToken;
+  if (spec.contextCeilingTokens !== undefined) {
+    env.BROOMVA_CONTEXT_CEILING = String(spec.contextCeilingTokens);
+  }
   return env;
 }
