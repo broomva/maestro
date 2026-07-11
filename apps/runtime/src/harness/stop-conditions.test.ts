@@ -28,6 +28,8 @@ import {
   progressPath,
   readFixPlan,
   readProgress,
+  renderFixPlan,
+  renderProgress,
   tickFixPlan,
   writeFixPlan,
   writeProgress,
@@ -413,6 +415,107 @@ describe("stop-conditions — fix_plan.md skip-done-work", () => {
     expect(await tickFixPlan(dir, ["anything"])).toBe(0);
     await writeFixPlan(dir, [{ text: "x", done: false }]);
     expect(await tickFixPlan(dir, [])).toBe(0);
+  });
+});
+
+// ── P20 robustness fixes (each test FAILS without its fix — mutation-proof) ───
+
+describe("stop-conditions — P20 robustness", () => {
+  test("a zero/negative noProgressN window DISABLES the halt (never a spurious no_progress)", () => {
+    // Without the `n <= 0` guard, slice(-0) is the whole array and [].every() is vacuously true → a
+    // fresh run (recentDiffs: []) would halt no_progress. The guard makes it continue.
+    expect(evaluateStopConditions(base({ recentDiffs: [], noProgressN: 0 }))).toEqual({
+      halt: false,
+    });
+    expect(evaluateStopConditions(base({ recentDiffs: ["", ""], noProgressN: -1 }))).toEqual({
+      halt: false,
+    });
+  });
+
+  test("stateOfTheWorld with an embedded '## ' heading round-trips (no silent truncation)", async () => {
+    const dir = await makeRunDir();
+    const doc: ProgressDoc = {
+      session: "7f3a",
+      iteration: 5,
+      updated: "2026-07-11T02:00:00.000Z",
+      // A '## '-prefixed line inside the prose used to truncate the field at parse.
+      stateOfTheWorld:
+        "Ported /login.\n\n## Remaining\nsession-store migration is HALF-DONE; do not re-run it.",
+      whatsLeft: ["finish session-store migration"],
+    };
+    await writeProgress(dir, doc);
+    expect(await readProgress(dir)).toEqual(doc);
+  });
+
+  test("a whatsLeft item literally '(none)' round-trips (no sentinel collision)", async () => {
+    const dir = await makeRunDir();
+    const doc: ProgressDoc = {
+      session: "7f3a",
+      iteration: 1,
+      updated: "2026-07-11T02:00:00.000Z",
+      stateOfTheWorld: "x",
+      whatsLeft: ["(none)", "real item"],
+    };
+    await writeProgress(dir, doc);
+    expect((await readProgress(dir))?.whatsLeft).toEqual(["(none)", "real item"]);
+  });
+
+  test("CRLF-saved progress.md parses identically to LF", () => {
+    const doc: ProgressDoc = {
+      session: "7f3a",
+      iteration: 9,
+      updated: "2026-07-11T02:00:00.000Z",
+      stateOfTheWorld: "line one\nline two",
+      whatsLeft: ["a", "b"],
+    };
+    const crlf = renderProgress(doc).replace(/\n/g, "\r\n");
+    expect(parseProgress(crlf)).toEqual(doc);
+  });
+
+  test("CRLF-saved fix_plan.md parses its checkboxes", () => {
+    const md = renderFixPlan([
+      { text: "done one", done: true },
+      { text: "todo two", done: false },
+    ]).replace(/\n/g, "\r\n");
+    expect(parseFixPlan(md)).toEqual([
+      { text: "done one", done: true },
+      { text: "todo two", done: false },
+    ]);
+  });
+
+  test("tickFixPlan ticks a CRLF-saved file (normalizing to LF) instead of a silent no-op", async () => {
+    const dir = await makeRunDir();
+    const crlf = ["# Fix plan", "", "- [ ] port /login", "- [ ] add tests"].join("\r\n");
+    await writeFile(fixPlanPath(dir), crlf, "utf8");
+    // Without splitting on /\r?\n/, the checkbox line ends with "\r" (`.` never matches it) → 0 ticks.
+    expect(await tickFixPlan(dir, ["port /login"])).toBe(1);
+    expect(pendingItems(await readFixPlan(dir)).map((i) => i.text)).toEqual(["add tests"]);
+    const after = await readFile(fixPlanPath(dir), "utf8");
+    expect(after).toContain("- [x] port /login");
+    expect(after).not.toContain("\r"); // normalized to LF (consistent with the writers)
+  });
+
+  test("a blank required machine field (iteration / updated) rejects as malformed (null)", () => {
+    const good = [
+      "<!-- maestro:progress",
+      "session: 7f3a",
+      "iteration: 3",
+      "updated: 2026-07-11T02:00:00.000Z",
+      "-->",
+      "## State of the world",
+      "",
+      "hi",
+      "",
+      "## What's left",
+      "",
+    ].join("\n");
+    expect(parseProgress(good)).not.toBeNull();
+    // Blank iteration must NOT slip through as Number("") === 0.
+    expect(parseProgress(good.replace("iteration: 3", "iteration: "))).toBeNull();
+    // Blank updated is equally malformed.
+    expect(
+      parseProgress(good.replace("updated: 2026-07-11T02:00:00.000Z", "updated: ")),
+    ).toBeNull();
   });
 });
 

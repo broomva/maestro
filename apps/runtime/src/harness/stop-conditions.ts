@@ -93,16 +93,19 @@ function effectiveMaxIterations(state: BeatState): number {
   return state.budget.max_iterations ?? state.maxIterationsDefault ?? DEFAULT_MAX_ITERATIONS;
 }
 
-/** True when the last `n` diffs all exist AND are all empty (no change for n consecutive beats). */
+/** True when the last `n` diffs all exist AND are all empty (no change for n consecutive beats). A
+ *  window of `n <= 0` DISABLES the check (returns false) rather than tripping it — `slice(-0)` is the
+ *  whole array and `[].every()` is vacuously true, so without this guard a zero window would raise a
+ *  spurious no_progress halt on a fresh run (P20 correctness nit). */
 function stalledOnDiffs(recentDiffs: readonly string[], n: number): boolean {
-  if (recentDiffs.length < n) return false;
+  if (n <= 0 || recentDiffs.length < n) return false;
   return recentDiffs.slice(-n).every((d) => d === "");
 }
 
 /** True when the last `n` errors all exist, are all non-empty, AND are all identical (agreeing with
- *  itself — the same failure n times). Empty entries (`""` = no error) never count. */
+ *  itself — the same failure n times). Empty entries (`""` = no error) never count; `n <= 0` disables. */
 function stalledOnErrors(recentErrors: readonly string[], n: number): boolean {
-  if (recentErrors.length < n) return false;
+  if (n <= 0 || recentErrors.length < n) return false;
   const window = recentErrors.slice(-n);
   const first = window[0];
   if (first === undefined || first === "") return false;
@@ -250,12 +253,15 @@ export interface ProgressDoc {
 const PROGRESS_META_OPEN = "<!-- maestro:progress";
 const PROGRESS_META_CLOSE = "-->";
 
+const SW_HEADING = /^##[ \t]+State of the world[ \t]*$/m;
+const WL_HEADING = /^##[ \t]+What's left[ \t]*$/gm;
+
 /** Render a ProgressDoc to markdown — agent- AND human-readable (P18): a machine block in an HTML
- *  comment + prose sections. Full-rewrite content (never appended). */
+ *  comment + prose sections. Full-rewrite content (never appended). An empty `whatsLeft` renders an
+ *  empty section (no bullets) rather than a `- (none)` sentinel — so a real item whose text is
+ *  literally "(none)" round-trips instead of colliding with the placeholder (P20 io-robustness nit). */
 export function renderProgress(doc: ProgressDoc): string {
-  const left =
-    doc.whatsLeft.length > 0 ? doc.whatsLeft.map((l) => `- ${l}`).join("\n") : "- (none)";
-  return [
+  const lines = [
     `# Progress — ${doc.session}`,
     "",
     PROGRESS_META_OPEN,
@@ -270,20 +276,23 @@ export function renderProgress(doc: ProgressDoc): string {
     "",
     "## What's left",
     "",
-    left,
-    "",
-  ].join("\n");
+  ];
+  for (const item of doc.whatsLeft) lines.push(`- ${item}`);
+  lines.push("");
+  return lines.join("\n");
 }
 
 /** Parse progress.md back to a ProgressDoc, or `null` if the machine block is absent/malformed (the
  *  respawn then treats it as "no checkpoint" and starts from the contract). Tolerant: a missing section
- *  yields an empty value rather than throwing, so a hand-edited file never wedges the child. */
+ *  yields an empty value rather than throwing, so a hand-edited file never wedges the child. CRLF is
+ *  normalized first so a Windows-saved hand edit parses identically to LF (P20 io-robustness). */
 export function parseProgress(md: string): ProgressDoc | null {
-  const open = md.indexOf(PROGRESS_META_OPEN);
+  const text = md.replace(/\r\n/g, "\n");
+  const open = text.indexOf(PROGRESS_META_OPEN);
   if (open === -1) return null;
-  const close = md.indexOf(PROGRESS_META_CLOSE, open);
+  const close = text.indexOf(PROGRESS_META_CLOSE, open);
   if (close === -1) return null;
-  const meta = md.slice(open + PROGRESS_META_OPEN.length, close);
+  const meta = text.slice(open + PROGRESS_META_OPEN.length, close);
   const field = (name: string): string | undefined => {
     const m = meta.match(new RegExp(`^\\s*${name}:\\s*(.*)$`, "m"));
     return m?.[1]?.trim();
@@ -291,44 +300,55 @@ export function parseProgress(md: string): ProgressDoc | null {
   const session = field("session");
   const iterationRaw = field("iteration");
   const updated = field("updated");
-  const iteration = Number(iterationRaw);
+  // All three machine fields are REQUIRED and non-empty — a blank `iteration:` must NOT slip through
+  // as `Number("") === 0` (a bogus iteration-0 checkpoint); a blank `updated:` is equally malformed.
   if (
     session === undefined ||
     session === "" ||
     updated === undefined ||
-    !Number.isInteger(iteration)
+    updated === "" ||
+    iterationRaw === undefined ||
+    iterationRaw === ""
   ) {
     return null;
   }
-  const body = md.slice(close + PROGRESS_META_CLOSE.length);
-  return {
-    session,
-    iteration,
-    updated,
-    stateOfTheWorld: extractSection(body, "State of the world"),
-    whatsLeft: extractBullets(extractSection(body, "What's left")),
-  };
+  const iteration = Number(iterationRaw);
+  if (!Number.isInteger(iteration)) return null;
+  const body = text.slice(close + PROGRESS_META_CLOSE.length);
+  const { stateOfTheWorld, whatsLeft } = splitProgressBody(body);
+  return { session, iteration, updated, stateOfTheWorld, whatsLeft };
 }
 
-/** The prose under a `## <title>` heading, trimmed, up to the next `## ` heading or EOF. */
-function extractSection(body: string, title: string): string {
-  const re = new RegExp(`^##\\s+${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m");
-  const m = re.exec(body);
-  if (!m) return "";
-  const start = m.index + m[0].length;
-  const rest = body.slice(start);
-  const next = rest.search(/^##\s+/m);
-  return (next === -1 ? rest : rest.slice(0, next)).trim();
+/**
+ * Split the post-meta body into the two known sections. `stateOfTheWorld` runs from its heading to the
+ * LAST `## What's left` heading (render always emits What's left as the FINAL section, so binding to
+ * the last occurrence keeps an embedded `## …` line inside the prose from truncating the field — the
+ * P20 silent-data-loss finding). `whatsLeft` is the bullets after that heading.
+ */
+function splitProgressBody(body: string): { stateOfTheWorld: string; whatsLeft: string[] } {
+  const sw = SW_HEADING.exec(body);
+  WL_HEADING.lastIndex = 0;
+  let wlHeadingStart = -1;
+  let wlBodyStart = -1;
+  for (let m = WL_HEADING.exec(body); m !== null; m = WL_HEADING.exec(body)) {
+    wlHeadingStart = m.index;
+    wlBodyStart = m.index + m[0].length;
+  }
+  const stateStart = sw ? sw.index + sw[0].length : 0;
+  const stateEnd = wlHeadingStart === -1 ? body.length : wlHeadingStart;
+  const stateOfTheWorld = sw ? body.slice(stateStart, stateEnd).trim() : "";
+  const whatsLeft = wlBodyStart === -1 ? [] : extractBullets(body.slice(wlBodyStart));
+  return { stateOfTheWorld, whatsLeft };
 }
 
-/** Bullet items (`- item`) inside a section body, ignoring the `- (none)` placeholder + blanks. */
+/** Bullet items (`- item`) inside a section body, skipping only blank bullets (no magic sentinel). */
 function extractBullets(section: string): string[] {
   const out: string[] = [];
   for (const line of section.split("\n")) {
     const m = line.match(/^\s*-\s+(.*)$/);
     if (!m) continue;
     const text = (m[1] ?? "").trim();
-    if (text === "" || text === "(none)") continue;
+    if (text === "") continue;
     out.push(text);
   }
   return out;
@@ -363,7 +383,7 @@ const FIX_PLAN_ITEM = /^(\s*)-\s+\[( |x|X)\]\s+(.*)$/;
  *  checkbox lines — headings, prose, evidence links — are ignored, so an append-only history parses fine. */
 export function parseFixPlan(md: string): FixPlanItem[] {
   const out: FixPlanItem[] = [];
-  for (const line of md.split("\n")) {
+  for (const line of md.replace(/\r\n/g, "\n").split("\n")) {
     const m = line.match(FIX_PLAN_ITEM);
     if (!m) continue;
     out.push({ text: (m[3] ?? "").trim(), done: (m[2] ?? " ").toLowerCase() === "x" });
@@ -404,9 +424,11 @@ export async function readFixPlan(runDir: string): Promise<FixPlanItem[]> {
 /**
  * TICK matching items done, IN PLACE (`- [ ]` → `- [x]`) — the F3 §5 / HARNESS §5 "tick fix_plan.md".
  * An in-place line rewrite (not a full re-render) so append-only verifier history — the `## attempt N`
- * sections VERIFIER §5 relies on for Loop 4 — is preserved byte-for-byte; only the matched checkboxes
- * flip. Matching is by trimmed item text (exact). Returns how many items it ticked; a no-op (no file /
- * no match) returns 0. Idempotent: an already-ticked item is left as-is.
+ * sections VERIFIER §5 relies on for Loop 4 — is preserved; only the matched checkboxes flip. Line
+ * endings are NORMALIZED to LF on rewrite (CRLF is split on read — `.` never matches `\r`, so without
+ * this a CRLF-saved plan would tick nothing; the writers all emit LF, so LF-normalizing is consistent).
+ * Matching is by trimmed item text (exact). Returns how many items it ticked; a no-op (no file / no
+ * match) returns 0. Idempotent: an already-ticked item is left as-is.
  */
 export async function tickFixPlan(runDir: string, doneTexts: Iterable<string>): Promise<number> {
   const wanted = new Set<string>();
@@ -419,7 +441,7 @@ export async function tickFixPlan(runDir: string, doneTexts: Iterable<string>): 
     return 0; // nothing to tick
   }
   let ticked = 0;
-  const lines = raw.split("\n").map((line) => {
+  const lines = raw.split(/\r?\n/).map((line) => {
     const m = line.match(FIX_PLAN_ITEM);
     if (!m) return line;
     const already = (m[2] ?? " ").toLowerCase() === "x";
