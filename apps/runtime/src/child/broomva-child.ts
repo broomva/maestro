@@ -7,9 +7,10 @@
 // HALTS (park blocked), or RESTARTS fresh (respawn). A turn with NO tool call is a clean completion.
 //
 // SPLIT (documented on BRO-1855): slice 2b-i = the loop + tool execution + stop-engine wiring (halt +
-// restart branches) + tool/beat events, proven through the real supervisor+proxy+mock. Slice 2b-ii =
-// retire the loop-child.ts fixture (re-point loops.test.ts's fresh_context respawn-RESUME + kill scenarios
-// onto this child) — the respawn-resume (reading progress.md on attempt ≥2) lands there.
+// restart branches) + tool/beat events; slice 2b-ii-A = the respawn-RESUME (reading progress.md on attempt
+// ≥2) + the context ceiling as a config knob; slice 2b-ii-B RETIRED the loop-child.ts fixture — the four
+// guardrail scenarios in loops.test.ts now run through THIS child. Every seam is proven through the real
+// supervisor+proxy+mock (zero tokens).
 //
 // Canon: AUTONOMY §1 (the five beats: trigger → find work → act → verify → log), §3–4 (guardrails: loops
 // don't get tired), HARNESS §3 (proxy: bearer, no model id → the proxy resolves + meters), §5 (stop
