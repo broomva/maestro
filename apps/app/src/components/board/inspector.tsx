@@ -6,7 +6,7 @@
 // verbs (approve, send back, grant, point); M3 wires selection → a read-only receipts view.
 
 import type { WorkItem } from "@maestro/protocol";
-import { StatusBadge, workStatusView } from "@maestro/ui";
+import { DotComet, StatusBadge, workStatusView } from "@maestro/ui";
 import { relativeTime } from "./board-view";
 
 /** One receipt row — a labelled fact from the work item. `mono` for identifiers (the run branch). */
@@ -42,11 +42,15 @@ export function Inspector({ item }: { item: WorkItem | null }) {
     <aside data-testid="inspector" aria-label="Inspector" className="flex flex-col gap-4">
       <header className="flex flex-col gap-2">
         <span className="truncate text-muted-foreground text-xs">{crumb || item.path}</span>
-        <h2 className="font-semibold text-foreground text-lg">{item.title}</h2>
+        {/* Title is a populated section heading → weight 500 (font-medium). 600 is reserved for
+            empty-state titles only (CLAUDE.md §Type). */}
+        <h2 className="font-medium text-foreground text-lg">{item.title}</h2>
         <StatusBadge
           status={v.tone}
           pulse={v.pulse}
-          dot={v.running ? <span className="size-2 rounded-full bg-current" /> : undefined}
+          // The running dot is the same live signal the board card uses — DotComet, not a static ink
+          // dot (bg-current is none of the five canon dot colors; CLAUDE.md §Work-states).
+          dot={v.running ? <DotComet size={8} /> : undefined}
         >
           {v.label}
         </StatusBadge>

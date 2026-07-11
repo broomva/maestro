@@ -19,12 +19,18 @@ export interface WorkCardProps {
   item: WorkItem;
   selected: boolean;
   onSelect: (id: string) => void;
+  /** A coarse board clock (epoch-ms) the age is computed against, threaded from Board's low-frequency
+   *  tick. Injecting it (vs reading ambient `Date.now()`) is what keeps ages HONEST under the memo: the
+   *  comparator can't see the wall clock, so without a compared time input an idle card's age would
+   *  freeze until its own fields change while running cards advance. The tick bumps `now` for every card
+   *  at once; between ticks an unrelated node.updated still skips the idle cards (the memo win). */
+  now: number;
 }
 
-function WorkCardImpl({ item, selected, onSelect }: WorkCardProps) {
+function WorkCardImpl({ item, selected, onSelect, now }: WorkCardProps) {
   const v = workStatusView(item.state, item.kind);
   const crumb = [item.initiative, item.project].filter(Boolean).join(" › ");
-  const age = relativeTime(item.lastEventAt ?? item.updatedAt);
+  const age = relativeTime(item.lastEventAt ?? item.updatedAt, now);
 
   return (
     <Card
@@ -69,17 +75,21 @@ function WorkCardImpl({ item, selected, onSelect }: WorkCardProps) {
   );
 }
 
-/** Re-render only when a field this card renders — or its selection — changed. Covers every visible
- *  input: the status (state/kind → workStatusView), the crumb (initiative/project/path), the age
- *  (lastEventAt/updatedAt), the title, and the run branch. Any node change bumps `updatedAt`, but the
- *  crumb derives from ancestors (an ancestor rename need not bump this node's updatedAt), so the crumb
- *  fields are compared explicitly rather than relying on updatedAt alone. */
-function areEqual(a: WorkCardProps, b: WorkCardProps): boolean {
+/** Re-render only when a field this card renders — or its selection, or the board clock — changed.
+ *  Covers every visible input: the status (state/kind → workStatusView), the crumb
+ *  (initiative/project/path), the age (lastEventAt/updatedAt + `now`), the title, and the run branch.
+ *  Any node change bumps `updatedAt`, but the crumb derives from ancestors (an ancestor rename need not
+ *  bump this node's updatedAt) so the crumb fields are compared explicitly, and `now` is compared so a
+ *  clock tick refreshes every card's age. `onSelect` is compared because a broken (unstable) parent would
+ *  otherwise silently defeat the memo — cheap insurance. Exported for a mutation-proving unit test: the
+ *  whole point of this file is that this comparator is neither `() => true` nor missing a field. */
+export function areEqual(a: WorkCardProps, b: WorkCardProps): boolean {
   const x = a.item;
   const y = b.item;
   return (
     a.selected === b.selected &&
     a.onSelect === b.onSelect &&
+    a.now === b.now &&
     x.id === y.id &&
     x.state === y.state &&
     x.kind === y.kind &&

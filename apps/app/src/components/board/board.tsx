@@ -8,12 +8,17 @@
 // selecting `selectBoard(...)` directly would return a fresh array every render and thrash
 // useSyncExternalStore ("getSnapshot should be cached"). The derivation is pure + cheap.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useStore } from "zustand";
 import { maestroStore, selectBoard, selectNeedsYouCount } from "@/store";
 import { toSections } from "./board-view";
 import { Inspector } from "./inspector";
 import { WorkCard } from "./work-card";
+
+/** How often the board clock ticks (ms) — refreshes every card's relative age. Coarse on purpose: the
+ *  age is a receipt, not a per-second counter (the Undertow is the liveness signal), and a low frequency
+ *  keeps the memo win (SSE events between ticks still skip idle cards). */
+const AGE_TICK_MS = 30_000;
 
 export function Board() {
   const server = useStore(maestroStore, (s) => s.server);
@@ -22,6 +27,14 @@ export function Board() {
   // Selection is ephemeral + component-local — it drives the inspector (M5 stub), never server truth.
   // `setSelectedId` is a stable ref, so passing it straight to WorkCard keeps its React.memo intact.
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // A coarse board clock threaded into every card so relative ages stay honest under the memo (the
+  // comparator cannot see the wall clock). Ticks are far apart, so between them a node.updated still
+  // re-renders only the changed card.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), AGE_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
   // The selected work item, looked up across the rendered sections. Memoized so the lookup (and the
   // inspector's re-render) fire only when the selection or the board data actually changed.
   const selectedItem = useMemo(
@@ -31,6 +44,11 @@ export function Board() {
         : (sections.flatMap((s) => s.items).find((i) => i.id === selectedId) ?? null),
     [sections, selectedId],
   );
+  // Clear a dangling selection: if the selected node LEFT the board (tombstoned / re-grouped away),
+  // drop the id so a later reappearance of the same stable UUID does not silently re-open the inspector.
+  useEffect(() => {
+    if (selectedId !== null && selectedItem === null) setSelectedId(null);
+  }, [selectedId, selectedItem]);
 
   if (sections.length === 0) {
     return (
@@ -68,13 +86,18 @@ export function Board() {
                 {section.items.length}
               </span>
             </div>
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
+            {/* `min(260px,100%)` lets a card shrink below 260px when the column itself is narrower
+                (inspector open on a small viewport) — the grid never forces a track wider than its
+                container, so the board column never overflows shell-main into a horizontal scrollbar
+                (CLAUDE.md §Layout: the shell never scrolls). */}
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(min(260px,100%),1fr))] gap-3">
               {section.items.map((item) => (
                 <WorkCard
                   key={item.id}
                   item={item}
                   selected={item.id === selectedId}
                   onSelect={setSelectedId}
+                  now={now}
                 />
               ))}
             </div>
