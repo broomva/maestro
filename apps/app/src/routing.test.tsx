@@ -25,6 +25,13 @@ describe("routing — the calm pane-error fallback", () => {
   test("unlabelled fallback still reads calm", () => {
     expect(renderToStaticMarkup(<PaneErrorFallback />)).toContain("This pane hit a snag.");
   });
+
+  test("shell scope (whole-app backstop) does NOT claim the rest of the app is fine", () => {
+    // The default/root errorComponent fires when the shell itself crashed — the pane copy would lie.
+    const html = renderToStaticMarkup(<PaneErrorFallback scope="shell" />);
+    expect(html).toContain("Something went wrong.");
+    expect(html).not.toContain("The rest of the app is fine");
+  });
 });
 
 describe("routing — ErrorBoundary contains a pane crash", () => {
@@ -53,16 +60,34 @@ describe("routing — ErrorBoundary contains a pane crash", () => {
 });
 
 describe("routing — every product view wires its own error boundary", () => {
-  test("/, /knowledge, /history, /settings, /account each carry an errorComponent", () => {
+  test("EVERY view under the shell layout carries an errorComponent (future views auto-caught)", () => {
     // A crashed view falls back WITHIN the shell only if the view route (not just the layout) has a
-    // boundary. Inspect the real router tree so a future route added without one fails here.
-    const byPath = new Map(
-      Object.values(router.routesById).map((r) => [String(r.fullPath), r] as const),
+    // boundary. Key by the stable route id, NOT fullPath (three routes share fullPath "/": __root__, the
+    // pathless /shell layout, and the board /shell/ — a fullPath map is ambiguous). Every child of the
+    // shell (id under "/shell/") must carry an errorComponent, so a future view added without one fails.
+    const viewRoutes = Object.values(router.routesById).filter((r) =>
+      String(r.id).startsWith("/shell/"),
     );
-    for (const p of ["/", "/knowledge", "/history", "/settings", "/account"]) {
-      const route = byPath.get(p);
-      expect(route, `route ${p} is registered`).toBeDefined();
-      expect(route?.options.errorComponent, `route ${p} wires an errorComponent`).toBeTruthy();
+    expect(viewRoutes.length).toBeGreaterThanOrEqual(5); // board + 4 stubs (+ the crash-probe fixture)
+    for (const r of viewRoutes) {
+      expect(r.options.errorComponent, `view ${String(r.id)} wires an errorComponent`).toBeTruthy();
+    }
+  });
+
+  test("the five product views are all registered + protected (a removed view is caught)", () => {
+    const byId = router.routesById;
+    for (const id of [
+      "/shell/",
+      "/shell/knowledge",
+      "/shell/history",
+      "/shell/settings",
+      "/shell/account",
+    ]) {
+      expect(byId[id as keyof typeof byId], `${id} registered`).toBeDefined();
+      expect(
+        byId[id as keyof typeof byId]?.options.errorComponent,
+        `${id} wires an errorComponent`,
+      ).toBeTruthy();
     }
   });
 });

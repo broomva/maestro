@@ -17,7 +17,7 @@ export function KnowledgeView() {
     <StubView
       title="Knowledge"
       testid="view-knowledge"
-      note="The knowledge graph over your workspace — files as nodes, frontmatter links as edges — lands here."
+      note="The knowledge graph over your workspace lands here: files as nodes, frontmatter links as edges."
     />
   );
 }
@@ -27,7 +27,7 @@ export function HistoryView() {
     <StubView
       title="History"
       testid="view-history"
-      note="Past runs and sessions with their receipts — branch, diffstat, verdict — land here."
+      note="Past runs and sessions with their receipts (branch, diffstat, verdict) land here."
     />
   );
 }
@@ -37,7 +37,7 @@ export function SettingsView() {
     <StubView
       title="Settings"
       testid="view-settings"
-      note="Appearance and defaults live here. The orchestrator has no settings page — it is an agent; its knobs are frontmatter."
+      note="Appearance and defaults live here. The orchestrator has no settings page; it is an agent, and its knobs are frontmatter."
     />
   );
 }

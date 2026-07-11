@@ -141,8 +141,12 @@ export function Board() {
               <X size={16} strokeWidth={2} />
             </button>
           </div>
-          {/* A crashed inspector must not take down the board (porting-notes §Production hardening). */}
-          <ErrorBoundary label="The inspector">
+          {/* A crashed inspector must not take down the board (porting-notes §Production hardening).
+              Keyed by the selected id so switching directly A→B remounts a fresh boundary — else a
+              caught crash on A would wedge the fallback for a healthy B (the boundary does not self-reset
+              on a prop change, and the panel stays mounted across an A→B switch). A genuinely-crashing
+              item simply re-errors on its own fresh mount. */}
+          <ErrorBoundary key={selectedItem.id} label="The inspector">
             <Inspector item={selectedItem} />
           </ErrorBoundary>
         </div>

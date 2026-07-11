@@ -37,6 +37,16 @@ const historyRoute = view("/history", HistoryView, "History");
 const settingsRoute = view("/settings", SettingsView, "Settings");
 const accountRoute = view("/account", AccountView, "Account");
 
+// Test-fixture route (BRO-1824 done-check): a view that DELIBERATELY throws on render, so routing.pw.ts
+// can prove at RUNTIME that a crashed view falls back within the shell (chrome survives) — React 19 SSR
+// rethrows boundary errors, so the client catch is only observable in a real browser. Harmless in prod
+// (an obscure, undocumented path that just shows the calm fallback), same class of dev surface as
+// /kitchen-sink. It is a child of the shell so its errorComponent renders inside the shell's Outlet.
+const CrashProbe = (): never => {
+  throw new Error("crash probe (BRO-1824 test fixture)");
+};
+const crashRoute = view("/__crash-probe", CrashProbe, "This view");
+
 // /kitchen-sink — the M1 primitive gallery (every variant/state). A developer surface, OUTSIDE the shell.
 const kitchenSinkRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -45,14 +55,23 @@ const kitchenSinkRoute = createRoute({
 });
 
 const routeTree = rootRoute.addChildren([
-  shellRoute.addChildren([boardRoute, knowledgeRoute, historyRoute, settingsRoute, accountRoute]),
+  shellRoute.addChildren([
+    boardRoute,
+    knowledgeRoute,
+    historyRoute,
+    settingsRoute,
+    accountRoute,
+    crashRoute,
+  ]),
   kitchenSinkRoute,
 ]);
 
 export const router = createRouter({
   routeTree,
-  // Backstop for any route without its own errorComponent (and the shell layout itself).
-  defaultErrorComponent: () => <PaneErrorFallback />,
+  // Whole-app backstop — fires if the shell LAYOUT itself crashes (it has no errorComponent of its own),
+  // so the copy must NOT claim the rest of the app is fine (`scope="shell"`); per-view crashes hit their
+  // own pane-scoped errorComponent above, where the shell survives.
+  defaultErrorComponent: () => <PaneErrorFallback scope="shell" />,
 });
 
 declare module "@tanstack/react-router" {

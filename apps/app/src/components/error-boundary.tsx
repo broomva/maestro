@@ -6,8 +6,16 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
 /** The calm fallback a crashed pane shows — plain voice, no stack, no red alarm tone. Reused by the
- *  ErrorBoundary class (component subtrees) AND as a TanStack Router route `errorComponent`. */
-export function PaneErrorFallback({ label }: { label?: string }) {
+ *  ErrorBoundary class (component subtrees) AND as a TanStack Router route `errorComponent`.
+ *  `scope="shell"` is the whole-app backstop (the root/default errorComponent, where the shell itself
+ *  is what crashed) — it must NOT claim "the rest of the app is fine", because it isn't. */
+export function PaneErrorFallback({
+  label,
+  scope = "pane",
+}: {
+  label?: string;
+  scope?: "pane" | "shell";
+}) {
   return (
     <div
       data-testid="pane-error"
@@ -15,10 +23,16 @@ export function PaneErrorFallback({ label }: { label?: string }) {
       className="flex h-full min-h-[140px] flex-col items-center justify-center gap-1 p-6 text-center"
     >
       <p className="font-medium text-foreground text-sm">
-        {label ? `${label} hit a snag.` : "This pane hit a snag."}
+        {scope === "shell"
+          ? "Something went wrong."
+          : label
+            ? `${label} hit a snag.`
+            : "This pane hit a snag."}
       </p>
       <p className="max-w-[320px] text-muted-foreground text-sm">
-        The rest of the app is fine. Reload to bring it back.
+        {scope === "shell"
+          ? "Reload to bring it back."
+          : "The rest of the app is fine. Reload to bring it back."}
       </p>
     </div>
   );
