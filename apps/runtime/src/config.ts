@@ -49,6 +49,17 @@ export interface RuntimeConfig {
   noProgressN?: number;
   /** Context-size ceiling (tokens) past which the child restarts fresh (MAESTRO_CONTEXT_CEILING_TOKENS). */
   contextCeilingTokens?: number;
+  /**
+   * session.jsonl rotation thresholds (DECISIONS §D3, BRO-1811) — the supervisor's rotating journal
+   * bounds each run's `session.jsonl` at whichever of these it reaches first, rotating to
+   * `session.jsonl.<n>` + digesting into `summary.md`. The index `event` table keeps the full archive;
+   * the FS keeps the tail + summaries. loadConfig always fills both; a hand-built literal may omit them
+   * and the journal falls back to its DEFAULT_ROTATE_*.
+   */
+  /** Bytes ceiling for a session.jsonl segment (MAESTRO_ROTATE_MAX_BYTES). */
+  rotateMaxBytes?: number;
+  /** Line ceiling for a session.jsonl segment (MAESTRO_ROTATE_MAX_LINES). */
+  rotateMaxLines?: number;
 }
 
 /** Default runtime port when MAESTRO_PORT is unset or invalid. */
@@ -69,6 +80,11 @@ export const DEFAULT_NO_PROGRESS_N = 3;
  *  ~200k working window with headroom for the final progress.md write + the restart signal. Tunable
  *  per model/host via MAESTRO_CONTEXT_CEILING_TOKENS. */
 export const DEFAULT_CONTEXT_CEILING_TOKENS = 160_000;
+
+/** session.jsonl rotates at 5 MB (DECISIONS §D3). */
+export const DEFAULT_ROTATE_MAX_BYTES = 5 * 1024 * 1024;
+/** …or 5,000 lines, whichever comes first (DECISIONS §D3). */
+export const DEFAULT_ROTATE_MAX_LINES = 5000;
 
 /** Build the runtime config from an environment map (defaults to process.env). */
 export function loadConfig(env: Record<string, string | undefined> = process.env): RuntimeConfig {
@@ -102,6 +118,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const noProgressN = positiveInt(env.MAESTRO_NO_PROGRESS_N) ?? DEFAULT_NO_PROGRESS_N;
   const contextCeilingTokens =
     positiveInt(env.MAESTRO_CONTEXT_CEILING_TOKENS) ?? DEFAULT_CONTEXT_CEILING_TOKENS;
+  // session.jsonl rotation thresholds (BRO-1811): a positive override wins, else the D3 default.
+  const rotateMaxBytes = positiveInt(env.MAESTRO_ROTATE_MAX_BYTES) ?? DEFAULT_ROTATE_MAX_BYTES;
+  const rotateMaxLines = positiveInt(env.MAESTRO_ROTATE_MAX_LINES) ?? DEFAULT_ROTATE_MAX_LINES;
   return {
     port,
     workspace,
@@ -115,6 +134,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxIterations,
     noProgressN,
     contextCeilingTokens,
+    rotateMaxBytes,
+    rotateMaxLines,
   };
 }
 
