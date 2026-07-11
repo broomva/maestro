@@ -29,7 +29,7 @@ import {
   type UIMessageEnvelope,
 } from "@maestro/protocol";
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessageChunk } from "ai";
-import { and, asc, eq, gt, max } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, max } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { IndexDb } from "../db/client";
@@ -106,6 +106,40 @@ async function currentMaxSeq(db: IndexDb, sessionId: string): Promise<number> {
   return rows[0]?.m ?? 0;
 }
 
+/** The terminal run events — the three ways a session ends (contract §7 / D-EVENTNAMES). */
+const TERMINAL_EVENT_TYPES = [
+  EVENT_TYPES.RUN_FINISHED,
+  EVENT_TYPES.RUN_FAILED,
+  EVENT_TYPES.RUN_KILLED,
+];
+
+/**
+ * The session's terminal run event (highest seq) if it has ended, else null. Used to finish a chat that
+ * landed in a run's finishing window: the terminal event sits at/below the chat's `startCursor`, so the
+ * live tail (which only reads `seq > startCursor`) never sees it. Reading it directly lets the render
+ * finish immediately instead of tailing a reaped run forever (the P20 slice-2 MAJOR hang). A read failure
+ * returns null (the caller then ends cleanly rather than hanging).
+ */
+async function lastTerminal(
+  db: IndexDb,
+  runId: string,
+): Promise<{ type: string; reason?: string } | null> {
+  try {
+    const rows = await db
+      .select()
+      .from(event)
+      .where(and(eq(event.sessionId, runId), inArray(event.type, TERMINAL_EVENT_TYPES)))
+      .orderBy(desc(event.seq))
+      .limit(1);
+    const r = rows[0];
+    if (!r) return null;
+    const p = parsePayload(r.payload) as { reason?: unknown } | undefined;
+    return { type: r.type, reason: typeof p?.reason === "string" ? p.reason : undefined };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The EventType→UIMessageChunk projection (contract §7) as a per-row tail. Writes ONE assistant message:
  * `start` → text/tool parts as the child tees them → `finish` on the terminal run event. A run that dies
@@ -114,11 +148,19 @@ async function currentMaxSeq(db: IndexDb, sessionId: string): Promise<number> {
  * tool.call then tool.result strictly paired (broomva-child.ts), and neither carries a toolCallId, so we
  * synthesize one from the tool.call's seq and correlate the immediately-following tool.result to it.
  */
-async function streamSession(
+export async function streamSession(
   writer: { write(chunk: UIMessageChunk): void },
-  opts: { db: IndexDb; runId: string; startCursor: number; pollMs: number; signal: AbortSignal },
+  opts: {
+    db: IndexDb;
+    runId: string;
+    startCursor: number;
+    pollMs: number;
+    signal: AbortSignal;
+    /** Is the run still in the supervisor's live registry? False once it has been reaped. */
+    isRunLive: () => boolean;
+  },
 ): Promise<void> {
-  const { db, runId, startCursor, pollMs, signal } = opts;
+  const { db, runId, startCursor, pollMs, signal, isRunLive } = opts;
   writer.write({ type: "start", messageId: runId });
 
   let cursor = startCursor;
@@ -135,7 +177,25 @@ async function streamSession(
     }
   };
 
-  while (!signal.aborted && !finished) {
+  // A terminal run event → chunks. Shared by the in-tail switch AND the reaped-detection below, so a run
+  // that ended is rendered identically whether the tail streamed its terminal event live or we read it
+  // directly after the reap (contract §4: a dead run closes any dangling tool part, never leaves it open).
+  const applyTerminal = (type: string, reason?: string) => {
+    if (type === EVENT_TYPES.RUN_FAILED || type === EVENT_TYPES.RUN_KILLED) {
+      const errorText =
+        type === EVENT_TYPES.RUN_KILLED ? "the session was stopped" : (reason ?? "the run failed");
+      closeDanglingTool(errorText);
+      writer.write({ type: "error", errorText });
+      errored = true;
+    }
+    finished = true;
+  };
+
+  // Drain every event newer than the cursor (seq order), projecting each to chunks; returns the row count
+  // so the caller can tell a still-full backlog (== batch) from a drained one (< batch). An index-read
+  // failure surfaces a stream `error` + ends the render — NOT a clean finish, which would falsely tell the
+  // client the turn completed (the P20 slice-2 MINOR).
+  const drainOnce = async (): Promise<number> => {
     let rows: (typeof event.$inferSelect)[];
     try {
       rows = await db
@@ -145,8 +205,10 @@ async function streamSession(
         .orderBy(asc(event.seq))
         .limit(CHAT_DRAIN_BATCH);
     } catch {
-      // The index became unreadable mid-tail — end the render rather than spin (the run is untouched).
-      break;
+      writer.write({ type: "error", errorText: "the session index became unreadable" });
+      errored = true;
+      finished = true;
+      return 0;
     }
 
     for (const row of rows) {
@@ -194,39 +256,50 @@ async function streamSession(
           break;
         }
         case EVENT_TYPES.RUN_FINISHED:
-          finished = true;
-          break;
-        case EVENT_TYPES.RUN_FAILED: {
-          const reason = typeof payload?.reason === "string" ? payload.reason : "the run failed";
-          closeDanglingTool(reason);
-          writer.write({ type: "error", errorText: reason });
-          errored = true;
-          finished = true;
-          break;
-        }
+        case EVENT_TYPES.RUN_FAILED:
         case EVENT_TYPES.RUN_KILLED:
-          closeDanglingTool("the session was stopped");
-          writer.write({ type: "error", errorText: "the session was stopped" });
-          errored = true;
-          finished = true;
+          applyTerminal(row.type, typeof payload?.reason === "string" ? payload.reason : undefined);
           break;
         default:
           break; // run.beat / budget.* / gate.* / synthetics: not chat content in slice 2
       }
       if (finished) break;
     }
+    return rows.length;
+  };
 
+  while (!signal.aborted && !finished) {
+    const n = await drainOnce();
     if (finished) break;
     // A full batch means the backlog is still draining — re-query immediately, no sleep.
-    if (rows.length === CHAT_DRAIN_BATCH) continue;
+    if (n === CHAT_DRAIN_BATCH) continue;
+    // Caught up (drained < a full batch). If the run has left the supervisor's live registry it has been
+    // reaped — and its terminal event was emitted BEFORE the registry delete (supervisor.terminal ordering)
+    // so everything it wrote is already committed. Do one guaranteed extra drain to catch events that
+    // landed in the reap window; if the terminal still hasn't shown, it sits at/below startCursor (a chat
+    // that arrived in the run's finishing window — the resolve-vs-snapshot race), so read it directly.
+    // Without this, such a chat would tail a dead run forever (the P20 slice-2 MAJOR hang).
+    if (!isRunLive()) {
+      while ((await drainOnce()) === CHAT_DRAIN_BATCH && !finished) {
+        // keep draining full batches the reaped run left behind
+      }
+      if (!finished) {
+        const term = await lastTerminal(db, runId);
+        if (term) applyTerminal(term.type, term.reason);
+        // Reaped without any terminal event (should not happen) — end cleanly rather than hang.
+        else finished = true;
+      }
+      break;
+    }
     await abortableSleep(pollMs, signal);
   }
 
   // The client went away — stop rendering; the run is untouched (chat is a projection). Writing after an
   // abort is harmless but pointless.
   if (signal.aborted) return;
-  // A clean finish (or an index-read failure that broke the loop): close any dangling tool part, then
-  // finish so the assistant message is well-formed even if the run ended between a call and its result.
+  // Close any dangling tool part, then finish so the assistant message is well-formed even if the run
+  // ended between a call and its result. `errored` (a failed/killed run or an unreadable index) carries the
+  // error finish reason; the stream-level `error` chunk was already written at the point of failure.
   closeDanglingTool("run ended before the tool returned");
   writer.write({ type: "finish", ...(errored ? { finishReason: "error" as const } : {}) });
 }
@@ -283,7 +356,16 @@ async function handleChat(c: Context, deps: ChatDeps): Promise<Response> {
   const pollMs = deps.pollMs && deps.pollMs > 0 ? deps.pollMs : DEFAULT_STREAM_POLL_MS;
   const stream = createUIMessageStream({
     execute: ({ writer }) =>
-      streamSession(writer, { db: deps.db, runId, startCursor, pollMs, signal }),
+      streamSession(writer, {
+        db: deps.db,
+        runId,
+        startCursor,
+        pollMs,
+        signal,
+        // The run is live while the supervisor still holds it; once reaped, streamSession reads the
+        // terminal event directly and finishes rather than tailing a dead run (the MAJOR-fix seam).
+        isRunLive: () => sup.get(runId) !== null,
+      }),
     // Surface the message; the SDK default masks it to avoid leaking server internals, but this is a
     // self-hosted runtime and an honest error is the point (a masked "An error occurred" hides the cause).
     onError: (err) => (err instanceof Error ? err.message : "chat stream error"),

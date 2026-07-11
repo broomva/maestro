@@ -19,12 +19,13 @@ import { and, eq } from "drizzle-orm";
 import type { Hono } from "hono";
 import { createApp } from "../app";
 import { loadConfig } from "../config";
+import type { IndexDb } from "../db/client";
 import { type IndexHandle, openIndex } from "../db/client";
 import { event, node } from "../db/schema";
 import { type DispatchRuntime, deriveDayTotalUsdFromIndex, mountDispatch } from "../dispatch";
 import { git } from "../git/git";
 import { createMockModel, type MockModelOptions } from "../proxy/mock-model";
-import { extractLatestUserMessage } from "./chat";
+import { extractLatestUserMessage, streamSession } from "./chat";
 
 const FIXED_MS = 1_700_000_000_000;
 
@@ -306,5 +307,130 @@ describe("deriveDayTotalUsdFromIndex — the per-day budget seed (BRO-1822 laten
   test("returns 0 when there are no metered events (a fresh cap, never blocking)", async () => {
     const h = await openMem();
     expect(await deriveDayTotalUsdFromIndex(h.db, 5 * DAY_MS)).toBe(0);
+  });
+});
+
+// ── streamSession — the projection's TERMINATION + failure contract ──────────────────────────────────
+// These drive the projector directly (deterministic, no child) to prove two P20 slice-2 findings are shut:
+// (1) the MAJOR — a chat that lands in a run's finishing window (its terminal event sits at/below the
+//     snapshot cursor, and the run is already reaped) MUST finish, not tail a dead run forever; and
+// (2) the MINOR — an index-read failure mid-tail MUST surface a stream `error`, not a false clean `finish`.
+
+/** Insert one index event row (seq-ordered; `ts` monotone with seq). */
+async function seedEvent(
+  h: IndexHandle,
+  sessionId: string,
+  seq: number,
+  type: string,
+  payload: Record<string, unknown> = {},
+): Promise<void> {
+  await h.db.insert(event).values({
+    seq,
+    sessionId,
+    ts: FIXED_MS + seq,
+    actor: "system",
+    type: type as never,
+    payload: JSON.stringify(payload),
+  });
+}
+
+/** Collect chunks; resolve `done` XOR a 500ms watchdog — a hang (regressed MAJOR) resolves "timeout". */
+async function runStreamSession(opts: {
+  db: IndexDb;
+  runId: string;
+  startCursor: number;
+  isRunLive: () => boolean;
+}): Promise<{ outcome: "done" | "timeout"; chunks: Array<Record<string, unknown>> }> {
+  const chunks: Array<Record<string, unknown>> = [];
+  const ctl = new AbortController();
+  const done = streamSession(
+    {
+      write: (c) => {
+        chunks.push(c as Record<string, unknown>);
+      },
+    },
+    {
+      db: opts.db,
+      runId: opts.runId,
+      startCursor: opts.startCursor,
+      pollMs: 5,
+      signal: ctl.signal,
+      isRunLive: opts.isRunLive,
+    },
+  );
+  const outcome = await Promise.race([
+    done.then(() => "done" as const),
+    new Promise<"timeout">((r) => {
+      setTimeout(() => r("timeout"), 500);
+    }),
+  ]);
+  ctl.abort(); // if it (regressed to) hung, stop the loop so nothing leaks past the test
+  return { outcome, chunks };
+}
+
+describe("streamSession — reaped-run termination + index-read failure (P20 slice-2 fixes)", () => {
+  test("MAJOR: a chat whose terminal event is at/below startCursor on a reaped run finishes (no hang)", async () => {
+    const h = await openMem();
+    await seedEvent(h, "rD", 1, EVENT_TYPES.RUN_STARTED);
+    await seedEvent(h, "rD", 2, EVENT_TYPES.AGENT_SAID, { text: "work before the chat" });
+    await seedEvent(h, "rD", 3, EVENT_TYPES.RUN_FINISHED);
+    // startCursor AT the terminal (seq 3): the live tail's `seq > 3` never returns run.finished, and the run
+    // is already reaped. WITHOUT the reaped-detection fix this tails forever → "timeout".
+    const { outcome, chunks } = await runStreamSession({
+      db: h.db,
+      runId: "rD",
+      startCursor: 3,
+      isRunLive: () => false,
+    });
+    expect(outcome).toBe("done");
+    const types = chunks.map((c) => c.type);
+    expect(types).toContain("start");
+    expect(types).toContain("finish");
+    expect(types).not.toContain("error"); // run.finished is a CLEAN terminal
+  });
+
+  test("MAJOR variant: a reaped run.failed at/below startCursor surfaces error + errored finish", async () => {
+    const h = await openMem();
+    await seedEvent(h, "rF", 1, EVENT_TYPES.RUN_STARTED);
+    await seedEvent(h, "rF", 2, EVENT_TYPES.RUN_FAILED, { reason: "the model crashed" });
+    const { outcome, chunks } = await runStreamSession({
+      db: h.db,
+      runId: "rF",
+      startCursor: 2,
+      isRunLive: () => false,
+    });
+    expect(outcome).toBe("done");
+    expect(chunks.find((c) => c.type === "error")?.errorText).toBe("the model crashed");
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("error");
+  });
+
+  test("MINOR: an index-read failure mid-tail surfaces a stream error, not a false clean finish", async () => {
+    // A db whose first read throws — the projection must report the failure, not finish as if the turn
+    // completed. WITHOUT the fix the catch just `break`s → a bare `finish` (client thinks the turn is done).
+    const throwingDb = {
+      select: () => {
+        throw new Error("index gone");
+      },
+    } as unknown as IndexDb;
+    const chunks: Array<Record<string, unknown>> = [];
+    await streamSession(
+      {
+        write: (c) => {
+          chunks.push(c as Record<string, unknown>);
+        },
+      },
+      {
+        db: throwingDb,
+        runId: "rG",
+        startCursor: 0,
+        pollMs: 5,
+        signal: new AbortController().signal,
+        isRunLive: () => true,
+      },
+    );
+    expect(chunks.find((c) => c.type === "error")?.errorText).toBe(
+      "the session index became unreadable",
+    );
+    expect(chunks.find((c) => c.type === "finish")?.finishReason).toBe("error");
   });
 });
