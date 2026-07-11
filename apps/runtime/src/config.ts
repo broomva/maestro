@@ -60,6 +60,15 @@ export interface RuntimeConfig {
   rotateMaxBytes?: number;
   /** Line ceiling for a session.jsonl segment (MAESTRO_ROTATE_MAX_LINES). */
   rotateMaxLines?: number;
+  /**
+   * Mock-model mode (MAESTRO_MOCK_MODEL=1) — mount the dispatch loop with the scripted mock upstream
+   * (proxy/mock-model.ts) instead of a real Anthropic upstream, so a running runtime can dispatch
+   * sessions with ZERO tokens / no API key (BRO-1822). Today this is the ONLY mode that mounts dispatch:
+   * no real upstream exists yet (the sole ModelUpstream is the mock), so a false/unset value leaves the
+   * runtime read-only (no supervisor mounted, the kill intent reports no live run). A real upstream +
+   * the "live locally" path is a follow-up. Default false.
+   */
+  mockModel?: boolean;
 }
 
 /** Default runtime port when MAESTRO_PORT is unset or invalid. */
@@ -121,6 +130,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   // session.jsonl rotation thresholds (BRO-1811): a positive override wins, else the D3 default.
   const rotateMaxBytes = positiveInt(env.MAESTRO_ROTATE_MAX_BYTES) ?? DEFAULT_ROTATE_MAX_BYTES;
   const rotateMaxLines = positiveInt(env.MAESTRO_ROTATE_MAX_LINES) ?? DEFAULT_ROTATE_MAX_LINES;
+  // Mock-model mode is an explicit opt-in (only "1" enables it) — the dispatch mount is a spawn-capable
+  // surface, so it stays off unless the operator asks for the token-free mock loop.
+  const mockModel = env.MAESTRO_MOCK_MODEL === "1";
   return {
     port,
     workspace,
@@ -136,6 +148,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     contextCeilingTokens,
     rotateMaxBytes,
     rotateMaxLines,
+    mockModel,
   };
 }
 
