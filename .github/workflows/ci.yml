@@ -44,9 +44,10 @@ jobs:
         # a mixed library or a non-canon glyph.
         run: bun run check:icons
       - name: Test
-        # --pass-with-no-tests keeps the gate dormant until tests land, then it
-        # bites automatically. P2 hook point (D8 layer 1): the mock-model loop
-        # tests join this step when BRO-1795/harness lands.
+        # Runs every *.test.ts across the workspace — including the D8-layer-1 mock-model loop
+        # tests (BRO-1806, `bun run test:loops`), which drive full F2→F3 flows through the real
+        # supervisor + proxy + a scripted mock upstream with ZERO tokens and NO API key set here.
+        # --pass-with-no-tests keeps the gate resilient if a package has none yet.
         run: bun test --pass-with-no-tests
 
   secrets:
