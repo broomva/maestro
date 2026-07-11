@@ -6,7 +6,7 @@
 // exact segment boundaries, not just "a file exists".
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { and, eq } from "drizzle-orm";
@@ -112,6 +112,25 @@ describe("session.jsonl rotation (D3) — summary.md digest", () => {
     expect(summary).toContain("## session.jsonl.2 — 2 lines");
     expect(summary).toContain("- tool.call: 1");
     expect(summary).toContain("- run.beat: 1");
+  });
+});
+
+describe("session.jsonl rotation (D3) — advisory digest never breaks the load-bearing path", () => {
+  test("a failing summary.md write does NOT reject rotate/append, clobber a segment, or lose a line", async () => {
+    const dir = await makeDir();
+    // Force every summary.md write to fail: pre-create summary.md as a DIRECTORY (appendFile → EISDIR).
+    await mkdir(join(dir, "summary.md"));
+    const j = fsRotatingJournal(dir, { maxLines: 1 });
+
+    // Each append past the first triggers a rotation whose digest write fails — must NOT throw.
+    await j.append(ev(0));
+    await j.append(ev(1)); // rotates .1 (summary write throws internally, swallowed)
+    await j.append(ev(2)); // rotates .2 — proves `rotations` advanced despite the digest failure (no .1 clobber)
+
+    const numbered = (await readdir(dir)).filter((n) => /^session\.jsonl\.\d+$/.test(n)).sort();
+    expect(numbered).toEqual(["session.jsonl.1", "session.jsonl.2"]); // suffix advanced; .1 not overwritten
+    // No line lost: the full stream replays gaplessly even though every digest write failed.
+    expect(await replay(dir)).toEqual([ev(0), ev(1), ev(2)]);
   });
 });
 

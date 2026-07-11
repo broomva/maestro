@@ -266,7 +266,14 @@ async function appendRotationSummary(
     .map(([type, count]) => `- ${type}: ${count}`)
     .join("\n");
   const section = `## session.jsonl.${n} — ${lineCount} lines, ${byteCount} bytes\n${rows || "- (empty)"}\n\n`;
-  await appendFile(join(runDir, "summary.md"), section, "utf8");
+  try {
+    await appendFile(join(runDir, "summary.md"), section, "utf8");
+  } catch {
+    // The digest is ADVISORY + best-effort (D3: the FS keeps the tail + summaries, the index keeps the
+    // full archive; summary.md is never replayed). A failed summary write must NEVER reject the
+    // load-bearing rotate/append path — else a digest-only failure (e.g. summary.md unwritable) would
+    // reap a healthy child. Same guard-every-best-effort-write discipline as the readFile above.
+  }
 }
 
 /**
@@ -306,11 +313,19 @@ export function fsRotatingJournal(runDir: string, opts: RotateOptions = {}): Jou
 
   async function rotate(): Promise<void> {
     const n = rotations + 1;
-    await rename(path, `${path}.${n}`);
-    await appendRotationSummary(runDir, n, `${path}.${n}`, lines, bytes);
+    const rotatedPath = `${path}.${n}`;
+    const segLines = lines;
+    const segBytes = bytes;
+    await rename(path, rotatedPath);
+    // Advance state on the LOAD-BEARING op (the rename succeeded — the segment is durable in `.n`).
+    // This MUST happen before the advisory digest: if it lagged, a summary-write failure would leave
+    // `rotations` un-advanced, and a retry would recompute the same `n` and rename-CLOBBER the durable
+    // `.n` segment — a gap in the F9 replay stream (P20 BRO-1811). `appendRotationSummary` is internally
+    // guarded (never throws), so the digest is purely additive after state is already consistent.
     rotations = n;
     bytes = 0;
     lines = 0;
+    await appendRotationSummary(runDir, n, rotatedPath, segLines, segBytes);
   }
 
   return {
