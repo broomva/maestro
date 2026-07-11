@@ -15,8 +15,8 @@
 //   • bounded READS — shell stdout/stderr and file reads stop at MAX_OUTPUT *bytes* (streamed, never
 //     buffered whole), so a `yes` / gigabyte file can't OOM the child before the clip.
 
-import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
 /** One tool request the model made — an Anthropic `tool_use` content block. */
 export interface ToolUse {
@@ -127,8 +127,11 @@ export function parseToolUses(body: unknown): ToolUse[] {
     if (block && typeof block === "object" && (block as { type?: unknown }).type === "tool_use") {
       const b = block as { id?: unknown; name?: unknown; input?: unknown };
       if (typeof b.id === "string" && typeof b.name === "string") {
+        // Normalize a non-object (incl. an ARRAY — `typeof [] === "object"`) input to {}.
         const input =
-          b.input && typeof b.input === "object" ? (b.input as Record<string, unknown>) : {};
+          b.input && typeof b.input === "object" && !Array.isArray(b.input)
+            ? (b.input as Record<string, unknown>)
+            : {};
         uses.push({ id: b.id, name: b.name, input });
       }
     }
@@ -142,14 +145,47 @@ export function toolResultBlock(id: string, result: ToolResult): Record<string, 
   return { type: "tool_result", tool_use_id: id, content: result.content, is_error: !result.ok };
 }
 
-/** Resolve a tool path WITHIN cwd, or null if it escapes (absolute outside cwd, or `..` above it). The
- *  jail is a resolved-prefix check: `resolve(cwd, p)` must equal `resolve(cwd)` or sit under `${cwd}/`. */
+/** True iff `abs` is the jail root or sits under it. The trailing slash is load-bearing: it stops a
+ *  sibling that shares the name prefix (`/w/subX` must NOT count as inside `/w/sub`). */
+function insideJail(base: string, abs: string): boolean {
+  return abs === base || abs.startsWith(`${base}/`);
+}
+
+/** Resolve a tool path WITHIN cwd, or null if it escapes (absolute outside cwd, or `..` above it). This
+ *  is a LEXICAL check only — it does not resolve symlinks; callers that touch the filesystem must also
+ *  pass the resolved real path through `insideJail` (see `realInsideJail`) so a symlink the agent created
+ *  via its free shell can't tunnel read/edit out of the worktree. */
 function jailedPath(cwd: string, p: unknown): string | null {
   if (typeof p !== "string" || p === "") return null;
   const base = resolve(cwd);
   const abs = resolve(base, p);
-  if (abs !== base && !abs.startsWith(`${base}/`)) return null;
-  return abs;
+  return insideJail(base, abs) ? abs : null;
+}
+
+/** Symlink-aware jail check for read/edit. `resolve()` is lexical, so a symlink INSIDE cwd pointing out
+ *  (or a symlinked parent dir) passes `jailedPath` yet resolves to a target outside the worktree. Follow
+ *  the links: the real path of the target (or, for a not-yet-created edit target, its nearest existing
+ *  ancestor) must still be inside the jail. The base is ALSO realpath'd — cwd itself may sit under a
+ *  symlinked prefix (e.g. macOS `/var` → `/private/var`), so comparing a resolved target against a
+ *  lexical base would false-refuse every path. Returns true when it is safe to touch `abs`. */
+async function realInsideJail(cwd: string, abs: string): Promise<boolean> {
+  const base = await realpath(cwd).catch(() => resolve(cwd)); // real cwd; lexical fallback if unresolved
+  const real = await realpath(abs).catch(() => null);
+  if (real !== null) return insideJail(base, real); // target exists — check where it really points
+  // Target does not exist (a fresh edit): walk up to the nearest existing ancestor and check THAT, so a
+  // symlinked parent (`d/link/new` with link → /etc) is refused even though `new` isn't there yet.
+  const parentReal = await realpath(dirname(abs)).catch(() => null);
+  return parentReal === null ? false : insideJail(base, parentReal);
+}
+
+/** A promise that settles when `signal` aborts (already-settled if it is). Used to bound `proc.exited`
+ *  by the same deadline that fires the SIGKILL, so a command that closes its fds but keeps running can't
+ *  slip past a disarmed timer into an unbounded wait. */
+function abortSignaled(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((res) => {
+    signal.addEventListener("abort", () => res(), { once: true });
+  });
 }
 
 /** Execute one tool in the run worktree cwd → a ToolResult (never throws). An unknown tool or bad input
@@ -177,36 +213,33 @@ export async function executeTool(
         stdout: "pipe",
         stderr: "pipe",
       });
-      // The timeout must return even if a DETACHED grandchild (`sleep 300 &`) still holds the pipe after
-      // `sh` exits: SIGKILL reaps the direct child, and the AbortSignal cancels the reads so we never
-      // block on that inherited write-end. This is the load-bearing "can't block the beat forever" seam.
+      // One deadline governs BOTH the reads and the exit wait, via a single abort. The timer SIGKILLs
+      // the child and aborts; `ac.signal.aborted` is then the ONE source of truth for "did we hit the
+      // deadline" — read once at the end, so `code` and the timeout decision can never disagree. This
+      // covers every runaway shape: a hung command (reads + exit both block), a DETACHED grandchild that
+      // holds the pipe after `sh` exits (reads block), and a command that closes its fds but keeps
+      // running (reads EOF but exit blocks — the exit wait is bounded by the same abort, never naked).
       const ac = new AbortController();
-      let timedOut = false;
       const timer = setTimeout(() => {
-        timedOut = true;
         proc.kill(9);
         ac.abort();
       }, timeoutMs);
       let out: { text: string; clipped: boolean };
       let err: { text: string; clipped: boolean };
-      let code: number;
-      let didTimeout = false;
+      let code = -1;
       try {
-        // Bounded, streamed, cancellable reads: neither memory nor wall-clock can run away.
+        // Bounded, streamed, cancellable reads: memory can't run away.
         [out, err] = await Promise.all([
           readCapped(proc.stdout as ReadableStream<Uint8Array>, MAX_OUTPUT, ac.signal),
           readCapped(proc.stderr as ReadableStream<Uint8Array>, MAX_OUTPUT, ac.signal),
         ]);
-        // Stop the timer and snapshot the flag ONCE, synchronously, before the next await — otherwise a
-        // command that finishes ~exactly at the deadline could let the timer fire DURING `await exited`
-        // and flip `timedOut` between the code-decision read and the return-decision read (a success
-        // spuriously reported as timed-out).
-        clearTimeout(timer);
-        didTimeout = timedOut;
-        code = didTimeout ? -1 : await proc.exited; // don't await a detached parent once we've timed out
+        // Exit wait is bounded by the abort too (never a naked `await proc.exited`).
+        code = await Promise.race([proc.exited, abortSignaled(ac.signal).then(() => -1)]);
       } finally {
-        clearTimeout(timer); // idempotent — covers an early throw before the inline clear above
+        clearTimeout(timer);
       }
+      const didTimeout = ac.signal.aborted; // the deadline fired at some point → a timeout, whatever code
+      if (didTimeout) code = -1;
       // Join the two streams with a newline so an unterminated stdout can't be glued onto stderr; the
       // clipped flag is honest about the COMBINED cut, not just each stream's own cap. The `…(truncated)`
       // marker is appended from `clipped` (not from length) so it also fires at the exact-cap boundary —
@@ -236,8 +269,16 @@ export async function executeTool(
           content: "error: path is missing or escapes the worktree",
         };
       }
-      // stat FIRST (never blocks): refuse anything that is not a regular file. Opening a FIFO / device
-      // for read would block forever with no writer — the read tool must not be able to hang the beat.
+      // Symlink-aware re-check: the lexical jail can't see through a symlink the agent made via shell.
+      if (!(await realInsideJail(cwd, path))) {
+        return {
+          ok: false,
+          summary: `read: refused ${String(input.path)} (symlink escapes the worktree)`,
+          content: "error: path resolves through a symlink outside the worktree",
+        };
+      }
+      // stat (never blocks): refuse anything that is not a regular file. Opening a FIFO / device for
+      // read would block forever with no writer — the read tool must not be able to hang the beat.
       const st = await stat(path); // ENOENT on a missing file → caught below → ok:false
       if (!st.isFile()) {
         return {
@@ -272,6 +313,15 @@ export async function executeTool(
           ok: false,
           summary: `edit: refused ${String(input.path)} (content not a string)`,
           content: "error: edit requires a string `content`",
+        };
+      }
+      // Symlink-aware re-check (target or, for a new file, its parent dir) so a symlink can't tunnel the
+      // write outside the worktree past the lexical jail.
+      if (!(await realInsideJail(cwd, path))) {
+        return {
+          ok: false,
+          summary: `edit: refused ${String(input.path)} (symlink escapes the worktree)`,
+          content: "error: path resolves through a symlink outside the worktree",
         };
       }
       // Refuse to overwrite a non-regular target (FIFO/device/directory) — a new file (ENOENT) is fine.
