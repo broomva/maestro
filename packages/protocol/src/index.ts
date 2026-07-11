@@ -10,6 +10,7 @@
 
 export * from "./api";
 export * from "./chat";
+export * from "./chunk-reducer";
 export * from "./events";
 export * from "./frontmatter";
 export * from "./gate";
