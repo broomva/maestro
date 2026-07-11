@@ -36,6 +36,19 @@ export interface RuntimeConfig {
   /** Grace after SIGTERM before SIGKILL (ms) (MAESTRO_CHILD_GRACE_MS). Optional;
    *  default DEFAULT_CHILD_GRACE_MS. */
   childGraceMs?: number;
+  /**
+   * Stop-condition guardrails (AUTONOMY §4, HARNESS §5, BRO-1795) — the RUNTIME defaults the
+   * child's stop-condition engine (`harness/stop-conditions.ts`) reads. Each is a policy default a
+   * per-work contract can still override: `budget.max_iterations` on the contract wins over
+   * `maxIterations` here (frontmatter overrides the runtime default). loadConfig always fills all
+   * three; a hand-built config literal may omit them and the engine falls back to its own DEFAULT_*.
+   */
+  /** Iteration-cap default when a contract sets no `budget.max_iterations` (MAESTRO_MAX_ITERATIONS). */
+  maxIterations?: number;
+  /** Consecutive empty-diffs / identical-errors before the no-progress halt (MAESTRO_NO_PROGRESS_N). */
+  noProgressN?: number;
+  /** Context-size ceiling (tokens) past which the child restarts fresh (MAESTRO_CONTEXT_CEILING_TOKENS). */
+  contextCeilingTokens?: number;
 }
 
 /** Default runtime port when MAESTRO_PORT is unset or invalid. */
@@ -47,6 +60,15 @@ export const DEFAULT_CHILD_HEARTBEAT_MS = 60_000;
 export const DEFAULT_CHILD_HUNG_MS = 300_000;
 /** SIGTERM to SIGKILL grace (HARNESS §2: 15 s grace, then escalate). */
 export const DEFAULT_CHILD_GRACE_MS = 15_000;
+
+/** Iteration cap when a contract sets no `budget.max_iterations` (AUTONOMY §4 "start 20–50"; F3 pins 30). */
+export const DEFAULT_MAX_ITERATIONS = 30;
+/** Consecutive empty diffs / identical errors before the no-progress halt (AUTONOMY §4, F3 §5). */
+export const DEFAULT_NO_PROGRESS_N = 3;
+/** Context-token ceiling past which the child restarts fresh (HARNESS §5). Conservative default: a
+ *  ~200k working window with headroom for the final progress.md write + the restart signal. Tunable
+ *  per model/host via MAESTRO_CONTEXT_CEILING_TOKENS. */
+export const DEFAULT_CONTEXT_CEILING_TOKENS = 160_000;
 
 /** Build the runtime config from an environment map (defaults to process.env). */
 export function loadConfig(env: Record<string, string | undefined> = process.env): RuntimeConfig {
@@ -73,6 +95,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     positiveInt(env.MAESTRO_CHILD_HEARTBEAT_MS) ?? DEFAULT_CHILD_HEARTBEAT_MS;
   const childHungMs = positiveInt(env.MAESTRO_CHILD_HUNG_MS) ?? DEFAULT_CHILD_HUNG_MS;
   const childGraceMs = positiveInt(env.MAESTRO_CHILD_GRACE_MS) ?? DEFAULT_CHILD_GRACE_MS;
+  // Stop-condition guardrails (BRO-1795): a positive override wins, else the AUTONOMY §4 / HARNESS §5
+  // default. Like the child-liveness cadences, these always resolve to a concrete number — the
+  // engine has an ultimate fallback but the runtime hands it a resolved value.
+  const maxIterations = positiveInt(env.MAESTRO_MAX_ITERATIONS) ?? DEFAULT_MAX_ITERATIONS;
+  const noProgressN = positiveInt(env.MAESTRO_NO_PROGRESS_N) ?? DEFAULT_NO_PROGRESS_N;
+  const contextCeilingTokens =
+    positiveInt(env.MAESTRO_CONTEXT_CEILING_TOKENS) ?? DEFAULT_CONTEXT_CEILING_TOKENS;
   return {
     port,
     workspace,
@@ -83,6 +112,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     childHeartbeatMs,
     childHungMs,
     childGraceMs,
+    maxIterations,
+    noProgressN,
+    contextCeilingTokens,
   };
 }
 

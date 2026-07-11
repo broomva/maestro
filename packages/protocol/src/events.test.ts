@@ -96,6 +96,9 @@ describe("event type namespaces + synthetics", () => {
     // HARNESS §4 (BRO-1779): run.exiting code vs real exit-code mismatch — a real run.* member
     expect(EVENT_TYPES.RUN_EXIT_MISMATCH).toBe("run.exit_mismatch");
     expect(eventNamespace(EVENT_TYPES.RUN_EXIT_MISMATCH)).toBe("run");
+    // HARNESS §5 (BRO-1795): the child's fresh-context restart request — a real run.* member
+    expect(EVENT_TYPES.RUN_RESTART_REQUESTED).toBe("run.restart_requested");
+    expect(eventNamespace(EVENT_TYPES.RUN_RESTART_REQUESTED)).toBe("run");
     // every catalog value is a valid wire event type
     for (const type of Object.values(EVENT_TYPES)) {
       expect(isWireEventType(type)).toBe(true);
