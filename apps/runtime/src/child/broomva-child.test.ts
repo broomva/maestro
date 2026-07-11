@@ -53,30 +53,30 @@ async function makeWorkspace(): Promise<string> {
 }
 
 /** Spawn the REAL broomva-child (no --scenario) — the supervisor's env (BROOMVA_MODEL_PROXY/TOKEN/
- *  CONTRACT/RUN_DIR/SESSION) reaches it unchanged, and its stdout NDJSON tees into the index. */
-const realChildSpawn = (args: {
-  argv: string[];
-  env: Record<string, string>;
-  cwd: string;
-}): ChildStdioPort => {
-  const proc = Bun.spawn(["bun", BROOMVA_CHILD, ...args.argv], {
-    cwd: args.cwd,
-    env: { ...args.env },
-    stdout: "pipe",
-    stderr: "pipe",
-    stdin: "pipe",
-  });
-  return {
-    stdout: proc.stdout,
-    stderr: proc.stderr,
-    exited: proc.exited,
-    kill: (s) => proc.kill(s),
-    writeStdin: (b: string) => {
-      proc.stdin.write(b);
-      void proc.stdin.flush();
-    },
+ *  CONTRACT/RUN_DIR/SESSION) reaches it unchanged, and its stdout NDJSON tees into the index. `extra`
+ *  merges test-only env (e.g. BROOMVA_CONTEXT_CEILING to force the restart path) — the supervisor's real
+ *  allowlist passes that BROOMVA_* var in production; here the injected spawn adds it directly (2b-ii). */
+const makeChildSpawn =
+  (extra: Record<string, string> = {}) =>
+  (args: { argv: string[]; env: Record<string, string>; cwd: string }): ChildStdioPort => {
+    const proc = Bun.spawn(["bun", BROOMVA_CHILD, ...args.argv], {
+      cwd: args.cwd,
+      env: { ...args.env, ...extra },
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "pipe",
+    });
+    return {
+      stdout: proc.stdout,
+      stderr: proc.stderr,
+      exited: proc.exited,
+      kill: (s) => proc.kill(s),
+      writeStdin: (b: string) => {
+        proc.stdin.write(b);
+        void proc.stdin.flush();
+      },
+    };
   };
-};
 
 async function openMem(): Promise<IndexHandle> {
   const h = await openIndex(":memory:");
@@ -107,6 +107,8 @@ async function harness(
     mock?: MockModelOptions;
     proxyUrlOverride?: string;
     kind?: string;
+    /** Extra env merged into the spawned child (test-only, e.g. BROOMVA_CONTEXT_CEILING). */
+    childEnvExtra?: Record<string, string>;
   } = {},
 ) {
   const ws = await makeWorkspace();
@@ -131,7 +133,7 @@ async function harness(
     // A dead override points the child at an unreachable proxy (the fetch-throw path); default = the
     // real served proxy.
     proxy: { url: opts.proxyUrlOverride ?? server.url },
-    spawnChild: realChildSpawn,
+    spawnChild: makeChildSpawn(opts.childEnvExtra),
     mintRunId: () => "r1",
     hostEnv: { PATH: process.env.PATH },
   });
@@ -146,6 +148,19 @@ function anthropicBody(text: string): unknown {
     role: "assistant",
     content: [{ type: "text", text }],
     stop_reason: "end_turn",
+    usage: { input_tokens: 8, output_tokens: 12 },
+  };
+}
+
+/** An Anthropic Messages response body requesting one tool call — the loop parses this, executes the
+ *  tool, and sends a tool_result on the next turn. */
+function anthropicToolUse(id: string, name: string, input: Record<string, unknown>): unknown {
+  return {
+    id: "msg_tool",
+    type: "message",
+    role: "assistant",
+    content: [{ type: "tool_use", id, name, input }],
+    stop_reason: "tool_use",
     usage: { input_tokens: 8, output_tokens: 12 },
   };
 }
@@ -257,9 +272,10 @@ describe("broomva-child slice 1 — one model turn through the proxy (zero token
     expect(await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID)).toHaveLength(0);
   });
 
-  test("a non-object (string) 200 body → empty agent.said, no crash → session review", async () => {
-    // textOf must NOT throw on a non-object body (its no-throw contract). A string body → text "" → a
-    // valid-but-empty turn (exit 0 / review), not a receiptless crash on `body.content`.
+  test("a non-object (string) 200 body → no text, no tool_use → clean exit 0 → review", async () => {
+    // textOf/parseToolUses must NOT throw on a non-object body (their no-throw contract). A string body →
+    // text "" (no agent.said — the loop only speaks when there IS text) AND no tool_use → a valid-but-
+    // empty turn completes the loop (exit 0 / review), not a receiptless crash on `body.content`.
     const { h, sup, mock } = await harness({
       mock: { script: [{ body: "unexpected string body" }] },
     });
@@ -270,9 +286,11 @@ describe("broomva-child slice 1 — one model turn through the proxy (zero token
     expect(reaped.exitCode).toBe(0);
     expect(reaped.sessionStatus).toBe("review");
     expect(mock.calls).toHaveLength(1);
-    const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
-    expect(said).toHaveLength(1);
-    expect(JSON.parse(said[0]?.payload ?? "{}")).toEqual({ text: "" });
+    // An empty turn says nothing — no agent.said noise — but still exits cleanly with a run.exiting {0}.
+    expect(await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID)).toHaveLength(0);
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
+    expect(exiting).toHaveLength(1);
+    expect(JSON.parse(exiting[0]?.payload ?? "{}")).toEqual({ code: 0 });
   });
 
   test("the outbound prompt reflects the contract — a different kind yields a different prompt", async () => {
@@ -289,6 +307,108 @@ describe("broomva-child slice 1 — one model turn through the proxy (zero token
     const sent = JSON.stringify(mock.calls[0]?.payload ?? {});
     expect(sent).toContain("project");
     expect(sent).not.toContain("Work on this task");
+  });
+});
+
+describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero tokens)", () => {
+  test("tool_use turn → executes the tool in the worktree → tees tool.call/tool.result → next text turn → exit 0", async () => {
+    // Beat 1: the model asks for a shell tool that WRITES a file; the child executes it in the run
+    // worktree and sends the result back. Beat 2: the model replies with text (no tool) → clean exit 0.
+    const { h, sup, mock } = await harness({
+      mock: {
+        script: [
+          { body: anthropicToolUse("tu1", "shell", { command: "echo hi > out.txt" }) },
+          { body: anthropicBody("done") },
+        ],
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0);
+    expect(reaped.sessionStatus).toBe("review");
+    expect(mock.calls).toHaveLength(2); // two turns reached the mock (tool turn + finishing text turn)
+
+    // The tool was announced then executed successfully (tool.call → tool.result {ok:true}).
+    const calls = await eventsOf(h, "r1", EVENT_TYPES.TOOL_CALL);
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]?.payload ?? "{}")).toMatchObject({ tool: "shell" });
+    const toolResults = await eventsOf(h, "r1", EVENT_TYPES.TOOL_RESULT);
+    expect(toolResults).toHaveLength(1);
+    expect(JSON.parse(toolResults[0]?.payload ?? "{}")).toMatchObject({ tool: "shell", ok: true });
+
+    // The beat's effect was REAL: the run.beat diffstat shows the file the tool wrote in the worktree
+    // (proves executeTool ran IN cwd, not a no-op) — the whole point of the tool layer.
+    const beats = await eventsOf(h, "r1", EVENT_TYPES.RUN_BEAT);
+    expect(beats).toHaveLength(1);
+    expect(JSON.parse(beats[0]?.payload ?? "{}").diffstat).toContain("out.txt");
+
+    // The finishing turn's text landed as agent.said and the run completed.
+    const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
+    expect(said).toHaveLength(1);
+    expect(JSON.parse(said[0]?.payload ?? "{}")).toEqual({ text: "done" });
+  });
+
+  test("no-progress → beat 1 changes the tree, then 3 no-op beats → engine halts no_progress → blocked", async () => {
+    // Beat 1 WRITES a file (a real change); beats 2-4 run a no-op tool (`echo hi` → stdout only, the
+    // worktree is UNCHANGED from beat 1). The per-beat signature is `porcelain === previous ? "" : cur`,
+    // so beats 2-4 are empty (the cumulative diff didn't move) → 3 consecutive empty → the BRO-1795 engine
+    // halts no_progress. This exercises the cumulative-but-no-new-change path: a regression using the raw
+    // porcelain (not the delta-vs-previous) would see a constant non-empty diff and never halt.
+    const { h, sup, mock } = await harness({
+      mock: {
+        script: [{ body: anthropicToolUse("tu1", "shell", { command: "echo hi > a.txt" }) }],
+        fallback: { body: anthropicToolUse("tuN", "shell", { command: "echo hi" }) },
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(10);
+    expect(reaped.reason).toBe("no_progress");
+    expect(reaped.sessionStatus).toBe("blocked");
+    expect(reaped.crash).toBe(false);
+    // Exactly 4 beats: beat 1 moved the tree, beats 2-4 (DEFAULT_NO_PROGRESS_N) added nothing → halt. A
+    // raw-porcelain regression (no delta-vs-previous) never halts → runs to the iteration cap (30 calls).
+    expect(mock.calls).toHaveLength(4);
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
+    expect(exiting).toHaveLength(1);
+    expect(JSON.parse(exiting[0]?.payload ?? "{}")).toMatchObject({
+      code: 10,
+      reason: "no_progress",
+    });
+    // The halt is the ENGINE's, not the proxy's — no budget.exhausted on this path.
+    expect(await eventsOf(h, "r1", EVENT_TYPES.BUDGET_EXHAUSTED)).toHaveLength(0);
+    // It DID execute a tool each beat (4 tool.calls) — the no-progress is about the EFFECT, not inaction.
+    expect(await eventsOf(h, "r1", EVENT_TYPES.TOOL_CALL)).toHaveLength(4);
+  });
+
+  test("context ceiling → child checkpoints + requests a fresh-context restart → supervisor respawns", async () => {
+    // A tiny ceiling (via the injected env — 2b-ii wires it through the supervisor's allowlist) forces the
+    // restart branch on beat 1 (the accumulated conversation exceeds 50 tokens after one tool turn). The
+    // child writes progress.md + emits run.restart_requested + exits 10 fresh_context; the supervisor
+    // respawns, and the script has exhausted to a text fallback so attempt 2 completes (exit 0 → review).
+    // (The respawn RESUMING from progress.md is slice 2b-ii; here we prove the restart DECISION + respawn.)
+    const { h, sup } = await harness({
+      childEnvExtra: { BROOMVA_CONTEXT_CEILING: "50" },
+      mock: {
+        script: [{ body: anthropicToolUse("tu1", "shell", { command: "echo hi > grew.txt" }) }],
+        fallback: { body: anthropicBody("done") },
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.respawns).toBe(1); // exactly one fresh-context respawn fired
+    expect(reaped.exitCode).toBe(0); // attempt 2 (text fallback) completed
+    expect(reaped.sessionStatus).toBe("review");
+    expect(reaped.crash).toBe(false);
+    // attempt 1 asked for the restart → prepareRestart wrote progress.md THEN emitted this (so the
+    // checkpoint exists), and the supervisor read exit-10 fresh_context to respawn.
+    expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_RESTART_REQUESTED)).toHaveLength(1);
   });
 });
 
