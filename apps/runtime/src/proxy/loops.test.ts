@@ -1,19 +1,21 @@
 /// <reference types="bun" />
-// loops.test.ts — BRO-1806 done.check `bun test:loops`. The D8-layer-1 deterministic loop tests: full
-// F2→F3 flows driven with ZERO tokens and NO API key, through the REAL supervisor (BRO-1779) + REAL
-// model proxy (BRO-1788) with the scripted mock-model upstream + a REAL spawned fixture child
-// (`loop-child.ts`) running the REAL stop-condition engine (BRO-1795). Only the model's far side is
-// scripted; every seam between the supervisor and the proxy is production code.
+// loops.test.ts — the D8-layer-1 deterministic loop tests (`bun test:loops`). Full F2→F3 flows driven
+// with ZERO tokens and NO API key, through the REAL supervisor (BRO-1779) + REAL model proxy (BRO-1788)
+// with the scripted mock-model upstream + the REAL SHIPPED child `broomva-child.ts` (BRO-1855) running the
+// REAL stop-condition engine (BRO-1795). The loop-child.ts FIXTURE is retired (slice 2b-ii-B) — every
+// scenario now spawns the production child and drives its behavior via the mock SCRIPT + config, not a
+// `--scenario` flag. Only the model's far side is scripted; every seam supervisor→proxy→child is production.
 //
 // The four scenarios each prove one guardrail end-to-end (not in a unit's isolation):
 //   budget refusal mid-run → proxy 402 → child halts budget → session blocked          (BRO-1788)
 //   no-progress exit       → 3 empty diffs → engine halt → session blocked              (BRO-1795)
-//   fresh-context resume   → ceiling → checkpoint + restart → respawn resumes → review  (BRO-1795 + 1779)
-//   kill mid-tool-call     → SIGKILL a live child mid-call → canceled + run.killed       (BRO-1801)
+//   fresh-context resume   → ceiling → checkpoint + restart → respawn resumes → review  (BRO-1795 + 1779 + 2b-ii-A)
+//   kill mid-tool-call     → SIGKILL a live child mid-executeTool → canceled + run.killed (BRO-1801)
 //
 // Anti-vacuity [[self-hosting-vacuous-pass]]: every scenario asserts the EXACT terminal (session, node,
-// event) triple AND the child's own teed events — not "something happened". NO API key is set anywhere
-// (the mock is the upstream), which is the "zero tokens in CI" guarantee as code.
+// event) triple AND the child's own teed events. NO API key is set anywhere (the mock is the upstream +
+// DEGRADES tool_use when a request advertises no `tools`; the real child sends TOOL_SCHEMAS so tool_use
+// flows) — the "zero tokens in CI" guarantee as code.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
@@ -21,19 +23,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EVENT_TYPES, type EventType } from "@maestro/protocol";
 import { and, eq } from "drizzle-orm";
+import { loadConfig, type RuntimeConfig } from "../config";
 import { type IndexHandle, openIndex } from "../db/client";
 import { event, node, session } from "../db/schema";
 import { git } from "../git/git";
 import type { ChildStdioPort } from "../harness/stdio";
 import { createWorktreeSandboxFactory } from "../sandbox/worktree";
-import { createSupervisor, type SpawnChild } from "../supervisor/supervisor";
+import { createSupervisor } from "../supervisor/supervisor";
 import { BudgetGuard } from "./budget";
 import { MemoryEventSink } from "./events";
 import { createMockModel, type MockModelOptions } from "./mock-model";
 import { createModelProxy, type ProxyServer, serveProxy } from "./proxy";
 import { SessionTokenRegistry } from "./tokens";
 
-const LOOP_CHILD = join(import.meta.dir, "loop-child.ts");
+const BROOMVA_CHILD = join(import.meta.dir, "..", "child", "broomva-child.ts");
 const FIXED_MS = 1_700_000_000_000;
 
 const handles: IndexHandle[] = [];
@@ -60,14 +63,15 @@ async function makeWorkspace(): Promise<string> {
   return dir;
 }
 
-/** A spawner that Bun.spawns the real fixture child with `--scenario <s>` (mirrors supervisor.test's
- *  realSpawn dogfood pattern). The supervisor's env (BROOMVA_MODEL_PROXY/TOKEN/RUN_DIR/SESSION) reaches
- *  the child unchanged; the scenario is injected via argv (no env-allowlist widening). */
-function scenarioSpawn(scenario: string): SpawnChild {
-  return (args): ChildStdioPort => {
-    const proc = Bun.spawn(["bun", LOOP_CHILD, "--scenario", scenario, ...args.argv], {
+/** Spawn the REAL broomva-child (BRO-1855) — the supervisor's env (BROOMVA_MODEL_PROXY/TOKEN/CONTRACT/
+ *  RUN_DIR/SESSION + the allowlisted BROOMVA_CONTEXT_CEILING) reaches it unchanged; behavior is driven by
+ *  the mock script, not a `--scenario` flag. `extra` adds test-only env (a known run dir for a checkpoint). */
+const makeChildSpawn =
+  (extra: Record<string, string> = {}) =>
+  (args: { argv: string[]; env: Record<string, string>; cwd: string }): ChildStdioPort => {
+    const proc = Bun.spawn(["bun", BROOMVA_CHILD, ...args.argv], {
       cwd: args.cwd,
-      env: { ...args.env },
+      env: { ...args.env, ...extra },
       stdout: "pipe",
       stderr: "pipe",
       stdin: "pipe",
@@ -83,7 +87,6 @@ function scenarioSpawn(scenario: string): SpawnChild {
       },
     };
   };
-}
 
 async function openMem(): Promise<IndexHandle> {
   const h = await openIndex(":memory:");
@@ -105,21 +108,20 @@ async function seedNode(h: IndexHandle, id: string, budgetJson?: string): Promis
   });
 }
 
-/**
- * Wire the full loop stack for a scenario: real `:memory:` index, real budget guard + token registry
- * (shared with the proxy), the scripted mock upstream behind a REAL served proxy, and a real supervisor
- * that spawns the fixture child. `mintRunId` is pinned to "r1" so the run dir / session id are stable.
- */
+/** Wire the full loop stack: real `:memory:` index, real budget guard + token registry (shared with the
+ *  proxy), the scripted mock upstream behind a REAL served proxy, and a real supervisor that spawns the
+ *  REAL child. `mintRunId` is pinned to "r1" so the run dir / session id are stable. */
 async function harness(
-  scenario: string,
-  opts: { budgetJson?: string; mock?: MockModelOptions } = {},
+  opts: {
+    budgetJson?: string;
+    mock?: MockModelOptions;
+    config?: RuntimeConfig;
+    childEnvExtra?: Record<string, string>;
+  } = {},
 ): Promise<{
   h: IndexHandle;
   sup: ReturnType<typeof createSupervisor>;
   tokens: SessionTokenRegistry;
-  /** The scripted upstream — `mock.calls` records every forward the proxy made (a refused call never
-   *  forwards), which is how a scenario pins "how many beats reached the model" AND proves the mock (not
-   *  Anthropic) served every call = zero tokens. */
   mock: ReturnType<typeof createMockModel>;
 }> {
   const ws = await makeWorkspace();
@@ -133,7 +135,7 @@ async function harness(
     guard,
     tokens,
     upstream: mock,
-    apiKey: () => "sk-never-forwarded", // the mock ignores it; asserts NO real key is needed
+    apiKey: () => "sk-never-forwarded",
     env: process.env,
   });
   const server = serveProxy(proxyApp, { port: 0 });
@@ -144,9 +146,10 @@ async function harness(
     factory: createWorktreeSandboxFactory({ workspace: ws }),
     tokens,
     proxy: { url: server.url },
-    spawnChild: scenarioSpawn(scenario),
+    spawnChild: makeChildSpawn(opts.childEnvExtra),
     mintRunId: () => "r1",
     hostEnv: { PATH: process.env.PATH },
+    config: opts.config,
   });
   return { h, sup, tokens, mock };
 }
@@ -179,18 +182,45 @@ async function eventsOf(h: IndexHandle, sessionId: string, type: EventType) {
     .where(and(eq(event.sessionId, sessionId), eq(event.type, type)));
 }
 
-describe("loops (D8 layer 1) — deterministic F2→F3 flows, zero tokens", () => {
-  // The zero-token guarantee is STRUCTURAL, not an env check: the proxy's upstream is the injected mock
-  // and the child dials the proxy, so no real Anthropic call is ever made regardless of the environment.
-  // Each scenario asserts `mock.calls.length` — proof the MOCK (not Anthropic) served every call. (An
-  // `expect(ANTHROPIC_API_KEY).toBe("")` assertion would prove nothing about the mechanism AND red the
-  // whole gate for any developer who runs the suite with a key exported — the near-universal case here.)
+/** An Anthropic Messages body carrying a text reply (a completed turn, stop_reason end_turn). */
+function anthropicBody(text: string): unknown {
+  return {
+    id: "msg_test",
+    type: "message",
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 8, output_tokens: 12 },
+  };
+}
+
+/** An Anthropic Messages body requesting one tool call — the real child executes it in the worktree. */
+function anthropicToolUse(id: string, name: string, input: Record<string, unknown>): unknown {
+  return {
+    id: "msg_tool",
+    type: "message",
+    role: "assistant",
+    content: [{ type: "tool_use", id, name, input }],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 8, output_tokens: 12 },
+  };
+}
+
+describe("loops (D8 layer 1) — deterministic F2→F3 flows through the REAL child, zero tokens", () => {
+  // The zero-token guarantee is STRUCTURAL: the proxy's upstream is the injected mock and the child dials
+  // the proxy, so no real Anthropic call is ever made. Each scenario asserts mock.calls — proof the MOCK
+  // (not Anthropic) served every call.
 
   test("budget refusal mid-run → proxy 402 → child halts budget → session blocked", async () => {
-    // per_run 1.5 with a $1.0/call mock cost → the child's 3rd call's reservation breaches the cap → 402.
-    const { h, sup, mock } = await harness("budget", {
-      budgetJson: JSON.stringify({ per_run_usd: 1.5 }),
-      mock: { usagePerCallUsd: 1.0 },
+    // The model appends to a file each beat (a GROWING diff, so the no-progress engine never fires and the
+    // BUDGET is the sole halt), each call metered at $30 against a $100/run cap → the proxy forwards the
+    // first call(s) then refuses at preflight when the next reservation would breach the cap.
+    const { h, sup, mock } = await harness({
+      budgetJson: JSON.stringify({ per_run_usd: 100 }),
+      mock: {
+        usagePerCallUsd: 30,
+        fallback: { body: anthropicToolUse("b", "shell", { command: "echo x >> log.txt" }) },
+      },
     });
     const out = await sup.dispatch("n0");
     if (!out.dispatched) throw new Error("dispatch failed");
@@ -207,15 +237,18 @@ describe("loops (D8 layer 1) — deterministic F2→F3 flows, zero tokens", () =
     const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
     expect(exiting).toHaveLength(1);
     expect(JSON.parse(exiting[0]?.payload ?? "{}")).toMatchObject({ code: 10, reason: "budget" });
-    // MID-RUN, not up-front: EXACTLY two calls reached the model (spent 0→1.0→2.0), and the child's 3rd
-    // call was refused at preflight (2.0 + reserve > 1.5) BEFORE forwarding — so the upstream saw two.
-    // A regression that refused up-front on call 1 leaves mock.calls empty and fails here. (mock.calls
-    // being non-empty also proves the MOCK, not Anthropic, served every call: zero tokens, no key.)
-    expect(mock.calls).toHaveLength(2);
+    // MID-RUN, not up-front: at least one call reached the model before the reservation breached the cap
+    // (an up-front refusal on call 1 leaves mock.calls empty). The exact count depends on the per-call
+    // reservation ceiling for the child's max_tokens, so we assert the mid-run PROPERTY, not a fixed count.
+    expect(mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
   test("no-progress exit → 3 consecutive empty diffs → engine halt → session blocked", async () => {
-    const { h, sup, mock } = await harness("no_progress");
+    // Every beat the model calls a tool that changes NOTHING in the worktree (`echo hi` → stdout only), so
+    // the content-diff signal is empty 3 beats running → the BRO-1795 engine halts no_progress.
+    const { h, sup, mock } = await harness({
+      mock: { fallback: { body: anthropicToolUse("np", "shell", { command: "echo hi" }) } },
+    });
     const out = await sup.dispatch("n0");
     if (!out.dispatched) throw new Error("dispatch failed");
     const res = await out.reaped;
@@ -232,34 +265,55 @@ describe("loops (D8 layer 1) — deterministic F2→F3 flows, zero tokens", () =
     });
     // no budget.exhausted on this path (the halt is the engine's, not the proxy's).
     expect(await eventsOf(h, "r1", EVENT_TYPES.BUDGET_EXHAUSTED)).toHaveLength(0);
-    // THREE consecutive empty diffs, not one: the child calls the model once per beat, so exactly 3
-    // calls reached the upstream before the halt (a 1-empty-diff regression would show only 1 call).
+    // Exactly 3 beats reached the model before the halt (DEFAULT_NO_PROGRESS_N); the child executed a tool
+    // each beat (a 1-empty-diff regression would show 1 call, a never-halting one would run to the cap).
     expect(mock.calls).toHaveLength(3);
+    expect(await eventsOf(h, "r1", EVENT_TYPES.TOOL_CALL)).toHaveLength(3);
   });
 
-  test("fresh-context restart → checkpoint + respawn → resumes skipping done work → review", async () => {
-    const { h, sup } = await harness("fresh_context");
+  test("fresh-context restart → checkpoint + respawn → resumes → review", async () => {
+    // A tiny ceiling (via the config→allowlist path) forces the restart on beat 1; the supervisor respawns
+    // (same run id "r1" → same run dir), the child RESUMES from progress.md (slice 2b-ii-A), and the
+    // exhausted script's text fallback completes.
+    const { h, sup, mock } = await harness({
+      config: { ...loadConfig({}), contextCeilingTokens: 50 },
+      mock: {
+        script: [{ body: anthropicToolUse("fc", "shell", { command: "echo hi > grew.txt" }) }],
+        fallback: { body: anthropicBody("done") },
+      },
+    });
     const out = await sup.dispatch("n0");
     if (!out.dispatched) throw new Error("dispatch failed");
     const res = await out.reaped;
 
-    // exactly one fresh-context respawn, then attempt 2 completed (exit 0 → review).
+    // exactly one fresh-context respawn, then attempt 2 completed (exit 0 → review) — the full lossless
+    // restart cycle end-to-end.
     expect(res.respawns).toBe(1);
     expect(res.exitCode).toBe(0);
     expect(res.sessionStatus).toBe("review");
     expect(res.crash).toBe(false);
-    // attempt 1 asked for the restart (proves the ceiling path fired + checkpoint written).
+    // attempt 1 asked for the restart (proves the ceiling path fired + checkpoint written before the respawn).
     expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_RESTART_REQUESTED)).toHaveLength(1);
-    // attempt 2 took the RESUME branch — only reachable by reading progress.md → lossless resume proven.
-    const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
-    const resumed = said.some((r) =>
-      (JSON.parse(r.payload ?? "{}").text ?? "").includes("resumed from checkpoint"),
-    );
-    expect(resumed).toBe(true);
+    // RESUME (not just respawn) proven IN-FILE: attempt 2's FIRST request (mock.calls[1]) folded the
+    // checkpoint into the prompt → the child READ progress.md across the respawn. A broken readProgress
+    // would leave the resume text absent while respawns/exit/status still hold — so this is the assertion
+    // that fails on a resume regression, not the ones above. (Mirrors broomva-child.test.ts's unit proof.)
+    const resumeCall = mock.calls[1];
+    if (!resumeCall) throw new Error("no respawn request reached the mock");
+    const prompt = JSON.stringify(resumeCall.payload ?? {});
+    expect(prompt).toContain("RESUMING"); // the resumeSuffix marker
+    expect(prompt).toContain("context ceiling"); // the checkpoint's state-of-the-world, folded in
   });
 
   test("kill mid-tool-call → SIGKILL a live child → canceled + run.killed, worktree preserved", async () => {
-    const { h, sup } = await harness("kill");
+    // The model calls a long-running tool; the child emits tool.call then blocks in executeTool. We kill it
+    // mid-tool (F8) and assert the human-kill terminal is DISTINCT from a crash. `sleep 5` (not 300): the
+    // kill lands ~100ms after tool.call, so 5s is ample slack to guarantee mid-tool — but SIGKILL does not
+    // cascade to the `sh -c` grandchild, so a long sleep would orphan a process (reparented to PID 1) for
+    // its full duration; 5s self-clears, so repeated/watch runs can't accumulate live orphans.
+    const { h, sup } = await harness({
+      mock: { fallback: { body: anthropicToolUse("k", "shell", { command: "sleep 5" }) } },
+    });
     const out = await sup.dispatch("n0");
     if (!out.dispatched) throw new Error("dispatch failed");
     // the child is live + registered; wait until it is genuinely mid-tool-call (tool.call teed).
