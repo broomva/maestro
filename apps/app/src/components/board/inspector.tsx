@@ -69,8 +69,12 @@ export function Inspector({ item }: { item: WorkItem | null }) {
               <dt className="text-muted-foreground text-xs">Decided</dt>
               <dd>
                 <ul className="flex flex-col gap-0.5 text-foreground text-sm">
-                  {item.look.decided.map((d) => (
-                    <li key={d}>{d}</li>
+                  {item.look.decided.map((d, i) => (
+                    // `decided` is a free-form string[] (duplicates possible, so the string itself is not
+                    // a safe key), and it is a render-only list of stateless text with no reordering
+                    // semantics — the index is the correct key here (React docs).
+                    // biome-ignore lint/suspicious/noArrayIndexKey: render-only list, no reorder/state
+                    <li key={i}>{d}</li>
                   ))}
                 </ul>
               </dd>

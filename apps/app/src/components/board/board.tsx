@@ -8,7 +8,8 @@
 // selecting `selectBoard(...)` directly would return a fresh array every render and thrash
 // useSyncExternalStore ("getSnapshot should be cached"). The derivation is pure + cheap.
 
-import { useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "zustand";
 import { maestroStore, selectBoard, selectNeedsYouCount } from "@/store";
 import { toSections } from "./board-view";
@@ -49,6 +50,21 @@ export function Board() {
   useEffect(() => {
     if (selectedId !== null && selectedItem === null) setSelectedId(null);
   }, [selectedId, selectedItem]);
+  // Selection TOGGLES: re-clicking the active card deselects (dismissing the inspector), so a user can
+  // return to the full-width board and `aria-pressed` on the card is honest (can return to false).
+  // Stable ref (useCallback []), so WorkCard's memo comparator (which checks onSelect) is not defeated.
+  const select = useCallback((id: string) => {
+    setSelectedId((cur) => (cur === id ? null : id));
+  }, []);
+  // Escape also dismisses the inspector while it is open (a discoverable, keyboard-first close path).
+  useEffect(() => {
+    if (selectedId === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedId(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selectedId]);
 
   if (sections.length === 0) {
     return (
@@ -96,7 +112,7 @@ export function Board() {
                   key={item.id}
                   item={item}
                   selected={item.id === selectedId}
-                  onSelect={setSelectedId}
+                  onSelect={select}
                   now={now}
                 />
               ))}
@@ -113,6 +129,17 @@ export function Board() {
           data-testid="inspector-panel"
           className="sticky top-0 max-h-[calc(100dvh-52px-3rem)] w-[45%] min-w-[380px] shrink-0 self-start overflow-y-auto rounded-card border border-border bg-card p-4"
         >
+          <div className="mb-2 flex justify-end">
+            <button
+              type="button"
+              data-testid="inspector-close"
+              aria-label="Close inspector"
+              onClick={() => setSelectedId(null)}
+              className="flex size-7 items-center justify-center rounded-row text-muted-foreground transition-colors hover:bg-[var(--bv-frost-8)] hover:text-foreground"
+            >
+              <X size={16} strokeWidth={2} />
+            </button>
+          </div>
           <Inspector item={selectedItem} />
         </div>
       ) : null}

@@ -88,12 +88,16 @@ test("Needs you is surfaced first in accent-blue; a running card wears the Under
   await expect(needsYou).toBeVisible();
   await expect(needsYou).toHaveClass(/bv-blue-accent/);
 
-  // The running card wears the Undertow (the live running signal) — asserted on the stable data hook.
+  // Exactly the ONE running card wears the Undertow — the two non-running cards (review + queued) must
+  // NOT be haloed. Asserting the total halo count (not a has-filter) discriminates: if every card were
+  // haloed this fails, so it proves the signal is exclusive to running.
+  const cards = page.locator('[data-testid="work-card"]');
+  await expect(cards).toHaveCount(3);
   const running = page.locator('[data-testid="work-card"][data-running]');
   await expect(running).toHaveCount(1);
   await expect(running).toContainText("Building the runner");
-  // ...and it is genuinely wrapped in the Undertow halo element (CLAUDE.md live signal).
-  await expect(page.locator(".bv-undertow", { has: running })).toHaveCount(1);
+  await expect(page.locator(".bv-undertow")).toHaveCount(1); // ONLY the running card is haloed
+  await expect(page.locator('[data-testid="work-card"]:not([data-running])')).toHaveCount(2);
 
   // No progress percentages anywhere on the board (receipts, not progress).
   await expect(page.getByTestId("board")).not.toContainText("%");
@@ -108,10 +112,30 @@ test("selection drives the inspector — a selected card opens the receipts pane
   // No inspector until something is selected (board is the primary surface).
   await expect(page.getByTestId("inspector-panel")).toHaveCount(0);
 
-  // Click the review card → the inspector opens with that item's title + state.
-  await page.getByTestId("board-group-review").getByText("Approve the deploy").click();
+  // Click a NON-first card (the running card, which is NOT the review group that renders first) so the
+  // assertion distinguishes "reflects the selection" from "always shows the first item".
+  await page.getByTestId("board-group-running").getByText("Building the runner").click();
   const panel = page.getByTestId("inspector-panel");
   await expect(panel).toBeVisible();
-  await expect(panel.getByTestId("inspector")).toContainText("Approve the deploy");
+  await expect(panel.getByTestId("inspector")).toContainText("Building the runner");
+  await expect(panel.getByTestId("inspector")).not.toContainText("Approve the deploy");
   await expect(panel).not.toContainText("%"); // receipts, never a percentage
+
+  // The inspector is DISMISSIBLE (P20 #2): Escape closes it and the board returns to full width.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("inspector-panel")).toHaveCount(0);
+
+  // Re-clicking the same card TOGGLES: open, then click again to close (honest aria-pressed).
+  const runningCard = page
+    .locator('[data-testid="work-card"]', { hasText: "Building the runner" })
+    .first();
+  await runningCard.click();
+  await expect(page.getByTestId("inspector-panel")).toBeVisible();
+  await runningCard.click();
+  await expect(page.getByTestId("inspector-panel")).toHaveCount(0);
+
+  // The close button also dismisses it.
+  await runningCard.click();
+  await page.getByTestId("inspector-close").click();
+  await expect(page.getByTestId("inspector-panel")).toHaveCount(0);
 });
