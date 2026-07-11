@@ -93,23 +93,32 @@ export function mountDispatch(deps: MountDispatchDeps): DispatchRuntime {
     env: process.env,
   });
   const proxyServer = serveProxy(proxyApp, { port: 0 }); // loopback, OS-assigned port
-  const supervisor = createSupervisor({
-    db: deps.db,
-    factory: createWorktreeSandboxFactory({ workspace: deps.config.workspace }),
-    tokens,
-    proxy: { url: proxyServer.url },
-    spawnChild: deps.spawnChild ?? devSpawnChild,
-    hostEnv: deps.hostEnv ?? process.env,
-    config: deps.config,
-    ...(deps.mintRunId ? { mintRunId: deps.mintRunId } : {}),
-  });
-  return {
-    supervisor,
-    proxyServer,
-    kill: (runId) => supervisor.kill(runId),
-    shutdown: () => {
-      supervisor.killAll();
-      proxyServer.stop();
-    },
-  };
+  // The proxy is already listening on its port. If assembling the supervisor throws (a bad workspace, a
+  // sandbox-factory error), that port would leak: index.ts's mount catch clears `dispatch` to undefined,
+  // so its shutdown hook can no longer reach this server to stop it. Tear down what we started, then
+  // rethrow so the caller's degrade-to-reads path still runs.
+  try {
+    const supervisor = createSupervisor({
+      db: deps.db,
+      factory: createWorktreeSandboxFactory({ workspace: deps.config.workspace }),
+      tokens,
+      proxy: { url: proxyServer.url },
+      spawnChild: deps.spawnChild ?? devSpawnChild,
+      hostEnv: deps.hostEnv ?? process.env,
+      config: deps.config,
+      ...(deps.mintRunId ? { mintRunId: deps.mintRunId } : {}),
+    });
+    return {
+      supervisor,
+      proxyServer,
+      kill: (runId) => supervisor.kill(runId),
+      shutdown: () => {
+        supervisor.killAll();
+        proxyServer.stop();
+      },
+    };
+  } catch (err) {
+    proxyServer.stop();
+    throw err;
+  }
 }

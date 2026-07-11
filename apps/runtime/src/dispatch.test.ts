@@ -87,6 +87,16 @@ async function waitForEvent(
   return false;
 }
 
+/** Poll a predicate until true or the deadline — for non-index signals (e.g. mock.calls). */
+async function waitFor(pred: () => boolean, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pred()) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return false;
+}
+
 function anthropicBody(text: string): unknown {
   return {
     id: "msg_test",
@@ -94,17 +104,6 @@ function anthropicBody(text: string): unknown {
     role: "assistant",
     content: [{ type: "text", text }],
     stop_reason: "end_turn",
-    usage: { input_tokens: 8, output_tokens: 12 },
-  };
-}
-
-function anthropicToolUse(id: string, name: string, input: Record<string, unknown>): unknown {
-  return {
-    id: "msg_tool",
-    type: "message",
-    role: "assistant",
-    content: [{ type: "tool_use", id, name, input }],
-    stop_reason: "tool_use",
     usage: { input_tokens: 8, output_tokens: 12 },
   };
 }
@@ -148,14 +147,25 @@ describe("dispatch mount (BRO-1822 slice 1) — the loop assembled into the runt
   });
 
   test("the F8 kill seam kills a live mounted child mid-run → canceled + run.killed", async () => {
-    // The model calls a slow tool so the child is genuinely mid-executeTool when we kill it.
-    const { h, dispatch } = await harness({
-      mock: { fallback: { body: anthropicToolUse("k", "shell", { command: "sleep 5" }) } },
+    // Park the child mid-model-call so the F8 kill lands on a genuinely live child: the mock records the
+    // forwarded request then hangs (delayMs). We hang it with a NEVER-RESOLVING promise, not a real timer,
+    // so nothing out-lives the killed run (a pending setTimeout would keep Bun's event loop reffed after
+    // the test). Killing mid-model-call (not mid-shell-tool) spawns NO `sh -c` grandchild, so the SIGKILL
+    // leaves nothing orphaned — phase 1's SIGKILL does not reap a shell tool's grandchild (reaping the
+    // whole process group is the phase-2 container jail's job, tracked in BRO-1860; out of scope here).
+    const { h, dispatch, mock } = await harness({
+      mock: {
+        fallback: { body: anthropicBody("slow"), delayMs: 1 },
+        sleep: () => new Promise<void>(() => {}),
+      },
     });
     const out = await dispatch.supervisor.dispatch("n0");
     if (!out.dispatched) throw new Error("dispatch failed");
-    // wait until the child is live + mid-tool (tool.call teed), then kill via the SAME seam createApp wires.
-    expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true);
+    // The child booted (run.started teed) and dialed the proxy — the mock records the forwarded request
+    // before parking on delayMs, so mock.calls >= 1 proves the child is live + parked mid-call. Then kill
+    // via the SAME seam createApp wires.
+    expect(await waitForEvent(h, "r1", EVENT_TYPES.RUN_STARTED)).toBe(true);
+    expect(await waitFor(() => mock.calls.length >= 1)).toBe(true);
     expect(dispatch.kill("r1")).toBe(true);
     const res = await out.reaped;
 
