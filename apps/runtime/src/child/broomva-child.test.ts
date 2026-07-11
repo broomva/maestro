@@ -165,6 +165,19 @@ function anthropicToolUse(id: string, name: string, input: Record<string, unknow
   };
 }
 
+/** A response TRUNCATED at the token cap: text, NO tool_use, stop_reason "max_tokens" — the model was cut
+ *  off mid-thought, so this is NOT a clean completion. */
+function anthropicTruncated(text: string): unknown {
+  return {
+    id: "msg_trunc",
+    type: "message",
+    role: "assistant",
+    content: [{ type: "text", text }],
+    stop_reason: "max_tokens",
+    usage: { input_tokens: 8, output_tokens: 8192 },
+  };
+}
+
 async function eventsOf(h: IndexHandle, sessionId: string, type: string) {
   return h.db
     .select()
@@ -503,6 +516,122 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     const results = await eventsOf(h, "r1", EVENT_TYPES.TOOL_RESULT);
     expect(results).toHaveLength(1);
     expect(JSON.parse(results[0]?.payload ?? "{}")).toMatchObject({ tool: "shell", ok: false });
+  });
+
+  test("a max_tokens-TRUNCATED tool-less turn is NOT a completion — the loop continues, not exit 0", async () => {
+    // The model narrates past the token cap before it can act → content=[text], stop_reason "max_tokens",
+    // no tool_use. Exiting 0 here would certify a cut-off run as done. The loop must read stop_reason and
+    // CONTINUE (nudge). MUTATION-PROOF: ignore stop_reason (exit 0 on any tool-less turn) → mock.calls=1.
+    const { h, sup, mock } = await harness({
+      mock: {
+        script: [
+          { body: anthropicTruncated("here is my long plan…") },
+          { body: anthropicBody("done") },
+        ],
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0); // completed on beat 2 (the end_turn reply), NOT beat 1
+    expect(mock.calls).toHaveLength(2); // it did NOT stop at the truncated beat 1
+    // the truncated narration was still surfaced; the run completed only after a real end_turn.
+    const said = await eventsOf(h, "r1", EVENT_TYPES.AGENT_SAID);
+    expect(said.some((r) => (JSON.parse(r.payload ?? "{}").text ?? "").includes("long plan"))).toBe(
+      true,
+    );
+  });
+
+  test("a beat that COMMITS its work counts as progress (diff vs run base), not a false no_progress", async () => {
+    // The model commits each beat (the branch is the receipt). Diffing vs HEAD would empty after a commit
+    // → false no_progress; diffing vs the run BASE keeps committed work visible. 4 committing beats make
+    // progress and the run completes. MUTATION-PROOF: diff vs HEAD → halts no_progress at beat ~3-4.
+    const commit = (n: number) =>
+      anthropicToolUse(`c${n}`, "shell", {
+        command: `echo v${n} > f${n}.txt && git add -A && git commit -qm w${n}`,
+      });
+    const { sup, mock } = await harness({
+      mock: {
+        script: [
+          { body: commit(1) },
+          { body: commit(2) },
+          { body: commit(3) },
+          { body: commit(4) },
+        ],
+        fallback: { body: anthropicBody("done") },
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0); // completed — committing is progress, no false no_progress halt
+    expect(reaped.sessionStatus).toBe("review");
+    expect(mock.calls).toHaveLength(5); // 4 committing beats + the finishing text
+  });
+
+  test("the SECOND request pairs the assistant tool_use with a matching tool_result (Anthropic contract)", async () => {
+    // A dropped / wrong-id tool_result passes the mock but a real Anthropic endpoint rejects it. Inspect
+    // the forwarded messages of beat 2: [user prompt, assistant tool_use, user tool_result], and the
+    // tool_result's tool_use_id must equal the assistant tool_use's id.
+    const { sup, mock } = await harness({
+      mock: {
+        script: [
+          { body: anthropicToolUse("tu-abc", "shell", { command: "echo hi" }) },
+          { body: anthropicBody("done") },
+        ],
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    await out.reaped;
+
+    expect(mock.calls).toHaveLength(2);
+    const call2 = mock.calls[1];
+    if (!call2) throw new Error("no second request");
+    const msgs = (call2.payload as { messages?: Array<{ role: string; content: unknown }> })
+      .messages;
+    if (!msgs) throw new Error("no messages in the second request");
+    // The assistant turn carries the tool_use; the following user turn carries the matching tool_result.
+    const assistant = msgs.find((m) => m.role === "assistant");
+    const toolUse = (assistant?.content as Array<{ type: string; id?: string }>)?.find(
+      (b) => b.type === "tool_use",
+    );
+    expect(toolUse?.id).toBe("tu-abc");
+    const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+    const toolResult = (lastUser?.content as Array<{ type: string; tool_use_id?: string }>)?.find(
+      (b) => b.type === "tool_result",
+    );
+    expect(toolResult?.tool_use_id).toBe("tu-abc"); // paired by id — the loop did not drop/mis-key it
+  });
+
+  test("iteration cap → the engine halts after budget.max_iterations beats → blocked, receipt code 10", async () => {
+    // The contract caps iterations at 3; each beat makes progress (distinct file) so no_progress never
+    // fires — the cap is what stops it. Proves the iteration_cap → exit-10 receipt path.
+    const { h, sup, mock } = await harness({
+      budgetJson: JSON.stringify({ max_iterations: 3 }),
+      mock: {
+        script: [
+          { body: anthropicToolUse("i1", "shell", { command: "echo a > a.txt" }) },
+          { body: anthropicToolUse("i2", "shell", { command: "echo b > b.txt" }) },
+          { body: anthropicToolUse("i3", "shell", { command: "echo c > c.txt" }) },
+        ],
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(10);
+    expect(reaped.reason).toBe("iteration_cap");
+    expect(reaped.sessionStatus).toBe("blocked");
+    expect(mock.calls).toHaveLength(3);
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
+    expect(JSON.parse(exiting[0]?.payload ?? "{}")).toMatchObject({
+      code: 10,
+      reason: "iteration_cap",
+    });
   });
 
   test("a turn carrying BOTH text and a tool_use → the text is said AND the tool runs", async () => {

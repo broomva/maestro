@@ -121,21 +121,54 @@ function assistantContent(body: unknown): unknown[] {
   return [];
 }
 
+/** The Anthropic `stop_reason` of a response body, or undefined if absent/malformed. */
+function stopReasonOf(body: unknown): string | undefined {
+  if (body && typeof body === "object") {
+    const sr = (body as { stop_reason?: unknown }).stop_reason;
+    if (typeof sr === "string") return sr;
+  }
+  return undefined;
+}
+
+/** True when a tool-less turn means the model is DONE (→ clean exit 0). `end_turn` / `stop_sequence` (and
+ *  an absent stop_reason — a malformed/bodyless turn is a valid-but-empty completion) are done. `max_tokens`
+ *  (and any other non-completion reason) is NOT: the turn was TRUNCATED mid-thought, so exiting 0 would
+ *  report a cut-off run as finished — the loop must continue instead (bounded by no_progress). */
+function isCompletion(stopReason: string | undefined): boolean {
+  return stopReason === undefined || stopReason === "end_turn" || stopReason === "stop_sequence";
+}
+
+/** The worktree's current HEAD (the run BASE, captured once at loop start), or "HEAD" if git can't
+ *  resolve it. Beat signatures diff vs THIS base, not the moving HEAD, so a beat that COMMITS its work
+ *  still reads as progress ("the branch is the receipt") rather than emptying the diff → false no_progress. */
+async function gitHead(cwd: string): Promise<string> {
+  try {
+    const p = Bun.spawn(["git", "rev-parse", "HEAD"], { cwd, stdout: "pipe", stderr: "ignore" });
+    const out = (await new Response(p.stdout).text()).trim();
+    return (await p.exited) === 0 && out !== "" ? out : "HEAD";
+  } catch {
+    return "HEAD";
+  }
+}
+
 /** The per-beat worktree signature — CONTENT-sensitive, not just file-status. `git status --porcelain`
  *  shows only status (added/modified/deleted), so a beat that edits the CONTENT of an already-dirty file
  *  would read as no change → a FALSE no_progress halt on the common "refine the same file" pattern. Here
  *  we stage the whole worktree into a THROWAWAY index (GIT_INDEX_FILE, so the real index/worktree are
- *  untouched; .gitignore still applies) and hash the diff vs HEAD → the hash moves iff any file's content
- *  moved. Returns `{sig, stat}`: `sig` (compared beat-to-beat to detect change) + a human `stat` for the
+ *  untouched; .gitignore still applies) and hash the diff vs the run BASE → the hash moves iff any file's
+ *  content moved (committed OR uncommitted). Returns `{sig, stat}`: `sig` (compared beat-to-beat) + `stat`
+ *  for the
  *  run.beat receipt. On git failure (non-git worktree / no HEAD / missing binary) → sig "" + "(unmeasured)":
  *  a worktree git can't read can't show trackable progress, so the loop converges via no_progress /
  *  iteration_cap rather than spinning (an accepted degradation — the worktree is broken anyway). */
-async function beatSignal(cwd: string): Promise<{ sig: string; stat: string }> {
+async function beatSignal(cwd: string, base: string): Promise<{ sig: string; stat: string }> {
   const env = { ...process.env, GIT_INDEX_FILE: join(tmpdir(), `maestro-beat-${process.pid}.idx`) };
   try {
     const add = Bun.spawn(["git", "add", "-A"], { cwd, env, stdout: "ignore", stderr: "ignore" });
     if ((await add.exited) !== 0) return { sig: "", stat: "(unmeasured)" };
-    const diff = Bun.spawn(["git", "diff", "--cached", "HEAD"], {
+    // Diff the staged worktree vs the run BASE (not HEAD) — a committed beat stays "ahead of base", so
+    // committing counts as progress instead of emptying a HEAD-relative diff.
+    const diff = Bun.spawn(["git", "diff", "--cached", base], {
       cwd,
       env,
       stdout: "pipe",
@@ -186,8 +219,9 @@ async function callProxy(messages: readonly Msg[]): Promise<ProxyTurn> {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       // No model id — the proxy resolves the role-pinned model. max_tokens is required for the proxy's
-      // pre-forward budget reservation (HARNESS §3 / BRO-1788).
-      body: JSON.stringify({ max_tokens: 1024, messages }),
+      // pre-forward budget reservation (HARNESS §3 / BRO-1788). Sized for a real agent turn (narration +
+      // a tool call) — too low a cap truncates the turn mid-thought before any tool_use lands.
+      body: JSON.stringify({ max_tokens: 8192, messages }),
       signal: AbortSignal.timeout(MODEL_CALL_TIMEOUT_MS),
     });
   } catch (err) {
@@ -230,7 +264,8 @@ async function main(): Promise<never> {
     // Honor a contract that narrows the halts (Done.stop_on); undefined keeps the safe default (all three).
     stopOn: contract?.done?.stop_on,
   };
-  let prevSig = (await beatSignal(cwd)).sig;
+  const base = await gitHead(cwd); // the run base — beat signatures diff vs this, so commits count
+  let prevSig = (await beatSignal(cwd, base)).sig;
 
   for (let beat = 1; beat <= MAX_BEATS; beat++) {
     const turn = await callProxy(messages);
@@ -267,35 +302,43 @@ async function main(): Promise<never> {
     if (text !== "") await emit({ actor: "agent", type: "agent.said", payload: { text } });
     messages.push({ role: "assistant", content: assistantContent(body) });
 
-    // A turn with NO tool call is the model saying it is done (end_turn) → clean completion → review.
-    if (uses.length === 0) {
-      await emit({ actor: "system", type: "run.exiting", payload: { code: 0 } });
-      process.exit(0);
-    }
-
-    // ACT: execute each requested tool IN the worktree, tee tool.call then tool.result {tool, ok, summary}
-    // (HARNESS §6 — summaries, never the full payload), and collect the tool_result blocks for the reply.
-    const results: Record<string, unknown>[] = [];
     let worstError = "";
-    for (const use of uses) {
-      await emit({
-        actor: "agent",
-        type: "tool.call",
-        payload: { tool: use.name, input: use.input },
-      });
-      const result = await executeTool(use.name, use.input, cwd);
-      await emit({
-        actor: "agent",
-        type: "tool.result",
-        payload: { tool: use.name, ok: result.ok, summary: result.summary },
-      });
-      results.push(toolResultBlock(use.id, result));
-      if (!result.ok) worstError = result.summary; // the beat's terminal-error signature (no_progress input)
+    if (uses.length === 0) {
+      // No tool call. A COMPLETED turn (end_turn / stop_sequence / an absent stop_reason) → the model is
+      // done → clean exit 0 → review. A TRUNCATED turn (stop_reason "max_tokens") is NOT done — it was cut
+      // off mid-thought before it could act; exiting 0 would certify incomplete work as a clean completion
+      // (the "fake receipt" canon forbids). Nudge and continue; the empty beat effect below feeds
+      // no_progress, so a model that keeps truncating without acting is bounded, not looped forever.
+      if (isCompletion(stopReasonOf(body))) {
+        await emit({ actor: "system", type: "run.exiting", payload: { code: 0 } });
+        process.exit(0);
+      }
+      messages.push({ role: "user", content: "Continue." });
+    } else {
+      // ACT: execute each requested tool IN the worktree, tee tool.call then tool.result {tool,ok,summary}
+      // (HARNESS §6 — summaries, never the full payload), and collect the tool_result blocks for the reply.
+      const results: Record<string, unknown>[] = [];
+      for (const use of uses) {
+        await emit({
+          actor: "agent",
+          type: "tool.call",
+          payload: { tool: use.name, input: use.input },
+        });
+        const result = await executeTool(use.name, use.input, cwd);
+        await emit({
+          actor: "agent",
+          type: "tool.result",
+          payload: { tool: use.name, ok: result.ok, summary: result.summary },
+        });
+        results.push(toolResultBlock(use.id, result));
+        if (!result.ok) worstError = result.summary; // the beat's terminal-error signature (no_progress)
+      }
+      messages.push({ role: "user", content: results });
     }
-    messages.push({ role: "user", content: results });
 
-    // VERIFY + LOG: the beat effect (did the worktree CONTENT change?) → the BRO-1795 stop-engine.
-    const cur = await beatSignal(cwd);
+    // VERIFY + LOG (a tool beat AND a nudge-continue beat both feed the stop-engine, so a repeatedly
+    // truncated or stalled loop converges): did the worktree CONTENT change vs the run base?
+    const cur = await beatSignal(cwd, base);
     const diffSig = cur.sig === prevSig ? "" : cur.sig; // "" ⇒ this beat changed nothing (no_progress input)
     prevSig = cur.sig;
     state.iterations = beat;
