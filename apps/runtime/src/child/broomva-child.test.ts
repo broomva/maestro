@@ -498,6 +498,45 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     expect(prompt).toContain("context ceiling"); // the checkpoint's state-of-the-world, folded in
   });
 
+  test("iteration_cap accumulates ACROSS respawns — the run's cap spans attempts, not processes", async () => {
+    // max_iterations=2 + a tiny ceiling + a tool that makes progress every beat: attempt 1 beat 1 (iter 1)
+    // hits the ceiling → restart (iter 1 < cap); the respawn RESUMES seeding iterations=1, so attempt 2
+    // beat 2 is iter 2 >= cap → iteration_cap halt. If iterations did NOT accumulate, attempt 2 would
+    // restart from iter 1 again → an endless respawn chain (respawns ≫ 1), never the cap. So respawns===1
+    // + reason iteration_cap mutation-proves the accumulation.
+    const { sup } = await harness({
+      budgetJson: JSON.stringify({ max_iterations: 2 }),
+      config: { ...loadConfig({}), contextCeilingTokens: 50 },
+      mock: { fallback: { body: anthropicToolUse("acc", "shell", { command: "echo x > f.txt" }) } },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.respawns).toBe(1); // exactly one restart, then the cap halted attempt 2 (accumulated)
+    expect(reaped.exitCode).toBe(10);
+    expect(reaped.reason).toBe("iteration_cap");
+  });
+
+  test("a malformed / stale progress.md is ignored — the child starts fresh, does not crash or resume", async () => {
+    // A garbage checkpoint (no machine block) → parseProgress → null → readProgress → null → no resume.
+    const runDir = await mkdtemp(join(tmpdir(), "maestro-bad-"));
+    tmps.push(runDir);
+    await writeFile(join(runDir, "progress.md"), "just some notes, no machine block\n");
+    const { sup, mock } = await harness({
+      childEnvExtra: { BROOMVA_RUN_DIR: runDir },
+      mock: { script: [{ body: anthropicBody("first step") }] },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(0); // fresh completion, no crash
+    // The prompt did NOT fold in a resume (the malformed checkpoint was treated as absent).
+    const prompt = JSON.stringify(mock.calls[0]?.payload ?? {});
+    expect(prompt).not.toContain("RESUMING");
+  });
+
   test("a checkpoint-write failure on restart still lands a receipt (exit 1), not a receiptless crash", async () => {
     // Point the run dir at an unwritable path (`/dev/null/nope` → mkdir ENOTDIR) so prepareRestart's
     // writeProgress throws. The GUARDED restart branch must emit run.exiting{code:1} rather than crash.

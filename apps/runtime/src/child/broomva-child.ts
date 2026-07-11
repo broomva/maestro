@@ -312,7 +312,8 @@ async function main(): Promise<never> {
   // (prepareRestart). Resume from it: fold its state into the opening prompt so the model continues, and
   // seed the iteration counter so the run's iteration_cap accumulates ACROSS respawns (it spans attempts,
   // not processes — BRO-1795). A fresh run has no checkpoint → resumedFrom 0, bare prompt.
-  const checkpoint = await readProgress(runDir);
+  // Guard the empty run dir (like readContract): `readProgress("")` would resolve progress.md against cwd.
+  const checkpoint = runDir === "" ? null : await readProgress(runDir);
   const resumedFrom = checkpoint?.iteration ?? 0;
   const messages: Msg[] = [
     { role: "user", content: promptFor(contract, session) + resumeSuffix(checkpoint) },
@@ -448,6 +449,16 @@ async function main(): Promise<never> {
       // prepareRestart does file I/O (writeProgress); guard it so a checkpoint-write failure (ENOSPC /
       // EROFS / unset run dir) still lands a receipt rather than crashing receiptless — the every-exit-
       // emits-a-run.exiting invariant every other branch upholds.
+      // stateOfTheWorld is an HONEST narrative — the real work carryover is the preserved worktree, so the
+      // resumed child is told to inspect it; recent tool errors are surfaced as CONTEXT, NOT as tasks.
+      // whatsLeft is the remaining-TASK list (ProgressDoc contract) — empty in this slice: the child has no
+      // model-authored task list yet (fix_plan.md wiring is later), and folding errors here would mislabel
+      // them as outstanding work to the resumed model. So [] rather than a fabricated task list.
+      const recentErrs = [...new Set(state.recentErrors.filter((e) => e !== ""))];
+      const errNote =
+        recentErrs.length > 0
+          ? ` Recent tool errors (context, not tasks): ${JSON.stringify(recentErrs)}.`
+          : "";
       let events: ChildEmittedEvent[];
       try {
         events = await prepareRestart(runDir, {
@@ -455,8 +466,8 @@ async function main(): Promise<never> {
             session,
             iteration: beat,
             updated: new Date().toISOString(),
-            stateOfTheWorld: `hit the context ceiling at beat ${beat}`,
-            whatsLeft: state.recentErrors.filter((e) => e !== ""),
+            stateOfTheWorld: `Reached the context ceiling at beat ${beat}; the work so far is in the worktree — inspect it and continue.${errNote}`,
+            whatsLeft: [],
           },
         });
       } catch (err) {
