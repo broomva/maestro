@@ -68,6 +68,11 @@ async function waitHealthy(deadlineMs = 15_000): Promise<void> {
 }
 
 function onExit(p: ChildProcess): Promise<number> {
+  // Resolve immediately if the process ALREADY exited (a crash before this is called) — the `exit` event
+  // has already fired and would never fire again, so a bare listener would hang until Playwright's
+  // timeout (CodeRabbit BRO-1824). exitCode is set on a normal exit, signalCode on a signal kill.
+  if (p.exitCode !== null) return Promise.resolve(p.exitCode);
+  if (p.signalCode !== null) return Promise.resolve(0);
   return new Promise((res) => p.on("exit", (code) => res(code ?? 0)));
 }
 
