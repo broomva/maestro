@@ -294,7 +294,10 @@ export function parseProgress(md: string): ProgressDoc | null {
   if (close === -1) return null;
   const meta = text.slice(open + PROGRESS_META_OPEN.length, close);
   const field = (name: string): string | undefined => {
-    const m = meta.match(new RegExp(`^\\s*${name}:\\s*(.*)$`, "m"));
+    // Escape regex metacharacters in the field name before interpolating (the names are fixed literals
+    // today, but this keeps the helper safe if a caller ever passes a metachar-bearing key).
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const m = meta.match(new RegExp(`^\\s*${escaped}:\\s*(.*)$`, "m"));
     return m?.[1]?.trim();
   };
   const session = field("session");
