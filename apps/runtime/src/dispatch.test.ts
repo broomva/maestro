@@ -9,7 +9,7 @@
 // MOCK (not Anthropic) served every call.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EVENT_TYPES } from "@maestro/protocol";
@@ -19,6 +19,7 @@ import { type IndexHandle, openIndex } from "./db/client";
 import { event, node } from "./db/schema";
 import { type DispatchRuntime, mountDispatch } from "./dispatch";
 import { git } from "./git/git";
+import { sessionJournalPath } from "./proxy/events";
 import { createMockModel, type MockModelOptions } from "./proxy/mock-model";
 
 const FIXED_MS = 1_700_000_000_000;
@@ -118,12 +119,12 @@ async function harness(opts: { mock?: MockModelOptions } = {}) {
   const mock = createMockModel(opts.mock);
   const dispatch = mountDispatch({ db: h.db, config, upstream: mock, mintRunId: () => "r1" });
   mounts.push(dispatch);
-  return { h, dispatch, mock };
+  return { h, dispatch, mock, ws };
 }
 
 describe("dispatch mount (BRO-1822 slice 1) — the loop assembled into the runtime, zero tokens", () => {
   test("a mounted dispatch runs a REAL child to completion → session events teed to the index", async () => {
-    const { h, dispatch, mock } = await harness({
+    const { h, dispatch, mock, ws } = await harness({
       mock: { fallback: { body: anthropicBody("done") } },
     });
     const out = await dispatch.supervisor.dispatch("n0");
@@ -144,6 +145,18 @@ describe("dispatch mount (BRO-1822 slice 1) — the loop assembled into the runt
     expect(JSON.parse(exiting[0]?.payload ?? "{}")).toMatchObject({ code: 0 });
     // The MOCK served the call (not Anthropic) — the zero-token/no-key guarantee, structurally.
     expect(mock.calls.length).toBeGreaterThanOrEqual(1);
+    // DURABILITY (D-DURABILITY, the BRO-1811 lesson): the proxy meters spend into the run's DURABLE
+    // session.jsonl via fsJournalSink — NOT the index. `budget.metered` is proxy-emitted; it never flows
+    // through the child's stdout, so it is absent from the `event` table (the assertions above cannot see
+    // it). Read the journal directly: a mount that swapped fsJournalSink for a memory tap would leave no
+    // metered line here and turn this RED — closing the anti-vacuity gap on the headline durability wire.
+    const journalLines = (await readFile(sessionJournalPath(join(ws, "runs", "run-r1")), "utf8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { type?: string; usd?: unknown });
+    const metered = journalLines.filter((e) => e.type === EVENT_TYPES.BUDGET_METERED);
+    expect(metered.length).toBeGreaterThanOrEqual(1);
+    expect(metered.some((e) => typeof e.usd === "number" && e.usd > 0)).toBe(true);
   });
 
   test("the F8 kill seam kills a live mounted child mid-run → canceled + run.killed", async () => {
