@@ -563,6 +563,20 @@ async function main(): Promise<never> {
       process.exit(10);
     }
     if (decision.action === "restart") {
+      // An explicit stop that RACED this ceiling-crossing beat WINS over the automatic restart. Otherwise the
+      // child would exit fresh_context, the supervisor would respawn a fresh child that boots
+      // stopRequested:false (the stop is stdin-only, not tracked across the respawn), and the human's stop
+      // would be silently lost — a run that keeps going after "stop" breaks the "gate is the human's"
+      // invariant. So honor the stop here (park blocked) instead of restarting. (A halt already parks blocked
+      // regardless of reason, so only the restart branch needs this precedence check.)
+      if (control.stopRequested) {
+        await emit({
+          actor: "system",
+          type: "run.exiting",
+          payload: { code: 10, reason: "user_stop" },
+        });
+        process.exit(10);
+      }
       // Context ceiling → lossless restart: checkpoint progress.md (so the respawn resumes — slice 2b-ii),
       // then run.restart_requested + exit 10 fresh_context; the supervisor respawns same session/worktree.
       // prepareRestart does file I/O (writeProgress); guard it so a checkpoint-write failure (ENOSPC /

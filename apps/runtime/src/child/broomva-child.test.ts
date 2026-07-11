@@ -946,9 +946,11 @@ describe("broomva-child pure helpers", () => {
 });
 
 // The keep-alive script: the model appends to a file every beat — a GROWING diff, so the no-progress
-// engine never fires and the child loops indefinitely (until stop/kill). A high context ceiling keeps the
-// short test off the fresh-context restart path. This lets a control line land WHILE the loop is running.
+// engine never fires. A high context ceiling keeps the run off the fresh-context restart path, and a large
+// max_iterations keeps it off the iteration_cap halt — so the loop runs UNTIL stop/kill, not to an implicit
+// ~30-beat (DEFAULT_MAX_ITERATIONS) deadline. This lets a control line land WHILE the loop is running.
 const KEEPALIVE = {
+  budgetJson: JSON.stringify({ max_iterations: 1_000_000 }),
   config: { ...loadConfig({}), contextCeilingTokens: 1_000_000 },
   mock: {
     fallback: { body: anthropicToolUse("ka", "shell", { command: "echo x >> keepalive.txt" }) },
@@ -1014,8 +1016,9 @@ describe("broomva-child slice 3 — stdin control (chat / stop / ping), zero tok
         mock.calls.slice(callsBefore).some((c) => JSON.stringify(c.payload ?? {}).includes(MARKER)),
       ),
     ).toBe(true);
-    // ANTI-VACUITY: the marker did not exist before injection (it IS the injection, not a pre-existing
-    // artifact of the prompt) — so this proves the stdin `chat` reached the conversation, not a false green.
+    // Sanity guard (not the anti-vacuity proof — the forward pollUntil above IS, and it is mutation-proven
+    // by userTurnFromChat→null reddening this test): the marker is a fresh unique literal, so its ABSENCE
+    // before injection documents that the match above is the injection, not a pre-existing prompt artifact.
     const before = JSON.stringify(mock.calls.slice(0, callsBefore).map((c) => c.payload));
     expect(before).not.toContain(MARKER);
     expect(sup.kill("r1")).toBe(true);
@@ -1041,5 +1044,36 @@ describe("broomva-child slice 3 — stdin control (chat / stop / ping), zero tok
     expect(res.reason).toBe("user_stop");
     expect(res.sessionStatus).toBe("blocked");
     expect(res.crash).toBe(false);
+  });
+
+  test("stop WINS over a racing fresh_context restart — the human's gate is honored, no respawn", async () => {
+    // P20 regression (BRO-1862): a stop that lands mid-beat on a beat that ALSO crosses the context ceiling
+    // must win over the automatic fresh_context restart — else the child exits fresh_context, the supervisor
+    // respawns a fresh child that boots stopRequested:false, and the human's stop is lost ("the gate is the
+    // human's"). A tiny ceiling makes beat 1 want to restart. We write the stop AFTER beat 1's tool.call —
+    // i.e. PAST the top-of-loop stop check, so the RESTART-branch check (not the top check) is what must
+    // catch it. If it does: exit user_stop, respawns 0, no restart_requested. Without the branch check the
+    // child would restart repeatedly to the respawn cap (respawns ≫ 0), never honoring the stop.
+    const { h, sup, writeControl } = await harness({
+      config: { ...loadConfig({}), contextCeilingTokens: 50 }, // beat 1 crosses the ceiling → wants restart
+      mock: {
+        fallback: { body: anthropicToolUse("sr", "shell", { command: "echo x >> grew.txt" }) },
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    // wait until beat 1 is PAST its top-of-loop check (tool.call is emitted mid-beat, after that check), then
+    // send the stop so it can only be caught by the restart-branch check this test targets.
+    expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true);
+    writeControl({ type: "stop", reason: "stop racing the ceiling restart" });
+    const res = await out.reaped;
+
+    expect(res.exitCode).toBe(10);
+    expect(res.reason).toBe("user_stop"); // the stop won, NOT fresh_context
+    expect(res.respawns).toBe(0); // the restart was pre-empted — no respawn
+    expect(res.sessionStatus).toBe("blocked");
+    expect(res.crash).toBe(false);
+    // the restart branch was pre-empted by the stop → no restart was ever requested.
+    expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_RESTART_REQUESTED)).toHaveLength(0);
   });
 });
