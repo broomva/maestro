@@ -8,6 +8,12 @@
 // executed). shell runs in cwd — a hard container jail is phase-2 (the sandbox's concern), not this
 // layer; the worktree cwd + the allowlisted child env are the phase-1 containment. Nothing here throws:
 // a tool failure is DATA (ok:false + an error `content` the model can recover from), never a child crash.
+//
+// Resource bounds (both fed by ARBITRARY model output, so both are load-bearing, not theoretical):
+//   • per-tool TIMEOUT — a `sleep infinity` / stdin-reading command is SIGKILLed at `shellTimeoutMs`
+//     so it can't block the beat forever;
+//   • bounded READS — shell stdout/stderr and file reads stop at MAX_OUTPUT *bytes* (streamed, never
+//     buffered whole), so a `yes` / gigabyte file can't OOM the child before the clip.
 
 import { resolve } from "node:path";
 
@@ -27,18 +33,65 @@ export interface ToolResult {
   content: string;
 }
 
+/** Options for a single tool execution — the beat loop uses defaults; tests pin the timeout. */
+export interface ToolOpts {
+  /** SIGKILL a `shell` command that outruns this budget (default `DEFAULT_SHELL_TIMEOUT_MS`). */
+  shellTimeoutMs?: number;
+}
+
 /** The tools this slice ships — the minimal agentic set. Broader / MCP tools land later. */
 export const TOOL_NAMES = ["shell", "read", "edit"] as const;
 
-/** Cap tool output fed back to the model — a runaway `cat` must not blow the context window. */
-const MAX_OUTPUT = 16_000;
+/** Cap tool output fed back to the model — a runaway `cat` must not blow the context window. Exported so
+ *  tests assert the boundary against the real constant, not a copy. */
+export const MAX_OUTPUT = 16_000;
 
-function clip(s: string): string {
-  return s.length > MAX_OUTPUT ? `${s.slice(0, MAX_OUTPUT)}\n…(truncated)` : s;
+/** Default per-`shell` wall-clock budget. A hanging command is SIGKILLed here so the beat is never
+ *  blocked longer than this by any single tool call. */
+export const DEFAULT_SHELL_TIMEOUT_MS = 120_000;
+
+/** Truncate to `cap` UTF-16 units + a marker, WITHOUT splitting a surrogate pair at the boundary (a lone
+ *  high surrogate would decode to U+FFFD in the model's view). */
+function truncate(s: string, cap: number): string {
+  if (s.length <= cap) return s;
+  let end = cap;
+  const last = s.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1; // don't cut a high surrogate from its low half
+  return `${s.slice(0, end)}\n…(truncated)`;
 }
 
 function msg(err: unknown): string {
   return String((err as Error)?.message ?? err);
+}
+
+/** Read a byte stream up to `cap` bytes then STOP, cancelling the source. Bounds MEMORY: a command that
+ *  spews gigabytes (or never ends, e.g. `yes`) is read only up to the cap — never buffered whole — and
+ *  the cancel unblocks a runaway producer via EPIPE. Returns the decoded text + whether more remained. */
+async function readCapped(
+  stream: ReadableStream<Uint8Array>,
+  cap: number,
+): Promise<{ text: string; clipped: boolean }> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let clipped = false;
+  try {
+    let r = await reader.read();
+    while (!r.done) {
+      if (r.value) {
+        chunks.push(r.value);
+        total += r.value.byteLength;
+      }
+      if (total >= cap) {
+        clipped = true;
+        break;
+      }
+      r = await reader.read();
+    }
+  } finally {
+    await reader.cancel().catch(() => {}); // stop the producer; a closed pipe is not a crash here
+  }
+  return { text: new TextDecoder().decode(Buffer.concat(chunks)), clipped };
 }
 
 /** Extract the `tool_use` blocks from an Anthropic Messages response body (defensive: a null / non-object
@@ -83,6 +136,7 @@ export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   cwd: string,
+  opts: ToolOpts = {},
 ): Promise<ToolResult> {
   try {
     if (name === "shell") {
@@ -94,22 +148,44 @@ export async function executeTool(
           content: "error: shell requires a non-empty `command` string",
         };
       }
+      const timeoutMs = opts.shellTimeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS;
       const proc = Bun.spawn(["sh", "-c", command], {
         cwd,
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
       });
-      const [out, err, code] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      const combined = clip(`${out}${err}`.trim());
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        proc.kill(9); // SIGKILL — closing its pipes also unblocks the readers below
+      }, timeoutMs);
+      let out: { text: string; clipped: boolean };
+      let err: { text: string; clipped: boolean };
+      let code: number;
+      try {
+        // Bounded, streamed reads: memory can't run away before proc.exited resolves.
+        [out, err] = await Promise.all([
+          readCapped(proc.stdout as ReadableStream<Uint8Array>, MAX_OUTPUT),
+          readCapped(proc.stderr as ReadableStream<Uint8Array>, MAX_OUTPUT),
+        ]);
+        code = await proc.exited;
+      } finally {
+        clearTimeout(timer);
+      }
+      const body = truncate(`${out.text}${err.text}`.trim(), MAX_OUTPUT);
+      if (timedOut) {
+        return {
+          ok: false,
+          summary: `shell \`${command.slice(0, 60)}\` → timed out (${timeoutMs}ms)`,
+          content: `${body}\n(timed out after ${timeoutMs}ms)`.trim(),
+        };
+      }
+      const clipped = out.clipped || err.clipped;
       return {
         ok: code === 0,
-        summary: `shell \`${command.slice(0, 60)}\` → exit ${code}`,
-        content: combined || `(no output; exit ${code})`,
+        summary: `shell \`${command.slice(0, 60)}\` → exit ${code}${clipped ? " (clipped)" : ""}`,
+        content: body || `(no output; exit ${code})`,
       };
     }
     if (name === "read") {
@@ -121,10 +197,16 @@ export async function executeTool(
           content: "error: path is missing or escapes the worktree",
         };
       }
+      const file = Bun.file(path);
+      // Bounded read: pull at most MAX_OUTPUT bytes so a huge file can't OOM the child (a missing file
+      // still throws below → the catch returns ok:false). The byte slice can split a multibyte char at
+      // the boundary, which only affects the last glyph of an already-truncated view.
+      const text = await file.slice(0, MAX_OUTPUT).text();
+      const clipped = file.size > MAX_OUTPUT;
       return {
         ok: true,
-        summary: `read ${String(input.path)}`,
-        content: clip(await Bun.file(path).text()),
+        summary: `read ${String(input.path)}${clipped ? " (clipped)" : ""}`,
+        content: clipped ? `${text}\n…(truncated)` : text,
       };
     }
     if (name === "edit") {
@@ -136,12 +218,22 @@ export async function executeTool(
           content: "error: path is missing or escapes the worktree",
         };
       }
-      const content = typeof input.content === "string" ? input.content : "";
+      // Bad input is ok:false like every other tool — NEVER coerce a non-string to "", which would
+      // silently truncate the target file to empty while reporting success (a data-loss bug).
+      if (typeof input.content !== "string") {
+        return {
+          ok: false,
+          summary: `edit: refused ${String(input.path)} (content not a string)`,
+          content: "error: edit requires a string `content`",
+        };
+      }
+      const content = input.content;
       await Bun.write(path, content);
+      const bytes = Buffer.byteLength(content, "utf8"); // true UTF-8 bytes on disk, not UTF-16 units
       return {
         ok: true,
-        summary: `edit ${String(input.path)} (${content.length}b)`,
-        content: `wrote ${content.length} bytes to ${String(input.path)}`,
+        summary: `edit ${String(input.path)} (${bytes}b)`,
+        content: `wrote ${bytes} bytes to ${String(input.path)}`,
       };
     }
     return {
