@@ -66,15 +66,23 @@ function msg(err: unknown): string {
 
 /** Read a byte stream up to `cap` bytes then STOP, cancelling the source. Bounds MEMORY: a command that
  *  spews gigabytes (or never ends, e.g. `yes`) is read only up to the cap — never buffered whole — and
- *  the cancel unblocks a runaway producer via EPIPE. Returns the decoded text + whether more remained. */
+ *  the cancel unblocks a runaway producer via EPIPE. `signal` cancels a read that would otherwise block
+ *  forever on a pipe held by a DETACHED grandchild (`sleep 300 &`) — so the caller's timeout can return
+ *  even though the direct child is already gone. Returns the decoded text + whether more remained. */
 async function readCapped(
   stream: ReadableStream<Uint8Array>,
   cap: number,
+  signal?: AbortSignal,
 ): Promise<{ text: string; clipped: boolean }> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   let clipped = false;
+  const abort = (): void => {
+    reader.cancel().catch(() => {});
+  };
+  if (signal?.aborted) reader.cancel().catch(() => {});
+  else signal?.addEventListener("abort", abort, { once: true });
   try {
     let r = await reader.read();
     while (!r.done) {
@@ -88,8 +96,11 @@ async function readCapped(
       }
       r = await reader.read();
     }
+  } catch {
+    // A read cancelled mid-flight (abort or a closed pipe) is not a crash — return what we captured.
   } finally {
-    await reader.cancel().catch(() => {}); // stop the producer; a closed pipe is not a crash here
+    signal?.removeEventListener("abort", abort);
+    await reader.cancel().catch(() => {});
   }
   return { text: new TextDecoder().decode(Buffer.concat(chunks)), clipped };
 }
@@ -155,25 +166,33 @@ export async function executeTool(
         stdout: "pipe",
         stderr: "pipe",
       });
+      // The timeout must return even if a DETACHED grandchild (`sleep 300 &`) still holds the pipe after
+      // `sh` exits: SIGKILL reaps the direct child, and the AbortSignal cancels the reads so we never
+      // block on that inherited write-end. This is the load-bearing "can't block the beat forever" seam.
+      const ac = new AbortController();
       let timedOut = false;
       const timer = setTimeout(() => {
         timedOut = true;
-        proc.kill(9); // SIGKILL — closing its pipes also unblocks the readers below
+        proc.kill(9);
+        ac.abort();
       }, timeoutMs);
       let out: { text: string; clipped: boolean };
       let err: { text: string; clipped: boolean };
       let code: number;
       try {
-        // Bounded, streamed reads: memory can't run away before proc.exited resolves.
+        // Bounded, streamed, cancellable reads: neither memory nor wall-clock can run away.
         [out, err] = await Promise.all([
-          readCapped(proc.stdout as ReadableStream<Uint8Array>, MAX_OUTPUT),
-          readCapped(proc.stderr as ReadableStream<Uint8Array>, MAX_OUTPUT),
+          readCapped(proc.stdout as ReadableStream<Uint8Array>, MAX_OUTPUT, ac.signal),
+          readCapped(proc.stderr as ReadableStream<Uint8Array>, MAX_OUTPUT, ac.signal),
         ]);
-        code = await proc.exited;
+        code = timedOut ? -1 : await proc.exited; // don't await a detached parent once we've timed out
       } finally {
         clearTimeout(timer);
       }
-      const body = truncate(`${out.text}${err.text}`.trim(), MAX_OUTPUT);
+      // Join the two streams with a newline so an unterminated stdout can't be glued onto stderr; the
+      // clipped flag is honest about the COMBINED cut, not just each stream's own cap.
+      const raw = [out.text, err.text].filter(Boolean).join("\n");
+      const body = truncate(raw, MAX_OUTPUT);
       if (timedOut) {
         return {
           ok: false,
@@ -181,7 +200,7 @@ export async function executeTool(
           content: `${body}\n(timed out after ${timeoutMs}ms)`.trim(),
         };
       }
-      const clipped = out.clipped || err.clipped;
+      const clipped = out.clipped || err.clipped || raw.length > MAX_OUTPUT;
       return {
         ok: code === 0,
         summary: `shell \`${command.slice(0, 60)}\` → exit ${code}${clipped ? " (clipped)" : ""}`,
