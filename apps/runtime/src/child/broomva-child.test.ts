@@ -1050,20 +1050,23 @@ describe("broomva-child slice 3 — stdin control (chat / stop / ping), zero tok
     // P20 regression (BRO-1862): a stop that lands mid-beat on a beat that ALSO crosses the context ceiling
     // must win over the automatic fresh_context restart — else the child exits fresh_context, the supervisor
     // respawns a fresh child that boots stopRequested:false, and the human's stop is lost ("the gate is the
-    // human's"). A tiny ceiling makes beat 1 want to restart. We write the stop AFTER beat 1's tool.call —
-    // i.e. PAST the top-of-loop stop check, so the RESTART-branch check (not the top check) is what must
-    // catch it. If it does: exit user_stop, respawns 0, no restart_requested. Without the branch check the
-    // child would restart repeatedly to the respawn cap (respawns ≫ 0), never honoring the stop.
+    // human's"). Determinism (no timing race — the first cut of this test flaked in CI): a LOW ceiling makes
+    // beat 1 always want to restart, and a SLOW tool (`sleep 2`) is what removes the race — we send the stop
+    // after beat 1's tool.call (PAST the top-of-loop check), and the child then sits in executeTool for ~2s,
+    // which deterministically outlasts the (sub-ms) stdin read, so stopRequested is set BEFORE the beat's
+    // restart branch runs. So ONLY the restart-branch check (not the top check) can catch it: exit user_stop,
+    // respawns 0, no restart_requested. Without that branch check the child restarts and, with max_iterations
+    // bounded, halts iteration_cap (respawns > 0, reason != user_stop) — which is exactly what reds the test.
     const { h, sup, writeControl } = await harness({
-      config: { ...loadConfig({}), contextCeilingTokens: 50 }, // beat 1 crosses the ceiling → wants restart
-      mock: {
-        fallback: { body: anthropicToolUse("sr", "shell", { command: "echo x >> grew.txt" }) },
-      },
+      budgetJson: JSON.stringify({ max_iterations: 3 }), // bounds the no-fix respawn chain (fast mutation-proof)
+      config: { ...loadConfig({}), contextCeilingTokens: 10 }, // low → beat 1 always wants to restart
+      mock: { fallback: { body: anthropicToolUse("sr", "shell", { command: "sleep 2" }) } }, // slow → the stop
+      // is reliably processed during executeTool, BEFORE the restart branch (deterministic, not a timing race)
     });
     const out = await sup.dispatch("n0");
     if (!out.dispatched) throw new Error("dispatch failed");
     // wait until beat 1 is PAST its top-of-loop check (tool.call is emitted mid-beat, after that check), then
-    // send the stop so it can only be caught by the restart-branch check this test targets.
+    // send the stop — during the ~2s executeTool it is processed, so only the restart-branch check can catch it.
     expect(await waitForEvent(h, "r1", EVENT_TYPES.TOOL_CALL)).toBe(true);
     writeControl({ type: "stop", reason: "stop racing the ceiling restart" });
     const res = await out.reaped;
