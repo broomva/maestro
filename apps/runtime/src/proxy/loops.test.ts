@@ -272,9 +272,10 @@ describe("loops (D8 layer 1) — deterministic F2→F3 flows through the REAL ch
   });
 
   test("fresh-context restart → checkpoint + respawn → resumes → review", async () => {
-    // A tiny ceiling (via the config→allowlist path) forces the restart on beat 1; the supervisor respawns,
-    // the child RESUMES from progress.md (slice 2b-ii-A), and the exhausted script's text fallback completes.
-    const { h, sup } = await harness({
+    // A tiny ceiling (via the config→allowlist path) forces the restart on beat 1; the supervisor respawns
+    // (same run id "r1" → same run dir), the child RESUMES from progress.md (slice 2b-ii-A), and the
+    // exhausted script's text fallback completes.
+    const { h, sup, mock } = await harness({
       config: { ...loadConfig({}), contextCeilingTokens: 50 },
       mock: {
         script: [{ body: anthropicToolUse("fc", "shell", { command: "echo hi > grew.txt" }) }],
@@ -286,20 +287,32 @@ describe("loops (D8 layer 1) — deterministic F2→F3 flows through the REAL ch
     const res = await out.reaped;
 
     // exactly one fresh-context respawn, then attempt 2 completed (exit 0 → review) — the full lossless
-    // restart cycle end-to-end (the resume-PROMPT-fold detail is unit-tested in broomva-child.test.ts).
+    // restart cycle end-to-end.
     expect(res.respawns).toBe(1);
     expect(res.exitCode).toBe(0);
     expect(res.sessionStatus).toBe("review");
     expect(res.crash).toBe(false);
     // attempt 1 asked for the restart (proves the ceiling path fired + checkpoint written before the respawn).
     expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_RESTART_REQUESTED)).toHaveLength(1);
+    // RESUME (not just respawn) proven IN-FILE: attempt 2's FIRST request (mock.calls[1]) folded the
+    // checkpoint into the prompt → the child READ progress.md across the respawn. A broken readProgress
+    // would leave the resume text absent while respawns/exit/status still hold — so this is the assertion
+    // that fails on a resume regression, not the ones above. (Mirrors broomva-child.test.ts's unit proof.)
+    const resumeCall = mock.calls[1];
+    if (!resumeCall) throw new Error("no respawn request reached the mock");
+    const prompt = JSON.stringify(resumeCall.payload ?? {});
+    expect(prompt).toContain("RESUMING"); // the resumeSuffix marker
+    expect(prompt).toContain("context ceiling"); // the checkpoint's state-of-the-world, folded in
   });
 
   test("kill mid-tool-call → SIGKILL a live child → canceled + run.killed, worktree preserved", async () => {
     // The model calls a long-running tool; the child emits tool.call then blocks in executeTool. We kill it
-    // mid-tool (F8) and assert the human-kill terminal is DISTINCT from a crash.
+    // mid-tool (F8) and assert the human-kill terminal is DISTINCT from a crash. `sleep 5` (not 300): the
+    // kill lands ~100ms after tool.call, so 5s is ample slack to guarantee mid-tool — but SIGKILL does not
+    // cascade to the `sh -c` grandchild, so a long sleep would orphan a process (reparented to PID 1) for
+    // its full duration; 5s self-clears, so repeated/watch runs can't accumulate live orphans.
     const { h, sup } = await harness({
-      mock: { fallback: { body: anthropicToolUse("k", "shell", { command: "sleep 300" }) } },
+      mock: { fallback: { body: anthropicToolUse("k", "shell", { command: "sleep 5" }) } },
     });
     const out = await sup.dispatch("n0");
     if (!out.dispatched) throw new Error("dispatch failed");
