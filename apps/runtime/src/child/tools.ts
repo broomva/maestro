@@ -172,10 +172,20 @@ async function realInsideJail(cwd: string, abs: string): Promise<boolean> {
   const base = await realpath(cwd).catch(() => resolve(cwd)); // real cwd; lexical fallback if unresolved
   const real = await realpath(abs).catch(() => null);
   if (real !== null) return insideJail(base, real); // target exists — check where it really points
-  // Target does not exist (a fresh edit): walk up to the nearest existing ancestor and check THAT, so a
-  // symlinked parent (`d/link/new` with link → /etc) is refused even though `new` isn't there yet.
-  const parentReal = await realpath(dirname(abs)).catch(() => null);
-  return parentReal === null ? false : insideJail(base, parentReal);
+  // Target does not exist yet (a fresh edit, possibly into new nested dirs `Bun.write` will create). Walk
+  // up to the nearest EXISTING ancestor and check THAT: a symlinked ancestor (`d/link/new`, link → /etc)
+  // is still caught, while a legitimate deep create (`a/b/c.txt`) is allowed — any dirs created under a
+  // real in-jail ancestor are fresh real dirs, never symlinks. `abs` is already lexically inside `base`
+  // (jailedPath), so the walk resolves at `base` (cwd exists) at worst; the root guard just fails closed.
+  let anc = dirname(abs);
+  let ancReal = await realpath(anc).catch(() => null);
+  while (ancReal === null) {
+    const up = dirname(anc);
+    if (up === anc) return false; // reached the fs root without resolving — refuse
+    anc = up;
+    ancReal = await realpath(anc).catch(() => null);
+  }
+  return insideJail(base, ancReal);
 }
 
 /** A promise that settles when `signal` aborts (already-settled if it is). Used to bound `proc.exited`
