@@ -314,7 +314,9 @@ async function main(): Promise<never> {
   // not processes — BRO-1795). A fresh run has no checkpoint → resumedFrom 0, bare prompt.
   // Guard the empty run dir (like readContract): `readProgress("")` would resolve progress.md against cwd.
   const checkpoint = runDir === "" ? null : await readProgress(runDir);
-  const resumedFrom = checkpoint?.iteration ?? 0;
+  // Clamp defensively — parseProgress already rejects a negative iteration, but a non-negative resumedFrom
+  // is a hard invariant of the beat-loop bounds, so belt-and-suspenders here too.
+  const resumedFrom = Math.max(0, checkpoint?.iteration ?? 0);
   const messages: Msg[] = [
     { role: "user", content: promptFor(contract, session) + resumeSuffix(checkpoint) },
   ];

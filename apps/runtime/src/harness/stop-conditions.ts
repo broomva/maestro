@@ -316,7 +316,10 @@ export function parseProgress(md: string): ProgressDoc | null {
     return null;
   }
   const iteration = Number(iterationRaw);
-  if (!Number.isInteger(iteration)) return null;
+  // Reject a non-integer OR negative iteration — a corrupted/hand-edited `iteration: -5` must NOT seed a
+  // negative resumedFrom into a resume loop (that would loosen iteration_cap by |iteration|, defeating the
+  // "loops don't get tired" guardrail). 0 is harmless (behaves as a fresh start).
+  if (!Number.isInteger(iteration) || iteration < 0) return null;
   const body = text.slice(close + PROGRESS_META_CLOSE.length);
   const { stateOfTheWorld, whatsLeft } = splitProgressBody(body);
   return { session, iteration, updated, stateOfTheWorld, whatsLeft };

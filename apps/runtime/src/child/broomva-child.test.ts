@@ -496,6 +496,7 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     const prompt = JSON.stringify(resumeCall.payload ?? {});
     expect(prompt).toContain("RESUMING");
     expect(prompt).toContain("context ceiling"); // the checkpoint's state-of-the-world, folded in
+    expect(prompt).toContain("from beat 1"); // the checkpoint's iteration NUMBER round-tripped, not just prose
   });
 
   test("iteration_cap accumulates ACROSS respawns — the run's cap spans attempts, not processes", async () => {
