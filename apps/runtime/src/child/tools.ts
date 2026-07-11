@@ -15,6 +15,7 @@
 //   • bounded READS — shell stdout/stderr and file reads stop at MAX_OUTPUT *bytes* (streamed, never
 //     buffered whole), so a `yes` / gigabyte file can't OOM the child before the clip.
 
+import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 /** One tool request the model made — an Anthropic `tool_use` content block. */
@@ -50,25 +51,29 @@ export const MAX_OUTPUT = 16_000;
  *  blocked longer than this by any single tool call. */
 export const DEFAULT_SHELL_TIMEOUT_MS = 120_000;
 
-/** Truncate to `cap` UTF-16 units + a marker, WITHOUT splitting a surrogate pair at the boundary (a lone
- *  high surrogate would decode to U+FFFD in the model's view). */
-function truncate(s: string, cap: number): string {
+/** Cap a string to `cap` UTF-16 units, WITHOUT splitting a surrogate pair at the boundary (a lone high
+ *  surrogate would decode to U+FFFD in the model's view). Returns only the capped text; the caller
+ *  appends any truncation marker so the marker tracks the real clipped decision, not just `s.length`. */
+function capText(s: string, cap: number): string {
   if (s.length <= cap) return s;
   let end = cap;
   const last = s.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end -= 1; // don't cut a high surrogate from its low half
-  return `${s.slice(0, end)}\n…(truncated)`;
+  return s.slice(0, end);
 }
 
 function msg(err: unknown): string {
   return String((err as Error)?.message ?? err);
 }
 
-/** Read a byte stream up to `cap` bytes then STOP, cancelling the source. Bounds MEMORY: a command that
- *  spews gigabytes (or never ends, e.g. `yes`) is read only up to the cap — never buffered whole — and
- *  the cancel unblocks a runaway producer via EPIPE. `signal` cancels a read that would otherwise block
- *  forever on a pipe held by a DETACHED grandchild (`sleep 300 &`) — so the caller's timeout can return
- *  even though the direct child is already gone. Returns the decoded text + whether more remained. */
+/** Read a byte stream, KEEPING at most `cap` bytes but DRAINING (discarding) the rest so the producer
+ *  runs to its real exit code. Bounds MEMORY (never buffers the whole stream — the tail is discarded, not
+ *  kept) without corrupting the exit code: an early `reader.cancel()` would SIGPIPE/EPIPE a still-writing
+ *  producer, turning a SUCCESSFUL large-output command (`grep -r`, `cat big.log`) into a spurious non-zero
+ *  exit. Draining lets `proc.exited` reflect the command's OWN status. `signal` (the caller's timeout)
+ *  cancels a read that would otherwise block forever — a hung command, or a pipe held by a DETACHED
+ *  grandchild (`sleep 300 &`) after the direct child exits, or an infinite producer (`yes`) whose drain
+ *  never ends. Returns the kept text + whether anything was dropped. */
 async function readCapped(
   stream: ReadableStream<Uint8Array>,
   cap: number,
@@ -86,13 +91,19 @@ async function readCapped(
   try {
     let r = await reader.read();
     while (!r.done) {
-      if (r.value) {
-        chunks.push(r.value);
-        total += r.value.byteLength;
-      }
-      if (total >= cap) {
-        clipped = true;
-        break;
+      const chunk = r.value;
+      if (chunk) {
+        const room = cap - total;
+        if (room <= 0) {
+          clipped = true; // past the cap — drain-and-discard so the producer reaches its real exit
+        } else if (chunk.byteLength <= room) {
+          chunks.push(chunk);
+          total += chunk.byteLength;
+        } else {
+          chunks.push(chunk.subarray(0, room)); // keep exactly up to the cap, discard the overflow
+          total = cap;
+          clipped = true;
+        }
       }
       r = await reader.read();
     }
@@ -190,9 +201,12 @@ export async function executeTool(
         clearTimeout(timer);
       }
       // Join the two streams with a newline so an unterminated stdout can't be glued onto stderr; the
-      // clipped flag is honest about the COMBINED cut, not just each stream's own cap.
-      const raw = [out.text, err.text].filter(Boolean).join("\n");
-      const body = truncate(raw, MAX_OUTPUT);
+      // clipped flag is honest about the COMBINED cut, not just each stream's own cap. The `…(truncated)`
+      // marker is appended from `clipped` (not from length) so it also fires at the exact-cap boundary —
+      // the model reads `content`, never the summary, so the clip signal must live in the content.
+      const raw = [out.text, err.text].filter(Boolean).join("\n").trim();
+      const clipped = out.clipped || err.clipped || raw.length > MAX_OUTPUT;
+      const body = clipped ? `${capText(raw, MAX_OUTPUT)}\n…(truncated)` : raw;
       if (timedOut) {
         return {
           ok: false,
@@ -200,7 +214,6 @@ export async function executeTool(
           content: `${body}\n(timed out after ${timeoutMs}ms)`.trim(),
         };
       }
-      const clipped = out.clipped || err.clipped || raw.length > MAX_OUTPUT;
       return {
         ok: code === 0,
         summary: `shell \`${command.slice(0, 60)}\` → exit ${code}${clipped ? " (clipped)" : ""}`,
@@ -216,12 +229,20 @@ export async function executeTool(
           content: "error: path is missing or escapes the worktree",
         };
       }
-      const file = Bun.file(path);
-      // Bounded read: pull at most MAX_OUTPUT bytes so a huge file can't OOM the child (a missing file
-      // still throws below → the catch returns ok:false). The byte slice can split a multibyte char at
-      // the boundary, which only affects the last glyph of an already-truncated view.
-      const text = await file.slice(0, MAX_OUTPUT).text();
-      const clipped = file.size > MAX_OUTPUT;
+      // stat FIRST (never blocks): refuse anything that is not a regular file. Opening a FIFO / device
+      // for read would block forever with no writer — the read tool must not be able to hang the beat.
+      const st = await stat(path); // ENOENT on a missing file → caught below → ok:false
+      if (!st.isFile()) {
+        return {
+          ok: false,
+          summary: `read: refused ${String(input.path)} (not a regular file)`,
+          content: "error: read only supports regular files (not a directory, FIFO, or device)",
+        };
+      }
+      // Bounded read: pull at most MAX_OUTPUT bytes so a huge file can't OOM the child. The byte slice
+      // can split a multibyte char at the boundary, which only affects the last glyph of a clipped view.
+      const text = await Bun.file(path).slice(0, MAX_OUTPUT).text();
+      const clipped = st.size > MAX_OUTPUT;
       return {
         ok: true,
         summary: `read ${String(input.path)}${clipped ? " (clipped)" : ""}`,
@@ -244,6 +265,15 @@ export async function executeTool(
           ok: false,
           summary: `edit: refused ${String(input.path)} (content not a string)`,
           content: "error: edit requires a string `content`",
+        };
+      }
+      // Refuse to overwrite a non-regular target (FIFO/device/directory) — a new file (ENOENT) is fine.
+      const existing = await stat(path).catch(() => null);
+      if (existing && !existing.isFile()) {
+        return {
+          ok: false,
+          summary: `edit: refused ${String(input.path)} (not a regular file)`,
+          content: "error: edit only supports regular files (not a directory, FIFO, or device)",
         };
       }
       const content = input.content;
