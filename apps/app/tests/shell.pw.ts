@@ -9,7 +9,7 @@ test("the shell never scrolls; the main panel does; the chrome holds when small"
   page,
 }) => {
   await page.setViewportSize({ width: 380, height: 480 });
-  await page.goto("/app");
+  await page.goto("/");
   // NOT networkidle — /app holds a live SSE connection open, so the network is never idle.
   // Wait for the shell chrome to mount instead.
   await expect(page.getByTestId("shell-main")).toBeVisible();
@@ -36,7 +36,7 @@ test("the shell never scrolls; the main panel does; the chrome holds when small"
 });
 
 test("the top bar presence reads as an agent — a tidepool dot, not a menu", async ({ page }) => {
-  await page.goto("/app");
+  await page.goto("/");
   await expect(page.locator("header .bv-dot-live")).toBeVisible();
   await expect(page.getByRole("button", { name: /maestro/i })).toBeVisible();
 });
@@ -47,7 +47,7 @@ test("the brand mark is an inline cool-axis chip, never a pure-#000 raster (BRO-
   // Default (light) theme — the failure mode was an opaque #000 JPEG tile on the near-white
   // sidebar. Guard: no raster in the sidebar, and the chip's computed background is a
   // cool-axis near-black (--bv-ink), never pure rgb(0,0,0).
-  await page.goto("/app");
+  await page.goto("/");
   await expect(page.getByTestId("brand-mark")).toBeVisible();
   await expect(page.locator("aside img")).toHaveCount(0);
   const chip = page.getByTestId("brand-mark");

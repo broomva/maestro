@@ -3,6 +3,12 @@ import { expect, type Page, test } from "@playwright/test";
 // The rendered half of the §6 sanity checks: real computed styles in a real
 // browser, in light and dark. Colors are rasterized to sRGB via a 1x1 canvas so
 // assertions don't depend on how Chromium serializes computed oklch values.
+//
+// Targets (BRO-1824, after the M0 Landing was superseded by the product at /): the token/theme/input/
+// heading checks run on /kitchen-sink (the design-system gallery — it has an input + an h1 + the theme
+// toggle, and the theme is set globally on <html> in index.html so it holds on any route). The
+// no-glass audit runs on / (the product DEFAULT surface — board + shell, matte); kitchen-sink is not a
+// valid target for it since the gallery deliberately shows the Composer (the one earned glass surface).
 
 async function rasterize(page: Page, selector: string, cssProp: string) {
   return page.evaluate(
@@ -28,7 +34,7 @@ async function rasterize(page: Page, selector: string, cssProp: string) {
 }
 
 test("light: white canvas, barely-blue ink, ai-blue focus ring", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/kitchen-sink");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
   const bg = await rasterize(page, "body", "background-color");
@@ -36,7 +42,8 @@ test("light: white canvas, barely-blue ink, ai-blue focus ring", async ({ page }
   expect(bg.luma).toBeGreaterThan(235); // near-white canvas
   expect(fg.luma).toBeLessThan(80); // barely-blue near-black ink
 
-  await page.locator("input[type=text]").focus();
+  // kitchen-sink shows several inputs — focus the first (querySelector in rasterize also reads the first).
+  await page.locator("input[type=text]").first().focus();
   const ring = await rasterize(page, "input[type=text]", "outline-color");
   expect(ring.b).toBeGreaterThan(ring.r); // ai-blue: blue channel dominates
   expect(ring.b).toBeGreaterThan(ring.g);
@@ -46,7 +53,7 @@ test("light: white canvas, barely-blue ink, ai-blue focus ring", async ({ page }
 
 test("dark: deep blue-purple canvas, light ink (never pure black)", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("bv-theme", "dark"));
-  await page.goto("/");
+  await page.goto("/kitchen-sink");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 
   const bg = await rasterize(page, "body", "background-color");
@@ -59,7 +66,11 @@ test("dark: deep blue-purple canvas, light ink (never pure black)", async ({ pag
   await page.screenshot({ path: "test-results/m0-dark.png", fullPage: true });
 });
 
-test("no element wears glass on the M0 page (backdrop-filter audit §6.4)", async ({ page }) => {
+test("no element wears glass on the product default surface (backdrop-filter audit §6.4)", async ({
+  page,
+}) => {
+  // / is the board + shell — matte by default (glass is earned; the Composer, the one glass surface,
+  // is not on this surface). Auditing the real default is more meaningful than the old M0 placeholder.
   await page.goto("/");
   const glassy = await page.evaluate(() => {
     const hits: string[] = [];
@@ -75,7 +86,7 @@ test("no element wears glass on the M0 page (backdrop-filter audit §6.4)", asyn
 });
 
 test("headings are regular weight and never uppercase (§6.5)", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/kitchen-sink");
   const h1 = await page.evaluate(() => {
     const el = document.querySelector("h1");
     if (!el) throw new Error("no h1");

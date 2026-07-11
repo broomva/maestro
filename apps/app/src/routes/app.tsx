@@ -1,14 +1,16 @@
-// The /app route (BRO-1780) — the live product surface. Wires the client store to the runtime
-// SSE stream ONCE on mount (hydrate /api/tree, then live off /api/stream through the vite `/api`
-// proxy), and mounts the read-only Board inside the shell. connectStream was authored by the
-// store (BRO-1775) but left unwired until a real surface consumed it — this is that surface.
+// The shell LAYOUT route (BRO-1824) — the chrome every product view lives inside. It wires the client
+// store to the runtime SSE stream ONCE on mount (hydrate /api/tree, then live off /api/stream through
+// the vite `/api` proxy) and renders the matched child view into the shell's main via <Outlet/>. The
+// board (/), knowledge, history, settings, and account routes are its children (production-notes §1);
+// switching views does NOT re-open the SSE connection. (Was the /app route in BRO-1780; generalized to a
+// layout when real routing landed.)
 
+import { Outlet } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { Board } from "@/components/board/board";
 import { Shell } from "@/components/shell";
 import { connectStream, maestroStore } from "@/store";
 
-export function App() {
+export function ShellLayout() {
   useEffect(() => {
     // Same-origin `/api/*` (default baseUrl) → the vite proxy forwards to the runtime.
     const handle = connectStream(maestroStore);
@@ -17,7 +19,7 @@ export function App() {
 
   return (
     <Shell>
-      <Board />
+      <Outlet />
     </Shell>
   );
 }

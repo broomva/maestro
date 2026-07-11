@@ -104,8 +104,14 @@ test.beforeAll(async () => {
   await waitHealthy();
 });
 
-test.afterAll(() => {
-  runtime?.kill("SIGTERM");
+test.afterAll(async () => {
+  // AWAIT the runtime's exit before removing the workspace — a bare kill+rmSync races the runtime's
+  // libSQL WAL flush and intermittently throws ENOTEMPTY on `.maestro/` (a teardown flake, not a real
+  // failure). Waiting for exit lets the process close its file handles first.
+  if (runtime) {
+    runtime.kill("SIGTERM");
+    await onExit(runtime);
+  }
   if (workspace) rmSync(workspace, { recursive: true, force: true });
 });
 
@@ -113,7 +119,7 @@ test.afterAll(() => {
 test("P1 exit ①: a hand-edit to a _work.md propagates to the board live, with no reload", async ({
   page,
 }) => {
-  await page.goto("/app");
+  await page.goto("/");
   await expect(page.getByTestId("board")).toBeVisible();
 
   // Attention-first: the FIRST board group is review ("Needs you").
@@ -146,7 +152,7 @@ test("P1 exit ①: a hand-edit to a _work.md propagates to the board live, with 
 test("P1 exit ②: killing the index rebuilds it identical (from --rebuild's own output)", async ({
   page,
 }) => {
-  await page.goto("/app");
+  await page.goto("/");
   await expect(page.getByTestId("board")).toBeVisible(); // the app is live over the built index
 
   const indexPath = join(workspace, ".maestro/index.db");
@@ -199,6 +205,6 @@ test("P1 exit ②: killing the index rebuilds it identical (from --rebuild's own
   // INTEGRATION: the app comes back up over the REBUILT index and serves the board.
   runtime = spawn("bun", ["run", RUNTIME_ENTRY], { env: runtimeEnv(), stdio: "inherit" });
   await waitHealthy();
-  await page.goto("/app");
+  await page.goto("/");
   await expect(page.getByTestId("board")).toBeVisible();
 });

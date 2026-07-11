@@ -12,6 +12,7 @@ import { X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "zustand";
 import { maestroStore, selectBoard, selectNeedsYouCount } from "@/store";
+import { ErrorBoundary } from "../error-boundary";
 import { toSections } from "./board-view";
 import { Inspector } from "./inspector";
 import { WorkCard } from "./work-card";
@@ -140,7 +141,10 @@ export function Board() {
               <X size={16} strokeWidth={2} />
             </button>
           </div>
-          <Inspector item={selectedItem} />
+          {/* A crashed inspector must not take down the board (porting-notes §Production hardening). */}
+          <ErrorBoundary label="The inspector">
+            <Inspector item={selectedItem} />
+          </ErrorBoundary>
         </div>
       ) : null}
     </div>

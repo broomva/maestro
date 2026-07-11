@@ -1,15 +1,44 @@
 /// <reference types="bun" />
 
-// Shell structure (BRO-1771). renderToStaticMarkup — no DOM harness, so it runs under CI's
-// plain bun test (the never-scroll *behavior* + the resize verify are the browser concern of
-// shell.pw.ts). ThemeToggle is SSR-safe (typeof document guard), so the whole shell renders.
+// Shell structure (BRO-1771; router context BRO-1824). renderToStaticMarkup — no DOM harness, so it runs
+// under CI's plain bun test (the never-scroll *behavior* is shell.pw.ts's browser concern). The nav is
+// now TanStack `<Link>`s, so the Shell needs router context — a loaded memory router mounts it at `/`
+// (Board active), which is exactly how it renders in the app.
 
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Shell } from "./shell";
 
+const NAV_PATHS = ["/", "/knowledge", "/history", "/settings", "/account"];
+
+/** Render the Shell inside a loaded memory router at `/` (Board active) — its real render context. */
+async function renderShell(children?: ReactNode): Promise<string> {
+  const rootRoute = createRootRoute({ component: () => <Shell>{children}</Shell> });
+  // The Shell's nav Links target these paths; they must exist in the tree for the active match to resolve.
+  const routes = NAV_PATHS.map((path) =>
+    createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),
+  );
+  const router = createRouter({
+    routeTree: rootRoute.addChildren(routes),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await router.load();
+  return renderToStaticMarkup(<RouterProvider router={router} />);
+}
+
 describe("Shell — the M2 chrome", () => {
-  const html = renderToStaticMarkup(<Shell />);
+  let html = "";
+  beforeAll(async () => {
+    html = await renderShell();
+  });
 
   test("is a never-scroll 200px + flex grid — the shell owns no scroll", () => {
     expect(html).toContain("grid-cols-[200px_1fr]");
@@ -29,6 +58,12 @@ describe("Shell — the M2 chrome", () => {
     }
   });
 
+  test("the nav items are links to the product routes", () => {
+    for (const path of ["/knowledge", "/history", "/settings", "/account"]) {
+      expect(html).toContain(`href="${path}"`);
+    }
+  });
+
   test("the top bar carries the orchestrator presence (tidepool) — an agent, not a menu", () => {
     expect(html).toContain("bv-dot-live");
     expect(html).toContain("maestro");
@@ -40,12 +75,12 @@ describe("Shell — the M2 chrome", () => {
     expect(html).toContain('overflow-y-auto p-6" data-testid="shell-main"');
   });
 
-  test("the active nav item is marked for assistive tech", () => {
+  test("the active nav item (Board, at /) is marked for assistive tech", () => {
     expect(html).toContain('aria-current="page"');
   });
 
-  test("renders children in place of the placeholder when given", () => {
-    const withChild = renderToStaticMarkup(<Shell>hello panel</Shell>);
+  test("renders children in place of the placeholder when given", async () => {
+    const withChild = await renderShell("hello panel");
     expect(withChild).toContain("hello panel");
     expect(withChild).not.toContain("Panel row 1");
   });
