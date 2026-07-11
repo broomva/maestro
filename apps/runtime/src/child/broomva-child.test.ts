@@ -561,6 +561,19 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     const results = await eventsOf(h, "r1", EVENT_TYPES.TOOL_RESULT);
     expect(results).toHaveLength(1);
     expect(JSON.parse(results[0]?.payload ?? "{}")).toMatchObject({ tool: "shell", ok: false });
+    // The FORWARDED tool_result the model actually sees carries is_error:true + the error content — not
+    // just the teed event (a regression mapping the failure to is_error:false would mislead the model).
+    const call2 = mock.calls[1];
+    if (!call2) throw new Error("no second request");
+    const msgs = (call2.payload as { messages?: Array<{ role: string; content: unknown }> })
+      .messages;
+    const tr = [...(msgs ?? [])]
+      .flatMap((m) =>
+        Array.isArray(m.content) ? (m.content as Array<Record<string, unknown>>) : [],
+      )
+      .find((b) => b.type === "tool_result" && b.tool_use_id === "tu1");
+    expect(tr?.is_error).toBe(true);
+    expect(String(tr?.content)).toContain("exit 7");
   });
 
   test("a max_tokens-TRUNCATED tool-less turn is NOT a completion — the loop continues, not exit 0", async () => {

@@ -176,15 +176,19 @@ async function gitHead(cwd: string): Promise<string> {
  *  untouched; .gitignore still applies) and hash the diff vs the run BASE → the hash moves iff any file's
  *  content moved (committed OR uncommitted). Returns `{sig, stat}`: `sig` (compared beat-to-beat) + `stat`
  *  for the
- *  run.beat receipt. On git failure (non-git worktree / no HEAD / missing binary) → sig "" + "(unmeasured)":
- *  a worktree git can't read can't show trackable progress, so the loop converges via no_progress /
- *  iteration_cap rather than spinning (an accepted degradation — the worktree is broken anyway). */
-async function beatSignal(cwd: string, base: string): Promise<{ sig: string; stat: string }> {
+ *  run.beat receipt, and `measured` (false on git failure). On git failure the caller treats the beat as
+ *  no-change but does NOT advance the baseline (so an intermittent failure can't read the next real beat
+ *  as spurious progress and reset the no_progress window); a persistently git-broken worktree converges
+ *  via no_progress / iteration_cap rather than spinning (an accepted degradation — it's broken anyway). */
+async function beatSignal(
+  cwd: string,
+  base: string,
+): Promise<{ sig: string; stat: string; measured: boolean }> {
   const idxPath = join(tmpdir(), `maestro-beat-${process.pid}.idx`);
   const env = { ...process.env, GIT_INDEX_FILE: idxPath };
   try {
     const add = Bun.spawn(["git", "add", "-A"], { cwd, env, stdout: "ignore", stderr: "ignore" });
-    if ((await add.exited) !== 0) return { sig: "", stat: "(unmeasured)" };
+    if ((await add.exited) !== 0) return { sig: "", stat: "(unmeasured)", measured: false };
     // Diff the staged worktree vs the run BASE (not HEAD) — a committed beat stays "ahead of base", so
     // committing counts as progress instead of emptying a HEAD-relative diff.
     const diff = Bun.spawn(["git", "diff", "--cached", base], {
@@ -194,7 +198,7 @@ async function beatSignal(cwd: string, base: string): Promise<{ sig: string; sta
       stderr: "ignore",
     });
     const out = await new Response(diff.stdout).text();
-    if ((await diff.exited) !== 0) return { sig: "", stat: "(unmeasured)" };
+    if ((await diff.exited) !== 0) return { sig: "", stat: "(unmeasured)", measured: false };
     // Count +/- CONTENT lines (skip the +++/--- file headers) for a cheap human diffstat.
     let changed = 0;
     for (const line of out.split("\n")) {
@@ -209,9 +213,10 @@ async function beatSignal(cwd: string, base: string): Promise<{ sig: string; sta
     return {
       sig: String(Bun.hash(out)),
       stat: changed === 0 ? "(no change)" : `${changed} line(s)`,
+      measured: true,
     };
   } catch {
-    return { sig: "", stat: "(unmeasured)" };
+    return { sig: "", stat: "(unmeasured)", measured: false };
   } finally {
     // Don't leave the throwaway index behind — a fresh one is staged next beat (git creates it on absence).
     await rm(idxPath, { force: true }).catch(() => {});
@@ -390,8 +395,16 @@ async function main(): Promise<never> {
     // VERIFY + LOG (a tool beat AND a nudge-continue beat both feed the stop-engine, so a repeatedly
     // truncated or stalled loop converges): did the worktree CONTENT change vs the run base?
     const cur = await beatSignal(cwd, base);
-    const diffSig = cur.sig === prevSig ? "" : cur.sig; // "" ⇒ this beat changed nothing (no_progress input)
-    prevSig = cur.sig;
+    // "" ⇒ this beat changed nothing (a no_progress input). Only a MEASURED beat advances the baseline —
+    // an unmeasured (git-failed) beat counts as no-change but leaves prevSig at the last real signature,
+    // so the next measured beat compares honestly instead of reading a poisoned "" baseline as progress.
+    let diffSig: string;
+    if (cur.measured) {
+      diffSig = cur.sig === prevSig ? "" : cur.sig;
+      prevSig = cur.sig;
+    } else {
+      diffSig = "";
+    }
     state.iterations = beat;
     // Keep only the recent window the engine reads (no_progress looks at the last N) — the arrays must
     // not grow with the run.
