@@ -16,6 +16,7 @@
 // conditions), §6 (child utterances: run.started / agent.said / tool.call / tool.result / run.beat /
 // run.exiting on stdout as NDJSON; the proxy owns budget.metered/refused, the child owns budget.exhausted).
 
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Budget, WorkContract } from "@maestro/protocol";
@@ -179,7 +180,8 @@ async function gitHead(cwd: string): Promise<string> {
  *  a worktree git can't read can't show trackable progress, so the loop converges via no_progress /
  *  iteration_cap rather than spinning (an accepted degradation — the worktree is broken anyway). */
 async function beatSignal(cwd: string, base: string): Promise<{ sig: string; stat: string }> {
-  const env = { ...process.env, GIT_INDEX_FILE: join(tmpdir(), `maestro-beat-${process.pid}.idx`) };
+  const idxPath = join(tmpdir(), `maestro-beat-${process.pid}.idx`);
+  const env = { ...process.env, GIT_INDEX_FILE: idxPath };
   try {
     const add = Bun.spawn(["git", "add", "-A"], { cwd, env, stdout: "ignore", stderr: "ignore" });
     if ((await add.exited) !== 0) return { sig: "", stat: "(unmeasured)" };
@@ -210,6 +212,9 @@ async function beatSignal(cwd: string, base: string): Promise<{ sig: string; sta
     };
   } catch {
     return { sig: "", stat: "(unmeasured)" };
+  } finally {
+    // Don't leave the throwaway index behind — a fresh one is staged next beat (git creates it on absence).
+    await rm(idxPath, { force: true }).catch(() => {});
   }
 }
 
@@ -261,14 +266,28 @@ async function callProxy(messages: readonly Msg[]): Promise<ProxyTurn> {
 }
 
 async function main(): Promise<never> {
+  // Emit run.started FIRST so EVERY exit — including a malformed-argv failure below — is preceded by a
+  // child receipt (the every-exit-emits-a-run.exiting invariant), not a receiptless crash the supervisor
+  // has to infer. (main() is guarded behind import.meta.main, so importing the module for its pure
+  // helpers still has no side effect.)
+  await emit({ actor: "system", type: "run.started" });
   // Validate the supervisor argv (--role agent --session <id>). `role` resolves the model PROXY-side, so
-  // the child never sends a model id; `session` is the prompt attribution. Read INSIDE main so importing
-  // this module (for the pure textOf/promptFor helpers in tests) has no side effect.
-  const { session } = parseChildArgv(Bun.argv.slice(2));
+  // the child never sends a model id; `session` is the prompt attribution. A malformed argv is a
+  // supervisor bug — report it with a receipt (not a receiptless throw) so the run parks with a reason.
+  let session: string;
+  try {
+    ({ session } = parseChildArgv(Bun.argv.slice(2)));
+  } catch (err) {
+    await emit({
+      actor: "system",
+      type: "run.exiting",
+      payload: { code: 1, reason: `bad argv: ${msg(err)}` },
+    });
+    process.exit(1);
+  }
   // The supervisor spawns the child with cwd = the run worktree — tools operate there (the phase-1
   // containment); the diff signature is measured there too.
   const cwd = process.cwd();
-  await emit({ actor: "system", type: "run.started" });
 
   const contract = await readContract();
   const budget: Budget = contract?.budget ?? {};
@@ -324,7 +343,15 @@ async function main(): Promise<never> {
     const uses = parseToolUses(body);
     const text = textOf(body);
     if (text !== "") await emit({ actor: "agent", type: "agent.said", payload: { text } });
-    messages.push({ role: "assistant", content: assistantContent(body, uses) });
+    // Never push an empty-content assistant turn: a conformant Anthropic endpoint 400s on it, and it
+    // breaks user/assistant alternation with the nudge below. A tool-less, text-less, non-completion turn
+    // reconstructs to [] → substitute a minimal placeholder so the conversation stays valid and the
+    // max_tokens nudge path stays bounded by no_progress (rather than crashing on the next request).
+    const asst = assistantContent(body, uses);
+    messages.push({
+      role: "assistant",
+      content: asst.length > 0 ? asst : [{ type: "text", text: "(no output)" }],
+    });
 
     let worstError = "";
     if (uses.length === 0) {

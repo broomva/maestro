@@ -434,8 +434,12 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     // child writes progress.md + emits run.restart_requested + exits 10 fresh_context; the supervisor
     // respawns, and the script has exhausted to a text fallback so attempt 2 completes (exit 0 → review).
     // (The respawn RESUMING from progress.md is slice 2b-ii; here we prove the restart DECISION + respawn.)
+    // A known run dir so we can read the checkpoint the child writes (the supervisor would set this via
+    // its allowlist — 2b-ii).
+    const runDir = await mkdtemp(join(tmpdir(), "maestro-run-"));
+    tmps.push(runDir);
     const { h, sup } = await harness({
-      childEnvExtra: { BROOMVA_CONTEXT_CEILING: "50" },
+      childEnvExtra: { BROOMVA_CONTEXT_CEILING: "50", BROOMVA_RUN_DIR: runDir },
       mock: {
         script: [{ body: anthropicToolUse("tu1", "shell", { command: "echo hi > grew.txt" }) }],
         fallback: { body: anthropicBody("done") },
@@ -449,9 +453,32 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     expect(reaped.exitCode).toBe(0); // attempt 2 (text fallback) completed
     expect(reaped.sessionStatus).toBe("review");
     expect(reaped.crash).toBe(false);
-    // attempt 1 asked for the restart → prepareRestart wrote progress.md THEN emitted this (so the
-    // checkpoint exists), and the supervisor read exit-10 fresh_context to respawn.
+    // attempt 1 asked for the restart → prepareRestart wrote progress.md THEN emitted this.
     expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_RESTART_REQUESTED)).toHaveLength(1);
+    // The checkpoint is REAL and lossless: progress.md carries the run state a 2b-ii respawn resumes from.
+    const progress = await Bun.file(join(runDir, "progress.md")).text();
+    expect(progress).toContain("context ceiling");
+    expect(progress).toContain("r1"); // the session id
+  });
+
+  test("a checkpoint-write failure on restart still lands a receipt (exit 1), not a receiptless crash", async () => {
+    // Point the run dir at an unwritable path (`/dev/null/nope` → mkdir ENOTDIR) so prepareRestart's
+    // writeProgress throws. The GUARDED restart branch must emit run.exiting{code:1} rather than crash.
+    const { h, sup } = await harness({
+      childEnvExtra: { BROOMVA_CONTEXT_CEILING: "50", BROOMVA_RUN_DIR: "/dev/null/nope" },
+      mock: {
+        script: [{ body: anthropicToolUse("tu1", "shell", { command: "echo hi > grew.txt" }) }],
+        fallback: { body: anthropicBody("done") },
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.exitCode).toBe(1); // the checkpoint write failed → exit 1, NOT a receiptless crash
+    const exiting = await eventsOf(h, "r1", EVENT_TYPES.RUN_EXITING);
+    expect(exiting).toHaveLength(1);
+    expect(String(JSON.parse(exiting[0]?.payload ?? "{}").reason)).toContain("checkpoint failed");
   });
 
   test("a turn with 2 tool_use blocks → BOTH execute → 2 tool.call + 2 tool.result → one combined reply", async () => {
@@ -494,6 +521,24 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     const results = await eventsOf(h, "r1", EVENT_TYPES.TOOL_RESULT);
     expect(results).toHaveLength(2);
     expect(results.every((r) => JSON.parse(r.payload ?? "{}").ok === true)).toBe(true);
+    // The FORWARDED beat-2 request must carry a tool_result for BOTH tool_use ids (the named regression:
+    // a dropped/mis-keyed result passes the mock but a real Anthropic endpoint 400s on the unpaired turn).
+    const call2 = mock.calls[1];
+    if (!call2) throw new Error("no second request");
+    const msgs = (call2.payload as { messages?: Array<{ role: string; content: unknown }> })
+      .messages;
+    const toolResultTurn = [...(msgs ?? [])]
+      .reverse()
+      .find(
+        (m) =>
+          m.role === "user" &&
+          Array.isArray(m.content) &&
+          (m.content as Array<{ type?: string }>).some((b) => b.type === "tool_result"),
+      );
+    const ids = ((toolResultTurn?.content as Array<{ type: string; tool_use_id?: string }>) ?? [])
+      .filter((b) => b.type === "tool_result")
+      .map((b) => b.tool_use_id);
+    expect(ids.sort()).toEqual(["tu1", "tu2"]); // BOTH paired, keyed by their tool_use ids
   });
 
   test("a tool that FAILS (ok:false) → is_error propagates, worstError feeds the engine, loop continues", async () => {
