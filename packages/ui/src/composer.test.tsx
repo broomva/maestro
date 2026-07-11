@@ -72,4 +72,26 @@ describe("Composer", () => {
     // :focus-visible ring, so this must be inline to avoid a double ring (BRO-1762 P20).
     expect(html).toContain("outline:none");
   });
+
+  // ── send/stop verb (BRO-1826 M4) ──
+  test("at rest the action button is Send (arrow up)", () => {
+    const html = renderToStaticMarkup(<Composer />);
+    expect(html).toContain('aria-label="Send"');
+    expect(html).not.toContain('aria-label="Stop"');
+    // lucide tags each glyph with a class — the send button carries the arrow-up, not the stop square.
+    expect(html).toContain("lucide-arrow-up");
+    expect(html).not.toContain("lucide-square");
+  });
+
+  test("while busy the action button flips to Stop (a square), and the send arrow is gone", () => {
+    const html = renderToStaticMarkup(<Composer busy onStop={() => {}} />);
+    expect(html).toContain('aria-label="Stop"');
+    expect(html).not.toContain('aria-label="Send"');
+    expect(html).toContain("lucide-square");
+    expect(html).not.toContain("lucide-arrow-up");
+  });
+
+  test("busy is false by default — a plain Composer is never in the stop state", () => {
+    expect(renderToStaticMarkup(<Composer />)).not.toContain('aria-label="Stop"');
+  });
 });

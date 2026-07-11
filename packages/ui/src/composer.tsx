@@ -1,4 +1,4 @@
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import * as React from "react";
 import { cn } from "./lib/cn";
 
@@ -27,13 +27,28 @@ export interface ComposerProps extends Omit<React.HTMLAttributes<HTMLDivElement>
   onChange?: (value: string) => void;
   /** Called with the trimmed text on Enter or send click. */
   onSend?: (text: string) => void;
+  /** True while a turn is streaming — the send arrow becomes a stop square and Enter is inert (the
+   *  visible affordance is Stop). Drives the one glass surface's send/stop verb (BRO-1826 M4). */
+  busy?: boolean;
+  /** Called when the stop square is clicked (only reachable while `busy`) — aborts the in-flight turn. */
+  onStop?: () => void;
   /** Optional leading element (e.g. an attach IconButton). */
   leading?: React.ReactNode;
 }
 
 export const Composer = React.forwardRef<HTMLDivElement, ComposerProps>(
   (
-    { placeholder = "Message Maestro", value, onChange, onSend, leading, className, ...props },
+    {
+      placeholder = "Message Maestro",
+      value,
+      onChange,
+      onSend,
+      busy = false,
+      onStop,
+      leading,
+      className,
+      ...props
+    },
     ref,
   ) => {
     const [internal, setInternal] = React.useState("");
@@ -49,6 +64,13 @@ export const Composer = React.forwardRef<HTMLDivElement, ComposerProps>(
       const payload = composerSendText(text);
       if (payload) onSend?.(payload);
       if (!controlled) setInternal("");
+    };
+
+    // The one action button: Stop while a turn streams (aborts it), Send otherwise. The icon + label
+    // flip together so the affordance is honest at every moment (a11y: label tracks the action).
+    const act = () => {
+      if (busy) onStop?.();
+      else send();
     };
 
     return (
@@ -69,8 +91,9 @@ export const Composer = React.forwardRef<HTMLDivElement, ComposerProps>(
           onKeyDown={(e) => {
             // Enter sends — but never while an IME candidate is composing (CJK/JP/KR).
             // Committing a candidate dispatches Enter with isComposing=true; sending then
-            // would swallow the half-composed text and clear the input.
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            // would swallow the half-composed text and clear the input. While a turn is
+            // streaming (`busy`) Enter is inert — the visible verb is Stop, reached by the button.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !busy) {
               e.preventDefault();
               send();
             }
@@ -85,11 +108,11 @@ export const Composer = React.forwardRef<HTMLDivElement, ComposerProps>(
         />
         <button
           type="button"
-          aria-label="Send"
-          onClick={send}
+          aria-label={busy ? "Stop" : "Send"}
+          onClick={act}
           className="inline-flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-[var(--bv-ink-hover)]"
         >
-          <ArrowUp size={18} strokeWidth={2} />
+          {busy ? <Square size={16} strokeWidth={2} /> : <ArrowUp size={18} strokeWidth={2} />}
         </button>
       </div>
     );

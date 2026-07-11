@@ -1,0 +1,130 @@
+// useBvChat (BRO-1826 M4, slice B) — the React binding, canon `AiProtocol.jsx:517-547`. Holds the
+// transcript in FEATURE-LOCAL state (NOT the global work store) — this IS "chat is a projection, not a
+// store" (the M4 verify criterion, CLAUDE.md §What Maestro is). All fold + status logic is the pure
+// `runChatTurn`; this wrapper only owns React state, the abort controller (the stop verb), and the
+// error-render policy.
+//
+// Refs mirror the latest transcript/transport/onData so `sendMessage` stays a STABLE callback (empty
+// deps) — the composer's handler identity never changes, and a mid-stream re-render can't stale the
+// history the next send builds on.
+
+import type { ChatMessage } from "@maestro/protocol";
+import { useCallback, useRef, useState } from "react";
+import {
+  type ChatStatus,
+  type RunChatTurnOptions,
+  runChatTurn,
+  type TransientDataChunk,
+} from "./chat-turn";
+import { type ChatTransport, ChatTransportError } from "./transport";
+
+/** A stable client id for a locally-composed user message. `crypto.randomUUID` is a client-only
+ *  impurity (the no-ambient-clock discipline is a RUNTIME rule; the browser may mint ids). */
+function newUserId(): string {
+  return `u-${crypto.randomUUID()}`;
+}
+
+export interface UseBvChatOptions {
+  /** The transport the turn streams over — the real `RuntimeChatTransport`, or a fixture double. */
+  transport: ChatTransport;
+  /** Seed transcript (e.g. a resumed session). Defaults to empty. */
+  initialMessages?: readonly ChatMessage[];
+  /** Transient `data-*` chunks (live ticks) — surfaced here, never persisted into the transcript. */
+  onData?: RunChatTurnOptions["onData"];
+}
+
+export interface UseBvChatResult {
+  messages: readonly ChatMessage[];
+  status: ChatStatus | "streaming";
+  /** True while a turn is in flight (submitted or streaming) — drives the composer's stop verb. */
+  busy: boolean;
+  /** Send a user turn: appends it, streams the reply, folds each chunk. Empty/whitespace is a no-op. */
+  sendMessage: (input: { text: string }) => void;
+  /** Abort the in-flight turn (the stop verb). Safe to call when idle. */
+  stop: () => void;
+}
+
+/** Render a transport failure as an assistant error part appended to the transcript, so the feed shows
+ *  an honest, specific message (slice A's `ChatTransportError` carries the endpoint's code/message)
+ *  rather than a silent stall. Uses the reducer's `error` part shape. */
+function withError(messages: readonly ChatMessage[], err: unknown): readonly ChatMessage[] {
+  const errorText =
+    err instanceof ChatTransportError
+      ? err.message
+      : err instanceof Error
+        ? err.message
+        : "The chat stream failed.";
+  return [
+    ...messages,
+    { id: `err-${messages.length}`, role: "assistant", parts: [{ type: "error", errorText }] },
+  ];
+}
+
+export function useBvChat({
+  transport,
+  initialMessages,
+  onData,
+}: UseBvChatOptions): UseBvChatResult {
+  const [messages, setMessages] = useState<readonly ChatMessage[]>(initialMessages ?? []);
+  const [status, setStatus] = useState<ChatStatus>("ready");
+
+  // Latest-value refs so sendMessage can stay a stable identity (empty-dep useCallback).
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
+  const onDataRef = useRef(onData);
+  onDataRef.current = onData;
+  // The controller for the in-flight turn — replaced per send, aborted by `stop`.
+  const abortRef = useRef<AbortController | null>(null);
+
+  const sendMessage = useCallback(({ text }: { text: string }) => {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    const user: ChatMessage = {
+      id: newUserId(),
+      role: "user",
+      parts: [{ type: "text", text: trimmed }],
+    };
+
+    // A fresh controller per turn; abort any prior in-flight turn first (a second send supersedes).
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    void (async () => {
+      try {
+        for await (const step of runChatTurn(transportRef.current, messagesRef.current, user, {
+          signal: controller.signal,
+          onData: (c: TransientDataChunk) => onDataRef.current?.(c),
+        })) {
+          setMessages(step.messages);
+          setStatus(step.status);
+        }
+      } catch (err) {
+        // A genuine transport failure (not an abort — slice A returns cleanly on abort). Keep the user
+        // turn (runChatTurn yielded `submitted` first), append an error part, settle to ready.
+        setMessages((m) => withError(m, err));
+        setStatus("ready");
+      } finally {
+        // Only clear the controller if it is still the current one (a superseding send owns its own).
+        if (abortRef.current === controller) abortRef.current = null;
+      }
+    })();
+  }, []);
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    // The stream returns cleanly on abort; settle the UI immediately (don't wait for the loop to unwind).
+    setStatus("ready");
+  }, []);
+
+  return {
+    messages,
+    status,
+    busy: status === "submitted" || status === "streaming",
+    sendMessage,
+    stop,
+  };
+}

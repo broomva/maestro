@@ -4,6 +4,7 @@ import { Board } from "./components/board/board";
 import { PaneErrorFallback } from "./components/error-boundary";
 import { ShellLayout } from "./routes/app";
 import { KitchenSink } from "./routes/kitchen-sink";
+import { SessionView } from "./routes/session";
 import { AccountView, HistoryView, KnowledgeView, SettingsView } from "./routes/stubs";
 
 // Code-based routing (no generated route tree) keeps routing explicit + lint-clean. The product views
@@ -32,6 +33,15 @@ const view = <const P extends string>(path: P, component: () => ReactNode, label
   });
 
 const boardRoute = view("/", Board, "The board");
+// The chat surface (BRO-1826 M4) — a session rendered as a thread (+ side-panel mirror). A path param
+// carries the session/node id; `view` takes only static paths, so this route is spelled out. Same
+// pane-scoped errorComponent as the others (a crashed chat falls back within the shell).
+const sessionRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/session/$sessionId",
+  component: SessionView,
+  errorComponent: () => <PaneErrorFallback label="This session" />,
+});
 const knowledgeRoute = view("/knowledge", KnowledgeView, "Knowledge");
 const historyRoute = view("/history", HistoryView, "History");
 const settingsRoute = view("/settings", SettingsView, "Settings");
@@ -61,6 +71,7 @@ const kitchenSinkRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   shellRoute.addChildren([
     boardRoute,
+    sessionRoute,
     knowledgeRoute,
     historyRoute,
     settingsRoute,

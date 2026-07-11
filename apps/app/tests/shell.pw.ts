@@ -38,7 +38,12 @@ test("the shell never scrolls; the main panel does; the chrome holds when small"
 test("the top bar presence reads as an agent — a tidepool dot, not a menu", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator("header .bv-dot-live")).toBeVisible();
-  await expect(page.getByRole("button", { name: /maestro/i })).toBeVisible();
+  // The presence chip opens the orchestrator's session (BRO-1826 M4) — a link, not a settings button
+  // (the orchestrator is an agent, not a settings page; CLAUDE.md §What Maestro is). It routes to the
+  // chat surface.
+  const presence = page.getByRole("link", { name: /maestro/i });
+  await expect(presence).toBeVisible();
+  await expect(presence).toHaveAttribute("href", "/session/orchestrator");
 });
 
 test("the brand mark is an inline cool-axis chip, never a pure-#000 raster (BRO-1771 P20)", async ({

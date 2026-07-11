@@ -1,0 +1,181 @@
+/* chat.css (BRO-1826 M4, slice B) — the feed's design-system classes. These are the
+ * "compiled-DS-bundle classes NOT in the vendored prototype CSS" (canon-map §51): bv-chat-feed,
+ * bv-msg, bv-typing, bv-link-pill + the streaming caret. They live in @maestro/ui (the DS layer)
+ * rather than the app, so any surface consuming @maestro/ui gets the same chat presentation, and
+ * rather than @maestro/tokens, which is re-published byte-for-byte from the hash-locked handoff
+ * canon (a new class there would break the tokens drift lock). The app pulls this in via a single
+ * @import in globals.css; it is @maestro/ui's first shipped stylesheet (the primitives are otherwise
+ * Tailwind-utility + token-class only).
+ *
+ * Canon (CLAUDE.md): the feed is MATTE (glass only on the composer); the ONLY color here is the
+ * ai-blue link pill (1 of the 5 sanctioned color uses); motion is calm and stops entirely under
+ * prefers-reduced-motion. All values reference tokens — never a raw hex/oklch. */
+
+/* ── The feed — a centered 768px column that scrolls INSIDE itself (the shell never scrolls) ── */
+.bv-chat-feed {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  width: 100%;
+  max-width: 768px; /* canon column width (CLAUDE.md §Layout) — NOT the prototype's 760px */
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 4px;
+}
+/* Anchor a short conversation to the bottom without breaking scroll when it overflows. */
+.bv-chat-feed > :first-child {
+  margin-top: auto;
+}
+
+/* ── A message row ── */
+.bv-msg {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--foreground);
+  max-width: 100%;
+  white-space: pre-wrap; /* preserve the agent's newlines without collapsing runs of spaces */
+  overflow-wrap: anywhere; /* long unbroken ids/urls wrap instead of forcing a horizontal scroll */
+}
+/* The user turn — a matte soft-canvas bubble, right-aligned, never glass (CLAUDE.md §Glass). */
+.bv-msg--user {
+  align-self: flex-end;
+  max-width: 80%;
+  background: var(--bv-canvas-soft-2);
+  border: 1px solid var(--bv-border-5);
+  border-radius: var(--bv-radius-xl);
+  padding: 8px 12px;
+}
+/* The assistant turn — plain text on the canvas, left-aligned, no bubble (the agent speaks in the open). */
+.bv-msg--assistant {
+  align-self: flex-start;
+}
+
+/* The streaming caret — a blinking block after the last glyph while a text part is still arriving. */
+.bv-msg--streaming::after {
+  content: "▍";
+  margin-left: 2px;
+  animation: bv-caret-blink 1s steps(2) infinite;
+}
+@keyframes bv-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ── Reasoning — quiet, italic, muted (rung-1 ambient, not a headline) ── */
+.bv-reasoning {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted-foreground);
+  max-width: 100%;
+}
+
+/* ── A tool part — a matte card (never glass); the head names the tool, the lines show io ── */
+.bv-toolpart {
+  align-self: flex-start;
+  max-width: 100%;
+  border: 1px solid var(--bv-border-5);
+  border-radius: var(--bv-radius-xl);
+  background: var(--bv-canvas-soft);
+  padding: 9px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.bv-toolpart-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+}
+.bv-toolpart-head > svg {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+.bv-toolpart-head b {
+  font-weight: 500;
+}
+.bv-toolpart-state {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.bv-toolpart-state[data-done="true"] {
+  color: var(--bv-success);
+}
+.bv-toolpart-line {
+  font-family: var(--bv-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── An error part — honest, muted, never red (a chat error is not a "Needs you" gate) ── */
+.bv-msg--error {
+  align-self: flex-start;
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+/* ── Typing dots — the pre-first-token "thinking" signal while status is submitted ── */
+.bv-typing {
+  align-self: flex-start;
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px 2px;
+}
+.bv-typing > span {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--bv-radius-full);
+  background: var(--muted-foreground);
+  animation: bv-typing-bounce 1.2s ease-in-out infinite;
+}
+.bv-typing > span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.bv-typing > span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes bv-typing-bounce {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+
+/* ── The inline link pill — the ONE colored inline element in the feed (ai-blue, 1 of 5 sanctioned
+ *    color uses, CLAUDE.md §Color). A frosted-blue chip for a real-world noun (a run ref, a branch). ── */
+.bv-link-pill {
+  display: inline;
+  font-family: var(--bv-font-mono, ui-monospace, monospace);
+  font-size: 0.92em;
+  color: var(--bv-blue);
+  background: var(--bv-frost-8);
+  border-radius: var(--bv-radius-chip);
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+/* Calm is load-bearing (CLAUDE.md §Motion): all feed motion stops under reduced-motion. */
+@media (prefers-reduced-motion: reduce) {
+  .bv-msg--streaming::after,
+  .bv-typing > span {
+    animation: none;
+  }
+}
