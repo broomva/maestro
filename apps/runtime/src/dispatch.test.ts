@@ -117,7 +117,7 @@ async function harness(opts: { mock?: MockModelOptions } = {}) {
   await seedNode(h, "n0");
   const config = { ...loadConfig({}), workspace: ws, mockModel: true };
   const mock = createMockModel(opts.mock);
-  const dispatch = mountDispatch({ db: h.db, config, upstream: mock, mintRunId: () => "r1" });
+  const dispatch = await mountDispatch({ db: h.db, config, upstream: mock, mintRunId: () => "r1" });
   mounts.push(dispatch);
   return { h, dispatch, mock, ws };
 }
@@ -187,5 +187,55 @@ describe("dispatch mount (BRO-1822 slice 1) — the loop assembled into the runt
     expect(res.event).toBe("run.killed");
     expect(res.sessionStatus).toBe("canceled");
     expect(await eventsOf(h, "r1", EVENT_TYPES.RUN_KILLED)).toHaveLength(1);
+  });
+
+  test("the per-day budget seed is WIRED at the mount: over-cap prior spend refuses the first call → blocked", async () => {
+    // The latent gap BRO-1822 closed: `deriveDayTotal` was documented as the restart seed but never fed to
+    // the BudgetGuard, so every restart reset the per-day cap to zero. This proves the SEED reaches the
+    // guard end-to-end (not just that the derive helper sums right — its own unit test covers that).
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    // A node with a $5/day cap...
+    await h.db.insert(node).values({
+      id: "n0",
+      path: "work/n0",
+      kind: "task",
+      state: "triggered",
+      gate: "human",
+      budgetJson: JSON.stringify({ per_day_usd: 5 }),
+      createdAt: FIXED_MS,
+      updatedAt: FIXED_MS,
+    });
+    // ...and $6 ALREADY metered today (a durable budget.metered, as F9 recovery leaves it in the index by
+    // mount time). ts = now so it falls in the current UTC day the mount's `Date.now()` bucket reads.
+    await h.db.insert(event).values({
+      seq: 1,
+      sessionId: "r-prior",
+      ts: Date.now(),
+      actor: "system",
+      type: EVENT_TYPES.BUDGET_METERED,
+      payload: JSON.stringify({ session: "r-prior", usd: 6, tokens: 100 }),
+    });
+
+    const config = { ...loadConfig({}), workspace: ws, mockModel: true };
+    const mock = createMockModel({ fallback: { body: anthropicBody("should never forward") } });
+    const dispatch = await mountDispatch({
+      db: h.db,
+      config,
+      upstream: mock,
+      mintRunId: () => "r1",
+    });
+    mounts.push(dispatch);
+    const out = await dispatch.supervisor.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const res = await out.reaped;
+
+    // The mount seeded dayTotalUsd=6 (> the $5 cap), so the child's FIRST proxy call is refused IN-PATH
+    // (402) → budget halt → exit 10 → the supervisor parks the run BLOCKED. Dropping `{ dayTotalUsd }` at
+    // the mount (dispatch.ts) resets the seed to 0 → the call is NOT refused → the run completes "review":
+    // this assertion is what turns that regression RED. The derive-helper unit test alone cannot see it.
+    expect(res.sessionStatus).toBe("blocked");
+    // Anti-vacuity: the refusal fired in-path BEFORE any forward — the mock (upstream) served ZERO calls.
+    expect(mock.calls.length).toBe(0);
   });
 });
