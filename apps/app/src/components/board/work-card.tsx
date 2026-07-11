@@ -1,10 +1,18 @@
-// WorkCard (BRO-1780) — one node on the board. Matte Card (glass is forbidden on cards,
+// WorkCard (BRO-1780; M3 BRO-1825) — one node on the board. Matte Card (glass is forbidden on cards,
 // CLAUDE.md §Glass); the Undertow halo is the ONLY running signal (`running` prop wraps the
 // card, it stays matte); the plain-voice StatusBadge carries the state, accent-blue for
 // "Needs you", never red. No progress percentage — the receipt is the crumb, age, and run branch.
+//
+// M3 memoization (scope: "React.memo on list items"): `selectBoard` RE-DERIVES fresh WorkItem objects
+// every render (deriveWorkItem, s-dependent for ancestry), so item refs churn on every SSE event and a
+// bare React.memo (shallow ref compare) would still re-render every card. The comparator below compares
+// the fields this card actually RENDERS, so a card re-renders only when ITS visible content — or its
+// selection — changed; one node.updated no longer thrashes the whole grid. `onSelect` is assumed stable
+// (Board passes the state setter directly) so it is not compared.
 
 import type { WorkItem } from "@maestro/protocol";
 import { Card, cn, DotComet, StatusBadge, workStatusView } from "@maestro/ui";
+import { memo } from "react";
 import { relativeTime } from "./board-view";
 
 export interface WorkCardProps {
@@ -13,7 +21,7 @@ export interface WorkCardProps {
   onSelect: (id: string) => void;
 }
 
-export function WorkCard({ item, selected, onSelect }: WorkCardProps) {
+function WorkCardImpl({ item, selected, onSelect }: WorkCardProps) {
   const v = workStatusView(item.state, item.kind);
   const crumb = [item.initiative, item.project].filter(Boolean).join(" › ");
   const age = relativeTime(item.lastEventAt ?? item.updatedAt);
@@ -26,6 +34,9 @@ export function WorkCard({ item, selected, onSelect }: WorkCardProps) {
       tabIndex={0}
       aria-pressed={selected}
       data-testid="work-card"
+      // Stable DOM hook for the running state — the Undertow wrapper (`.bv-undertow`) carries no testid,
+      // so board-m3.pw.ts asserts the live running signal on this attribute (M3 done.check).
+      data-running={v.running ? "" : undefined}
       onClick={() => onSelect(item.id)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -57,3 +68,29 @@ export function WorkCard({ item, selected, onSelect }: WorkCardProps) {
     </Card>
   );
 }
+
+/** Re-render only when a field this card renders — or its selection — changed. Covers every visible
+ *  input: the status (state/kind → workStatusView), the crumb (initiative/project/path), the age
+ *  (lastEventAt/updatedAt), the title, and the run branch. Any node change bumps `updatedAt`, but the
+ *  crumb derives from ancestors (an ancestor rename need not bump this node's updatedAt), so the crumb
+ *  fields are compared explicitly rather than relying on updatedAt alone. */
+function areEqual(a: WorkCardProps, b: WorkCardProps): boolean {
+  const x = a.item;
+  const y = b.item;
+  return (
+    a.selected === b.selected &&
+    a.onSelect === b.onSelect &&
+    x.id === y.id &&
+    x.state === y.state &&
+    x.kind === y.kind &&
+    x.title === y.title &&
+    x.run === y.run &&
+    x.initiative === y.initiative &&
+    x.project === y.project &&
+    x.path === y.path &&
+    x.updatedAt === y.updatedAt &&
+    x.lastEventAt === y.lastEventAt
+  );
+}
+
+export const WorkCard = memo(WorkCardImpl, areEqual);

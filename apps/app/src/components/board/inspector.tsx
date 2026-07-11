@@ -1,0 +1,96 @@
+// Inspector (BRO-1825, M3 stub of the M5 panel) — the right panel, rung 3 of the disclosure ladder:
+// for VERIFYING, not operating (CLAUDE.md §disclosure ladder). Selection drives it — a selected work
+// item shows its RECEIPTS (run branch, verdict, reason, the gate "look", worker, age), never worktrees /
+// index.db / the engine room, and NEVER a progress percentage (CLAUDE.md §Work states: receipts, not
+// progress). This is the persistent ~45% panel M5 fills in with look/chat/activity tabs + the human
+// verbs (approve, send back, grant, point); M3 wires selection → a read-only receipts view.
+
+import type { WorkItem } from "@maestro/protocol";
+import { StatusBadge, workStatusView } from "@maestro/ui";
+import { relativeTime } from "./board-view";
+
+/** One receipt row — a labelled fact from the work item. `mono` for identifiers (the run branch). */
+function Receipt({ label, mono, children }: { label: string; mono?: boolean; children: string }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <dt className="text-muted-foreground text-xs">{label}</dt>
+      <dd className={mono ? "font-mono text-foreground text-xs" : "text-foreground text-sm"}>
+        {children}
+      </dd>
+    </div>
+  );
+}
+
+export function Inspector({ item }: { item: WorkItem | null }) {
+  if (item === null) {
+    return (
+      <aside
+        data-testid="inspector-empty"
+        aria-label="Inspector"
+        className="flex h-full items-center justify-center px-6 text-center text-muted-foreground text-sm"
+      >
+        Select work to see its receipts.
+      </aside>
+    );
+  }
+
+  const v = workStatusView(item.state, item.kind);
+  const crumb = [item.initiative, item.project].filter(Boolean).join(" › ");
+  const age = relativeTime(item.lastEventAt ?? item.updatedAt);
+
+  return (
+    <aside data-testid="inspector" aria-label="Inspector" className="flex flex-col gap-4">
+      <header className="flex flex-col gap-2">
+        <span className="truncate text-muted-foreground text-xs">{crumb || item.path}</span>
+        <h2 className="font-semibold text-foreground text-lg">{item.title}</h2>
+        <StatusBadge
+          status={v.tone}
+          pulse={v.pulse}
+          dot={v.running ? <span className="size-2 rounded-full bg-current" /> : undefined}
+        >
+          {v.label}
+        </StatusBadge>
+      </header>
+
+      {/* The gate "look" — what ran · what it decided · what it asks. The one card a "Needs you" item
+          leads with (FLOWS §F5); rendered as receipts, never as a control (verbs are M5's). */}
+      {item.look ? (
+        <section
+          data-testid="inspector-look"
+          className="flex flex-col gap-2 border-border border-t pt-3"
+        >
+          <Receipt label="Ran">{item.look.ran}</Receipt>
+          {item.look.decided.length > 0 ? (
+            <div className="flex flex-col gap-0.5">
+              <dt className="text-muted-foreground text-xs">Decided</dt>
+              <dd>
+                <ul className="flex flex-col gap-0.5 text-foreground text-sm">
+                  {item.look.decided.map((d) => (
+                    <li key={d}>{d}</li>
+                  ))}
+                </ul>
+              </dd>
+            </div>
+          ) : null}
+          {item.look.ask ? <Receipt label="Asks">{item.look.ask}</Receipt> : null}
+        </section>
+      ) : null}
+
+      <dl className="flex flex-col gap-3 border-border border-t pt-3">
+        {item.run ? (
+          <Receipt label="Branch" mono>
+            {item.run}
+          </Receipt>
+        ) : null}
+        {item.verdict ? <Receipt label="Verdict">{item.verdict}</Receipt> : null}
+        {item.reason ? <Receipt label="Reason">{item.reason}</Receipt> : null}
+        {item.worker ? <Receipt label="Worker">{item.worker.name}</Receipt> : null}
+        {age ? <Receipt label="Last event">{`${age} ago`}</Receipt> : null}
+      </dl>
+
+      <p className="mt-1 text-muted-foreground text-xs">
+        Full look, chat, and activity land with the inspector.
+      </p>
+    </aside>
+  );
+}
