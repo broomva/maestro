@@ -317,6 +317,31 @@ describe("recovery — D4 singleton lock", () => {
     expect(second.id).toBe("rt-2");
   });
 
+  test("a heartbeat after being stale-stolen does NOT clobber the stealer + signals ownership loss", async () => {
+    const ws = await makeWorkspace();
+    const lockPath = join(ws, ".maestro", "runtime.lock");
+    const lostTo: string[] = [];
+    // rt-1 holds the lock, with an ownership-loss callback wired in.
+    const first = await acquireRuntimeLock(lockPath, {
+      id: "rt-1",
+      now: () => 1000,
+      onOwnershipLost: (h) => lostTo.push(h),
+    });
+    // rt-1 pauses > staleMs; rt-2 presumes it dead and steals the lock.
+    const stealT = 1000 + DEFAULT_LOCK_STALE_MS + 1;
+    const second = await acquireRuntimeLock(lockPath, { id: "rt-2", now: () => stealT });
+    expect(second.id).toBe("rt-2");
+    // rt-1 resumes and heartbeats — it MUST re-read, see rt-2 owns the lock, and NOT overwrite it (the
+    // split-brain clobber). It signals ownership loss so the caller stands down.
+    await first.heartbeat();
+    expect((JSON.parse(await readFile(lockPath, "utf8")) as { id: string }).id).toBe("rt-2"); // intact
+    expect(lostTo).toEqual(["rt-2"]); // rt-1 told it lost ownership
+    // A subsequent heartbeat is a no-op (already stood down) — still rt-2, callback not re-fired.
+    await first.heartbeat();
+    expect((JSON.parse(await readFile(lockPath, "utf8")) as { id: string }).id).toBe("rt-2");
+    expect(lostTo).toEqual(["rt-2"]);
+  });
+
   test("two runtimes racing the SAME stale lock: exactly ONE steals it (atomic rename + verify, no double-acquire)", async () => {
     // The steal captures the stale inode via an ATOMIC `rename` (not rm-then-link) THEN re-validates the
     // captured record's freshness — closing both the loser's-rm-deletes-winner TOCTOU AND the capture-a-

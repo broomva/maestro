@@ -129,12 +129,18 @@ if (import.meta.main) {
   // `import ./index` never grabs a lock. A fresh lock held by a live runtime → refuse + exit(1).
   let lock: RuntimeLock | undefined;
   let lockHeartbeat: ReturnType<typeof setInterval> | undefined;
+  // Forward-declared so the ownership-loss callback (wired into the lock BEFORE `shutdown` is defined
+  // below) can stand the runtime down. If a heartbeat finds we were stale-stolen, another runtime owns
+  // the workspace — this instance must exit so single-writer (D4) is restored.
+  let standDown: (holderId: string) => void = () => {};
   {
     const { acquireRuntimeLock, DEFAULT_LOCK_HEARTBEAT_MS, RuntimeLockedError } = await import(
       "./runtime-lock"
     );
     try {
-      lock = await acquireRuntimeLock(config.lockPath);
+      lock = await acquireRuntimeLock(config.lockPath, {
+        onOwnershipLost: (holderId) => standDown(holderId),
+      });
     } catch (err) {
       if (err instanceof RuntimeLockedError) {
         console.error(`maestro runtime · refusing to start: ${err.message}`);
@@ -176,7 +182,7 @@ if (import.meta.main) {
   // Graceful shutdown — release the OS file watcher and the libSQL handle, then stop
   // accepting connections. Without this the recursive watcher keeps the process alive.
   let shuttingDown = false;
-  const shutdown = () => {
+  const shutdown = (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
     if (lockHeartbeat) clearInterval(lockHeartbeat);
@@ -184,8 +190,17 @@ if (import.meta.main) {
     watcher?.stop();
     handle?.client.close();
     server.stop();
-    process.exit(0);
+    process.exit(code);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown(0));
+  process.on("SIGTERM", () => shutdown(0));
+  // Lost the workspace lock (stale-stolen after a pause) → another runtime is live here. Stand down with
+  // a nonzero exit so a supervisor sees the abnormal handover; release() no-ops (it never deletes a
+  // stealer's lock), the heartbeat has already stopped refreshing.
+  standDown = (holderId) => {
+    console.error(
+      `maestro runtime · lost the workspace lock to runtime ${holderId} — standing down (D4 single-writer)`,
+    );
+    shutdown(1);
+  };
 }

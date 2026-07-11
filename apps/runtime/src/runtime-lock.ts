@@ -76,6 +76,11 @@ export interface AcquireOptions {
   id?: string;
   /** A lock older than this is stealable (default DEFAULT_LOCK_STALE_MS). */
   staleMs?: number;
+  /** Called ONCE if a heartbeat discovers the lock is now held by ANOTHER runtime (we were stale-stolen
+   *  after a pause > staleMs). The caller should stand down — two runtimes on one workspace is the D4
+   *  violation this signals — so single-writer is restored. Best-effort: absent → heartbeat still refuses
+   *  to clobber the stealer, it just does not halt. */
+  onOwnershipLost?: (holderId: string) => void;
 }
 
 /**
@@ -165,13 +170,27 @@ export async function acquireRuntimeLock(
     await rm(tmp, { force: true });
   }
 
+  let lost = false;
   return {
     id,
     async heartbeat(): Promise<void> {
+      if (lost) return; // already stood down — never refresh a lock we no longer own
+      // GUARD lost ownership before writing: a runtime that paused > staleMs may have been stale-stolen,
+      // and an UNCONDITIONAL refresh would clobber the stealer's lock → two runtimes on one workspace
+      // (split-brain, CodeRabbit BRO-1814). Re-read: if ANOTHER id owns it now, do NOT write — signal
+      // loss so the caller stands down (restoring single-writer). A missing/malformed lock is nobody's,
+      // so re-asserting it does not clobber a holder — refresh normally. (This narrows but cannot fully
+      // close the read→rename window; true fencing needs monotonic tokens at the resource layer — the
+      // documented D4 scope is best-effort mutual exclusion under staleMs > max-pause, not consensus.)
+      const cur = await readLock(lockPath);
+      if (cur !== null && cur.id !== id) {
+        lost = true;
+        opts.onOwnershipLost?.(cur.id);
+        return;
+      }
       // ATOMIC refresh: write a temp then `rename` over lockPath (atomic replace — no truncate window a
       // concurrent acquire could read as empty + steal). Best-effort: a failure is swallowed, next tick
-      // retries. (A heartbeat that lands AFTER we were stale-stolen could clobber the stealer — bounded
-      // by staleMs > max pause, the standard file-lock limit; D4 is mutual exclusion, not consensus.)
+      // retries.
       const t = tmpPath();
       try {
         await writeFile(t, record(), "utf8");
