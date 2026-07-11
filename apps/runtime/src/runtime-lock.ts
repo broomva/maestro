@@ -110,19 +110,54 @@ export async function acquireRuntimeLock(
       if (existing !== null && existing.id !== id && now() - existing.heartbeat < staleMs) {
         throw new RuntimeLockedError(existing.id, now() - existing.heartbeat); // fresh + other → refuse
       }
-      // STALE (dead prior runtime), OURS (idempotent), or unreadable → steal: remove + retry the link.
-      await rm(lockPath, { force: true });
+      // STALE (dead prior runtime), OURS (idempotent), or unreadable → steal it ATOMICALLY. `rm`-then-
+      // `link` is a non-atomic TOCTOU (P20 BRO-1814): two runtimes both observing the SAME stale lock each
+      // `rm` then `link`, and the loser's `rm` deletes the winner's just-linked lock → BOTH acquire.
+      // Instead CAPTURE the stale inode by renaming it aside to a unique per-acquirer name: `rename` is
+      // atomic, so of N racing stealers exactly ONE rename of lockPath succeeds; the others' rename fails
+      // (lockPath already moved). Only the capturer `link`s its fresh lock into the now-free path; a loser
+      // re-inspects and refuses/contends. `link` stays the final arbiter, so even a fresh runtime that
+      // first-tries `link` into the brief post-rename gap funnels through its EEXIST — never two holders.
+      const dead = `${lockPath}.dead.${id}.${randomBytes(4).toString("hex")}`;
       try {
-        await link(tmp, lockPath);
+        await rename(lockPath, dead); // atomic capture — exactly one racing stealer wins this
       } catch {
-        // A racing stealer linked between our rm and link. Refuse if it is a fresh other; else surface a
-        // retryable contention error rather than risk a double-acquire by forcing.
+        // Lost the capture race (another stealer moved lockPath first) or it vanished. Re-inspect: a fresh
+        // other holder → refuse; otherwise a stealer is mid-capture → retryable contention.
         const raced = await readLock(lockPath);
         if (raced !== null && raced.id !== id && now() - raced.heartbeat < staleMs) {
           throw new RuntimeLockedError(raced.id, now() - raced.heartbeat);
         }
         throw new Error("runtime lock contended during steal — retry startup");
       }
+      // RE-VALIDATE the captured record (the TOCTOU `existing` didn't close): between our stale-read above
+      // and this rename, a racing stealer may have stolen + refreshed the lock, so what we atomically
+      // captured could now be a FRESH other lock — stealing it would double-acquire. The captured record
+      // is frozen at `dead` (we hold its only name) so this freshness re-check is stable. Fresh + other →
+      // RESTORE it (link it back, non-clobbering) and refuse; null/ours/stale → genuinely stealable.
+      const captured = await readLock(dead);
+      if (captured !== null && captured.id !== id && now() - captured.heartbeat < staleMs) {
+        try {
+          await link(dead, lockPath); // put the fresh holder's record back (EEXIST if a newer one exists)
+        } catch {
+          // a newer holder already occupies lockPath — leave it; our captured copy is superseded
+        }
+        await rm(dead, { force: true });
+        throw new RuntimeLockedError(captured.id, now() - captured.heartbeat);
+      }
+      try {
+        await link(tmp, lockPath); // lockPath is free (we captured it) — link our fresh lock atomically
+      } catch {
+        // A fresh runtime `link`ed into the post-rename gap before us — it holds the lock now. Refuse if
+        // fresh+other, else retryable contention. Clean up the stale inode we captured either way.
+        await rm(dead, { force: true });
+        const raced = await readLock(lockPath);
+        if (raced !== null && raced.id !== id && now() - raced.heartbeat < staleMs) {
+          throw new RuntimeLockedError(raced.id, now() - raced.heartbeat);
+        }
+        throw new Error("runtime lock contended during steal — retry startup");
+      }
+      await rm(dead, { force: true }); // drop the captured stale record — we hold the fresh lock now
     }
   } finally {
     // The link left a second name for the temp inode; unlink the temp (lockPath keeps the content). On a

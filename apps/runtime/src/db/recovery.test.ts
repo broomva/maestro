@@ -61,6 +61,21 @@ async function seedIndexed(
     payload: Object.keys(payload).length > 0 ? JSON.stringify(payload) : null,
   });
 }
+/** Seed an index `event` row with a VERBATIM payload string — models the tee's live insert, which stores
+ *  `JSON.stringify(payload)` (so an empty `{}` payload is indexed as the STRING "{}", NOT null; stdio.ts
+ *  line 449). Used to reproduce the eventKey byte-divergence seedIndexed's empty→null collapse would hide. */
+async function seedIndexedRaw(
+  h: IndexHandle,
+  sessionId: string,
+  type: string,
+  payload: string | null,
+  tsMs = 1_700_000_000_000,
+  actor = "agent",
+): Promise<void> {
+  await h.db
+    .insert(event)
+    .values({ sessionId, ts: tsMs, actor: actor as never, type: type as never, payload });
+}
 async function typeCount(h: IndexHandle, sessionId: string, type: string): Promise<number> {
   const rows = await h.db
     .select({ t: event.type })
@@ -169,6 +184,37 @@ describe("recovery — journal replay (F9.1, no event loss; the CO-WRITER realit
     expect(await typeCount(h, "d", "run.orphaned")).toBe(1);
     expect(await typeCount(h, "d", "run.beat")).toBe(1); // the journal event was inserted
   });
+
+  test('an EMPTY-{} payload event indexed as "{}" is NOT duplicated (eventKey canonicalizes {}↔null)', async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedSession(h, "e", "blocked");
+    const T = 1_700_000_000_000;
+    // The tee indexed an event whose payload was an empty object → stored as the STRING "{}" (stdio.ts
+    // 449). The journal line for the same event carries NO payload keys → parseJournalLine reconstructs
+    // `null`. Raw string keys diverge ("{}" vs "") — the P20 minor. canonicalPayload collapses both to "".
+    await seedIndexedRaw(h, "e", "run.beat", "{}", T);
+    await writeRunJournal(ws, "e", [journalLine("run.beat", {}, T)]);
+    const r = await recoverOnStartup(h.db, { workspace: ws, now: () => T });
+    expect(r.replayedEvents).toBe(0); // recognized as already-indexed — NOT re-inserted
+    expect(await eventCount(h, "e")).toBe(1); // no duplicate (was 2 before the fix)
+  });
+
+  test("a RESERVED-KEY payload (a key named type) is NOT duplicated (journal drops it; both sides canonicalize)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedSession(h, "f", "blocked");
+    const T = 1_700_000_000_000;
+    // The tee indexed the full payload {type:"custom",n:1}. On the wire the journal line is
+    // {...payload, ts, actor, type} so the envelope's type OVERWRITES payload.type → the "custom" is LOST;
+    // parseJournalLine reconstructs {n:1}. Index "{\"type\":\"custom\",\"n\":1}" vs journal "{\"n\":1}"
+    // — canonicalPayload drops reserved keys on BOTH sides → both "{\"n\":1}" → matched, no dup.
+    await seedIndexedRaw(h, "f", "run.beat", JSON.stringify({ type: "custom", n: 1 }), T);
+    await writeRunJournal(ws, "f", [journalLine("run.beat", { type: "custom", n: 1 }, T)]);
+    const r = await recoverOnStartup(h.db, { workspace: ws, now: () => T });
+    expect(r.replayedEvents).toBe(0); // recognized as already-indexed — NOT re-inserted
+    expect(await eventCount(h, "f")).toBe(1); // no duplicate (was 2 before the fix)
+  });
 });
 
 describe("recovery — budget reconcile (D5 derive-and-max, through the journal→index path)", () => {
@@ -269,6 +315,35 @@ describe("recovery — D4 singleton lock", () => {
       now: () => 1000 + DEFAULT_LOCK_STALE_MS + 1,
     });
     expect(second.id).toBe("rt-2");
+  });
+
+  test("two runtimes racing the SAME stale lock: exactly ONE steals it (atomic rename + verify, no double-acquire)", async () => {
+    // The steal captures the stale inode via an ATOMIC `rename` (not rm-then-link) THEN re-validates the
+    // captured record's freshness — closing both the loser's-rm-deletes-winner TOCTOU AND the capture-a-
+    // just-refreshed-lock TOCTOU. Run the concurrent race many times: correct code yields exactly one
+    // holder EVERY time (a naive rename-without-reverify reproduced a double-acquire at ~2% in the harness).
+    const ROUNDS = 25;
+    const t = () => 1000 + DEFAULT_LOCK_STALE_MS + 1;
+    for (let round = 0; round < ROUNDS; round++) {
+      const ws = await makeWorkspace();
+      const lockPath = join(ws, ".maestro", "runtime.lock");
+      await acquireRuntimeLock(lockPath, { id: "rt-1", now: () => 1000 });
+      const settled = await Promise.allSettled([
+        acquireRuntimeLock(lockPath, { id: `rt-2-${round}`, now: t }),
+        acquireRuntimeLock(lockPath, { id: `rt-3-${round}`, now: t }),
+      ]);
+      const won = settled.filter((s) => s.status === "fulfilled");
+      expect(won).toHaveLength(1); // exactly one holder — never two, never zero
+      // The on-disk lock belongs to the single winner (no torn/overwritten record).
+      const onDisk = JSON.parse(await readFile(lockPath, "utf8")) as { id: string };
+      const winnerId = (won[0] as PromiseFulfilledResult<{ id: string }>).value.id;
+      expect(onDisk.id).toBe(winnerId);
+      // No leftover .tmp or .dead capture files (cleaned on both the win and the loss paths).
+      const leftovers = (await readdir(join(ws, ".maestro"))).filter(
+        (n) => n.endsWith(".tmp") || n.includes(".dead."),
+      );
+      expect(leftovers).toEqual([]);
+    }
   });
 
   test("release frees the lock for re-acquire; a stealer's lock is never deleted by the old holder", async () => {
