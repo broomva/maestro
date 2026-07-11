@@ -28,7 +28,9 @@ import {
   type BeatState,
   beatExitEvents,
   evaluateBeat,
+  type ProgressDoc,
   prepareRestart,
+  readProgress,
 } from "../harness/stop-conditions";
 import { executeTool, parseToolUses, TOOL_SCHEMAS, type ToolUse, toolResultBlock } from "./tools";
 
@@ -101,6 +103,16 @@ export function promptFor(contract: WorkContract | null, session: string): strin
   }
   const done = contract.done ? ` Done when: ${JSON.stringify(contract.done)}.` : "";
   return `Work on this ${contract.kind} (id ${contract.id}).${done} Describe your first step.`;
+}
+
+/** On a fresh-context RESPAWN, fold the checkpoint (progress.md) into the opening prompt so the model
+ *  CONTINUES from the recorded state instead of restarting the work — the disk-memory continuity that
+ *  makes a restart lossless (AUTONOMY §3). Empty string on a fresh run (no checkpoint). */
+function resumeSuffix(checkpoint: ProgressDoc | null): string {
+  if (checkpoint === null) return "";
+  const left =
+    checkpoint.whatsLeft.length > 0 ? ` Remaining: ${JSON.stringify(checkpoint.whatsLeft)}.` : "";
+  return ` You are RESUMING after a fresh-context restart (from beat ${checkpoint.iteration}). State so far: ${checkpoint.stateOfTheWorld}.${left} Continue from there; do not restart completed work.`;
 }
 
 /** Pull the assistant text out of an Anthropic Messages response body — the `content[]` text blocks,
@@ -296,9 +308,17 @@ async function main(): Promise<never> {
 
   const contract = await readContract();
   const budget: Budget = contract?.budget ?? {};
-  const messages: Msg[] = [{ role: "user", content: promptFor(contract, session) }];
+  // On a fresh-context RESPAWN the run dir already holds a progress.md checkpoint the prior attempt wrote
+  // (prepareRestart). Resume from it: fold its state into the opening prompt so the model continues, and
+  // seed the iteration counter so the run's iteration_cap accumulates ACROSS respawns (it spans attempts,
+  // not processes — BRO-1795). A fresh run has no checkpoint → resumedFrom 0, bare prompt.
+  const checkpoint = await readProgress(runDir);
+  const resumedFrom = checkpoint?.iteration ?? 0;
+  const messages: Msg[] = [
+    { role: "user", content: promptFor(contract, session) + resumeSuffix(checkpoint) },
+  ];
   const state: BeatState = {
-    iterations: 0,
+    iterations: resumedFrom,
     budget,
     // spentUsd/dayUsd stay 0: the child has no channel to the running spend in this slice, so the
     // engine's end-of-beat `budget` backstop is inert — the IN-PATH proxy guard (402, BRO-1788) is the
@@ -315,7 +335,7 @@ async function main(): Promise<never> {
   const base = await gitHead(cwd); // the run base — beat signatures diff vs this, so commits count
   let prevSig = (await beatSignal(cwd, base)).sig;
 
-  for (let beat = 1; beat <= MAX_BEATS; beat++) {
+  for (let beat = resumedFrom + 1; beat <= resumedFrom + MAX_BEATS; beat++) {
     const turn = await callProxy(messages);
     if (turn.kind === "error") {
       await emit({

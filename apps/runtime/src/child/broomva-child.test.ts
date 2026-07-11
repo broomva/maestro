@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EVENT_TYPES } from "@maestro/protocol";
 import { and, eq } from "drizzle-orm";
+import { loadConfig, type RuntimeConfig } from "../config";
 import { type IndexHandle, openIndex } from "../db/client";
 import { event, node } from "../db/schema";
 import { git } from "../git/git";
@@ -109,6 +110,9 @@ async function harness(
     kind?: string;
     /** Extra env merged into the spawned child (test-only, e.g. BROOMVA_CONTEXT_CEILING). */
     childEnvExtra?: Record<string, string>;
+    /** Runtime config for the supervisor — e.g. contextCeilingTokens (passed to the child via the
+     *  spawn-contract ALLOWLIST, the production path, not a test-only env). */
+    config?: RuntimeConfig;
   } = {},
 ) {
   const ws = await makeWorkspace();
@@ -136,6 +140,7 @@ async function harness(
     spawnChild: makeChildSpawn(opts.childEnvExtra),
     mintRunId: () => "r1",
     hostEnv: { PATH: process.env.PATH },
+    config: opts.config,
   });
   return { h, sup, mock };
 }
@@ -459,6 +464,38 @@ describe("broomva-child slice 2b-i — the F3 beat loop + tool execution (zero t
     const progress = await Bun.file(join(runDir, "progress.md")).text();
     expect(progress).toContain("context ceiling");
     expect(progress).toContain("r1"); // the session id
+  });
+
+  test("a respawned child RESUMES from progress.md — folds the checkpoint into the prompt (ceiling via config allowlist)", async () => {
+    // The full lossless-restart cycle through the PRODUCTION path: the ceiling comes from the runtime
+    // config → the supervisor's spawn-contract allowlist → BROOMVA_CONTEXT_CEILING (NOT a test-only env).
+    // Attempt 1 hits the ceiling → checkpoints → the supervisor respawns → attempt 2 READS progress.md and
+    // folds its state into the opening prompt (resume, not restart-from-scratch). A known run dir lets the
+    // checkpoint round-trip; the script exhausts to a text fallback so attempt 2 completes.
+    const runDir = await mkdtemp(join(tmpdir(), "maestro-resume-"));
+    tmps.push(runDir);
+    const { sup, mock } = await harness({
+      config: { ...loadConfig({}), contextCeilingTokens: 50 }, // ceiling via the config→allowlist path
+      childEnvExtra: { BROOMVA_RUN_DIR: runDir }, // known run dir so the checkpoint round-trips
+      mock: {
+        script: [{ body: anthropicToolUse("tu1", "shell", { command: "echo hi > grew.txt" }) }],
+        fallback: { body: anthropicBody("done") },
+      },
+    });
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const reaped = await out.reaped;
+
+    expect(reaped.respawns).toBe(1);
+    expect(reaped.exitCode).toBe(0);
+    // Attempt 2's FIRST request (mock.calls[1]) folded the checkpoint into the prompt → the child READ
+    // progress.md and RESUMED (a from-scratch restart would omit it). A regression that skips readProgress
+    // leaves the resume text absent → this fails.
+    const resumeCall = mock.calls[1];
+    if (!resumeCall) throw new Error("no respawn request");
+    const prompt = JSON.stringify(resumeCall.payload ?? {});
+    expect(prompt).toContain("RESUMING");
+    expect(prompt).toContain("context ceiling"); // the checkpoint's state-of-the-world, folded in
   });
 
   test("a checkpoint-write failure on restart still lands a receipt (exit 1), not a receiptless crash", async () => {
