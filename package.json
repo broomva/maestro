@@ -16,7 +16,9 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "check:icons": "bun run scripts/check-icons.ts",
-    "check": "biome check . && bun run typecheck && bun run check:icons"
+    "check": "biome check . && bun run typecheck && bun run check:icons",
+    "test": "bun test",
+    "test:loops": "bun test apps/runtime/src/proxy/loops.test.ts apps/runtime/src/proxy/mock-model.test.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2",
