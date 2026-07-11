@@ -108,6 +108,9 @@ const app = createApp(
   index,
   watcher?.nudge,
   (runId) => dispatch?.kill(runId) ?? false,
+  // F10 chat (BRO-1822) — lazy: `dispatch` is mounted below (after recovery, mock-model only), so the
+  // chat route reads it at request time. Until then it returns `unsupported_intent`.
+  () => dispatch,
 );
 
 /** Exported for embedding/tests; the binary serves it when run as the entrypoint. */
@@ -195,7 +198,7 @@ if (import.meta.main) {
   if (index && config.mockModel) {
     try {
       const { mountDispatch } = await import("./dispatch");
-      dispatch = mountDispatch({ db: index, config, hostEnv: process.env });
+      dispatch = await mountDispatch({ db: index, config, hostEnv: process.env });
       console.log(
         `maestro runtime · dispatch mounted (mock-model) · proxy ${dispatch.proxyServer.url}`,
       );

@@ -117,7 +117,7 @@ async function harness(opts: { mock?: MockModelOptions } = {}) {
   await seedNode(h, "n0");
   const config = { ...loadConfig({}), workspace: ws, mockModel: true };
   const mock = createMockModel(opts.mock);
-  const dispatch = mountDispatch({ db: h.db, config, upstream: mock, mintRunId: () => "r1" });
+  const dispatch = await mountDispatch({ db: h.db, config, upstream: mock, mintRunId: () => "r1" });
   mounts.push(dispatch);
   return { h, dispatch, mock, ws };
 }

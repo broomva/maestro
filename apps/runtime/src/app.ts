@@ -8,11 +8,13 @@
 import { MAESTRO_PROTOCOL_VERSION, X_MAESTRO_PROTOCOL } from "@maestro/protocol";
 import { Hono } from "hono";
 import pkg from "../package.json";
+import { registerChatRoutes } from "./api/chat";
 import { registerIntentRoutes } from "./api/intents";
 import { registerReadRoutes } from "./api/reads";
 import { registerStreamRoutes } from "./api/stream";
 import type { RuntimeConfig } from "./config";
 import type { IndexDb } from "./db/client";
+import type { DispatchRuntime } from "./dispatch";
 
 /** The runtime's own version — the self-host binary's version, from package.json. */
 export const RUNTIME_VERSION = pkg.version;
@@ -49,6 +51,12 @@ export function createApp(
   reconcile?: () => void,
   /** Kill seam for the F8 kill intent — the supervisor's `kill` (BRO-1801). Absent → kill intent 501s. */
   kill?: (sessionId: string) => boolean,
+  /**
+   * F10 chat seam (BRO-1822) — a LAZY accessor for the mounted dispatch runtime. Lazy because the
+   * supervisor is mounted AFTER createApp runs (index.ts), and only in mock-model mode; the chat route
+   * reads it at request time. Absent / returning undefined → chat returns `unsupported_intent` 501.
+   */
+  dispatch?: () => DispatchRuntime | undefined,
 ) {
   const app = new Hono();
 
@@ -74,6 +82,11 @@ export function createApp(
       heartbeatMs: config.streamHeartbeatMs,
     });
     registerIntentRoutes(app, { db: index, workspace: config.workspace, reconcile, kill });
+    registerChatRoutes(app, {
+      db: index,
+      dispatch: dispatch ?? (() => undefined),
+      pollMs: config.streamPollMs,
+    });
   }
 
   return app;

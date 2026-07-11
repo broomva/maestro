@@ -92,7 +92,7 @@ export interface StreamDeps {
  * explicitly. Without this, a 24/7 connection accretes one dead listener per poll
  * on the request-lifetime signal (MaxListeners warning + O(n) eventual abort).
  */
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
     if (signal.aborted) return resolve();
     let timer: ReturnType<typeof setTimeout>;
