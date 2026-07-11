@@ -215,6 +215,30 @@ describe("recovery — journal replay (F9.1, no event loss; the CO-WRITER realit
     expect(r.replayedEvents).toBe(0); // recognized as already-indexed — NOT re-inserted
     expect(await eventCount(h, "f")).toBe(1); // no duplicate (was 2 before the fix)
   });
+
+  test("skips literal-null / out-of-enum journal lines without aborting recovery (robust parse)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedSession(h, "g", "blocked");
+    const T = 1_700_000_000_000;
+    const iso = new Date(T).toISOString();
+    // A torn/garbage journal: the literal `null` token (destructuring it would THROW → abort the whole
+    // recovery pass), a bare scalar, an out-of-enum actor, an out-of-enum type — ALL must be skipped, not
+    // crash — around two valid events that must still be replayed.
+    await writeRunJournal(ws, "g", [
+      "null",
+      "12345",
+      journalLine("run.beat", { i: 0 }, T),
+      JSON.stringify({ ts: iso, actor: "martian", type: "run.beat" }), // out-of-enum actor
+      JSON.stringify({ ts: iso, actor: "agent", type: "not.a.namespace" }), // out-of-enum type
+      journalLine("agent.said", { text: "hi" }, T),
+    ]);
+    const r = await recoverOnStartup(h.db, { workspace: ws, now: () => T });
+    expect(r.replayedEvents).toBe(2); // only the 2 valid events — 4 bad lines skipped, no crash
+    expect(await eventCount(h, "g")).toBe(2);
+    expect(await typeCount(h, "g", "run.beat")).toBe(1);
+    expect(await typeCount(h, "g", "agent.said")).toBe(1);
+  });
 });
 
 describe("recovery — budget reconcile (D5 derive-and-max, through the journal→index path)", () => {
@@ -369,6 +393,35 @@ describe("recovery — D4 singleton lock", () => {
       );
       expect(leftovers).toEqual([]);
     }
+  });
+
+  test("post-capture reverify: a steal+refresh landing after the stale-read is NOT stolen (deterministic)", async () => {
+    // DETERMINISTIC guard for the headline TOCTOU fix (the 25-round test above is probabilistic). The
+    // `_afterStaleRead` seam fires EXACTLY between rt-2's stale-read and its rename-capture: there, rt-3
+    // fully steals + holds the lock fresh. rt-2's rename then captures rt-3's FRESH lock — the reverify
+    // branch MUST detect fresh+other, restore it, and refuse. Without reverify rt-2 would link into the
+    // freed path and double-acquire (rt-3 already holds it).
+    const ws = await makeWorkspace();
+    const lockPath = join(ws, ".maestro", "runtime.lock");
+    await acquireRuntimeLock(lockPath, { id: "rt-1", now: () => 1000 });
+    const stealT = 1000 + DEFAULT_LOCK_STALE_MS + 1;
+    await expect(
+      acquireRuntimeLock(lockPath, {
+        id: "rt-2",
+        now: () => stealT,
+        _afterStaleRead: async () => {
+          // rt-3 steals the stale rt-1 lock cleanly (no seam of its own) and holds it fresh.
+          await acquireRuntimeLock(lockPath, { id: "rt-3", now: () => stealT });
+        },
+      }),
+    ).rejects.toBeInstanceOf(RuntimeLockedError);
+    // rt-3's fresh lock survived intact — rt-2 restored + refused, never stole it (no double-acquire).
+    expect((JSON.parse(await readFile(lockPath, "utf8")) as { id: string }).id).toBe("rt-3");
+    // No orphaned capture/temp files from rt-2's aborted steal.
+    const leftovers = (await readdir(join(ws, ".maestro"))).filter(
+      (n) => n.endsWith(".tmp") || n.includes(".dead."),
+    );
+    expect(leftovers).toEqual([]);
   });
 
   test("release frees the lock for re-acquire; a stealer's lock is never deleted by the old holder", async () => {

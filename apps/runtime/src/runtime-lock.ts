@@ -81,6 +81,10 @@ export interface AcquireOptions {
    *  violation this signals — so single-writer is restored. Best-effort: absent → heartbeat still refuses
    *  to clobber the stealer, it just does not halt. */
   onOwnershipLost?: (holderId: string) => void;
+  /** TEST SEAM (internal): awaited after the stale-lock decision but BEFORE the rename-capture, so a test
+   *  can deterministically interleave a competing steal+refresh and drive the post-capture reverify branch
+   *  (`captured is now fresh+other → restore + refuse`). Undefined in production. */
+  _afterStaleRead?: () => Promise<void>;
 }
 
 /**
@@ -123,6 +127,7 @@ export async function acquireRuntimeLock(
       // (lockPath already moved). Only the capturer `link`s its fresh lock into the now-free path; a loser
       // re-inspects and refuses/contends. `link` stays the final arbiter, so even a fresh runtime that
       // first-tries `link` into the brief post-rename gap funnels through its EEXIST — never two holders.
+      await opts._afterStaleRead?.(); // test seam: interleave a competing steal here (no-op in production)
       const dead = `${lockPath}.dead.${id}.${randomBytes(4).toString("hex")}`;
       try {
         await rename(lockPath, dead); // atomic capture — exactly one racing stealer wins this
@@ -204,13 +209,29 @@ export async function acquireRuntimeLock(
       }
     },
     async release(): Promise<void> {
-      const cur = await readLock(lockPath);
-      if (cur !== null && cur.id !== id) return; // a stealer owns it now — never delete their lock
+      // CAPTURE-based release (symmetric to the steal path): a naive readLock-then-`rm(lockPath)` is a
+      // TOCTOU — a steal completing between the read and the rm makes the rm delete the STEALER's fresh
+      // lock (P20 BRO-1814). Instead atomically move the lock aside, then delete only our OWN captured
+      // copy: if what we captured is a stealer's lock, link it BACK (never delete their lock) and drop our
+      // extra name. We only ever `rm` the uniquely-named capture file, never the shared lockPath.
+      const grave = `${lockPath}.rel.${id}.${randomBytes(4).toString("hex")}`;
       try {
-        await rm(lockPath, { force: true });
+        await rename(lockPath, grave); // atomic capture (ENOENT → already released/gone → nothing to do)
       } catch {
-        // already gone / unlink race — release is best-effort + idempotent
+        return;
       }
+      const cur = await readLock(grave);
+      if (cur !== null && cur.id !== id) {
+        // A stealer owns it now — restore their lock (non-clobbering) rather than dropping it.
+        try {
+          await link(grave, lockPath);
+        } catch {
+          // a newer holder already re-linked lockPath — leave it
+        }
+      }
+      // Ours (or malformed) → dropping `grave` IS the release (lockPath stays absent). Stealer → this drops
+      // only our extra name; lockPath keeps the restored record.
+      await rm(grave, { force: true });
     },
   };
 }
