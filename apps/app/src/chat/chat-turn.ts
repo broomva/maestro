@@ -34,6 +34,28 @@ export interface ChatTurnStep {
   status: ChatStatus;
 }
 
+/**
+ * Settle any still-"streaming" text/reasoning part of the LAST assistant message to "done". On a clean
+ * finish the reducer already flipped them (text-end / reasoning-end arrived); on an ABORT — the stop verb,
+ * or a truncated stream — those end chunks never arrive, so the trailing part would keep its blinking
+ * caret forever, falsely signalling "still typing" after the turn is settled (P20 slice-B round-2 MAJOR).
+ * Pure; returns the SAME reference when nothing was streaming (reference-stability for React). Only bare
+ * "streaming" parts (text/reasoning) are touched — a tool part uses "input-streaming"/… and an interrupted
+ * tool honestly stays mid-state, so it is left alone.
+ */
+export function finalizeStreamingParts(messages: readonly ChatMessage[]): readonly ChatMessage[] {
+  const li = messages.length - 1;
+  const last = messages[li];
+  if (!last || last.role !== "assistant") return messages;
+  if (!last.parts.some((p) => p.state === "streaming")) return messages;
+  const next = messages.slice();
+  next[li] = {
+    ...last,
+    parts: last.parts.map((p) => (p.state === "streaming" ? { ...p, state: "done" } : p)),
+  };
+  return next;
+}
+
 /** Options for a turn — the abort signal (the stop verb) and the transient-data sink. */
 export interface RunChatTurnOptions {
   signal?: AbortSignal;
@@ -69,5 +91,7 @@ export async function* runChatTurn(
     messages = bvApplyChunk(messages, chunk);
     yield { messages, status: "streaming" };
   }
-  yield { messages, status: "ready" };
+  // On loop exit — clean finish OR an abort that dropped the trailing text-end — settle any part left
+  // "streaming" so the caret stops (P20 round-2 MAJOR). Idempotent when the stream ended normally.
+  yield { messages: finalizeStreamingParts(messages), status: "ready" };
 }

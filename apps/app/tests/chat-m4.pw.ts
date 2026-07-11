@@ -121,6 +121,29 @@ test("a CLIENT-SIDE session switch tears the old one down — the new session ne
   await expect(page.getByTestId("session-view")).not.toContainText("queued it to your gate.");
 });
 
+test("clicking Stop mid-stream halts the turn AND settles the caret (no perpetual blink) — P20 round-2 MAJOR", async ({
+  page,
+}) => {
+  // Widen the per-chunk delay so there is a deterministic window with a text part mid-stream (caret on)
+  // to click Stop in. Without the finalizeStreamingParts fix, the stopped text part stays state:"streaming"
+  // and .bv-msg--streaming persists forever — this test's caret-gone assertion fails in that world.
+  await page.goto("/session/orchestrator?fixture=1&step=250");
+  const thread = page.locator('section[aria-label="Thread"] [data-testid="chat-feed"]');
+  await page.getByPlaceholder("Message Maestro").fill("run the build");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // Wait until a text part is actively streaming (the blinking caret is on), then Stop mid-stream.
+  await expect(thread.locator(".bv-msg--streaming")).toBeVisible();
+  await page.getByRole("button", { name: "Stop" }).click();
+
+  // The turn settles: the verb returns to Send, and the caret is GONE (the streaming class is removed) —
+  // the stopped message no longer falsely signals "still typing". Whatever text had arrived remains.
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
+  await expect(thread.locator(".bv-msg--streaming")).toHaveCount(0);
+  await expect(thread.getByTestId("chat-assistant-text")).toContainText("Listed the files.");
+});
+
 test("navigating away mid-session and back yields a fresh mount, no stale bleed, no crash", async ({
   page,
 }) => {

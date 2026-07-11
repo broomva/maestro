@@ -69,7 +69,9 @@ describe("MessageRow — per-part rendering", () => {
     expect(out).toContain("bv-toolpart");
     expect(out).toContain("shell");
     expect(out).toContain('data-done="true"'); // output-available → done
-    expect(out).toContain("done");
+    // Assert the VISIBLE label text, not just the substring "done" (which also lives in the `data-done`
+    // attribute name — a tautology): the state span's element text must read "done".
+    expect(out).toMatch(/data-done="true">done</);
     // JSON.stringify(input) is rendered as text, so `"` is HTML-escaped to `&quot;` in the markup.
     expect(out).toContain("command");
     expect(out).toContain("ls");
@@ -83,7 +85,7 @@ describe("MessageRow — per-part rendering", () => {
       parts: [{ type: "tool-shell", toolCallId: "c1", state: "input-available", input: {} }],
     };
     const out = html(<MessageRow msg={msg} />);
-    expect(out).toContain("running");
+    expect(out).toMatch(/data-done="false">running</); // the visible label, not a substring coincidence
     expect(out).toContain('data-done="false"');
   });
 

@@ -11,7 +11,7 @@ import { Composer } from "@maestro/ui";
 import { useParams } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { ChatFeed } from "@/chat/chat-feed";
-import { FixtureChatTransport, fixtureRequested } from "@/chat/fixture-transport";
+import { FixtureChatTransport, fixtureRequested, fixtureStepMs } from "@/chat/fixture-transport";
 import { type ChatTransport, RuntimeChatTransport } from "@/chat/transport";
 import { useBvChat } from "@/chat/use-bv-chat";
 
@@ -24,7 +24,9 @@ function SessionChat({ sessionId }: { sessionId: string }) {
   // otherwise — production streams over the real F10 endpoint.
   const transport = useMemo<ChatTransport>(
     () =>
-      fixtureRequested() ? new FixtureChatTransport() : new RuntimeChatTransport({ sessionId }),
+      fixtureRequested()
+        ? new FixtureChatTransport(fixtureStepMs())
+        : new RuntimeChatTransport({ sessionId }),
     [sessionId],
   );
 

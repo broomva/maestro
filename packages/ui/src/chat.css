@@ -109,9 +109,9 @@
   font-size: 12px;
   color: var(--muted-foreground);
 }
-.bv-toolpart-state[data-done="true"] {
-  color: var(--bv-success);
-}
+/* The 'done' label stays MUTED — the word carries the state; a green text label would be a 6th color
+ * use beyond the five the canon budgets (CLAUDE.md §Color), and color-as-text rather than the sanctioned
+ * dot. (The `data-done` attribute stays for testing + a future status dot.) */
 .bv-toolpart-line {
   font-family: var(--bv-font-mono, ui-monospace, monospace);
   font-size: 12px;

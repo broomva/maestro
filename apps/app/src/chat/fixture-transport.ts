@@ -47,16 +47,22 @@ const wait = (ms: number, signal?: AbortSignal): Promise<void> =>
 
 /**
  * The fixture transport. Ignores the sent messages (it always replays the same reply) and honors the
- * abort signal at every step (the stop verb works against it exactly like the real transport).
+ * abort signal at every step (the stop verb works against it exactly like the real transport). The
+ * per-chunk delay is configurable so a test can widen the streaming window to click Stop deterministically
+ * mid-stream (the abort test) without slowing the default fast replay.
  */
 export class FixtureChatTransport implements ChatTransport {
+  readonly #stepMs: number;
+  constructor(stepMs: number = STEP_MS) {
+    this.#stepMs = stepMs;
+  }
   async *stream(
     _messages: readonly ChatMessage[],
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     for (const chunk of FIXTURE_CHUNKS) {
       if (opts?.signal?.aborted) return;
-      await wait(STEP_MS, opts?.signal);
+      await wait(this.#stepMs, opts?.signal);
       if (opts?.signal?.aborted) return;
       yield chunk;
     }
@@ -68,4 +74,14 @@ export class FixtureChatTransport implements ChatTransport {
 export function fixtureRequested(): boolean {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).has("fixture");
+}
+
+/** Optional per-chunk delay (ms) from `?step=<n>` — lets a test widen the streaming window (to click Stop
+ *  mid-stream). Undefined (the default) → the fast STEP_MS. Ignored outside fixture mode. */
+export function fixtureStepMs(): number | undefined {
+  if (typeof window === "undefined") return undefined;
+  const raw = new URLSearchParams(window.location.search).get("step");
+  if (raw === null) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
 }

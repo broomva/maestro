@@ -54,7 +54,7 @@ function ToolPart({ part }: { part: ChatPart }): ReactNode {
   return (
     <div className="bv-toolpart" data-testid="chat-tool">
       <div className="bv-toolpart-head">
-        <SquareCheck size={13} strokeWidth={2} aria-hidden="true" />
+        <SquareCheck size={16} strokeWidth={2} aria-hidden="true" className="shrink-0" />
         <b>{name}</b>
         <span className="bv-toolpart-state" data-done={done}>
           {label}
@@ -89,7 +89,7 @@ function AssistantPart({ part }: { part: ChatPart }): ReactNode {
   if (part.type === "reasoning") {
     return (
       <div className="bv-reasoning" data-testid="chat-reasoning">
-        <Sparkles size={13} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+        <Sparkles size={16} strokeWidth={2} aria-hidden="true" className="shrink-0" />
         <span>{part.text}</span>
       </div>
     );
@@ -97,7 +97,7 @@ function AssistantPart({ part }: { part: ChatPart }): ReactNode {
   if (part.type === "error") {
     return (
       <div className="bv-msg--error" data-testid="chat-error">
-        <CircleAlert size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+        <CircleAlert size={16} strokeWidth={2} aria-hidden="true" className="shrink-0" />
         <span>{part.errorText}</span>
       </div>
     );

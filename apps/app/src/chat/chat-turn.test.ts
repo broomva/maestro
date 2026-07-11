@@ -7,7 +7,12 @@
 
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage, StreamChunk } from "@maestro/protocol";
-import { type ChatTurnStep, isTransientData, runChatTurn } from "./chat-turn";
+import {
+  type ChatTurnStep,
+  finalizeStreamingParts,
+  isTransientData,
+  runChatTurn,
+} from "./chat-turn";
 import type { ChatTransport } from "./transport";
 
 const user: ChatMessage = { id: "u1", role: "user", parts: [{ type: "text", text: "list" }] };
@@ -123,6 +128,67 @@ describe("runChatTurn — the pure turn engine", () => {
     const gen = runChatTurn(fakeTransport([{ type: "finish" }]), [prior], user);
     const first = await gen.next();
     expect(first.value?.messages).toEqual([prior, user]);
+  });
+});
+
+describe("runChatTurn — abort settles the trailing streaming part (P20 round-2 MAJOR)", () => {
+  test("a truncated stream (text-end never arrives) still settles the text part to done on the final ready step", async () => {
+    // The transport ends WITHOUT a text-end/finish — exactly what an abort produces (slice A returns
+    // cleanly, dropping the tail). The last text part is left state:"streaming" by the reducer; the
+    // final `ready` step MUST settle it so the caret stops.
+    const chunks: StreamChunk[] = [
+      { type: "start", messageId: "r1" },
+      { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "half a th" }, // no text-end, no finish
+    ];
+    const steps = await collect(runChatTurn(fakeTransport(chunks), [], user));
+    const final = steps.at(-1);
+    expect(final?.status).toBe("ready");
+    const textPart = final?.messages[1]?.parts.find((p) => p.type === "text");
+    // Mid-stream steps saw it streaming; the terminal ready step settles it to done.
+    expect(textPart).toMatchObject({ text: "half a th", state: "done" });
+  });
+});
+
+describe("finalizeStreamingParts", () => {
+  test("flips a streaming text/reasoning part of the last assistant message to done", () => {
+    const msgs: ChatMessage[] = [
+      user,
+      {
+        id: "r1",
+        role: "assistant",
+        parts: [
+          { type: "reasoning", text: "hmm", state: "streaming" },
+          { type: "text", text: "typing", state: "streaming" },
+        ],
+      },
+    ];
+    const out = finalizeStreamingParts(msgs);
+    expect(out[1]?.parts.every((p) => p.state === "done")).toBe(true);
+    // The user turn is untouched (same reference).
+    expect(out[0]).toBe(user);
+  });
+
+  test("leaves a tool part's own state alone (only bare 'streaming' is settled)", () => {
+    const msgs: ChatMessage[] = [
+      {
+        id: "r1",
+        role: "assistant",
+        parts: [{ type: "tool-shell", toolCallId: "c1", state: "input-streaming" }],
+      },
+    ];
+    const out = finalizeStreamingParts(msgs);
+    expect(out[0]?.parts[0]?.state).toBe("input-streaming"); // an interrupted tool stays honest
+    expect(out).toBe(msgs); // nothing streaming (bare) → same reference (React stability)
+  });
+
+  test("returns the same reference when nothing is streaming / no assistant tail", () => {
+    const done: ChatMessage[] = [
+      { id: "r1", role: "assistant", parts: [{ type: "text", text: "x", state: "done" }] },
+    ];
+    expect(finalizeStreamingParts(done)).toBe(done);
+    expect(finalizeStreamingParts([user])).toEqual([user]); // last msg is user → untouched
+    expect(finalizeStreamingParts([])).toEqual([]);
   });
 });
 

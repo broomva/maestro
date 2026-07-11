@@ -12,6 +12,7 @@ import type { ChatMessage } from "@maestro/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type ChatStatus,
+  finalizeStreamingParts,
   type RunChatTurnOptions,
   runChatTurn,
   type TransientDataChunk,
@@ -120,7 +121,10 @@ export function useBvChat({
   const stop = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    // The stream returns cleanly on abort; settle the UI immediately (don't wait for the loop to unwind).
+    // Settle the UI immediately (don't wait for the async loop to unwind): status ready AND settle the
+    // trailing streaming part so its caret stops NOW (P20 round-2 MAJOR — else the stopped turn keeps a
+    // blinking caret until the loop's own final step lands a tick later, or forever if it never does).
+    setMessages((m) => finalizeStreamingParts(m));
     setStatus("ready");
   }, []);
 
