@@ -37,10 +37,13 @@ export interface MockModelOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** A recorded forward — what the proxy asked the upstream for (model resolved proxy-side, role, beat). */
+/** A recorded forward — what the proxy asked the upstream for (model resolved proxy-side, role, and the
+ *  forwarded request payload so a test can assert the outbound prompt reflects the contract). */
 export interface MockCall {
   model: string;
   role: ChildRole;
+  /** The request body the proxy forwarded (`{ max_tokens, messages, … }`) — verbatim from the child. */
+  payload: unknown;
 }
 
 export interface MockModel extends ModelUpstream {
@@ -84,7 +87,7 @@ export function createMockModel(opts: MockModelOptions = {}): MockModel {
 
   const upstream: ModelUpstream = {
     async forward(req): Promise<UpstreamResult> {
-      calls.push({ model: req.model, role: req.role });
+      calls.push({ model: req.model, role: req.role, payload: req.payload });
       const r = i < script.length ? (script[i] as MockResponse) : fallback;
       i++;
       if (r.delayMs) await sleep(r.delayMs);
