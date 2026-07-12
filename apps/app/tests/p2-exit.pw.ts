@@ -158,11 +158,11 @@ async function api<T>(path: string): Promise<T> {
   if (!r.ok) throw new Error(`GET ${path} → ${r.status}`);
   return (await r.json()) as T;
 }
-const fetchNodeSessions = (id: string) =>
-  api<{ sessions: SessionRow[] }>(`/api/node/${id}`).then((b) => b.sessions);
+const fetchNodeSessions = async (id: string) =>
+  (await api<{ sessions: SessionRow[] }>(`/api/node/${id}`)).sessions;
 const fetchSession = (id: string) => api<{ session: SessionRow }>(`/api/sessions/${id}`);
-const fetchSessionEvents = (id: string) =>
-  api<{ events: EventRow[] }>(`/api/sessions/${id}/events`).then((b) => b.events);
+const fetchSessionEvents = async (id: string) =>
+  (await api<{ events: EventRow[] }>(`/api/sessions/${id}/events`)).events;
 
 function writeEvidence(name: string, lines: string[]): void {
   mkdirSync(EVIDENCE_DIR, { recursive: true });
