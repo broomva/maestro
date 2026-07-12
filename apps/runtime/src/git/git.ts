@@ -58,6 +58,58 @@ export async function gitHead(cwd: string): Promise<string> {
 }
 
 /**
+ * Read `git diff <base> <branch>` in `cwd`, BOUNDED to `maxBytes`. Streams stdout and STOPS the moment the
+ * cap is exceeded (cancelling the read + killing git), so an adversarial multi-hundred-MB diff can never
+ * buffer into the caller — the 24/7 supervisor reads this to hand the verifier judge the run diff, and the
+ * judge must hold the whole diff to grade it, while Stage 0 only gates line/file COUNTS (a few minified
+ * lines can be huge). Returns the captured text (≤ maxBytes + one final chunk) and whether it was truncated;
+ * the caller fails the verification CLOSED on `truncated`. Never throws on a git error (a failed diff yields
+ * empty text, not truncated) — the reader is a memory guard, not a diff-validity gate.
+ */
+export async function gitDiffBounded(
+  cwd: string,
+  base: string,
+  branch: string,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  const proc = Bun.spawn(["git", "diff", base, branch], {
+    cwd,
+    stdout: "pipe",
+    stderr: "ignore",
+    stdin: "ignore",
+  });
+  const reader = proc.stdout.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let truncated = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        chunks.push(value);
+        total += value.byteLength;
+        if (total > maxBytes) {
+          truncated = true;
+          break; // stop reading — never buffer past the cap (+ at most the chunk that tripped it)
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    proc.kill();
+    await proc.exited.catch(() => {});
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    buf.set(c, off);
+    off += c.byteLength;
+  }
+  return { text: new TextDecoder().decode(buf), truncated };
+}
+
+/**
  * Stage `paths` (repo-relative) and commit them with `message`. Pathspec-limited on
  * BOTH add and commit, so it never sweeps unrelated staged or working-tree changes —
  * only the given paths land in the commit. Throws {@link GitError} on any failure so

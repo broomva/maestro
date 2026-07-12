@@ -9,6 +9,7 @@
 // MOCK (not Anthropic) served every call.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -135,6 +136,27 @@ const exitZeroChild: SpawnChild = () =>
     kill: () => {},
     exited: Promise.resolve(0),
   }) satisfies ChildStdioPort;
+
+/** A fabricated child that FIRST (synchronously) writes + commits `file` in the run's worktree — so
+ *  `git diff base..run/<id>` has a REAL diff for Stage 0 + the judge to see — then exits 0 with zero proxy
+ *  calls. `Bun.spawnSync` keeps the commit within the synchronous SpawnChild seam; the worktree inherits the
+ *  workspace's git user config. Used to prove readRunDiff/gitDiffBounded actually reaches the judge. */
+function committingChild(file: string, content: string): SpawnChild {
+  return (args) => {
+    writeFileSync(join(args.cwd, file), content);
+    Bun.spawnSync(["git", "add", file], { cwd: args.cwd });
+    Bun.spawnSync(["git", "commit", "-qm", "run change"], { cwd: args.cwd });
+    return {
+      stdout: streamOf([
+        `${JSON.stringify({ actor: "system", type: "run.exiting", payload: { code: 0 } })}\n`,
+      ]),
+      stderr: streamOf([]),
+      writeStdin: () => {},
+      kill: () => {},
+      exited: Promise.resolve(0),
+    } satisfies ChildStdioPort;
+  };
+}
 
 /** True if a path exists (a durable-receipt assertion). */
 async function fileExists(p: string): Promise<boolean> {
@@ -318,12 +340,13 @@ describe("verifier judge wiring (BRO-1794 slice 1b-ii-B) — Stage 2 dials the m
         body: anthropicBody(JSON.stringify({ criteria: [{ id: "correctness", score: 1 }] })),
       },
     });
+    // The child commits a real file so `git diff base..run/<id>` is NON-empty — the diff the judge grades.
     const dispatch = await mountDispatch({
       db: h.db,
       config,
       upstream: mock,
       mintRunId: () => "r1",
-      spawnChild: exitZeroChild,
+      spawnChild: committingChild("feature.ts", 'export const GREETING = "hello-from-run-diff";\n'),
     });
     mounts.push(dispatch);
 
@@ -356,11 +379,15 @@ describe("verifier judge wiring (BRO-1794 slice 1b-ii-B) — Stage 2 dials the m
     // blocked) and never reach the mock as role:"verifier".
     expect(mock.calls).toHaveLength(1);
     expect(mock.calls[0]?.role).toBe("verifier");
-    // The isolated judge request was assembled at temperature 0 and carried the brief (readBrief wired) —
-    // not the transcript (the JudgeInput type has no transcript field; VERIFIER §2 Stage 2 isolation).
+    // The isolated judge request was assembled at temperature 0 and carried BOTH the brief (readBrief wired)
+    // AND the run diff (gitDiffBounded wired) — not the transcript (the JudgeInput type has no transcript
+    // field; VERIFIER §2 Stage 2 isolation). The diff assertion is the anti-vacuity guard for the diff read:
+    // mutating gitDiffBounded to return "" (or the wrong base/branch) drops the marker → this turns RED.
     const payload = mock.calls[0]?.payload as { temperature?: number };
     expect(payload.temperature).toBe(0);
-    expect(JSON.stringify(mock.calls[0]?.payload)).toContain("Add the greeting feature");
+    const forwarded = JSON.stringify(mock.calls[0]?.payload);
+    expect(forwarded).toContain("Add the greeting feature"); // brief
+    expect(forwarded).toContain("hello-from-run-diff"); // the committed diff reached the judge
   });
 
   test("a pinned-but-MISSING rubric fails CLOSED → verdict error → park blocked, judge never forwards", async () => {
@@ -403,6 +430,53 @@ describe("verifier judge wiring (BRO-1794 slice 1b-ii-B) — Stage 2 dials the m
     expect((JSON.parse(verdict[0]?.payload ?? "{}") as { verdict?: string }).verdict).toBe("error");
     // Fail-CLOSED, not fail-open: parseRubric threw BEFORE any model call, so the judge NEVER forwarded —
     // a missing rubric can never be scored into a silent pass.
+    expect(mock.calls).toHaveLength(0);
+  });
+
+  test("a run diff over the byte cap fails CLOSED → park blocked, judge never forwards (no unbounded buffer)", async () => {
+    const ws = await makeWorkspace();
+    await writeFile(
+      join(ws, "rubric.md"),
+      "---\nthreshold: 0.5\nscale: [0, 1]\ncriteria:\n  - id: c\n    weight: 1\n    ask: ok?\n---\ngrade\n",
+    );
+    await git(ws, ["add", "-A"]);
+    await git(ws, ["commit", "-qm", "rubric"]);
+
+    const h = await openMem();
+    await h.db.insert(node).values({
+      id: "root",
+      path: "",
+      kind: "task",
+      state: "triggered",
+      gate: "human",
+      doneJson: JSON.stringify({ check: [{ name: "ok", run: "true" }], judge: "rubric.md" }),
+      budgetJson: null,
+      createdAt: FIXED_MS,
+      updatedAt: FIXED_MS,
+    });
+
+    // A tiny byte cap + a child that commits a file bigger than it → the run diff exceeds the cap. The
+    // supervisor must STOP reading at the cap (never buffer the whole diff — the BRO-1778 unbounded-buffer
+    // class) and park the run blocked BEFORE minting the verifier bearer or calling the judge.
+    const config = { ...loadConfig({}), workspace: ws, mockModel: true, judgeDiffMaxBytes: 64 };
+    const mock = createMockModel({ fallback: { body: anthropicBody("should never forward") } });
+    const dispatch = await mountDispatch({
+      db: h.db,
+      config,
+      upstream: mock,
+      mintRunId: () => "r1",
+      spawnChild: committingChild("big.txt", "x".repeat(4096)),
+    });
+    mounts.push(dispatch);
+
+    const out = await dispatch.supervisor.dispatch("root");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const res = await out.reaped;
+
+    // Fail-CLOSED: park blocked (a clean verify halt, human looks), NOT a crash, and NOT a silent pass.
+    expect(res.crash).toBe(false);
+    expect(res.sessionStatus).toBe("blocked");
+    // The judge never forwarded — the diff was refused before any bearer mint / model call (no OOM path).
     expect(mock.calls).toHaveLength(0);
   });
 });

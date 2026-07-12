@@ -46,13 +46,14 @@ import {
 } from "@maestro/protocol";
 import { and, desc, eq, gt, max } from "drizzle-orm";
 import {
+  DEFAULT_JUDGE_DIFF_MAX_BYTES,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_VERIFIER_MAX_ATTEMPTS,
   type RuntimeConfig,
 } from "../config";
 import type { IndexDb } from "../db/client";
 import { event, gate, lease, node, runBudget, session } from "../db/schema";
-import { git, gitHead } from "../git/git";
+import { gitDiffBounded, gitHead } from "../git/git";
 import { writeContractSnapshot } from "../harness/contract-snapshot";
 import type { ChildEmittedEvent } from "../harness/runner";
 import type { ChildRole } from "../harness/spawn-contract";
@@ -69,7 +70,11 @@ import type { SessionTokenRegistry } from "../proxy/tokens";
 import type { Sandbox, SandboxFactory } from "../sandbox/sandbox";
 import { WORK_FILE } from "../scanner/scanner";
 import { proxyJudgeCaller } from "../verifier/judge";
-import { type RunVerificationResult, runVerification } from "../verifier/run";
+import {
+  type RunVerificationDeps,
+  type RunVerificationResult,
+  runVerification,
+} from "../verifier/run";
 import { type RunEntry, RunRegistry } from "./registry";
 
 /** The role every Loop-1 dispatch spawns. Verifier (Loop 2) + orchestrator (F6) are later runners. */
@@ -231,10 +236,12 @@ function nodeRowToContract(row: typeof node.$inferSelect): WorkContract {
 }
 
 // ── Stage-2 judge input resolution (VERIFIER §2, BRO-1794 slice 1b-ii-B) ─────────
-// The three inputs the LLM judge is allowed to see, read from the run's worktree. Each is deliberately
-// fail-safe (never throws) so building the judge deps can't wedge the reap; the rubric read is the only
-// fail-CLOSED one (an unusable rubric must park blocked, never silently pass), the diff + brief are
-// best-effort context (Stage 0 already gated the diff's validity/size before the judge ever runs).
+// The inputs the LLM judge is allowed to see, read from the run's worktree. The rubric + brief reads below
+// are fail-safe (never throw) so building the judge deps can't wedge the reap; the rubric is fail-CLOSED
+// (an unusable rubric → "" → parseRubric errors → park blocked, never a silent pass), the brief is
+// best-effort context. The DIFF is read separately in `verifyAndRoute` via the BYTE-BOUNDED `gitDiffBounded`
+// (not a helper here): the judge must hold the whole diff to grade it and Stage 0 gates only line/file
+// COUNTS, so an unbounded read would OOM the shared 24/7 supervisor — a diff past the cap parks blocked.
 
 /** Read the pinned judge rubric (`done.judge`) from the worktree. The ref is a work-subtree-relative path
  *  that "lives next to `_work.md`", so it resolves against the node's folder (`nodePath`), validated by
@@ -256,17 +263,6 @@ async function readRubricText(workdir: string, nodePath: string, ref: string): P
 async function readBrief(workdir: string, nodePath: string): Promise<string> {
   try {
     return parseWorkFile(await readFile(join(workdir, nodePath, WORK_FILE), "utf8")).brief;
-  } catch {
-    return "";
-  }
-}
-
-/** The unified diff the judge grades (`git diff base..run/<id>`). Stage 0 already validated the diff is
- *  within the contract's size limits before the judge runs, so it is bounded here. Best-effort text: a git
- *  failure yields "" (Stage 0 is the diff-validity gate, not this read). Never throws. */
-async function readRunDiff(workdir: string, base: string, branch: string): Promise<string> {
-  try {
-    return (await git(workdir, ["diff", base, branch])).stdout;
   } catch {
     return "";
   }
@@ -703,33 +699,70 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     // the duration of the judge call (key-confinement). Without a rubric the judge is skipped: `rubricText:
     // null` → `attachJudge` yields `judge: { score: null }` and `call` is never invoked.
     const judgeRef = done.judge;
+    // A kill that landed BEFORE we mint the verifier bearer must WIN. `tokens.mint` is idempotent per session
+    // and would otherwise RESURRECT proxy access for a killed run — re-installing a LIVE bearer over the one
+    // `kill()` revoked — letting the judge make a billed model call after the F8 kill (defeating the
+    // kill-switch shield). Mirror `respawn()`'s guard: a synchronous check adjacent to the synchronous mint
+    // closes the window. (A kill AFTER the mint revokes the live bearer → the in-flight forward 401s → the
+    // post-verify `cancelled` re-check below routes terminalKilled — the already-handled case.)
+    if (judgeRef !== undefined && cancelled.has(ctx.runId)) {
+      return terminalKilled(
+        { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
+        entry,
+        0,
+        respawns,
+        entry.supervised.supervisionFailed(),
+      );
+    }
     let verifierBearer: string | null = null;
-    if (judgeRef !== undefined) {
+    let judge: RunVerificationDeps["judge"];
+    if (judgeRef === undefined) {
+      judge = {
+        rubricText: null,
+        diff: "",
+        brief: "",
+        call: () => {
+          throw new Error("verifier judge caller invoked without a rubric");
+        },
+      };
+    } else {
+      // Read the run diff BYTE-BOUNDED before it reaches the judge (see the resolution comment above). A diff
+      // past the cap fails CLOSED: park blocked (`diff_too_large`) — the human looks — rather than buffering
+      // an adversarial diff into the shared supervisor. Done BEFORE the mint so a too-large diff mints nothing.
+      const maxBytes = config?.judgeDiffMaxBytes ?? DEFAULT_JUDGE_DIFF_MAX_BYTES;
+      const runDiff = await gitDiffBounded(
+        ctx.sandbox.workdir,
+        ctx.base,
+        ctx.sandbox.branch,
+        maxBytes,
+      );
+      if (runDiff.truncated) {
+        return terminal(ctx, entry, {
+          exitCode: 0,
+          sessionStatus: "blocked",
+          nodeState: "blocked",
+          event: "run.finished",
+          crash: false,
+          reason: "diff_too_large",
+          mismatch,
+          respawns,
+        });
+      }
       verifierBearer = tokens.mint({
         session: ctx.runId,
         runDir: ctx.sandbox.runDir,
         role: VERIFIER_ROLE,
         budget: ctx.budget,
       });
+      judge = {
+        // fail-CLOSED: an invalid ref / unreadable rubric → "" → parseRubric errors → verdict error → park
+        // blocked. The brief is best-effort context; the diff is the byte-bounded read above.
+        rubricText: await readRubricText(ctx.sandbox.workdir, ctx.nodePath, judgeRef),
+        diff: runDiff.text,
+        brief: await readBrief(ctx.sandbox.workdir, ctx.nodePath),
+        call: proxyJudgeCaller({ proxyUrl: proxy.url, bearer: verifierBearer }),
+      };
     }
-    const judge =
-      judgeRef === undefined || verifierBearer === null
-        ? {
-            rubricText: null as string | null,
-            diff: "",
-            brief: "",
-            call: () => {
-              throw new Error("verifier judge caller invoked without a rubric");
-            },
-          }
-        : {
-            // fail-CLOSED: an invalid ref / unreadable rubric → "" → parseRubric errors → verdict error →
-            // park blocked. The diff + brief are best-effort context (Stage 0 gates the diff's validity).
-            rubricText: await readRubricText(ctx.sandbox.workdir, ctx.nodePath, judgeRef),
-            diff: await readRunDiff(ctx.sandbox.workdir, ctx.base, ctx.sandbox.branch),
-            brief: await readBrief(ctx.sandbox.workdir, ctx.nodePath),
-            call: proxyJudgeCaller({ proxyUrl: proxy.url, bearer: verifierBearer }),
-          };
 
     let result: RunVerificationResult;
     try {

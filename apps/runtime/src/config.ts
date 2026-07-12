@@ -70,6 +70,16 @@ export interface RuntimeConfig {
    */
   verifierMaxAttempts?: number;
   /**
+   * Max bytes of `git diff base..run/<id>` the Stage-2 judge reads into memory before failing the
+   * verification CLOSED (MAESTRO_JUDGE_DIFF_MAX_BYTES, VERIFIER §2). The judge must hold the WHOLE diff to
+   * grade it (assembleJudgeRequest embeds it verbatim), and Stage 0 only gates line/file COUNTS — a handful
+   * of minified/generated lines can be hundreds of MB, which would OOM the shared 24/7 supervisor. This byte
+   * cap bounds that read; a run whose diff exceeds it parks blocked (`diff_too_large`) for the human rather
+   * than being buffered. loadConfig always fills it; a hand-built literal may omit it and the supervisor
+   * falls back to DEFAULT_JUDGE_DIFF_MAX_BYTES.
+   */
+  judgeDiffMaxBytes?: number;
+  /**
    * Mock-model mode (MAESTRO_MOCK_MODEL=1) — mount the dispatch loop with the scripted mock upstream
    * (proxy/mock-model.ts) instead of a real Anthropic upstream, so a running runtime can dispatch
    * sessions with ZERO tokens / no API key (BRO-1822). Today this is the ONLY mode that mounts dispatch:
@@ -101,6 +111,11 @@ export const DEFAULT_CONTEXT_CEILING_TOKENS = 160_000;
 
 /** Verifier consecutive-fail cap when unset (VERIFIER §5) — the protocol's `VERIFIER_MAX_ATTEMPTS`. */
 export const DEFAULT_VERIFIER_MAX_ATTEMPTS = VERIFIER_MAX_ATTEMPTS;
+
+/** Byte cap on the run diff the judge reads (VERIFIER §2) — 10 MiB. A diff past this parks blocked rather
+ *  than buffering into the 24/7 supervisor (Stage 0 gates line/file counts, not bytes). Generous: 2000
+ *  lines of normal code is ~100-200 KB; hitting 10 MiB means minified/generated content (pathological). */
+export const DEFAULT_JUDGE_DIFF_MAX_BYTES = 10 * 1024 * 1024;
 
 /** session.jsonl rotates at 5 MB (DECISIONS §D3). */
 export const DEFAULT_ROTATE_MAX_BYTES = 5 * 1024 * 1024;
@@ -145,6 +160,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   // Verifier consecutive-fail cap (BRO-1794): a positive override wins, else the VERIFIER §5 default.
   const verifierMaxAttempts =
     positiveInt(env.MAESTRO_VERIFIER_MAX_ATTEMPTS) ?? DEFAULT_VERIFIER_MAX_ATTEMPTS;
+  // Judge diff byte cap (BRO-1794): a positive override wins, else the VERIFIER §2 default.
+  const judgeDiffMaxBytes =
+    positiveInt(env.MAESTRO_JUDGE_DIFF_MAX_BYTES) ?? DEFAULT_JUDGE_DIFF_MAX_BYTES;
   // Mock-model mode is an explicit opt-in (only "1" enables it) — the dispatch mount is a spawn-capable
   // surface, so it stays off unless the operator asks for the token-free mock loop.
   const mockModel = env.MAESTRO_MOCK_MODEL === "1";
@@ -164,6 +182,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     rotateMaxBytes,
     rotateMaxLines,
     verifierMaxAttempts,
+    judgeDiffMaxBytes,
     mockModel,
   };
 }
