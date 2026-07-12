@@ -103,8 +103,12 @@ function onExit(p: ChildProcess): Promise<number> {
   return new Promise((res) => p.on("exit", (code) => res(code ?? 0)));
 }
 
-async function boot(workspace: string): Promise<ChildProcess> {
-  const p = spawn("bun", ["run", RUNTIME_ENTRY], {
+// Assign the module-level `runtime` to the spawned child BEFORE awaiting health, so a waitHealthy()
+// timeout (a boot that never comes up) still leaves the process reapable by afterEach. Returning it
+// only after health would leak the process — holding the shared port 4319, never killed — on a failed
+// boot. Kill-safe, mirroring p1-exit.pw.ts (P20 BRO-1827 minor).
+async function boot(workspace: string): Promise<void> {
+  runtime = spawn("bun", ["run", RUNTIME_ENTRY], {
     env: {
       ...process.env,
       MAESTRO_WORKSPACE: workspace,
@@ -115,7 +119,6 @@ async function boot(workspace: string): Promise<ChildProcess> {
     stdio: "inherit",
   });
   await waitHealthy(RUNTIME_PORT);
-  return p;
 }
 
 async function stop(p: ChildProcess | undefined, signal: NodeJS.Signals): Promise<void> {
@@ -185,7 +188,7 @@ test("P2 exit ①: dispatch from the app, watch events stream, then survive a ha
   const workspace = makeGitWorkspace("maestro-p2-live-", {
     "runner/_work.md": wm({ id: "runner", state: "proposed", title: "Ship the runner" }),
   });
-  runtime = await boot(workspace);
+  await boot(workspace);
 
   // DISPATCH FROM THE APP: open the session view for the idle node and send a turn. The real
   // RuntimeChatTransport (no ?fixture) POSTs /api/sessions/runner/chat → dispatch-then-chat (F10.2).
@@ -215,7 +218,7 @@ test("P2 exit ①: dispatch from the app, watch events stream, then survive a ha
   await stop(runtime, "SIGKILL");
   runtime = undefined;
   clearLock(workspace);
-  runtime = await boot(workspace);
+  await boot(workspace);
 
   // NOTHING LOST: the restarted runtime still serves the same session and all its pre-crash events
   // (durable across a hard crash), and the app comes back up over the persisted index.
@@ -251,7 +254,7 @@ test("P2 exit ②: a crash-interrupted run is parked at Stuck on restart, with n
 
   // RESTART: boot the runtime over the crash-left index. On boot recoverOnStartup → parkOrphans parks
   // the orphan `blocked` + appends `run.orphaned`; scanIntoIndex loads node `runner` from the FS.
-  runtime = await boot(workspace);
+  await boot(workspace);
 
   // The app comes up healthy over the recovered index.
   await page.goto("/");
