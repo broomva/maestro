@@ -19,6 +19,11 @@
 @import "@maestro/tokens/styles.css";
 @import "tailwindcss";
 @import "@maestro/tokens/theme.css";
+/* The chat feed's design-system classes (bv-chat-feed / bv-msg / bv-typing / bv-link-pill + caret,
+ * BRO-1826 M4). Authored in @maestro/ui (the DS layer, not the hash-locked tokens package) and pulled
+ * in here — @maestro/ui's first shipped stylesheet. Relative path (same walk as the @source below), so
+ * it resolves without a package `exports` entry. */
+@import "../../../../packages/ui/src/chat.css";
 
 /* The component library lives in a sibling workspace package (@maestro/ui). Tailwind v4
  * auto-detection does not reach across the package boundary, so the primitives' utility

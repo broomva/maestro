@@ -66,15 +66,16 @@ function BrandMark() {
  */
 function PresenceChip() {
   return (
-    <button
-      type="button"
+    <Link
+      to="/session/$sessionId"
+      params={{ sessionId: "orchestrator" }}
       title="Open the orchestrator"
       className="inline-flex items-center gap-2 rounded-row px-2 py-1 text-left transition-colors hover:bg-[var(--bv-frost-8)]"
     >
       <DotComet size={13} />
       <span className="font-medium text-sm">maestro</span>
       <span className="text-muted-foreground text-xs">standing</span>
-    </button>
+    </Link>
   );
 }
 
