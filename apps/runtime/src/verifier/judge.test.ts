@@ -45,7 +45,7 @@ criteria:
 Judge the diff against the brief. Score each criterion on the scale.`;
 
 /** An Anthropic-shaped assistant reply whose text is the judge's JSON. */
-function reply(text: string, usdOverride?: number): { status: number; body: unknown } {
+function reply(text: string): { status: number; body: unknown } {
   return {
     status: 200,
     body: {
@@ -54,7 +54,7 @@ function reply(text: string, usdOverride?: number): { status: number; body: unkn
       role: "assistant",
       content: [{ type: "text", text }],
       stop_reason: "end_turn",
-      usage: { input_tokens: 10, output_tokens: 20, ...(usdOverride ? {} : {}) },
+      usage: { input_tokens: 10, output_tokens: 20 },
     },
   };
 }
@@ -228,6 +228,29 @@ describe("verifier-judge — parseJudgeReport", () => {
     const raw =
       '{"criteria":[{"id":"coverage","score":2},{"id":"no-regressions","score":2}]}\n{"criteria":[{"id":"coverage","score":0,"note":"nothing"},{"id":"no-regressions","score":2}]}';
     expect(() => parseJudgeReport(raw, rubric)).toThrow(/ambiguous/);
+  });
+
+  test("a real report NESTED inside an outer prose-brace span is still surfaced → ambiguous, not silent-pass (P20 R4)", () => {
+    // Fail-open the round-4 exactly-one-valid guard assumed away: a standalone valid all-max report,
+    // then the REAL below-threshold report nested inside a larger balanced-but-unparseable span
+    // (`{reasoning {…}}`). The old extractor jumped past the whole outer span (i = end + 1), dropping the
+    // nested real report so ONLY the all-max survived → valid.length === 1 → scored as a silent PASS of
+    // failing work. Superset extraction (advance i++ into nested spans) surfaces BOTH reports, so the
+    // conflict is caught as ambiguous → verdict error (park blocked), never a guessed pass.
+    // Mutation proof: revert `extractJsonObjects` to `i = end + 1` and this test goes RED (no throw).
+    const raw =
+      'Summary: {"criteria":[{"id":"coverage","score":2},{"id":"no-regressions","score":2}]}. Detail: {reasoning {"criteria":[{"id":"coverage","score":0,"note":"none"},{"id":"no-regressions","score":0,"note":"none"}]}}';
+    expect(() => parseJudgeReport(raw, rubric)).toThrow(/ambiguous/);
+  });
+
+  test("a single legitimate report with nested criterion sub-objects is NOT spuriously ambiguous", () => {
+    // Guards the superset extractor against over-rejection: the criterion sub-objects ({id,score,note})
+    // extracted from inside the real report are not report-shaped (no `criteria` array) so they are
+    // dropped, leaving exactly one valid report. One valid report in → one report out.
+    const raw =
+      '{"criteria":[{"id":"coverage","score":1,"note":"missing og:image"},{"id":"no-regressions","score":2}]}';
+    const r = parseJudgeReport(raw, rubric);
+    expect(r.criteria.map((c) => c.id)).toEqual(["coverage", "no-regressions"]);
   });
 
   test("does not close the object early on a `}` inside a note string", () => {

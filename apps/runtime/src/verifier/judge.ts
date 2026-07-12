@@ -297,11 +297,17 @@ export function extractText(body: unknown): string {
     .join("");
 }
 
-/** Extract EVERY balanced top-level JSON object from model text that may wrap the real object in ```
- *  fences or prose — before AND after. Bracket-depth scan (string/escape-aware) so a `}` inside a
- *  string does not close an object early. The caller picks the first candidate that is a valid judge
- *  report, so a stray `{…}` in a preamble (a set, a `if (x) {` fragment, an `{og:image}` mention) does
- *  not shadow the real reply that follows it. */
+/** Extract EVERY balanced JSON object from model text at EVERY depth — the real object may be wrapped in
+ *  ``` fences or prose (before AND after) and may be NESTED inside a larger balanced-but-unparseable span
+ *  (e.g. `Detail: {reasoning {"criteria":[…]}}`). Bracket-depth scan (string/escape-aware) so a `}` inside
+ *  a string does not close an object early. After recording a balanced span we advance by a single char
+ *  (`i++`, not past its end) so any object nested inside it is ALSO surfaced as its own candidate. That
+ *  keeps this strictly a *superset* extractor: junk candidates (brace-in-string, non-JSON prose spans,
+ *  criterion sub-objects) fail JSON.parse / the report-shape check / rubric validation downstream and are
+ *  dropped, while the caller's exactly-one-valid guard sees every real report — so a report hidden inside
+ *  an outer prose-brace span can never be silently dropped to let a preceding candidate shadow it
+ *  (fail-open → the reply resolves to an ambiguous-report `error`, i.e. park blocked, per VERIFIER §2).
+ *  Replies are small, so the O(n²) worst case from re-scanning nested spans is bounded. */
 function extractJsonObjects(text: string): string[] {
   const objs: string[] = [];
   let i = 0;
@@ -339,7 +345,10 @@ function extractJsonObjects(text: string): string[] {
       continue;
     }
     objs.push(text.slice(i, end + 1));
-    i = end + 1;
+    // Advance by one char (NOT past `end`) so an object nested inside this balanced span — a real report
+    // wrapped in an outer prose-brace span like `{reasoning {…}}` — is still surfaced as its own
+    // candidate. Superset extraction; downstream parse/shape/rubric validation drops the junk.
+    i++;
   }
   return objs;
 }
