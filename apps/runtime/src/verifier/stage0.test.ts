@@ -65,6 +65,18 @@ describe("verifier-stage0 — defaultGlobMatch (the protect floor matches at roo
       expect(defaultGlobMatch(g, "src/server.ts")).toBe(false);
     }
   });
+  test("a leading-! protect entry is NEUTRALIZED — it never inverts the guard (matched literally)", () => {
+    // Bun.Glob reads a leading `!` as negation; a positive protect entry must never mean "everything
+    // except X". A `!`-prefixed entry matches only the file literally NAMED that, so a clean file is
+    // never falsely flagged, and the guard can never be inverted by author input.
+    expect(defaultGlobMatch("!secrets.env", "src/server.ts")).toBe(false);
+    expect(defaultGlobMatch("!secrets.env", "README.md")).toBe(false);
+    expect(defaultGlobMatch("!secrets.env", "!secrets.env")).toBe(true); // the literal file
+    expect(defaultGlobMatch("!secrets.env", "secrets.env")).toBe(false); // NOT gitignore re-include
+    // ...even when the negation is the tail of a **/ pattern (the .slice(3) retry must escape too).
+    expect(defaultGlobMatch("**/!keep.env", "src/server.ts")).toBe(false);
+    expect(defaultGlobMatch("**/!keep.env", "!keep.env")).toBe(true);
+  });
 });
 
 describe("verifier-stage0 — runStage0 (tamper + diff guard)", () => {
@@ -116,6 +128,24 @@ describe("verifier-stage0 — runStage0 (tamper + diff guard)", () => {
     expect(v.verdict).toBe("fail");
     if (v.verdict !== "fail" || v.reason !== "tampering") throw new Error("expected tampering");
     expect(v.tampering).toEqual(["package.json"]);
+  });
+
+  test("a !-prefixed author protect entry does NOT invert the guard — a clean diff still passes", async () => {
+    // The footgun: `!secrets.env` under raw Bun.Glob matched every path but that one, flagging a clean
+    // run as tampering. Neutralized — a clean, in-bounds diff passes despite the malformed protect entry.
+    const v = await runStage0({
+      cwd: "/repo",
+      base: BASE,
+      branch: BRANCH,
+      protect: effectiveProtect({ check: "bun test", protect: ["!secrets.env"] }),
+      git: fakeGit(
+        numstat([
+          [10, 2, "src/server.ts"],
+          [4, 0, "README.md"],
+        ]),
+      ),
+    });
+    expect(v).toEqual({ verdict: "pass", diffstat: { files: 2, plus: 14, minus: 2 } });
   });
 
   test("over the file limit → diff_too_large with the limit as evidence", async () => {

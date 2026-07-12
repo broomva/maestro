@@ -114,16 +114,28 @@ export function parseNumstat(stdout: string): NumstatRow[] {
   return rows;
 }
 
-/** Default glob matcher — Bun.Glob. `**\/*.test.*` etc. must match at the repo ROOT and any depth, so
- *  every floor glob is tried BOTH as written and, when it starts with `**​/`, against the bare basename
- *  pattern too (Bun.Glob's `**\/x` does not always match a top-level `x`). A pattern with no leading
- *  `**​/` (e.g. `package.json`, `.github/**`) is matched literally, as authored. */
+/** Build a Bun.Glob from a PROTECT pattern, neutralizing a leading `!`. Bun.Glob reads a leading `!` as
+ *  micromatch-style NEGATION — meaningless for a positive protect entry (protect is an OR of inclusion
+ *  patterns; a path is protected if it matches ANY) and a footgun: `!secrets.env` would match EVERY path
+ *  except `secrets.env`, inverting the guard (clean diffs flagged `tampering`, the named file waved
+ *  through). Escaping the `!` makes it match a file literally NAMED `!…`; to protect `secrets.env` an
+ *  author writes `secrets.env` / `**​/secrets.env`, not a gitignore-style negation. (`!` is only special
+ *  at position 0, so this is applied to the sliced tail below too, where the `!` becomes leading.) */
+function protectGlob(pattern: string): Bun.Glob {
+  return new Bun.Glob(pattern.startsWith("!") ? `\\${pattern}` : pattern);
+}
+
+/** Default glob matcher — Bun.Glob, with negation neutralized ({@link protectGlob}). `**\/*.test.*` etc.
+ *  must match at the repo ROOT and any depth, so every floor glob is tried BOTH as written and, when it
+ *  starts with `**​/`, against the bare basename pattern too (Bun.Glob's `**\/x` does not always match a
+ *  top-level `x`). A pattern with no leading `**​/` (e.g. `package.json`, `.github/**`) is matched as
+ *  authored. Extglob syntax (`(a|b)`) is unsupported by Bun.Glob → silently no-matches (an author-intent
+ *  miss, never an inversion); protect patterns use `*` / `**` / `?` / `[…]` and plain literals. */
 export function defaultGlobMatch(glob: string, path: string): boolean {
-  const g = new Bun.Glob(glob);
-  if (g.match(path)) return true;
+  if (protectGlob(glob).match(path)) return true;
   // `**/foo` should also catch a top-level `foo` — retry against the tail after the leading `**/`.
   if (glob.startsWith("**/")) {
-    return new Bun.Glob(glob.slice(3)).match(path);
+    return protectGlob(glob.slice(3)).match(path);
   }
   return false;
 }
