@@ -88,22 +88,26 @@ interface NumstatRow {
 }
 
 /**
- * Parse `git diff --numstat --no-renames` output. Each line is `<added>\t<deleted>\t<path>`; a binary
- * file shows `-\t-\t<path>` (counted as a changed file with 0 lines). `--no-renames` guarantees one path
- * per line (a rename becomes delete(old)+add(new) — SAFER for a tamper guard: a protected file renamed
- * away is still caught as a touched protected path, and no `{old => new}` token can slip past a glob).
- * The path is everything after the second tab, so a path containing spaces is preserved intact.
+ * Parse `git diff --numstat -z --no-renames` output. Records are NUL-terminated (`-z`): each is
+ * `<added>\t<deleted>\t<path>\0`; a binary file shows `-\t-\t<path>` (a changed file with 0 lines).
+ * `-z` is load-bearing: it emits the path RAW (no C-quoting), so a path containing a `"`, `\`, tab, or
+ * newline is matched against the protect globs literally — WITHOUT `-z`, git wraps such paths in
+ * `"…"` with C-escapes (and `core.quotePath=false` suppresses only the *non-ASCII* case), which would
+ * let a protected file with such a name slip past the glob — a tamper false-negative in the floor.
+ * `--no-renames` keeps one path per record (a rename → delete(old)+add(new): a protected file renamed
+ * away is still caught, and there is no `-z` two-NUL rename record to special-case). The path is
+ * everything after the second tab, so an embedded tab/space/newline in the path is preserved intact.
  */
 export function parseNumstat(stdout: string): NumstatRow[] {
   const rows: NumstatRow[] = [];
-  for (const line of stdout.split("\n")) {
-    if (line === "") continue;
-    const firstTab = line.indexOf("\t");
-    const secondTab = line.indexOf("\t", firstTab + 1);
-    if (firstTab === -1 || secondTab === -1) continue; // not a numstat row — skip defensively
-    const addedStr = line.slice(0, firstTab);
-    const deletedStr = line.slice(firstTab + 1, secondTab);
-    const path = line.slice(secondTab + 1);
+  for (const record of stdout.split("\0")) {
+    if (record === "") continue; // the trailing NUL yields a final empty record — skip it
+    const firstTab = record.indexOf("\t");
+    const secondTab = record.indexOf("\t", firstTab + 1);
+    if (firstTab === -1 || secondTab === -1) continue; // not a numstat record — skip defensively
+    const addedStr = record.slice(0, firstTab);
+    const deletedStr = record.slice(firstTab + 1, secondTab);
+    const path = record.slice(secondTab + 1);
     if (path === "") continue;
     rows.push({
       added: addedStr === "-" ? 0 : Number.parseInt(addedStr, 10) || 0,
@@ -141,11 +145,12 @@ export function defaultGlobMatch(glob: string, path: string): boolean {
 }
 
 /**
- * Run Stage 0 against the run's net diff (`git diff --numstat --no-renames <base> <branch>`, which for
+ * Run Stage 0 against the run's net diff (`git diff --numstat -z --no-renames <base> <branch>`, which for
  * `diff` equals the spec's `<base>..run/<id>`). Tampering is checked BEFORE size: a run that both edits a
  * protected path AND blows the size limit is reported as `tampering` (the more serious, security-class
- * failure), with the protected paths as evidence. `core.quotePath=false` keeps non-ASCII paths literal so
- * the glob match is not defeated by git's octal escaping.
+ * failure), with the protected paths as evidence. `-z` emits every path RAW (NUL-terminated, no C-quoting
+ * of `"`/`\`/tab/newline nor non-ASCII octal escaping), so no protected path can be hidden from the glob
+ * by git's quoting — the soundness the floor depends on.
  */
 export async function runStage0(input: Stage0Input): Promise<Stage0Verdict> {
   const {
@@ -161,15 +166,7 @@ export async function runStage0(input: Stage0Input): Promise<Stage0Verdict> {
 
   let result: GitResult;
   try {
-    result = await git(cwd, [
-      "-c",
-      "core.quotePath=false",
-      "diff",
-      "--numstat",
-      "--no-renames",
-      base,
-      branch,
-    ]);
+    result = await git(cwd, ["diff", "--numstat", "-z", "--no-renames", base, branch]);
   } catch (err) {
     return {
       verdict: "error",

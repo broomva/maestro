@@ -9,9 +9,10 @@ import {
 import type { GitRunner } from "./stage0";
 import { defaultGlobMatch, parseNumstat, runStage0 } from "./stage0";
 
-/** A numstat fixture line — `[added, deleted, path]`; a number or "-" (binary). */
+/** A numstat fixture record — `[added, deleted, path]`; a number or "-" (binary). Mirrors `git diff
+ *  --numstat -z`: each record is `added\tdeleted\tpath` and NUL-terminated, path raw (never quoted). */
 type Row = [number | "-", number | "-", string];
-const numstat = (rows: Row[]): string => rows.map(([a, d, p]) => `${a}\t${d}\t${p}`).join("\n");
+const numstat = (rows: Row[]): string => rows.map(([a, d, p]) => `${a}\t${d}\t${p}\0`).join("");
 
 /** An injected git runner returning a scripted numstat blob (exit 0 by default). */
 const fakeGit =
@@ -33,12 +34,22 @@ describe("verifier-stage0 — parseNumstat", () => {
     ]);
   });
   test("a path containing spaces is preserved intact", () => {
-    expect(parseNumstat("1\t0\tsrc/my file.ts")).toEqual([
+    expect(parseNumstat("1\t0\tsrc/my file.ts\0")).toEqual([
       { added: 1, deleted: 0, path: "src/my file.ts" },
     ]);
   });
-  test("blank lines and malformed rows are skipped", () => {
-    expect(parseNumstat("\n5\t2\tok.ts\ngarbage-no-tabs\n")).toEqual([
+  test("a path with a double-quote/backslash/tab is preserved RAW (the -z contract, no C-unquoting)", () => {
+    // Under -z git emits these paths raw; without -z they'd be C-quoted and defeat the glob (the R2 bug).
+    expect(parseNumstat('12\t0\tweird"name/_work.md\0')).toEqual([
+      { added: 12, deleted: 0, path: 'weird"name/_work.md' },
+    ]);
+    expect(parseNumstat("3\t1\tdir/a\tb.ts\0")).toEqual([
+      { added: 3, deleted: 1, path: "dir/a\tb.ts" }, // an embedded tab (3rd+) stays in the path
+    ]);
+  });
+  test("blank records and malformed records are skipped", () => {
+    // leading empty record (a bare NUL), then a good record, then a malformed one (no tabs).
+    expect(parseNumstat("\x005\t2\tok.ts\x00garbage-no-tabs\x00")).toEqual([
       { added: 5, deleted: 2, path: "ok.ts" },
     ]);
   });
@@ -180,6 +191,44 @@ describe("verifier-stage0 — runStage0 (tamper + diff guard)", () => {
     if (v.verdict !== "fail" || v.reason !== "diff_too_large")
       throw new Error("expected diff_too_large");
     expect(v.diffstat).toEqual({ files: 1, plus: 6, minus: 6 });
+  });
+
+  test("a diff EXACTLY at the file + line limits passes (limits are 'exceed', not '>=')", async () => {
+    const v = await runStage0({
+      cwd: "/repo",
+      base: BASE,
+      branch: BRANCH,
+      protect,
+      maxFiles: 2,
+      maxLines: 12,
+      git: fakeGit(
+        numstat([
+          [3, 3, "src/a.ts"],
+          [3, 3, "src/b.ts"], // 2 files == maxFiles; 12 lines == maxLines
+        ]),
+      ),
+    });
+    expect(v).toEqual({ verdict: "pass", diffstat: { files: 2, plus: 6, minus: 6 } });
+  });
+
+  test("a protected path git would C-quote (contains a double-quote) is still caught (the -z fix)", async () => {
+    // Under -z the path is raw, so the floor glob **/_work.md matches it — a child editing its own
+    // success function at a quote-containing folder can no longer slip past the anti-reward-hacking floor.
+    const v = await runStage0({
+      cwd: "/repo",
+      base: BASE,
+      branch: BRANCH,
+      protect,
+      git: fakeGit(
+        numstat([
+          [2, 0, 'weird"name/_work.md'],
+          [1, 0, "src/a.ts"],
+        ]),
+      ),
+    });
+    expect(v.verdict).toBe("fail");
+    if (v.verdict !== "fail" || v.reason !== "tampering") throw new Error("expected tampering");
+    expect(v.tampering).toEqual(['weird"name/_work.md']);
   });
 
   test("tampering wins over an oversize diff (the graver, security-class failure)", async () => {

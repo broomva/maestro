@@ -6,7 +6,7 @@ import type { VerifierResult } from "./verifier";
 import { runVerifier } from "./verifier";
 
 type Row = [number | "-", number | "-", string];
-const numstat = (rows: Row[]): string => rows.map(([a, d, p]) => `${a}\t${d}\t${p}`).join("\n");
+const numstat = (rows: Row[]): string => rows.map(([a, d, p]) => `${a}\t${d}\t${p}\0`).join("");
 const fakeGit =
   (stdout: string, code = 0, stderr = ""): GitRunner =>
   async () => ({ code, stdout, stderr });
