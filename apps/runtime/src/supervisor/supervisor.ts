@@ -27,8 +27,6 @@
 // disagreement emits `run.exit_mismatch` (a Loop-4 harness-bug signal) and the REAL code wins the route.
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type {
   Actor,
   Budget,
@@ -53,7 +51,7 @@ import {
 } from "../config";
 import type { IndexDb } from "../db/client";
 import { event, gate, lease, node, runBudget, session } from "../db/schema";
-import { gitDiffBounded, gitHead } from "../git/git";
+import { gitDiffBounded, gitHead, gitShowBounded } from "../git/git";
 import { writeContractSnapshot } from "../harness/contract-snapshot";
 import type { ChildEmittedEvent } from "../harness/runner";
 import type { ChildRole } from "../harness/spawn-contract";
@@ -240,33 +238,49 @@ function nodeRowToContract(row: typeof node.$inferSelect): WorkContract {
 }
 
 // ── Stage-2 judge input resolution (VERIFIER §2, BRO-1794 slice 1b-ii-B) ─────────
-// The inputs the LLM judge is allowed to see, read from the run's worktree. The rubric + brief reads below
-// are fail-safe (never throw) so building the judge deps can't wedge the reap; the rubric is fail-CLOSED
-// (an unusable rubric → "" → parseRubric errors → park blocked, never a silent pass), the brief is
-// best-effort context. The DIFF is read separately in `verifyAndRoute` via the BYTE-BOUNDED `gitDiffBounded`
-// (not a helper here): the judge must hold the whole diff to grade it and Stage 0 gates only line/file
-// COUNTS, so an unbounded read would OOM the shared 24/7 supervisor — a diff past the cap parks blocked.
+// The inputs the LLM judge is allowed to see, ALL read from the agent-immutable BASE commit's object store
+// (`git show <base>:<path>`), never the working tree — so an uncommitted worktree edit can neither tamper
+// with the grading rubric nor inject content into the judge prompt (rubric.md + _work.md are protected
+// paths; base is the canonical copy), and the read cannot block on an agent-planted worktree FIFO. Each is
+// BYTE-BOUNDED (the judge holds the whole input; an unbounded read would OOM the shared 24/7 supervisor).
+// The rubric is fail-CLOSED (unusable → "" → parseRubric errors → park blocked, never a silent pass); the
+// brief is best-effort context; the DIFF (`git diff base branch`, also commit-based) is read in verifyAndRoute.
 
-/** Read the pinned judge rubric (`done.judge`) from the worktree. The ref is a work-subtree-relative path
- *  that "lives next to `_work.md`", so it resolves against the node's folder (`nodePath`), validated by
- *  {@link isValidRubricRef} first — a `..`/absolute/non-`.md` ref never escapes the worktree. Fail-CLOSED:
- *  an invalid ref or an unreadable/absent file resolves to "" so `parseRubric` errors → verdict `error` →
- *  park blocked (a pinned-but-unusable rubric never becomes a silent auto-pass). Never throws. */
-async function readRubricText(workdir: string, nodePath: string, ref: string): Promise<string> {
+/** Read the pinned judge rubric (`done.judge`) from the BASE commit — never the working tree. The ref is a
+ *  work-subtree-relative path that "lives next to `_work.md`", resolved against the node's folder
+ *  (`nodePath`) as a repo-root-relative pathspec, validated by {@link isValidRubricRef} first (a
+ *  `..`/absolute/non-`.md` ref is rejected). Reading from `base` (where rubric.md is a PROTECTED path) is
+ *  tamper-proof: an uncommitted worktree rewrite of the rubric is invisible, closing the reward-hacking
+ *  vector (the writer cannot rewrite its own grading rubric). Fail-CLOSED: an invalid ref, an absent/over-cap
+ *  blob → "" so `parseRubric` errors → verdict `error` → park blocked. Never throws. */
+async function readRubricText(
+  cwd: string,
+  base: string,
+  nodePath: string,
+  ref: string,
+  maxBytes: number,
+): Promise<string> {
   if (!isValidRubricRef(ref)) return "";
-  try {
-    return await readFile(join(workdir, nodePath, ref), "utf8");
-  } catch {
-    return "";
-  }
+  const pathspec = nodePath === "" ? ref : `${nodePath}/${ref}`;
+  const { text, truncated } = await gitShowBounded(cwd, base, pathspec, maxBytes);
+  return truncated ? "" : text;
 }
 
-/** The run's brief — the `_work.md` body the work was scoped from (the judge's context, VERIFIER §2 Stage
- *  2, never a gate). Best-effort: an unreadable/malformed `_work.md` yields "" (the judge prompt handles an
- *  empty brief). Never throws. */
-async function readBrief(workdir: string, nodePath: string): Promise<string> {
+/** The run's brief — the `_work.md` body the work was scoped from (the judge's context, VERIFIER §2 Stage 2,
+ *  never a gate). Read from the BASE commit (not the working tree) so an uncommitted worktree edit can't
+ *  inject content into the judge prompt; `_work.md` is a PROTECTED path, so base IS the canonical body.
+ *  Best-effort: an absent/over-cap/malformed `_work.md` yields "" (the judge prompt handles an empty brief).
+ *  Never throws. */
+async function readBrief(
+  cwd: string,
+  base: string,
+  nodePath: string,
+  maxBytes: number,
+): Promise<string> {
+  const pathspec = nodePath === "" ? WORK_FILE : `${nodePath}/${WORK_FILE}`;
   try {
-    return parseWorkFile(await readFile(join(workdir, nodePath, WORK_FILE), "utf8")).brief;
+    const { text, truncated } = await gitShowBounded(cwd, base, pathspec, maxBytes);
+    return truncated ? "" : parseWorkFile(text).brief;
   } catch {
     return "";
   }
@@ -762,11 +776,19 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         budget: ctx.budget,
       });
       judge = {
-        // fail-CLOSED: an invalid ref / unreadable rubric → "" → parseRubric errors → verdict error → park
-        // blocked. The brief is best-effort context; the diff is the byte-bounded read above.
-        rubricText: await readRubricText(ctx.sandbox.workdir, ctx.nodePath, judgeRef),
+        // All three inputs read from the agent-immutable BASE commit (see the resolution comment above),
+        // never the worktree — tamper-proof (the writer can't rewrite its own rubric) and hang-proof (no
+        // worktree FIFO). fail-CLOSED: an invalid ref / absent / over-cap rubric → "" → parseRubric errors →
+        // verdict error → park blocked. The brief is best-effort context; the diff is the byte-bounded read above.
+        rubricText: await readRubricText(
+          ctx.sandbox.workdir,
+          ctx.base,
+          ctx.nodePath,
+          judgeRef,
+          maxBytes,
+        ),
         diff: runDiff.text,
-        brief: await readBrief(ctx.sandbox.workdir, ctx.nodePath),
+        brief: await readBrief(ctx.sandbox.workdir, ctx.base, ctx.nodePath, maxBytes),
         call: proxyJudgeCaller({ proxyUrl: proxy.url, bearer: verifierBearer }),
       };
     }

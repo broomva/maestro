@@ -58,21 +58,19 @@ export async function gitHead(cwd: string): Promise<string> {
 }
 
 /**
- * Read `git diff <base> <branch>` in `cwd`, BOUNDED to `maxBytes`. Streams stdout and STOPS the moment the
- * cap is exceeded (cancelling the read + killing git), so an adversarial multi-hundred-MB diff can never
- * buffer into the caller — the 24/7 supervisor reads this to hand the verifier judge the run diff, and the
- * judge must hold the whole diff to grade it, while Stage 0 only gates line/file COUNTS (a few minified
- * lines can be huge). Returns the captured text (≤ maxBytes + one final chunk) and whether it was truncated;
- * the caller fails the verification CLOSED on `truncated`. Never throws on a git error (a failed diff yields
- * empty text, not truncated) — the reader is a memory guard, not a diff-validity gate.
+ * Spawn `git <argv>` in `cwd` and read its stdout BOUNDED to `maxBytes` — streams and STOPS the moment the
+ * cap is exceeded (cancelling the read + killing git), so an adversarial huge output can never buffer into
+ * the caller (the 24/7 supervisor). Reads only from git (the object store / index / a commit-to-commit
+ * diff), NEVER from a filesystem path the caller opens — so it cannot block on an agent-planted FIFO.
+ * Returns the captured text (≤ maxBytes + one final chunk) and whether it was truncated. Never throws on a
+ * git error (a failed command yields empty text, not truncated) — a memory guard, not a validity gate.
  */
-export async function gitDiffBounded(
+async function gitBoundedStdout(
   cwd: string,
-  base: string,
-  branch: string,
+  argv: string[],
   maxBytes: number,
 ): Promise<{ text: string; truncated: boolean }> {
-  const proc = Bun.spawn(["git", "diff", base, branch], {
+  const proc = Bun.spawn(["git", ...argv], {
     cwd,
     stdout: "pipe",
     stderr: "ignore",
@@ -107,6 +105,37 @@ export async function gitDiffBounded(
     off += c.byteLength;
   }
   return { text: new TextDecoder().decode(buf), truncated };
+}
+
+/**
+ * Read `git diff <base> <branch>` in `cwd`, BOUNDED to `maxBytes` — the verifier judge's run diff. It is
+ * COMMIT-to-commit (never the working tree), so it reflects exactly what the agent COMMITTED (tamper-safe)
+ * and cannot block on a worktree FIFO. Fails the verification CLOSED on `truncated` (see {@link gitBoundedStdout}).
+ */
+export async function gitDiffBounded(
+  cwd: string,
+  base: string,
+  branch: string,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  return gitBoundedStdout(cwd, ["diff", base, branch], maxBytes);
+}
+
+/**
+ * Read the blob at `<ref>:<pathspec>` from git's object store in `cwd`, BOUNDED to `maxBytes`. `pathspec` is
+ * repo-root-relative (POSIX `/`). This reads the COMMITTED content at `ref` (the agent-immutable base
+ * captured at dispatch) — NEVER the working tree — so the verifier's rubric + brief inputs cannot be tampered
+ * by an uncommitted worktree edit (a committed edit to a protected path is caught by Stage 0), and the read
+ * cannot block on an agent-planted worktree FIFO. A missing path / bad ref yields empty text (git show exits
+ * non-zero, stderr ignored, empty stdout) — the caller treats that as fail-closed for the rubric.
+ */
+export async function gitShowBounded(
+  cwd: string,
+  ref: string,
+  pathspec: string,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  return gitBoundedStdout(cwd, ["show", `${ref}:${pathspec}`], maxBytes);
 }
 
 /**
