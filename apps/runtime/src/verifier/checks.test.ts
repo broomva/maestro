@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { DoneCheck } from "@maestro/protocol";
 import type { SandboxSpawnContext } from "../sandbox/sandbox";
 import type { CheckProcResult, CheckRunner } from "./checks";
-import { liftStage1, runChecks } from "./checks";
+import { defaultCheckRunner, liftStage1, MAX_EVIDENCE_BYTES, runChecks } from "./checks";
 
 const PHASE1: SandboxSpawnContext = { cwd: "/wt", commandPrefix: [], env: {} };
 
@@ -304,6 +304,49 @@ describe("verifier-checks — runChecks (Stage 1 deterministic oracle)", () => {
     await runChecks({ checks, spawnContext: PHASE1, runDir: "/rd", run, writeLog, now });
     expect(calls.map((c) => c.timeoutMs)).toEqual([600_000, 120_000, 1_800_000]);
   });
+
+  test("an evidence-write failure → verdict error (infra: parks blocked, never rejects)", async () => {
+    // A full/read-only runs/ dir makes writeLog throw. That is infra, exactly like a spawn error — it
+    // must map to verdict `error` (park blocked, never burn an attempt), NOT escape as a rejected promise.
+    const { run } = scripted([pass("ok")]);
+    const now = harness().now;
+    const writeLog = async () => {
+      throw new Error("ENOSPC: no space left on device");
+    };
+    const r = await runChecks({
+      checks: [{ name: "tests", run: "bun test" }],
+      spawnContext: PHASE1,
+      runDir: "/rd",
+      run,
+      writeLog,
+      now,
+    });
+    expect(r.verdict).toBe("error");
+    expect(r.error).toContain("evidence log write failed");
+    expect(r.error).toContain("ENOSPC");
+  });
+});
+
+describe("verifier-checks — defaultCheckRunner (real subprocess, bounded capture)", () => {
+  // A REAL check that floods stdout must not grow the runner heap without bound: only the trailing
+  // MAX_EVIDENCE_BYTES are retained, so a hot-loop logger / `yes` / `cat /dev/zero` can't OOM the 24/7
+  // supervisor. The long (30s) timeout also proves the fix for the leaked kill-timer: if the losing
+  // Promise.race timer were not cleared, this suite would hang ~30s after the check resolves.
+  test("floods stdout but the runner keeps only the bounded tail (no unbounded heap growth)", async () => {
+    const floodBytes = MAX_EVIDENCE_BYTES * 4;
+    const r = await defaultCheckRunner(
+      ["sh", "-c", `yes AAAAAAAA | head -c ${floodBytes}; printf '\\nTAIL_MARKER\\n'`],
+      { cwd: process.cwd(), env: { PATH: process.env.PATH ?? "" }, timeoutMs: 30_000 },
+    );
+    expect(r.spawnError).toBeUndefined();
+    expect(r.timedOut).toBe(false);
+    expect(r.code).toBe(0);
+    // captured output is bounded (tail + a short truncation marker), NOT the full 4 MiB flood
+    expect(r.stdout.length).toBeLessThanOrEqual(MAX_EVIDENCE_BYTES + 4096);
+    // the TAIL survives (the flood's head is dropped) and truncation is signalled
+    expect(r.stdout).toContain("TAIL_MARKER");
+    expect(r.stdout).toContain("output truncated");
+  }, 60_000);
 });
 
 describe("verifier-checks — liftStage1 (into a VerifierResult)", () => {

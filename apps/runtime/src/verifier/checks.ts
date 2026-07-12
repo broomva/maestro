@@ -78,8 +78,24 @@ export interface RunChecksDeps {
  *  (the repo's own `escalateHung` races exit against a delay for the same reason). */
 const DRAIN_GRACE_MS = 2000;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/** Cap the in-memory evidence buffer PER STREAM. A check runs agent-influenced code; a hot-loop
+ *  `console.log`, `yes`, or `cat /dev/zero` emits output without bound, and Bun.spawn has no `maxBuffer`.
+ *  Accumulating it all would balloon the long-lived supervisor heap and OOM-crash the 24/7 engine (and
+ *  every concurrent run with it). We keep a rolling TAIL of the last {@link MAX_EVIDENCE_BYTES} — evidence
+ *  is the last-200-lines tail anyway, where failures surface — and drain continuously so the child never
+ *  blocks on a full pipe. 1 MiB per stream holds 200 lines of ordinary output with huge margin. */
+export const MAX_EVIDENCE_BYTES = 1024 * 1024;
+
+/** A cancellable delay for `Promise.race`. The LOSING branch's timer MUST be cleared: a bare
+ *  `setTimeout` left armed keeps the event loop alive for up to `timeout_s` (max 1800s) after a fast
+ *  check resolves, blocking clean process exit in any short-lived reuse of the runner (the `verify` CLI,
+ *  the `--role verifier` child, a `bun test` that drives the real runner). */
+function deadline(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let id: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<void>((resolve) => {
+    id = setTimeout(resolve, ms);
+  });
+  return { promise, cancel: () => clearTimeout(id) };
 }
 
 /** Concatenate byte chunks into one buffer. */
@@ -96,8 +112,13 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
 }
 
 /** Read a process stream into text via a reader we OWN (not a `Response`, which locks the stream), so a
- *  hung pipe can be `cancel()`led to release its fd. `text` always resolves — with whatever was captured
- *  when the stream EOFs, errors, or is cancelled — so it can never wedge the runner. */
+ *  hung pipe can be `cancel()`led to release its fd. Memory is BOUNDED: only the trailing
+ *  {@link MAX_EVIDENCE_BYTES} are retained (oldest whole chunks dropped first; a single oversized chunk
+ *  copied down to its tail so the big source buffer is released), so an unbounded-output check cannot grow
+ *  the supervisor heap. We keep draining rather than stop reading, both so the child never blocks on a
+ *  full pipe AND so we capture the TAIL (where failures surface), not the head. `text` always resolves —
+ *  with whatever was captured when the stream EOFs, errors, or is cancelled — so it can never wedge the
+ *  runner. A truncation marker is prepended iff bytes were dropped. */
 function pipeReader(stream: ReadableStream<Uint8Array> | null): {
   text: Promise<string>;
   cancel: () => void;
@@ -105,17 +126,39 @@ function pipeReader(stream: ReadableStream<Uint8Array> | null): {
   if (stream === null) return { text: Promise.resolve(""), cancel: () => {} };
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let dropped = false;
   const text = (async () => {
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (value) chunks.push(value);
+        if (!value || value.byteLength === 0) continue;
+        chunks.push(value);
+        bytes += value.byteLength;
+        // Keep only the trailing cap: drop whole leading chunks first (never the newest)...
+        while (bytes > MAX_EVIDENCE_BYTES && chunks.length > 1) {
+          const front = chunks.shift();
+          if (front) bytes -= front.byteLength;
+          dropped = true;
+        }
+        // ...then, if one chunk alone still exceeds the cap, keep a COPY of its tail (`subarray` would
+        // retain the oversized backing buffer, defeating the bound).
+        if (bytes > MAX_EVIDENCE_BYTES && chunks.length === 1) {
+          const only = chunks[0];
+          if (only) {
+            const tail = only.slice(only.byteLength - MAX_EVIDENCE_BYTES);
+            chunks[0] = tail;
+            bytes = tail.byteLength;
+            dropped = true;
+          }
+        }
       }
     } catch {
       // cancelled or errored mid-read — return what we captured
     }
-    return new TextDecoder().decode(concatChunks(chunks));
+    const body = new TextDecoder().decode(concatChunks(chunks));
+    return dropped ? `[output truncated to last ${MAX_EVIDENCE_BYTES} bytes]\n${body}` : body;
   })();
   return {
     text,
@@ -144,22 +187,27 @@ export const defaultCheckRunner: CheckRunner = async (argv, { cwd, env, timeoutM
   const out = pipeReader(proc.stdout as ReadableStream<Uint8Array>);
   const err = pipeReader(proc.stderr as ReadableStream<Uint8Array>);
 
-  // Enforce the timeout on the process, not the pipe: kill the shell if it outlives the deadline.
+  // Enforce the timeout on the process, not the pipe: kill the shell if it outlives the deadline. The
+  // losing timer is cancelled so a fast check leaves no armed setTimeout keeping the event loop alive.
   let timedOut = false;
+  const killAt = deadline(timeoutMs);
   const outcome = await Promise.race([
     proc.exited.then(() => "exited" as const),
-    sleep(timeoutMs).then(() => "timeout" as const),
+    killAt.promise.then(() => "timeout" as const),
   ]);
+  killAt.cancel();
   if (outcome === "timeout") {
     timedOut = true;
     proc.kill("SIGKILL");
   }
 
   // Drain the captured output, but never block past the grace — an orphan may hold the pipe open.
+  const graceAt = deadline(DRAIN_GRACE_MS);
   const drained = await Promise.race([
     Promise.all([out.text, err.text]).then((v) => v),
-    sleep(DRAIN_GRACE_MS).then(() => null),
+    graceAt.promise.then(() => null),
   ]);
+  graceAt.cancel();
   if (drained === null) {
     out.cancel();
     err.cancel();
@@ -249,7 +297,17 @@ export async function runChecks(deps: RunChecksDeps): Promise<Stage1Result> {
 
     const logRel = nameLog(check.name);
     const combined = r.stderr ? (r.stdout ? `${r.stdout}\n${r.stderr}` : r.stderr) : r.stdout;
-    await writeLog(logRel, lastLines(combined, maxLogLines));
+    // A failed evidence write is infra (ENOSPC/EACCES/EROFS), not the agent's fault — map it to verdict
+    // `error` so the run parks blocked, matching the spawn-error path. runChecks must never reject.
+    try {
+      await writeLog(logRel, lastLines(combined, maxLogLines));
+    } catch (e) {
+      return {
+        verdict: "error",
+        checks: results,
+        error: `check "${check.name}": evidence log write failed: ${msg(e)}`,
+      };
+    }
 
     const ok = !r.timedOut && r.code === 0;
     results.push({
