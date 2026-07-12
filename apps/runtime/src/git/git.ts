@@ -6,6 +6,26 @@
 // argv form ONLY (Bun.spawn with an array) — never a shell string. The commit message
 // and paths derive from user input (a mission title / parentPath), so shelling out
 // would be an injection surface. spawn's array form passes them as literal argv.
+//
+// KEY-CONFINEMENT (BRO-1794 P20): EVERY git spawn here runs with a SCRUBBED env — the
+// same deny-by-default allowlist ({@link filterPassthroughEnv}) the runtime gives an
+// agent-influenced Stage-1 check (buildCheckEnv). Reason: these commands run in the
+// AGENT-CONTROLLED worktree, where git executes agent-configured drivers — a diff
+// `diff.external`/`textconv`, a `filter.*.smudge`, a hook — and a driver inheriting the
+// supervisor's process.env would read ANTHROPIC_API_KEY and exfiltrate it. Scrubbing the
+// env means no host secret is ever in scope for any git subprocess. Defense-in-depth on
+// the one PATCH-producing diff ({@link gitDiffBounded}): `--no-ext-diff --no-textconv`
+// so an agent-planted external-diff/textconv driver never even runs.
+
+import { filterPassthroughEnv } from "../harness/spawn-contract";
+
+/** The scrubbed env EVERY runtime git spawn runs under — PATH/HOME/toolchain only, NEVER a host secret
+ *  (see the key-confinement note at the top of this file). Recomputed per call from the live process.env
+ *  (cheap; the process env is small) so a late-set toolchain var is still seen. Passed as the FULL env to
+ *  the spawn (Bun's `env` REPLACES process.env for the child), so git sees only the allowlist. */
+function gitEnv(): Record<string, string> {
+  return filterPassthroughEnv(process.env);
+}
 
 /** Result of a git invocation — exit code plus captured streams. */
 export interface GitResult {
@@ -30,7 +50,7 @@ export class GitError extends Error {
 
 /** Run `git <args>` in `cwd`, capturing streams. Resolves even on non-zero exit. */
 export async function git(cwd: string, args: string[]): Promise<GitResult> {
-  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(["git", ...args], { cwd, env: gitEnv(), stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -72,6 +92,7 @@ async function gitBoundedStdout(
 ): Promise<{ text: string; truncated: boolean }> {
   const proc = Bun.spawn(["git", ...argv], {
     cwd,
+    env: gitEnv(),
     stdout: "pipe",
     stderr: "ignore",
     stdin: "ignore",
@@ -118,7 +139,10 @@ export async function gitDiffBounded(
   branch: string,
   maxBytes: number,
 ): Promise<{ text: string; truncated: boolean }> {
-  return gitBoundedStdout(cwd, ["diff", base, branch], maxBytes);
+  // `--no-ext-diff --no-textconv`: this is the one PATCH-producing diff run in the agent worktree, so it
+  // would otherwise invoke an agent-configured `diff.external`/`textconv` driver. Suppressing them (belt to
+  // the scrubbed-env suspenders) means such a driver never runs at all. See the key-confinement note above.
+  return gitBoundedStdout(cwd, ["diff", "--no-ext-diff", "--no-textconv", base, branch], maxBytes);
 }
 
 /**

@@ -483,10 +483,13 @@ describe("verifier judge wiring (BRO-1794 slice 1b-ii-B) — Stage 2 dials the m
       updatedAt: FIXED_MS,
     });
 
-    // A tiny byte cap + a child that commits a file bigger than it → the run diff exceeds the cap. The
-    // supervisor must STOP reading at the cap (never buffer the whole diff — the BRO-1778 unbounded-buffer
-    // class) and park the run blocked BEFORE minting the verifier bearer or calling the judge.
-    const config = { ...loadConfig({}), workspace: ws, mockModel: true, judgeDiffMaxBytes: 64 };
+    // The cap (512 B) is chosen to sit ABOVE the ~90-byte rubric but BELOW the run diff (a committed 4 KiB
+    // file), so ONLY the diff exceeds it — the rubric read (also bounded by this same cap since round 4)
+    // succeeds and is valid. That isolates the DIFF-cap early-return as the sole reason the run blocks:
+    // without it, the valid rubric would let the judge forward the truncated diff (review / mock.calls 1).
+    // The supervisor must STOP reading at the cap (never buffer the whole diff — the BRO-1778 unbounded-
+    // buffer class) and park the run blocked with reason `diff_too_large` BEFORE minting the bearer.
+    const config = { ...loadConfig({}), workspace: ws, mockModel: true, judgeDiffMaxBytes: 512 };
     const mock = createMockModel({ fallback: { body: anthropicBody("should never forward") } });
     const dispatch = await mountDispatch({
       db: h.db,
@@ -504,6 +507,10 @@ describe("verifier judge wiring (BRO-1794 slice 1b-ii-B) — Stage 2 dials the m
     // Fail-CLOSED: park blocked (a clean verify halt, human looks), NOT a crash, and NOT a silent pass.
     expect(res.crash).toBe(false);
     expect(res.sessionStatus).toBe("blocked");
+    // Pin the REASON to the diff-cap path (not a rubric-truncation-to-error block) — this is what makes the
+    // test a true mutation-proof of the diff-cap early-return: delete it and the valid rubric forwards a
+    // truncated diff → review / reason undefined / mock.calls 1, flipping all three assertions RED.
+    expect(res.reason).toBe("diff_too_large");
     // The judge never forwarded — the diff was refused before any bearer mint / model call (no OOM path).
     expect(mock.calls).toHaveLength(0);
   });
