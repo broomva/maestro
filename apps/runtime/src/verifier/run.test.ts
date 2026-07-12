@@ -450,4 +450,40 @@ describe("verifier-run — runVerification (verify runner)", () => {
     const started = events.find((e) => e.type === EVENT_TYPES.CHECK_STARTED);
     expect(started?.payload).toEqual({ attempt: 3 });
   });
+
+  test("durability-first: verdict.md is written before the FIRST result event too", async () => {
+    const { io, files } = memIo();
+    // Fail on the FIRST result-bearing event (check.result), not just the terminal verdict — this pins
+    // that persist happens before the WHOLE result-emit block, so a reorder of writeVerdict past ANY
+    // emit (not only past the terminal one) reds this.
+    const emit: VerifyEmit = async (type) => {
+      if (type === EVENT_TYPES.CHECK_RESULT) throw new Error("stream down");
+    };
+    await expect(runVerification(baseDeps(io, emit))).rejects.toThrow("stream down");
+    expect(files.has(verdictPath(RUN_DIR))).toBe(true);
+  });
+
+  test("an advisory (required: false) check failing never gates — pass, both checks projected", async () => {
+    const { io } = memIo();
+    const { emit, events } = recorder();
+    const r = await runVerification(
+      baseDeps(io, emit, {
+        checks: {
+          checks: [
+            { name: "unit", run: "bun test", required: true },
+            { name: "lint", run: "biome ci", required: false },
+          ] as DoneCheck[],
+          spawnContext,
+          run: fakeRunner({ "bun test": { code: 0 }, "biome ci": { code: 1 } }),
+          now: () => 0,
+        },
+      }),
+    );
+
+    expect(r.receipt.verdict).toBe("pass"); // an advisory failure reports but never gates the stage
+    expect(r.outcome.action).toBe("park_review");
+    const results = events.filter((e) => e.type === EVENT_TYPES.CHECK_RESULT);
+    expect(results.map((e) => e.payload.name)).toEqual(["unit", "lint"]); // both projected, in order
+    expect(results.find((e) => e.payload.name === "lint")?.payload.ok).toBe(false);
+  });
 });
