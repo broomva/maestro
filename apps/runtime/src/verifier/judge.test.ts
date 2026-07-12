@@ -203,6 +203,16 @@ describe("verifier-judge — parseJudgeReport", () => {
     expect(r.criteria).toHaveLength(2);
   });
 
+  test("a stray brace in a preamble does NOT shadow the real report that follows it", () => {
+    // extractJsonObjects must skip `{og:image}` (not valid JSON) and pick the real report after it —
+    // otherwise a legitimate assessment is spuriously rejected as malformed (round-2 minor).
+    const raw =
+      'Looking at the {og:image} handling and the if (x) { branch, my scores: {"criteria":[{"id":"coverage","score":2},{"id":"no-regressions","score":2}]}';
+    const r = parseJudgeReport(raw, rubric);
+    expect(r.criteria).toHaveLength(2);
+    expect(r.criteria.every((c) => c.score === 2)).toBe(true);
+  });
+
   test("does not close the object early on a `}` inside a note string", () => {
     const raw =
       '{"criteria":[{"id":"coverage","score":1,"note":"missing the {og:image} tag}"},{"id":"no-regressions","score":2}]}';
@@ -264,6 +274,29 @@ describe("verifier-judge — weightedScore", () => {
     );
     expect(s).toBeCloseTo(4 / 6, 6);
   });
+
+  test("MIN-ANCHORED: a 1-based scale [1,2] floors all-min at 0 (not minScale/maxScale) so fail is reachable", () => {
+    // Without min-anchoring, scale [1,2] would floor every reply at 1/2 = 0.5, so a threshold-0.5 gate
+    // could NEVER fail (the round-2 MAJOR). Min-anchored: all-min → 0, all-max → 1.
+    const r = parseRubric(
+      "---\nthreshold: 0.5\nscale: [1, 2]\ncriteria:\n  - {id: a, weight: 1, ask: x}\n---\n",
+    );
+    expect(weightedScore({ criteria: [{ id: "a", score: 1, note: "worst" }] }, r)).toBe(0);
+    expect(weightedScore({ criteria: [{ id: "a", score: 2 }] }, r)).toBe(1);
+  });
+
+  test("0-based scale is unchanged by min-anchoring (backward compatible)", () => {
+    const s = weightedScore(
+      {
+        criteria: [
+          { id: "coverage", score: 1, note: "x" },
+          { id: "no-regressions", score: 2 },
+        ],
+      },
+      rubric,
+    );
+    expect(s).toBeCloseTo((1 * 2 + 2 * 1) / (2 * 3), 6); // 4/6 — identical to the pre-fix formula
+  });
 });
 
 // ── runJudge (scored via a mock caller) ──────────────────────────────────────────────────────────────
@@ -291,6 +324,18 @@ describe("verifier-judge — runJudge", () => {
     expect(r.verdict).toBe("fail");
     expect(r.score).toBeCloseTo(4 / 6, 6);
     expect(r.report?.criteria.find((c) => c.id === "coverage")?.note).toContain("twitter:card");
+  });
+
+  test("a 1-based scale [1,2] can still return FAIL (min-anchoring closes the general fail-open)", async () => {
+    // Before min-anchoring, scale [1,2] + threshold 0.5 made fail unreachable (all-min = 0.5 ≥ 0.5).
+    const rubric1 =
+      "---\nthreshold: 0.5\nscale: [1, 2]\ncriteria:\n  - {id: a, weight: 1, ask: did the work}\n---\n";
+    const { call } = recordingCaller(
+      reply('{"criteria":[{"id":"a","score":1,"note":"nothing was done"}]}'),
+    );
+    const r = await runJudge({ rubricText: rubric1, diff: "d", brief: "b", checks: CHECKS, call });
+    expect(r.verdict).toBe("fail");
+    expect(r.score).toBe(0);
   });
 
   test("honors the MAESTRO_MODEL_VERIFIER pin override", async () => {

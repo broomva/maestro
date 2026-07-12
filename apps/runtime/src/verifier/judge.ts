@@ -297,31 +297,51 @@ export function extractText(body: unknown): string {
     .join("");
 }
 
-/** Extract the first balanced top-level JSON object from model text that may wrap it in ``` fences or
- *  prose. Returns null if no plausible object is found. Bracket-depth scan (string/escape-aware) so a
- *  `}` inside a note string does not close the object early. */
-function extractJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
+/** Extract EVERY balanced top-level JSON object from model text that may wrap the real object in ```
+ *  fences or prose — before AND after. Bracket-depth scan (string/escape-aware) so a `}` inside a
+ *  string does not close an object early. The caller picks the first candidate that is a valid judge
+ *  report, so a stray `{…}` in a preamble (a set, a `if (x) {` fragment, an `{og:image}` mention) does
+ *  not shadow the real reply that follows it. */
+function extractJsonObjects(text: string): string[] {
+  const objs: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "{") {
+      i++;
       continue;
     }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          end = j;
+          break;
+        }
+      }
     }
+    if (end === -1) {
+      // An unbalanced open — a false start (e.g. a bare `if (x) {` in prose). Skip just this `{` and
+      // keep looking: a real balanced object can still follow it. (Bounded work — replies are small.)
+      i++;
+      continue;
+    }
+    objs.push(text.slice(i, end + 1));
+    i = end + 1;
   }
-  return null;
+  return objs;
 }
 
 /**
@@ -331,17 +351,30 @@ function extractJsonObject(text: string): string | null {
  * fail the work with a malformed verdict.
  */
 export function parseJudgeReport(text: string, rubric: Rubric): JudgeReport {
-  const json = extractJsonObject(text);
-  if (json === null) throw new JudgeError("malformed_report", "no JSON object in the judge reply");
-  let doc: unknown;
-  try {
-    doc = JSON.parse(json);
-  } catch (e) {
-    throw new JudgeError("malformed_report", `judge reply is not valid JSON: ${msg(e)}`);
+  // Pick the FIRST balanced object that parses AND carries a `criteria` array — so a stray brace in a
+  // model preamble does not shadow the real report that follows (it fails the parse/shape and is skipped).
+  let rawCriteria: unknown;
+  for (const candidate of extractJsonObjects(text)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue; // not JSON — try the next balanced candidate
+    }
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      Array.isArray((parsed as { criteria?: unknown }).criteria)
+    ) {
+      rawCriteria = (parsed as { criteria: unknown }).criteria;
+      break;
+    }
   }
-  const rawCriteria = (doc as { criteria?: unknown } | null)?.criteria;
   if (!Array.isArray(rawCriteria)) {
-    throw new JudgeError("malformed_report", "judge reply must have a `criteria` array");
+    throw new JudgeError(
+      "malformed_report",
+      "no JSON object with a `criteria` array in the judge reply",
+    );
   }
 
   const allowed = new Map(rubric.criteria.map((c) => [c.id, c]));
@@ -381,18 +414,26 @@ export function parseJudgeReport(text: string, rubric: Rubric): JudgeReport {
 }
 
 /**
- * Weighted score 0–1: Σ(score·weight) / (maxScale·Σweight). All-max scores → 1.0. Pass = score ≥
- * threshold. Assumes `report` was validated against `rubric` (every criterion present, score in scale).
+ * Weighted score 0–1, MIN-ANCHORED: Σ((score−minScale)·weight) / ((maxScale−minScale)·Σweight).
+ * Anchoring to the scale MINIMUM (not just dividing by the max) is what makes `fail` reachable for a
+ * non-zero-based scale: a Likert `scale: [1, 2]` would otherwise floor every reply at minScale/maxScale
+ * (= 0.5 here), so a below-threshold verdict could be unreachable — a silent fail-open. All-min scores
+ * → 0, all-max → 1, for ANY strictly-ascending scale. Backward-compatible with a 0-based scale
+ * ([0,1,2] → minScale 0 → the plain achieved/possible). Pass = score ≥ threshold. Assumes `report` was
+ * validated against `rubric` (every criterion present, score in scale). The span (maxScale−minScale) is
+ * > 0 because `parseRubric` requires a strictly-ascending scale of length ≥ 2.
  */
 export function weightedScore(report: JudgeReport, rubric: Rubric): number {
   const max = maxScale(rubric);
+  const min = rubric.scale[0] as number; // validated non-empty + ascending → element 0 is the minimum
+  const span = max - min;
   const weightOf = new Map(rubric.criteria.map((c) => [c.id, c.weight]));
   let achieved = 0;
   let possible = 0;
   for (const c of report.criteria) {
     const w = weightOf.get(c.id) ?? 0;
-    achieved += c.score * w;
-    possible += max * w;
+    achieved += (c.score - min) * w;
+    possible += span * w;
   }
   return possible === 0 ? 0 : achieved / possible;
 }
