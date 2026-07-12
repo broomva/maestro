@@ -228,6 +228,37 @@ describe("verifier-checks — runChecks (Stage 1 deterministic oracle)", () => {
     expect(log.at(-1)).toBe("line 299");
   });
 
+  test("evidence with exactly maxLogLines content lines + a trailing newline keeps ALL of them", async () => {
+    // 3 content lines + trailing NL. The trailing empty split element must NOT consume a slot.
+    const { run } = scripted([pass("a\nb\nc\n")]);
+    const { logs, writeLog, now } = harness();
+    await runChecks({
+      checks: [{ name: "tests", run: "x" }],
+      spawnContext: PHASE1,
+      runDir: "/rd",
+      run,
+      writeLog,
+      now,
+      maxLogLines: 3,
+    });
+    expect(need(logs, "checks/tests.log")).toBe("a\nb\nc\n"); // "a" kept (not dropped for a blank trailer)
+  });
+
+  test("evidence over maxLogLines truncates to the last N content lines (trailing NL preserved)", async () => {
+    const { run } = scripted([pass("a\nb\nc\n")]);
+    const { logs, writeLog, now } = harness();
+    await runChecks({
+      checks: [{ name: "tests", run: "x" }],
+      spawnContext: PHASE1,
+      runDir: "/rd",
+      run,
+      writeLog,
+      now,
+      maxLogLines: 2,
+    });
+    expect(need(logs, "checks/tests.log")).toBe("b\nc\n"); // oldest content line dropped
+  });
+
   test("colliding check names get distinct log files (no evidence overwrite)", async () => {
     const { run } = scripted([pass("a"), pass("b")]);
     const { logs, writeLog, now } = harness();
@@ -239,6 +270,27 @@ describe("verifier-checks — runChecks (Stage 1 deterministic oracle)", () => {
     expect(r.checks.map((c) => c.log)).toEqual(["checks/test_unit.log", "checks/test_unit-2.log"]);
     expect(logs["checks/test_unit.log"]).toBe("a");
     expect(logs["checks/test_unit-2.log"]).toBe("b");
+  });
+
+  test("a literal name equal to a generated -N suffix does NOT overwrite (seen-set keys on emitted base)", async () => {
+    // check-2 (literal) → check-2.log; check → check.log; check (dup) → check-2 taken → check-3.log.
+    const { run } = scripted([pass("first"), pass("second"), pass("third")]);
+    const { logs, writeLog, now } = harness();
+    const checks: DoneCheck[] = [
+      { name: "check-2", run: "a" },
+      { name: "check", run: "b" },
+      { name: "check", run: "c" },
+    ];
+    const r = await runChecks({ checks, spawnContext: PHASE1, runDir: "/rd", run, writeLog, now });
+    expect(r.checks.map((c) => c.log)).toEqual([
+      "checks/check-2.log",
+      "checks/check.log",
+      "checks/check-3.log",
+    ]);
+    // no file was written twice — every check's evidence survives
+    expect(logs["checks/check-2.log"]).toBe("first");
+    expect(logs["checks/check.log"]).toBe("second");
+    expect(logs["checks/check-3.log"]).toBe("third");
   });
 
   test("timeout is derived per-check (default 600s; explicit honored; clamped to the 1800s cap)", async () => {

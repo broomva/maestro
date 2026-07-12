@@ -72,8 +72,68 @@ export interface RunChecksDeps {
   maxLogLines?: number;
 }
 
-/** The default runner: spawn `argv` via Bun, capture streams, and enforce `timeoutMs` by SIGKILL. A
- *  spawn THROW (the shell binary missing) becomes `spawnError` — the caller maps it to verdict `error`. */
+/** After the check process ends (or is killed) never wait longer than this for its stdout/stderr to
+ *  reach EOF: a backgrounded grandchild can inherit and HOLD the pipe's write end open, so the stream
+ *  never EOFs. Without this bound the runner would hang forever, defeating the very timeout it enforces
+ *  (the repo's own `escalateHung` races exit against a delay for the same reason). */
+const DRAIN_GRACE_MS = 2000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Concatenate byte chunks into one buffer. */
+function concatChunks(chunks: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+
+/** Read a process stream into text via a reader we OWN (not a `Response`, which locks the stream), so a
+ *  hung pipe can be `cancel()`led to release its fd. `text` always resolves — with whatever was captured
+ *  when the stream EOFs, errors, or is cancelled — so it can never wedge the runner. */
+function pipeReader(stream: ReadableStream<Uint8Array> | null): {
+  text: Promise<string>;
+  cancel: () => void;
+} {
+  if (stream === null) return { text: Promise.resolve(""), cancel: () => {} };
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  const text = (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+    } catch {
+      // cancelled or errored mid-read — return what we captured
+    }
+    return new TextDecoder().decode(concatChunks(chunks));
+  })();
+  return {
+    text,
+    cancel: () => {
+      reader.cancel().catch(() => {});
+    },
+  };
+}
+
+/**
+ * The default runner: spawn `argv` via Bun, capture streams, and enforce `timeoutMs`. A spawn THROW (the
+ * shell binary missing) becomes `spawnError` — the caller maps it to verdict `error`. The timeout is
+ * enforced on the PROCESS (race `exited` against the deadline, then SIGKILL), and the stream drain is
+ * BOUNDED by {@link DRAIN_GRACE_MS}: a check that orphans a pipe-holding grandchild (jest/vitest workers,
+ * `dev-server &`, an E2E fixture) can hold stdout open after the shell dies — so we never await EOF
+ * unconditionally. On the grace path the readers are cancelled to release the fds. The runner ALWAYS
+ * resolves; it never throws post-spawn.
+ */
 export const defaultCheckRunner: CheckRunner = async (argv, { cwd, env, timeoutMs }) => {
   let proc: ReturnType<typeof Bun.spawn>;
   try {
@@ -81,21 +141,32 @@ export const defaultCheckRunner: CheckRunner = async (argv, { cwd, env, timeoutM
   } catch (err) {
     return { code: -1, stdout: "", stderr: "", timedOut: false, spawnError: msg(err) };
   }
+  const out = pipeReader(proc.stdout as ReadableStream<Uint8Array>);
+  const err = pipeReader(proc.stderr as ReadableStream<Uint8Array>);
+
+  // Enforce the timeout on the process, not the pipe: kill the shell if it outlives the deadline.
   let timedOut = false;
-  const timer = setTimeout(() => {
+  const outcome = await Promise.race([
+    proc.exited.then(() => "exited" as const),
+    sleep(timeoutMs).then(() => "timeout" as const),
+  ]);
+  if (outcome === "timeout") {
     timedOut = true;
     proc.kill("SIGKILL");
-  }, timeoutMs);
-  try {
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout as ReadableStream).text(),
-      new Response(proc.stderr as ReadableStream).text(),
-      proc.exited,
-    ]);
-    return { code, stdout, stderr, timedOut };
-  } finally {
-    clearTimeout(timer);
   }
+
+  // Drain the captured output, but never block past the grace — an orphan may hold the pipe open.
+  const drained = await Promise.race([
+    Promise.all([out.text, err.text]).then((v) => v),
+    sleep(DRAIN_GRACE_MS).then(() => null),
+  ]);
+  if (drained === null) {
+    out.cancel();
+    err.cancel();
+  }
+  const [stdout, stderr] = drained ?? (await Promise.all([out.text, err.text]));
+  const code = timedOut ? -1 : await proc.exited;
+  return { code, stdout, stderr, timedOut };
 };
 
 /** Clamp a check's `timeout_s` to the contract-legal window (defensive — the parser already enforces
@@ -108,22 +179,34 @@ function timeoutMsFor(check: DoneCheck): number {
 }
 
 /** Sanitize a check name into a safe log-file base — `[A-Za-z0-9_-]` only, so no `/`, no `..`, no
- *  control char can escape `<runDir>/checks/`. A collision (two checks whose names sanitize alike) gets
- *  a `-2`/`-3` suffix so no evidence is silently overwritten. */
+ *  control char can escape `<runDir>/checks/`. A collision gets a `-2`/`-3` suffix so no evidence is
+ *  silently overwritten. The seen-set keys on the EMITTED base (not the sanitized input), so a generated
+ *  `-N` suffix that equals a later literal check name (e.g. a check literally named `foo-2`) still gets
+ *  its own distinct file rather than clobbering the suffix. */
 function logNamer(): (name: string) => string {
-  const used = new Map<string, number>();
+  const used = new Set<string>();
   return (name) => {
     const base = name.replace(/[^A-Za-z0-9_-]/g, "_") || "check";
-    const n = (used.get(base) ?? 0) + 1;
-    used.set(base, n);
-    return join("checks", n === 1 ? `${base}.log` : `${base}-${n}.log`);
+    let candidate = base;
+    let n = 1;
+    while (used.has(candidate)) {
+      n += 1;
+      candidate = `${base}-${n}`;
+    }
+    used.add(candidate);
+    return join("checks", `${candidate}.log`);
   };
 }
 
-/** Keep the last `max` lines of `text` (the evidence tail, VERIFIER §2 "last 200 lines"). */
+/** Keep the last `max` lines of `text` (the evidence tail, VERIFIER §2 "last 200 lines"). A single
+ *  trailing newline (the normal shape of process output) is NOT counted as a line, so exactly `max`
+ *  content lines followed by a newline are all kept — not `max-1` content lines plus a blank trailer. */
 function lastLines(text: string, max: number): string {
-  const lines = text.split("\n");
-  return lines.length <= max ? text : lines.slice(-max).join("\n");
+  const trailingNl = text.endsWith("\n");
+  const body = trailingNl ? text.slice(0, -1) : text;
+  const lines = body.split("\n");
+  const kept = lines.length <= max ? lines : lines.slice(-max);
+  return kept.join("\n") + (trailingNl ? "\n" : "");
 }
 
 /**
