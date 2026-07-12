@@ -34,8 +34,21 @@ export interface CheckResult {
   reason?: "fail" | "timeout";
 }
 
+/** The Stage 2 judge receipt (VERIFIER §4 `judge`). `score` is the weighted 0–1 result, or null when
+ *  the judge did not run (no `judge:` rubric) or errored. Defined here (not in judge.ts) so
+ *  `VerifierResult` can reference it without an import cycle. */
+export interface JudgeReceipt {
+  /** Weighted score 0–1, or null (judge not run / errored). */
+  score: number | null;
+  /** The pinned judge model that scored, when the judge ran. */
+  model?: string;
+  /** Relative path to the `judge.json` detail under the run dir, when persisted. */
+  detail?: string;
+}
+
 /** The verifier's result so far. Stage 0 always populates `diffstat` + `base`; `reason` is set on a
- *  Stage 0 fail; `message` on an infra error; `checks` on a Stage 1 (deterministic-check) result. */
+ *  Stage 0 fail; `message` on an infra error; `checks` on a Stage 1 (deterministic-check) result;
+ *  `judge` on a Stage 2 (LLM-judge) result. */
 export interface VerifierResult {
   verdict: Verdict;
   /** The Stage 0 fail reason, if the run failed the guard. */
@@ -50,6 +63,8 @@ export interface VerifierResult {
   message?: string;
   /** The Stage 1 check results (VERIFIER §2 Stage 1), present once deterministic checks have run. */
   checks?: CheckResult[];
+  /** The Stage 2 judge receipt (VERIFIER §2 Stage 2), present once the judge stage has run. */
+  judge?: JudgeReceipt;
 }
 
 export interface VerifierDeps {
