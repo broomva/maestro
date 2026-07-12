@@ -11,7 +11,13 @@ import { Composer } from "@maestro/ui";
 import { useParams } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { ChatFeed } from "@/chat/chat-feed";
-import { FixtureChatTransport, fixtureRequested, fixtureStepMs } from "@/chat/fixture-transport";
+import {
+  FixtureChatTransport,
+  FixtureErrorChatTransport,
+  fixtureMode,
+  fixtureRequested,
+  fixtureStepMs,
+} from "@/chat/fixture-transport";
 import { type ChatTransport, RuntimeChatTransport } from "@/chat/transport";
 import { useBvChat } from "@/chat/use-bv-chat";
 
@@ -22,13 +28,12 @@ import { useBvChat } from "@/chat/use-bv-chat";
 function SessionChat({ sessionId }: { sessionId: string }) {
   // Bind the transport once per mount. Fixture mode is a demo/test seam (query-triggered), inert
   // otherwise — production streams over the real F10 endpoint.
-  const transport = useMemo<ChatTransport>(
-    () =>
-      fixtureRequested()
-        ? new FixtureChatTransport(fixtureStepMs())
-        : new RuntimeChatTransport({ sessionId }),
-    [sessionId],
-  );
+  const transport = useMemo<ChatTransport>(() => {
+    if (!fixtureRequested()) return new RuntimeChatTransport({ sessionId });
+    return fixtureMode() === "error"
+      ? new FixtureErrorChatTransport(fixtureStepMs())
+      : new FixtureChatTransport(fixtureStepMs());
+  }, [sessionId]);
 
   const { messages, status, busy, sendMessage, stop } = useBvChat({ transport });
 

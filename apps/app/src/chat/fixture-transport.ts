@@ -69,11 +69,52 @@ export class FixtureChatTransport implements ChatTransport {
   }
 }
 
-/** True when the current URL opts into the fixture transport (`?fixture=1`) — the demo/test seam,
- *  inert otherwise. Mirrors the router's `?crash` probe convention (BRO-1824). */
+/**
+ * A fixture that streams a few chunks then FAILS mid-stream with a non-abort error — the transport-error
+ * path (a connection drop / server crash). Exercises useBvChat's catch: the partial assistant text must
+ * settle (no perpetual caret) AND an error row must appear. Selected with `?fixture=error`.
+ */
+export class FixtureErrorChatTransport implements ChatTransport {
+  readonly #stepMs: number;
+  constructor(stepMs: number = STEP_MS) {
+    this.#stepMs = stepMs;
+  }
+  async *stream(
+    _messages: readonly ChatMessage[],
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<StreamChunk, void, unknown> {
+    const prefix: StreamChunk[] = [
+      { type: "start", messageId: "r-err" },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "Here are the " },
+    ];
+    for (const chunk of prefix) {
+      if (opts?.signal?.aborted) return;
+      await wait(this.#stepMs, opts?.signal);
+      if (opts?.signal?.aborted) return;
+      yield chunk;
+    }
+    await wait(this.#stepMs, opts?.signal);
+    if (opts?.signal?.aborted) return;
+    // A genuine mid-stream failure (not an abort) — propagates out of the transport into the hook's catch.
+    throw new Error("connection dropped");
+  }
+}
+
+/** True when the current URL opts into the fixture transport (`?fixture=…`) — the demo/test seam, inert
+ *  otherwise. Mirrors the router's `?crash` probe convention (BRO-1824). */
 export function fixtureRequested(): boolean {
   if (typeof window === "undefined") return false;
   return new URLSearchParams(window.location.search).has("fixture");
+}
+
+/** The fixture variant from `?fixture=<mode>` — "error" selects the mid-stream-failure fixture; anything
+ *  else (including `1`) is the normal recorded reply. */
+export function fixtureMode(): "normal" | "error" {
+  if (typeof window === "undefined") return "normal";
+  return new URLSearchParams(window.location.search).get("fixture") === "error"
+    ? "error"
+    : "normal";
 }
 
 /** Optional per-chunk delay (ms) from `?step=<n>` — lets a test widen the streaming window (to click Stop

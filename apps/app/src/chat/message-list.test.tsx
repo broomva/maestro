@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage } from "@maestro/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
+import { finalizeStreamingParts } from "./chat-turn";
 import { MessageList, MessageRow } from "./message-list";
 import { ChatTransportError } from "./transport";
 import { appendErrorMessage } from "./use-bv-chat";
@@ -177,5 +178,29 @@ describe("appendErrorMessage — the transport-failure render path", () => {
     const out = html(<MessageRow msg={errMsg as ChatMessage} />);
     expect(out).toContain("bv-msg--error");
     expect(out).toContain("boom");
+  });
+
+  test("the hook's catch transform SETTLES the partial streaming part before appending the error (P20 round-3 MAJOR)", () => {
+    // This is EXACTLY what useBvChat's catch runs: appendErrorMessage(finalizeStreamingParts(m), err).
+    // A mid-stream transport failure must not leave the truncated assistant text blinking its caret.
+    const partial: ChatMessage[] = [
+      { id: "u1", role: "user", parts: [{ type: "text", text: "list files" }] },
+      {
+        id: "r1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Here are ", state: "streaming" }],
+      },
+    ];
+    const out = appendErrorMessage(
+      finalizeStreamingParts(partial),
+      new Error("connection dropped"),
+    );
+    // The truncated text part is settled (no caret) — NOT still "streaming".
+    expect(out[1]?.parts[0]).toMatchObject({ text: "Here are ", state: "done" });
+    expect(out.some((m) => m.parts.some((p) => p.state === "streaming"))).toBe(false);
+    // And the error row is appended after it.
+    expect(out.at(-1)?.parts[0]).toMatchObject({ type: "error", errorText: "connection dropped" });
+    // Rendering the settled partial message shows NO streaming caret class.
+    expect(html(<MessageRow msg={out[1] as ChatMessage} />)).not.toContain("bv-msg--streaming");
   });
 });

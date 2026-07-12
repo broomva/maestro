@@ -144,6 +144,26 @@ test("clicking Stop mid-stream halts the turn AND settles the caret (no perpetua
   await expect(thread.getByTestId("chat-assistant-text")).toContainText("Listed the files.");
 });
 
+test("a mid-stream transport failure shows an error row AND settles the caret (P20 round-3 MAJOR)", async ({
+  page,
+}) => {
+  // ?fixture=error streams start→text-start→text-delta("Here are the ") then throws a non-abort error,
+  // landing in useBvChat's catch. The catch must settle the partial streaming text (no perpetual caret)
+  // and append an honest error row. Without finalizeStreamingParts in the catch the caret blinks forever
+  // — this test's caret-gone assertion fails in that world.
+  await page.goto("/session/orchestrator?fixture=error&step=150");
+  const thread = page.locator('section[aria-label="Thread"] [data-testid="chat-feed"]');
+  await page.getByPlaceholder("Message Maestro").fill("list files");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // The error row appears (honest, muted — never red) and the partial assistant text is retained.
+  await expect(thread.getByTestId("chat-error")).toContainText("connection dropped");
+  await expect(thread.getByTestId("chat-assistant-text")).toContainText("Here are the");
+  // The turn settled: verb back to Send, and NO streaming caret left behind.
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+  await expect(thread.locator(".bv-msg--streaming")).toHaveCount(0);
+});
+
 test("navigating away mid-session and back yields a fresh mount, no stale bleed, no crash", async ({
   page,
 }) => {

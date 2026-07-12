@@ -108,8 +108,12 @@ export function useBvChat({
         }
       } catch (err) {
         // A genuine transport failure (not an abort — slice A returns cleanly on abort). Keep the user
-        // turn (runChatTurn yielded `submitted` first), append an error part, settle to ready.
-        setMessages((m) => appendErrorMessage(m, err));
+        // turn (runChatTurn yielded `submitted` first), SETTLE the partial assistant message's trailing
+        // streaming part (else its caret blinks forever on a mid-stream failure — runChatTurn's terminal
+        // ready-yield never ran because the throw preceded it), THEN append the error part, settle to
+        // ready. This is the THIRD and last terminal exit path for a turn; all three settle the caret:
+        //   clean finish → runChatTurn's ready yield · explicit stop → stop() · transport error → here.
+        setMessages((m) => appendErrorMessage(finalizeStreamingParts(m), err));
         setStatus("ready");
       } finally {
         // Only clear the controller if it is still the current one (a superseding send owns its own).

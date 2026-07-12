@@ -167,7 +167,7 @@
 .bv-link-pill {
   display: inline;
   font-family: var(--bv-font-mono, ui-monospace, monospace);
-  font-size: 0.92em;
+  font-size: 12px; /* on the tight scale (CLAUDE.md §Type) — the mono pill sits one step below the 14px feed text */
   color: var(--bv-blue);
   background: var(--bv-frost-8);
   border-radius: var(--bv-radius-chip);
