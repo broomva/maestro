@@ -64,16 +64,13 @@ function checkFailResult(over: Partial<VerifierResult> = {}): VerifierResult {
   };
 }
 
-/** An in-memory {@link VerdictIo} for deterministic, filesystem-free tests. */
+/** An in-memory {@link VerdictIo} for deterministic, filesystem-free tests. `read` returns null for a
+ *  missing file (the seam's not-found contract), never throws. */
 function memIo(seed: Record<string, string> = {}): VerdictIo & { files: Map<string, string> } {
   const files = new Map<string, string>(Object.entries(seed));
   return {
     files,
-    read: async (path) => {
-      const v = files.get(path);
-      if (v === undefined) throw new Error(`ENOENT: ${path}`);
-      return v;
-    },
+    read: async (path) => files.get(path) ?? null,
     write: async (path, data) => {
       files.set(path, data);
     },
@@ -378,6 +375,39 @@ describe("verifier-verdict — appendVerdictFeedback", () => {
     expect(ok).toBe(false);
     expect(io.files.get("/run/fix_plan.md")).toBe("# Fix plan\n");
   });
+
+  test("a REAL read fault propagates and does NOT clobber the existing file (history-loss guard)", async () => {
+    // CodeRabbit R1: a transient read failure (permission / disk I/O) on an EXISTING file must reject,
+    // not be swallowed as "absent" and then overwrite prior append-only history with a fresh header.
+    const prior = "# Fix plan\n\n## Verifier — attempt 1 failed (t1)\n- [ ] a\n";
+    const files = new Map<string, string>([["/run/fix_plan.md", prior]]);
+    let wrote = false;
+    const io: VerdictIo = {
+      read: async () => {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      },
+      write: async () => {
+        wrote = true;
+      },
+      mkdirp: async () => {},
+    };
+    await expect(
+      appendVerdictFeedback("/run", "## Verifier — attempt 2 failed (t2)\n- [ ] b\n", io),
+    ).rejects.toThrow(/EACCES/);
+    expect(wrote).toBe(false); // never wrote → prior history intact
+    expect(files.get("/run/fix_plan.md")).toBe(prior);
+  });
+
+  test("a genuine not-found (read → null) still seeds a fresh fix_plan", async () => {
+    const io = memIo(); // read returns null for the missing file
+    const ok = await appendVerdictFeedback(
+      "/run",
+      "## Verifier — attempt 1 failed (t)\n- [ ] x\n",
+      io,
+    );
+    expect(ok).toBe(true);
+    expect(io.files.get("/run/fix_plan.md")).toContain("# Fix plan");
+  });
 });
 
 // ── writeVerdict ───────────────────────────────────────────────────────────────────────────────────
@@ -523,5 +553,28 @@ describe("verifier-verdict — verdictSignature", () => {
     const a = verdictSignature(checkFailResult({ judge: { score: 0.4 } }));
     const b = verdictSignature(checkFailResult({ judge: { score: 0.7 } }));
     expect(a).not.toBe(b);
+  });
+
+  test("a SHRINKING diff_too_large is NOT identical (progress detected, no false no_progress)", () => {
+    // CodeRabbit R1: two over-cap diffs must not collide just because both are diff_too_large — a run that
+    // shrank 200 files → 50 (still over cap) made progress and must not park no_progress.
+    const big = verdictSignature(
+      checkFailResult({
+        reason: "diff_too_large",
+        diffstat: { files: 200, plus: 9000, minus: 10 },
+      }),
+    );
+    const smaller = verdictSignature(
+      checkFailResult({ reason: "diff_too_large", diffstat: { files: 50, plus: 2000, minus: 10 } }),
+    );
+    expect(big).not.toBe(smaller);
+    // but an unchanged over-cap diff IS identical (genuine no-progress)
+    const same = verdictSignature(
+      checkFailResult({
+        reason: "diff_too_large",
+        diffstat: { files: 200, plus: 9000, minus: 10 },
+      }),
+    );
+    expect(big).toBe(same);
   });
 });

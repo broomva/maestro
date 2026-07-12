@@ -184,16 +184,28 @@ export function renderVerdictFeedback(
 
 // ── IO seam (injectable; node fs by default) ────────────────────────────────────────────────────────
 
-/** The filesystem operations the persist helpers need — injected as fakes in tests, node fs in the runtime. */
+/** The filesystem operations the persist helpers need — injected as fakes in tests, node fs in the runtime.
+ *  `read` models "file not found" as `null` (a VALUE, never an exception) so a real read failure (a
+ *  permission or disk-I/O error on an EXISTING file) rejects and propagates rather than being swallowed as
+ *  "absent" — critical for {@link appendVerdictFeedback}, which reads-then-writes and would otherwise clobber
+ *  prior append-only history on a transient fault. */
 export interface VerdictIo {
-  read(path: string): Promise<string>;
+  /** The file's contents, or `null` when it does not exist. Rejects on any OTHER read failure. */
+  read(path: string): Promise<string | null>;
   write(path: string, data: string): Promise<void>;
   mkdirp(path: string): Promise<void>;
 }
 
-/** The default IO seam — node:fs/promises. */
+/** The default IO seam — node:fs/promises. ENOENT maps to `null`; every other error propagates. */
 export const nodeVerdictIo: VerdictIo = {
-  read: (path) => readFile(path, "utf8"),
+  read: async (path) => {
+    try {
+      return await readFile(path, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+      throw err; // a real failure (permission, disk I/O) must NOT read as "absent"
+    }
+  },
   write: (path, data) => writeFile(path, data, "utf8"),
   mkdirp: async (path) => {
     await mkdir(path, { recursive: true });
@@ -221,6 +233,11 @@ export async function writeVerdict(
  * is seeded with a `# Fix plan` header first so the appended section reads as history under it; an
  * existing file is preserved verbatim and the block is appended after exactly one blank-line separator.
  * A no-op block (a non-fail verdict) leaves the file untouched. Returns true iff a block was appended.
+ *
+ * A read that REJECTS (a real fault on an existing file — permission, disk I/O) propagates rather than
+ * being treated as "absent": clobbering prior append-only attempt history on a transient error would be
+ * worse than failing the append (the caller parks the run, VERIFIER §2 — never a silent history loss).
+ * Only a genuine not-found (`io.read` → null) seeds a fresh header.
  */
 export async function appendVerdictFeedback(
   runDir: string,
@@ -231,12 +248,7 @@ export async function appendVerdictFeedback(
   const path = fixPlanPath(runDir);
   await io.mkdirp(dirname(path));
 
-  let existing = "";
-  try {
-    existing = await io.read(path);
-  } catch {
-    existing = ""; // no fix_plan yet — seed one below
-  }
+  const existing = (await io.read(path)) ?? ""; // null = no fix_plan yet; a real fault rejects here
 
   // Trailing newlines are stripped from BOTH the seed header and an existing file so the join adds
   // exactly one blank-line separator (a seed `"# Fix plan\n"` would otherwise yield two blank lines).
@@ -322,6 +334,11 @@ export function decideVerdictOutcome(input: VerdictDecisionInput): VerdictOutcom
  * same judge score produce the same signature — that is what "identical verdict" means here. Order-
  * independent (sets are sorted) so a reordered-but-equivalent result still matches. A `pass`/`error`
  * signature is never compared (the loop only continues on fail), but is still well-defined.
+ *
+ * For a `diff_too_large` fail the diffstat is folded in: shrinking the diff between attempts (e.g. 200 →
+ * 50 files, still over cap) IS progress and must NOT read as an identical verdict, mirroring how the
+ * tamper case already tracks its (shrinking) path set. Without this, "split the work" feedback would be
+ * contradicted by a premature no_progress park.
  */
 export function verdictSignature(result: VerifierResult): string {
   const failingChecks = (result.checks ?? [])
@@ -334,5 +351,6 @@ export function verdictSignature(result: VerifierResult): string {
     t: [...result.tampering].sort(),
     c: failingChecks,
     j: result.judge?.score ?? null,
+    d: result.reason === "diff_too_large" ? result.diffstat : null,
   });
 }
