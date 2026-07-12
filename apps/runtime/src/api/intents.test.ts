@@ -152,14 +152,15 @@ test("a failing new_mission (non-git workspace) leaves nothing half-created", as
 });
 
 test("a commit that fails AFTER `git add` unstages the index (no phantom staged entry)", async () => {
-  // Force `git add` to succeed but `git commit` to fail WITHOUT a hook — the runtime now disables hooks on
-  // every git spawn (`core.hooksPath=/dev/null`, BRO-1802 key-confinement), so a rejecting pre-commit hook
-  // would simply be ignored. Instead require commit signing but point gpg at a program that always fails:
-  // `git add` stages, `git commit` tries to sign → fails → the intent rolls back. The rollback must clean
-  // the INDEX too, not just the working tree (P20 minor: "nothing half-created").
+  // Force `git add` to succeed but `git commit` to fail WITHOUT a hook — the runtime now disables hooks AND
+  // neutralizes the config exec channels on every git spawn (BRO-1802 key-confinement), so a rejecting
+  // pre-commit hook OR a `commit.gpgsign`+`gpg.program` trick would simply be overridden. A hook-free,
+  // config-hardening-proof failure: an EMPTY committer identity — `git add` stages fine (needs no identity),
+  // `git commit` fails ("empty ident name not allowed"), and the enumerator never touches `user.*`. The
+  // rollback must then clean the INDEX too, not just the working tree (P20 minor: "nothing half-created").
   const ws = mkWorkspace();
-  Bun.spawnSync(["git", "config", "commit.gpgsign", "true"], { cwd: ws });
-  Bun.spawnSync(["git", "config", "gpg.program", "/bin/false"], { cwd: ws });
+  Bun.spawnSync(["git", "config", "user.email", ""], { cwd: ws });
+  Bun.spawnSync(["git", "config", "user.name", ""], { cwd: ws });
   const { app } = await mkApp(ws);
 
   const res = await post(app, NEW_MISSION, "key-signfail");

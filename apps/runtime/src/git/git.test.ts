@@ -27,7 +27,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { git, gitCommitAllStaged, gitDiffBounded, gitShowBounded } from "./git";
+import {
+  git,
+  gitCommitAllStaged,
+  gitDiffBounded,
+  gitIsClean,
+  gitMergeSquash,
+  gitShowBounded,
+} from "./git";
 
 const SECRET = "sk-ant-SECRET-do-not-leak-12345";
 const GIT_MODULE = join(import.meta.dir, "git.ts");
@@ -144,6 +151,70 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     const sha = await gitCommitAllStaged(dir, "runtime commit");
     expect(sha).toHaveLength(40); // the commit succeeded
     // Remove GIT_HARDENING from the git() spawn → the repo core.hooksPath hook fires → marker → this REDs.
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("an agent-planted core.fsmonitor never executes on the runtime's clean-tree check (gitIsClean)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
+    const ext = mkdtempSync(join(tmpdir(), "maestro-ext-")); // driver + marker live OUTSIDE the repo tree
+    tmps.push(dir, ext);
+    await git(dir, ["init", "-q"]);
+    await git(dir, ["config", "user.email", "t@t.co"]);
+    await git(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "a.txt"), "1\n");
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "base"]);
+
+    // core.fsmonitor is a program git runs on EVERY `git status`/index refresh — and gitIsClean (run on
+    // every approve, merge.ts) is a `git status --porcelain`. An agent sets it in the shared repo config;
+    // without the hardening it runs as the supervisor on the runtime's own clean-tree check.
+    const marker = join(ext, "FSM-RAN.txt");
+    const fsm = join(ext, "fsm.sh");
+    writeFileSync(fsm, `#!/bin/sh\necho ran > "${marker}"\n`);
+    chmodSync(fsm, 0o755);
+    await git(dir, ["config", "core.fsmonitor", fsm]); // the agent's vector
+
+    const clean = await gitIsClean(dir); // runs `git status --porcelain`
+    expect(clean).toBe(true); // the tree IS clean — status still works, it just never queried the monitor
+    // Drop `-c core.fsmonitor=` from GIT_HARDENING *and* the `core.fsmonitor` arm of EXEC_KEY_RE (status is
+    // driver-triggering, so both layers cover it) → the monitor runs → marker written → this REDs.
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("a dynamically-named filter.<name>.smudge never runs on the runtime's squash-merge (execChannelOverrides)", async () => {
+    // The BRO-1802 approve path: gitMergeSquash writes the run branch's files into the workspace tree, which
+    // applies smudge filters. An agent commits a `.gitattributes` assigning a filter to a file it adds AND
+    // sets `filter.<name>.smudge=<program>` in the shared config — the program then runs as the supervisor on
+    // the merge's tree write. `filter.evil` is DYNAMICALLY named, so the static GIT_HARDENING can't spell it
+    // out; only the per-op execChannelOverrides enumeration neutralizes it.
+    const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
+    const ext = mkdtempSync(join(tmpdir(), "maestro-ext-")); // driver + marker live OUTSIDE the repo tree
+    tmps.push(dir, ext);
+    await git(dir, ["init", "-q"]);
+    await git(dir, ["config", "user.email", "t@t.co"]);
+    await git(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "base.txt"), "base\n");
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "base"]);
+
+    await git(dir, ["checkout", "-q", "-b", "run/x"]);
+    const marker = join(ext, "SMUDGE-RAN.txt");
+    const smudge = join(ext, "smudge.sh");
+    writeFileSync(smudge, `#!/bin/sh\necho ran > "${marker}"\ncat\n`);
+    chmodSync(smudge, 0o755);
+    writeFileSync(join(dir, "data.txt"), "payload\n");
+    writeFileSync(join(dir, ".gitattributes"), "data.txt filter=evil\n");
+    await git(dir, ["config", "filter.evil.smudge", smudge]); // the agent's vector (config, not driver-triggering)
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "run"]);
+    await git(dir, ["checkout", "-q", "main"]);
+
+    const merge = await gitMergeSquash(dir, "run/x"); // materializes data.txt → would fire the smudge
+    expect(merge.code).toBe(0);
+    const sha = await gitCommitAllStaged(dir, "merge run");
+    expect(sha).toHaveLength(40); // the merge + commit succeeded
+    // Make hardeningFor return just GIT_HARDENING (skip execChannelOverrides) → the dynamically-named smudge
+    // runs on the merge's tree write → marker written → this REDs. Proves the enumeration, not the static list.
     expect(existsSync(marker)).toBe(false);
   });
 

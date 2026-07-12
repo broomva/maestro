@@ -15,21 +15,115 @@
 //      `diff.external`/`textconv`, a `filter.*.smudge`, a hook — and a driver inheriting the supervisor's
 //      process.env would read ANTHROPIC_API_KEY and exfiltrate it. Scrubbing the env means no host secret is
 //      ever in scope for any git subprocess.
-//   2. HOOKS DISABLED — `-c core.hooksPath=/dev/null` on every spawn. `--no-verify` skips only
-//      pre-commit/commit-msg; git still fires prepare-commit-msg/post-commit (on a commit), post-checkout
-//      (on `worktree add`), post-merge, etc. An agent-planted hook (`.git/hooks/*` or a `core.hooksPath` set
-//      in the shared config) would otherwise run arbitrary code as the SUPERVISOR uid on the runtime's own
-//      git operations (RCE-as-supervisor — index.db, minted bearers, network). Pointing hooksPath at an
-//      empty location neutralizes every hook and outranks any repo/agent config.
+//   2. EXEC CHANNELS NEUTRALIZED — git runs several *agent-configurable programs* as subprocesses of the
+//      runtime (the SUPERVISOR uid): hooks (`--no-verify` skips only pre-commit/commit-msg — git still fires
+//      prepare-commit-msg/post-commit on a commit, post-checkout on `worktree add`, post-merge, etc.),
+//      `core.fsmonitor` (a query-monitor run on EVERY `git status` — the runtime's clean-tree check on every
+//      approve), `filter.<name>.smudge|clean|process` (run on a tree write — checkout/merge/reset),
+//      `merge.<name>.driver` (a content merge), `diff.<name>.command|textconv` + `diff.external` (a diff), and
+//      the gpg program via `commit.gpgsign`. Any of these, planted in the shared `.git/config` from a run/<id>
+//      worktree, is RCE-as-supervisor (reads index.db, minted bearers, network — and /proc/<pid>/environ).
+//      Two layers close them: (a) GIT_HARDENING — a STATIC `-c` prefix for the fixed-name channels
+//      (`core.hooksPath=/dev/null` — the ONLY thing that also neutralizes a `.git/hooks/*` FILE, which never
+//      appears in `git config`; `core.fsmonitor=`; `commit.gpgsign=false`/`tag.gpgsign=false`); (b)
+//      {@link execChannelOverrides} — a per-op ENUMERATION of the repo's actual config that overrides the
+//      *dynamically-named* driver families (`filter.*`/`merge.*`/`diff.*`) a static list can't spell out. This
+//      is defense-in-depth, not the trust boundary: phase-1 self-host shares the host uid (DECISIONS §D7 — full
+//      isolation is phase-2 containers), so an agent's own shell already reaches the host; these layers stop the
+//      runtime's OWN mechanical git ops from becoming the exec vector. See BRO-1876 for the phase-2 closure.
 // Defense-in-depth on the PATCH-producing diffs ({@link gitDiffBounded}, {@link gitChangedFiles}, Stage 0):
 // `--no-ext-diff --no-textconv` so an agent-planted external-diff/textconv driver never even runs.
 
 import { filterPassthroughEnv } from "../harness/spawn-contract";
 
-/** Config flags prepended to EVERY git spawn: disable hooks (an agent-planted hook must never run as the
- *  supervisor on the runtime's git ops — see the key-confinement note above). `-c` must precede the
- *  subcommand. `/dev/null` is a directory with no hooks, so git finds none and runs none. */
-const GIT_HARDENING: readonly string[] = ["-c", "core.hooksPath=/dev/null"];
+/** STATIC `-c` prefix on EVERY git spawn — the FIXED-name exec channels an agent can plant in the shared
+ *  `.git/config` that the runtime's own ops would otherwise execute as the supervisor (see the key-confinement
+ *  note above). `-c` must precede the subcommand; a later `-c` outranks the repo config.
+ *   - `core.hooksPath=/dev/null` — a dir with no hooks: disables every hook, including the ones `--no-verify`
+ *     does NOT skip AND any `.git/hooks/*` FILE (which never appears in `git config`, so ONLY this — not the
+ *     enumerator below — can neutralize it). Empty would re-enable the default `.git/hooks`, hence `/dev/null`.
+ *   - `core.fsmonitor=` — the query-monitor program run on `status`/index refresh (fires on every approve via
+ *     {@link gitIsClean}); empty = disabled.
+ *   - `commit.gpgsign=false` / `tag.gpgsign=false` — stop a forced `gpg.program` exec on the runtime's commit. */
+const GIT_HARDENING: readonly string[] = [
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.fsmonitor=",
+  "-c",
+  "commit.gpgsign=false",
+  "-c",
+  "tag.gpgsign=false",
+];
+
+/** git subcommands that materialize the working tree or refresh the index — the ops that can trigger a
+ *  *dynamically-named* tree/index exec driver (`filter.<name>.smudge|clean|process` on a tree write or `add`;
+ *  `merge.<name>.driver` on a content merge; `core.fsmonitor` on `status`) that a static list can't spell out,
+ *  so they take the (cheap, one extra spawn) config enumeration. Content DIFF drivers (`diff.<name>.command|
+ *  textconv`, `diff.external`) are deliberately NOT here: the runtime's only diffs ({@link gitDiffBounded},
+ *  {@link gitChangedFiles}, Stage 0) already pass `--no-ext-diff --no-textconv`, and the scrubbed env is the
+ *  backstop for any other — so a plain `git diff` need not pay the enumeration. Pure plumbing (rev-parse,
+ *  cat-file, show-a-blob, `branch -m`, worktree list/prune) can't trigger a driver at all. Safe-by-default: the
+ *  RUNNER decides, not the call site. */
+const DRIVER_TRIGGERING: ReadonlySet<string> = new Set([
+  "status",
+  "add",
+  "commit",
+  "merge",
+  "reset",
+  "checkout",
+  "switch",
+  "restore",
+  "stash",
+  "cherry-pick",
+  "revert",
+  "rebase",
+  "worktree",
+]);
+
+/** A config key whose value git EXECUTES as a subprocess (or a boolean gating such execution). The driver
+ *  segment of `filter.*`/`merge.*`/`diff.*` is agent-chosen, so a static list can't spell them out — this
+ *  matches the family by shape. Tested against the LOWERCASED key name (section + key are case-insensitive);
+ *  the subsection keeps its case in `--name-only`, so the override is emitted with the ORIGINAL name. */
+const EXEC_KEY_RE =
+  /^(?:filter\..+\.(?:smudge|clean|process)|merge\..+\.driver|diff\..+\.(?:command|textconv)|diff\.external|core\.(?:fsmonitor|hookspath|sshcommand|gitproxy|askpass|pager|editor)|sequence\.editor|gpg\.(?:program|.+\.program)|(?:commit|tag|push)\.gpgsign|credential\.(?:helper|.+\.helper))$/;
+
+/** Enumerate the repo's ACTUAL config keys (all scopes — the agent-writable shared `.git/config` among them)
+ *  and return `-c key=<neutral>` overrides for every exec channel found, closing the dynamically-named
+ *  `filter.*`/`merge.*`/`diff.*` drivers the static {@link GIT_HARDENING} can't. Runs via a RAW hardened spawn
+ *  (NOT {@link git} — that would recurse) under the scrubbed env; a git failure yields no overrides (the static
+ *  prefix still applies). `core.hooksPath` → `/dev/null` (empty re-enables `.git/hooks`); a `*.gpgsign` is a
+ *  boolean gate → `false`; every other exec key is a program path → empty = "run nothing". */
+async function execChannelOverrides(cwd: string): Promise<string[]> {
+  const proc = Bun.spawn(
+    ["git", "-c", "core.hooksPath=/dev/null", "config", "--list", "--name-only", "-z"],
+    { cwd, env: gitEnv(), stdout: "pipe", stderr: "ignore", stdin: "ignore" },
+  );
+  const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  const overrides: string[] = [];
+  const seen = new Set<string>();
+  for (const name of out.split("\0")) {
+    const key = name.trim();
+    if (!key) continue;
+    const lower = key.toLowerCase();
+    if (seen.has(lower) || !EXEC_KEY_RE.test(lower)) continue;
+    seen.add(lower);
+    const value =
+      lower === "core.hookspath" ? "/dev/null" : lower.endsWith(".gpgsign") ? "false" : "";
+    overrides.push("-c", `${key}=${value}`);
+  }
+  return overrides;
+}
+
+/** The full hardening prefix for a git spawn: the static {@link GIT_HARDENING} plus, for a
+ *  {@link DRIVER_TRIGGERING} subcommand, the enumerated dynamic-name exec overrides ({@link execChannelOverrides}). */
+async function hardeningFor(cwd: string, args: string[]): Promise<string[]> {
+  const sub = args[0];
+  if (sub !== undefined && DRIVER_TRIGGERING.has(sub)) {
+    return [...GIT_HARDENING, ...(await execChannelOverrides(cwd))];
+  }
+  return [...GIT_HARDENING];
+}
 
 /** The scrubbed env EVERY runtime git spawn runs under — PATH/HOME/toolchain only, NEVER a host secret
  *  (see the key-confinement note at the top of this file). Recomputed per call from the live process.env
@@ -62,7 +156,8 @@ export class GitError extends Error {
 
 /** Run `git <args>` in `cwd`, capturing streams. Resolves even on non-zero exit. */
 export async function git(cwd: string, args: string[]): Promise<GitResult> {
-  const proc = Bun.spawn(["git", ...GIT_HARDENING, ...args], {
+  const hardening = await hardeningFor(cwd, args);
+  const proc = Bun.spawn(["git", ...hardening, ...args], {
     cwd,
     env: gitEnv(),
     stdout: "pipe",
@@ -107,7 +202,8 @@ async function gitBoundedStdout(
   argv: string[],
   maxBytes: number,
 ): Promise<{ text: string; truncated: boolean }> {
-  const proc = Bun.spawn(["git", ...GIT_HARDENING, ...argv], {
+  const hardening = await hardeningFor(cwd, argv);
+  const proc = Bun.spawn(["git", ...hardening, ...argv], {
     cwd,
     env: gitEnv(),
     stdout: "pipe",
