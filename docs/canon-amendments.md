@@ -14,6 +14,14 @@ governance PR per **BRO-1769** (`p0-canon-repairs`). Date: **2026-07-09**.
 
 ---
 
+## Applied 2026-07-12 (BRO-1794) — VERIFIER §7 events folded into `check.*`
+
+| Decision | What changed | Why | Where |
+|---|---|---|---|
+| **Fold `verify.started` / `judge.result` / `verify.error` into the `check.*` namespace** (resolves the D-EVENTNAMES follow-up surfaced below under "Noted discrepancies") | `EVENT_TYPES` gains `CHECK_STARTED` (`check.started`), `CHECK_JUDGE` (`check.judge`), `CHECK_ERROR` (`check.error`) alongside the existing `CHECK_RESULT`/`CHECK_VERDICT`. The namespace set is **unchanged** (still six). The verifier reap (`apps/runtime/src/verifier/run.ts`) emits them in order: `check.started` → per-check `check.result` → `check.judge` → `check.verdict`, or `check.error` on an infra failure. The canon spec §7 Events list is repaired in place to name the folded events. | VERIFIER §7 named three events (`verify.started`, `judge.result`, `verify.error`) that fell outside the six envelope namespaces. Widening (as BRO-1756 did for `agent.*`) was one option; folding is the smaller move and the better fit — the verifier IS one check family, so its lifecycle belongs under `check.*`. Keeps the envelope's namespace count stable and every verifier event resolvable by `eventNamespace`. | `packages/protocol/src/events.ts`, `events.test.ts`, `README.md`; `apps/runtime/src/verifier/run.ts`; `handoff/design_handoff_maestro/build-docs/specs/VERIFIER.md` §7 |
+
+---
+
 ## Applied 2026-07-10 (BRO-1756) — `agent.*` event namespace
 
 | Decision | What changed | Why | Where |
@@ -91,7 +99,7 @@ assert *absence* of the removed tokens (`gate: none`, `node.created`, bare ` ver
 
 | Where | Discrepancy | Owner |
 |---|---|---|
-| `build-docs/specs/VERIFIER.md` §7 vs `DATA-MODEL.md` §A.3 / `API.md` §stream | VERIFIER §7 names the events `verify.started`, `judge.result`, `verify.error`, which fall **outside** the five envelope namespaces (`run.* \| tool.* \| check.* \| gate.* \| budget.*`) that DATA-MODEL / API / the BRO-1785 ticket pin. `packages/protocol` (BRO-1785) types `EventType` to the pinned set + the four closed synthetics, so those three names are **not admitted** by the protocol type. Surfaced here rather than silently widened. | The verifier-implementation ticket resolves it: either fold the three into `check.*` (`check.started` / `check.judge` / `check.error`) or widen the namespace set as a deliberate protocol edit (PATTERNS §10). |
+| `build-docs/specs/VERIFIER.md` §7 vs `DATA-MODEL.md` §A.3 / `API.md` §stream | VERIFIER §7 names the events `verify.started`, `judge.result`, `verify.error`, which fall **outside** the five envelope namespaces (`run.* \| tool.* \| check.* \| gate.* \| budget.*`) that DATA-MODEL / API / the BRO-1785 ticket pin. `packages/protocol` (BRO-1785) types `EventType` to the pinned set + the four closed synthetics, so those three names are **not admitted** by the protocol type. Surfaced here rather than silently widened. | **RESOLVED (BRO-1794, see the applied entry above):** folded into `check.*` (`check.started` / `check.judge` / `check.error`); the namespace set stays at six. |
 
 ## Recorded, doc-body edits deferred
 

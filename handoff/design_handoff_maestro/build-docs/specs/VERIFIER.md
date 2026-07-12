@@ -126,4 +126,4 @@ Rules: one checkbox per failing check/criterion; each item names the evidence fi
 
 ## 7. Events
 
-`verify.started` · `check.result` (per check, streamed live — the card's Undertow shows checks running) · `judge.result` · `check.verdict` (frontmatter payload, **D-EVENTNAMES**) · `verify.error` (infra). All land in `session.jsonl` first, per the flows convention.
+`check.started` · `check.result` (per check, streamed live — the card's Undertow shows checks running) · `check.judge` · `check.verdict` (frontmatter payload) · `check.error` (infra). All live in the single `check.*` namespace (**D-EVENTNAMES**: `verify.started`/`judge.result`/`verify.error` were folded into `check.started`/`check.judge`/`check.error` by BRO-1794 to keep the six-namespace envelope intact — see `docs/canon-amendments.md`). All land in `session.jsonl` first, per the flows convention.

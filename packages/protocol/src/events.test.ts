@@ -99,6 +99,14 @@ describe("event type namespaces + synthetics", () => {
     // HARNESS §5 (BRO-1795): the child's fresh-context restart request — a real run.* member
     expect(EVENT_TYPES.RUN_RESTART_REQUESTED).toBe("run.restart_requested");
     expect(eventNamespace(EVENT_TYPES.RUN_RESTART_REQUESTED)).toBe("run");
+    // VERIFIER §7 (BRO-1794): verify.started/judge.result/verify.error FOLDED into check.* — not widened.
+    expect(EVENT_TYPES.CHECK_STARTED).toBe("check.started");
+    expect(EVENT_TYPES.CHECK_RESULT).toBe("check.result");
+    expect(EVENT_TYPES.CHECK_JUDGE).toBe("check.judge");
+    expect(EVENT_TYPES.CHECK_ERROR).toBe("check.error");
+    for (const t of [EVENT_TYPES.CHECK_STARTED, EVENT_TYPES.CHECK_JUDGE, EVENT_TYPES.CHECK_ERROR]) {
+      expect(eventNamespace(t)).toBe("check");
+    }
     // every catalog value is a valid wire event type
     for (const type of Object.values(EVENT_TYPES)) {
       expect(isWireEventType(type)).toBe(true);
