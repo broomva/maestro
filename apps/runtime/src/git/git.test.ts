@@ -150,7 +150,7 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     await git(dir, ["add", "-A"]);
     const sha = await gitCommitAllStaged(dir, "runtime commit");
     expect(sha).toHaveLength(40); // the commit succeeded
-    // Remove GIT_HARDENING from the git() spawn → the repo core.hooksPath hook fires → marker → this REDs.
+    // Remove core.hooksPath from STATIC_HARDENING → the repo core.hooksPath hook fires → marker → this REDs.
     expect(existsSync(marker)).toBe(false);
   });
 
@@ -176,7 +176,7 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
 
     const clean = await gitIsClean(dir); // runs `git status --porcelain`
     expect(clean).toBe(true); // the tree IS clean — status still works, it just never queried the monitor
-    // Drop `-c core.fsmonitor=` from GIT_HARDENING *and* the `core.fsmonitor` arm of EXEC_KEY_RE (status is
+    // Drop `core.fsmonitor` from STATIC_HARDENING *and* the `core.fsmonitor` arm of EXEC_KEY_RE (status is
     // driver-triggering, so both layers cover it) → the monitor runs → marker written → this REDs.
     expect(existsSync(marker)).toBe(false);
   });
@@ -185,7 +185,7 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     // The BRO-1802 approve path: gitMergeSquash writes the run branch's files into the workspace tree, which
     // applies smudge filters. An agent commits a `.gitattributes` assigning a filter to a file it adds AND
     // sets `filter.<name>.smudge=<program>` in the shared config — the program then runs as the supervisor on
-    // the merge's tree write. `filter.evil` is DYNAMICALLY named, so the static GIT_HARDENING can't spell it
+    // the merge's tree write. `filter.evil` is DYNAMICALLY named, so STATIC_HARDENING can't spell it
     // out; only the per-op execChannelOverrides enumeration neutralizes it.
     const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
     const ext = mkdtempSync(join(tmpdir(), "maestro-ext-")); // driver + marker live OUTSIDE the repo tree
@@ -213,8 +213,44 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     expect(merge.code).toBe(0);
     const sha = await gitCommitAllStaged(dir, "merge run");
     expect(sha).toHaveLength(40); // the merge + commit succeeded
-    // Make hardeningFor return just GIT_HARDENING (skip execChannelOverrides) → the dynamically-named smudge
-    // runs on the merge's tree write → marker written → this REDs. Proves the enumeration, not the static list.
+    // Skip the execChannelOverrides branch in hardenedEnv (STATIC_HARDENING only) → the dynamically-named
+    // smudge runs on the merge's tree write → marker written → this REDs. Proves the enumeration, not the static set.
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("a filter whose subsection name contains '=' is still neutralized (env form, not `-c` which splits on '=')", async () => {
+    // A subsection name CAN contain `=` — `filter.ev=il.smudge` is a VALID config key that fires a smudge on a
+    // tree write. Git's `-c key=value` splits on the FIRST `=`, so `-c filter.ev=il.smudge=` sets the WRONG key
+    // (`filter.ev`) and leaves the real driver live → RCE-as-supervisor. The GIT_CONFIG_KEY/VALUE env form
+    // passes key + value SEPARATELY, so the `=`-named key IS disarmed. (P20 R3: the `-c` enumerate had this bypass.)
+    const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
+    const ext = mkdtempSync(join(tmpdir(), "maestro-ext-"));
+    tmps.push(dir, ext);
+    await git(dir, ["init", "-q"]);
+    await git(dir, ["config", "user.email", "t@t.co"]);
+    await git(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "base.txt"), "base\n");
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "base"]);
+
+    await git(dir, ["checkout", "-q", "-b", "run/x"]);
+    const marker = join(ext, "SMUDGE-EQ.txt");
+    const smudge = join(ext, "smudge.sh");
+    writeFileSync(smudge, `#!/bin/sh\necho ran > "${marker}"\ncat\n`);
+    chmodSync(smudge, 0o755);
+    writeFileSync(join(dir, "data.txt"), "payload\n");
+    writeFileSync(join(dir, ".gitattributes"), "data.txt filter=ev=il\n"); // driver name is `ev=il`
+    await git(dir, ["config", "filter.ev=il.smudge", smudge]); // the `=`-named exec key
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "run"]);
+    await git(dir, ["checkout", "-q", "main"]);
+
+    const merge = await gitMergeSquash(dir, "run/x");
+    expect(merge.code).toBe(0);
+    const sha = await gitCommitAllStaged(dir, "merge run");
+    expect(sha).toHaveLength(40);
+    // Switch withConfigEnv to emit `-c ${key}=${value}` args instead of GIT_CONFIG_* env → the `=`-split
+    // misparses → the real filter.ev=il.smudge stays live → smudge fires → marker → this REDs.
     expect(existsSync(marker)).toBe(false);
   });
 

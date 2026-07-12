@@ -23,37 +23,40 @@
 //      `merge.<name>.driver` (a content merge), `diff.<name>.command|textconv` + `diff.external` (a diff), and
 //      the gpg program via `commit.gpgsign`. Any of these, planted in the shared `.git/config` from a run/<id>
 //      worktree, is RCE-as-supervisor (reads index.db, minted bearers, network — and /proc/<pid>/environ).
-//      Two layers close them: (a) GIT_HARDENING — a STATIC `-c` prefix for the fixed-name channels
+//      Two layers close them: (a) STATIC_HARDENING — the fixed-name channels neutralized on EVERY spawn
 //      (`core.hooksPath=/dev/null` — the ONLY thing that also neutralizes a `.git/hooks/*` FILE, which never
 //      appears in `git config`; `core.fsmonitor=`; `commit.gpgsign=false`/`tag.gpgsign=false`); (b)
-//      {@link execChannelOverrides} — a per-op ENUMERATION of the repo's actual config that overrides the
-//      *dynamically-named* driver families (`filter.*`/`merge.*`/`diff.*`) a static list can't spell out. This
-//      is defense-in-depth, not the trust boundary: phase-1 self-host shares the host uid (DECISIONS §D7 — full
-//      isolation is phase-2 containers), so an agent's own shell already reaches the host; these layers stop the
-//      runtime's OWN mechanical git ops from becoming the exec vector. See BRO-1876 for the phase-2 closure.
+//      {@link execChannelOverrides} — a per-op ENUMERATION of the repo's actual config that neutralizes the
+//      *dynamically-named* driver families (`filter.*`/`merge.*`) a static list can't spell out. BOTH are
+//      applied via the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` ENV form — NOT `-c
+//      key=value`, because `-c` splits on the FIRST `=`, so an agent-planted key whose subsection name contains
+//      `=` (`filter.a=b.smudge` — a VALID config key that fires a smudge as the supervisor) is NOT overridable
+//      via `-c`; the env form passes key + value separately and neutralizes it. Defense-in-depth, not the trust
+//      boundary: phase-1 self-host shares the host uid (DECISIONS §D7 — full isolation is phase-2 containers),
+//      so an agent's own shell already reaches the host; these layers stop the runtime's OWN mechanical git ops
+//      from becoming the exec vector. See BRO-1876 for the phase-2 closure.
 // Defense-in-depth on the PATCH-producing diffs ({@link gitDiffBounded}, {@link gitChangedFiles}, Stage 0):
 // `--no-ext-diff --no-textconv` so an agent-planted external-diff/textconv driver never even runs.
 
 import { filterPassthroughEnv } from "../harness/spawn-contract";
 
-/** STATIC `-c` prefix on EVERY git spawn — the FIXED-name exec channels an agent can plant in the shared
- *  `.git/config` that the runtime's own ops would otherwise execute as the supervisor (see the key-confinement
- *  note above). `-c` must precede the subcommand; a later `-c` outranks the repo config.
+/** A git config key + the NEUTRAL value that disarms it. */
+type ConfigOverride = readonly [key: string, value: string];
+
+/** The FIXED-name exec channels an agent can plant in the shared `.git/config` that the runtime's own ops
+ *  would otherwise execute as the supervisor (see the key-confinement note above), neutralized on EVERY git
+ *  spawn via the env form ({@link withConfigEnv}).
  *   - `core.hooksPath=/dev/null` — a dir with no hooks: disables every hook, including the ones `--no-verify`
  *     does NOT skip AND any `.git/hooks/*` FILE (which never appears in `git config`, so ONLY this — not the
  *     enumerator below — can neutralize it). Empty would re-enable the default `.git/hooks`, hence `/dev/null`.
  *   - `core.fsmonitor=` — the query-monitor program run on `status`/index refresh (fires on every approve via
  *     {@link gitIsClean}); empty = disabled.
  *   - `commit.gpgsign=false` / `tag.gpgsign=false` — stop a forced `gpg.program` exec on the runtime's commit. */
-const GIT_HARDENING: readonly string[] = [
-  "-c",
-  "core.hooksPath=/dev/null",
-  "-c",
-  "core.fsmonitor=",
-  "-c",
-  "commit.gpgsign=false",
-  "-c",
-  "tag.gpgsign=false",
+const STATIC_HARDENING: readonly ConfigOverride[] = [
+  ["core.hooksPath", "/dev/null"],
+  ["core.fsmonitor", ""],
+  ["commit.gpgsign", "false"],
+  ["tag.gpgsign", "false"],
 ];
 
 /** git subcommands that materialize the working tree or refresh the index — the ops that can trigger a
@@ -88,47 +91,78 @@ const DRIVER_TRIGGERING: ReadonlySet<string> = new Set([
 const EXEC_KEY_RE =
   /^(?:filter\..+\.(?:smudge|clean|process)|merge\..+\.driver|diff\..+\.(?:command|textconv)|diff\.external|core\.(?:fsmonitor|hookspath|sshcommand|gitproxy|askpass|pager|editor)|sequence\.editor|gpg\.(?:program|.+\.program)|(?:commit|tag|push)\.gpgsign|credential\.(?:helper|.+\.helper))$/;
 
+/** Upper bound on enumerated exec-channel overrides. Legit repos have a handful (git-lfs is 4); a config with
+ *  more is an agent trying to overflow the override set (or the env) — fail CLOSED (the driver-triggering op
+ *  throws → the approve parks) rather than let un-neutralized keys through. */
+const MAX_EXEC_OVERRIDES = 500;
+
 /** Enumerate the repo's ACTUAL config keys (all scopes — the agent-writable shared `.git/config` among them)
- *  and return `-c key=<neutral>` overrides for every exec channel found, closing the dynamically-named
- *  `filter.*`/`merge.*`/`diff.*` drivers the static {@link GIT_HARDENING} can't. Runs via a RAW hardened spawn
- *  (NOT {@link git} — that would recurse) under the scrubbed env; a git failure yields no overrides (the static
- *  prefix still applies). `core.hooksPath` → `/dev/null` (empty re-enables `.git/hooks`); a `*.gpgsign` is a
- *  boolean gate → `false`; every other exec key is a program path → empty = "run nothing". */
-async function execChannelOverrides(cwd: string): Promise<string[]> {
+ *  and return `[key, neutral]` overrides for every exec channel found, closing the dynamically-named
+ *  `filter.*`/`merge.*`/`diff.*` drivers {@link STATIC_HARDENING} can't. Runs via a RAW hardened spawn (NOT
+ *  {@link git} — that would recurse) under the scrubbed env; a git failure yields no overrides (the static set
+ *  still applies). `core.hooksPath` → `/dev/null` (empty re-enables `.git/hooks`); a `*.gpgsign` is a boolean
+ *  gate → `false`; every other exec key is a program path → empty = "run nothing". Throws (fail-closed) past
+ *  {@link MAX_EXEC_OVERRIDES}. */
+async function execChannelOverrides(cwd: string): Promise<ConfigOverride[]> {
   const proc = Bun.spawn(
     ["git", "-c", "core.hooksPath=/dev/null", "config", "--list", "--name-only", "-z"],
     { cwd, env: gitEnv(), stdout: "pipe", stderr: "ignore", stdin: "ignore" },
   );
   const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-  const overrides: string[] = [];
+  const overrides: ConfigOverride[] = [];
   const seen = new Set<string>();
   for (const name of out.split("\0")) {
     const key = name.trim();
-    if (!key) continue;
+    if (!key || seen.has(key)) continue; // de-dup on the EXACT key (subsection case is significant)
     const lower = key.toLowerCase();
-    if (seen.has(lower) || !EXEC_KEY_RE.test(lower)) continue;
-    seen.add(lower);
+    if (!EXEC_KEY_RE.test(lower)) continue;
+    seen.add(key);
     const value =
       lower === "core.hookspath" ? "/dev/null" : lower.endsWith(".gpgsign") ? "false" : "";
-    overrides.push("-c", `${key}=${value}`);
+    overrides.push([key, value]);
+    if (overrides.length > MAX_EXEC_OVERRIDES) {
+      throw new GitError(
+        ["config", "--list"],
+        1,
+        `too many exec-channel config keys (> ${MAX_EXEC_OVERRIDES})`,
+      );
+    }
   }
   return overrides;
 }
 
-/** The full hardening prefix for a git spawn: the static {@link GIT_HARDENING} plus, for a
- *  {@link DRIVER_TRIGGERING} subcommand, the enumerated dynamic-name exec overrides ({@link execChannelOverrides}). */
-async function hardeningFor(cwd: string, args: string[]): Promise<string[]> {
-  const sub = args[0];
-  if (sub !== undefined && DRIVER_TRIGGERING.has(sub)) {
-    return [...GIT_HARDENING, ...(await execChannelOverrides(cwd))];
-  }
-  return [...GIT_HARDENING];
+/** Merge git config `overrides` into `env` as `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`.
+ *  The env form passes key + value SEPARATELY, so a key whose subsection name contains `=` (which `-c key=value`
+ *  would misparse on the first `=`, leaving the real key un-neutralized) is still disarmed. Env-config outranks
+ *  the repo-local config, so the neutral value wins over an agent's planted driver. */
+function withConfigEnv(
+  env: Record<string, string>,
+  overrides: readonly ConfigOverride[],
+): Record<string, string> {
+  env.GIT_CONFIG_COUNT = String(overrides.length);
+  overrides.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
 }
 
-/** The scrubbed env EVERY runtime git spawn runs under — PATH/HOME/toolchain only, NEVER a host secret
- *  (see the key-confinement note at the top of this file). Recomputed per call from the live process.env
- *  (cheap; the process env is small) so a late-set toolchain var is still seen. Passed as the FULL env to
+/** The scrubbed env for a git spawn, hardened against the config exec channels: PATH/HOME/toolchain only
+ *  (NEVER a host secret — see the key-confinement note), plus the {@link STATIC_HARDENING} overrides on every
+ *  spawn and, for a {@link DRIVER_TRIGGERING} subcommand, the enumerated dynamic-name overrides. Recomputed per
+ *  call from the live process.env (cheap) so a late-set toolchain var is still seen. Passed as the FULL env to
  *  the spawn (Bun's `env` REPLACES process.env for the child), so git sees only the allowlist. */
+async function hardenedEnv(cwd: string, args: string[]): Promise<Record<string, string>> {
+  const overrides: ConfigOverride[] = [...STATIC_HARDENING];
+  const sub = args[0];
+  if (sub !== undefined && DRIVER_TRIGGERING.has(sub)) {
+    overrides.push(...(await execChannelOverrides(cwd)));
+  }
+  return withConfigEnv(gitEnv(), overrides);
+}
+
+/** The base scrubbed env (allowlist only, no host secret) — the foundation {@link hardenedEnv} adds the config
+ *  overrides to, and the env the raw enumeration spawn ({@link execChannelOverrides}) runs under. */
 function gitEnv(): Record<string, string> {
   return filterPassthroughEnv(process.env);
 }
@@ -156,10 +190,9 @@ export class GitError extends Error {
 
 /** Run `git <args>` in `cwd`, capturing streams. Resolves even on non-zero exit. */
 export async function git(cwd: string, args: string[]): Promise<GitResult> {
-  const hardening = await hardeningFor(cwd, args);
-  const proc = Bun.spawn(["git", ...hardening, ...args], {
+  const proc = Bun.spawn(["git", ...args], {
     cwd,
-    env: gitEnv(),
+    env: await hardenedEnv(cwd, args),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -202,10 +235,9 @@ async function gitBoundedStdout(
   argv: string[],
   maxBytes: number,
 ): Promise<{ text: string; truncated: boolean }> {
-  const hardening = await hardeningFor(cwd, argv);
-  const proc = Bun.spawn(["git", ...hardening, ...argv], {
+  const proc = Bun.spawn(["git", ...argv], {
     cwd,
-    env: gitEnv(),
+    env: await hardenedEnv(cwd, argv),
     stdout: "pipe",
     stderr: "ignore",
     stdin: "ignore",
@@ -351,7 +383,7 @@ export async function gitMergeSquash(cwd: string, branch: string): Promise<GitRe
 }
 
 /** Commit everything currently staged with `message`, returning the new HEAD sha. `--no-verify` skips
- *  pre-commit + commit-msg; the runner's `core.hooksPath=/dev/null` (GIT_HARDENING) neutralizes the hooks
+ *  pre-commit + commit-msg; the runner's `core.hooksPath=/dev/null` (STATIC_HARDENING) neutralizes the hooks
  *  --no-verify does NOT skip (prepare-commit-msg, post-commit) so no agent-planted hook runs as the
  *  supervisor. Throws {@link GitError} on failure (e.g. nothing staged). */
 export async function gitCommitAllStaged(cwd: string, message: string): Promise<string> {
