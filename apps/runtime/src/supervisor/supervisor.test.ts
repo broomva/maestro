@@ -645,6 +645,43 @@ describe("reap containment + attempt-scoping + kill race (P20 fixes)", () => {
     expect(built.mintCalls()).toBe(1);
   });
 
+  test("MAJOR: kill during an OVER-CAP diff read ends canceled/run.killed, NOT misclassified blocked (F8 provenance)", async () => {
+    // BRO-1794 slice 1b-ii-B P20 round-3: the `cancelled` guard must DOMINATE the over-cap truncation
+    // early-return, not sit after it. A kill landing during a truncated (over-cap) read must end
+    // canceled/run.killed — misclassifying it as the `diff_too_large` park (blocked/run.finished) reports
+    // the wrong provenance to the operator who pressed stop + to run.killed-vs-run.finished consumers.
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0", {
+      doneJson: JSON.stringify({ check: [{ name: "ok", run: "true" }], judge: "rubric.md" }),
+    });
+    let sup!: ReturnType<typeof createSupervisor>;
+    const built = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([{ lines: [runExiting(0)], exitCode: 0 }]).spawn,
+      {
+        // The over-cap read: kills mid-read AND reports truncated. The kill must win over the truncation park.
+        readDiff: async () => {
+          sup.kill("r1");
+          return { text: "", truncated: true };
+        },
+      },
+    );
+    sup = built.sup;
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const res = await out.reaped;
+
+    // F8 wins over the over-cap park: canceled/run.killed, NOT blocked/run.finished. Placing the guard after
+    // the truncation check (the round-2 order) makes this res.event === "run.finished" / blocked → RED.
+    expect(res.crash).toBe(false);
+    expect(res.event).toBe("run.killed");
+    expect(res.sessionStatus).toBe("canceled");
+    expect(built.mintCalls()).toBe(1); // still no verifier mint
+  });
+
   test("kill racing a respawn provision THROW still ends canceled + run.killed (not a crash) — P20 fix", async () => {
     // The containOrKilled catch path: a kill lands during the respawn's factory.create await, and that
     // create then THROWS (a transient re-attach fault). The catch must still honor the kill (canceled +

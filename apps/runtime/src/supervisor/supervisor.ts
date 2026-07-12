@@ -716,11 +716,33 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         },
       };
     } else {
-      // Read the run diff BYTE-BOUNDED before it reaches the judge (see the resolution comment above). A diff
-      // past the cap fails CLOSED: park blocked (`diff_too_large`) — the human looks — rather than buffering
-      // an adversarial diff into the shared supervisor.
+      // Read the run diff BYTE-BOUNDED before it reaches the judge (see the resolution comment above) — the
+      // judge must hold the whole diff, so an unbounded read would OOM the shared supervisor.
       const maxBytes = config?.judgeDiffMaxBytes ?? DEFAULT_JUDGE_DIFF_MAX_BYTES;
       const runDiff = await readDiff(ctx.sandbox.workdir, ctx.base, ctx.sandbox.branch, maxBytes);
+      // A kill that landed while we read the diff (or earlier) must WIN — checked IMMEDIATELY after the
+      // `await`, so it DOMINATES every branch below (the truncation early-return AND the mint) with NO await
+      // in between. Placing it here (not after the truncation check) is load-bearing on TWO counts:
+      //   (1) F8 provenance — a kill during the diff read must end canceled/run.killed, NOT be misclassified
+      //       as the over-cap park blocked/run.finished below (the run is still registered during verify, so
+      //       a human kill lands here; the over-cap read is the LONGEST such window).
+      //   (2) no resurrection — `tokens.mint` is idempotent per session, so minting after `kill()`'s revoke
+      //       would re-install a LIVE bearer, letting the judge bill a model call AFTER the kill. JS is
+      //       single-threaded, so `kill()` (which runs at an await point) cannot interleave between this
+      //       synchronous check and the synchronous `tokens.mint` below.
+      // A kill AFTER the mint instead revokes the live bearer → the in-flight forward 401s → the post-verify
+      // `cancelled` re-check routes terminalKilled.
+      if (cancelled.has(ctx.runId)) {
+        return terminalKilled(
+          { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
+          entry,
+          0,
+          respawns,
+          entry.supervised.supervisionFailed(),
+        );
+      }
+      // A diff past the cap fails CLOSED: park blocked (`diff_too_large`) — the human looks — rather than
+      // buffering an adversarial diff into the shared supervisor (gitDiffBounded stopped at the cap).
       if (runDiff.truncated) {
         return terminal(ctx, entry, {
           exitCode: 0,
@@ -732,22 +754,6 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
           mismatch,
           respawns,
         });
-      }
-      // A kill that landed while we read the diff (or earlier) must WIN, checked IMMEDIATELY before the mint
-      // with NO await in between (JS is single-threaded, so `kill()` — which runs at an await point — cannot
-      // interleave between this check and the synchronous `tokens.mint` below). `tokens.mint` is idempotent
-      // per session and would otherwise RESURRECT proxy access for a killed run — re-installing a LIVE bearer
-      // over the one `kill()` revoked — letting the judge make a billed model call AFTER the F8 kill
-      // (defeating the kill-switch shield). A kill AFTER the mint instead revokes the live bearer → the
-      // in-flight forward 401s → the post-verify `cancelled` re-check below routes terminalKilled.
-      if (cancelled.has(ctx.runId)) {
-        return terminalKilled(
-          { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
-          entry,
-          0,
-          respawns,
-          entry.supervised.supervisionFailed(),
-        );
       }
       verifierBearer = tokens.mint({
         session: ctx.runId,
