@@ -132,12 +132,16 @@ test("clicking Stop mid-stream halts the turn AND settles the caret (no perpetua
   await page.getByPlaceholder("Message Maestro").fill("run the build");
   await page.getByRole("button", { name: "Send" }).click();
 
-  // Wait until a text part is actively streaming (the blinking caret is on), then Stop mid-stream.
-  await expect(thread.locator(".bv-msg--streaming")).toBeVisible();
+  // Sync on REAL streamed text (not a bare `.bv-msg--streaming` visible, which fires at the EMPTY
+  // text-start frame — clicking Stop there could abort before the first delta and flake the retention
+  // assertion). With ?step=250 the first delta ("Listed the files. ") lands well before text-end, so the
+  // text part is populated AND still streaming (caret on) when we click Stop.
+  await expect(thread.getByTestId("chat-assistant-text")).toContainText("Listed the files.");
+  await expect(thread.locator(".bv-msg--streaming")).toBeVisible(); // text-end not yet → still streaming
   await page.getByRole("button", { name: "Stop" }).click();
 
   // The turn settles: the verb returns to Send, and the caret is GONE (the streaming class is removed) —
-  // the stopped message no longer falsely signals "still typing". Whatever text had arrived remains.
+  // the stopped message no longer falsely signals "still typing". The text that had arrived remains.
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
   await expect(thread.locator(".bv-msg--streaming")).toHaveCount(0);
