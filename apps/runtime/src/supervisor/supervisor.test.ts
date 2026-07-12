@@ -606,6 +606,45 @@ describe("reap containment + attempt-scoping + kill race (P20 fixes)", () => {
     expect(tokens.size).toBe(0);
   });
 
+  test("MAJOR: kill during the judge diff read (pre-mint) WINS — verifier bearer NEVER minted (no resurrection)", async () => {
+    // BRO-1794 slice 1b-ii-B P20: the pre-mint kill guard must be ADJACENT to the verifier mint. A kill
+    // landing while the reap reads the run diff (the `await` right before the mint) must route terminalKilled
+    // WITHOUT minting — `tokens.mint` is idempotent per session, so a mint after kill()'s revoke would
+    // RESURRECT a live bearer and let the judge bill a model call after the F8 kill. Deterministic via an
+    // injected readDiff that fires the kill mid-read (the exact pre-mint window).
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0", {
+      doneJson: JSON.stringify({ check: [{ name: "ok", run: "true" }], judge: "rubric.md" }),
+    });
+    let sup!: ReturnType<typeof createSupervisor>;
+    const built = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([{ lines: [runExiting(0)], exitCode: 0 }]).spawn,
+      {
+        readDiff: async () => {
+          sup.kill("r1"); // mid-read: sets `cancelled` + revokes the agent bearer
+          return { text: "diff", truncated: false };
+        },
+      },
+    );
+    sup = built.sup;
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const res = await out.reaped;
+
+    // Killed distinctly (F8): canceled + run.killed, not park review/blocked, not a crash.
+    expect(res.crash).toBe(false);
+    expect(res.event).toBe("run.killed");
+    expect(res.sessionStatus).toBe("canceled");
+    // The verifier bearer was NEVER minted — only the agent bearer at launch (mintCalls === 1). A second
+    // mint would be the resurrection the ADJACENT guard prevents: moving the guard before the diff read
+    // (the original P20 defect) makes readDiff's kill land after the guard → verifier minted → mintCalls 2.
+    expect(built.mintCalls()).toBe(1);
+  });
+
   test("kill racing a respawn provision THROW still ends canceled + run.killed (not a crash) — P20 fix", async () => {
     // The containOrKilled catch path: a kill lands during the respawn's factory.create await, and that
     // create then THROWS (a transient re-attach fault). The catch must still honor the kill (canceled +

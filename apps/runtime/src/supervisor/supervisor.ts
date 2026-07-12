@@ -161,6 +161,10 @@ export interface SupervisorDeps {
   hostEnv?: Record<string, string | undefined>;
   /** Fresh-context respawn safety bound (default 50). */
   maxRespawns?: number;
+  /** Read the run diff for the Stage-2 judge (default {@link gitDiffBounded}). Injected so a test can drive
+   *  the kill-during-verify race deterministically — the reap awaits this between the reap's own guards and
+   *  the verifier-bearer mint, so a fixture that kills mid-read exercises the pre-mint kill guard. */
+  readDiff?: typeof gitDiffBounded;
 }
 
 /** The terminal lifecycle event the reap derives (D-EVENTNAMES). `run.killed` = killed by intent (F8). */
@@ -307,6 +311,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     config,
     hostEnv = process.env,
     maxRespawns = DEFAULT_MAX_RESPAWNS,
+    readDiff = gitDiffBounded,
   } = deps;
   const registry = new RunRegistry();
   // Run ids a `kill` landed on. A fresh-context respawn consults this after each await so a kill that
@@ -699,21 +704,6 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     // the duration of the judge call (key-confinement). Without a rubric the judge is skipped: `rubricText:
     // null` → `attachJudge` yields `judge: { score: null }` and `call` is never invoked.
     const judgeRef = done.judge;
-    // A kill that landed BEFORE we mint the verifier bearer must WIN. `tokens.mint` is idempotent per session
-    // and would otherwise RESURRECT proxy access for a killed run — re-installing a LIVE bearer over the one
-    // `kill()` revoked — letting the judge make a billed model call after the F8 kill (defeating the
-    // kill-switch shield). Mirror `respawn()`'s guard: a synchronous check adjacent to the synchronous mint
-    // closes the window. (A kill AFTER the mint revokes the live bearer → the in-flight forward 401s → the
-    // post-verify `cancelled` re-check below routes terminalKilled — the already-handled case.)
-    if (judgeRef !== undefined && cancelled.has(ctx.runId)) {
-      return terminalKilled(
-        { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
-        entry,
-        0,
-        respawns,
-        entry.supervised.supervisionFailed(),
-      );
-    }
     let verifierBearer: string | null = null;
     let judge: RunVerificationDeps["judge"];
     if (judgeRef === undefined) {
@@ -728,14 +718,9 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     } else {
       // Read the run diff BYTE-BOUNDED before it reaches the judge (see the resolution comment above). A diff
       // past the cap fails CLOSED: park blocked (`diff_too_large`) — the human looks — rather than buffering
-      // an adversarial diff into the shared supervisor. Done BEFORE the mint so a too-large diff mints nothing.
+      // an adversarial diff into the shared supervisor.
       const maxBytes = config?.judgeDiffMaxBytes ?? DEFAULT_JUDGE_DIFF_MAX_BYTES;
-      const runDiff = await gitDiffBounded(
-        ctx.sandbox.workdir,
-        ctx.base,
-        ctx.sandbox.branch,
-        maxBytes,
-      );
+      const runDiff = await readDiff(ctx.sandbox.workdir, ctx.base, ctx.sandbox.branch, maxBytes);
       if (runDiff.truncated) {
         return terminal(ctx, entry, {
           exitCode: 0,
@@ -747,6 +732,22 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
           mismatch,
           respawns,
         });
+      }
+      // A kill that landed while we read the diff (or earlier) must WIN, checked IMMEDIATELY before the mint
+      // with NO await in between (JS is single-threaded, so `kill()` — which runs at an await point — cannot
+      // interleave between this check and the synchronous `tokens.mint` below). `tokens.mint` is idempotent
+      // per session and would otherwise RESURRECT proxy access for a killed run — re-installing a LIVE bearer
+      // over the one `kill()` revoked — letting the judge make a billed model call AFTER the F8 kill
+      // (defeating the kill-switch shield). A kill AFTER the mint instead revokes the live bearer → the
+      // in-flight forward 401s → the post-verify `cancelled` re-check below routes terminalKilled.
+      if (cancelled.has(ctx.runId)) {
+        return terminalKilled(
+          { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
+          entry,
+          0,
+          respawns,
+          entry.supervised.supervisionFailed(),
+        );
       }
       verifierBearer = tokens.mint({
         session: ctx.runId,
