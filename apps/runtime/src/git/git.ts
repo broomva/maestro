@@ -186,6 +186,82 @@ export async function gitUnstage(cwd: string, paths: string[]): Promise<void> {
   await git(cwd, ["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", ...paths]);
 }
 
+// ── Approve/merge primitives (BRO-1802, D1) ─────────────────────────────────────
+// Approve = squash-merge `run/<id>` onto the workspace branch with the verdict-freshness ladder.
+// These run in the WORKSPACE repo (the runtime owns it), so like every git spawn here they inherit the
+// scrubbed env (key-confinement) — a `merge`/`textconv`/hook driver an agent planted in the shared config
+// can neither read a host secret nor (for the merge below) run an external diff.
+
+/** Resolve `ref` (a branch, tag, or sha) to its full 40-char commit sha (`rev-parse <ref>^{commit}`). Used to
+ *  normalize the verdict's `base` and compare it to the workspace branch tip. Throws {@link GitError} on a bad ref. */
+export async function gitRevParse(cwd: string, ref: string): Promise<string> {
+  const r = await git(cwd, ["rev-parse", `${ref}^{commit}`]);
+  if (r.code !== 0) throw new GitError(["rev-parse", `${ref}^{commit}`], r.code, r.stderr);
+  return r.stdout.trim();
+}
+
+/** The set of paths that differ between commits `a` and `b` (`git diff --name-only <a> <b>`). Read with
+ *  `-z` (NUL-terminated, raw paths — never C-quoted) + `--no-renames` (a rename is a delete+add, so both
+ *  paths surface) + `--no-ext-diff --no-textconv` (an agent-configured driver never runs — a `--name-only`
+ *  diff already avoids content drivers, but stay uniform with {@link gitDiffBounded}). Used for the freshness
+ *  ladder's file-overlap test. Throws {@link GitError} on a git failure (a bad ref must not read as "no changes"). */
+export async function gitChangedFiles(cwd: string, a: string, b: string): Promise<string[]> {
+  const r = await git(cwd, [
+    "diff",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--name-only",
+    "-z",
+    "--no-renames",
+    a,
+    b,
+  ]);
+  if (r.code !== 0) throw new GitError(["diff", "--name-only", "-z", a, b], r.code, r.stderr);
+  return r.stdout.split("\0").filter((p) => p.length > 0);
+}
+
+/** True when `cwd`'s working tree + index are clean (`git status --porcelain` empty). The squash-merge lands
+ *  in the live workspace checkout, so a dirty tree (uncommitted human edits) makes the merge unsafe — the
+ *  approve refuses rather than clobber. Throws {@link GitError} on a git failure. */
+export async function gitIsClean(cwd: string): Promise<boolean> {
+  const r = await git(cwd, ["status", "--porcelain"]);
+  if (r.code !== 0) throw new GitError(["status", "--porcelain"], r.code, r.stderr);
+  return r.stdout.trim().length === 0;
+}
+
+/** Stage a squash of `branch` onto the current checkout WITHOUT committing (`git merge --squash`). Resolves
+ *  even on a conflicting merge (nonzero code) so the caller can roll back + report `stale`; disjoint file
+ *  sets (the only case the ladder reaches here) never conflict. Does NOT create a merge commit — the caller
+ *  commits the staged squash as one commit ("one commit per approved run", D1). */
+export async function gitMergeSquash(cwd: string, branch: string): Promise<GitResult> {
+  return git(cwd, ["merge", "--squash", branch]);
+}
+
+/** Commit everything currently staged with `message`, returning the new HEAD sha. `--no-verify` skips
+ *  commit/pre-commit hooks (an agent-planted hook in the shared repo never runs on the runtime's merge
+ *  commit). Throws {@link GitError} on failure (e.g. nothing staged). */
+export async function gitCommitAllStaged(cwd: string, message: string): Promise<string> {
+  const commit = await git(cwd, ["commit", "--no-verify", "-m", message]);
+  if (commit.code !== 0) throw new GitError(["commit", "--no-verify"], commit.code, commit.stderr);
+  return gitRevParse(cwd, "HEAD");
+}
+
+/** Hard-reset `cwd` to `ref` (default HEAD) — rolls back a conflicted `git merge --squash` (which leaves no
+ *  MERGE_HEAD, so `git merge --abort` cannot). Safe only because approve requires a clean tree first, so the
+ *  reset restores exactly that clean state. Throws {@link GitError} on failure. */
+export async function gitResetHard(cwd: string, ref = "HEAD"): Promise<void> {
+  const r = await git(cwd, ["reset", "--hard", ref]);
+  if (r.code !== 0) throw new GitError(["reset", "--hard", ref], r.code, r.stderr);
+}
+
+/** Rename branch `from` to `to` (`git branch -m`). On merge the run branch `run/<id>` becomes
+ *  `archive/run-<id>` — the branch is the receipt (D1), never deleted. The branch must not be checked out in
+ *  any worktree (remove the run worktree first). Throws {@link GitError} on failure. */
+export async function gitRenameBranch(cwd: string, from: string, to: string): Promise<void> {
+  const r = await git(cwd, ["branch", "-m", from, to]);
+  if (r.code !== 0) throw new GitError(["branch", "-m", from, to], r.code, r.stderr);
+}
+
 // ── Worktree primitives (BRO-1746) ─────────────────────────────────────────────
 // The runtime runs each agent in a `git worktree` on a `run/<id>` branch — phase-1 isolation
 // (ARCHITECTURE §5). These are the raw git ops the sandbox adapter (sandbox/worktree.ts) composes;
