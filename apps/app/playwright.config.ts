@@ -9,6 +9,12 @@ export default defineConfig({
   testDir: "./tests",
   testMatch: "**/*.pw.ts",
   fullyParallel: true,
+  // One worker: the two phase-exit specs (p1-exit, p2-exit) each boot a REAL runtime on the fixed
+  // proxy port 4319 (the single shared vite-preview `/api` target), so they must never run
+  // concurrently or they collide on the bind. The suite is small and local-only (CI never installs a
+  // browser — Playwright is the local P11 gate), so serializing every spec is a cheap, deterministic
+  // fix. `fullyParallel` still governs within-file ordering.
+  workers: 1,
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: [["list"]],

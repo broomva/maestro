@@ -168,7 +168,12 @@ export class RuntimeChatTransport implements ChatTransport {
   constructor(opts: RuntimeChatTransportOptions) {
     this.#sessionId = opts.sessionId;
     this.#baseUrl = opts.baseUrl ?? "";
-    this.#fetch = opts.fetchImpl ?? fetch;
+    // Bind the default to the global: native `fetch` requires `this === window`, and calling it as a
+    // private field (`this.#fetch(...)`) would pass `this === undefined` → the browser throws
+    // "Failed to execute 'fetch' on 'Window': Illegal invocation". An injected `fetchImpl` (a plain
+    // function test double) doesn't care about `this`, so it's unaffected. This only bites the real
+    // browser path — never exercised until a live-browser E2E drove the un-injected transport (BRO-1827).
+    this.#fetch = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
   }
 
   async *stream(

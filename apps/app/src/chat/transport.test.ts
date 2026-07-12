@@ -275,4 +275,32 @@ describe("RuntimeChatTransport — the F10 chat wire", () => {
     expect(seen.map((c) => c.type)).toEqual(["start"]); // the first frame streamed before the failure
     expect((caught as Error)?.message).toBe("read exploded");
   });
+
+  test("with no fetchImpl, the default fetch is bound to the global (native fetch's `this` rule) — BRO-1827", async () => {
+    // Every other test injects a plain-function fetchImpl (which ignores `this`), so the PRODUCTION path
+    // — the un-injected default — was never exercised, and it shipped broken: native browser `fetch`
+    // throws "Illegal invocation" when called with `this !== window`, and a private-field call
+    // (`this.#fetch(...)`) passes `this === undefined`. bun doesn't enforce that, so this spy emulates
+    // native fetch's `this` check to catch the binding here; the live regression is the browser E2E
+    // apps/app/tests/p2-exit.pw.ts. Revert the constructor's `.bind(globalThis)` → this test throws.
+    const realFetch = globalThis.fetch;
+    let calledWith: string | undefined;
+    const spy = function (this: unknown, url: string | URL | Request): Promise<Response> {
+      if (this !== globalThis) throw new TypeError("Illegal invocation"); // what Chromium's fetch does
+      calledWith = String(url);
+      return Promise.resolve(streamResponse([DONE_FRAME]));
+    };
+    try {
+      globalThis.fetch = spy as unknown as typeof fetch;
+      const t = new RuntimeChatTransport({ sessionId: "n7" }); // NO fetchImpl → the default (browser) path
+      for await (const _c of t.stream([
+        { id: "u", role: "user", parts: [{ type: "text", text: "hi" }] },
+      ])) {
+        // drain to completion — the point is that the call did not throw Illegal invocation
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(calledWith).toContain("/api/sessions/n7/chat");
+  });
 });
