@@ -125,7 +125,7 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
   test("an agent-planted git hook never runs on a runtime commit (core.hooksPath=/dev/null)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
     tmps.push(dir);
-    await git(dir, ["init", "-q"]);
+    await git(dir, ["init", "-q", "-b", "main"]);
     await git(dir, ["config", "user.email", "t@t.co"]);
     await git(dir, ["config", "user.name", "t"]);
     writeFileSync(join(dir, "a.txt"), "1\n");
@@ -158,7 +158,7 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
     const ext = mkdtempSync(join(tmpdir(), "maestro-ext-")); // driver + marker live OUTSIDE the repo tree
     tmps.push(dir, ext);
-    await git(dir, ["init", "-q"]);
+    await git(dir, ["init", "-q", "-b", "main"]);
     await git(dir, ["config", "user.email", "t@t.co"]);
     await git(dir, ["config", "user.name", "t"]);
     writeFileSync(join(dir, "a.txt"), "1\n");
@@ -190,7 +190,7 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
     const ext = mkdtempSync(join(tmpdir(), "maestro-ext-")); // driver + marker live OUTSIDE the repo tree
     tmps.push(dir, ext);
-    await git(dir, ["init", "-q"]);
+    await git(dir, ["init", "-q", "-b", "main"]);
     await git(dir, ["config", "user.email", "t@t.co"]);
     await git(dir, ["config", "user.name", "t"]);
     writeFileSync(join(dir, "base.txt"), "base\n");
@@ -226,7 +226,7 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
     const ext = mkdtempSync(join(tmpdir(), "maestro-ext-"));
     tmps.push(dir, ext);
-    await git(dir, ["init", "-q"]);
+    await git(dir, ["init", "-q", "-b", "main"]);
     await git(dir, ["config", "user.email", "t@t.co"]);
     await git(dir, ["config", "user.name", "t"]);
     writeFileSync(join(dir, "base.txt"), "base\n");
