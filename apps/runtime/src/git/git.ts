@@ -46,6 +46,18 @@ export async function isGitRepo(cwd: string): Promise<boolean> {
 }
 
 /**
+ * The current HEAD commit sha of `cwd` — the base a run branches from (VERIFIER §4 `base`). Captured at
+ * dispatch from the freshly-created worktree (whose HEAD is the workspace branch point) and threaded on
+ * the run context, so the verifier can diff `base..run/<id>` at reap. Throws {@link GitError} on failure
+ * (an unborn/bare repo, git missing) so the caller contains it as a crash rather than diffing against "".
+ */
+export async function gitHead(cwd: string): Promise<string> {
+  const r = await git(cwd, ["rev-parse", "HEAD"]);
+  if (r.code !== 0) throw new GitError(["rev-parse", "HEAD"], r.code, r.stderr);
+  return r.stdout.trim();
+}
+
+/**
  * Stage `paths` (repo-relative) and commit them with `message`. Pathspec-limited on
  * BOTH add and commit, so it never sweeps unrelated staged or working-tree changes —
  * only the given paths land in the commit. Throws {@link GitError} on any failure so
