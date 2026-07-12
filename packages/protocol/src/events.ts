@@ -50,12 +50,12 @@ export type EventType = NamespacedEventType | SyntheticEventType;
  * flow emits. Kept as a named catalog so consumers reference constants, not
  * string literals.
  *
- * Note (canon discrepancy, tracked in docs/canon-amendments.md): VERIFIER §7
- * also names `verify.started`, `judge.result`, `verify.error`, which fall
- * OUTSIDE the six namespaces the envelope pins. They are not admitted by
- * EventType here; the verifier-implementation ticket owns reconciling them
- * (fold into `check.*` or widen the namespace set — a deliberate protocol edit,
- * the same move BRO-1756 made for `agent.*`).
+ * Resolution (BRO-1794, tracked in docs/canon-amendments.md): VERIFIER §7 also
+ * names `verify.started`, `judge.result`, `verify.error`, which fell OUTSIDE the
+ * six envelope namespaces. Rather than widen the namespace set (the move BRO-1756
+ * made for `agent.*`), the verifier reap FOLDS them into the `check.*` family —
+ * `check.started` / `check.judge` / `check.error` — since the verifier is one
+ * check family; the six-namespace envelope stays intact.
  */
 export const EVENT_TYPES = {
   // run.* — lifecycle (FLOWS F2/F4/F8/F9, HARNESS, D-EVENTNAMES)
@@ -74,9 +74,14 @@ export const EVENT_TYPES = {
   // tool.*
   TOOL_CALL: "tool.call",
   TOOL_RESULT: "tool.result", // HARNESS §6 — { tool, ok, summary }
-  // check.* — verification (VERIFIER §7, the namespaced subset)
-  CHECK_RESULT: "check.result",
-  CHECK_VERDICT: "check.verdict", // D-EVENTNAMES: renamed from bare `verdict`
+  // check.* — verification (VERIFIER §7). The reap emits these in order: started → per-check result(s) →
+  // judge → verdict; an infra failure emits `check.error` instead. verify.started/judge.result/verify.error
+  // are FOLDED here (BRO-1794) rather than widening the namespace set — the verifier is one check family.
+  CHECK_STARTED: "check.started", // a verification attempt began { attempt } (was VERIFIER §7 `verify.started`)
+  CHECK_RESULT: "check.result", // one deterministic check's outcome { name, ok, exit, duration_s, log }
+  CHECK_JUDGE: "check.judge", // the Stage-2 judge receipt { score, model, detail? } (was `judge.result`)
+  CHECK_VERDICT: "check.verdict", // the VerdictReceipt verbatim — D-EVENTNAMES: renamed from bare `verdict`
+  CHECK_ERROR: "check.error", // verification could not run (infra) { message } (was VERIFIER §7 `verify.error`)
   // gate.*
   GATE_OPENED: "gate.opened",
   GATE_DECIDED: "gate.decided",
