@@ -33,7 +33,7 @@ bun run typecheck            # proves apps/runtime + apps/app both import this p
 > (`agent.*` added in BRO-1756 to admit `agent.said` per HARNESS §6; a deliberate widening logged
 > in `docs/canon-amendments.md`).
 >
-> Canon discrepancy still tracked for a later ticket: VERIFIER §7 names `verify.started`,
-> `judge.result`, `verify.error`, which fall outside those namespaces. `EventType` does not admit
-> them; the verifier-implementation ticket owns reconciling them (fold into `check.*` or widen the
-> namespace set as a deliberate protocol edit — the same move BRO-1756 made for `agent.*`).
+> VERIFIER §7's `verify.started`, `judge.result`, `verify.error` fell outside those namespaces; the
+> verifier reap (BRO-1794) FOLDED them into `check.*` — `check.started` / `check.judge` / `check.error`
+> — rather than widening the set, since the verifier is one check family. The count stays six; logged
+> in `docs/canon-amendments.md` (D-EVENTNAMES follow-up).
