@@ -11,6 +11,7 @@ import {
   effectiveProtect,
   hasCheck,
   InvalidContractError,
+  isValidRubricRef,
   MAX_CHECK_TIMEOUT_S,
   normalizeChecks,
   SESSION_STATUSES,
@@ -79,6 +80,34 @@ describe("protect floor (VERIFIER §1)", () => {
   test("dedupes overlap with the floor", () => {
     const eff = effectiveProtect({ check: "x", protect: ["**/_work.md"] });
     expect(eff.filter((g) => g === "**/_work.md")).toHaveLength(1);
+  });
+});
+
+describe("done-schema — rubric ref (isValidRubricRef, VERIFIER §1/§3)", () => {
+  test("a relative .md path within the tree is valid", () => {
+    expect(isValidRubricRef("rubric.md")).toBe(true);
+    expect(isValidRubricRef("checks/rubric.md")).toBe(true);
+    expect(isValidRubricRef("r.md")).toBe(true);
+  });
+  test("empty or whitespace-wrapped refs are malformed", () => {
+    expect(isValidRubricRef("")).toBe(false);
+    expect(isValidRubricRef("   ")).toBe(false);
+    expect(isValidRubricRef(" rubric.md")).toBe(false);
+    expect(isValidRubricRef("rubric.md ")).toBe(false);
+  });
+  test("a non-.md file is malformed", () => {
+    expect(isValidRubricRef("rubric.yaml")).toBe(false);
+    expect(isValidRubricRef("rubric")).toBe(false);
+    expect(isValidRubricRef("rubric.md.txt")).toBe(false);
+  });
+  test("absolute paths are malformed (posix + windows)", () => {
+    expect(isValidRubricRef("/etc/rubric.md")).toBe(false);
+    expect(isValidRubricRef("C:\\rubric.md")).toBe(false);
+  });
+  test("parent-traversal is malformed (escapes the worktree — a tamper vector)", () => {
+    expect(isValidRubricRef("../rubric.md")).toBe(false);
+    expect(isValidRubricRef("checks/../../rubric.md")).toBe(false);
+    expect(isValidRubricRef("a/../b/rubric.md")).toBe(false);
   });
 });
 
