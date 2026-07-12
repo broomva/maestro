@@ -5,6 +5,7 @@
 // exit, the `runtime.lock` singleton (D4) is acquired in P2.
 
 import { resolve } from "node:path";
+import { VERIFIER_MAX_ATTEMPTS } from "@maestro/protocol";
 
 export interface RuntimeConfig {
   /** TCP port the Hono service binds (MAESTRO_PORT, default DEFAULT_PORT). */
@@ -61,6 +62,14 @@ export interface RuntimeConfig {
   /** Line ceiling for a session.jsonl segment (MAESTRO_ROTATE_MAX_LINES). */
   rotateMaxLines?: number;
   /**
+   * Verifier consecutive-fail cap (MAESTRO_VERIFIER_MAX_ATTEMPTS, VERIFIER §5) — how many failing
+   * verification attempts a run may burn before it parks `blocked` (reason `verifier_exhausted`) instead
+   * of respawning the coding agent again. A run-time policy default; a contract's `budget` does not
+   * override it (it bounds the verify loop, not the model-call budget). loadConfig always fills it; a
+   * hand-built literal may omit it and the supervisor falls back to DEFAULT_VERIFIER_MAX_ATTEMPTS.
+   */
+  verifierMaxAttempts?: number;
+  /**
    * Mock-model mode (MAESTRO_MOCK_MODEL=1) — mount the dispatch loop with the scripted mock upstream
    * (proxy/mock-model.ts) instead of a real Anthropic upstream, so a running runtime can dispatch
    * sessions with ZERO tokens / no API key (BRO-1822). Today this is the ONLY mode that mounts dispatch:
@@ -89,6 +98,9 @@ export const DEFAULT_NO_PROGRESS_N = 3;
  *  ~200k working window with headroom for the final progress.md write + the restart signal. Tunable
  *  per model/host via MAESTRO_CONTEXT_CEILING_TOKENS. */
 export const DEFAULT_CONTEXT_CEILING_TOKENS = 160_000;
+
+/** Verifier consecutive-fail cap when unset (VERIFIER §5) — the protocol's `VERIFIER_MAX_ATTEMPTS`. */
+export const DEFAULT_VERIFIER_MAX_ATTEMPTS = VERIFIER_MAX_ATTEMPTS;
 
 /** session.jsonl rotates at 5 MB (DECISIONS §D3). */
 export const DEFAULT_ROTATE_MAX_BYTES = 5 * 1024 * 1024;
@@ -130,6 +142,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   // session.jsonl rotation thresholds (BRO-1811): a positive override wins, else the D3 default.
   const rotateMaxBytes = positiveInt(env.MAESTRO_ROTATE_MAX_BYTES) ?? DEFAULT_ROTATE_MAX_BYTES;
   const rotateMaxLines = positiveInt(env.MAESTRO_ROTATE_MAX_LINES) ?? DEFAULT_ROTATE_MAX_LINES;
+  // Verifier consecutive-fail cap (BRO-1794): a positive override wins, else the VERIFIER §5 default.
+  const verifierMaxAttempts =
+    positiveInt(env.MAESTRO_VERIFIER_MAX_ATTEMPTS) ?? DEFAULT_VERIFIER_MAX_ATTEMPTS;
   // Mock-model mode is an explicit opt-in (only "1" enables it) — the dispatch mount is a spawn-capable
   // surface, so it stays off unless the operator asks for the token-free mock loop.
   const mockModel = env.MAESTRO_MOCK_MODEL === "1";
@@ -148,6 +163,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     contextCeilingTokens,
     rotateMaxBytes,
     rotateMaxLines,
+    verifierMaxAttempts,
     mockModel,
   };
 }

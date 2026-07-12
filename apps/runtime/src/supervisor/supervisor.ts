@@ -13,7 +13,9 @@
 //   once the child is LIVE (the reap runs in the background).
 //
 // Reap maps the child's REAL exit code (ground truth) per HARNESS §4:
-//   0  → claims complete → spawn the verifier (STUB until P3: park review)
+//   0  → claims complete → run the verifier (F4, Loop 2): Stage 0 tamper/diff guard + Stage 1 checks
+//        against base..run/<id>; pass → park review (F5), fail → respawn with fix_plan OR park blocked at
+//        a cap, infra error → park blocked (no attempt burned). (Stage-2 judge = BRO-1794 slice 1b-ii.)
 //   10 → stopped → read the child's declared reason; fresh_context → IMMEDIATE respawn (same run id,
 //        same worktree, same run_budget — budgets span attempts, not processes); every other reason
 //        (budget | iteration_cap | no_progress | user_stop) → park blocked
@@ -32,11 +34,16 @@ import type {
   SessionStatus,
   WorkContract,
 } from "@maestro/protocol";
-import { EVENT_TYPES } from "@maestro/protocol";
+import { EVENT_TYPES, effectiveProtect, normalizeChecks } from "@maestro/protocol";
 import { and, desc, eq, gt, max } from "drizzle-orm";
-import type { RuntimeConfig } from "../config";
+import {
+  DEFAULT_MAX_ITERATIONS,
+  DEFAULT_VERIFIER_MAX_ATTEMPTS,
+  type RuntimeConfig,
+} from "../config";
 import type { IndexDb } from "../db/client";
 import { event, gate, lease, node, runBudget, session } from "../db/schema";
+import { gitHead } from "../git/git";
 import { writeContractSnapshot } from "../harness/contract-snapshot";
 import type { ChildEmittedEvent } from "../harness/runner";
 import type { ChildRole } from "../harness/spawn-contract";
@@ -51,6 +58,7 @@ import {
 } from "../harness/stdio";
 import type { SessionTokenRegistry } from "../proxy/tokens";
 import type { Sandbox, SandboxFactory } from "../sandbox/sandbox";
+import { runVerification } from "../verifier/run";
 import { type RunEntry, RunRegistry } from "./registry";
 
 /** The role every Loop-1 dispatch spawns. Verifier (Loop 2) + orchestrator (F6) are later runners. */
@@ -214,6 +222,23 @@ interface RunContext {
   contract: WorkContract;
   budget: Budget;
   sandbox: Sandbox;
+  /** The commit the run branched from — captured ONCE at dispatch (the worktree's HEAD at create time,
+   *  = the workspace branch point). The verifier diffs `base..run/<id>`. Threaded on the context (never
+   *  the index) so a respawn keeps the ORIGINAL base even after the child's commits move the branch tip. */
+  base: string;
+  /** The node's workspace-relative folder path (`""` for the root) — where its `_work.md` lives. */
+  nodePath: string;
+}
+
+/** The verification loop's cross-attempt state (VERIFIER §5). Distinct from the fresh-context `respawns`
+ *  bound: `attempt` counts VERIFY attempts (each exit-0 claim), and `priorSignature` is the immediately-
+ *  preceding verdict's signature for the no-progress check. Threaded through reap → respawn so a verify
+ *  fail → respawn → re-verify chain accumulates the attempt count and remembers the last verdict. */
+interface VerifyState {
+  /** Verify attempts already made on this run (0 before the first). */
+  attempt: number;
+  /** The previous verification's signature, for the no-progress halt (undefined before the first). */
+  priorSignature?: string;
 }
 
 export function createSupervisor(deps: SupervisorDeps): Supervisor {
@@ -556,14 +581,153 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return containCrash(ids, reason, respawns);
   }
 
+  /** The run's model-call iteration count (`run_budget.iterations`) — the global-budget backstop the
+   *  verifier's `iteration_cap` halt checks against `max_iterations`. Guarded: a read fault yields 0 so
+   *  the reap never rejects on it (an under-count only delays the cap, never fails a good run). */
+  async function readIterations(runId: string): Promise<number> {
+    try {
+      const rows = await db
+        .select({ i: runBudget.iterations })
+        .from(runBudget)
+        .where(eq(runBudget.sessionId, runId))
+        .limit(1);
+      return rows[0]?.i ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  // ── Verify (F4, Loop 2) — the exit-0 route ──────────────────────────────────
+  // The child claims complete → run the deterministic verifier (Stage 0 tamper/diff guard + Stage 1
+  // checks) against `base..run/<id>`, persist verdict.md + the check.* stream, and route on the verdict:
+  //   pass          → park review (the human gate, F5 — nothing auto-completes under gate:human)
+  //   fail          → respawn the coding agent with the appended fix_plan, OR park blocked when a cap hits
+  //   error (infra) → park blocked, NO attempt burned (a broken harness is never the agent's fault)
+  // The Stage-2 LLM judge is slice 1b-ii of BRO-1794: `rubricText: null` skips it here, which is correct
+  // for the current reality — the judge only becomes decision-load-bearing under gate:auto (BRO-1802);
+  // under gate:human every clean run parks review regardless, so deferring the judge is not a fail-open.
+  async function verifyAndRoute(
+    ctx: RunContext,
+    entry: RunEntry,
+    mismatch: boolean,
+    respawns: number,
+    verify: VerifyState,
+  ): Promise<ReapResult> {
+    const done = ctx.contract.done;
+    // No verifiable success function → nothing to check; the human gate holds it (the pre-verifier
+    // behavior). Never auto-completes (gate:human).
+    if (!done) {
+      return terminal(ctx, entry, {
+        exitCode: 0,
+        sessionStatus: "review",
+        nodeState: "review",
+        event: "run.finished",
+        crash: false,
+        mismatch,
+        respawns,
+      });
+    }
+
+    const attempt = verify.attempt + 1;
+    const iterations = await readIterations(ctx.runId);
+    const maxIterations =
+      ctx.contract.budget?.max_iterations ?? config?.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    const maxAttempts = config?.verifierMaxAttempts ?? DEFAULT_VERIFIER_MAX_ATTEMPTS;
+
+    // One SessionTee for the whole check.* stream (started → result(s) → verdict), so the events land
+    // ordered alongside the run's other events (the same FS-first single-writer path the child stdout uses).
+    const teeEmit = runEmitter(ctx.runId, ctx.sandbox.runDir);
+
+    const result = await runVerification({
+      stage0: {
+        cwd: ctx.sandbox.workdir,
+        base: ctx.base,
+        branch: ctx.sandbox.branch,
+        protect: effectiveProtect(done),
+        maxFiles: done.diff?.max_files,
+        maxLines: done.diff?.max_lines,
+      },
+      checks: {
+        checks: normalizeChecks(done.check),
+        spawnContext: ctx.sandbox.spawnContext(),
+      },
+      // Stage 2 (the LLM judge) is slice 1b-ii — skipped here (rubricText null → attachJudge never calls
+      // `call`, and the verdict carries judge: { score: null }).
+      judge: {
+        rubricText: null,
+        diff: "",
+        brief: "",
+        call: () => {
+          throw new Error("verifier judge caller invoked without a rubric (slice 1b-ii)");
+        },
+      },
+      runDir: ctx.sandbox.runDir,
+      attempt,
+      maxAttempts,
+      iterations,
+      maxIterations,
+      priorSignature: verify.priorSignature,
+      emit: (type, payload) => teeEmit(sys(type, payload)),
+      now: () => new Date(now()).toISOString(),
+    });
+
+    // A kill that landed DURING the verify must WIN (F8): it set `cancelled` + revoked the token while we
+    // awaited runVerification. End canceled/run.killed, not park review/respawn. (A kill that made the
+    // verify THROW is already handled by reap's outer catch → containOrKilled, which honors `cancelled`.)
+    if (cancelled.has(ctx.runId)) {
+      return terminalKilled(
+        { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
+        entry,
+        0,
+        respawns,
+        entry.supervised.supervisionFailed(),
+      );
+    }
+
+    const outcome = result.outcome;
+    if (outcome.action === "respawn") {
+      // Fail with attempts left → the fresh coding agent re-reads the appended fix_plan.md at boot
+      // (runVerification already wrote it). Carry the verify attempt count + this verdict's signature
+      // forward; `respawns` (the fresh-context bound) is UNCHANGED — a verify-respawn is a distinct loop
+      // bounded by maxAttempts, not by maxRespawns.
+      entry.supervised.stop();
+      return respawn(ctx, respawns, { attempt, priorSignature: result.signature });
+    }
+    if (outcome.action === "park_blocked") {
+      // A cap hit (verifier_exhausted / iteration_cap / no_progress) or an infra verify_error → blocked,
+      // event run.finished (a clean verify halt, NOT a crash's run.failed). The human looks.
+      return terminal(ctx, entry, {
+        exitCode: 0,
+        sessionStatus: "blocked",
+        nodeState: "blocked",
+        event: "run.finished",
+        crash: false,
+        reason: outcome.reason,
+        mismatch,
+        respawns,
+      });
+    }
+    // park_review — a clean pass waits at the human gate (F5). Nothing auto-completes under gate:human.
+    return terminal(ctx, entry, {
+      exitCode: 0,
+      sessionStatus: "review",
+      nodeState: "review",
+      event: "run.finished",
+      crash: false,
+      mismatch,
+      respawns,
+    });
+  }
+
   async function reap(
     ctx: RunContext,
     entry: RunEntry,
     watermark: number,
     respawns: number,
+    verify: VerifyState,
   ): Promise<ReapResult> {
     try {
-      return await reapInner(ctx, entry, watermark, respawns);
+      return await reapInner(ctx, entry, watermark, respawns, verify);
     } catch (err) {
       return containOrKilled(
         { runId: ctx.runId, nodeId: ctx.nodeId, runDir: ctx.sandbox.runDir },
@@ -578,6 +742,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     entry: RunEntry,
     watermark: number,
     respawns: number,
+    verify: VerifyState,
   ): Promise<ReapResult> {
     // Ground truth: the real process exit code (Bun resolves a signal kill to a non-{0,10,20} value).
     const realCode = await entry.child.exited;
@@ -612,16 +777,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 
     // Route on the REAL code (ground truth); the declared reason sub-routes exit 10.
     if (Number.isInteger(realCode) && realCode === 0) {
-      // Claims complete → verifier (F4). STUB until P3: park review (the human gate holds it).
-      return terminal(ctx, entry, {
-        exitCode: 0,
-        sessionStatus: "review",
-        nodeState: "review",
-        event: "run.finished",
-        crash: false,
-        mismatch,
-        respawns,
-      });
+      // Claims complete → run the verifier (F4, Loop 2) and route on its verdict.
+      return verifyAndRoute(ctx, entry, mismatch, respawns, verify);
     }
 
     if (Number.isInteger(realCode) && realCode === 10) {
@@ -629,9 +786,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       if (reason === "fresh_context") {
         // IMMEDIATE respawn: same run id, same worktree, same run_budget row (budgets span attempts,
         // NOT processes — do NOT re-zero / re-insert). The token is re-minted inside launch (mint
-        // revokes the prior). NOT a terminal — do not revoke/drop/release here.
+        // revokes the prior). NOT a terminal — do not revoke/drop/release here. The verify state passes
+        // through UNCHANGED: a mid-coding context-restart is not a new verification attempt.
         entry.supervised.stop(); // the old tick is already stopped (done ran it), belt-and-suspenders
-        return respawn(ctx, respawns + 1);
+        return respawn(ctx, respawns + 1, verify);
       }
       // budget | iteration_cap | no_progress | user_stop | (missing/unknown reason) → park blocked.
       return terminal(ctx, entry, {
@@ -738,9 +896,15 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return { entry, watermark };
   }
 
-  /** Re-launch a fresh-context run (same run id / worktree / budget). A re-provision or re-spawn throw
-   *  is contained as a crash. The safety bound stops an infinite `fresh_context` loop. */
-  async function respawn(ctx: RunContext, respawns: number): Promise<ReapResult> {
+  /** Re-launch a run (same run id / worktree / budget). Used by BOTH the fresh-context restart (exit 10,
+   *  `respawns + 1`) and a verify-fail retry (`respawns` unchanged, `verify` advanced) — the `verify`
+   *  state threads through so the next reap's exit-0 verify continues the attempt count. A re-provision
+   *  or re-spawn throw is contained as a crash. The safety bound stops an infinite `fresh_context` loop. */
+  async function respawn(
+    ctx: RunContext,
+    respawns: number,
+    verify: VerifyState,
+  ): Promise<ReapResult> {
     // A kill(runId) that landed while the prior attempt was reaping must WIN — never resurrect a killed
     // run with a fresh child + token. Checked here AND after the create await (a kill can land in it).
     // A killed run ends `canceled`/`run.killed` (F8), same as a kill caught in reap — not a crash.
@@ -793,7 +957,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       );
     }
     await launched.entry.supervised.done;
-    return reap(nextCtx, launched.entry, launched.watermark, respawns);
+    return reap(nextCtx, launched.entry, launched.watermark, respawns, verify);
   }
 
   // ── Dispatch (F2) ────────────────────────────────────────────────────────
@@ -851,7 +1015,21 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       const reaped = containCrash({ runId, nodeId }, `provision failed: ${msg(err)}`, 0);
       return { dispatched: true, runId, reaped };
     }
-    const ctx: RunContext = { runId, nodeId, contract, budget, sandbox };
+    // Capture the base commit ONCE, here: the freshly-created worktree's HEAD IS the workspace branch
+    // point, and the verifier diffs `base..run/<id>` at reap. On the RunContext, never the index — a
+    // respawn keeps the ORIGINAL base even after the child's commits move the branch tip past it.
+    let base: string;
+    try {
+      base = await gitHead(sandbox.workdir);
+    } catch (err) {
+      const reaped = containCrash(
+        { runId, nodeId, runDir: sandbox.runDir },
+        `base capture failed: ${msg(err)}`,
+        0,
+      );
+      return { dispatched: true, runId, reaped };
+    }
+    const ctx: RunContext = { runId, nodeId, contract, budget, sandbox, base, nodePath: row.path };
 
     // 6. Launch the child. A spawn throw (ENOENT: broomva-child) → crash, worktree preserved.
     let launched: { entry: RunEntry; watermark: number };
@@ -879,7 +1057,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     //    never rejects (it contains its own throws), but the `.catch` is the belt to that suspenders so a
     //    truly-unexpected rejection on the fire-and-forget chain can never surface unhandled.
     const reaped = entry.supervised.done
-      .then(() => reap(ctx, entry, watermark, 0))
+      .then(() => reap(ctx, entry, watermark, 0, { attempt: 0 }))
       .catch((err) =>
         containCrash(
           { runId, nodeId, runDir: sandbox.runDir },

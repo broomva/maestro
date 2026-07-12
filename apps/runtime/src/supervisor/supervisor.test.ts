@@ -202,6 +202,102 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     expect(await h.db.select().from(lease).where(eq(lease.key, "n0"))).toHaveLength(0);
   });
 
+  // ── Verifier reap (F4, Loop 2, BRO-1794 slice 1b-ii) ──────────────────────
+  // An exit-0 claim now runs the deterministic verifier (Stage 0 + Stage 1) against base..run/<id>,
+  // persists verdict.md, and routes on the verdict. The child fixtures exit 0 without committing, so the
+  // diff is empty (Stage 0 pass) and the seeded `done.check` runs as a REAL subprocess in the worktree.
+  test("exit 0 + a passing check → park review, verdict.md + check.verdict, base captured", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0", { doneJson: JSON.stringify({ check: [{ name: "ok", run: "true" }] }) });
+    const { sup, tokens } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([{ lines: [runExiting(0)], exitCode: 0 }]).spawn,
+    );
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const res = await out.reaped;
+
+    expect(res.sessionStatus).toBe("review");
+    expect(res.nodeState).toBe("review");
+    expect(res.event).toBe("run.finished");
+    expect(res.crash).toBe(false);
+    // the receipt landed on disk
+    expect(await exists(join(ws, "runs/run-r1/verdict.md"))).toBe(true);
+    // the check.verdict event carries the pass verdict + the base captured at dispatch (= workspace HEAD)
+    const [verdictEv] = await h.db
+      .select()
+      .from(event)
+      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.CHECK_VERDICT)));
+    expect(verdictEv).toBeDefined();
+    const payload = JSON.parse(verdictEv?.payload ?? "{}");
+    expect(payload.verdict).toBe("pass");
+    expect(payload.base).toBe((await git(ws, ["rev-parse", "HEAD"])).stdout.trim());
+    // the ordered check.* stream reached the durable log
+    const types = (await h.db.select().from(event).where(eq(event.sessionId, "r1"))).map(
+      (e) => e.type,
+    );
+    expect(types).toContain(EVENT_TYPES.CHECK_STARTED);
+    expect(types).toContain(EVENT_TYPES.CHECK_RESULT);
+    // no rubric → the judge did not run
+    expect(payload.judge).toEqual({ score: null });
+    expect(tokens.size).toBe(0);
+    expect(sup.list()).toHaveLength(0);
+  });
+
+  test("exit 0 + a failing check, maxAttempts 1 → park blocked (verifier_exhausted) + fix_plan", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0", {
+      doneJson: JSON.stringify({ check: [{ name: "fail", run: "exit 1" }] }),
+    });
+    const spawner = scriptedSpawner([{ lines: [runExiting(0)], exitCode: 0 }]);
+    const { sup } = makeSupervisor(ws, h, spawner.spawn, {
+      config: loadConfig({ MAESTRO_VERIFIER_MAX_ATTEMPTS: "1" }),
+    });
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const res = await out.reaped;
+
+    expect(res.sessionStatus).toBe("blocked");
+    expect(res.nodeState).toBe("blocked");
+    expect(res.event).toBe("run.finished"); // a clean verify halt, NOT a crash's run.failed
+    expect(res.reason).toBe("verifier_exhausted");
+    expect(res.crash).toBe(false);
+    expect(spawner.calls()).toBe(1); // exhausted at attempt 1 → no respawn
+    const [verdictEv] = await h.db
+      .select()
+      .from(event)
+      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.CHECK_VERDICT)));
+    expect(JSON.parse(verdictEv?.payload ?? "{}").verdict).toBe("fail");
+    expect(await exists(join(ws, "runs/run-r1/fix_plan.md"))).toBe(true);
+  });
+
+  test("exit 0 + an identically-failing check → respawn, then park blocked (no_progress)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0", {
+      doneJson: JSON.stringify({ check: [{ name: "fail", run: "exit 1" }] }),
+    });
+    const spawner = scriptedSpawner([{ lines: [runExiting(0)], exitCode: 0 }]);
+    const { sup } = makeSupervisor(ws, h, spawner.spawn, {
+      config: loadConfig({ MAESTRO_VERIFIER_MAX_ATTEMPTS: "5" }),
+    });
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const res = await out.reaped;
+
+    // attempt 1 fails → respawn (a 2nd child launch); attempt 2 fails IDENTICALLY → the no-progress halt
+    // (priorSignature === signature) parks blocked BEFORE the attempt cap. Proves the verify-state thread.
+    expect(spawner.calls()).toBe(2);
+    expect(res.sessionStatus).toBe("blocked");
+    expect(res.reason).toBe("no_progress");
+  });
+
   for (const reason of ["budget", "iteration_cap", "no_progress", "user_stop"] as const) {
     test(`exit 10 reason ${reason} → session blocked + node blocked`, async () => {
       const ws = await makeWorkspace();
@@ -643,6 +739,47 @@ describe("real child process (dogfood, P11)", () => {
       };
     };
   }
+
+  test("verifier end-to-end: a real child commits a diff → Stage 0 + Stage 1 pass → review + verdict.md", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0", {
+      doneJson: JSON.stringify({ check: [{ name: "has-feature", run: "test -f feature.ts" }] }),
+    });
+    const base = (await git(ws, ["rev-parse", "HEAD"])).stdout.trim();
+    // A real child that WRITES + COMMITS a file on the run branch, then claims complete — so the verifier
+    // sees a real non-empty `base..run/<id>` diff and runs a real `test -f` check in the worktree.
+    const scriptPath = await writeFixtureChild(
+      ws,
+      "committing-child.ts",
+      `await Bun.write("feature.ts", "export const feature = 42;\\n");
+await Bun.spawn(["git", "add", "feature.ts"], { cwd: process.cwd() }).exited;
+await Bun.spawn(["git", "commit", "-qm", "add feature"], { cwd: process.cwd() }).exited;
+await Bun.write(Bun.stdout, ${JSON.stringify(`${JSON.stringify({ actor: "system", type: "run.exiting", payload: { code: 0 } })}\n`)});
+process.exit(0);`,
+    );
+    const { sup } = makeSupervisor(ws, h, realSpawn(scriptPath));
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const res = await out.reaped;
+
+    expect(res.sessionStatus).toBe("review");
+    expect(res.event).toBe("run.finished");
+    expect(await exists(join(ws, "runs/run-r1/verdict.md"))).toBe(true);
+    const [verdictEv] = await h.db
+      .select()
+      .from(event)
+      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.CHECK_VERDICT)));
+    const payload = JSON.parse(verdictEv?.payload ?? "{}");
+    expect(payload.verdict).toBe("pass");
+    expect(payload.base).toBe(base); // the base captured at dispatch = the pre-commit workspace HEAD
+    expect(payload.diffstat.files).toBe(1); // the child's one committed file, seen via base..run/r1
+    // the passing check is recorded in the receipt
+    expect(payload.checks).toEqual([
+      expect.objectContaining({ name: "has-feature", ok: true, exit: 0 }),
+    ]);
+  });
 
   test("clean exit 0 through a real process → review, and the child's stdout event is teed", async () => {
     const ws = await makeWorkspace();
