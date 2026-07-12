@@ -54,6 +54,7 @@
         "ai": "^6",
         "drizzle-orm": "^0.45.2",
         "hono": "^4.12.28",
+        "yaml": "^2.6.1",
       },
       "devDependencies": {
         "drizzle-kit": "^0.31.10",
