@@ -102,6 +102,15 @@ describe("verifier-judge — parseRubric", () => {
     expect(r.instructions).toContain("Judge the diff against the brief");
   });
 
+  test("accepts the minimal valid scale [0, 1] (the length≥2 floor is a boundary, not over-strict)", () => {
+    const r = parseRubric(
+      "---\nthreshold: 0.5\nscale: [0, 1]\ncriteria:\n  - {id: a, weight: 1, ask: x}\n---\n",
+    );
+    expect(r.scale).toEqual([0, 1]);
+    // and a below-max score is reachable → fail is possible (the point of the ≥2 floor)
+    expect(weightedScore({ criteria: [{ id: "a", score: 0, note: "n" }] }, r)).toBe(0);
+  });
+
   test.each([
     ["no frontmatter fence", "threshold: 0.8\nscale: [0,1]\n"],
     [
@@ -119,6 +128,14 @@ describe("verifier-judge — parseRubric", () => {
     [
       "non-ascending scale",
       "---\nthreshold: 0.5\nscale: [2, 1, 0]\ncriteria:\n  - {id: a, weight: 1, ask: x}\n---\n",
+    ],
+    [
+      "single-element scale (fail-open: only reply is all-max → always pass)",
+      "---\nthreshold: 0.5\nscale: [1]\ncriteria:\n  - {id: a, weight: 1, ask: x}\n---\n",
+    ],
+    [
+      "negative scale value (weightedScore would escape [0,1])",
+      "---\nthreshold: 0.5\nscale: [-1, 0, 1]\ncriteria:\n  - {id: a, weight: 1, ask: x}\n---\n",
     ],
     ["no criteria", "---\nthreshold: 0.5\nscale: [0,1]\ncriteria: []\n---\n"],
     [

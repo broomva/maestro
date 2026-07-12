@@ -156,15 +156,21 @@ export function parseRubric(text: string): Rubric {
   }
   const threshold = obj.threshold;
 
+  // A scale needs ≥2 non-negative, strictly-ascending points. Length ≥ 2 keeps a below-max score
+  // REACHABLE, so the judge can actually return `fail` — a single-element scale (e.g. `[1]`, a
+  // fat-finger for "0-1") would pin every well-formed reply at the max, forcing weightedScore to a
+  // constant 1.0 = an always-pass FAIL-OPEN. Non-negative + ascending keeps weightedScore in [0, 1]
+  // (each score ∈ [0, maxScale], so achieved ∈ [0, possible]). A malformed scale parks blocked, never
+  // becomes a silent auto-pass (VERIFIER §2).
   if (
     !Array.isArray(obj.scale) ||
-    obj.scale.length === 0 ||
-    !obj.scale.every(isFiniteNumber) ||
+    obj.scale.length < 2 ||
+    !obj.scale.every((n) => isFiniteNumber(n) && n >= 0) ||
     !isStrictlyAscending(obj.scale)
   ) {
     throw new JudgeError(
       "malformed_rubric",
-      "scale must be a non-empty, strictly ascending array of numbers",
+      "scale must be a strictly ascending array of at least 2 non-negative numbers",
     );
   }
   const scale = obj.scale as number[];
