@@ -16,10 +16,18 @@
 //   (2) --no-ext-diff --no-textconv on the patch-producing gitDiffBounded — the driver never runs at all.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { git, gitDiffBounded, gitShowBounded } from "./git";
+import { git, gitCommitAllStaged, gitDiffBounded, gitShowBounded } from "./git";
 
 const SECRET = "sk-ant-SECRET-do-not-leak-12345";
 const GIT_MODULE = join(import.meta.dir, "git.ts");
@@ -105,6 +113,38 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     // …and the real, git-native patch still came back (not empty, not the driver's output).
     expect(out.truncated).toBe(false);
     expect(out.text).toContain("changed-content-marker");
+  });
+
+  test("an agent-planted git hook never runs on a runtime commit (core.hooksPath=/dev/null)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
+    tmps.push(dir);
+    await git(dir, ["init", "-q"]);
+    await git(dir, ["config", "user.email", "t@t.co"]);
+    await git(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "a.txt"), "1\n");
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "base"]);
+
+    // The confirmed attack vector: an agent runs `git config core.hooksPath <dir>` from its run/<id>
+    // worktree — it lands in the SHARED repo config and OVERRIDES any global hooksPath. The planted
+    // post-commit (a hook `--no-verify` does NOT skip) would then run as the supervisor on approveMerge's
+    // commit. NOTE: `.git/hooks/*` is NOT a reliable vector on a host with a global core.hooksPath (gitleaks
+    // etc.), which shadows it — the repo-config vector is the faithful one.
+    const marker = join(dir, "HOOK-RAN.txt");
+    const hooks = join(dir, "evilhooks");
+    mkdirSync(hooks);
+    writeFileSync(join(hooks, "post-commit"), `#!/bin/sh\necho ran > "${marker}"\n`);
+    chmodSync(join(hooks, "post-commit"), 0o755);
+    await git(dir, ["config", "core.hooksPath", hooks]); // repo-level — the agent's vector
+
+    // A runtime commit via the hardened runner (core.hooksPath=/dev/null, which outranks the repo config)
+    // commits but fires no hook.
+    writeFileSync(join(dir, "a.txt"), "2\n");
+    await git(dir, ["add", "-A"]);
+    const sha = await gitCommitAllStaged(dir, "runtime commit");
+    expect(sha).toHaveLength(40); // the commit succeeded
+    // Remove GIT_HARDENING from the git() spawn → the repo core.hooksPath hook fires → marker → this REDs.
+    expect(existsSync(marker)).toBe(false);
   });
 
   test("gitShowBounded reads a committed blob (no diff drivers) and bounds the read", async () => {

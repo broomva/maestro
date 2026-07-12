@@ -7,17 +7,29 @@
 // and paths derive from user input (a mission title / parentPath), so shelling out
 // would be an injection surface. spawn's array form passes them as literal argv.
 //
-// KEY-CONFINEMENT (BRO-1794 P20): EVERY git spawn here runs with a SCRUBBED env — the
-// same deny-by-default allowlist ({@link filterPassthroughEnv}) the runtime gives an
-// agent-influenced Stage-1 check (buildCheckEnv). Reason: these commands run in the
-// AGENT-CONTROLLED worktree, where git executes agent-configured drivers — a diff
-// `diff.external`/`textconv`, a `filter.*.smudge`, a hook — and a driver inheriting the
-// supervisor's process.env would read ANTHROPIC_API_KEY and exfiltrate it. Scrubbing the
-// env means no host secret is ever in scope for any git subprocess. Defense-in-depth on
-// the one PATCH-producing diff ({@link gitDiffBounded}): `--no-ext-diff --no-textconv`
-// so an agent-planted external-diff/textconv driver never even runs.
+// KEY-CONFINEMENT (BRO-1794 + BRO-1802 P20): EVERY git spawn here is hardened two ways, because these
+// commands run against a repo whose config + hooks an AGENT can write from its run/<id> worktree (the
+// linked worktree shares the common `.git/config` + `.git/hooks`):
+//   1. SCRUBBED ENV — the same deny-by-default allowlist ({@link filterPassthroughEnv}) the runtime gives an
+//      agent-influenced Stage-1 check (buildCheckEnv). git executes agent-configured drivers — a diff
+//      `diff.external`/`textconv`, a `filter.*.smudge`, a hook — and a driver inheriting the supervisor's
+//      process.env would read ANTHROPIC_API_KEY and exfiltrate it. Scrubbing the env means no host secret is
+//      ever in scope for any git subprocess.
+//   2. HOOKS DISABLED — `-c core.hooksPath=/dev/null` on every spawn. `--no-verify` skips only
+//      pre-commit/commit-msg; git still fires prepare-commit-msg/post-commit (on a commit), post-checkout
+//      (on `worktree add`), post-merge, etc. An agent-planted hook (`.git/hooks/*` or a `core.hooksPath` set
+//      in the shared config) would otherwise run arbitrary code as the SUPERVISOR uid on the runtime's own
+//      git operations (RCE-as-supervisor — index.db, minted bearers, network). Pointing hooksPath at an
+//      empty location neutralizes every hook and outranks any repo/agent config.
+// Defense-in-depth on the PATCH-producing diffs ({@link gitDiffBounded}, {@link gitChangedFiles}, Stage 0):
+// `--no-ext-diff --no-textconv` so an agent-planted external-diff/textconv driver never even runs.
 
 import { filterPassthroughEnv } from "../harness/spawn-contract";
+
+/** Config flags prepended to EVERY git spawn: disable hooks (an agent-planted hook must never run as the
+ *  supervisor on the runtime's git ops — see the key-confinement note above). `-c` must precede the
+ *  subcommand. `/dev/null` is a directory with no hooks, so git finds none and runs none. */
+const GIT_HARDENING: readonly string[] = ["-c", "core.hooksPath=/dev/null"];
 
 /** The scrubbed env EVERY runtime git spawn runs under — PATH/HOME/toolchain only, NEVER a host secret
  *  (see the key-confinement note at the top of this file). Recomputed per call from the live process.env
@@ -50,7 +62,12 @@ export class GitError extends Error {
 
 /** Run `git <args>` in `cwd`, capturing streams. Resolves even on non-zero exit. */
 export async function git(cwd: string, args: string[]): Promise<GitResult> {
-  const proc = Bun.spawn(["git", ...args], { cwd, env: gitEnv(), stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(["git", ...GIT_HARDENING, ...args], {
+    cwd,
+    env: gitEnv(),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -90,7 +107,7 @@ async function gitBoundedStdout(
   argv: string[],
   maxBytes: number,
 ): Promise<{ text: string; truncated: boolean }> {
-  const proc = Bun.spawn(["git", ...argv], {
+  const proc = Bun.spawn(["git", ...GIT_HARDENING, ...argv], {
     cwd,
     env: gitEnv(),
     stdout: "pipe",
@@ -238,8 +255,9 @@ export async function gitMergeSquash(cwd: string, branch: string): Promise<GitRe
 }
 
 /** Commit everything currently staged with `message`, returning the new HEAD sha. `--no-verify` skips
- *  commit/pre-commit hooks (an agent-planted hook in the shared repo never runs on the runtime's merge
- *  commit). Throws {@link GitError} on failure (e.g. nothing staged). */
+ *  pre-commit + commit-msg; the runner's `core.hooksPath=/dev/null` (GIT_HARDENING) neutralizes the hooks
+ *  --no-verify does NOT skip (prepare-commit-msg, post-commit) so no agent-planted hook runs as the
+ *  supervisor. Throws {@link GitError} on failure (e.g. nothing staged). */
 export async function gitCommitAllStaged(cwd: string, message: string): Promise<string> {
   const commit = await git(cwd, ["commit", "--no-verify", "-m", message]);
   if (commit.code !== 0) throw new GitError(["commit", "--no-verify"], commit.code, commit.stderr);

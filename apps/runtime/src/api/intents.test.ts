@@ -152,14 +152,17 @@ test("a failing new_mission (non-git workspace) leaves nothing half-created", as
 });
 
 test("a commit that fails AFTER `git add` unstages the index (no phantom staged entry)", async () => {
-  // A rejecting pre-commit hook: `git add` stages, `git commit` runs the hook → exit 1 → fails.
-  // This is the add-succeeds/commit-fails path the non-git test can't reach. The rollback must
-  // clean the INDEX too, not just the working tree (P20 minor: "nothing half-created").
+  // Force `git add` to succeed but `git commit` to fail WITHOUT a hook — the runtime now disables hooks on
+  // every git spawn (`core.hooksPath=/dev/null`, BRO-1802 key-confinement), so a rejecting pre-commit hook
+  // would simply be ignored. Instead require commit signing but point gpg at a program that always fails:
+  // `git add` stages, `git commit` tries to sign → fails → the intent rolls back. The rollback must clean
+  // the INDEX too, not just the working tree (P20 minor: "nothing half-created").
   const ws = mkWorkspace();
-  writeFileSync(join(ws, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  Bun.spawnSync(["git", "config", "commit.gpgsign", "true"], { cwd: ws });
+  Bun.spawnSync(["git", "config", "gpg.program", "/bin/false"], { cwd: ws });
   const { app } = await mkApp(ws);
 
-  const res = await post(app, NEW_MISSION, "key-hook");
+  const res = await post(app, NEW_MISSION, "key-signfail");
   expect(res.status).toBe(500);
   expect(((await res.json()) as { error: { code: string } }).error.code).toBe("intent_failed");
   // Working tree: folder gone. Index: nothing staged (the `git add` was rolled back).
