@@ -1,6 +1,7 @@
 /// <reference types="bun" />
 import { describe, expect, test } from "bun:test";
 import { effectiveProtect } from "@maestro/protocol";
+import { liftStage1, runChecks } from "./checks";
 import type { GitRunner } from "./stage0";
 import type { VerifierResult } from "./verifier";
 import { runVerifier } from "./verifier";
@@ -137,5 +138,67 @@ describe("verifier-stage0 — runVerifier pipeline (short-circuit invariant)", (
     expect(called).toBe(false);
     expect(v.verdict).toBe("error");
     expect(v.message).toContain("bad revision");
+  });
+});
+
+describe("verifier-stage0 — Stage 1 wired as the `next` continuation (composition)", () => {
+  test("a clean Stage 0 hands to Stage 1, whose check verdict + evidence propagate", async () => {
+    const v = await runVerifier({
+      stage0: {
+        cwd: "/repo",
+        base: BASE,
+        branch: BRANCH,
+        protect,
+        git: fakeGit(numstat([[3, 1, "src/a.ts"]])),
+      },
+      next: async (s0) =>
+        liftStage1(
+          await runChecks({
+            checks: [{ name: "tests", run: "bun test" }],
+            spawnContext: { cwd: "/wt", commandPrefix: [], env: {} },
+            runDir: "/rd",
+            run: async () => ({ code: 1, stdout: "", stderr: "1 failure", timedOut: false }),
+            writeLog: async () => {},
+            now: () => 0,
+          }),
+          s0.diffstat,
+          BASE,
+        ),
+    });
+    expect(v.verdict).toBe("fail");
+    expect(v.diffstat).toEqual({ files: 1, plus: 3, minus: 1 }); // Stage 0's diffstat carried forward
+    expect(v.checks?.[0]).toMatchObject({ name: "tests", ok: false, reason: "fail" });
+  });
+
+  test("a Stage 0 tampering fail means Stage 1 checks NEVER run", async () => {
+    let ran = false;
+    const v = await runVerifier({
+      stage0: {
+        cwd: "/repo",
+        base: BASE,
+        branch: BRANCH,
+        protect,
+        git: fakeGit(numstat([[8, 0, "src/head.test.tsx"]])),
+      },
+      next: async (s0) =>
+        liftStage1(
+          await runChecks({
+            checks: [{ name: "tests", run: "bun test" }],
+            spawnContext: { cwd: "/wt", commandPrefix: [], env: {} },
+            runDir: "/rd",
+            run: async () => {
+              ran = true;
+              return { code: 0, stdout: "", stderr: "", timedOut: false };
+            },
+            writeLog: async () => {},
+            now: () => 0,
+          }),
+          s0.diffstat,
+          BASE,
+        ),
+    });
+    expect(ran).toBe(false); // the tamper verdict short-circuits before any check spawns
+    expect(v.verdict).toBe("fail");
+    expect(v.reason).toBe("tampering");
   });
 });

@@ -14,8 +14,28 @@
 import type { Verdict } from "@maestro/protocol";
 import { type DiffStat, runStage0, type Stage0Input, type Stage0Verdict } from "./stage0";
 
+/** One deterministic check's outcome (VERIFIER §2 Stage 1). A superset of the VERIFIER §4 receipt row
+ *  (`{name, ok, exit, duration_s, log}`) — `required`/`reason` are runtime signal the receipt projects
+ *  away. Defined here (not in checks.ts) so `VerifierResult` can reference it without an import cycle. */
+export interface CheckResult {
+  /** The check's name (contract `done.check[].name`). */
+  name: string;
+  /** True iff the check exited 0 within its timeout. */
+  ok: boolean;
+  /** Process exit code (the kill code when `reason === "timeout"`). */
+  exit: number;
+  /** Wall-clock the check ran, whole seconds (VERIFIER §4 `duration_s`). */
+  duration_s: number;
+  /** Relative path to the evidence log under the run dir (`checks/<name>.log`). */
+  log: string;
+  /** False for an advisory (`required: false`) check — its failure never gates the stage. */
+  required: boolean;
+  /** Why the check is not `ok` — `fail` (nonzero exit) or `timeout`. Absent when `ok`. */
+  reason?: "fail" | "timeout";
+}
+
 /** The verifier's result so far. Stage 0 always populates `diffstat` + `base`; `reason` is set on a
- *  Stage 0 fail; `message` on an infra error. Later stages (checks/judge) extend this shape. */
+ *  Stage 0 fail; `message` on an infra error; `checks` on a Stage 1 (deterministic-check) result. */
 export interface VerifierResult {
   verdict: Verdict;
   /** The Stage 0 fail reason, if the run failed the guard. */
@@ -26,8 +46,10 @@ export interface VerifierResult {
   diffstat: DiffStat;
   /** The commit the diff was judged against (VERIFIER §4 `base`). */
   base: string;
-  /** Set only on `verdict === "error"` — the infra failure that stopped the guard. */
+  /** Set only on `verdict === "error"` — the infra failure that stopped the guard/stage. */
   message?: string;
+  /** The Stage 1 check results (VERIFIER §2 Stage 1), present once deterministic checks have run. */
+  checks?: CheckResult[];
 }
 
 export interface VerifierDeps {
