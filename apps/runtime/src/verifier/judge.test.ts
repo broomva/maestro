@@ -213,6 +213,23 @@ describe("verifier-judge — parseJudgeReport", () => {
     expect(r.criteria.every((c) => c.score === 2)).toBe(true);
   });
 
+  test("an invalid criteria-shaped preamble object (e.g. an empty example) does NOT shadow the real report", () => {
+    // `{"criteria":[]}` is criteria-SHAPED but not a valid report (missing every rubric criterion); the
+    // real report follows. Requiring the ONE fully-valid report picks the real one, not the empty draft.
+    const raw =
+      'Example format: {"criteria":[]}\nActual: {"criteria":[{"id":"coverage","score":2},{"id":"no-regressions","score":2}]}';
+    const r = parseJudgeReport(raw, rubric);
+    expect(r.criteria.map((c) => c.score)).toEqual([2, 2]);
+  });
+
+  test("TWO distinct valid reports → ambiguous → throws (never silently pick one verdict)", () => {
+    // A fail-open guard: a valid all-max draft BEFORE the real below-threshold report must NOT be scored
+    // as the verdict. Ambiguity parks blocked rather than guessing.
+    const raw =
+      '{"criteria":[{"id":"coverage","score":2},{"id":"no-regressions","score":2}]}\n{"criteria":[{"id":"coverage","score":0,"note":"nothing"},{"id":"no-regressions","score":2}]}';
+    expect(() => parseJudgeReport(raw, rubric)).toThrow(/ambiguous/);
+  });
+
   test("does not close the object early on a `}` inside a note string", () => {
     const raw =
       '{"criteria":[{"id":"coverage","score":1,"note":"missing the {og:image} tag}"},{"id":"no-regressions","score":2}]}';

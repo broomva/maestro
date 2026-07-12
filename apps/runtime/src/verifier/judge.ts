@@ -350,34 +350,11 @@ function extractJsonObjects(text: string): string[] {
  * allowed (a hallucinated id is a `malformed_report`). Any violation throws — the judge does not get to
  * fail the work with a malformed verdict.
  */
-export function parseJudgeReport(text: string, rubric: Rubric): JudgeReport {
-  // Pick the FIRST balanced object that parses AND carries a `criteria` array — so a stray brace in a
-  // model preamble does not shadow the real report that follows (it fails the parse/shape and is skipped).
-  let rawCriteria: unknown;
-  for (const candidate of extractJsonObjects(text)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(candidate);
-    } catch {
-      continue; // not JSON — try the next balanced candidate
-    }
-    if (
-      parsed !== null &&
-      typeof parsed === "object" &&
-      Array.isArray((parsed as { criteria?: unknown }).criteria)
-    ) {
-      rawCriteria = (parsed as { criteria: unknown }).criteria;
-      break;
-    }
-  }
-  if (!Array.isArray(rawCriteria)) {
-    throw new JudgeError(
-      "malformed_report",
-      "no JSON object with a `criteria` array in the judge reply",
-    );
-  }
-
-  const allowed = new Map(rubric.criteria.map((c) => [c.id, c]));
+/** Validate one raw `criteria` array against the rubric → a rubric-ordered {@link JudgeReport}. Throws a
+ *  `malformed_report` JudgeError on any violation (a non-object criterion, an unknown/duplicate/missing
+ *  criterion, a score off the scale, or a below-max score with no note). */
+function buildReport(rawCriteria: unknown[], rubric: Rubric): JudgeReport {
+  const allowed = new Set(rubric.criteria.map((c) => c.id));
   const max = maxScale(rubric);
   const byId = new Map<string, JudgeCriterionScore>();
   for (const raw of rawCriteria) {
@@ -411,6 +388,53 @@ export function parseJudgeReport(text: string, rubric: Rubric): JudgeReport {
   }
   // Emit in rubric order (stable receipts), not reply order.
   return { criteria: rubric.criteria.map((c) => byId.get(c.id) as JudgeCriterionScore) };
+}
+
+export function parseJudgeReport(text: string, rubric: Rubric): JudgeReport {
+  // Collect every balanced object that PARSES and FULLY VALIDATES against the rubric, then require
+  // EXACTLY ONE. A judge is prompted to return exactly one JSON object; requiring one *valid* report
+  // (not merely the first criteria-SHAPED object) means a stray criteria-shaped object in a preamble
+  // (an example, an empty draft) cannot shadow the real report, AND two conflicting valid reports can
+  // never silently resolve to one — an ambiguous reply parks blocked (VERIFIER §2: never guess the
+  // verdict). 0 valid → the specific validation reason when a candidate was criteria-shaped but wrong,
+  // else "no report"; ≥2 valid → ambiguous.
+  const valid: JudgeReport[] = [];
+  let lastError: JudgeError | null = null;
+  for (const candidate of extractJsonObjects(text)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue; // a false-start brace in prose (e.g. `if (x) {`) — try the next balanced candidate
+    }
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      !Array.isArray((parsed as { criteria?: unknown }).criteria)
+    ) {
+      continue; // not a report shape
+    }
+    try {
+      valid.push(buildReport((parsed as { criteria: unknown[] }).criteria, rubric));
+    } catch (e) {
+      if (e instanceof JudgeError)
+        lastError = e; // criteria-shaped but invalid — remember why
+      else throw e;
+    }
+  }
+
+  if (valid.length === 1) return valid[0] as JudgeReport;
+  if (valid.length > 1) {
+    throw new JudgeError(
+      "malformed_report",
+      `judge reply carried ${valid.length} distinct valid reports — ambiguous, cannot pick a verdict`,
+    );
+  }
+  if (lastError !== null) throw lastError;
+  throw new JudgeError(
+    "malformed_report",
+    "no JSON object with a `criteria` array in the judge reply",
+  );
 }
 
 /**
