@@ -109,15 +109,13 @@ export interface ChildEnvSpec {
 }
 
 /**
- * Construct the child's env from the host env + the contract spec. Allowlist-only: host secrets
- * (Anthropic key, runtime credential, relay key) never pass. The BROOMVA_* contract vars are set
- * explicitly AFTER the passthrough filter — including BROOMVA_MODEL_TOKEN, which the child legitimately
- * needs (its name matches the secret predicate, so it can only be set deliberately here, never leaked
- * from the host).
+ * The DENY-BY-DEFAULT env floor shared by every process the runtime spawns that must not see host
+ * secrets: keep only the {@link PASSTHROUGH_ENV} allowlist, and drop anything whose name looks like a
+ * secret ({@link isSecretEnvName}) even if the allowlist ever admitted it. No BROOMVA_* contract vars —
+ * callers that need those (the agent child) add them AFTER this floor.
  */
-export function buildChildEnv(
+export function filterPassthroughEnv(
   hostEnv: Record<string, string | undefined>,
-  spec: ChildEnvSpec,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(hostEnv)) {
@@ -125,6 +123,21 @@ export function buildChildEnv(
     if (isSecretEnvName(name)) continue; // defense-in-depth, before the allowlist
     if (PASSTHROUGH_ENV.has(name)) env[name] = value;
   }
+  return env;
+}
+
+/**
+ * Construct the child's env from the host env + the contract spec. Allowlist-only ({@link
+ * filterPassthroughEnv}): host secrets (Anthropic key, runtime credential, relay key) never pass. The
+ * BROOMVA_* contract vars are set explicitly AFTER the passthrough filter — including BROOMVA_MODEL_TOKEN,
+ * which the child legitimately needs (its name matches the secret predicate, so it can only be set
+ * deliberately here, never leaked from the host).
+ */
+export function buildChildEnv(
+  hostEnv: Record<string, string | undefined>,
+  spec: ChildEnvSpec,
+): Record<string, string> {
+  const env = filterPassthroughEnv(hostEnv);
   env.BROOMVA_SESSION = spec.session;
   env.BROOMVA_RUN_DIR = spec.runDir;
   env.BROOMVA_CONTRACT = spec.contractPath;
@@ -134,4 +147,14 @@ export function buildChildEnv(
     env.BROOMVA_CONTEXT_CEILING = String(spec.contextCeilingTokens);
   }
   return env;
+}
+
+/**
+ * The env a verifier Stage-1 CHECK runs under (VERIFIER §2 Stage 1). A check command runs
+ * agent-influenced code (the diff's test/build scripts), so it gets the allowlist floor and NOTHING
+ * else — no BROOMVA_* contract vars, no model token, no host secret. Passed as the FULL child env to
+ * the spawn (never merged onto `process.env`), so the check sees only PATH/HOME/toolchain.
+ */
+export function buildCheckEnv(hostEnv: Record<string, string | undefined>): Record<string, string> {
+  return filterPassthroughEnv(hostEnv);
 }
