@@ -6,6 +6,26 @@
 // argv form ONLY (Bun.spawn with an array) — never a shell string. The commit message
 // and paths derive from user input (a mission title / parentPath), so shelling out
 // would be an injection surface. spawn's array form passes them as literal argv.
+//
+// KEY-CONFINEMENT (BRO-1794 P20): EVERY git spawn here runs with a SCRUBBED env — the
+// same deny-by-default allowlist ({@link filterPassthroughEnv}) the runtime gives an
+// agent-influenced Stage-1 check (buildCheckEnv). Reason: these commands run in the
+// AGENT-CONTROLLED worktree, where git executes agent-configured drivers — a diff
+// `diff.external`/`textconv`, a `filter.*.smudge`, a hook — and a driver inheriting the
+// supervisor's process.env would read ANTHROPIC_API_KEY and exfiltrate it. Scrubbing the
+// env means no host secret is ever in scope for any git subprocess. Defense-in-depth on
+// the one PATCH-producing diff ({@link gitDiffBounded}): `--no-ext-diff --no-textconv`
+// so an agent-planted external-diff/textconv driver never even runs.
+
+import { filterPassthroughEnv } from "../harness/spawn-contract";
+
+/** The scrubbed env EVERY runtime git spawn runs under — PATH/HOME/toolchain only, NEVER a host secret
+ *  (see the key-confinement note at the top of this file). Recomputed per call from the live process.env
+ *  (cheap; the process env is small) so a late-set toolchain var is still seen. Passed as the FULL env to
+ *  the spawn (Bun's `env` REPLACES process.env for the child), so git sees only the allowlist. */
+function gitEnv(): Record<string, string> {
+  return filterPassthroughEnv(process.env);
+}
 
 /** Result of a git invocation — exit code plus captured streams. */
 export interface GitResult {
@@ -30,7 +50,7 @@ export class GitError extends Error {
 
 /** Run `git <args>` in `cwd`, capturing streams. Resolves even on non-zero exit. */
 export async function git(cwd: string, args: string[]): Promise<GitResult> {
-  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(["git", ...args], { cwd, env: gitEnv(), stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -55,6 +75,91 @@ export async function gitHead(cwd: string): Promise<string> {
   const r = await git(cwd, ["rev-parse", "HEAD"]);
   if (r.code !== 0) throw new GitError(["rev-parse", "HEAD"], r.code, r.stderr);
   return r.stdout.trim();
+}
+
+/**
+ * Spawn `git <argv>` in `cwd` and read its stdout BOUNDED to `maxBytes` — streams and STOPS the moment the
+ * cap is exceeded (cancelling the read + killing git), so an adversarial huge output can never buffer into
+ * the caller (the 24/7 supervisor). Reads only from git (the object store / index / a commit-to-commit
+ * diff), NEVER from a filesystem path the caller opens — so it cannot block on an agent-planted FIFO.
+ * Returns the captured text (≤ maxBytes + one final chunk) and whether it was truncated. Never throws on a
+ * git error (a failed command yields empty text, not truncated) — a memory guard, not a validity gate.
+ */
+async function gitBoundedStdout(
+  cwd: string,
+  argv: string[],
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  const proc = Bun.spawn(["git", ...argv], {
+    cwd,
+    env: gitEnv(),
+    stdout: "pipe",
+    stderr: "ignore",
+    stdin: "ignore",
+  });
+  const reader = proc.stdout.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let truncated = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        chunks.push(value);
+        total += value.byteLength;
+        if (total > maxBytes) {
+          truncated = true;
+          break; // stop reading — never buffer past the cap (+ at most the chunk that tripped it)
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    proc.kill();
+    await proc.exited.catch(() => {});
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    buf.set(c, off);
+    off += c.byteLength;
+  }
+  return { text: new TextDecoder().decode(buf), truncated };
+}
+
+/**
+ * Read `git diff <base> <branch>` in `cwd`, BOUNDED to `maxBytes` — the verifier judge's run diff. It is
+ * COMMIT-to-commit (never the working tree), so it reflects exactly what the agent COMMITTED (tamper-safe)
+ * and cannot block on a worktree FIFO. Fails the verification CLOSED on `truncated` (see {@link gitBoundedStdout}).
+ */
+export async function gitDiffBounded(
+  cwd: string,
+  base: string,
+  branch: string,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  // `--no-ext-diff --no-textconv`: this is the one PATCH-producing diff run in the agent worktree, so it
+  // would otherwise invoke an agent-configured `diff.external`/`textconv` driver. Suppressing them (belt to
+  // the scrubbed-env suspenders) means such a driver never runs at all. See the key-confinement note above.
+  return gitBoundedStdout(cwd, ["diff", "--no-ext-diff", "--no-textconv", base, branch], maxBytes);
+}
+
+/**
+ * Read the blob at `<ref>:<pathspec>` from git's object store in `cwd`, BOUNDED to `maxBytes`. `pathspec` is
+ * repo-root-relative (POSIX `/`). This reads the COMMITTED content at `ref` (the agent-immutable base
+ * captured at dispatch) — NEVER the working tree — so the verifier's rubric + brief inputs cannot be tampered
+ * by an uncommitted worktree edit (a committed edit to a protected path is caught by Stage 0), and the read
+ * cannot block on an agent-planted worktree FIFO. A missing path / bad ref yields empty text (git show exits
+ * non-zero, stderr ignored, empty stdout) — the caller treats that as fail-closed for the rubric.
+ */
+export async function gitShowBounded(
+  cwd: string,
+  ref: string,
+  pathspec: string,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  return gitBoundedStdout(cwd, ["show", `${ref}:${pathspec}`], maxBytes);
 }
 
 /**

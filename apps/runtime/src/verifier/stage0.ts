@@ -166,7 +166,19 @@ export async function runStage0(input: Stage0Input): Promise<Stage0Verdict> {
 
   let result: GitResult;
   try {
-    result = await git(cwd, ["diff", "--numstat", "-z", "--no-renames", base, branch]);
+    // `--no-ext-diff --no-textconv`: --numstat does not itself invoke an external diff driver, but pass
+    // them anyway so every diff the runtime runs in an agent worktree is uniformly driver-free (the git
+    // env is already scrubbed of secrets — see git.ts key-confinement note — this is defense-in-depth).
+    result = await git(cwd, [
+      "diff",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--numstat",
+      "-z",
+      "--no-renames",
+      base,
+      branch,
+    ]);
   } catch (err) {
     return {
       verdict: "error",
