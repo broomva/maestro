@@ -129,6 +129,21 @@ export function effectiveProtect(done: Done | undefined): string[] {
   return Array.from(new Set([...DEFAULT_PROTECT_GLOBS, ...extra]));
 }
 
+/**
+ * A well-formed `judge:` rubric reference (VERIFIER §1/§3): a relative `.md` path
+ * that stays inside the work subtree ("lives next to `_work.md`"). Rejects the empty
+ * ref, surrounding whitespace, a non-`.md` file, an absolute path (posix `/…` or
+ * Windows `C:\…`), and any parent-traversal segment (`..`) — the last is a tamper/escape
+ * vector the verifier would otherwise resolve outside the run's worktree. Pure + shared:
+ * the runtime validates at dispatch, the verifier when it loads the rubric.
+ */
+export function isValidRubricRef(ref: string): boolean {
+  if (ref.length === 0 || ref.trim() !== ref) return false; // empty or surrounding whitespace
+  if (!ref.endsWith(".md")) return false; // rubric.md format
+  if (ref.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(ref)) return false; // absolute (posix / windows)
+  return !ref.split(/[\\/]/).includes(".."); // no parent traversal (escapes the worktree)
+}
+
 // ── Session + verdict receipt (wire-shaped downstream) ───────────────────────
 
 /** session.status enum (DATA-MODEL §B.3). Distinct from a node's OrchState. */

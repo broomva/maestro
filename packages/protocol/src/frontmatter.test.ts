@@ -335,3 +335,66 @@ describe("reject — invalid contracts throw typed errors", () => {
     expect(codeOf(() => parseWorkContract(bad))).toBe("invalid_type");
   });
 });
+
+describe("done-schema — VERIFIER §1 timeout caps + rubric refs + D8 fixture 4 (BRO-1753)", () => {
+  const HEAD = "---\nid: x\nkind: task\nstate: proposed\n";
+  const TAIL = "created: 2026-06-26\nupdated: 2026-06-26\n---\n# x\n";
+  // gate defaults to human unless the case needs auto; `done` is the block under test.
+  const doc = (done: string, gate = "gate: human\n") => `${HEAD}${gate}${done}${TAIL}`;
+
+  test("a full valid done: block (in-cap timeout, .md rubric, extended protect, diff) parses clean", () => {
+    const ok = doc(
+      "done:\n  check:\n    - name: tests\n      run: bun test\n      timeout_s: 600\n  judge: rubric.md\n  protect:\n    - package.json\n  diff:\n    max_files: 30\n    max_lines: 2000\n",
+    );
+    const c = parseWorkContract(ok);
+    expect(c.done?.judge).toBe("rubric.md");
+    expect(c.done?.protect).toContain("package.json");
+  });
+
+  test("timeout_s over the hard cap (1800) is malformed_done", () => {
+    const bad = doc("done:\n  check:\n    - name: t\n      run: bun test\n      timeout_s: 3600\n");
+    expect(codeOf(() => parseWorkContract(bad))).toBe("malformed_done");
+  });
+
+  test("a non-positive timeout_s is malformed_done", () => {
+    const bad = doc("done:\n  check:\n    - name: t\n      run: bun test\n      timeout_s: 0\n");
+    expect(codeOf(() => parseWorkContract(bad))).toBe("malformed_done");
+  });
+
+  test("timeout_s exactly at the cap (1800) is allowed", () => {
+    const ok = doc("done:\n  check:\n    - name: t\n      run: bun test\n      timeout_s: 1800\n");
+    expect(parseWorkContract(ok).done?.check).toBeDefined();
+  });
+
+  test("a non-.md rubric ref is malformed_rubric", () => {
+    const bad = doc("done:\n  check: bun test\n  judge: rubric.yaml\n");
+    expect(codeOf(() => parseWorkContract(bad))).toBe("malformed_rubric");
+  });
+
+  test("an absolute rubric ref is malformed_rubric", () => {
+    const bad = doc("done:\n  check: bun test\n  judge: /etc/rubric.md\n");
+    expect(codeOf(() => parseWorkContract(bad))).toBe("malformed_rubric");
+  });
+
+  test("a parent-traversal rubric ref is malformed_rubric (escapes the worktree)", () => {
+    const bad = doc("done:\n  check: bun test\n  judge: ../rubric.md\n");
+    expect(codeOf(() => parseWorkContract(bad))).toBe("malformed_rubric");
+  });
+
+  test("a valid nested rubric ref is accepted", () => {
+    const ok = doc("done:\n  check: bun test\n  judge: checks/rubric.md\n");
+    expect(parseWorkContract(ok).done?.judge).toBe("checks/rubric.md");
+  });
+
+  // D8 fixture 4 — a judge-only contract trying gate:auto is rejected at contract validation.
+  // The parser makes `check` mandatory in any done: block, so it surfaces two ways:
+  test("D8 fixture 4a — gate:auto with an empty check list is rejected (malformed_done)", () => {
+    const bad = doc("done:\n  check: []\n  judge: rubric.md\n", "gate: auto\n");
+    expect(codeOf(() => parseWorkContract(bad))).toBe("malformed_done");
+  });
+
+  test("D8 fixture 4b — gate:auto with no deterministic check is rejected (gate_auto_no_check)", () => {
+    const bad = doc("", "gate: auto\n");
+    expect(codeOf(() => parseWorkContract(bad))).toBe("gate_auto_no_check");
+  });
+});

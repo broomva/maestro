@@ -20,6 +20,8 @@ import {
   type Done,
   type DoneCheck,
   hasCheck,
+  isValidRubricRef,
+  MAX_CHECK_TIMEOUT_S,
   STOP_CONDITIONS,
   type StopCondition,
   type WorkContract,
@@ -34,6 +36,7 @@ export type WorkContractErrorCode =
   | "invalid_type"
   | "invalid_enum"
   | "malformed_done"
+  | "malformed_rubric"
   | "gate_auto_no_check";
 
 /** Every parse/validation failure is this one class, discriminated by `code`. */
@@ -212,7 +215,18 @@ function parseDoneCheck(raw: unknown): string | DoneCheck[] {
       }
       const check: DoneCheck = { name: item.name, run: item.run };
       const timeout = optionalNumber(item, "timeout_s", `done.check[${i}]`);
-      if (timeout !== undefined) check.timeout_s = timeout;
+      if (timeout !== undefined) {
+        // VERIFIER §1: per-check timeout is positive and never exceeds the hard cap (default 600,
+        // cap 1800). An unbounded timeout would let a check hang a run past every guardrail.
+        if (timeout <= 0 || timeout > MAX_CHECK_TIMEOUT_S) {
+          throw new WorkContractError(
+            "malformed_done",
+            `done.check[${i}].timeout_s must be in (0, ${MAX_CHECK_TIMEOUT_S}], got ${timeout}`,
+            "done.check",
+          );
+        }
+        check.timeout_s = timeout;
+      }
       if (item.required !== undefined) {
         if (typeof item.required !== "boolean") {
           throw new WorkContractError(
@@ -243,7 +257,19 @@ function parseDone(raw: unknown): Done | undefined {
   }
   const done: Done = { check: parseDoneCheck(raw.check) };
   const judge = optionalString(raw, "judge");
-  if (judge !== undefined) done.judge = judge;
+  if (judge !== undefined) {
+    // VERIFIER §1/§3: `judge` is a rubric.md reference living inside the work subtree. Reject a
+    // malformed ref (absolute, parent-traversal, non-`.md`, empty) — the verifier resolves this path
+    // to load the rubric, so an escaping/garbage ref is a tamper vector, not a silent no-op.
+    if (!isValidRubricRef(judge)) {
+      throw new WorkContractError(
+        "malformed_rubric",
+        `done.judge must be a relative .md rubric path within the work tree, got ${JSON.stringify(judge)}`,
+        "done.judge",
+      );
+    }
+    done.judge = judge;
+  }
   if (raw.protect !== undefined) done.protect = parseStringArray(raw.protect, "done.protect");
   if (raw.diff !== undefined) {
     if (!isMapping(raw.diff)) {
