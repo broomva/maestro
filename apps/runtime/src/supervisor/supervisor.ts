@@ -13,9 +13,10 @@
 //   once the child is LIVE (the reap runs in the background).
 //
 // Reap maps the child's REAL exit code (ground truth) per HARNESS §4:
-//   0  → claims complete → run the verifier (F4, Loop 2): Stage 0 tamper/diff guard + Stage 1 checks
-//        against base..run/<id>; pass → park review (F5), fail → respawn with fix_plan OR park blocked at
-//        a cap, infra error → park blocked (no attempt burned). (Stage-2 judge = BRO-1794 slice 1b-ii.)
+//   0  → claims complete → run the verifier (F4, Loop 2): Stage 0 tamper/diff guard + Stage 1 checks +
+//        Stage 2 LLM judge (when the contract pins a rubric) against base..run/<id>; pass → park review
+//        (F5), fail → respawn with fix_plan OR park blocked at a cap, infra error → park blocked (no
+//        attempt burned).
 //   10 → stopped → read the child's declared reason; fresh_context → IMMEDIATE respawn (same run id,
 //        same worktree, same run_budget — budgets span attempts, not processes); every other reason
 //        (budget | iteration_cap | no_progress | user_stop) → park blocked
@@ -26,6 +27,8 @@
 // disagreement emits `run.exit_mismatch` (a Loop-4 harness-bug signal) and the REAL code wins the route.
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type {
   Actor,
   Budget,
@@ -34,7 +37,13 @@ import type {
   SessionStatus,
   WorkContract,
 } from "@maestro/protocol";
-import { EVENT_TYPES, effectiveProtect, normalizeChecks } from "@maestro/protocol";
+import {
+  EVENT_TYPES,
+  effectiveProtect,
+  isValidRubricRef,
+  normalizeChecks,
+  parseWorkFile,
+} from "@maestro/protocol";
 import { and, desc, eq, gt, max } from "drizzle-orm";
 import {
   DEFAULT_MAX_ITERATIONS,
@@ -43,7 +52,7 @@ import {
 } from "../config";
 import type { IndexDb } from "../db/client";
 import { event, gate, lease, node, runBudget, session } from "../db/schema";
-import { gitHead } from "../git/git";
+import { git, gitHead } from "../git/git";
 import { writeContractSnapshot } from "../harness/contract-snapshot";
 import type { ChildEmittedEvent } from "../harness/runner";
 import type { ChildRole } from "../harness/spawn-contract";
@@ -58,11 +67,17 @@ import {
 } from "../harness/stdio";
 import type { SessionTokenRegistry } from "../proxy/tokens";
 import type { Sandbox, SandboxFactory } from "../sandbox/sandbox";
-import { runVerification } from "../verifier/run";
+import { WORK_FILE } from "../scanner/scanner";
+import { proxyJudgeCaller } from "../verifier/judge";
+import { type RunVerificationResult, runVerification } from "../verifier/run";
 import { type RunEntry, RunRegistry } from "./registry";
 
 /** The role every Loop-1 dispatch spawns. Verifier (Loop 2) + orchestrator (F6) are later runners. */
 const AGENT_ROLE: ChildRole = "agent";
+
+/** The role the Stage-2 judge's model call bills under (HARNESS §3, §7) — drives the proxy's verifier
+ *  model pin. Minted per verify (a rubric was pinned) + revoked right after, distinct from the agent bearer. */
+const VERIFIER_ROLE: ChildRole = "verifier";
 
 /** How long a node's dispatch lease is held (dedup lock, not a run-state lock). Released on terminal
  *  reap; a runtime crash mid-run leaves it to expire (GC + crash-recovery reconcile = F9/BRO-1814). */
@@ -213,6 +228,48 @@ function nodeRowToContract(row: typeof node.$inferSelect): WorkContract {
     created: isoDate(row.createdAt),
     updated: isoDate(row.updatedAt),
   };
+}
+
+// ── Stage-2 judge input resolution (VERIFIER §2, BRO-1794 slice 1b-ii-B) ─────────
+// The three inputs the LLM judge is allowed to see, read from the run's worktree. Each is deliberately
+// fail-safe (never throws) so building the judge deps can't wedge the reap; the rubric read is the only
+// fail-CLOSED one (an unusable rubric must park blocked, never silently pass), the diff + brief are
+// best-effort context (Stage 0 already gated the diff's validity/size before the judge ever runs).
+
+/** Read the pinned judge rubric (`done.judge`) from the worktree. The ref is a work-subtree-relative path
+ *  that "lives next to `_work.md`", so it resolves against the node's folder (`nodePath`), validated by
+ *  {@link isValidRubricRef} first — a `..`/absolute/non-`.md` ref never escapes the worktree. Fail-CLOSED:
+ *  an invalid ref or an unreadable/absent file resolves to "" so `parseRubric` errors → verdict `error` →
+ *  park blocked (a pinned-but-unusable rubric never becomes a silent auto-pass). Never throws. */
+async function readRubricText(workdir: string, nodePath: string, ref: string): Promise<string> {
+  if (!isValidRubricRef(ref)) return "";
+  try {
+    return await readFile(join(workdir, nodePath, ref), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/** The run's brief — the `_work.md` body the work was scoped from (the judge's context, VERIFIER §2 Stage
+ *  2, never a gate). Best-effort: an unreadable/malformed `_work.md` yields "" (the judge prompt handles an
+ *  empty brief). Never throws. */
+async function readBrief(workdir: string, nodePath: string): Promise<string> {
+  try {
+    return parseWorkFile(await readFile(join(workdir, nodePath, WORK_FILE), "utf8")).brief;
+  } catch {
+    return "";
+  }
+}
+
+/** The unified diff the judge grades (`git diff base..run/<id>`). Stage 0 already validated the diff is
+ *  within the contract's size limits before the judge runs, so it is bounded here. Best-effort text: a git
+ *  failure yields "" (Stage 0 is the diff-validity gate, not this read). Never throws. */
+async function readRunDiff(workdir: string, base: string, branch: string): Promise<string> {
+  try {
+    return (await git(workdir, ["diff", base, branch])).stdout;
+  } catch {
+    return "";
+  }
 }
 
 /** Everything one run threads through dispatch → launch → reap → respawn. */
@@ -598,14 +655,14 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   }
 
   // ── Verify (F4, Loop 2) — the exit-0 route ──────────────────────────────────
-  // The child claims complete → run the deterministic verifier (Stage 0 tamper/diff guard + Stage 1
-  // checks) against `base..run/<id>`, persist verdict.md + the check.* stream, and route on the verdict:
+  // The child claims complete → run the verifier (Stage 0 tamper/diff guard + Stage 1 checks + Stage 2 LLM
+  // judge) against `base..run/<id>`, persist verdict.md + the check.* stream, and route on the verdict:
   //   pass          → park review (the human gate, F5 — nothing auto-completes under gate:human)
   //   fail          → respawn the coding agent with the appended fix_plan, OR park blocked when a cap hits
   //   error (infra) → park blocked, NO attempt burned (a broken harness is never the agent's fault)
-  // The Stage-2 LLM judge is slice 1b-ii of BRO-1794: `rubricText: null` skips it here, which is correct
-  // for the current reality — the judge only becomes decision-load-bearing under gate:auto (BRO-1802);
-  // under gate:human every clean run parks review regardless, so deferring the judge is not a fail-open.
+  // Stage 2 runs only when the contract pins a rubric (`done.judge`); a rubric-less contract skips the judge
+  // (verdict carries judge: { score: null }). The judge is a SUPPLEMENT under gate:human (every clean run
+  // parks review regardless of its score); it becomes decision-load-bearing only under gate:auto (BRO-1802).
   async function verifyAndRoute(
     ctx: RunContext,
     entry: RunEntry,
@@ -634,42 +691,77 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       ctx.contract.budget?.max_iterations ?? config?.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     const maxAttempts = config?.verifierMaxAttempts ?? DEFAULT_VERIFIER_MAX_ATTEMPTS;
 
-    // One SessionTee for the whole check.* stream (started → result(s) → verdict), so the events land
-    // ordered alongside the run's other events (the same FS-first single-writer path the child stdout uses).
+    // One SessionTee for the whole check.* stream (started → result(s) → judge → verdict), so the events
+    // land ordered alongside the run's other events (the same FS-first single-writer path the child uses).
     const teeEmit = runEmitter(ctx.runId, ctx.sandbox.runDir);
 
-    const result = await runVerification({
-      stage0: {
-        cwd: ctx.sandbox.workdir,
-        base: ctx.base,
-        branch: ctx.sandbox.branch,
-        protect: effectiveProtect(done),
-        maxFiles: done.diff?.max_files,
-        maxLines: done.diff?.max_lines,
-      },
-      checks: {
-        checks: normalizeChecks(done.check),
-        spawnContext: ctx.sandbox.spawnContext(),
-      },
-      // Stage 2 (the LLM judge) is slice 1b-ii — skipped here (rubricText null → attachJudge never calls
-      // `call`, and the verdict carries judge: { score: null }).
-      judge: {
-        rubricText: null,
-        diff: "",
-        brief: "",
-        call: () => {
-          throw new Error("verifier judge caller invoked without a rubric (slice 1b-ii)");
+    // Stage 2 (the LLM judge) runs ONLY when the contract pins a rubric (`done.judge`). We mint a
+    // VERIFIER-role bearer for the judge's model call — the judge dials the SAME metered proxy as the agent
+    // but never holds the runtime/Anthropic key (the proxy attaches it at forward time). `tokens.mint` is
+    // idempotent per session: it revokes the now-dead agent bearer (the child exited 0) and installs the
+    // verifier one. The bearer is revoked in the `finally` below, so a live verifier bearer exists only for
+    // the duration of the judge call (key-confinement). Without a rubric the judge is skipped: `rubricText:
+    // null` → `attachJudge` yields `judge: { score: null }` and `call` is never invoked.
+    const judgeRef = done.judge;
+    let verifierBearer: string | null = null;
+    if (judgeRef !== undefined) {
+      verifierBearer = tokens.mint({
+        session: ctx.runId,
+        runDir: ctx.sandbox.runDir,
+        role: VERIFIER_ROLE,
+        budget: ctx.budget,
+      });
+    }
+    const judge =
+      judgeRef === undefined || verifierBearer === null
+        ? {
+            rubricText: null as string | null,
+            diff: "",
+            brief: "",
+            call: () => {
+              throw new Error("verifier judge caller invoked without a rubric");
+            },
+          }
+        : {
+            // fail-CLOSED: an invalid ref / unreadable rubric → "" → parseRubric errors → verdict error →
+            // park blocked. The diff + brief are best-effort context (Stage 0 gates the diff's validity).
+            rubricText: await readRubricText(ctx.sandbox.workdir, ctx.nodePath, judgeRef),
+            diff: await readRunDiff(ctx.sandbox.workdir, ctx.base, ctx.sandbox.branch),
+            brief: await readBrief(ctx.sandbox.workdir, ctx.nodePath),
+            call: proxyJudgeCaller({ proxyUrl: proxy.url, bearer: verifierBearer }),
+          };
+
+    let result: RunVerificationResult;
+    try {
+      result = await runVerification({
+        stage0: {
+          cwd: ctx.sandbox.workdir,
+          base: ctx.base,
+          branch: ctx.sandbox.branch,
+          protect: effectiveProtect(done),
+          maxFiles: done.diff?.max_files,
+          maxLines: done.diff?.max_lines,
         },
-      },
-      runDir: ctx.sandbox.runDir,
-      attempt,
-      maxAttempts,
-      iterations,
-      maxIterations,
-      priorSignature: verify.priorSignature,
-      emit: (type, payload) => teeEmit(sys(type, payload)),
-      now: () => new Date(now()).toISOString(),
-    });
+        checks: {
+          checks: normalizeChecks(done.check),
+          spawnContext: ctx.sandbox.spawnContext(),
+        },
+        judge,
+        runDir: ctx.sandbox.runDir,
+        attempt,
+        maxAttempts,
+        iterations,
+        maxIterations,
+        priorSignature: verify.priorSignature,
+        emit: (type, payload) => teeEmit(sys(type, payload)),
+        now: () => new Date(now()).toISOString(),
+      });
+    } finally {
+      // Revoke the verifier bearer the instant the judge's model call is done (or if runVerification threw)
+      // — minimize the window a live bearer exists. Only when we minted one. Idempotent with the
+      // terminal/kill revoke; a respawn re-mints a fresh AGENT bearer inside `launch`.
+      if (verifierBearer !== null) tokens.revoke(ctx.runId);
+    }
 
     // A kill that landed DURING the verify must WIN (F8): it set `cancelled` + revoked the token while we
     // awaited runVerification. End canceled/run.killed, not park review/respawn. (A kill that made the

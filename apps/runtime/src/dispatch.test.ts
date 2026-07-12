@@ -19,8 +19,10 @@ import { type IndexHandle, openIndex } from "./db/client";
 import { event, node } from "./db/schema";
 import { type DispatchRuntime, mountDispatch } from "./dispatch";
 import { git } from "./git/git";
+import type { ChildStdioPort } from "./harness/stdio";
 import { sessionJournalPath } from "./proxy/events";
 import { createMockModel, type MockModelOptions } from "./proxy/mock-model";
+import type { SpawnChild } from "./supervisor/supervisor";
 
 const FIXED_MS = 1_700_000_000_000;
 
@@ -107,6 +109,41 @@ function anthropicBody(text: string): unknown {
     stop_reason: "end_turn",
     usage: { input_tokens: 8, output_tokens: 12 },
   };
+}
+
+/** A ReadableStream of newline-delimited lines — a fake child stdout (closes after the last line). */
+function streamOf(lines: string[]): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(c) {
+      for (const l of lines) c.enqueue(enc.encode(l));
+      c.close();
+    },
+  });
+}
+
+/** A fabricated exit-0 child that makes ZERO proxy calls (it just declares `run.exiting {0}` and exits).
+ *  So when the reap runs the verifier, the ONLY forward the mock upstream sees is the JUDGE's — which makes
+ *  `mock.calls` a clean anti-vacuity witness that the judge dialed the proxy as the verifier role. */
+const exitZeroChild: SpawnChild = () =>
+  ({
+    stdout: streamOf([
+      `${JSON.stringify({ actor: "system", type: "run.exiting", payload: { code: 0 } })}\n`,
+    ]),
+    stderr: streamOf([]),
+    writeStdin: () => {},
+    kill: () => {},
+    exited: Promise.resolve(0),
+  }) satisfies ChildStdioPort;
+
+/** True if a path exists (a durable-receipt assertion). */
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await readFile(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Mount the dispatch loop over a fresh temp workspace + `:memory:` index with a scripted mock upstream.
@@ -237,5 +274,135 @@ describe("dispatch mount (BRO-1822 slice 1) — the loop assembled into the runt
     expect(res.sessionStatus).toBe("blocked");
     // Anti-vacuity: the refusal fired in-path BEFORE any forward — the mock (upstream) served ZERO calls.
     expect(mock.calls.length).toBe(0);
+  });
+});
+
+describe("verifier judge wiring (BRO-1794 slice 1b-ii-B) — Stage 2 dials the mounted proxy as the verifier", () => {
+  test("a pinned rubric → the judge scores via a role:verifier forward → pass verdict.md + check.judge", async () => {
+    const ws = await makeWorkspace();
+    // Commit a VALID rubric + a _work.md carrying a brief at the workspace root. The run's worktree branches
+    // off HEAD, so both are present in the worktree the verifier reads (rubric = the gate, brief = context).
+    await writeFile(
+      join(ws, "rubric.md"),
+      "---\nthreshold: 0.5\nscale: [0, 1]\ncriteria:\n  - id: correctness\n    weight: 1\n    ask: Does the change satisfy the brief?\n---\nGrade the diff alone.\n",
+    );
+    // A COMPLETE valid contract — exactly what the scanner leaves a dispatchable node with — so the brief
+    // parser (parseWorkFile) accepts it and readBrief resolves the body (the judge's context).
+    await writeFile(
+      join(ws, "_work.md"),
+      "---\nid: root\nkind: task\nstate: triggered\ncreated: 2026-06-25\nupdated: 2026-06-25\n---\nAdd the greeting feature.\n",
+    );
+    await git(ws, ["add", "-A"]);
+    await git(ws, ["commit", "-qm", "rubric"]);
+
+    const h = await openMem();
+    // A ROOT node (path "") that pins a deterministic check AND the rubric. nodePath "" → the rubric + brief
+    // resolve at the worktree root. The done contract comes from THIS row, not a re-parse of _work.md.
+    await h.db.insert(node).values({
+      id: "root",
+      path: "",
+      kind: "task",
+      state: "triggered",
+      gate: "human",
+      doneJson: JSON.stringify({ check: [{ name: "ok", run: "true" }], judge: "rubric.md" }),
+      budgetJson: null,
+      createdAt: FIXED_MS,
+      updatedAt: FIXED_MS,
+    });
+
+    const config = { ...loadConfig({}), workspace: ws, mockModel: true };
+    // The fixture agent makes NO model call, so the mock's fallback is served ONLY to the judge: a valid
+    // one-criterion report scoring the scale max (1 ≥ threshold 0.5 → judge pass → overall pass).
+    const mock = createMockModel({
+      fallback: {
+        body: anthropicBody(JSON.stringify({ criteria: [{ id: "correctness", score: 1 }] })),
+      },
+    });
+    const dispatch = await mountDispatch({
+      db: h.db,
+      config,
+      upstream: mock,
+      mintRunId: () => "r1",
+      spawnChild: exitZeroChild,
+    });
+    mounts.push(dispatch);
+
+    const out = await dispatch.supervisor.dispatch("root");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const res = await out.reaped;
+
+    // A clean pass parks at the human gate (gate:human — nothing auto-completes), NOT a crash.
+    expect(res.crash).toBe(false);
+    expect(res.sessionStatus).toBe("review");
+
+    // The judge RAN: a check.judge event + the durable verdict.md receipt on disk.
+    expect((await eventsOf(h, "r1", EVENT_TYPES.CHECK_JUDGE)).length).toBeGreaterThanOrEqual(1);
+    expect(await fileExists(join(ws, "runs", "run-r1", "verdict.md"))).toBe(true);
+
+    // The verdict carries the judge score (the check.verdict payload IS the verdict.md frontmatter, canon).
+    const verdict = await eventsOf(h, "r1", EVENT_TYPES.CHECK_VERDICT);
+    expect(verdict).toHaveLength(1);
+    const fm = JSON.parse(verdict[0]?.payload ?? "{}") as {
+      verdict?: string;
+      judge?: { score?: number; model?: string };
+    };
+    expect(fm.verdict).toBe("pass");
+    expect(fm.judge?.score).toBe(1);
+    expect(typeof fm.judge?.model).toBe("string"); // the pinned verifier model scored it
+
+    // ANTI-VACUITY ([[self-hosting-vacuous-pass]]): the fixture agent made ZERO proxy calls, so the ONE
+    // forwarded call is the JUDGE's, billed under the VERIFIER role (the bearer the reap minted + revoked) —
+    // the headline of this slice. A wire that forgot to mint the verifier bearer would 401 (verdict error →
+    // blocked) and never reach the mock as role:"verifier".
+    expect(mock.calls).toHaveLength(1);
+    expect(mock.calls[0]?.role).toBe("verifier");
+    // The isolated judge request was assembled at temperature 0 and carried the brief (readBrief wired) —
+    // not the transcript (the JudgeInput type has no transcript field; VERIFIER §2 Stage 2 isolation).
+    const payload = mock.calls[0]?.payload as { temperature?: number };
+    expect(payload.temperature).toBe(0);
+    expect(JSON.stringify(mock.calls[0]?.payload)).toContain("Add the greeting feature");
+  });
+
+  test("a pinned-but-MISSING rubric fails CLOSED → verdict error → park blocked, judge never forwards", async () => {
+    const ws = await makeWorkspace();
+    // NO rubric.md committed, but the contract pins one → an unusable rubric must NOT silently pass.
+    const h = await openMem();
+    await h.db.insert(node).values({
+      id: "root",
+      path: "",
+      kind: "task",
+      state: "triggered",
+      gate: "human",
+      doneJson: JSON.stringify({ check: [{ name: "ok", run: "true" }], judge: "rubric.md" }),
+      budgetJson: null,
+      createdAt: FIXED_MS,
+      updatedAt: FIXED_MS,
+    });
+
+    const config = { ...loadConfig({}), workspace: ws, mockModel: true };
+    const mock = createMockModel({ fallback: { body: anthropicBody("should never forward") } });
+    const dispatch = await mountDispatch({
+      db: h.db,
+      config,
+      upstream: mock,
+      mintRunId: () => "r1",
+      spawnChild: exitZeroChild,
+    });
+    mounts.push(dispatch);
+
+    const out = await dispatch.supervisor.dispatch("root");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const res = await out.reaped;
+
+    // readRubricText resolves the absent file to "" → parseRubric errors → verdict error → park BLOCKED
+    // (fail-CLOSED, the human looks; an infra verdict-error never burns an attempt). NOT a crash.
+    expect(res.crash).toBe(false);
+    expect(res.sessionStatus).toBe("blocked");
+    const verdict = await eventsOf(h, "r1", EVENT_TYPES.CHECK_VERDICT);
+    expect(verdict).toHaveLength(1);
+    expect((JSON.parse(verdict[0]?.payload ?? "{}") as { verdict?: string }).verdict).toBe("error");
+    // Fail-CLOSED, not fail-open: parseRubric threw BEFORE any model call, so the judge NEVER forwarded —
+    // a missing rubric can never be scored into a silent pass.
+    expect(mock.calls).toHaveLength(0);
   });
 });
