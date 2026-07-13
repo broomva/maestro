@@ -27,14 +27,20 @@ import {
   gitRevParse as defaultRevParse,
   gitWorktreeList as defaultWorktreeList,
   gitWorktreeRemove as defaultWorktreeRemove,
+  GitError,
+  isIndexLockError,
 } from "../git/git";
 
 /** Which ladder rung merged. */
 export type MergeFreshness = "base_unmoved" | "no_overlap";
 /** Why a merge was deferred — the gate stays open and the caller redispatches "Rebase & re-verify". */
 export type StaleReason = "overlap" | "conflict";
-/** Why the merge was refused outright (a precondition the caller must resolve — never a silent merge). */
-export type MergeRefusal = "not_pass" | "dirty_workspace" | "empty_run";
+/** Why the merge was refused outright (a precondition the caller must resolve — never a silent merge).
+ *  `workspace_busy` is RETRYABLE: a stuck workspace-index lock (a concurrent new_mission / reap writer that
+ *  {@link isIndexLockError} outlasted {@link git}'s retry budget), rolled back to a clean tree — the caller
+ *  re-tries the SAME approve later, NOT a rebase. It is never a conflict and never leaves the tree half-merged.
+ *  BRO-1881 removes the contention entirely (one per-workspace index-write lock over approve + new_mission + reap). */
+export type MergeRefusal = "not_pass" | "dirty_workspace" | "empty_run" | "workspace_busy";
 
 export type MergeOutcome =
   | { kind: "merged"; sha: string; freshness: MergeFreshness; archivedBranch: string }
@@ -117,7 +123,7 @@ function oneLine(value: string): string {
 /** The squash commit message: node title subject + the D1 trailers. Subject + each trailer value are reduced to
  *  a single line so neither the title nor an id can inject extra commit-body lines (D1: the trailers are receipts). */
 function commitMessage(title: string, runId: string, nodeId: string, attempt: number): string {
-  const subject = oneLine(title).trim() || `run ${runId}`;
+  const subject = oneLine(title).trim() || `run ${oneLine(runId)}`;
   return `${subject}\n\nRun-Id: ${oneLine(runId)}\nNode-Id: ${oneLine(nodeId)}\nVerdict: pass@${attempt}\n`;
 }
 
@@ -177,7 +183,10 @@ async function approveMergeCritical(deps: ApproveMergeDeps): Promise<MergeOutcom
   try {
     const merge = await g.mergeSquash(cwd, runBranch);
     if (merge.code !== 0) {
-      await g.resetHard(cwd, "HEAD");
+      await g.resetHard(cwd, "HEAD"); // roll the unfinished squash back to the clean tree (may throw → outer catch)
+      // A stuck workspace-index lock is NOT a conflict: report it retryable so the caller re-tries the same approve,
+      // never a bogus "rebase & resolve" redispatch (git.ts already rode out the transient hold — see workspace_busy).
+      if (isIndexLockError(merge.stderr)) return { kind: "refused", reason: "workspace_busy" };
       return {
         kind: "stale",
         reason: "conflict",
@@ -188,6 +197,11 @@ async function approveMergeCritical(deps: ApproveMergeDeps): Promise<MergeOutcom
     sha = await g.commitAllStaged(cwd, commitMessage(nodeTitle, runId, nodeId, verdict.attempt));
   } catch (err) {
     await g.resetHard(cwd, "HEAD").catch(NOOP); // best-effort — the throw, not the reset outcome, is the signal
+    // commit lost the index-lock race after the squash staged → the reset above restored the clean tree → report it
+    // retryable, not a crash. Any other failure (empty identity, >500 exec-key fail-closed) still throws.
+    if (err instanceof GitError && isIndexLockError(err.stderr)) {
+      return { kind: "refused", reason: "workspace_busy" };
+    }
     throw err;
   }
 

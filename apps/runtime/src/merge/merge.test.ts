@@ -10,7 +10,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { VerdictReceipt } from "@maestro/protocol";
-import { git } from "../git/git";
+import { GitError, git } from "../git/git";
 import { approveMerge, type MergeGit, rebaseFixPlanItem } from "./merge";
 
 const tmps: string[] = [];
@@ -313,5 +313,116 @@ describe("approve = squash-merge (D1 freshness ladder)", () => {
       rebasePlan: rebaseFixPlanItem("SAME"),
     });
     expect(seen).toEqual(["merge", "reset"]); // the tree was reset; the commit was NEVER made
+  });
+
+  // ── BRO-1802 P20 R4 MAJOR: a stuck workspace-index lock is retryable, NOT a conflict or a dirty-wedge ─────────
+  // git() rides out a TRANSIENT index.lock (new_mission's brief add+commit); these prove that a lock which OUTLASTS
+  // that retry budget resolves to a clean `workspace_busy` refusal with the tree reset — never a bogus
+  // "rebase & resolve" redispatch (merge path) and never a thrown crash leaving a half-merged tree (commit path).
+  const lockStub = (over: Partial<MergeGit>, seen: string[]): MergeGit => ({
+    revParse: async () => "SAME", // rung 1 base_unmoved + the re-read guard passes
+    changedFiles: async () => ["f.txt"], // a non-empty run
+    isClean: async () => true,
+    mergeSquash: async () => {
+      seen.push("merge");
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    resetHard: async () => {
+      seen.push("reset");
+    },
+    commitAllStaged: async () => {
+      seen.push("commit");
+      return "SHA";
+    },
+    renameBranch: async () => {
+      seen.push("rename");
+    },
+    worktreeList: async () => [],
+    worktreeRemove: async () => {},
+    ...over,
+  });
+
+  const INDEX_LOCK_STDERR =
+    "fatal: Unable to create '/ws/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository";
+
+  test("a stuck index-lock on merge --squash → workspace_busy (retryable), tree reset — NOT misread as conflict", async () => {
+    const seen: string[] = [];
+    const stub = lockStub(
+      {
+        mergeSquash: async () => {
+          seen.push("merge");
+          return { code: 128, stdout: "", stderr: INDEX_LOCK_STDERR };
+        },
+      },
+      seen,
+    );
+
+    const out = await approveMerge({
+      cwd: "/nonexistent-stub-cwd",
+      runId: "rl",
+      nodeId: "nl",
+      nodeTitle: "locked merge",
+      verdict: passVerdict("BASE"),
+      git: stub,
+    });
+
+    // MUTATION: drop the `isIndexLockError(merge.stderr)` branch in merge.ts → returns `stale:conflict` (a bogus
+    // rebase redispatch) → this REDs.
+    expect(out).toEqual({ kind: "refused", reason: "workspace_busy" });
+    expect(seen).toEqual(["merge", "reset"]); // rolled back to the clean tree; no commit
+  });
+
+  test("a stuck index-lock on commit → workspace_busy (retryable), tree reset — NOT a thrown crash", async () => {
+    const seen: string[] = [];
+    const stub = lockStub(
+      {
+        commitAllStaged: async () => {
+          seen.push("commit");
+          throw new GitError(["commit", "--no-verify"], 128, INDEX_LOCK_STDERR);
+        },
+      },
+      seen,
+    );
+
+    const out = await approveMerge({
+      cwd: "/nonexistent-stub-cwd",
+      runId: "rc2",
+      nodeId: "nc2",
+      nodeTitle: "locked commit",
+      verdict: passVerdict("BASE"),
+      git: stub,
+    });
+
+    // MUTATION: drop the `err instanceof GitError && isIndexLockError(err.stderr)` branch → approveMerge REJECTS
+    // (the GitError propagates) → this test throws instead of asserting → REDs.
+    expect(out).toEqual({ kind: "refused", reason: "workspace_busy" });
+    expect(seen).toEqual(["merge", "commit", "reset"]); // squash staged, commit lost the lock, tree reset
+  });
+
+  test("a NON-lock commit failure still throws (empty-identity etc. are not swallowed as workspace_busy)", async () => {
+    const seen: string[] = [];
+    const stub = lockStub(
+      {
+        commitAllStaged: async () => {
+          seen.push("commit");
+          throw new GitError(["commit", "--no-verify"], 128, "fatal: empty ident name not allowed");
+        },
+      },
+      seen,
+    );
+
+    // MUTATION: widen isIndexLockError (or drop the GitError-narrowing) so a plain failure returns workspace_busy →
+    // this REDs (it must still reject, never a silent refusal that hides a real crash).
+    await expect(
+      approveMerge({
+        cwd: "/nonexistent-stub-cwd",
+        runId: "rc3",
+        nodeId: "nc3",
+        nodeTitle: "empty identity",
+        verdict: passVerdict("BASE"),
+        git: stub,
+      }),
+    ).rejects.toThrow(/empty ident/);
+    expect(seen).toEqual(["merge", "commit", "reset"]); // best-effort reset still ran before the rethrow
   });
 });

@@ -34,7 +34,7 @@
 //      via `-c`; the env form passes key + value separately and neutralizes it. Defense-in-depth, not the trust
 //      boundary: phase-1 self-host shares the host uid (DECISIONS §D7 — full isolation is phase-2 containers),
 //      so an agent's own shell already reaches the host; these layers stop the runtime's OWN mechanical git ops
-//      from becoming the exec vector. See BRO-1876 for the phase-2 closure.
+//      from becoming the exec vector. See BRO-1877 for the phase-2 closure.
 // Defense-in-depth on the PATCH-producing diffs ({@link gitDiffBounded}, {@link gitChangedFiles}, Stage 0):
 // `--no-ext-diff --no-textconv` so an agent-planted external-diff/textconv driver never even runs.
 
@@ -203,6 +203,38 @@ function withConfigEnv(
   return env;
 }
 
+/** git global options that CONSUME the next argv token as their value (`git -C <path> status`, `git -c
+ *  <name>=<value> status`) — so the SUBCOMMAND is the token after, not the option's value. The `--opt=value`
+ *  forms are self-contained (one token). Used by {@link subcommandOf}. */
+const VALUE_TAKING_GLOBALS: ReadonlySet<string> = new Set([
+  "-C",
+  "-c",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--exec-path",
+  "--super-prefix",
+  "--config-env",
+]);
+
+/** The git subcommand in `args` — the FIRST token that is neither a global option nor a global option's value.
+ *  {@link hardenedEnv} keys the exec-channel enumeration off this: reading `args[0]` naively would let a future
+ *  caller hide a {@link DRIVER_TRIGGERING} op behind a leading global flag (`["-c", "x=y", "commit"]` → `args[0]`
+ *  is `-c`, not `commit` → enumeration skipped → the dynamic-name drivers un-neutralized on a tree write). No
+ *  current caller passes a leading global flag, so this is defense-in-depth against that latent bypass. Returns
+ *  undefined for an all-flags/empty argv (a degenerate call that triggers no driver). */
+function subcommandOf(args: readonly string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === undefined) break;
+    if (!a.startsWith("-")) return a; // first non-flag token = the subcommand
+    if (a.includes("=")) continue; // self-contained `--opt=value`
+    if (VALUE_TAKING_GLOBALS.has(a)) i++; // skip the option AND its value token
+    // else a valueless global flag (`--paginate`, `--no-pager`, `--bare`) — skip
+  }
+  return undefined;
+}
+
 /** The scrubbed env for a git spawn, hardened against the config exec channels: PATH/HOME/toolchain only
  *  (NEVER a host secret — see the key-confinement note), plus the {@link STATIC_HARDENING} overrides on every
  *  spawn and, for a {@link DRIVER_TRIGGERING} subcommand, the enumerated dynamic-name overrides. Recomputed per
@@ -210,7 +242,7 @@ function withConfigEnv(
  *  the spawn (Bun's `env` REPLACES process.env for the child), so git sees only the allowlist. */
 async function hardenedEnv(cwd: string, args: string[]): Promise<Record<string, string>> {
   const overrides: ConfigOverride[] = [...STATIC_HARDENING];
-  const sub = args[0];
+  const sub = subcommandOf(args);
   if (sub !== undefined && DRIVER_TRIGGERING.has(sub)) {
     overrides.push(...(await execChannelOverrides(cwd)));
   }
@@ -244,20 +276,47 @@ export class GitError extends Error {
   }
 }
 
-/** Run `git <args>` in `cwd`, capturing streams. Resolves even on non-zero exit. */
+/** git's OWN index mutex: an index-writing op (`commit`/`merge`/`reset`/`add`) exits non-zero with this when a
+ *  concurrent git process in the same repo is mid-write holding `.git/index.lock`. In this runtime the other
+ *  index writer is new_mission / reap ({@link gitCommit}, intents.ts) sharing the workspace index; its hold is
+ *  brief (an add+commit). Matched on the message rather than an exit code (git uses 128 for the lock AND for
+ *  other fatals). "another git process seems to be running" is git's own longer phrasing of the same condition. */
+const INDEX_LOCK_RE = /index\.lock|another git process seems to be running/i;
+
+/** True if `text` (a git stderr / {@link GitError} message) is git's index-lock contention signature — a stuck or
+ *  transient concurrent index writer, NOT a merge conflict or any other failure. {@link git} retries the transient
+ *  hold ({@link INDEX_LOCK_RETRY_MAX}); the approve ladder (merge.ts) uses this to report a retryable refusal on a
+ *  stuck lock instead of misreading it as a conflict (BRO-1802 P20 R4). */
+export function isIndexLockError(text: string): boolean {
+  return INDEX_LOCK_RE.test(text);
+}
+
+/** Bounded linear-backoff retry on {@link INDEX_LOCK_RE}. WITHOUT it a lost index-lock race surfaces as a nonzero
+ *  exit the approve ladder (merge.ts) misreads as a merge conflict (a bogus "rebase & resolve" redispatch) or, if
+ *  it strikes between a staged squash and its commit, strands a dirty tree that wedges every later approve — the
+ *  BRO-1802 P20 R4 MAJOR. A brief transient hold (new_mission's add+commit) is ridden out; a truly stuck holder
+ *  still fails LOUD after the budget (the caller then reports `workspace_busy`, never a hang). BRO-1881 unifies all
+ *  workspace-index writers under one in-process lock so contention can't arise and this becomes a pure backstop. */
+const INDEX_LOCK_RETRY_MAX = 10;
+const INDEX_LOCK_RETRY_STEP_MS = 25; // 25,50,…,250ms → ≤ ~1.4s total before giving up
+
+/** Run `git <args>` in `cwd`, capturing streams. Resolves even on non-zero exit. Retries a transient
+ *  index-lock contention ({@link isIndexLockError}) up to {@link INDEX_LOCK_RETRY_MAX} times. */
 export async function git(cwd: string, args: string[]): Promise<GitResult> {
-  const proc = Bun.spawn(["git", ...args], {
-    cwd,
-    env: await hardenedEnv(cwd, args),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { code, stdout, stderr };
+  const env = await hardenedEnv(cwd, args); // enumerate once, not per retry
+  for (let attempt = 0; ; attempt++) {
+    const proc = Bun.spawn(["git", ...args], { cwd, env, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (code !== 0 && attempt < INDEX_LOCK_RETRY_MAX && isIndexLockError(stderr)) {
+      await new Promise((r) => setTimeout(r, INDEX_LOCK_RETRY_STEP_MS * (attempt + 1)));
+      continue;
+    }
+    return { code, stdout, stderr };
+  }
 }
 
 /** True if `cwd` is inside a git work tree. */

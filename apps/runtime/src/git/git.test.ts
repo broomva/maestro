@@ -159,13 +159,13 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  // NOTE (BRO-1877 follow-up): STATIC_HARDENING's `core.hooksPath=/dev/null` also closes a `.git/hooks/*` FILE
+  // NOTE (BRO-1878 follow-up): STATIC_HARDENING's `core.hooksPath=/dev/null` also closes a `.git/hooks/*` FILE
   // hook (no config key, so the enumeration cannot see it) — but a deterministic regression test for that vector
   // is not written here. On this repo's runtime path the enumeration reads the git config across ALL scopes, so
   // a dev/CI host that itself sets a global `core.hooksPath` has that key enumerated + neutralized, which makes
   // the static entry redundant and any "drop the static entry" mutation inert (the file hook stays shadowed) —
   // i.e. the test would pass vacuously and cannot be honestly mutation-proven without a hermetic git-config
-  // environment (env injection). Deferred to BRO-1877 rather than shipped as false-confidence coverage. The
+  // environment (env injection). Deferred to BRO-1878 rather than shipped as false-confidence coverage. The
   // config-key hook test above IS locally mutation-proven (drop BOTH layers).
 
   test("an agent-planted core.fsmonitor never executes on the runtime's clean-tree check (gitIsClean)", async () => {
@@ -305,5 +305,77 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     // Byte-bounded: a cap below the blob size truncates (never buffers the whole thing).
     const capped = await gitShowBounded(dir, base, "f.txt", 3);
     expect(capped.truncated).toBe(true);
+  });
+
+  test("the exec-channel enumeration keys off the SUBCOMMAND, not args[0] — a leading global flag can't hide it", async () => {
+    // Defense-in-depth: hardenedEnv finds the subcommand via subcommandOf, not `args[0]`. A future caller
+    // passing a leading global flag (`git -c … merge …`) must still get the merge's tree-write enumeration — else
+    // the dynamically-named smudge below (which ONLY the enumeration neutralizes, not STATIC_HARDENING) would fire.
+    const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
+    const ext = mkdtempSync(join(tmpdir(), "maestro-ext-"));
+    tmps.push(dir, ext);
+    await git(dir, ["init", "-q", "-b", "main"]);
+    await git(dir, ["config", "user.email", "t@t.co"]);
+    await git(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "base.txt"), "base\n");
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "base"]);
+
+    await git(dir, ["checkout", "-q", "-b", "run/x"]);
+    const marker = join(ext, "SMUDGE-FLAG.txt");
+    const smudge = join(ext, "smudge.sh");
+    writeFileSync(smudge, `#!/bin/sh\necho ran > "${marker}"\ncat\n`);
+    chmodSync(smudge, 0o755);
+    writeFileSync(join(dir, "data.txt"), "payload\n");
+    writeFileSync(join(dir, ".gitattributes"), "data.txt filter=evil\n");
+    await git(dir, ["config", "filter.evil.smudge", smudge]);
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "run"]);
+    await git(dir, ["checkout", "-q", "main"]);
+
+    // Merge with a LEADING value-taking global flag so `args[0]` is `-c`, not `merge`. subcommandOf skips
+    // `-c` + its value and finds `merge` → driver-triggering → the enumeration neutralizes filter.evil.smudge.
+    const merge = await git(dir, ["-c", "color.ui=never", "merge", "--squash", "run/x"]);
+    expect(merge.code).toBe(0);
+    const sha = await gitCommitAllStaged(dir, "merge run");
+    expect(sha).toHaveLength(40);
+    // MUTATION: revert subcommandOf to `const sub = args[0]` → `sub` is `-c` (not driver-triggering) → no
+    // enumeration → the dynamically-named smudge fires on the merge's tree write → marker → this REDs.
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("git() rides out a TRANSIENT index.lock (a concurrent new_mission add+commit) instead of failing", async () => {
+    // The BRO-1802 P20 R4 MAJOR trigger: approve's merge/commit contends with new_mission on `.git/index.lock`.
+    // A lost race must NOT surface as an immediate failure (which merge.ts would misread as a conflict, or which
+    // would strand a dirty tree) — git() retries until the brief hold clears.
+    const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
+    tmps.push(dir);
+    await git(dir, ["init", "-q", "-b", "main"]);
+    await git(dir, ["config", "user.email", "t@t.co"]);
+    await git(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "a.txt"), "1\n");
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "base"]);
+
+    // Hold the index lock, release it after 100ms — inside git()'s ~1.4s retry budget, mirroring new_mission's
+    // add+commit window. git() first contends at t≈0 (lock held) and must retry, succeeding once it frees.
+    const lock = join(dir, ".git", "index.lock");
+    writeFileSync(lock, "");
+    const releaser = setTimeout(() => {
+      try {
+        rmSync(lock);
+      } catch {
+        /* already gone */
+      }
+    }, 100);
+
+    writeFileSync(join(dir, "a.txt"), "2\n");
+    const r = await git(dir, ["commit", "--no-verify", "-am", "update"]);
+    clearTimeout(releaser);
+
+    // MUTATION: remove the retry loop in git() (spawn once, return) → the op runs at t≈0 with the lock held →
+    // "Unable to create '.../index.lock': File exists" exit≠0 → this REDs.
+    expect(r.code).toBe(0);
+    expect(existsSync(lock)).toBe(false); // git created + removed its OWN lock; none left dangling
   });
 });
