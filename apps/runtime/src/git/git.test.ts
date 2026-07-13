@@ -34,6 +34,7 @@ import {
   gitDiffBounded,
   gitIsClean,
   gitMergeSquash,
+  gitResetHard,
   gitShowBounded,
 } from "./git";
 
@@ -342,6 +343,34 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     // MUTATION: revert subcommandOf to `const sub = args[0]` → `sub` is `-c` (not driver-triggering) → no
     // enumeration → the dynamically-named smudge fires on the merge's tree write → marker → this REDs.
     expect(existsSync(marker)).toBe(false);
+  });
+
+  test("gitResetHard restores a dirty working tree to clean (the REAL rollback merge.ts's stub tests abstract)", async () => {
+    // merge.ts's conflict / workspace_busy rollback tests stub resetHard as a no-op (they assert it was CALLED, not
+    // that a real reset restores the tree). The conflict branch is defensive/unreachable via approveMerge's public
+    // path (the overlap pre-check keeps only disjoint files reaching merge --squash, and disjoint files don't
+    // conflict), so this proves the underlying primitive directly instead: a real dirty tree → clean.
+    const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
+    tmps.push(dir);
+    await git(dir, ["init", "-q", "-b", "main"]);
+    await git(dir, ["config", "user.email", "t@t.co"]);
+    await git(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "a.txt"), "committed\n");
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "base"]);
+
+    // Dirty the tree the way a half-done squash does: a tracked-file modification AND a staged new file.
+    writeFileSync(join(dir, "a.txt"), "uncommitted change\n");
+    writeFileSync(join(dir, "staged.txt"), "new\n");
+    await git(dir, ["add", "-A"]);
+    expect((await git(dir, ["status", "--porcelain"])).stdout.trim()).not.toBe(""); // dirty
+
+    await gitResetHard(dir); // the real primitive approveMergeCritical's rollback calls
+
+    // MUTATION: no-op gitResetHard (as the merge.ts stubs do) → the tree stays dirty → all three assertions RED.
+    expect((await git(dir, ["status", "--porcelain"])).stdout.trim()).toBe(""); // index + worktree clean
+    expect((await git(dir, ["cat-file", "-p", "HEAD:a.txt"])).stdout).toBe("committed\n"); // tracked mod reverted
+    expect(existsSync(join(dir, "staged.txt"))).toBe(false); // the staged new file is gone
   });
 
   test("git() rides out a TRANSIENT index.lock (a concurrent new_mission add+commit) instead of failing", async () => {

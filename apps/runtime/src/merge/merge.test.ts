@@ -232,12 +232,14 @@ describe("approve = squash-merge (D1 freshness ladder)", () => {
     expect(out).toEqual({ kind: "refused", reason: "empty_run" });
   });
 
-  test("concurrent approves are serialized — the second sees the moved tip and defers to stale (D1 TOCTOU guard)", async () => {
+  test("concurrent approves on the SAME file → exactly one merged, one deferred (never two silent merges)", async () => {
     const { dir, base } = await makeRepo();
-    // Two runs off the SAME base both changing the SAME file — without serialization both read HEAD===base,
-    // both decide rung-1 base_unmoved, and the second squash-merges onto the first's tip, silently COMBINING
-    // two changes into a commit neither verdict earned. serializeApprove must make the second observe the moved
-    // tip + file overlap and defer to stale instead.
+    // Two runs off the SAME base both adding the SAME file. This is the END-TO-END outcome invariant: however the
+    // two concurrent approves interleave, the workspace never ends with BOTH runs silently merged. The first to
+    // land commits shared.txt; the second is deferred — its files overlap the workspace change since its judged
+    // base, so the ladder's overlap pre-check (or the re-read guard) returns stale:overlap. (This proves the
+    // OUTCOME, not serializeApprove in isolation — same-file runs also collide via the overlap check + re-read
+    // guard, so removing the mutex alone need not RED this. The next test mutation-proves the mutex deterministically.)
     await seedRun(dir, "r1", base, { "shared.txt": "from-r1\n" });
     await seedRun(dir, "r2", base, { "shared.txt": "from-r2\n" });
 
@@ -259,15 +261,66 @@ describe("approve = squash-merge (D1 freshness ladder)", () => {
       }),
     ]);
 
-    // Exactly one merged and one deferred — NEVER two silent merges (the combine the guard prevents).
+    // Exactly one merged and one deferred — NEVER two silent merges.
     expect([o1.kind, o2.kind].sort()).toEqual(["merged", "stale"]);
     const stale = [o1, o2].find((o) => o.kind === "stale");
     expect(stale?.kind === "stale" && stale.reason).toBe("overlap");
-    // The workspace holds exactly ONE run's content (the first), never the combined text.
+    // The workspace holds exactly ONE run's content, never a combine.
     const shared = (await git(dir, ["show", "HEAD:shared.txt"])).stdout;
     expect(shared === "from-r1\n" || shared === "from-r2\n").toBe(true);
-    // Remove the serializeApprove wrapper (call approveMergeCritical directly) → both read base, both merge →
-    // ["merged","merged"] and a combined shared.txt → this REDs.
+  });
+
+  test("serializeApprove makes concurrent approves NON-INTERLEAVED critical sections (deterministic mutex proof)", async () => {
+    // The guarantee serializeApprove uniquely provides — beyond the ladder's overlap pre-check + re-read guard — is
+    // that two approves on the SAME workspace run as fully-ordered critical sections: the first's read→stage→commit
+    // completes ENTIRELY before the second reads any state. That is what prevents the D1 stage-level combine (both
+    // `merge --squash` staging disjoint files into one index before either commits). Proven deterministically with an
+    // instrumented stub that YIELDS the event loop inside its section: with the mutex the second cannot enter during
+    // the first's yield; without it, the two interleave. Uses a distinct cwd so it can't disturb other tests' chains.
+    const events: string[] = [];
+    const yieldTick = () => new Promise((r) => setTimeout(r, 5));
+    const stub = (id: string): MergeGit => ({
+      revParse: async () => "SAME", // rung 1 base_unmoved + the re-read guard passes → reaches merge+commit
+      changedFiles: async () => ["f.txt"],
+      isClean: async () => {
+        events.push(`${id}:enter`);
+        await yieldTick(); // a real event-loop yield INSIDE the critical section
+        return true;
+      },
+      mergeSquash: async () => ({ code: 0, stdout: "", stderr: "" }),
+      commitAllStaged: async () => {
+        events.push(`${id}:commit`);
+        return `sha-${id}`;
+      },
+      resetHard: async () => {},
+      renameBranch: async () => {},
+      worktreeList: async () => [],
+      worktreeRemove: async () => {},
+    });
+
+    await Promise.all([
+      approveMerge({
+        cwd: "/mutex",
+        runId: "a",
+        nodeId: "na",
+        nodeTitle: "a",
+        verdict: passVerdict("BASE"),
+        git: stub("a"),
+      }),
+      approveMerge({
+        cwd: "/mutex",
+        runId: "b",
+        nodeId: "nb",
+        nodeTitle: "b",
+        verdict: passVerdict("BASE"),
+        git: stub("b"),
+      }),
+    ]);
+
+    // The first approve (call order → "a") fully finishes (enter → commit) before the second enters — no interleave.
+    // MUTATION: make approveMerge call approveMergeCritical(deps) directly (drop the serializeApprove wrapper) → both
+    // isClean run during each other's yield → events become [a:enter, b:enter, a:commit, b:commit] → this REDs.
+    expect(events).toEqual(["a:enter", "a:commit", "b:enter", "b:commit"]);
   });
 
   test("a conflicting squash resets the tree and defers to stale — the mutating rollback path (via the injectable git seam)", async () => {
