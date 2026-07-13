@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { VerdictReceipt } from "@maestro/protocol";
 import { git } from "../git/git";
-import { approveMerge, rebaseFixPlanItem } from "./merge";
+import { approveMerge, type MergeGit, rebaseFixPlanItem } from "./merge";
 
 const tmps: string[] = [];
 afterEach(async () => {
@@ -230,5 +230,88 @@ describe("approve = squash-merge (D1 freshness ladder)", () => {
     });
 
     expect(out).toEqual({ kind: "refused", reason: "empty_run" });
+  });
+
+  test("concurrent approves are serialized — the second sees the moved tip and defers to stale (D1 TOCTOU guard)", async () => {
+    const { dir, base } = await makeRepo();
+    // Two runs off the SAME base both changing the SAME file — without serialization both read HEAD===base,
+    // both decide rung-1 base_unmoved, and the second squash-merges onto the first's tip, silently COMBINING
+    // two changes into a commit neither verdict earned. serializeApprove must make the second observe the moved
+    // tip + file overlap and defer to stale instead.
+    await seedRun(dir, "r1", base, { "shared.txt": "from-r1\n" });
+    await seedRun(dir, "r2", base, { "shared.txt": "from-r2\n" });
+
+    // Fire both without awaiting between them (Promise.all) — the per-cwd chain serializes them in call order.
+    const [o1, o2] = await Promise.all([
+      approveMerge({
+        cwd: dir,
+        runId: "r1",
+        nodeId: "n1",
+        nodeTitle: "r1",
+        verdict: passVerdict(base),
+      }),
+      approveMerge({
+        cwd: dir,
+        runId: "r2",
+        nodeId: "n2",
+        nodeTitle: "r2",
+        verdict: passVerdict(base),
+      }),
+    ]);
+
+    // Exactly one merged and one deferred — NEVER two silent merges (the combine the guard prevents).
+    expect([o1.kind, o2.kind].sort()).toEqual(["merged", "stale"]);
+    const stale = [o1, o2].find((o) => o.kind === "stale");
+    expect(stale?.kind === "stale" && stale.reason).toBe("overlap");
+    // The workspace holds exactly ONE run's content (the first), never the combined text.
+    const shared = (await git(dir, ["show", "HEAD:shared.txt"])).stdout;
+    expect(shared === "from-r1\n" || shared === "from-r2\n").toBe(true);
+    // Remove the serializeApprove wrapper (call approveMergeCritical directly) → both read base, both merge →
+    // ["merged","merged"] and a combined shared.txt → this REDs.
+  });
+
+  test("a conflicting squash resets the tree and defers to stale — the mutating rollback path (via the injectable git seam)", async () => {
+    // Drive approveMerge with a MergeGit stub whose mergeSquash reports a conflict, so the otherwise-hard-to-reach
+    // resetHard rollback branch (merge.ts) is exercised without a synthetic gitattributes-driver conflict. Also
+    // exercises the `git?: MergeGit` injection seam end to end.
+    const seen: string[] = [];
+    const stub: MergeGit = {
+      revParse: async () => "SAME", // judgedBase === HEAD → rung 1 base_unmoved, and the re-read guard passes
+      changedFiles: async () => ["f.txt"], // a non-empty run
+      isClean: async () => true,
+      mergeSquash: async () => {
+        seen.push("merge");
+        return { code: 1, stdout: "", stderr: "CONFLICT" };
+      },
+      resetHard: async () => {
+        seen.push("reset");
+      },
+      commitAllStaged: async () => {
+        seen.push("commit");
+        return "SHOULD-NOT-COMMIT";
+      },
+      renameBranch: async () => {
+        seen.push("rename");
+      },
+      worktreeList: async () => [],
+      worktreeRemove: async () => {},
+    };
+
+    const out = await approveMerge({
+      cwd: "/nonexistent-stub-cwd",
+      runId: "rc",
+      nodeId: "nc",
+      nodeTitle: "conflict",
+      verdict: passVerdict("BASE"),
+      git: stub,
+    });
+
+    expect(out).toEqual({
+      kind: "stale",
+      reason: "conflict",
+      rebaseOnto: "SAME",
+      rebasePlan: rebaseFixPlanItem("SAME"),
+    });
+    expect(seen).toEqual(["merge", "reset"]); // the tree was reset; the commit was NEVER made
   });
 });

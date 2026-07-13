@@ -96,22 +96,78 @@ const EXEC_KEY_RE =
  *  throws → the approve parks) rather than let un-neutralized keys through. */
 const MAX_EXEC_OVERRIDES = 500;
 
+/** Bounds on the `git config --list` enumeration read. A hostile shared `.git/config` (writable from a run
+ *  worktree) can be huge — buffering it whole would OOM the 24/7 supervisor, the exact unbounded-buffer class
+ *  {@link gitBoundedStdout} exists to prevent — or make git block forever (an `include.path` pointing at a
+ *  FIFO makes `git config --list` hang on open()). Both fail CLOSED (throw), so a driver-triggering op never
+ *  proceeds having enumerated only PART of the exec channels. Legit config-list output is a few KB. */
+const CONFIG_LIST_MAX_BYTES = 1 << 20; // 1 MiB
+const CONFIG_LIST_TIMEOUT_MS = 5_000;
+
 /** Enumerate the repo's ACTUAL config keys (all scopes — the agent-writable shared `.git/config` among them)
  *  and return `[key, neutral]` overrides for every exec channel found, closing the dynamically-named
  *  `filter.*`/`merge.*`/`diff.*` drivers {@link STATIC_HARDENING} can't. Runs via a RAW hardened spawn (NOT
- *  {@link git} — that would recurse) under the scrubbed env; a git failure yields no overrides (the static set
- *  still applies). `core.hooksPath` → `/dev/null` (empty re-enables `.git/hooks`); a `*.gpgsign` is a boolean
- *  gate → `false`; every other exec key is a program path → empty = "run nothing". Throws (fail-closed) past
- *  {@link MAX_EXEC_OVERRIDES}. */
+ *  {@link git} — that would recurse) under the scrubbed env. The output is read BOUNDED + TIMED (see
+ *  {@link CONFIG_LIST_MAX_BYTES}/{@link CONFIG_LIST_TIMEOUT_MS}); overflow or hang throws (fail-closed). A plain
+ *  git failure yields no overrides (the static set still applies). `core.hooksPath` → `/dev/null` (empty
+ *  re-enables `.git/hooks`); a `*.gpgsign` is a boolean gate → `false`; every other exec key is a program path
+ *  → empty = "run nothing". Throws (fail-closed) past {@link MAX_EXEC_OVERRIDES}. */
 async function execChannelOverrides(cwd: string): Promise<ConfigOverride[]> {
   const proc = Bun.spawn(
     ["git", "-c", "core.hooksPath=/dev/null", "config", "--list", "--name-only", "-z"],
     { cwd, env: gitEnv(), stdout: "pipe", stderr: "ignore", stdin: "ignore" },
   );
-  const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+  const reader = proc.stdout.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let overflow = false;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill(); // unblocks a read hung on git's FIFO-include open()
+  }, CONFIG_LIST_TIMEOUT_MS);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        total += value.byteLength;
+        if (total > CONFIG_LIST_MAX_BYTES) {
+          overflow = true;
+          break; // never buffer past the cap
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    await reader.cancel().catch(() => {});
+    proc.kill();
+    await proc.exited.catch(() => {});
+  }
+  if (timedOut) {
+    throw new GitError(
+      ["config", "--list"],
+      1,
+      "git config enumeration timed out (possible include FIFO)",
+    );
+  }
+  if (overflow) {
+    throw new GitError(
+      ["config", "--list"],
+      1,
+      `.git/config exceeds ${CONFIG_LIST_MAX_BYTES} bytes`,
+    );
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    buf.set(c, off);
+    off += c.byteLength;
+  }
   const overrides: ConfigOverride[] = [];
   const seen = new Set<string>();
-  for (const name of out.split("\0")) {
+  for (const name of new TextDecoder().decode(buf).split("\0")) {
     const key = name.trim();
     if (!key || seen.has(key)) continue; // de-dup on the EXACT key (subsection case is significant)
     const lower = key.toLowerCase();

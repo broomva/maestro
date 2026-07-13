@@ -17,6 +17,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -150,9 +151,22 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     await git(dir, ["add", "-A"]);
     const sha = await gitCommitAllStaged(dir, "runtime commit");
     expect(sha).toHaveLength(40); // the commit succeeded
-    // Remove core.hooksPath from STATIC_HARDENING → the repo core.hooksPath hook fires → marker → this REDs.
+    // `commit` is driver-triggering, so BOTH layers cover this CONFIG-KEY vector: STATIC_HARDENING's
+    // core.hooksPath AND the enumeration (EXEC_KEY_RE matches `core.hooksPath`). Non-vacuity therefore needs
+    // BOTH dropped — remove the STATIC_HARDENING entry AND the `core.(...|hookspath|...)` arm of EXEC_KEY_RE →
+    // the repo core.hooksPath hook fires → marker → this REDs. (The static entry's UNIQUE job — a `.git/hooks/*`
+    // FILE with no config key — is proven by the next test.)
     expect(existsSync(marker)).toBe(false);
   });
+
+  // NOTE (BRO-1877 follow-up): STATIC_HARDENING's `core.hooksPath=/dev/null` also closes a `.git/hooks/*` FILE
+  // hook (no config key, so the enumeration cannot see it) — but a deterministic regression test for that vector
+  // is not written here. On this repo's runtime path the enumeration reads the git config across ALL scopes, so
+  // a dev/CI host that itself sets a global `core.hooksPath` has that key enumerated + neutralized, which makes
+  // the static entry redundant and any "drop the static entry" mutation inert (the file hook stays shadowed) —
+  // i.e. the test would pass vacuously and cannot be honestly mutation-proven without a hermetic git-config
+  // environment (env injection). Deferred to BRO-1877 rather than shipped as false-confidence coverage. The
+  // config-key hook test above IS locally mutation-proven (drop BOTH layers).
 
   test("an agent-planted core.fsmonitor never executes on the runtime's clean-tree check (gitIsClean)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
@@ -252,6 +266,31 @@ describe("git key-confinement (BRO-1794 P20 round-5)", () => {
     // Switch withConfigEnv to emit `-c ${key}=${value}` args instead of GIT_CONFIG_* env → the `=`-split
     // misparses → the real filter.ev=il.smudge stays live → smudge fires → marker → this REDs.
     expect(existsSync(marker)).toBe(false);
+  });
+
+  test("execChannelOverrides fails CLOSED on an oversized .git/config (bounds the read into the 24/7 supervisor)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "maestro-git-"));
+    tmps.push(dir);
+    await git(dir, ["init", "-q", "-b", "main"]);
+    await git(dir, ["config", "user.email", "t@t.co"]);
+    await git(dir, ["config", "user.name", "t"]);
+    writeFileSync(join(dir, "a.txt"), "1\n");
+    await git(dir, ["add", "-A"]);
+    await git(dir, ["commit", "-qm", "base"]);
+
+    // A hostile shared config whose `--list` output exceeds CONFIG_LIST_MAX_BYTES (1 MiB) — all NON-exec keys,
+    // so the MAX_EXEC_OVERRIDES count-cap (0 matches) would NOT catch it; only the bounded READ does. Without
+    // the bound, `new Response().text()` would buffer it whole into the supervisor (the BRO-1778/1856 OOM class).
+    const bloat = Array.from({ length: 120_000 }, (_, i) => `[padsection "s${i}"]\n\tkey = 1`).join(
+      "\n",
+    );
+    appendFileSync(join(dir, ".git", "config"), `\n${bloat}\n`);
+
+    // A driver-triggering op (status via gitIsClean) enumerates the config → the bounded read overflows →
+    // fail-closed throw, so the op never proceeds with a partially-enumerated (thus incompletely-neutralized)
+    // config. (Remove the overflow guard → the whole config-list buffers into memory and gitIsClean returns
+    // true → this stops throwing.)
+    await expect(gitIsClean(dir)).rejects.toThrow(/exceeds|config/i);
   });
 
   test("gitShowBounded reads a committed blob (no diff drivers) and bounds the read", async () => {

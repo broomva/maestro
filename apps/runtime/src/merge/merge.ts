@@ -66,6 +66,29 @@ const REAL_GIT: MergeGit = {
   worktreeRemove: defaultWorktreeRemove,
 };
 
+const NOOP = (): void => {};
+
+/**
+ * Serialize {@link approveMerge} per workspace so the freshness decision + merge + commit + archive run as ONE
+ * critical section. Without it a concurrent approve can move the workspace tip between the ladder's HEAD read
+ * and the `merge --squash`, silently combining two runs' changes into a single commit that neither verdict was
+ * earned against (the D1 TOCTOU: `git merge --squash` of disjoint hunks onto a moved tip reports "went well",
+ * exit 0, no conflict). A runtime owns exactly one workspace (D4 runtime-lock), so an in-process promise chain
+ * keyed by `cwd` is a sufficient lock; the map holds one entry per distinct workspace (one, in production) and
+ * self-prunes when a chain drains. `gate:auto` (D-AUTODONE) shares this path, so the guard covers it too.
+ */
+const approveChain = new Map<string, Promise<unknown>>();
+function serializeApprove<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
+  const prev = approveChain.get(cwd) ?? Promise.resolve();
+  const next = prev.then(fn, fn); // run after the previous holder regardless of its outcome
+  const tail = next.then(NOOP, NOOP); // a never-rejecting tail the next caller chains behind
+  approveChain.set(cwd, tail);
+  void tail.then(() => {
+    if (approveChain.get(cwd) === tail) approveChain.delete(cwd);
+  });
+  return next;
+}
+
 export interface ApproveMergeDeps {
   /** The workspace repo root (RuntimeConfig.workspace) — approved work squash-merges onto its checked-out branch. */
   cwd: string;
@@ -84,18 +107,31 @@ export function rebaseFixPlanItem(sha: string): string {
   return `- [ ] rebase onto ${sha}, resolve conflicts, do not change scope`;
 }
 
-/** The squash commit message: node title subject + the D1 trailers. */
+/** Strip anything from the first newline on — a trailer VALUE is a single line, so an id carrying an embedded
+ *  newline cannot inject a forged trailer (e.g. a second `Verdict:`) into the commit body. System ids never
+ *  contain a newline; this guards a future caller (BRO-1805 / gate:auto) passing an untrusted id. */
+function oneLine(value: string): string {
+  return value.split("\n")[0] ?? "";
+}
+
+/** The squash commit message: node title subject + the D1 trailers. Subject + each trailer value are reduced to
+ *  a single line so neither the title nor an id can inject extra commit-body lines (D1: the trailers are receipts). */
 function commitMessage(title: string, runId: string, nodeId: string, attempt: number): string {
-  const subject = title.split("\n")[0]?.trim() || `run ${runId}`;
-  return `${subject}\n\nRun-Id: ${runId}\nNode-Id: ${nodeId}\nVerdict: pass@${attempt}\n`;
+  const subject = oneLine(title).trim() || `run ${runId}`;
+  return `${subject}\n\nRun-Id: ${oneLine(runId)}\nNode-Id: ${oneLine(nodeId)}\nVerdict: pass@${attempt}\n`;
 }
 
 /**
  * Attempt to merge an approved run onto the workspace branch, applying the D1 verdict-freshness ladder.
  * Returns a `merged` receipt (rung 1/2), a `stale` deferral the caller redispatches (rung 3), or a `refused`
- * precondition failure — it NEVER merges silently past a stale verdict or a dirty tree.
+ * precondition failure — it NEVER merges silently past a stale verdict or a dirty tree. Serialized per workspace
+ * ({@link serializeApprove}) so the freshness decision and the merge are one critical section (D1 TOCTOU).
  */
 export async function approveMerge(deps: ApproveMergeDeps): Promise<MergeOutcome> {
+  return serializeApprove(deps.cwd, () => approveMergeCritical(deps));
+}
+
+async function approveMergeCritical(deps: ApproveMergeDeps): Promise<MergeOutcome> {
   const { cwd, runId, nodeId, nodeTitle, verdict } = deps;
   const g = deps.git ?? REAL_GIT;
   const runBranch = `run/${runId}`;
@@ -120,40 +156,72 @@ export async function approveMerge(deps: ApproveMergeDeps): Promise<MergeOutcome
     const baseChanged = new Set(await g.changedFiles(cwd, judgedBase, workspaceTip));
     if (runFiles.some((f) => baseChanged.has(f))) {
       // rung 3 — overlap: the verdict no longer covers the merge; defer, the caller re-earns it on a rebase.
-      return {
-        kind: "stale",
-        reason: "overlap",
-        rebaseOnto: workspaceTip,
-        rebasePlan: rebaseFixPlanItem(workspaceTip),
-      };
+      return staleOverlap(workspaceTip);
     }
     freshness = "no_overlap"; // disjoint files → the check ran on the same files it judged (D1)
   }
 
-  // Squash-merge onto the current workspace checkout. Disjoint files never conflict, but if git reports one
-  // (defensive: mode changes, gitattributes merge drivers), roll the clean tree back and defer as stale.
-  const merge = await g.mergeSquash(cwd, runBranch);
-  if (merge.code !== 0) {
-    await g.resetHard(cwd, "HEAD");
-    return {
-      kind: "stale",
-      reason: "conflict",
-      rebaseOnto: workspaceTip,
-      rebasePlan: rebaseFixPlanItem(workspaceTip),
-    };
+  // TOCTOU guard: serializeApprove keeps concurrent APPROVES out, but a concurrent new_mission commit could
+  // still advance HEAD during the read-only analysis above. Re-read HEAD immediately before the merge; if it
+  // moved, the ladder judged a tip we are no longer merging onto → defer to stale rather than combine onto a
+  // tip no verdict covers (nothing is staged yet, so there is nothing to roll back).
+  const tipBeforeMerge = await g.revParse(cwd, "HEAD");
+  if (tipBeforeMerge !== workspaceTip) return staleOverlap(tipBeforeMerge);
+
+  // Squash-merge + commit — the irreversible step. `merge --squash` stages WITHOUT a MERGE_HEAD, so any failure
+  // before the commit lands (a reported conflict, or a throw from the merge/commit — e.g. empty identity, or
+  // the >500 exec-key fail-closed during commit's config enumeration) must reset the clean tree back, or a
+  // failed approve would leave the live workspace checkout dirty and wedge every later approve on `isClean`
+  // (mirrors the conflict path + new_mission's commit-is-the-transaction rollback in intents.ts).
+  let sha: string;
+  try {
+    const merge = await g.mergeSquash(cwd, runBranch);
+    if (merge.code !== 0) {
+      await g.resetHard(cwd, "HEAD");
+      return {
+        kind: "stale",
+        reason: "conflict",
+        rebaseOnto: workspaceTip,
+        rebasePlan: rebaseFixPlanItem(workspaceTip),
+      };
+    }
+    sha = await g.commitAllStaged(cwd, commitMessage(nodeTitle, runId, nodeId, verdict.attempt));
+  } catch (err) {
+    await g.resetHard(cwd, "HEAD").catch(NOOP); // best-effort — the throw, not the reset outcome, is the signal
+    throw err;
   }
-  const sha = await g.commitAllStaged(
-    cwd,
-    commitMessage(nodeTitle, runId, nodeId, verdict.attempt),
-  );
 
-  // The branch is the receipt (D1): remove the worktree (if still checked out), then rename run/<id> →
-  // archive/run-<id>. The rename requires the branch not be checked out in any worktree.
-  await removeRunWorktree(g, cwd, runBranch);
+  // The commit is DURABLE — the merge has succeeded. Archival (worktree removal + run/<id> → archive/run-<id>)
+  // is post-durable CLEANUP: a failure here must NOT turn a landed merge into a thrown "approve failed" (D1: the
+  // branch is the receipt — run/<id> is itself a valid receipt if the rename cannot complete). Best-effort.
   const archivedBranch = `archive/run-${runId}`;
-  await g.renameBranch(cwd, runBranch, archivedBranch);
+  const archived = await archiveRun(g, cwd, runBranch, archivedBranch);
 
-  return { kind: "merged", sha, freshness, archivedBranch };
+  return { kind: "merged", sha, freshness, archivedBranch: archived ? archivedBranch : runBranch };
+}
+
+/** The rung-3 / moved-tip deferral: the gate stays open and the caller re-earns the verdict on a rebase. */
+function staleOverlap(tip: string): MergeOutcome {
+  return { kind: "stale", reason: "overlap", rebaseOnto: tip, rebasePlan: rebaseFixPlanItem(tip) };
+}
+
+/** Post-merge cleanup: free the run worktree (if still checked out) then rename run/<id> → archive/run-<id>.
+ *  BEST-EFFORT — the squash commit is already durable, so a cleanup failure (a locked worktree, a pre-existing
+ *  archive branch on a re-dispatched id, the >500 exec-key fail-closed on `worktree list`) must not discard the
+ *  merge. Returns whether the branch reached its archived name; the caller reports run/<id> as the receipt if not. */
+async function archiveRun(
+  g: MergeGit,
+  cwd: string,
+  runBranch: string,
+  archivedBranch: string,
+): Promise<boolean> {
+  try {
+    await removeRunWorktree(g, cwd, runBranch);
+    await g.renameBranch(cwd, runBranch, archivedBranch);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Remove the worktree checked out to `runBranch`, if one is still registered. Idempotent — a run whose
