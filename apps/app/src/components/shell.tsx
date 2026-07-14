@@ -31,6 +31,19 @@ const NAV_WIDTH_DEFAULT = 200;
 /** The collapsed icon-rail width (matches `.mcc-rail` in shell.css + CLAUDE.md §Layout: 52px). */
 const RAIL_WIDTH = 52;
 
+/**
+ * The chrome tab strip + FS pane belong to the WORK surface — the Maestro plane (`/`), an open file
+ * (`/file/$`), or a session (`/session/$`). The full-page views (History / Knowledge / Settings /
+ * Account) are standalone framed destinations reached from the sidebar nav: in the prototype each
+ * renders its own `BvNavTree` + top bar with NO tab strip (`onOpenView` swaps the whole frame). So we
+ * scope the tab strip + FS pane to the work surface and hide them on the view routes — the sidebar +
+ * top bar stay on every route. Open-file state lives in the store, so returning to the work surface
+ * restores the file tabs (no loss).
+ */
+function isWorkSurface(pathname: string): boolean {
+  return pathname === "/" || pathname.startsWith("/file/") || pathname.startsWith("/session/");
+}
+
 /** Open the command palette (a later surface); dispatch the event the palette will listen for. */
 function openCommandPalette() {
   if (typeof window !== "undefined") {
@@ -65,6 +78,9 @@ export function Shell({ children }: { children?: ReactNode }) {
   // useSyncExternalStore (the FID-2 getSnapshot lesson).
   const fileTree = useMemo(() => selectFileTree(server), [server]);
   const activeFile = activeFilePath(pathname);
+  // The tab strip + FS pane are work-surface chrome, hidden on the full-page-view routes (see above).
+  const workSurface = isWorkSurface(pathname);
+  const showFs = workSurface && fsOpen;
 
   // ⌘K is global — open the palette from anywhere in the shell (the field in the top bar is one
   // affordance; the shortcut is another). The palette itself is a later fidelity ticket.
@@ -98,17 +114,18 @@ export function Shell({ children }: { children?: ReactNode }) {
           onCommand={openCommandPalette}
         />
         {/* The chrome tab strip (BRO-1890) — the pinned Maestro tab + open file tabs + the FS toggle,
-            under the header. Chrome across every view. */}
-        <TabStrip />
+            under the header. Work-surface chrome only (BRO-1896): hidden on the full-page-view routes,
+            which the prototype frames without a tab strip. */}
+        {workSurface ? <TabStrip /> : null}
         {/* The main row: the matched view + the FS pane at the layout edge (a 248px column when open).
             The shell frame owns NO scroll — the matched view is the inner panel that scrolls (CLAUDE.md
             §Layout: the shell never scrolls; inner panels do). The mission plane fills `.mcc-fsmain` and
-            owns its own scroll; the file pane owns its own. */}
-        <div className={`mcc-fsrow${fsOpen ? " has-fs" : ""}`}>
+            owns its own scroll; the file pane owns its own. The FS pane is work-surface chrome too. */}
+        <div className={`mcc-fsrow${showFs ? " has-fs" : ""}`}>
           <main className="mcc-fsmain min-h-0 overflow-hidden" data-testid="shell-main">
             {children ?? <ShellPlaceholder />}
           </main>
-          {fsOpen ? (
+          {showFs ? (
             <div className="mcc-rpane" data-testid="fs-rpane">
               <FilePane
                 entries={fileTree}

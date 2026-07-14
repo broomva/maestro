@@ -22,8 +22,8 @@ import { Shell } from "./shell";
 // (/, /history, /knowledge), the footer (/settings, /account), and the orchestrator presence.
 const STATIC_PATHS = ["/", "/knowledge", "/history", "/settings", "/account"];
 
-/** Render the Shell inside a loaded memory router at `/` (the board lens active) — its real context. */
-async function renderShell(children?: ReactNode): Promise<string> {
+/** Render the Shell inside a loaded memory router at `at` (default `/`, the board lens) — its real context. */
+async function renderShell(children?: ReactNode, at = "/"): Promise<string> {
   const rootRoute = createRootRoute({ component: () => <Shell>{children}</Shell> });
   const staticRoutes = STATIC_PATHS.map((path) =>
     createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),
@@ -33,9 +33,14 @@ async function renderShell(children?: ReactNode): Promise<string> {
     path: "/session/$sessionId",
     component: () => null,
   });
+  const fileRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/file/$",
+    component: () => null,
+  });
   const router = createRouter({
-    routeTree: rootRoute.addChildren([...staticRoutes, sessionRoute]),
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree: rootRoute.addChildren([...staticRoutes, sessionRoute, fileRoute]),
+    history: createMemoryHistory({ initialEntries: [at] }),
   });
   await router.load();
   return renderToStaticMarkup(<RouterProvider router={router} />);
@@ -100,5 +105,27 @@ describe("Shell — the tree-led chrome (BRO-1884)", () => {
     const withChild = await renderShell("hello panel");
     expect(withChild).toContain("hello panel");
     expect(withChild).not.toContain("surfaces mount here");
+  });
+});
+
+describe("Shell — the tab strip is work-surface chrome (BRO-1896)", () => {
+  // The prototype frames the full-page views (History/Knowledge/Settings/Account) with NO tab strip;
+  // the tab strip belongs to the Maestro plane (/), files (/file/$), and sessions (/session/$). The
+  // sidebar + top bar stay on every route (the way back to Maestro).
+  test("present on the work surface: the board /, a file, and a session", async () => {
+    for (const at of ["/", "/file/spec.md", "/session/s1"]) {
+      const html = await renderShell(undefined, at);
+      expect(html).toContain('data-testid="tab-strip"');
+    }
+  });
+
+  test("ABSENT on the full-page-view routes, but the sidebar + top bar stay", async () => {
+    for (const at of ["/history", "/knowledge", "/settings", "/account"]) {
+      const html = await renderShell(undefined, at);
+      expect(html).not.toContain('data-testid="tab-strip"');
+      // chrome the views keep: the sidebar (brand mark) + the top bar (⌘K command field).
+      expect(html).toContain('data-testid="brand-mark"');
+      expect(html).toContain('class="mcc-cmd"');
+    }
   });
 });
