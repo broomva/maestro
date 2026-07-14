@@ -1,0 +1,464 @@
+/* The account / user page (BRO-1893 FID-6 slice 4, `MccUser`) — full-page frame inside the shell main,
+ * like the Knowledge / History / Settings pages. Ported from the prototype's `.usr-*` classes
+ * (handoff settings.css ~lines 173-287). Center of gravity: who you are and your autonomy score (how
+ * long work ran without you). Two views toggled in the local top bar: an Overview dashboard and an
+ * editable Account page (identity · preferences · security).
+ *
+ * Canon fixes vs the prototype (one cool axis, matte surfaces, tokens-only — no invented literals):
+ *  - `.usr-week-bar.is-peak` drops the gradient wash (CLAUDE.md §Color "no gradient washes"); the peak
+ *    is a solid accent-blue at full opacity vs the resting blue at 0.55 — a data highlight, not a wash.
+ *  - `.usr-here` "this device" green: the raw oklch literal becomes a `color-mix` over `--bv-success`.
+ *  - `.usr-danger` keeps `--bv-danger` red — it marks GENUINE destructive actions only (revoke a
+ *    session, sign out), never a status / needs-you (those stay accent-blue). §Color.
+ * Every card / panel is matte with the 1px edge shadow at rest; glass stays on the composer + overlays.
+ * The page shell + local top bar reuse the settings chrome classes (`.set-topbar` family, globally
+ * imported) so the two config pages share one frame.
+ */
+
+/* ── Page shell + the autonomy clock pill ────────────────────────────────── */
+.usr-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+/* The autonomy clock — matte pill echoing the sidebar footer's unsupervised-hours read-out. The number
+ * is SAMPLE until the autonomy-ledger read path lands (labelled by the adjacent "sample" affordance). */
+.usr-clock {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: var(--bv-radius-full);
+  background: var(--bv-canvas-soft);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.usr-clock-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--bv-radius-full);
+  background: var(--bv-blue);
+}
+
+/* ── Scroll frame ────────────────────────────────────────────────────────── */
+.usr-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.usr-inner {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 28px 32px 72px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* ── Identity header ─────────────────────────────────────────────────────── */
+.usr-id {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 22px 24px;
+  border: 1px solid var(--bv-border-5);
+  border-radius: var(--bv-radius-2xl);
+  background: var(--card);
+  box-shadow: var(--bv-shadow-edge);
+}
+.usr-id-avatar {
+  position: relative;
+  flex-shrink: 0;
+}
+.usr-id-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.usr-id-name {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.usr-id-line {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.usr-id-sep {
+  width: 3px;
+  height: 3px;
+  border-radius: var(--bv-radius-full);
+  background: var(--bv-gray-500);
+}
+.usr-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: var(--bv-radius-full);
+  background: var(--bv-frost-12);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* ── Autonomy score hero ─────────────────────────────────────────────────── */
+.usr-score {
+  border: 1px solid var(--bv-border-5);
+  border-radius: var(--bv-radius-2xl);
+  background: var(--card);
+  box-shadow: var(--bv-shadow-edge);
+  overflow: hidden;
+}
+.usr-score-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 16px 22px 0;
+}
+.usr-score-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.usr-score-sub {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin-left: auto;
+}
+.usr-score-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  padding: 16px 22px 18px;
+}
+.usr-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-right: 18px;
+  position: relative;
+}
+.usr-stat + .usr-stat {
+  padding-left: 22px;
+}
+.usr-stat + .usr-stat::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background: var(--bv-border-5);
+}
+.usr-stat-val {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.usr-stat-val small {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  margin-left: 1px;
+}
+.usr-stat-label {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.usr-stat-foot {
+  font-size: 12px;
+  color: var(--bv-gray-500);
+}
+
+/* ── Weekly bars (sample viz — labelled by the hero's "sample" chip) ──────── */
+.usr-week {
+  padding: 0 22px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.usr-week-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 64px;
+}
+.usr-week-day {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.usr-week-bar {
+  width: 100%;
+  max-width: 30px;
+  border-radius: 5px 5px 2px 2px;
+  background: var(--bv-blue);
+  opacity: 0.55;
+  min-height: 3px;
+}
+/* Peak: the SAME ai-blue hue at full opacity — a value contrast, not a hue change. Never
+ * --bv-blue-accent (hue 235), which canon reserves for the "Needs you" gate (§Color); and no gradient
+ * wash. So the peak reads as "more" of the same signal, not as a different one. */
+.usr-week-bar.is-peak {
+  opacity: 1;
+  background: var(--bv-blue);
+}
+.usr-week-lab {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+/* ── Two-column body ─────────────────────────────────────────────────────── */
+.usr-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  align-items: start;
+}
+@media (max-width: 880px) {
+  .usr-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+.usr-card {
+  border: 1px solid var(--bv-border-5);
+  border-radius: var(--bv-radius-xl);
+  background: var(--card);
+  box-shadow: var(--bv-shadow-edge);
+  overflow: hidden;
+}
+.usr-card-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 14px 16px 10px;
+}
+.usr-card-head-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.usr-card-head .mc-receipt,
+.usr-card-head .set-preview {
+  margin-left: auto;
+}
+.usr-card-link {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--bv-blue);
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.usr-card-link:hover {
+  text-decoration: underline;
+}
+
+/* Session list (compact) — REAL rows from selectHistory */
+.usr-sess {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 10px 16px;
+  border-top: 1px solid var(--bv-border-5);
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.usr-sess:hover {
+  background: var(--bv-frost-8);
+}
+.usr-sess-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.usr-sess-title {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usr-sess-meta {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usr-sess-kind {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: var(--bv-radius-full);
+  flex-shrink: 0;
+}
+.usr-sess-kind--you {
+  background: var(--bv-frost-12);
+  color: var(--foreground);
+}
+.usr-sess-kind--loop {
+  background: var(--bv-canvas-soft);
+  color: var(--muted-foreground);
+}
+.usr-sess-empty {
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--bv-border-5);
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+/* Preference / security rows */
+.usr-prow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--bv-border-5);
+}
+.usr-prow:first-of-type {
+  border-top: none;
+}
+.usr-prow-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.usr-prow-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+.usr-prow-desc {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.usr-prow-desc code {
+  font-family: var(--bv-font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  background: var(--bv-canvas-soft);
+  border-radius: var(--bv-radius-chip);
+  padding: 1px 4px;
+}
+.usr-prow-control {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Editable identity grid (Account variation) */
+.usr-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px 18px;
+  padding: 18px 20px;
+}
+.usr-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.usr-form-field--full {
+  grid-column: 1 / -1;
+}
+.usr-form-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+/* Security: active session row */
+.usr-dev {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--bv-border-5);
+}
+.usr-dev:first-of-type {
+  border-top: none;
+}
+.usr-dev-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.usr-dev-name {
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usr-dev-meta {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+/* "this device" — success green (a benign status, not a halt); tokenized from the raw oklch literal. */
+.usr-here {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: var(--bv-radius-full);
+  background: color-mix(in oklab, var(--bv-success) 16%, transparent);
+  color: var(--bv-success);
+}
+/* Sign-out row — the button plus its own "sample" receipt (it sits outside the sample-labelled cards). */
+.usr-signout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  align-self: flex-start;
+}
+
+/* Destructive-only red (revoke a session, sign out) — never a status / needs-you (§Color). */
+.usr-danger {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--bv-danger);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.usr-danger:hover {
+  text-decoration: underline;
+}

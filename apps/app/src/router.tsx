@@ -1,5 +1,6 @@
 import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
 import type { ReactNode } from "react";
+import { AccountPage } from "./components/account/account-page";
 import { Board } from "./components/board/board";
 import { PaneErrorFallback } from "./components/error-boundary";
 import { HistoryPage } from "./components/history/history-page";
@@ -9,7 +10,6 @@ import { ShellLayout } from "./routes/app";
 import { FileRoute } from "./routes/file";
 import { KitchenSink } from "./routes/kitchen-sink";
 import { SessionView } from "./routes/session";
-import { AccountView } from "./routes/stubs";
 
 // Code-based routing (no generated route tree) keeps routing explicit + lint-clean. The product views
 // map 1:1 to /, /knowledge, /history, /settings, /account (production-notes §1); they are CHILDREN of a
@@ -58,7 +58,7 @@ const fileRoute = createRoute({
 const knowledgeRoute = view("/knowledge", KnowledgePage, "Knowledge");
 const historyRoute = view("/history", HistoryPage, "History");
 const settingsRoute = view("/settings", SettingsPage, "Settings");
-const accountRoute = view("/account", AccountView, "Account");
+const accountRoute = view("/account", AccountPage, "Account");
 
 // Test-fixture route (BRO-1824 done-check): routing.pw.ts proves at RUNTIME that a crashed view falls
 // back within the shell (chrome survives) — React 19 SSR rethrows boundary errors, so the client catch
