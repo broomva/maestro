@@ -1,4 +1,4 @@
-import type { Kind, OrchState } from "@maestro/protocol";
+import type { Intent, Kind, OrchState, WorkItem } from "@maestro/protocol";
 import {
   Avatar,
   Button,
@@ -12,6 +12,7 @@ import {
 } from "@maestro/ui";
 import { Paperclip, Plus, Search, Settings } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { GateQueue } from "../components/gate/gate-queue";
 import { ThemeToggle } from "../components/theme-toggle";
 
 /**
@@ -63,9 +64,49 @@ const SAMPLE_IMAGE =
     '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="oklch(0.6 0.12 260)"/><circle cx="20" cy="16" r="7" fill="white"/><rect x="8" y="26" width="24" height="12" rx="6" fill="white"/></svg>',
   );
 
+// Seed gate-queue items for the gallery (the interactive grace window is proven here — the live
+// projection needs a store + SSE-emitted gate rows, so the component-level proof is decoupled).
+const GATE_ITEMS: WorkItem[] = [
+  {
+    id: "g-deploy",
+    state: "review",
+    kind: "task",
+    title: "Approve the deploy to production",
+    gate: "human",
+    path: "hawthorne/gate",
+    updatedAt: "2026-07-14T00:00:00.000Z",
+    gateId: "gate-1",
+    run: "run/7c2f1a",
+    look: {
+      ran: "2h 14m unsupervised · judge passed · 14 tests",
+      decided: ["transcripts persist on the Run record", "replay covered by 14 tests"],
+      ask: "merge the branch; tonight's phase 2 builds on it",
+    },
+  },
+  {
+    id: "g-token",
+    state: "blocked",
+    kind: "task",
+    title: "Waiting on an API token",
+    gate: "human",
+    path: "hawthorne/stuck",
+    updatedAt: "2026-07-14T00:00:00.000Z",
+    reason: "the deploy key expired",
+  },
+];
+
 export function KitchenSink() {
   const [sent, setSent] = useState<{ id: number; text: string }[]>([]);
   const onSend = (text: string) => setSent((s) => [...s, { id: s.length, text }]);
+  // The gate queue echoes each dispatched verb so the pw harness can assert the intent + grace timing.
+  const [dispatched, setDispatched] = useState<string[]>([]);
+  const onIntent = async (intent: Intent) => {
+    const key = "gateId" in intent ? intent.gateId : "nodeId" in intent ? intent.nodeId : "";
+    setDispatched((d) => [...d, `${intent.type}:${key}`]);
+  };
+  // A mount toggle so the harness can prove the unmount-FLUSH: unmounting mid-grace must still commit the
+  // chosen verdict (gate.ts §PendingVerdict), not drop it — the live analogue is a session switch.
+  const [gateMounted, setGateMounted] = useState(true);
   return (
     <main className="flex min-h-dvh flex-col bg-background text-foreground">
       <header className="flex h-[52px] shrink-0 items-center justify-between border-border border-b px-5">
@@ -222,6 +263,38 @@ export function KitchenSink() {
                 </div>
               </div>
             </Row>
+          </Section>
+
+          <Section title="Gate queue">
+            <Row label="Rung 2: the human looks, then acts with verbs. Click a card to see the look + verbs; Approve is reversible for a beat (grace), Needs you is accent-blue, never red.">
+              <div className="flex w-full max-w-[520px] flex-col gap-2">
+                <button
+                  type="button"
+                  data-testid="gate-mount-toggle"
+                  className="self-start text-muted-foreground text-xs underline"
+                  onClick={() => setGateMounted((m) => !m)}
+                >
+                  {gateMounted ? "unmount queue" : "remount queue"}
+                </button>
+                {gateMounted ? <GateQueue items={GATE_ITEMS} onIntent={onIntent} /> : null}
+              </div>
+            </Row>
+            <Row label="Empty: nothing at your gate">
+              <div className="w-full max-w-[520px]">
+                <GateQueue items={[]} onIntent={onIntent} />
+              </div>
+            </Row>
+            {dispatched.length > 0 && (
+              <Row label="Dispatched (harness echo)">
+                <ul className="flex flex-col gap-1" data-testid="gate-dispatched">
+                  {dispatched.map((d) => (
+                    <li key={d} className="text-muted-foreground text-sm">
+                      {d}
+                    </li>
+                  ))}
+                </ul>
+              </Row>
+            )}
           </Section>
         </div>
       </div>

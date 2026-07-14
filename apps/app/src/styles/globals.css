@@ -32,6 +32,11 @@
  * / mcc-seg view toggle / mcc-plane-feed|board|list / mcc-col / mcc-rowitem / mc-triage / mc-chips /
  * mc-group). Composes tokens only; consumed by components/board/{board,planes}.tsx (BRO-1886). */
 @import "./plane.css";
+/* The gate-queue structural classes ported from the prototype (mcc-gateq / -card / -look / -done /
+ * mcc-allclear). The disclosure-ladder rung-2 surface — verbs over the review/blocked leaves; the verb
+ * buttons are the <Button> primitive. Composes tokens only; consumed by components/gate/gate-queue.tsx
+ * (BRO-1888, design fidelity). */
+@import "./gate-queue.css";
 
 /* The component library lives in a sibling workspace package (@maestro/ui). Tailwind v4
  * auto-detection does not reach across the package boundary, so the primitives' utility

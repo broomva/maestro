@@ -1,0 +1,167 @@
+/* The gate queue (BRO-1888 FID-3) — the prototype's `.mcc-gateq*` classes, ported (porting-notes:
+ * verbatim; they compose @maestro/tokens vars only). Source: handoff/apps/maestro/concepts.css
+ * (§"The gate queue"). The verb buttons are the app's <Button> primitive (the prototype's `.bv-pill`
+ * is not vendored here), so only the STRUCTURAL queue classes are ported — the queue frame, the card,
+ * the row, the inline look, and the grace/undo done-row. Consumed by components/gate/gate-queue.tsx. */
+
+/* On short viewports the queue scrolls instead of eating the conversation (concepts.css:1058). */
+.mcc-gateq {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(34vh, 320px);
+  overflow-y: auto;
+}
+
+/* All-clear — nothing at the gate (concepts.css §.mcc-allclear). */
+.mcc-allclear {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 2px;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+}
+.mcc-allclear > svg {
+  color: var(--bv-success);
+  flex-shrink: 0;
+}
+
+/* ── The card ───────────────────────────────────────────── */
+.mcc-gateq-card {
+  border: 1px solid var(--bv-border-15);
+  border-radius: var(--bv-radius-xl);
+  background: var(--card);
+  box-shadow: var(--bv-shadow-edge);
+  padding: 10px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-gateq-card:hover {
+  background: var(--bv-frost-4, var(--card));
+}
+.mcc-gateq-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.mcc-gateq-title {
+  font-size: 13px;
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Relative age on the row (adapted from concepts.css §.mcc-loops-t — margin-top dropped; the row
+   centers a single line here rather than heading a multiline loops entry). */
+.mcc-loops-t {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.mcc-gateq-meta {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  padding-left: 23px;
+}
+
+/* The look, inline — what changed · what it decided · what it asks. Evidence sits on the card so the
+   approve verb is never blind (concepts.css §.mcc-gateq-look). */
+.mcc-gateq-look {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-left: 23px;
+  padding: 8px 10px;
+  border: 1px solid var(--bv-border-5);
+  border-radius: var(--bv-radius-lg);
+  background: var(--bv-frost-4, transparent);
+}
+.mcc-gateq-look-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.mcc-gateq-look-key {
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+.mcc-gateq-look-val {
+  min-width: 0;
+}
+
+/* The verb row — indented under the dot (concepts.css §.mcc-gateq-card .mc-detail-actions). */
+.mc-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mcc-gateq-card .mc-detail-actions {
+  padding-left: 23px;
+}
+
+/* The send-back note — a revise carries feedback (intents.ts), collected inline. */
+.mcc-gateq-note {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-left: 23px;
+}
+.mcc-gateq-note-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 52px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--foreground);
+  background: var(--bv-frost-4, var(--card));
+  border: 1px solid var(--bv-border-15);
+  border-radius: var(--bv-radius-md);
+}
+.mcc-gateq-note-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+/* Chosen, with a grace window — reversible for a beat (concepts.css §.mcc-gateq-done). */
+.mcc-gateq-done {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-left: 23px;
+  font-size: 12.5px;
+}
+.mcc-gateq-done > svg {
+  color: var(--bv-success);
+  flex-shrink: 0;
+}
+.mcc-gateq-done-note {
+  color: var(--muted-foreground);
+}
+.mcc-gateq-undo {
+  margin-left: auto;
+}
+/* A failed send re-surfaces with an error chip, never a silent drop (gate.ts §PendingVerdict). The
+   copy is calm and accent-blue-adjacent, never alarm-red (CLAUDE.md: halts are not failures). */
+.mcc-gateq-error {
+  color: var(--foreground);
+}
+
+/* Reduced motion (CLAUDE.md §Motion: everything stops). */
+@media (prefers-reduced-motion: reduce) {
+  .mcc-gateq-card {
+    transition: none;
+  }
+}
