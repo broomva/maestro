@@ -40,7 +40,6 @@ interface CommandPaletteViewProps {
   onKeyDown: (e: React.KeyboardEvent) => void;
   onScrimDown: () => void;
   inputRef?: React.Ref<HTMLInputElement>;
-  comboRef?: React.Ref<HTMLDivElement>;
   style?: React.CSSProperties;
 }
 
@@ -69,7 +68,6 @@ export function CommandPaletteView({
   onKeyDown,
   onScrimDown,
   inputRef,
-  comboRef,
   style,
 }: CommandPaletteViewProps) {
   return (
@@ -78,7 +76,6 @@ export function CommandPaletteView({
       <div className="cmdk-scrim" aria-hidden="true" onMouseDown={onScrimDown} />
       <div
         className="cmdk-combo"
-        ref={comboRef}
         style={style}
         role="dialog"
         aria-modal="true"
@@ -177,7 +174,6 @@ export function CommandPalette({ open, onClose, onOpenFeedback }: CommandPalette
   const [activeIndex, setActiveIndex] = useState(0);
   const [rect, setRect] = useState<Rect | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const comboRef = useRef<HTMLDivElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
 
   const groups = useMemo(() => groupCommands(filterCommands(query)), [query]);
@@ -282,7 +278,6 @@ export function CommandPalette({ open, onClose, onOpenFeedback }: CommandPalette
       onKeyDown={onKeyDown}
       onScrimDown={onClose}
       inputRef={inputRef}
-      comboRef={comboRef}
       style={rect ? { left: rect.left, top: rect.top, width: rect.width } : { left: -9999, top: 0 }}
     />,
     document.body,

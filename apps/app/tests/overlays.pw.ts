@@ -126,3 +126,87 @@ test("the Send feedback command opens the drawer from the palette", async ({ pag
   await expect(page.getByRole("dialog", { name: "Command palette" })).toHaveCount(0);
   await expect(page.getByTestId("feedback-drawer")).toBeVisible();
 });
+
+test("Esc closes the feedback drawer and returns focus to the trigger (WAI-ARIA)", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const trigger = page.locator("aside").getByRole("button", { name: "Feedback", exact: true });
+  await trigger.click();
+  await expect(page.getByTestId("feedback-drawer")).toBeVisible();
+  // Focus must actually MOVE into the drawer first (the textarea auto-focuses), otherwise the
+  // return-to-trigger assertion below would pass vacuously (focus never having left the trigger).
+  await expect(page.getByRole("textbox", { name: "Your feedback" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("feedback-drawer")).toHaveCount(0);
+  // The modal-dialog focus-return leg the palette also upholds (P20 BRO-1894).
+  await expect(trigger).toBeFocused();
+});
+
+test("in-progress feedback survives a background store update (no text-wipe on re-render)", async ({
+  page,
+}) => {
+  // Reproduce the exact real-world trigger: a background run emits an SSE event WHILE the drawer is
+  // open → Shell re-renders → OverlayHost re-renders. Before the fix, the drawer's open effect (keyed
+  // on the fresh inline onClose) re-ran on that render and wiped the user's text. We HOLD the stream
+  // open, then fire one node.updated event mid-typing. (Test-scoped route added before goto; Playwright
+  // runs the most-recently-registered handler first, so it shadows the beforeEach stream mock.)
+  const deferred: { fire: () => void } = { fire: () => {} };
+  const armed = new Promise<void>((resolve) => {
+    deferred.fire = resolve;
+  });
+  const EVENT = {
+    seq: 999_999,
+    type: "node.updated",
+    payload: {
+      id: "n2",
+      path: "later",
+      parentId: null,
+      kind: "task",
+      state: "running",
+      owner: null,
+      gate: "human",
+      budgetJson: null,
+      doneJson: null,
+      title: "A late arrival",
+      createdAt: T,
+      updatedAt: T,
+    },
+    sessionId: null,
+    ts: "2026-07-14T00:00:00.000Z",
+    actor: "system",
+  };
+  await page.route("**/api/stream*", async (route) => {
+    await armed;
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      headers: { "cache-control": "no-cache" },
+      body: `retry: 3600000\n\ndata: ${JSON.stringify(EVENT)}\n\n`,
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("board")).toBeVisible();
+  await page.locator("aside").getByRole("button", { name: "Feedback", exact: true }).click();
+  await expect(page.getByTestId("feedback-drawer")).toBeVisible();
+
+  const REPORT = "the gate queue lost my scroll position";
+  const field = page.getByRole("textbox", { name: "Your feedback" });
+  await field.fill(REPORT);
+  await expect(field).toHaveValue(REPORT);
+
+  // Fire the event → the store updates → Shell + OverlayHost re-render while the drawer is open.
+  deferred.fire();
+  await page.waitForTimeout(250); // let the store update + re-render flush
+
+  // The fix: the text must still be there (the reset effect keys on [open] + reads onClose via a ref).
+  await expect(field).toHaveValue(REPORT);
+  await expect(page.getByTestId("feedback-drawer")).toBeVisible();
+
+  // Non-vacuity guard: prove the event actually applied (so a re-render DID happen while open — else
+  // the assertion above would pass trivially). The new node shows on the board once the drawer closes.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("feedback-drawer")).toHaveCount(0);
+  await expect(page.getByText("A late arrival")).toBeVisible();
+});

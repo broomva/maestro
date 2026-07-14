@@ -96,23 +96,34 @@ export function FeedbackDrawer({ open, onClose }: FeedbackDrawerProps) {
   const [previewed, setPreviewed] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  // Read the latest onClose via a ref so the open effect can key on [open] ALONE. Shell subscribes to
+  // the live server slice, so it (and this drawer's OverlayHost parent) re-renders on every SSE event;
+  // keying the effect on onClose — a fresh inline identity each render — would re-run it on ordinary
+  // background traffic and WIPE the user's in-progress text + yank focus. The palette is immune the
+  // same way (its effect keys on [open, place]). P20 BRO-1894.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
+    // Capture the trigger so close returns focus to it (WAI-ARIA dialog), reset the form, focus in.
+    restoreFocusRef.current = document.activeElement as HTMLElement | null;
     setType("idea");
     setText("");
     setAttach(true);
     setPreviewed(false);
     const t = setTimeout(() => textRef.current?.focus(), 40);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     };
     window.addEventListener("keydown", onKey);
     return () => {
       clearTimeout(t);
       window.removeEventListener("keydown", onKey);
+      restoreFocusRef.current?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
