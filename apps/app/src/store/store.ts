@@ -57,6 +57,8 @@ export interface MaestroStore extends Prefs {
   setNavOpen(navOpen: boolean): void;
   toggleNav(): void;
   setCol(key: string, width: number): void;
+  /** toggle the FS pane (BRO-1890) — a persisted layout pref. */
+  toggleFs(): void;
 
   /** clear server truth (a hard reconnect / stream reset); prefs are untouched. */
   reset(): void;
@@ -168,14 +170,15 @@ export function createMaestroStore(opts?: { storage?: StateStorage; name?: strin
         setNavOpen: (navOpen) => set({ navOpen }),
         toggleNav: () => set((st) => ({ navOpen: !st.navOpen })),
         setCol: (key, width) => set((st) => ({ cols: { ...st.cols, [key]: width } })),
+        toggleFs: () => set((st) => ({ fsOpen: !st.fsOpen })),
 
         reset: () => set({ server: emptyServerTruth() }),
       }),
       {
         name: opts?.name ?? "maestro-ui-prefs",
         storage: createJSONStorage(() => writeIfChanged(opts?.storage ?? defaultStorage())),
-        // THE invariant: only the three prefs keys are persisted — never server truth.
-        partialize: (s) => ({ view: s.view, navOpen: s.navOpen, cols: s.cols }),
+        // THE invariant: only the prefs keys are persisted — never server truth.
+        partialize: (s) => ({ view: s.view, navOpen: s.navOpen, cols: s.cols, fsOpen: s.fsOpen }),
         version: 1,
       },
     ),

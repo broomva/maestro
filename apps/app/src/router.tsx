@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Board } from "./components/board/board";
 import { PaneErrorFallback } from "./components/error-boundary";
 import { ShellLayout } from "./routes/app";
+import { FileRoute } from "./routes/file";
 import { KitchenSink } from "./routes/kitchen-sink";
 import { SessionView } from "./routes/session";
 import { AccountView, HistoryView, KnowledgeView, SettingsView } from "./routes/stubs";
@@ -42,6 +43,15 @@ const sessionRoute = createRoute({
   component: SessionView,
   errorComponent: () => <PaneErrorFallback label="This session" />,
 });
+// The file surface (BRO-1890 FID-4) — a workspace file rendered as a document. A `$` splat param carries
+// the node's workspace-relative PATH (paths nest, so a catch-all, not a flat `$fileId`). Pane-scoped
+// errorComponent like the others (a crashed file view falls back within the shell).
+const fileRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: "/file/$",
+  component: FileRoute,
+  errorComponent: () => <PaneErrorFallback label="This file" />,
+});
 const knowledgeRoute = view("/knowledge", KnowledgeView, "Knowledge");
 const historyRoute = view("/history", HistoryView, "History");
 const settingsRoute = view("/settings", SettingsView, "Settings");
@@ -72,6 +82,7 @@ const routeTree = rootRoute.addChildren([
   shellRoute.addChildren([
     boardRoute,
     sessionRoute,
+    fileRoute,
     knowledgeRoute,
     historyRoute,
     settingsRoute,
