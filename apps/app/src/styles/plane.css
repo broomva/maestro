@@ -274,8 +274,9 @@
   background: var(--background);
   z-index: 2;
 }
-/* The list body is edge-to-edge (data-view="list" zeroes its padding), so the first sticky group
-   tightens its top inset (prototype concepts.css §.mcc-plane-list .mcc-list-group). */
+/* The list body is edge-to-edge (data-view="list" zeroes its padding), so list group headers tighten
+   their top inset — most visible on the topmost group, which sits flush against the body top
+   (verbatim prototype port, concepts.css §.mcc-plane-list .mcc-list-group). */
 .mcc-plane-list .mcc-list-group {
   padding-top: 10px;
 }

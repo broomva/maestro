@@ -156,7 +156,7 @@ export function BoardPlane({
 }
 
 // ── List ─────────────────────────────────────────────────────────────────────
-interface RowProps {
+export interface RowProps {
   item: WorkItem;
   selected: boolean;
   onSelect: (id: string) => void;
@@ -186,8 +186,10 @@ function ListRowImpl({ item, selected, onSelect, now }: RowProps) {
 
 /** Re-render a row only when a field it renders — or selection / the board clock — changed. Mirrors
  *  work-card.tsx's `areEqual` (same rendered inputs) so an idle row skips the 30s tick + unrelated SSE
- *  events just like the feed/board cards do, instead of re-rendering the whole list on every event. */
-function rowAreEqual(a: RowProps, b: RowProps): boolean {
+ *  events just like the feed/board cards do, instead of re-rendering the whole list on every event.
+ *  Exported for the mutation-proof in planes.test.ts (the comparator must be neither `() => true` nor
+ *  missing a field), matching work-card's exported-and-tested `areEqual`. */
+export function rowAreEqual(a: RowProps, b: RowProps): boolean {
   const x = a.item;
   const y = b.item;
   return (
