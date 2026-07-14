@@ -439,6 +439,14 @@
   background: color-mix(in oklab, var(--bv-success) 16%, transparent);
   color: var(--bv-success);
 }
+/* Sign-out row — the button plus its own "sample" receipt (it sits outside the sample-labelled cards). */
+.usr-signout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  align-self: flex-start;
+}
+
 /* Destructive-only red (revoke a session, sign out) — never a status / needs-you (§Color). */
 .usr-danger {
   border: none;

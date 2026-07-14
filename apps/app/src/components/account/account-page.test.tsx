@@ -95,6 +95,8 @@ describe("AccountView — shell + top bar", () => {
     expect(html).toContain("sample");
     // the chip scope now names identity + security as sample too (not only the score) — no over-scope.
     expect(html).toContain("your profile, autonomy score, and security are sample");
+    // the disclosure is screen-reader accessible (a visually-hidden companion), not only a hover title.
+    expect(html).toContain('class="sr-only"');
   });
 });
 
@@ -161,6 +163,9 @@ describe("AccountPanel (the editable account view)", () => {
   test("destructive red is confined to genuine destructive actions (revoke + sign out)", () => {
     expect(html).toContain("usr-danger"); // the device revokes
     expect(html).toContain("Sign out");
+    // Sign out sits outside the sample-labelled cards, so it carries its own sample affordance (no no-op
+    // destructive action presented as if it were wired).
+    expect(html).toContain("usr-signout");
   });
 
   test("§Voice + §Work-states hold across the Account markup (the copy-denser half)", () => {

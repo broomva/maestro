@@ -444,14 +444,17 @@ export function AccountPanel({ onEdit }: { onEdit: () => void }) {
           </div>
         </div>
 
-        <Button
-          size="sm"
-          variant="secondary"
-          style={{ alignSelf: "flex-start", color: "var(--bv-danger)" }}
-        >
-          <LogOut size={16} strokeWidth={2} />
-          Sign out
-        </Button>
+        {/* Sign out sits outside the sample-labelled cards, so it carries its own "sample" receipt (no
+            sign-out path wired yet). Destructive red via inline --bv-danger — @maestro/ui Button has no
+            `destructive` CVA variant, and a sample no-op button does not justify adding a governance-class
+            one to the shared DS. */}
+        <div className="usr-signout">
+          <Button size="sm" variant="secondary" style={{ color: "var(--bv-danger)" }}>
+            <LogOut size={16} strokeWidth={2} />
+            Sign out
+          </Button>
+          <span className="mc-receipt">sample</span>
+        </div>
       </div>
     </div>
   );
@@ -485,11 +488,18 @@ export function AccountView({ sessions }: { sessions: HistorySession[] }) {
             <span className="usr-clock-dot" />
             31h 12m unsupervised this week
           </span>
+          {/* The disclosure is announced to screen readers via aria-describedby → a visually-hidden note
+              (not only the hover title), while the visible chip text stays exactly "sample". */}
           <span
             className="set-preview"
+            aria-describedby="usr-sample-note"
             title="This is a sample account. Your sessions and the theme control are live; your profile, autonomy score, and security are sample until the account is wired."
           >
             sample
+          </span>
+          <span id="usr-sample-note" className="sr-only">
+            This is a sample account. Your sessions and the theme control are live; your profile,
+            autonomy score, and security are sample until the account is wired.
           </span>
           <SetSegmented
             label="Account view"
