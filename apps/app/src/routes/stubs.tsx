@@ -18,16 +18,7 @@ function StubView({ title, note, testid }: { title: string; note: string; testid
 
 // KnowledgeView superseded by the real components/knowledge/knowledge-page.tsx (BRO-1893 FID-6 slice 2).
 // HistoryView superseded by the real components/history/history-page.tsx (BRO-1893 FID-6 slice 1).
-
-export function SettingsView() {
-  return (
-    <StubView
-      title="Settings"
-      testid="view-settings"
-      note="Appearance and defaults live here. The orchestrator has no settings page; it is an agent, and its knobs are frontmatter."
-    />
-  );
-}
+// SettingsView superseded by the real components/settings/settings-page.tsx (BRO-1893 FID-6 slice 3).
 
 export function AccountView() {
   return (
