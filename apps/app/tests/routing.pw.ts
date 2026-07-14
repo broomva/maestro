@@ -68,6 +68,33 @@ test("the sidebar nav routes between product views while the shell chrome persis
   await expect(page.getByTestId("board")).toBeVisible();
 });
 
+test("the tab strip is work-surface chrome — present on the board, gone on a full-page view (BRO-1896)", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("board")).toBeVisible();
+  await expect(page.getByTestId("tab-strip")).toBeVisible(); // the Maestro plane IS the work surface
+  // Make sure the FS pane is open on the board so its disappearance on the view is a real signal.
+  if ((await page.getByTestId("fs-rpane").count()) === 0) {
+    await page.getByRole("button", { name: "Show files" }).click();
+  }
+  await expect(page.getByTestId("fs-rpane")).toBeVisible();
+
+  // A full-page view is a standalone framed destination (the prototype gives it no tab strip): the tab
+  // strip AND the FS pane go away, but the sidebar + top bar stay (the way back to Maestro).
+  await page.getByRole("link", { name: "Settings" }).click();
+  await expect(page.getByTestId("view-settings")).toBeVisible();
+  await expect(page.getByTestId("tab-strip")).toHaveCount(0);
+  await expect(page.getByTestId("fs-rpane")).toHaveCount(0);
+  await expect(page.getByTestId("brand-mark")).toBeVisible();
+
+  // Back to the board — the tab strip + FS pane return (fsOpen state was never lost, it lives in the store).
+  await page.locator("aside").getByRole("link", { name: "Maestro", exact: true }).click();
+  await expect(page.getByTestId("board")).toBeVisible();
+  await expect(page.getByTestId("tab-strip")).toBeVisible();
+  await expect(page.getByTestId("fs-rpane")).toBeVisible();
+});
+
 test("a crashed view falls back within the shell — the chrome never blanks (done-check)", async ({
   page,
 }) => {
