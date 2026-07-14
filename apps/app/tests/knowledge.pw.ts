@@ -93,6 +93,19 @@ test("selecting an entity opens the detail drawer (inspector + neighbourhood)", 
   await expect(page.getByTestId("kg-drawer")).toHaveCount(0);
 });
 
+test("the drawer moves focus to Close on open and Escape closes it", async ({ page }) => {
+  const view = page.getByTestId("view-knowledge");
+  await view.getByRole("tab", { name: "List" }).click();
+  await view.locator(".kg-list-row").filter({ hasText: "Bookkeeping" }).click();
+  const drawer = page.getByTestId("kg-drawer");
+  await expect(drawer).toBeVisible();
+  // focus moved INTO the drawer (the Close button), not left behind on the list row.
+  await expect(drawer.getByRole("button", { name: "Close detail" })).toBeFocused();
+  // Escape closes the drawer (keyboard path, no pointer).
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("kg-drawer")).toHaveCount(0);
+});
+
 test("descending a folder re-scopes the graph; the breadcrumb navigates back", async ({ page }) => {
   const view = page.getByTestId("view-knowledge");
   // Descend via the graph folder node (hawthorne is a sub-scope).

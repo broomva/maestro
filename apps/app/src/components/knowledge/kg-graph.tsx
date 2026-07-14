@@ -20,13 +20,7 @@ import {
 } from "@/lib/kg";
 import type { KgNode, KgScope } from "@/lib/kg-data";
 
-const LEGEND: [string, string][] = [
-  ["folder", "folder"],
-  ["concept", "concept"],
-  ["decision", "decision"],
-  ["primitive", "primitive"],
-  ["session", "session"],
-];
+const LEGEND: string[] = ["folder", "concept", "decision", "primitive", "session"];
 
 export function KgGraph({
   scope,
@@ -108,7 +102,11 @@ export function KgGraph({
           const r = kgNodeR(n, deg[n.id] ?? 0);
           const folder = kgIsScope(n);
           const sel = n.id === selectedId;
-          const faded = offType(n) || (focusSet != null && !focusSet.has(n.id));
+          // A type-filtered node leaves the tab order AND the a11y tree, so the chip filter applies
+          // uniformly to keyboard/SR users (the List view removes filtered rows entirely — this keeps
+          // the two surfaces in agreement). Focus-dimming (neighbour highlight) only fades, never hides.
+          const filteredOut = offType(n);
+          const faded = filteredOut || (focusSet != null && !focusSet.has(n.id));
           return (
             // biome-ignore lint/a11y/useSemanticElements: an SVG <g> can't be a <button>; role=button + tabIndex + onKeyDown is the accessible pattern for an in-canvas graph node (the List view is the fuller fallback).
             <g
@@ -116,7 +114,8 @@ export function KgGraph({
               transform={`translate(${p.x.toFixed(2)} ${p.y.toFixed(2)})`}
               className="kg-node"
               role="button"
-              tabIndex={0}
+              tabIndex={filteredOut ? undefined : 0}
+              aria-hidden={filteredOut || undefined}
               aria-label={`${n.label} · ${folder ? "folder" : t.label}${sel ? " · selected" : ""}`}
               aria-pressed={sel}
               style={{ opacity: faded ? 0.18 : 1, cursor: "pointer" }}
@@ -155,7 +154,7 @@ export function KgGraph({
       </svg>
 
       <div className="kg-legend">
-        {LEGEND.map(([k, lab]) => (
+        {LEGEND.map((k) => (
           <span key={k} className="kg-legend-item">
             <span
               className="kg-legend-dot"
@@ -166,7 +165,7 @@ export function KgGraph({
                     : (KG_TYPE[k as KgNode["type"]] ?? KG_TYPE.concept).color,
               }}
             />
-            {lab}
+            {k}
           </span>
         ))}
       </div>

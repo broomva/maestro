@@ -205,7 +205,12 @@ export function kgNeighbors(nodeId: string, edges: KgEdge[]): Set<string> {
 
 /** Entities linked to `node` within a scope (bidirectional) — the inspector's backlinks. */
 export function kgBacklinks(node: KgNode, scope: KgScope): KgNode[] {
+  // Exclude the node itself, mirroring kgEdges' self-loop guard: a reflexive `related:` link must not
+  // count as its own backlink, or the inspector's `related · N` header + the list's Links column
+  // over-count and disagree with the graph (which shows zero self-edges).
   return scope.nodes.filter(
-    (n) => (n.related ?? []).includes(node.id) || (node.related ?? []).includes(n.id),
+    (n) =>
+      n.id !== node.id &&
+      ((n.related ?? []).includes(node.id) || (node.related ?? []).includes(n.id)),
   );
 }

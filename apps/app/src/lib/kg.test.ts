@@ -143,4 +143,28 @@ describe("kgNeighbors / kgBacklinks — bidirectional", () => {
     expect(ids).toContain("drun");
     expect(ids).toContain("run7c");
   });
+
+  test("a reflexive `related` link is NOT counted as the node's own backlink (matches kgEdges)", () => {
+    // A node that lists its own id in `related` (realistic once real frontmatter is walked). kgEdges
+    // drops self-loops; kgBacklinks must agree, or the inspector's `related · N` count + the list's Links
+    // column over-count and render a backlink-to-self while the graph shows zero self-edges.
+    const self = {
+      id: "self",
+      label: "Self ref",
+      type: "concept",
+      claim: "x",
+      related: ["self"],
+    } as KgNode;
+    const s: KgScope = {
+      id: "t",
+      crumb: "t",
+      kind: "test",
+      desc: "d",
+      parent: null,
+      nodes: [self],
+    };
+    expect(kgBacklinks(self, s).map((n) => n.id)).not.toContain("self");
+    expect(kgBacklinks(self, s)).toHaveLength(0);
+    expect(kgEdges(s.nodes)).toHaveLength(0); // the two derived views agree: no self-edge, no self-backlink
+  });
 });

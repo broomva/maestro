@@ -10,7 +10,7 @@
 // palette) is slice 2b. The disclosure ladder holds — entities + claims + receipts, no engine room.
 
 import { List, Network, Pin, X } from "lucide-react";
-import { type KeyboardEvent, useMemo, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { KG_GOLD, KG_TYPE, kgCategory, kgPath } from "@/lib/kg";
 import { KG_SCOPES } from "@/lib/kg-data";
 import { KgGraph } from "./kg-graph";
@@ -59,12 +59,14 @@ function ViewToggle({ view, onView }: { view: View; onView: (v: View) => void })
       {VIEWS.map(([id, label], i) => (
         <button
           key={id}
+          id={`kg-tab-${id}`}
           ref={(el) => {
             tabs.current[i] = el;
           }}
           type="button"
           role="tab"
           aria-selected={view === id}
+          aria-controls="kg-view-panel"
           tabIndex={view === id ? 0 : -1}
           className={`mcc-seg-btn${view === id ? " is-active" : ""}`}
           onClick={() => onView(id)}
@@ -90,6 +92,7 @@ export function KnowledgePage() {
   const [filter, setFilter] = useState<ReadonlySet<string>>(new Set());
   const [recent, setRecent] = useState<KgRef[]>([]);
   const [pinned, setPinned] = useState<KgRef[]>([{ scopeId: "broomva", nodeId: "p6" }]);
+  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
 
   const scope = KG_SCOPES[scopeId];
   const path = useMemo(() => kgPath(scopeId), [scopeId]);
@@ -98,6 +101,25 @@ export function KnowledgePage() {
     const present = new Set(scope.nodes.map(kgCategory));
     return CAT_ORDER.filter((c) => present.has(c));
   }, [scope]);
+
+  // Drawer focus management: move focus into the drawer on open, Escape closes it, and focus returns to
+  // whatever launched it (the activating node) on close — non-modal disclosure hygiene for keyboard users.
+  useEffect(() => {
+    if (!drawer) return;
+    const prev = document.activeElement as HTMLElement | null;
+    closeBtnRef.current?.focus();
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setDrawer(false);
+        setSel(null);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      prev?.focus?.();
+    };
+  }, [drawer]);
 
   if (!scope) return null;
 
@@ -163,7 +185,7 @@ export function KnowledgePage() {
           </span>
           <span
             className="kg-sample"
-            title="Sample data — the live knowledge graph lands with its read path."
+            title="Sample data. The live knowledge graph lands with its read path."
           >
             sample
           </span>
@@ -184,30 +206,30 @@ export function KnowledgePage() {
             >
               All
             </button>
-            {cats.map((c) => (
-              <button
-                type="button"
-                key={c}
-                className={`kg-chip${filter.has(c) ? " is-active" : ""}`}
-                aria-pressed={filter.has(c)}
-                onClick={() => toggleCat(c)}
-              >
-                <span
-                  className="kg-legend-dot"
-                  style={{
-                    background:
-                      c === "folder"
-                        ? KG_GOLD
-                        : (KG_TYPE[c as keyof typeof KG_TYPE] ?? KG_TYPE.concept).color,
-                  }}
-                />
-                {c === "folder"
-                  ? "folders"
-                  : (KG_TYPE[c as keyof typeof KG_TYPE] ?? KG_TYPE.concept).label}
-              </button>
-            ))}
+            {cats.map((c) => {
+              // Single-source the color + label per chip (was looked up twice, once for each).
+              const t =
+                c === "folder" ? null : (KG_TYPE[c as keyof typeof KG_TYPE] ?? KG_TYPE.concept);
+              return (
+                <button
+                  type="button"
+                  key={c}
+                  className={`kg-chip${filter.has(c) ? " is-active" : ""}`}
+                  aria-pressed={filter.has(c)}
+                  onClick={() => toggleCat(c)}
+                >
+                  <span className="kg-legend-dot" style={{ background: t ? t.color : KG_GOLD }} />
+                  {t ? t.label : "folders"}
+                </button>
+              );
+            })}
           </div>
-          <div className="kg-graphwrap">
+          <div
+            className="kg-graphwrap"
+            id="kg-view-panel"
+            role="tabpanel"
+            aria-labelledby={`kg-tab-${view}`}
+          >
             {view === "graph" ? (
               <KgGraph
                 scope={scope}
@@ -242,6 +264,7 @@ export function KnowledgePage() {
                       <Pin size={15} strokeWidth={2} />
                     </button>
                     <button
+                      ref={closeBtnRef}
                       type="button"
                       className="kg-iconbtn"
                       title="Close"

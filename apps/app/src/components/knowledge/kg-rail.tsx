@@ -72,7 +72,12 @@ export function KgRail({
             <Pin size={12} strokeWidth={2} /> Pinned
           </div>
           {pinned.map((p) => (
-            <KgRailItem key={`${p.scopeId}${p.nodeId}`} {...p} onPick={onPick} onUnpin={onUnpin} />
+            <KgRailItem
+              key={`${p.scopeId}::${p.nodeId}`}
+              {...p}
+              onPick={onPick}
+              onUnpin={onUnpin}
+            />
           ))}
         </div>
       ) : null}
@@ -81,7 +86,7 @@ export function KgRail({
         {recent.length === 0 ? (
           <p className="kg-rail-empty">Open an entity and it lands here.</p>
         ) : (
-          recent.map((p) => <KgRailItem key={`${p.scopeId}${p.nodeId}`} {...p} onPick={onPick} />)
+          recent.map((p) => <KgRailItem key={`${p.scopeId}::${p.nodeId}`} {...p} onPick={onPick} />)
         )}
       </div>
       <div className="kg-rail-sec">
@@ -90,7 +95,7 @@ export function KgRail({
         </div>
         {KG_FRESH.map((f) => (
           <KgRailItem
-            key={`${f.scopeId}${f.nodeId}`}
+            key={`${f.scopeId}::${f.nodeId}`}
             scopeId={f.scopeId}
             nodeId={f.nodeId}
             meta={`${f.when} ago`}

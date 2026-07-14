@@ -8,7 +8,9 @@
 
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { kgCategory } from "@/lib/kg";
 import { KG_SCOPES, type KgScope } from "@/lib/kg-data";
+import { KgGraph } from "./kg-graph";
 import { KgInspector } from "./kg-inspector";
 import { KgListView } from "./kg-list";
 import { KnowledgePage } from "./knowledge-page";
@@ -69,10 +71,11 @@ describe("KgInspector — the entity page (pure, by props)", () => {
     expect(html).toContain("fast-path promote"); // verdict for >= 7
     expect(html).toContain("PR #214"); // a source receipt
     expect(html).toContain("spec.md"); // a backlink label
-    // NB: the Nous score BAR is a `width:N%` fill (a score receipt viz, novelty 3/3 → full) — that is a
-    // score, not a work-progress percentage, so the §Work-states "no progress %" invariant does not apply
-    // here. It IS asserted on the page + list surfaces below, which show no percentage at all.
-    expect(html).not.toContain("Nous score</span></div>%"); // no stray % adjacent to the score text
+    // The score renders as a receipt (the "9/9" fraction + a verdict), NOT a work-progress percentage.
+    // The Nous BAR uses a `width:N%` fill (novelty 3/3 -> full), so a blanket not.toContain("%") does not
+    // apply here; the §Work-states "no progress %" invariant is enforced on the whole page + list surfaces
+    // (which carry no % at all — asserted above and in the KgListView test).
+    expect(html).toContain("/9"); // the score is a bounded receipt fraction, not an unbounded progress %
   });
 
   test("an unscored node renders no Nous block", () => {
@@ -111,5 +114,37 @@ describe("KgListView — the a11y-first table (pure, by props)", () => {
     );
     expect(onlyDecisions).toContain("persist transcript on Run"); // a decision
     expect(onlyDecisions).not.toContain("multi-turn"); // a concept — filtered out
+  });
+});
+
+describe("KgGraph — the type filter applies to the a11y tree, not just visually", () => {
+  // Only graph nodes carry tabindex="0" in KgGraph, so counting them = the number of keyboard-reachable
+  // nodes. The filter must remove off-type nodes from BOTH the tab order and the SR tree (parity with the
+  // List view, which drops filtered rows) — not merely dim them.
+  const stops = (html: string) => (html.match(/tabindex="0"/g) ?? []).length;
+  const graph = (typeFilter: ReadonlySet<string>) =>
+    renderToStaticMarkup(
+      <KgGraph
+        scope={core}
+        selectedId={null}
+        onSelectNode={() => {}}
+        onNavigate={() => {}}
+        typeFilter={typeFilter}
+      />,
+    );
+
+  test("with no filter every node is a tab stop and none is hidden from SR", () => {
+    const html = graph(new Set());
+    expect(stops(html)).toBe(core.nodes.length);
+    expect(html).not.toContain('aria-hidden="true"');
+  });
+
+  test("a type filter drops off-type nodes from the tab order AND hides them from SR", () => {
+    const decisions = core.nodes.filter((n) => kgCategory(n) === "decision").length;
+    expect(decisions).toBeGreaterThan(0);
+    expect(decisions).toBeLessThan(core.nodes.length); // some nodes ARE off-type
+    const html = graph(new Set(["decision"]));
+    expect(stops(html)).toBe(decisions); // only decision nodes stay keyboard-reachable
+    expect(html).toContain('aria-hidden="true"'); // the rest leave the a11y tree
   });
 });
