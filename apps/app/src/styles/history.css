@@ -1,0 +1,185 @@
+/* The History page (BRO-1893 FID-6) — the session list, "your runs and the loop's". A verbatim port of
+   concepts.css's `.mcc-hist` / `.mcc-hrow` / `.mcc-hgroup` blocks. Matte throughout (glass stays on the
+   composer, CLAUDE.md §Glass); the shell never scrolls — the list owns its overflow. The axis toggle
+   reuses the board's `.mcc-seg` and the filters reuse `.mc-chip` (plane.css), so History and the board
+   share one segmented/chip vocabulary. Composes `@maestro/tokens` vars only. */
+
+.mcc-hist {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--background);
+}
+.mcc-hist-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-height: 43px;
+  padding: 6px 24px;
+  border-bottom: 1px solid var(--bv-border-5);
+  flex-shrink: 0;
+}
+.mcc-hsearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px;
+  width: 260px;
+  max-width: 100%;
+  border: 1px solid var(--bv-border-15);
+  border-radius: var(--bv-radius-full);
+  background: var(--bv-canvas-soft);
+}
+.mcc-hsearch > svg {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+.mcc-hsearch input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  outline: none;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--foreground);
+}
+.mcc-hist-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.mcc-hgroup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 24px 7px;
+  font-size: 12px;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--background);
+  color: var(--foreground);
+}
+.mcc-hgroup > svg {
+  color: var(--muted-foreground);
+}
+.mcc-hgroup-count {
+  font-weight: 400;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.mcc-hrow {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  min-height: 54px;
+  padding: 8px 24px 8px 16px;
+  border: none;
+  border-top: 1px solid var(--bv-border-5);
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-hrow:hover {
+  background: var(--bv-frost-8);
+}
+.mcc-hrow.is-sel {
+  background: var(--bv-frost-12);
+}
+.mcc-hrow > .mc-chip-dot {
+  flex-shrink: 0;
+}
+.mcc-hrow-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mcc-hrow-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcc-hrow-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.mcc-hrow-meta > span {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+.mcc-hrow-meta > span + span::before {
+  content: "·";
+  margin-right: 8px;
+  opacity: 0.5;
+}
+.mcc-hrow-who {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.mcc-hrow-run {
+  font-family: var(--bv-font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+}
+.mcc-hrow-kind {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 99px;
+}
+.mcc-hrow-kind--you {
+  color: var(--bv-blue);
+  background: var(--bv-frost-12);
+}
+.mcc-hrow-kind--loop {
+  color: var(--muted-foreground);
+  background: var(--bv-canvas-soft);
+}
+.mcc-hrow-time {
+  flex-shrink: 0;
+  width: 60px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.mcc-hist-end {
+  padding: 18px 24px 28px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.mcc-hist-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mcc-hrow {
+    transition: none;
+  }
+}

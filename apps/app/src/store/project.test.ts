@@ -11,6 +11,7 @@ import {
   selectFileNode,
   selectFileTree,
   selectGateQueue,
+  selectHistory,
   selectNarration,
   selectNeedsYouCount,
   selectSidebarTree,
@@ -370,5 +371,108 @@ describe("selectFileNode — the node behind an open file tab (BRO-1890 FID-4)",
     const s = server([node({ id: "x", kind: "task", state: "review", path: "real", title: "R" })]);
     expect(selectFileNode(s, "ghost/path")).toBeUndefined();
     expect(selectFileNode(emptyServerTruth(), "anything")).toBeUndefined();
+  });
+});
+
+describe("selectHistory — the History page's run list (BRO-1893 FID-6)", () => {
+  // A workspace mixing leaves that have RUN (running / blocked / review / done) with those that have
+  // NOT (proposed / reviewing / triggered / canceled) and two container folders. History is derived
+  // from WORK STATE (the session-row map has no client read path — see selectHistory's doc), so a
+  // node's own state decides inclusion; updatedAt drives `at`, so it also drives the sort.
+  function ran(): ServerTruth {
+    return server([
+      node({ id: "i-haw", kind: "initiative", state: "running", title: "hawthorne" }),
+      node({
+        id: "p-core",
+        parentId: "i-haw",
+        kind: "project",
+        state: "running",
+        title: "hawthorne-core",
+      }),
+      node({
+        id: "w1",
+        parentId: "p-core",
+        kind: "task",
+        state: "review",
+        path: "haw/w1",
+        owner: "@ana",
+        title: "Persist run transcripts",
+        updatedAt: 3000,
+      }),
+      node({
+        id: "w2",
+        parentId: "p-core",
+        kind: "task",
+        state: "running",
+        path: "haw/w2",
+        owner: "agent:claude",
+        title: "Resume sessions",
+        updatedAt: 2000,
+      }),
+      node({
+        id: "w3",
+        kind: "task",
+        state: "done",
+        path: "gen/w3",
+        title: "Ship genesis",
+        updatedAt: 1000,
+      }),
+      // Not yet run (backlog / queued) — excluded.
+      node({ id: "w4", kind: "task", state: "proposed", path: "gen/w4", title: "Backlog" }),
+      node({ id: "w5", kind: "task", state: "triggered", path: "gen/w5", title: "Queued" }),
+      // Terminal-neutral, may never have run — excluded (no fabricated receipts, like the FID-5 rail).
+      node({ id: "w6", kind: "task", state: "canceled", path: "gen/w6", title: "Dropped" }),
+    ]);
+  }
+
+  test("only leaves that have RUN are rows — containers + not-yet-run + canceled excluded", () => {
+    const rows = selectHistory(ran());
+    // p-core (folder), w4 (proposed), w5 (triggered), w6 (canceled) all gone.
+    expect(rows.map((r) => r.id)).toEqual(["w1", "w2", "w3"]);
+  });
+
+  test("blocked (Stuck) work counts as a run — it has already dispatched", () => {
+    const rows = selectHistory(
+      server([node({ id: "b", kind: "task", state: "blocked", title: "Stuck run" })]),
+    );
+    expect(rows.map((r) => r.id)).toEqual(["b"]);
+  });
+
+  test("rows are most-recent activity first (by `at`)", () => {
+    const rows = selectHistory(ran());
+    const at = rows.map((r) => r.at);
+    expect([...at].sort((a, b) => b.localeCompare(a))).toEqual(at); // already desc
+    expect(rows[0]?.id).toBe("w1"); // updatedAt 3000, newest
+  });
+
+  test("kind: a human @handle → 'you'; an agent owner or the orchestrator → 'loop'", () => {
+    const by = new Map(selectHistory(ran()).map((r) => [r.id, r]));
+    expect(by.get("w1")?.kind).toBe("you"); // owner "@ana"
+    expect(by.get("w2")?.kind).toBe("loop"); // owner "agent:claude"
+    expect(by.get("w3")?.kind).toBe("loop"); // no owner → the loop
+  });
+
+  test("agent: worker name → owner handle → 'maestro' (the loop) fallback", () => {
+    const by = new Map(selectHistory(ran()).map((r) => [r.id, r]));
+    expect(by.get("w1")?.agent).toBe("@ana"); // no worker on the fixture → owner
+    expect(by.get("w2")?.agent).toBe("agent:claude");
+    expect(by.get("w3")?.agent).toBe("maestro"); // no worker, no owner → the loop
+  });
+
+  test("folder is the initiative / project crumb, else the path", () => {
+    const by = new Map(selectHistory(ran()).map((r) => [r.id, r]));
+    expect(by.get("w1")?.folder).toBe("hawthorne / hawthorne-core");
+    expect(by.get("w3")?.folder).toBe("gen/w3"); // no ancestry → path
+  });
+
+  test("run branch surfaces once a session read path attaches one (forward-compatible)", () => {
+    // A run whose latest session carries a branch — the projector attaches it; History passes it through.
+    const s = server([node({ id: "w1", kind: "task", state: "done", title: "Ran" })]);
+    s.sessions.s1 = session({ id: "s1", nodeId: "w1", branch: "run/ab12cd" });
+    expect(selectHistory(s)[0]?.run).toBe("run/ab12cd");
+  });
+
+  test("empty workspace → no rows (never throws)", () => {
+    expect(selectHistory(emptyServerTruth())).toEqual([]);
   });
 });
