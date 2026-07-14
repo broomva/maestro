@@ -17,21 +17,25 @@ test("the shell never scrolls; the main panel does; the chrome holds when small"
   const m = await page.evaluate(() => {
     const doc = document.documentElement;
     const main = document.querySelector('[data-testid="shell-main"]');
+    const panel = document.querySelector(".mcc-plane-body");
     const aside = document.querySelector("aside");
     return {
       docVOverflow: doc.scrollHeight - doc.clientHeight,
       docHOverflow: doc.scrollWidth - doc.clientWidth,
-      // The scroll invariant is a CONTAINMENT property, not incidental content height:
-      // the shell doc holds while `main` owns its own overflow. (Content-independent — the
-      // board that now mounts here may be short or empty; the containment must still hold.)
+      // The scroll invariant is a CONTAINMENT property, not incidental content height: the shell doc
+      // holds and `main` is a no-scroll frame (BRO-1886) while the INNER panel — the mission plane's
+      // `.mcc-plane-body` — owns its own overflow. (Content-independent — the plane may be short or
+      // empty; the containment must still hold.)
       mainOverflowY: main ? getComputedStyle(main).overflowY : "",
+      panelOverflowY: panel ? getComputedStyle(panel).overflowY : "",
       sidebarWidth: aside ? Math.round(aside.getBoundingClientRect().width) : -1,
     };
   });
 
   expect(m.docVOverflow, "document must not scroll vertically").toBeLessThanOrEqual(1);
   expect(m.docHOverflow, "document must not scroll horizontally").toBeLessThanOrEqual(1);
-  expect(m.mainOverflowY, "the main panel owns the scroll (overflow-y: auto)").toBe("auto");
+  expect(m.mainOverflowY, "the shell frame owns no scroll (overflow: hidden)").toBe("hidden");
+  expect(m.panelOverflowY, "the inner plane panel owns the scroll (overflow-y: auto)").toBe("auto");
   expect(m.sidebarWidth, "the 200px sidebar holds").toBe(200);
 });
 

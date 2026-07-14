@@ -1,0 +1,346 @@
+/* Mission plane (BRO-1886) — the prototype's plane classes, ported (porting-notes: keep verbatim;
+ * they compose @maestro/tokens vars only). Source of truth: handoff/apps/maestro/styles.css (.mc-*)
+ * + handoff/apps/maestro/concepts.css (.mcc-*). The feed/board cards are the app's own <WorkCard>
+ * (which already wears the canonical .bv-undertow running halo), so only the STRUCTURAL plane
+ * classes are ported here — the plane frame, the view toggle, columns, list rows, triage + chips +
+ * group headers. Consumed by components/board/{board,planes}.tsx.
+ *
+ * The plane owns its height + scroll: `.mcc-plane` fills the shell's <main> (a matte frame, no
+ * scroll), the `.mcc-plane-bar` is fixed, and `.mcc-plane-body` is the ONE inner panel that scrolls
+ * (CLAUDE.md §Layout: the shell never scrolls; inner panels do). */
+
+/* ── Plane frame ────────────────────────────────────────── */
+.mcc-plane {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mcc-plane-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 22px 12px;
+  flex-shrink: 0;
+  container-type: inline-size;
+}
+.mcc-plane-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 22px 24px;
+  container-type: inline-size;
+}
+/* The list view goes edge-to-edge — the body drops its horizontal padding so the sticky group
+   headers + rows span full width (rows own their 18px inset). Feed + board keep the base padding
+   AND the base whole-body scroll — a deliberate divergence from the prototype's board `overflow:hidden`
+   clip (a static specimen with few cards); a real board must scroll its work, not hide it below the fold. */
+.mcc-plane-body[data-view="list"] {
+  padding: 0 0 16px;
+}
+
+/* ── View toggle (feed / board / list) ──────────────────── */
+.mcc-seg {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--bv-border-15);
+  border-radius: var(--bv-radius-full);
+}
+.mcc-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 99px;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-seg-btn:hover {
+  background: var(--bv-frost-8);
+}
+.mcc-seg-btn.is-active {
+  background: var(--bv-frost-12);
+  color: var(--foreground);
+}
+
+/* ── Feed plane ─────────────────────────────────────────── */
+.mcc-plane-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  /* Reading-width cap — the feed is a column, not a wall (prototype concepts.css). It lifts at a
+     ≥820px container below, where each group's cards flow into a grid instead of a single stack. */
+  max-width: 720px;
+}
+.mcc-plane-feed .mc-group-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Responsive to the PLANE's own width (the .mcc-plane-body container), not the window: wherever the
+   plane is wide (inspector closed, or a large screen) the reading cap lifts and cards flow into a grid. */
+@container (min-width: 820px) {
+  .mcc-plane-feed {
+    max-width: none;
+  }
+  .mcc-plane-feed .mc-group-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    align-items: start;
+  }
+}
+.mc-triage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.mc-triage-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.mc-triage-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.mc-triage-sub {
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+/* ── Filter chips ───────────────────────────────────────── */
+.mc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mcc-plane-bar .mc-chips {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.mcc-plane-bar .mc-chips::-webkit-scrollbar {
+  display: none;
+}
+.mc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--bv-radius-full);
+  border: 1px solid var(--bv-border-15);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mc-chip:hover {
+  background: var(--bv-frost-8);
+}
+.mc-chip.is-active {
+  background: var(--bv-frost-12);
+  border-color: color-mix(in oklab, var(--bv-blue) 40%, transparent);
+  color: var(--foreground);
+}
+.mc-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  flex-shrink: 0;
+}
+.mc-chip-count {
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Group headers (feed + list) ────────────────────────── */
+.mc-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mc-group-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 2px;
+}
+.mc-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.mc-group-label .mc-chip-dot {
+  width: 8px;
+  height: 8px;
+}
+.mc-group-count {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Board plane ────────────────────────────────────────── */
+.mcc-plane-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+.mcc-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  min-width: 0;
+}
+.mcc-col-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 0 2px;
+}
+.mcc-col-count {
+  background: var(--bv-canvas-soft);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 99px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+.mcc-col-hint {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  padding: 0 2px;
+  margin-top: -6px;
+}
+.mcc-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+@container (max-width: 720px) {
+  .mcc-plane-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ── List plane ─────────────────────────────────────────── */
+.mcc-plane-list {
+  display: flex;
+  flex-direction: column;
+}
+.mcc-list-group {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 14px 18px 7px;
+  font-size: 12px;
+  font-weight: 500;
+  position: sticky;
+  top: 0;
+  background: var(--background);
+  z-index: 2;
+}
+/* The list body is edge-to-edge (data-view="list" zeroes its padding), so list group headers tighten
+   their top inset — most visible on the topmost group, which sits flush against the body top
+   (verbatim prototype port, concepts.css §.mcc-plane-list .mcc-list-group). */
+.mcc-plane-list .mcc-list-group {
+  padding-top: 10px;
+}
+.mcc-rowitem {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto auto auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-top: 1px solid var(--bv-border-5);
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  width: 100%;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-rowitem:hover {
+  background: var(--bv-frost-8);
+}
+.mcc-rowitem.is-selected {
+  background: var(--bv-frost-12);
+}
+.mcc-row-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.mcc-row-crumb {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+.mcc-row-time {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Receipt pill (branch run/<id>) ─────────────────────── */
+.mc-receipt {
+  font-family: var(--bv-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  background: var(--bv-canvas-soft);
+  border-radius: var(--bv-radius-md);
+  padding: 2px 6px;
+  color: var(--bv-gray-700);
+  white-space: nowrap;
+}
+
+/* ── Reduced motion (CLAUDE.md §Motion: everything stops) ── */
+@media (prefers-reduced-motion: reduce) {
+  .mcc-seg-btn,
+  .mc-chip,
+  .mcc-rowitem {
+    transition: none;
+  }
+}
