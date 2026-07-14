@@ -16,17 +16,8 @@ function StubView({ title, note, testid }: { title: string; note: string; testid
   );
 }
 
-export function KnowledgeView() {
-  return (
-    <StubView
-      title="Knowledge"
-      testid="view-knowledge"
-      note="The knowledge graph over your workspace lands here: files as nodes, frontmatter links as edges."
-    />
-  );
-}
-
-// HistoryView superseded by the real components/history/history-page.tsx (BRO-1893 FID-6).
+// KnowledgeView superseded by the real components/knowledge/knowledge-page.tsx (BRO-1893 FID-6 slice 2).
+// HistoryView superseded by the real components/history/history-page.tsx (BRO-1893 FID-6 slice 1).
 
 export function SettingsView() {
   return (
