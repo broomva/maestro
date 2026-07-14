@@ -84,6 +84,25 @@ test("unmounting mid-grace COMMITS the chosen verdict (not Undo) — a session s
   });
 });
 
+test("closing a card mid-send-back discards the draft — reopening shows the default verbs, not a stale note", async ({
+  page,
+}) => {
+  const queue = page.getByTestId("gate-queue");
+  const reviewCard = queue.locator('[data-state="review"]');
+
+  // Open → Send back → type a draft, then close the card WITHOUT sending or cancelling.
+  await reviewCard.locator(".mcc-gateq-row").click();
+  await reviewCard.getByRole("button", { name: "Send back", exact: true }).click();
+  await reviewCard.locator(".mcc-gateq-note-input").fill("half-typed feedback");
+  await reviewCard.locator(".mcc-gateq-row").click();
+  await expect(reviewCard.locator(".mcc-gateq-note-input")).toHaveCount(0);
+
+  // Reopen → the default verbs are back, no stale note editor.
+  await reviewCard.locator(".mcc-gateq-row").click();
+  await expect(reviewCard.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
+  await expect(reviewCard.locator(".mcc-gateq-note-input")).toHaveCount(0);
+});
+
 test("Send back collects a note (a revise carries feedback); a blocked card redispatches immediately", async ({
   page,
 }) => {

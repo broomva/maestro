@@ -77,17 +77,18 @@ export function GateQueue({ items, onIntent }: GateQueueProps) {
   // redispatch). The idempotency key is STABLE per decision, so any retry of THIS POST at the transport
   // layer (browser/proxy, or an unmount flush racing a timer) de-dupes server-side (client.ts §idempotencyKey).
   const send = useCallback(
-    (id: string, label: string, intent: Intent, chosenAt: number) => {
+    async (id: string, label: string, intent: Intent, chosenAt: number) => {
       setPending((cur) => (cur[id] ? { ...cur, [id]: { ...cur[id], phase: "sending" } } : cur));
-      onIntent(intent, { idempotencyKey: `${id}:${label}:${chosenAt}` })
-        .then(() =>
-          setPending((cur) => (cur[id] ? { ...cur, [id]: { ...cur[id], phase: "sent" } } : cur)),
-        )
-        .catch((e: unknown) =>
-          setPending((cur) =>
-            cur[id] ? { ...cur, [id]: { ...cur[id], phase: "failed", error: errText(e) } } : cur,
-          ),
+      try {
+        await onIntent(intent, { idempotencyKey: `${id}:${label}:${chosenAt}` });
+        setPending((cur) => (cur[id] ? { ...cur, [id]: { ...cur[id], phase: "sent" } } : cur));
+      } catch (e: unknown) {
+        // A rejected POST — or a SYNCHRONOUS throw from a bad dispatcher — lands the card in `failed`
+        // (never a silent drop, gate.ts §PendingVerdict); the try/catch means `send` never rejects.
+        setPending((cur) =>
+          cur[id] ? { ...cur, [id]: { ...cur[id], phase: "failed", error: errText(e) } } : cur,
         );
+      }
     },
     [onIntent],
   );
@@ -205,7 +206,13 @@ export function GateQueue({ items, onIntent }: GateQueueProps) {
               className="mcc-gateq-row"
               aria-expanded={openId === item.id}
               disabled={Boolean(p)}
-              onClick={() => setOpenId((cur) => (cur === item.id ? null : item.id))}
+              onClick={() => {
+                // Toggling a row (open, close, or switch cards) discards any in-progress send-back
+                // draft, so a half-typed note can't resurface when the card is reopened.
+                setOpenId((cur) => (cur === item.id ? null : item.id));
+                setNoteFor(null);
+                setNoteText("");
+              }}
             >
               <span className="mc-chip-dot" style={{ background: STATUS_DOT_VAR[v.tone] }} />
               <span className="mcc-gateq-title">{item.title}</span>
@@ -339,6 +346,7 @@ function SendBackNote({
       <textarea
         className="mcc-gateq-note-input"
         placeholder="What should change? (sent back with notes)"
+        aria-label="What should change? Sent back with notes"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         rows={2}
