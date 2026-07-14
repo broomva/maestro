@@ -6,7 +6,7 @@
 // done/total; project order is live→attention→name; narration is derived, attention-first.
 
 import { describe, expect, test } from "bun:test";
-import type { LiveNode } from "@maestro/protocol";
+import type { LiveNode, LiveSession } from "@maestro/protocol";
 import { selectNarration, selectNeedsYouCount, selectSidebarTree } from "./project";
 import { emptyServerTruth, type ServerTruth } from "./types";
 
@@ -36,6 +36,20 @@ function server(nodes: LiveNode[]): ServerTruth {
   const s = emptyServerTruth();
   for (const n of nodes) s.nodes[n.id] = n;
   return s;
+}
+
+/** A live session with sane defaults (the node ↔ session join; carries the branch receipt). */
+function session(p: Partial<LiveSession> & Pick<LiveSession, "id" | "nodeId">): LiveSession {
+  return {
+    id: p.id,
+    nodeId: p.nodeId,
+    branch: p.branch ?? `run/${p.id}`,
+    status: p.status ?? "review",
+    startedAt: p.startedAt ?? 1,
+    endedAt: p.endedAt ?? null,
+    diffstatJson: p.diffstatJson ?? null,
+    updatedAt: p.updatedAt ?? 1,
+  };
 }
 
 /** The prototype's workspace shape: hawthorne (3 projects) + genesis + ops, task-level states. */
@@ -176,6 +190,19 @@ describe("selectSidebarTree", () => {
     );
     expect(tree).toEqual({ initiatives: [], looseProjects: [], placesCount: 0 });
   });
+
+  test("a project with no initiative ancestor surfaces as a loose root folder", () => {
+    // The looseProjects path: a leaf with a project ancestor but no initiative → a root folder.
+    const tree = selectSidebarTree(
+      server([
+        node({ id: "p", kind: "project", state: "blocked", title: "standalone" }),
+        node({ id: "t", parentId: "p", kind: "task", state: "blocked", title: "wire it" }),
+      ]),
+    );
+    expect(tree.initiatives).toEqual([]);
+    expect(tree.looseProjects).toEqual([{ name: "standalone", live: false, attn: 1 }]);
+    expect(tree.placesCount).toBe(1);
+  });
 });
 
 describe("selectNeedsYouCount + selectNarration", () => {
@@ -211,5 +238,31 @@ describe("selectNeedsYouCount + selectNarration", () => {
     expect(selectNarration(running)).toBe("1 running");
     // nothing → the calm resting line.
     expect(selectNarration(emptyServerTruth())).toBe("standing · nothing at your gate");
+  });
+
+  test("narration leads with the branch receipt when the review item has a run", () => {
+    // The receipt-leading branch (`${run} at your gate`) — the review node carries a session with a
+    // branch, so the narration shows the run receipt, not the bare count.
+    const one = server([
+      node({ id: "p", kind: "project", state: "running", title: "core" }),
+      node({
+        id: "w",
+        parentId: "p",
+        kind: "task",
+        state: "review",
+        title: "ship it",
+        updatedAt: 20,
+      }),
+    ]);
+    one.sessions.s1 = session({ id: "s1", nodeId: "w", branch: "run/ab12" });
+    expect(selectNarration(one)).toBe("run/ab12 at your gate");
+
+    // two review items, most-recent carries the branch → "<branch> + N more at your gate".
+    const two = server([
+      node({ id: "w1", kind: "task", state: "review", title: "newer", updatedAt: 30 }),
+      node({ id: "w2", kind: "task", state: "review", title: "older", updatedAt: 10 }),
+    ]);
+    two.sessions.s1 = session({ id: "s1", nodeId: "w1", branch: "run/cd34" });
+    expect(selectNarration(two)).toBe("run/cd34 + 1 more at your gate");
   });
 });

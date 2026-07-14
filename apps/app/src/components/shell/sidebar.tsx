@@ -22,6 +22,7 @@ import {
   Settings,
   Share2,
 } from "lucide-react";
+import { useCallback } from "react";
 import type { SidebarTree } from "@/store";
 import { AutonomyScoreboard } from "./autonomy-scoreboard";
 import { WorkspaceTree } from "./workspace-tree";
@@ -51,7 +52,9 @@ function BrandChip() {
 
 export function Sidebar({ tree, needsYou, collapsed, onFeedback }: SidebarProps) {
   const navigate = useNavigate();
-  const toBoard = () => navigate({ to: "/" });
+  // Stable identity so WorkspaceTree's memo can short-circuit when only unrelated chrome state
+  // changes (an inline arrow would be a fresh prop every render, defeating the memo).
+  const toBoard = useCallback(() => navigate({ to: "/" }), [navigate]);
 
   if (collapsed) {
     return <RailSidebar tree={tree} needsYou={needsYou} onFeedback={onFeedback} />;

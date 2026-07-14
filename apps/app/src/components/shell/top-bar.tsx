@@ -42,7 +42,7 @@ export function TopBar({
           onClick={onToggleCollapsed}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className="grid size-8 shrink-0 place-items-center rounded-row text-muted-foreground transition-colors hover:bg-[var(--bv-frost-8)] hover:text-foreground"
+          className="grid size-8 shrink-0 place-items-center rounded-row text-muted-foreground transition-colors motion-reduce:transition-none hover:bg-[var(--bv-frost-8)] hover:text-foreground"
         >
           <PanelLeft size={16} strokeWidth={2} />
         </button>

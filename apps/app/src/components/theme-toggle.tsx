@@ -17,7 +17,7 @@ export function ThemeToggle() {
       type="button"
       aria-label={theme === "dark" ? "Switch to light" : "Switch to dark"}
       onClick={() => setThemeState(toggleTheme())}
-      className="grid h-9 w-9 place-items-center rounded-row text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      className="grid h-9 w-9 place-items-center rounded-row text-muted-foreground transition-colors motion-reduce:transition-none hover:bg-accent hover:text-foreground"
     >
       {theme === "dark" ? <Sun size={20} strokeWidth={2} /> : <Moon size={20} strokeWidth={2} />}
     </button>

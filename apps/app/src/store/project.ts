@@ -247,11 +247,16 @@ export function selectSidebarTree(s: ServerTruth): SidebarTree {
 
 /**
  * "Needs you" headline — the count of LEAF work at a gate or stuck (contract §"Reactive queries").
- * Leaf-only, to agree with `selectSidebarTree.attn` (skips containers, line ~218) and
- * `selectNarration` (line ~259): a container folder (initiative/project) can carry an aggregate
- * `review`/`blocked` state, and counting it here would inflate the badge above the visible tree +
- * narration — the badge would read a number the tree cannot explain. The three selectors that feed
- * the chrome MUST agree on what counts as needing you.
+ * Leaf-only, matching the container-exclusion rule of `selectSidebarTree.attn` (skips containers,
+ * line ~218) and `selectNarration` (line ~259): a container folder (initiative/project) can carry
+ * an aggregate `review`/`blocked` state, and counting it here would inflate the badge above the
+ * visible tree + narration — a number the tree cannot explain. All three chrome selectors agree on
+ * this rule, so the count never over-reports because of a folder's own state.
+ *
+ * (One edge remains, tracked as a fast-follow: a leaf homed DIRECTLY under an initiative with no
+ * project ancestor is counted here but its attention surfaces in the tree only at project
+ * granularity — the tree has no initiative-level attention badge yet. Rare shape; the badge stays
+ * the authoritative top-level count.)
  */
 export function selectNeedsYouCount(s: ServerTruth): number {
   let n = 0;

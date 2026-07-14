@@ -396,7 +396,7 @@
   font-weight: 500;
   padding: 2px 6px;
   border: 1px solid var(--bv-border-15);
-  border-radius: 5px;
+  border-radius: var(--bv-radius-chip);
   background: var(--card);
   flex-shrink: 0;
 }
