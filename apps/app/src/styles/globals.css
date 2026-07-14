@@ -54,6 +54,10 @@
  * Composes tokens only; consumed by components/knowledge/* (BRO-1893 slice 2, design fidelity). */
 @import "./knowledge.css";
 
+/* The Settings page (.set-* — two-pane / one-scroll app + account config; Appearance writes live,
+ * the rest preview). Composes tokens only; consumed by components/settings/* (BRO-1893 slice 3). */
+@import "./settings.css";
+
 /* The component library lives in a sibling workspace package (@maestro/ui). Tailwind v4
  * auto-detection does not reach across the package boundary, so the primitives' utility
  * classes (frost/ink hover, pill radius, etc.) must be scanned explicitly or they never
