@@ -1,0 +1,385 @@
+/* ============================================================
+   Feedback drawer (FID-7 · BRO-1894) — ported from the prototype's
+   feedback.css (`.fb-*`). A right-docked MATTE drawer over a dimmed
+   app (a drawer is a panel, not glass — CLAUDE.md §Glass). Feedback
+   is handed to the loop; the composer is the hero.
+
+   Consumed by components/overlays/feedback-drawer.tsx. Composes
+   tokens only (canon rule). The prototype's live-thread Undertow
+   treatment + the autonomy hover-card are omitted here (honest data:
+   no live feedback threads yet; the autonomy card is its own surface).
+   ============================================================ */
+
+/* Scrim — static dim (never animates opacity, so a frozen clock can't blank it). */
+.fb-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: oklch(0.135 0.02 272 / 0.4);
+}
+
+.fb-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 81;
+  width: 452px;
+  max-width: 92vw;
+  background: var(--card);
+  border-left: 1px solid var(--bv-border-15);
+  box-shadow: -24px 0 60px -28px oklch(0.2 0.04 265 / 0.4);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Declare the full sans stack explicitly — the body's inline `ui-sans-serif` has no fallback and
+     silently drops to serif in browsers that don't resolve that bare keyword (e.g. Firefox). */
+  font-family: var(--bv-font-sans);
+  color: var(--foreground);
+}
+/* Entrance is additive transform only — resting state is fully visible, so a paused animation clock
+   can never hide it. */
+@media (prefers-reduced-motion: no-preference) {
+  .fb-drawer {
+    animation: fb-slide 0.3s var(--bv-ease-emphasized, cubic-bezier(0.2, 0, 0, 1));
+  }
+}
+@keyframes fb-slide {
+  from {
+    transform: translateX(28px);
+  }
+  to {
+    transform: none;
+  }
+}
+
+/* ── Header ──────────────────────────────────────────────── */
+.fb-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid var(--bv-border-5);
+}
+.fb-head-glyph {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bv-frost-8);
+  color: var(--bv-blue);
+}
+.fb-head-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fb-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fb-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.fb-sub {
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  line-height: 1.4;
+}
+.fb-x {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--bv-radius-lg);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.fb-x:hover {
+  background: var(--bv-frost-8);
+  color: var(--foreground);
+}
+
+/* ── Body (scrolls) ──────────────────────────────────────── */
+.fb-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Composer — calm, the way you talk to maestro everywhere else. */
+.fb-compose {
+  padding: 16px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  border-bottom: 1px solid var(--bv-border-5);
+}
+.fb-compose-field {
+  border: 1px solid var(--bv-border-15);
+  border-radius: 14px;
+  background: var(--card);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition:
+    border-color var(--bv-dur-fast) var(--bv-ease-standard),
+    box-shadow var(--bv-dur-fast);
+}
+.fb-compose-field:focus-within {
+  border-color: var(--bv-blue);
+  box-shadow: 0 0 0 3px var(--bv-frost-12);
+}
+.fb-text {
+  width: 100%;
+  min-height: 92px;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+  padding: 13px 14px 4px;
+  outline: none;
+}
+.fb-text::placeholder {
+  color: var(--bv-gray-500);
+}
+
+/* Composer tray — quiet type pills + send, inside the field */
+.fb-tray {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+}
+.fb-types {
+  display: inline-flex;
+  gap: 2px;
+}
+.fb-type {
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 99px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition:
+    background var(--bv-dur-fast) var(--bv-ease-standard),
+    color var(--bv-dur-fast);
+}
+.fb-type > svg {
+  width: 14px;
+  height: 14px;
+}
+.fb-type:hover {
+  background: var(--bv-frost-8);
+  color: var(--foreground);
+}
+.fb-type.is-active {
+  background: var(--bv-frost-12);
+  color: var(--bv-blue);
+}
+.fb-send {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 10px;
+  background: var(--bv-ink);
+  color: var(--bv-white);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background var(--bv-dur-fast) var(--bv-ease-standard),
+    opacity var(--bv-dur-fast);
+}
+.fb-send:hover {
+  background: var(--bv-ink-hover);
+}
+.fb-send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Attach-context line — a quiet receipt, not a boxed toggle. A label wrapping a real (visually
+   hidden) checkbox, so it stays keyboard-native + screen-reader correct while the styled box shows
+   the state. */
+.fb-ctx {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px;
+  cursor: pointer;
+}
+/* The native checkbox is visually hidden but focusable + in the a11y tree (sr-only pattern). */
+.fb-ctx-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.fb-ctx-check {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  border-radius: 5px;
+  border: 1.5px solid var(--bv-border-15);
+  background: var(--card);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+  transition:
+    background var(--bv-dur-fast) var(--bv-ease-standard),
+    border-color var(--bv-dur-fast),
+    color var(--bv-dur-fast);
+}
+.fb-ctx-check.is-on {
+  background: var(--bv-blue);
+  border-color: var(--bv-blue);
+  color: var(--bv-white);
+}
+/* Keyboard focus ring on the styled box (the native input is visually hidden). Declared AFTER the
+   base .fb-ctx-check rules so its higher specificity is not a descending-specificity surprise. */
+.fb-ctx-input:focus-visible + .fb-ctx-check {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.fb-ctx-label {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+/* The honest receipt — feedback delivery is a preview, so submitting says so rather than faking a
+   "routing to the team" acknowledgement. */
+.fb-receipt {
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  background: var(--bv-canvas-soft);
+  border: 1px dashed var(--bv-border-15);
+  border-radius: var(--bv-radius-md);
+  padding: 8px 11px;
+}
+
+/* ── Threads — sample examples, tracked like every other noun ── */
+.fb-threads {
+  padding: 14px 14px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.fb-threads-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 8px;
+}
+.fb-threads-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+
+.fb-thread {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 10px;
+  border-radius: 12px;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+}
+.fb-thread-dot {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.fb-thread-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fb-thread-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.fb-thread-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+.fb-thread-time {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--bv-gray-500);
+  font-variant-numeric: tabular-nums;
+}
+.fb-thread-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.fb-thread-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.fb-thread-status--ship {
+  color: var(--bv-success);
+}
+.fb-thread-status--triage {
+  color: var(--bv-blue);
+}
+.fb-thread-status--log {
+  color: var(--muted-foreground);
+}
+.fb-thread-detail {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.fb-thread-detail::before {
+  content: "·";
+  margin-right: 7px;
+  color: var(--bv-gray-400);
+}

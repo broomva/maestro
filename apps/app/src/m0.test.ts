@@ -33,12 +33,21 @@ describe("M0 · glass is earned (§6.4)", () => {
     }
   });
 
-  test("no M0 app surface wears glass (the page is matte)", () => {
+  // Glass is earned in exactly three places (CLAUDE.md §Glass): overlays (dialogs + the ⌘K command
+  // palette), popovers, and the composer. Those sanctioned surfaces legitimately wear glass; EVERY
+  // other app surface stays matte (cards, panels, sidebars, chrome — and even the feedback DRAWER,
+  // which is a panel, not an overlay). The composer's glass lives in @maestro/ui (outside this scan);
+  // the command-palette overlay is the one in-app glass stylesheet (BRO-1894 FID-7).
+  const GLASS_SANCTIONED = /(^|\/)command\.css$/;
+
+  test("only the sanctioned overlay surface wears glass; every other page surface is matte", () => {
     const srcDir = new URL("./", import.meta.url);
     for (const entry of readdirSync(srcDir, { recursive: true, encoding: "utf8" })) {
       // Skip non-source and ANY test file (.test.ts / .test.tsx) — a test that ASSERTS a surface is
       // matte legitimately contains the "bv-glass" literal in its assertion, and must not self-trip.
       if (!/\.(tsx?|css)$/.test(entry) || /\.test\.tsx?$/.test(entry)) continue;
+      // Skip the sanctioned glass overlay (the ⌘K palette) — it is canon glass, not a matte surface.
+      if (GLASS_SANCTIONED.test(entry)) continue;
       // Strip comments so a doc reference to glass (like this file's own prose)
       // is not mistaken for glass being applied to a surface.
       const code = readFileSync(new URL(entry, srcDir), "utf8")

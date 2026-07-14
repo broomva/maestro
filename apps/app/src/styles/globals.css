@@ -63,6 +63,16 @@
  * consumed by components/account/account-page.tsx (BRO-1893 slice 4, design fidelity). */
 @import "./user.css";
 
+/* The ⌘K command palette (.cmdk-* — earned glass; one of the three glass places). Real commands only:
+ * navigate / toggle theme / open feedback. Composes tokens only; consumed by
+ * components/overlays/command-palette.tsx (BRO-1894 FID-7, design fidelity). */
+@import "./command.css";
+
+/* The feedback drawer (.fb-* — a right-docked matte drawer; the composer is real, delivery is a labelled
+ * preview, threads are a labelled sample). Composes tokens only; consumed by
+ * components/overlays/feedback-drawer.tsx (BRO-1894 FID-7, design fidelity). */
+@import "./feedback.css";
+
 /* The component library lives in a sibling workspace package (@maestro/ui). Tailwind v4
  * auto-detection does not reach across the package boundary, so the primitives' utility
  * classes (frost/ink hover, pill radius, etc.) must be scanned explicitly or they never

@@ -23,6 +23,7 @@ import {
 } from "@/store";
 import { FilePane } from "./fs/file-pane";
 import { TabStrip } from "./fs/tab-strip";
+import { OverlayHost } from "./overlays/overlay-host";
 import { Sidebar } from "./shell/sidebar";
 import { TopBar } from "./shell/top-bar";
 
@@ -137,6 +138,12 @@ export function Shell({ children }: { children?: ReactNode }) {
           ) : null}
         </div>
       </div>
+
+      {/* The transient overlay layer (BRO-1894 FID-7): the ⌘K command palette + the feedback drawer.
+          Mounted once here so any surface can open one by firing `bv:command-open` / `bv:feedback-open`
+          (dispatched by the ⌘K keydown above, the top-bar command field, and the sidebar footer). Both
+          render null when closed, so this never touches the shell's SSR render. */}
+      <OverlayHost />
     </div>
   );
 }
