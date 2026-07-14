@@ -212,10 +212,12 @@
   opacity: 0.55;
   min-height: 3px;
 }
-/* Peak: solid accent-blue at full opacity — a data highlight, not a gradient wash (canon fix). */
+/* Peak: the SAME ai-blue hue at full opacity — a value contrast, not a hue change. Never
+ * --bv-blue-accent (hue 235), which canon reserves for the "Needs you" gate (§Color); and no gradient
+ * wash. So the peak reads as "more" of the same signal, not as a different one. */
 .usr-week-bar.is-peak {
   opacity: 1;
-  background: var(--bv-blue-accent);
+  background: var(--bv-blue);
 }
 .usr-week-lab {
   font-size: 12px;
@@ -252,7 +254,8 @@
   font-size: 13px;
   font-weight: 600;
 }
-.usr-card-head .mc-receipt {
+.usr-card-head .mc-receipt,
+.usr-card-head .set-preview {
   margin-left: auto;
 }
 .usr-card-link {
@@ -371,6 +374,9 @@
 }
 .usr-prow-control {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* Editable identity grid (Account variation) */

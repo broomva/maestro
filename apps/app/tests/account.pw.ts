@@ -107,6 +107,27 @@ test("the 'Your sessions' card shows REAL runs from the tree (not a fabricated l
   ).toBeVisible();
   // destructive red does NOT appear on the Overview (revoke/sign out live in the Account view only).
   await expect(view.locator(".usr-danger")).toHaveCount(0);
+  // Preferences is an honest "preview" (persists nothing), NOT a "this device" persistence claim.
+  await expect(view.locator(".usr-card", { hasText: "Preferences" })).toContainText("preview");
+});
+
+test("session rows + Open History navigate CLIENT-SIDE (no full reload tearing down the shell)", async ({
+  page,
+}) => {
+  // Mutation-proof of the P20 MAJOR: raw <a href> hard-reloads the SPA and tears down the shared SSE
+  // stream; a TanStack <Link> navigates in-app. Stamp a window marker — a hard reload wipes it, a
+  // client-side nav preserves it.
+  const view = page.getByTestId("view-account");
+  await page.evaluate(() => {
+    (window as unknown as { __navProbe?: number }).__navProbe = 42;
+  });
+  await view.locator(".usr-sess", { hasText: "Refactor the store" }).click();
+  await expect(page).toHaveURL(/\/history$/);
+  await expect(page.getByTestId("view-history")).toBeVisible(); // arrived at History, still in the shell
+  const probe = await page.evaluate(
+    () => (window as unknown as { __navProbe?: number }).__navProbe,
+  );
+  expect(probe).toBe(42); // survived → no document reload → the shell + SSE stream were never torn down
 });
 
 test("the Overview↔Account segmented swaps to the editable Account view (honest, no false sync claim)", async ({
@@ -124,6 +145,10 @@ test("the Overview↔Account segmented swaps to the editable Account view (hones
   // ...and it is HONEST: it says "not saved", never the prototype's false "syncs to your profile".
   await expect(view).toContainText("not saved yet");
   await expect(view).not.toContainText("syncs to your profile");
+  // the two inert preference rows carry a "preview" chip so they read distinct from the LIVE Theme.
+  await expect(
+    view.locator(".usr-card", { hasText: "Personal preferences" }).locator(".set-preview"),
+  ).toHaveCount(2);
   // security section + the sanctioned destructive reds (revoke a session, sign out).
   await expect(view.locator(".usr-danger")).toHaveCount(2); // two device revokes
   await expect(view.getByRole("button", { name: "Sign out" })).toBeVisible();
