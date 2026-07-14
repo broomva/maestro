@@ -58,6 +58,8 @@ describe("HistoryView — the session list", () => {
     expect(html).toContain('data-testid="view-history"');
     expect(html).toContain('data-testid="history-empty"');
     expect(html).toContain("No runs yet");
+    // §Type: empty-state titles are the ONE place weight 600 is used (not 500). Lock it here.
+    expect(html).toMatch(/font-semibold[^>]*>No runs yet/);
     expect(html).not.toContain('class="mcc-hrow"'); // no rows
   });
 

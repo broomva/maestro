@@ -12,7 +12,7 @@
 
 import { DotComet, STATUS_DOT_VAR, workStatusView } from "@maestro/ui";
 import { Folder, Search } from "lucide-react";
-import { type KeyboardEvent, type ReactNode, useMemo, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useMemo, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { type HistorySession, maestroStore, selectHistory } from "@/store";
 import { relativeTime } from "../board/board-view";
@@ -77,9 +77,7 @@ function HistRow({
           {s.run ? <span className="mcc-hrow-run">{s.run}</span> : null}
         </span>
       </span>
-      <span className={`mcc-hrow-kind mcc-hrow-kind--${s.kind}`}>
-        {s.kind === "you" ? "you" : "loop"}
-      </span>
+      <span className={`mcc-hrow-kind mcc-hrow-kind--${s.kind}`}>{s.kind}</span>
       <span className="mcc-hrow-time">{relativeTime(s.at)}</span>
     </button>
   );
@@ -161,18 +159,23 @@ export function HistoryView({ sessions }: { sessions: HistorySession[] }) {
     }));
   }, [axis, rows]);
 
+  // WAI-ARIA tabs with automatic activation (same pattern as the board's PlaneToggle): Arrow/Home/End
+  // move selection AND focus (re-grouping is cheap + reversible, so activate-on-move is right), plus a
+  // roving tabindex so the whole toggle is one Tab stop. onClick still activates directly.
+  const axisTabs = useRef<(HTMLButtonElement | null)[]>([]);
   const onAxisKey = (e: KeyboardEvent<HTMLButtonElement>) => {
     const i = AXES.findIndex(([id]) => id === axis);
-    const step =
-      e.key === "ArrowRight" || e.key === "ArrowDown"
-        ? 1
-        : e.key === "ArrowLeft" || e.key === "ArrowUp"
-          ? -1
-          : 0;
-    if (step === 0) return;
+    const last = AXES.length - 1;
+    let n = -1;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") n = i >= last ? 0 : i + 1;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") n = i <= 0 ? last : i - 1;
+    else if (e.key === "Home") n = 0;
+    else if (e.key === "End") n = last;
+    const next = n < 0 ? undefined : AXES[n];
+    if (!next) return;
     e.preventDefault();
-    const next = AXES[(i + step + AXES.length) % AXES.length];
-    if (next) setAxis(next[0]);
+    setAxis(next[0]);
+    axisTabs.current[n]?.focus();
   };
 
   return (
@@ -189,12 +192,16 @@ export function HistoryView({ sessions }: { sessions: HistorySession[] }) {
           />
         </div>
         <div className="mcc-seg" role="tablist" aria-label="Organize history">
-          {AXES.map(([id, label]) => (
+          {AXES.map(([id, label], i) => (
             <button
               key={id}
+              ref={(el) => {
+                axisTabs.current[i] = el;
+              }}
               type="button"
               role="tab"
               aria-selected={axis === id}
+              tabIndex={axis === id ? 0 : -1}
               className={`mcc-seg-btn${axis === id ? " is-active" : ""}`}
               onClick={() => setAxis(id)}
               onKeyDown={onAxisKey}
@@ -226,7 +233,8 @@ export function HistoryView({ sessions }: { sessions: HistorySession[] }) {
 
       {sessions.length === 0 ? (
         <div className="mcc-hist-empty" data-testid="history-empty">
-          <span className="font-medium text-base text-foreground">No runs yet</span>
+          {/* Empty-state title → weight 600 (font-semibold); CLAUDE.md §Type reserves 600 for these. */}
+          <span className="font-semibold text-base text-foreground">No runs yet</span>
           <span className="max-w-[420px] text-muted-foreground text-sm">
             When you start a mission or the loop dispatches work, each run appears here as a
             session.
@@ -255,7 +263,7 @@ export function HistoryView({ sessions }: { sessions: HistorySession[] }) {
               archive of older, closed runs fills in over time — no faked count, no "read path" jargon. */}
           <div className="mcc-hist-end">
             {rows.length === 0
-              ? "No runs match this search."
+              ? "No runs match these filters."
               : "Older runs join this list as the archive fills in."}
           </div>
         </div>

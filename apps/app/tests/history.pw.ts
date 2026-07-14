@@ -141,3 +141,35 @@ test("search narrows the runs by title / folder / agent", async ({ page }) => {
   await expect(view.getByText("Persist run transcripts")).toHaveCount(0);
   await expect(view.locator(".mcc-hrow")).toHaveCount(1);
 });
+
+test("a filtered-empty list reads 'filters', not 'search' (honest end note)", async ({ page }) => {
+  const view = page.getByTestId("view-history");
+  await view.getByPlaceholder("Search sessions").fill("zzz-no-such-run");
+  await expect(view.locator(".mcc-hrow")).toHaveCount(0);
+  // The store is non-empty (it is the filters, not an empty workspace), so the copy says "filters".
+  await expect(view.locator(".mcc-hist-end")).toHaveText("No runs match these filters.");
+  await expect(view.getByTestId("history-empty")).toHaveCount(0); // not the zero-state screen
+});
+
+test("the axis toggle is a WAI-ARIA tab list — arrows move selection AND focus, roving tabindex", async ({
+  page,
+}) => {
+  const view = page.getByTestId("view-history");
+  const byDay = view.getByRole("tab", { name: "By day" });
+  const byWork = view.getByRole("tab", { name: "By work" });
+
+  // Roving tabindex: the selected tab is the single Tab stop; the others are removed from the order.
+  await expect(byDay).toHaveAttribute("tabindex", "0");
+  await expect(byWork).toHaveAttribute("tabindex", "-1");
+
+  // Automatic activation: ArrowRight moves BOTH aria-selected and DOM focus to the next tab.
+  await byDay.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(byWork).toBeFocused();
+  await expect(byWork).toHaveAttribute("aria-selected", "true");
+  await expect(byDay).toHaveAttribute("aria-selected", "false");
+  await expect(byWork).toHaveAttribute("tabindex", "0");
+  await expect(byDay).toHaveAttribute("tabindex", "-1");
+  // Selection moving re-grouped the list (by work → folder header), same rows.
+  await expect(view.locator(".mcc-hgroup").filter({ hasText: "hawthorne / core" })).toHaveCount(1);
+});
