@@ -24,6 +24,12 @@ function groupByState(items: WorkItem[]): BoardGroup[] {
  * Feed / list sections — plain-voice buckets (Needs you → Stuck → Running → Queued → Done),
  * attention-first, recency within a bucket. Identical shaping to the board's `toSections` so the
  * feed and the board agree on grouping; the ONLY difference is the plane feeds leaf items.
+ *
+ * Grouping deliberately buckets by raw system state (via `groupByState` + `workStatusView(state)`),
+ * while each CARD is kind-aware (`WorkCard` → `workStatusView(state, kind)`). So a `routine` between
+ * fires wears a "Standing" badge on its card yet files under its state bucket ("Queued"/"Running"/…).
+ * That is intentional: section headers answer "where is this in the system pipeline", cards answer
+ * "what should I call this one" — headers stay a stable, small set; the routine overlay stays per-card.
  */
 export function feedSections(items: WorkItem[]): BoardSection[] {
   return toSections(groupByState(items));

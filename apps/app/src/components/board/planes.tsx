@@ -9,6 +9,7 @@
 import type { PlaneView, WorkItem } from "@maestro/protocol";
 import { DotComet, STATUS_DOT_VAR, workStatusView } from "@maestro/ui";
 import { Columns3, LayoutList, List } from "lucide-react";
+import { type KeyboardEvent, memo, useRef } from "react";
 import type { BoardSection } from "./board-view";
 import { relativeTime } from "./board-view";
 import type { PlaneColumn } from "./plane-view";
@@ -27,16 +28,39 @@ const VIEWS: readonly { id: PlaneView; label: string; Icon: typeof List }[] = [
 ];
 
 export function PlaneToggle({ view, onView }: { view: PlaneView; onView: (v: PlaneView) => void }) {
+  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  const active = VIEWS.findIndex((v) => v.id === view);
+  // WAI-ARIA tabs with automatic activation: Arrow/Home/End move selection AND focus (switching a view
+  // is cheap + reversible, so activate-on-move is the right pattern), plus a roving tabindex so the
+  // whole toggle is a single Tab stop. onClick still activates directly.
+  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    const last = VIEWS.length - 1;
+    let next = -1;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") next = active >= last ? 0 : active + 1;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = active <= 0 ? last : active - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    const target = next < 0 ? undefined : VIEWS[next];
+    if (!target) return;
+    e.preventDefault();
+    onView(target.id);
+    tabs.current[next]?.focus();
+  };
   return (
     <div className="mcc-seg" role="tablist" aria-label="Plane view">
-      {VIEWS.map(({ id, label, Icon }) => (
+      {VIEWS.map(({ id, label, Icon }, i) => (
         <button
           key={id}
+          ref={(el) => {
+            tabs.current[i] = el;
+          }}
           type="button"
           role="tab"
           aria-selected={view === id}
+          tabIndex={view === id ? 0 : -1}
           className={`mcc-seg-btn${view === id ? " is-active" : ""}`}
           onClick={() => onView(id)}
+          onKeyDown={onKeyDown}
         >
           <Icon size={13} />
           <span className="mcc-seg-label">{label}</span>
@@ -56,21 +80,18 @@ interface PlaneProps {
 // ── Feed ─────────────────────────────────────────────────────────────────────
 export function FeedPlane({
   sections,
-  attention,
+  headline,
   active,
   selectedId,
   onSelect,
   now,
-}: PlaneProps & { sections: BoardSection[]; attention: number; active: number }) {
+}: PlaneProps & { sections: BoardSection[]; headline: string; active: number }) {
   return (
     <div className="mcc-plane-feed" data-testid="plane-feed">
       <div className="mc-triage">
         <div className="mc-triage-headline">
-          <span className="mc-triage-title">
-            {attention > 0
-              ? `${attention} ${attention === 1 ? "piece" : "pieces"} of work ${attention === 1 ? "needs" : "need"} you`
-              : "All clear"}
-          </span>
+          {/* One source for the headline string — triage().headline (plane-view.ts), the tested path. */}
+          <span className="mc-triage-title">{headline}</span>
           <span className="mc-triage-sub">{active} active · workers handle the rest</span>
         </div>
       </div>
@@ -135,17 +156,14 @@ export function BoardPlane({
 }
 
 // ── List ─────────────────────────────────────────────────────────────────────
-function ListRow({
-  item,
-  selected,
-  onSelect,
-  now,
-}: {
+interface RowProps {
   item: WorkItem;
   selected: boolean;
   onSelect: (id: string) => void;
   now: number;
-}) {
+}
+
+function ListRowImpl({ item, selected, onSelect, now }: RowProps) {
   const v = workStatusView(item.state, item.kind);
   const crumb = [item.initiative, item.project].filter(Boolean).join(" › ");
   const age = relativeTime(item.lastEventAt ?? item.updatedAt, now);
@@ -165,6 +183,30 @@ function ListRow({
     </button>
   );
 }
+
+/** Re-render a row only when a field it renders — or selection / the board clock — changed. Mirrors
+ *  work-card.tsx's `areEqual` (same rendered inputs) so an idle row skips the 30s tick + unrelated SSE
+ *  events just like the feed/board cards do, instead of re-rendering the whole list on every event. */
+function rowAreEqual(a: RowProps, b: RowProps): boolean {
+  const x = a.item;
+  const y = b.item;
+  return (
+    a.selected === b.selected &&
+    a.onSelect === b.onSelect &&
+    a.now === b.now &&
+    x.id === y.id &&
+    x.state === y.state &&
+    x.kind === y.kind &&
+    x.title === y.title &&
+    x.run === y.run &&
+    x.initiative === y.initiative &&
+    x.project === y.project &&
+    x.path === y.path &&
+    x.updatedAt === y.updatedAt &&
+    x.lastEventAt === y.lastEventAt
+  );
+}
+const ListRow = memo(ListRowImpl, rowAreEqual);
 
 export function ListPlane({
   sections,

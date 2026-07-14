@@ -33,6 +33,13 @@
   padding: 2px 22px 24px;
   container-type: inline-size;
 }
+/* The list view goes edge-to-edge — the body drops its horizontal padding so the sticky group
+   headers + rows span full width (rows own their 18px inset). Feed + board keep the base padding
+   AND the base whole-body scroll — a deliberate divergence from the prototype's board `overflow:hidden`
+   clip (a static specimen with few cards); a real board must scroll its work, not hide it below the fold. */
+.mcc-plane-body[data-view="list"] {
+  padding: 0 0 16px;
+}
 
 /* ── View toggle (feed / board / list) ──────────────────── */
 .mcc-seg {
@@ -72,12 +79,26 @@
   display: flex;
   flex-direction: column;
   gap: 18px;
+  /* Reading-width cap — the feed is a column, not a wall (prototype concepts.css). It lifts at a
+     ≥820px container below, where each group's cards flow into a grid instead of a single stack. */
+  max-width: 720px;
 }
 .mcc-plane-feed .mc-group-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  align-items: start;
+}
+/* Responsive to the PLANE's own width (the .mcc-plane-body container), not the window: wherever the
+   plane is wide (inspector closed, or a large screen) the reading cap lifts and cards flow into a grid. */
+@container (min-width: 820px) {
+  .mcc-plane-feed {
+    max-width: none;
+  }
+  .mcc-plane-feed .mc-group-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    align-items: start;
+  }
 }
 .mc-triage {
   display: flex;
@@ -181,10 +202,6 @@
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
-.mc-group-hint {
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
 
 /* ── Board plane ────────────────────────────────────────── */
 .mcc-plane-board {
@@ -249,7 +266,7 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 14px 4px 7px;
+  padding: 14px 18px 7px;
   font-size: 12px;
   font-weight: 500;
   position: sticky;
@@ -257,8 +274,10 @@
   background: var(--background);
   z-index: 2;
 }
-.mcc-list-group .mc-group-hint {
-  font-weight: 400;
+/* The list body is edge-to-edge (data-view="list" zeroes its padding), so the first sticky group
+   tightens its top inset (prototype concepts.css §.mcc-plane-list .mcc-list-group). */
+.mcc-plane-list .mcc-list-group {
+  padding-top: 10px;
 }
 .mcc-rowitem {
   display: grid;
@@ -266,7 +285,7 @@
   gap: 12px;
   align-items: center;
   min-height: 44px;
-  padding: 0 4px;
+  padding: 0 18px;
   border-top: 1px solid var(--bv-border-5);
   background: transparent;
   border-left: none;

@@ -41,7 +41,11 @@ export function Board() {
   // Selection is ephemeral + component-local — drives the inspector, never server truth. Stable
   // `select` ref (useCallback) so WorkCard's memo comparator (which checks onSelect) is not defeated.
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // The feed's state filter (a representative OrchState, or null for "All") — ephemeral, feed-only.
+  // The feed's state filter — the STABLE plain-voice label ("Needs you" · "Queued" · "Done" · …), or
+  // null for "All". Ephemeral, feed-only. Keyed on the label, NOT a section's representative OrchState:
+  // a merged bucket's representative sub-state is unstable (when the first-in-order sub-state empties
+  // while the bucket still holds items, the representative shifts), which would silently drop the active
+  // filter. The label is invariant across sub-state churn within a bucket.
   const [filter, setFilter] = useState<string | null>(null);
 
   // A coarse board clock threaded into every card so relative ages stay honest under the memo (the
@@ -77,11 +81,18 @@ export function Board() {
   }, [selectedId]);
 
   // The feed body honours the filter; the board/list always show the full set (the prototype filters
-  // only the feed). A stale filter (its section emptied out) falls back to "All" rather than blanking.
+  // only the feed). A stale filter (its bucket drained via a live update) falls back to "All" rather
+  // than blanking — and the effect below then clears it so the chip highlight agrees with the content.
   const filteredFeed = useMemo(() => {
     if (filter === null) return sections;
-    const only = sections.filter((s) => s.state === filter);
+    const only = sections.filter((s) => s.label === filter);
     return only.length > 0 ? only : sections;
+  }, [sections, filter]);
+  // Clear a stale filter: if the filtered bucket is gone entirely (drained by an SSE update), drop it
+  // so the tablist never sits with content-shows-all but no chip selected. Label-keyed, so it fires
+  // only when the whole plain-voice bucket empties — not on sub-state churn within it.
+  useEffect(() => {
+    if (filter !== null && !sections.some((s) => s.label === filter)) setFilter(null);
   }, [sections, filter]);
 
   const empty = items.length === 0;
@@ -91,11 +102,14 @@ export function Board() {
       <div className="mcc-plane flex-1" data-testid="board">
         <div className="mcc-plane-bar">
           {view === "feed" && !empty ? (
-            <div className="mc-chips" role="tablist" aria-label="Filter by state">
+            // Toggle chips, not tabs: each is independently pressable AND deselectable (clicking the
+            // active chip clears to "All"), so the honest ARIA is a group of aria-pressed toggles — a
+            // tablist would promise one-always-selected + arrow roving, which these deliberately are not.
+            // biome-ignore lint/a11y/useSemanticElements: role="group" over <fieldset> — toggle buttons, not form fields.
+            <div className="mc-chips" role="group" aria-label="Filter by state">
               <button
                 type="button"
-                role="tab"
-                aria-selected={filter === null}
+                aria-pressed={filter === null}
                 className={`mc-chip${filter === null ? " is-active" : ""}`}
                 onClick={() => setFilter(null)}
               >
@@ -103,12 +117,11 @@ export function Board() {
               </button>
               {sections.map((s) => (
                 <button
-                  key={s.state}
+                  key={s.label}
                   type="button"
-                  role="tab"
-                  aria-selected={filter === s.state}
-                  className={`mc-chip${filter === s.state ? " is-active" : ""}`}
-                  onClick={() => setFilter(filter === s.state ? null : s.state)}
+                  aria-pressed={filter === s.label}
+                  className={`mc-chip${filter === s.label ? " is-active" : ""}`}
+                  onClick={() => setFilter(filter === s.label ? null : s.label)}
                 >
                   <span className="mc-chip-dot" style={{ background: STATUS_DOT_VAR[s.tone] }} />
                   {s.label}
@@ -139,7 +152,7 @@ export function Board() {
           ) : (
             <FeedPlane
               sections={filteredFeed}
-              attention={tri.attention}
+              headline={tri.headline}
               active={tri.active}
               selectedId={selectedId}
               onSelect={select}
