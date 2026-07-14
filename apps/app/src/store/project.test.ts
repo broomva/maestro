@@ -8,6 +8,8 @@
 import { describe, expect, test } from "bun:test";
 import type { LiveNode, LiveSession } from "@maestro/protocol";
 import {
+  selectFileNode,
+  selectFileTree,
   selectGateQueue,
   selectNarration,
   selectNeedsYouCount,
@@ -304,5 +306,69 @@ describe("selectGateQueue — the rung-2 gate queue (BRO-1888)", () => {
     ]);
     expect(selectGateQueue(s)).toEqual([]);
     expect(selectGateQueue(emptyServerTruth())).toEqual([]);
+  });
+});
+
+describe("selectFileTree — the workspace walked as files (BRO-1890 FID-4)", () => {
+  test("every node is a row: containers are folders, leaves are files, indented by path depth", () => {
+    const s = server([
+      node({
+        id: "i",
+        kind: "initiative",
+        state: "running",
+        path: "hawthorne",
+        title: "Hawthorne",
+      }),
+      node({
+        id: "p",
+        kind: "project",
+        state: "review",
+        path: "hawthorne/core",
+        title: "core",
+      }),
+      node({
+        id: "t",
+        kind: "task",
+        state: "running",
+        path: "hawthorne/core/spec",
+        title: "spec",
+      }),
+    ]);
+    const tree = selectFileTree(s);
+    expect(tree).toEqual([
+      { path: "hawthorne", name: "hawthorne", depth: 0, kind: "folder", live: true },
+      { path: "hawthorne/core", name: "core", depth: 1, kind: "folder", live: false },
+      { path: "hawthorne/core/spec", name: "spec", depth: 2, kind: "file", live: true },
+    ]);
+  });
+
+  test("live is true only for a running node; the tree is path-sorted + stable", () => {
+    const s = server([
+      node({ id: "b", kind: "task", state: "blocked", path: "b/second", title: "second" }),
+      node({ id: "a", kind: "task", state: "running", path: "a/first", title: "first" }),
+    ]);
+    const tree = selectFileTree(s);
+    expect(tree.map((e) => e.path)).toEqual(["a/first", "b/second"]); // path-sorted
+    expect(tree[0]?.live).toBe(true); // a/first is running
+    expect(tree[1]?.live).toBe(false); // b/second is blocked, not running
+    expect(selectFileTree(emptyServerTruth())).toEqual([]);
+  });
+});
+
+describe("selectFileNode — the node behind an open file tab (BRO-1890 FID-4)", () => {
+  test("looks a node up by PATH (the tab key + /file/$ param), projecting the full WorkItem", () => {
+    const s = server([
+      node({ id: "x", kind: "task", state: "review", path: "hawthorne/spec", title: "The spec" }),
+    ]);
+    const found = selectFileNode(s, "hawthorne/spec");
+    expect(found?.id).toBe("x");
+    expect(found?.title).toBe("The spec");
+    expect(found?.path).toBe("hawthorne/spec");
+  });
+
+  test("undefined when the path names no node (a stale deep link never throws)", () => {
+    const s = server([node({ id: "x", kind: "task", state: "review", path: "real", title: "R" })]);
+    expect(selectFileNode(s, "ghost/path")).toBeUndefined();
+    expect(selectFileNode(emptyServerTruth(), "anything")).toBeUndefined();
   });
 });

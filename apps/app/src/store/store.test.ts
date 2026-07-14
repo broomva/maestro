@@ -314,6 +314,7 @@ describe("store: persistence isolation", () => {
     store.getState().setView("board");
     store.getState().setNavOpen(false);
     store.getState().setCol("nav", 240);
+    store.getState().toggleFs();
     store
       .getState()
       .applyEvent(ev(1, "node.updated", node({ id: "secret", path: "secret", state: "running" })));
@@ -321,8 +322,8 @@ describe("store: persistence isolation", () => {
     const raw = storage.map.get("test-prefs");
     expect(raw).toBeDefined();
     const parsed = JSON.parse(raw as string) as { state: Record<string, unknown> };
-    // Exactly the three prefs keys — no server truth leaks into storage.
-    expect(Object.keys(parsed.state).sort()).toEqual(["cols", "navOpen", "view"]);
+    // Exactly the prefs keys — no server truth leaks into storage (fsOpen joined them in BRO-1890).
+    expect(Object.keys(parsed.state).sort()).toEqual(["cols", "fsOpen", "navOpen", "view"]);
     expect(raw).not.toContain("secret");
     expect(raw).not.toContain("server");
   });

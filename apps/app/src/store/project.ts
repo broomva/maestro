@@ -331,3 +331,46 @@ export function selectNarration(s: ServerTruth): string {
   if (running > 0) return `${running} running`;
   return "standing · nothing at your gate";
 }
+
+/** One row of the FS pane (BRO-1890 FID-4) — the workspace walked as files (`MccFilePane`'s entry). */
+export interface FileEntry {
+  /** the node's workspace-relative path — the tab key + the `/file/$` route param (open by path). */
+  path: string;
+  /** the display name — the last path segment (or the title fallback), never empty. */
+  name: string;
+  /** indentation depth = path-segment count − 1 (the tree's nesting, from the flat path). */
+  depth: number;
+  /** container nodes (initiative/project) are folders (not openable); leaves are files. */
+  kind: "folder" | "file";
+  /** a live tide dot when the node is running (the FS pane's only live signal). */
+  live: boolean;
+}
+
+/**
+ * The FS pane's file tree (BRO-1890 FID-4) — the workspace as files (`MccFilePane`). DERIVED from the
+ * real node tree: every node is a row, indented by its path depth; container folders (initiative /
+ * project) render as non-openable folders and leaf work as openable files (its contract `_work.md`,
+ * shown by the file view). Path-sorted + stable (mirrors `selectWorkItems` / `/api/tree`). The disclosure
+ * ladder holds: this is work-as-files, NOT the engine room — `run/<id>` worktrees + the index never
+ * appear (they are not nodes). The file *body* awaits the P1 read path; the tree + frontmatter are real.
+ */
+export function selectFileTree(s: ServerTruth): FileEntry[] {
+  return selectWorkItems(s).map((it) => {
+    const segs = it.path.split("/").filter(Boolean);
+    const isFolder = it.kind === "initiative" || it.kind === "project";
+    return {
+      path: it.path,
+      name: segs[segs.length - 1] ?? it.title,
+      depth: Math.max(0, segs.length - 1),
+      kind: isFolder ? "folder" : "file",
+      live: it.state === "running",
+    };
+  });
+}
+
+/** The WorkItem behind an open file tab, looked up by `path` (the tab key + `/file/$` param), or
+ *  undefined when the path names no node — the file view renders its frontmatter as the document. */
+export function selectFileNode(s: ServerTruth, path: string): WorkItem | undefined {
+  const node = Object.values(s.nodes).find((n) => n.path === path);
+  return node ? deriveWorkItem(node, s) : undefined;
+}

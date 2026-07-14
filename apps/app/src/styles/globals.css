@@ -37,6 +37,10 @@
  * buttons are the <Button> primitive. Composes tokens only; consumed by components/gate/gate-queue.tsx
  * (BRO-1888, design fidelity). */
 @import "./gate-queue.css";
+/* The FS surfaces ported from the prototype (mcc-ftabs / -ftab chrome tab strip, mcc-ftree file pane,
+ * mcc-doc rendered document, mcc-rpane edge column). Placement B (chrome-level tabs); the workspace
+ * walked as files. Composes tokens only; consumed by components/fs/* (BRO-1890, design fidelity). */
+@import "./fs.css";
 
 /* The component library lives in a sibling workspace package (@maestro/ui). Tailwind v4
  * auto-detection does not reach across the package boundary, so the primitives' utility

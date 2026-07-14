@@ -9,10 +9,20 @@
 // wired in routes/app.tsx, which also opens the one SSE connection). The mission plane replaces the
 // placeholder board in a later fidelity ticket.
 
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { useEffect, useMemo } from "react";
 import { useStore } from "zustand";
-import { maestroStore, selectNarration, selectNeedsYouCount, selectSidebarTree } from "@/store";
+import { activeFilePath } from "@/lib/file-route";
+import {
+  maestroStore,
+  selectFileTree,
+  selectNarration,
+  selectNeedsYouCount,
+  selectSidebarTree,
+} from "@/store";
+import { FilePane } from "./fs/file-pane";
+import { TabStrip } from "./fs/tab-strip";
 import { Sidebar } from "./shell/sidebar";
 import { TopBar } from "./shell/top-bar";
 
@@ -43,10 +53,18 @@ export function Shell({ children }: { children?: ReactNode }) {
   const navOpen = useStore(maestroStore, (s) => s.navOpen);
   const navWidth = useStore(maestroStore, (s) => s.cols.nav ?? NAV_WIDTH_DEFAULT);
   const toggleNav = useStore(maestroStore, (s) => s.toggleNav);
+  const fsOpen = useStore(maestroStore, (s) => s.fsOpen);
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (st) => st.location.pathname });
 
   const tree = useMemo(() => selectSidebarTree(server), [server]);
   const needsYou = useMemo(() => selectNeedsYouCount(server), [server]);
   const narration = useMemo(() => selectNarration(server), [server]);
+  // The FS pane's rows (workspace-as-files) + the active row (the open file). Deriving in useMemo keyed
+  // on the stable `server` slice — inline derivation returns a fresh array every render and thrashes
+  // useSyncExternalStore (the FID-2 getSnapshot lesson).
+  const fileTree = useMemo(() => selectFileTree(server), [server]);
+  const activeFile = activeFilePath(pathname);
 
   // ⌘K is global — open the palette from anywhere in the shell (the field in the top bar is one
   // affordance; the shortcut is another). The palette itself is a later fidelity ticket.
@@ -79,13 +97,28 @@ export function Shell({ children }: { children?: ReactNode }) {
           onToggleCollapsed={toggleNav}
           onCommand={openCommandPalette}
         />
-        {/* The shell frame owns NO scroll and NO padding — the matched view is the inner panel that
-            scrolls (CLAUDE.md §Layout: the shell never scrolls; inner panels do). The mission plane
-            fills it and owns its own scroll; the simpler views (stubs) wrap themselves in a padded
-            scroll container. */}
-        <main className="min-h-0 flex-1 overflow-hidden" data-testid="shell-main">
-          {children ?? <ShellPlaceholder />}
-        </main>
+        {/* The chrome tab strip (BRO-1890) — the pinned Maestro tab + open file tabs + the FS toggle,
+            under the header. Chrome across every view. */}
+        <TabStrip />
+        {/* The main row: the matched view + the FS pane at the layout edge (a 248px column when open).
+            The shell frame owns NO scroll — the matched view is the inner panel that scrolls (CLAUDE.md
+            §Layout: the shell never scrolls; inner panels do). The mission plane fills `.mcc-fsmain` and
+            owns its own scroll; the file pane owns its own. */}
+        <div className={`mcc-fsrow${fsOpen ? " has-fs" : ""}`}>
+          <main className="mcc-fsmain min-h-0 overflow-hidden" data-testid="shell-main">
+            {children ?? <ShellPlaceholder />}
+          </main>
+          {fsOpen ? (
+            <div className="mcc-rpane" data-testid="fs-rpane">
+              <FilePane
+                entries={fileTree}
+                openPath={activeFile}
+                onOpen={(path) => navigate({ to: "/file/$", params: { _splat: path } })}
+                label="Workspace"
+              />
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   );

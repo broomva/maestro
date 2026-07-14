@@ -61,8 +61,9 @@ test("the sidebar nav routes between product views while the shell chrome persis
   await page.getByRole("link", { name: "Settings" }).click();
   await expect(page.getByTestId("view-settings")).toBeVisible();
 
-  // Back to the board via the primary lens (reads "Maestro" while the gate is clear).
-  await page.getByRole("link", { name: "Maestro", exact: true }).click();
+  // Back to the board via the primary lens (reads "Maestro" while the gate is clear). Scope to the
+  // sidebar — the FID-4 chrome tab strip also carries a "Maestro" tab (both route to the board).
+  await page.locator("aside").getByRole("link", { name: "Maestro", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByTestId("board")).toBeVisible();
 });

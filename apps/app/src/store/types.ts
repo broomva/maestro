@@ -115,6 +115,12 @@ export interface Prefs {
   navOpen: boolean;
   /** column widths (was `bv-ml-cols`), default `{ nav: 200 }`. */
   cols: Record<string, number>;
+  /**
+   * FS pane open (BRO-1890 FID-4) — the chrome-level file pane at the layout's right edge. A layout
+   * preference (rule-of-thumb: losing it loses only a layout choice → persisted slice), default true.
+   * The prototype's responsive auto-collapse is deferred to FID-8 (mobile).
+   */
+  fsOpen: boolean;
 }
 
 /** The persisted-slice defaults (the prototype's localStorage defaults). */
@@ -122,4 +128,5 @@ export const defaultPrefs = (): Prefs => ({
   view: "feed",
   navOpen: true,
   cols: { nav: 200 },
+  fsOpen: true,
 });

@@ -1,0 +1,301 @@
+/* FS surfaces (BRO-1890 FID-4) — the chrome tab strip, the file pane, and the rendered document.
+   A verbatim port of concepts.css's `.mcc-ftabs` / `.mcc-ftree` / `.mcc-doc` blocks (placement B:
+   chrome-level tabs, FS pane at the layout's right edge). Matte throughout (glass stays on the
+   composer, CLAUDE.md §Glass); the shell never scrolls — the pane + document own their overflow. */
+
+/* ── The chrome tab strip ─────────────────────────────────────────────────── */
+.mcc-ftabs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 7px 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--bv-border-5);
+  overflow-x: auto;
+}
+.mcc-ftab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--bv-radius-lg);
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-ftab:hover {
+  background: var(--bv-frost-8);
+}
+.mcc-ftab.is-active {
+  background: var(--bv-frost-12);
+  color: var(--foreground);
+}
+.mcc-ftab-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The navigable tab body — a bare button so the close-X can be a SIBLING button, never nested
+   (a button inside a button / anchor is invalid + an a11y trap). Inherits the tab's colour. */
+.mcc-ftab-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.mcc-ftab-link > svg {
+  flex-shrink: 0;
+}
+.mcc-ftab-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: -4px;
+  border-radius: 5px;
+  color: var(--muted-foreground);
+}
+.mcc-ftab-x:hover {
+  background: var(--bv-frost-12);
+  color: var(--foreground);
+}
+.mcc-ftabs-spacer {
+  flex: 1;
+}
+
+/* File tabs enter from the file pane's side (the prototype's queue slide-in). */
+.mcc-ftab--in {
+  animation: mcc-tabin 0.34s var(--bv-ease-standard);
+  overflow: hidden;
+}
+@keyframes mcc-tabin {
+  from {
+    max-width: 0;
+    opacity: 0;
+    transform: translateX(22px);
+    padding-left: 0;
+    padding-right: 0;
+  }
+  55% {
+    opacity: 0.5;
+  }
+  to {
+    max-width: 170px;
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* The tab strip's icon toggles (sidebar, file pane) — matte, frost on hover / when on. */
+.mcc-prompt-iconbtn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--bv-radius-lg);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background var(--bv-dur-fast) var(--bv-ease-standard),
+    color var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-prompt-iconbtn:hover {
+  background: var(--bv-frost-8);
+  color: var(--foreground);
+}
+.mcc-prompt-iconbtn.is-on {
+  background: var(--bv-frost-12);
+  color: var(--foreground);
+}
+
+/* ── Chrome placement (B): the main tab content + the FS pane at the edge ──── */
+.mcc-fsrow {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+.mcc-fsrow.has-fs {
+  grid-template-columns: minmax(0, 1fr) 248px;
+}
+.mcc-fsmain {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+/* The FS pane wrapper at the layout edge (a matte left-bordered column). Defined BEFORE the responsive
+   clamp so the media-query override (equal specificity, later, inside the query) wins without raising
+   specificity — the `noDescendingSpecificity` rule wants the base ahead of its overrides. */
+.mcc-rpane {
+  position: relative;
+  border-left: 1px solid var(--bv-border-5);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+/* The FS pane is a wide-viewport affordance (the prototype collapses it responsively). Below the
+   breakpoint it yields so the main view keeps the full width — the full responsive state machine is
+   FID-8 (mobile); this CSS clamp just prevents the pane squeezing `main` to nothing on a narrow screen. */
+@media (max-width: 1024px) {
+  .mcc-fsrow.has-fs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .mcc-rpane {
+    display: none;
+  }
+}
+
+/* ── The file pane ────────────────────────────────────────────────────────── */
+.mcc-ftree {
+  border-left: 1px solid var(--bv-border-5);
+  overflow-y: auto;
+  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.mcc-ftree-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  padding: 0 8px 6px;
+}
+.mcc-ftree-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--bv-radius-lg);
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--foreground);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-ftree-row > svg {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+.mcc-ftree-row:hover {
+  background: var(--bv-frost-8);
+}
+.mcc-ftree-row.is-active {
+  background: var(--bv-frost-12);
+}
+.mcc-ftree-row.is-folder {
+  cursor: default;
+}
+.mcc-ftree-row.is-folder:hover {
+  background: transparent;
+}
+.mcc-ftree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcc-ftree-loc {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 8px 8px;
+}
+.mcc-ftree-loc-path {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcc-ftree-loc .mc-receipt {
+  align-self: flex-start;
+}
+
+/* The FS pane's tree fills the wrapper without its own left border (the wrapper owns it). */
+.mcc-rpane .mcc-ftree {
+  border-left: none;
+  flex: 1;
+}
+
+/* ── The rendered document — every file is a contract or a receipt ─────────── */
+.mcc-doc {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px 28px;
+}
+.mcc-doc-inner {
+  max-width: 620px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.mcc-doc-crumb {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.mcc-doc-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+.mcc-fm-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mcc-doc-p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.mcc-doc-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.mcc-doc-list li {
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mcc-ftab--in {
+    animation: none;
+  }
+  .mcc-ftab,
+  .mcc-ftree-row,
+  .mcc-prompt-iconbtn {
+    transition: none;
+  }
+}
