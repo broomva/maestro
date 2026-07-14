@@ -5,20 +5,14 @@
 // source of truth. Session tabs (multi-session) + column-resize + drag-to-split are deferred follow-ups.
 
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { FileText, PanelRight, X } from "lucide-react";
+import { Columns3, FileText, PanelRight, X } from "lucide-react";
 import { useStore } from "zustand";
+import { activeFilePath } from "@/lib/file-route";
 import { maestroStore } from "@/store";
 
 /** The last path segment — the tab label (the prototype's `p.split("/").pop()`). */
 function basename(path: string): string {
   return path.split("/").filter(Boolean).pop() ?? path;
-}
-
-/** The open file's path when the route is "/file/$path", else null (the active-tab source). */
-function activeFilePath(pathname: string): string | null {
-  const prefix = "/file/";
-  if (!pathname.startsWith(prefix)) return null;
-  return decodeURIComponent(pathname.slice(prefix.length));
 }
 
 export function TabStrip() {
@@ -44,9 +38,10 @@ export function TabStrip() {
       <Link
         to="/"
         className={`mcc-ftab${maestroActive ? " is-active" : ""}`}
+        aria-current={maestroActive ? "page" : undefined}
         title="The orchestrator's plane — work grouped by attention"
       >
-        <span className="mc-chip-dot" style={{ background: "var(--bv-info)" }} />
+        <Columns3 size={13} strokeWidth={2} />
         <span className="mcc-ftab-name">Maestro</span>
       </Link>
 
@@ -60,7 +55,12 @@ export function TabStrip() {
             className={`mcc-ftab mcc-ftab--in${activeFile === p ? " is-active" : ""}`}
             title={p}
           >
-            <button type="button" className="mcc-ftab-link" onClick={() => openFileTab(p)}>
+            <button
+              type="button"
+              className="mcc-ftab-link"
+              aria-current={activeFile === p ? "page" : undefined}
+              onClick={() => openFileTab(p)}
+            >
               <FileText size={13} strokeWidth={2} />
               <span className="mcc-ftab-name">{name}</span>
             </button>

@@ -72,6 +72,11 @@ test("the chrome carries a pinned Maestro tab; the FS pane walks the workspace a
   const maestro = strip.getByRole("link", { name: "Maestro" });
   await expect(maestro).toBeVisible();
   await expect(maestro).toHaveClass(/is-active/);
+  // Active state is exposed to assistive tech, not just via a class (aria-current).
+  await expect(maestro).toHaveAttribute("aria-current", "page");
+  // The Maestro tab is a static nav tab — it carries a board glyph, NOT a running-state dot
+  // (a persistent info dot would read as "always running"; canon §Work states, prototype placement B).
+  await expect(maestro.locator(".mc-chip-dot")).toHaveCount(0);
   await expect(strip).not.toContainText("%");
 
   // The FS pane shows the workspace: the project as a folder, the leaves as files.
@@ -94,6 +99,12 @@ test("opening a file adds a tab + renders it as a document; the pane marks the o
   await expect(page).toHaveURL(/\/file\/hawthorne\/spec$/);
   const strip = page.getByTestId("tab-strip");
   await expect(strip.getByText("spec", { exact: true })).toBeVisible();
+  // The open file's tab is the current one (aria-current); the Maestro tab yields it.
+  await expect(strip.getByRole("button", { name: "spec", exact: true })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  await expect(strip.getByRole("link", { name: "Maestro" })).not.toHaveAttribute("aria-current");
   const doc = page.getByTestId("file-view");
   await expect(doc).toContainText("The spec"); // real title
   await expect(doc).toContainText("~ / hawthorne / spec"); // crumb from path
@@ -109,6 +120,14 @@ test("opening a file adds a tab + renders it as a document; the pane marks the o
   await expect(page.getByTestId("board")).toBeVisible();
   await expect(strip.getByText("spec", { exact: true })).toHaveCount(0);
 });
+
+// NOTE — the malformed-URL guard (activeFilePath swallowing a URIError so a hand-typed `/file/foo%`
+// never blanks the shell) is proven at the UNIT level in src/lib/file-route.test.ts, which is
+// mutation-checked (removing the try/catch throws). It is NOT an integration test here on purpose:
+// `page.goto("/file/bad%E0%A4")` never reaches the client — vite's own `viteHtmlFallbackMiddleware`
+// decodes the request path and 500s server-side before serving the SPA, so the harness can't exercise
+// the client-render path the guard protects (production serves the SPA via Hono/static, not vite). An
+// integration test through this harness would fail identically with or without the fix — vacuous.
 
 test("the FS toggle collapses the pane (a persisted layout pref)", async ({ page }) => {
   await expect(page.getByTestId("fs-rpane")).toBeVisible();

@@ -13,6 +13,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { useEffect, useMemo } from "react";
 import { useStore } from "zustand";
+import { activeFilePath } from "@/lib/file-route";
 import {
   maestroStore,
   selectFileTree,
@@ -24,12 +25,6 @@ import { FilePane } from "./fs/file-pane";
 import { TabStrip } from "./fs/tab-strip";
 import { Sidebar } from "./shell/sidebar";
 import { TopBar } from "./shell/top-bar";
-
-/** The open file's path when the route is "/file/$path", else null (the active file-tree row). */
-function activeFilePath(pathname: string): string | null {
-  const prefix = "/file/";
-  return pathname.startsWith(prefix) ? decodeURIComponent(pathname.slice(prefix.length)) : null;
-}
 
 /** The default sidebar width when nothing is persisted (CLAUDE.md §Layout: 200px). */
 const NAV_WIDTH_DEFAULT = 200;
