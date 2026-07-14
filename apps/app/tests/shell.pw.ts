@@ -41,7 +41,9 @@ test("the top bar presence reads as an agent — a tidepool dot, not a menu", as
   // The presence chip opens the orchestrator's session (BRO-1826 M4) — a link, not a settings button
   // (the orchestrator is an agent, not a settings page; CLAUDE.md §What Maestro is). It routes to the
   // chat surface.
-  const presence = page.getByRole("link", { name: /maestro/i });
+  // Scope to the header — the sidebar's "Maestro" lens also matches /maestro/i; the presence is the
+  // top-bar narration link.
+  const presence = page.locator("header").getByRole("link", { name: /maestro/i });
   await expect(presence).toBeVisible();
   await expect(presence).toHaveAttribute("href", "/session/orchestrator");
 });

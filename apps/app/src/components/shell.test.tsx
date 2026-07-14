@@ -1,9 +1,10 @@
 /// <reference types="bun" />
 
-// Shell structure (BRO-1771; router context BRO-1824). renderToStaticMarkup — no DOM harness, so it runs
-// under CI's plain bun test (the never-scroll *behavior* is shell.pw.ts's browser concern). The nav is
-// now TanStack `<Link>`s, so the Shell needs router context — a loaded memory router mounts it at `/`
-// (Board active), which is exactly how it renders in the app.
+// Shell structure (BRO-1771 → BRO-1884 design fidelity). renderToStaticMarkup — no DOM harness, so
+// it runs under CI's plain bun test (the never-scroll *behavior* is shell.pw.ts's browser concern).
+// The chrome is now the IA4 tree-led sidebar + McvTopBar, so the nav is TanStack `<Link>`s (lens bar
+// + footer) + a workspace tree — the Shell needs router context; a loaded memory router mounts it at
+// `/` (the Maestro/board lens active), exactly how it renders in the app.
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import {
@@ -17,71 +18,86 @@ import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Shell } from "./shell";
 
-const NAV_PATHS = ["/", "/knowledge", "/history", "/settings", "/account"];
+// Every route the shell's Links target must exist in the tree for hrefs to resolve — the lens bar
+// (/, /history, /knowledge), the footer (/settings, /account), and the orchestrator presence.
+const STATIC_PATHS = ["/", "/knowledge", "/history", "/settings", "/account"];
 
-/** Render the Shell inside a loaded memory router at `/` (Board active) — its real render context. */
+/** Render the Shell inside a loaded memory router at `/` (the board lens active) — its real context. */
 async function renderShell(children?: ReactNode): Promise<string> {
   const rootRoute = createRootRoute({ component: () => <Shell>{children}</Shell> });
-  // The Shell's nav Links target these paths; they must exist in the tree for the active match to resolve.
-  const routes = NAV_PATHS.map((path) =>
+  const staticRoutes = STATIC_PATHS.map((path) =>
     createRoute({ getParentRoute: () => rootRoute, path, component: () => null }),
   );
+  const sessionRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/session/$sessionId",
+    component: () => null,
+  });
   const router = createRouter({
-    routeTree: rootRoute.addChildren(routes),
+    routeTree: rootRoute.addChildren([...staticRoutes, sessionRoute]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
   await router.load();
   return renderToStaticMarkup(<RouterProvider router={router} />);
 }
 
-describe("Shell — the M2 chrome", () => {
+describe("Shell — the tree-led chrome (BRO-1884)", () => {
   let html = "";
   beforeAll(async () => {
     html = await renderShell();
   });
 
-  test("is a never-scroll 200px + flex grid — the shell owns no scroll", () => {
-    expect(html).toContain("grid-cols-[200px_1fr]");
-    expect(html).toContain("h-dvh");
-    expect(html).toContain("overflow-hidden");
+  test("the shell is the bv-app grid at the 200px sidebar width (store-driven)", () => {
+    expect(html).toContain('class="bv-app"');
+    // Width comes from the persisted prefs slice (default 200 / CLAUDE.md §Layout), set inline.
+    expect(html).toContain("grid-template-columns:200px 1fr");
   });
 
-  test("the sidebar is matte with the inline brand mark (no #000 raster) and a Lucide nav", () => {
-    expect(html).toContain("bg-sidebar");
-    // The brand mark is an inline SVG on a cool-axis --bv-ink chip — never the opaque raster
-    // that painted a pure-#000 tile on the light sidebar (BRO-1771 P20).
+  test("the sidebar is a matte workspace tree with the inline brand chip (no #000 raster)", () => {
+    expect(html).toContain('class="bv-sidebar mcc-nav"');
+    // Brand mark is an inline SVG on a cool-axis --bv-ink chip — never the opaque raster that
+    // painted a pure-#000 tile on the light sidebar (BRO-1771 P20).
+    expect(html).toContain('data-testid="brand-mark"');
     expect(html).toContain("bg-[var(--bv-ink)]");
     expect(html).not.toContain("broomva-blackhole-logo");
     expect(html).not.toContain("<img");
-    for (const label of ["Board", "Knowledge", "History", "Settings"]) {
-      expect(html).toContain(label);
-    }
+    // The "Workspace" tree section is the backbone of the tree-led sidebar.
+    expect(html).toContain("Workspace");
   });
 
-  test("the nav items are links to the product routes", () => {
-    for (const path of ["/knowledge", "/history", "/settings", "/account"]) {
+  test("the adaptive lens bar + footer link to the product routes", () => {
+    // Primary lens falls back to Maestro when the gate is clear (empty store → needsYou 0).
+    expect(html).toContain('class="mcc-lensbar"');
+    expect(html).toContain("Maestro");
+    // Lenses + footer are real links to the routes.
+    for (const path of ["/history", "/knowledge", "/settings", "/account"]) {
       expect(html).toContain(`href="${path}"`);
     }
   });
 
-  test("the top bar carries the orchestrator presence (tidepool) — an agent, not a menu", () => {
+  test("the top bar carries the orchestrator presence (tidepool) linking to its session", () => {
     expect(html).toContain("bv-dot-live");
     expect(html).toContain("maestro");
+    // The presence is an agent you can open, not a settings button (CLAUDE.md §What Maestro is).
+    expect(html).toContain('href="/session/orchestrator"');
+    // ...and the ⌘K command field on the center axis.
+    expect(html).toContain('class="mcc-cmd"');
+    expect(html).toContain("⌘K");
   });
 
   test("the main panel owns the scroll", () => {
-    // Couple the assertion to <main> — `overflow-y-auto` is also on <aside>, so a bare
-    // toContain would stay green even if <main> lost its scroll (BRO-1771 P20 nit).
+    // Couple the assertion to <main> — `overflow-y-auto` is also on <aside> (mcc-nav), so a bare
+    // toContain would stay green even if <main> lost its scroll.
     expect(html).toContain('overflow-y-auto p-6" data-testid="shell-main"');
   });
 
-  test("the active nav item (Board, at /) is marked for assistive tech", () => {
+  test("the active lens (Maestro, at /) is marked for assistive tech", () => {
     expect(html).toContain('aria-current="page"');
   });
 
   test("renders children in place of the placeholder when given", async () => {
     const withChild = await renderShell("hello panel");
     expect(withChild).toContain("hello panel");
-    expect(withChild).not.toContain("Panel row 1");
+    expect(withChild).not.toContain("surfaces mount here");
   });
 });

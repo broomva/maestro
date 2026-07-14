@@ -73,7 +73,7 @@ export function Board() {
         data-testid="board-empty"
         className="flex h-full items-center justify-center text-muted-foreground text-sm"
       >
-        No work yet. Add a _work.md to the workspace and it appears here.
+        No work yet. Start a mission and it appears here.
       </div>
     );
   }

@@ -148,11 +148,148 @@ export function selectBoard(s: ServerTruth): BoardGroup[] {
   return groups;
 }
 
-/** "Needs you" headline — the count of work at a gate or stuck (contract §"Reactive queries"). */
+/** One project folder in the sidebar workspace tree. */
+export interface SidebarProject {
+  /** project title (the `project` ancestry field). */
+  name: string;
+  /** any item in the project is `running` (renders a live tidepool dot). */
+  live: boolean;
+  /** count of items at a gate or stuck (`review` + `blocked`) — the attention badge. */
+  attn: number;
+}
+
+/** One initiative folder in the sidebar workspace tree — its projects + progress. */
+export interface SidebarInitiative {
+  /** initiative title (the `initiative` ancestry field). */
+  name: string;
+  /** count of `done` items under it (the `done/total` progress, never a percentage). */
+  done: number;
+  /** total items under it. */
+  total: number;
+  /** its project folders, ordered live-first then attention then name. */
+  projects: SidebarProject[];
+}
+
+/** The sidebar workspace tree — initiatives (each with projects) + loose projects. */
+export interface SidebarTree {
+  initiatives: SidebarInitiative[];
+  /** projects whose items carry no initiative ancestor (shown at the tree root). */
+  looseProjects: SidebarProject[];
+  /** top-level folder count for the root "N places" row. */
+  placesCount: number;
+}
+
+// Folders are keyed by their display TITLE (the ancestry field), not node id — the tree presents
+// and groups by title, mirroring the prototype. Two sibling folders with the same explicit title
+// therefore merge into one row (their live/attn, and the initiative's done/total, combine). In
+// practice `titleOf` falls back to the unique path segment, so a collision needs a hand-authored
+// duplicate `title:`; if that ever matters, carry the ancestor id on the WorkItem and key on it.
+/** Fold a work item into a project-folder accumulator (live OR-in, attention count-up). */
+function foldProject(acc: Map<string, SidebarProject>, name: string, item: WorkItem): void {
+  const p = acc.get(name) ?? { name, live: false, attn: 0 };
+  if (item.state === "running") p.live = true;
+  if (item.state === "review" || item.state === "blocked") p.attn += 1;
+  acc.set(name, p);
+}
+
+/** Order project folders: live first, then by attention (desc), then name (stable, locale-free). */
+function orderProjects(projects: SidebarProject[]): SidebarProject[] {
+  return projects.sort(
+    (a, b) =>
+      Number(b.live) - Number(a.live) ||
+      b.attn - a.attn ||
+      (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+  );
+}
+
+/**
+ * The sidebar workspace tree (BRO-1884) — the nav IS the workspace, derived from real
+ * WorkItems (the McSidebar/MccTcSidebar logic, ported from seed to store): initiatives group
+ * their projects; each project carries a live dot + an attention count; each initiative carries
+ * `done/total` (receipts, never a percentage — CLAUDE.md §Work states). Items with a project but
+ * no initiative ancestor surface as loose root folders. A leaf with NEITHER ancestor is not a
+ * folder "place" — it has no home in the folder tree, so it is not surfaced here (it still appears
+ * in the board/feed, which render leaf WorkItems directly). Insertion order follows
+ * `selectWorkItems` (path-sorted → stable).
+ */
+export function selectSidebarTree(s: ServerTruth): SidebarTree {
+  const items = selectWorkItems(s);
+  // Per-initiative accumulators (Maps preserve first-seen order → stable tree order).
+  const initProjects = new Map<string, Map<string, SidebarProject>>();
+  const initTotals = new Map<string, { done: number; total: number }>();
+  const loose = new Map<string, SidebarProject>();
+
+  for (const item of items) {
+    // Skip the container folders themselves (initiative / project nodes) — the tree structure comes
+    // from the LEAF items' ancestry titles, and counting the folders would double-count done/total.
+    if (item.kind === "initiative" || item.kind === "project") continue;
+    if (item.initiative) {
+      const projs = initProjects.get(item.initiative) ?? new Map<string, SidebarProject>();
+      if (item.project) foldProject(projs, item.project, item);
+      initProjects.set(item.initiative, projs);
+      const tot = initTotals.get(item.initiative) ?? { done: 0, total: 0 };
+      tot.total += 1;
+      if (item.state === "done") tot.done += 1;
+      initTotals.set(item.initiative, tot);
+    } else if (item.project) {
+      foldProject(loose, item.project, item);
+    }
+  }
+
+  const initiatives: SidebarInitiative[] = [...initProjects].map(([name, projs]) => {
+    const tot = initTotals.get(name) ?? { done: 0, total: 0 };
+    return { name, done: tot.done, total: tot.total, projects: orderProjects([...projs.values()]) };
+  });
+  const looseProjects = orderProjects([...loose.values()]);
+
+  return { initiatives, looseProjects, placesCount: initiatives.length + looseProjects.length };
+}
+
+/**
+ * "Needs you" headline — the count of LEAF work at a gate or stuck (contract §"Reactive queries").
+ * Leaf-only, matching the container-exclusion rule of `selectSidebarTree.attn` (skips containers,
+ * line ~218) and `selectNarration` (line ~259): a container folder (initiative/project) can carry
+ * an aggregate `review`/`blocked` state, and counting it here would inflate the badge above the
+ * visible tree + narration — a number the tree cannot explain. All three chrome selectors agree on
+ * this rule, so the count never over-reports because of a folder's own state.
+ *
+ * (One edge remains, tracked as a fast-follow: a leaf homed DIRECTLY under an initiative with no
+ * project ancestor is counted here but its attention surfaces in the tree only at project
+ * granularity — the tree has no initiative-level attention badge yet. Rare shape; the badge stays
+ * the authoritative top-level count.)
+ */
 export function selectNeedsYouCount(s: ServerTruth): number {
   let n = 0;
   for (const node of Object.values(s.nodes)) {
+    if (node.kind === "initiative" || node.kind === "project") continue;
     if (node.state === "review" || node.state === "blocked") n++;
   }
   return n;
+}
+
+/**
+ * The orchestrator's last move, as one plain-voice line for the top-bar narration (BRO-1884) —
+ * DERIVED from real state, never the prototype's hardcoded "maestro woke 2m ago". Attention-first:
+ * a run at your gate (with its branch receipt) → stuck → running → the calm resting line. Leads with
+ * the receipt, no fabricated timestamp (CLAUDE.md §Voice + §Work states).
+ */
+export function selectNarration(s: ServerTruth): string {
+  // Leaf work only — a "3 running" line that counted the initiative + project folders above a single
+  // running task would be misleading (the folders are structure, not the work).
+  const items = selectWorkItems(s).filter((i) => i.kind !== "initiative" && i.kind !== "project");
+  const review = items
+    .filter((i) => i.state === "review")
+    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
+  if (review.length > 0) {
+    const top = review[0]; // most-recent review item — lead with its branch receipt when present
+    const n = review.length;
+    if (top?.run)
+      return n === 1 ? `${top.run} at your gate` : `${top.run} + ${n - 1} more at your gate`;
+    return `${n} at your gate`;
+  }
+  const blocked = items.filter((i) => i.state === "blocked").length;
+  if (blocked > 0) return `${blocked} stuck`;
+  const running = items.filter((i) => i.state === "running").length;
+  if (running > 0) return `${running} running`;
+  return "standing · nothing at your gate";
 }
