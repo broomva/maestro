@@ -62,6 +62,19 @@ describe("LifecycleRail", () => {
     expect((h.match(/is-passed/g) ?? []).length).toBe(3); // Queued + Running + Needs you passed
   });
 
+  test("canceled → terminal-neutral: NO stage passed or current (never fabricates a completed run)", () => {
+    // A canceled item claims no progression — every stage stays inert/upcoming (matches the prototype's
+    // absent-entry behavior). It must NOT render blue-passed stages + a lit Done, which would flatly
+    // contradict the inspector's own "No run yet" stub and canceled's muted/gray canon tone.
+    const h = html("canceled");
+    expect(h).not.toContain("is-passed"); // nothing behind — no fabricated progression
+    expect(h).not.toContain("is-current"); // Done is not lit — a canceled item did not complete
+    expect(h).not.toContain("is-warn");
+    expect(h).not.toContain('aria-current="step"'); // no active step for a terminal-neutral item
+    // The four stages still render (inert), so the rail reads as a calm, un-traversed lifecycle.
+    for (const label of ["Queued", "Running", "Needs you", "Done"]) expect(h).toContain(label);
+  });
+
   test("proposed/reviewing/triggered all collapse to Queued being current (upcoming rest)", () => {
     for (const s of ["proposed", "reviewing", "triggered"] as const) {
       const h = html(s);

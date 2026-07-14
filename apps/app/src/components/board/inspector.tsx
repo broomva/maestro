@@ -106,12 +106,13 @@ export function Inspector({ item }: { item: WorkItem | null }) {
 
       {/* Honest scope line: the RECEIPTS shown here (look, run, verdict, state, the rail) are the real,
           projected work noun. The per-event activity timeline + full diffstat live behind the
-          session-event read path — WorkItem deliberately excludes the event stream (no chat / events /
-          budget / percent), so those land with the P1 read path, keyed on this item's sessionId. */}
+          session-event read path (the P1 deliverable) — WorkItem deliberately excludes the event stream
+          (no chat / events / budget / percent), so they open once that read path lands. Copy is plain
+          voice: no em dashes, no internal build-phase names (CLAUDE.md §Voice). */}
       <p className="mt-1 text-muted-foreground text-xs">
         {item.sessionId
-          ? "The full activity timeline and diffstat open with this run's events — the session read path lands in P1."
-          : "No run yet — the activity timeline appears once a session dispatches."}
+          ? "The full activity timeline and diffstat open once this run's events are recorded."
+          : "No run yet · the activity timeline appears once a session dispatches."}
       </p>
     </aside>
   );

@@ -72,16 +72,22 @@ describe("Inspector — the M5 receipts stub", () => {
     expect(html).not.toContain("%");
   });
 
-  test("the activity-timeline stub is honest + keyed on sessionId", () => {
-    // A dispatched item (has a session) → the timeline lands with the session read path.
+  test("the activity-timeline stub is honest + keyed on sessionId (plain voice — no em dash, no 'P1')", () => {
+    // A dispatched item (has a session) → the timeline opens when its run events are recorded.
     const dispatched = renderToStaticMarkup(<Inspector item={{ ...base, sessionId: "s1" }} />);
-    expect(dispatched).toContain("activity timeline and diffstat");
-    expect(dispatched).toContain("lands in P1");
+    // (the apostrophe in "run's" renders as &#x27; in static markup, so match around it)
+    expect(dispatched).toContain("activity timeline and diffstat open once");
+    expect(dispatched).toContain("events are recorded");
     expect(dispatched).not.toContain("%");
     // A never-run item (no session) → an honest "no run yet" line, never faked activity.
     const neverRun = renderToStaticMarkup(<Inspector item={base} />);
     expect(neverRun).toContain("No run yet");
     expect(neverRun).not.toContain("activity timeline and diffstat");
+    // CLAUDE.md §Voice: no em dashes, no internal build-phase names in the user-facing copy.
+    for (const h of [dispatched, neverRun]) {
+      expect(h).not.toContain("—"); // em dash
+      expect(h).not.toContain("P1"); // internal build-phase jargon
+    }
   });
 
   test("omits absent receipts (a bare item renders no branch/verdict/look rows)", () => {

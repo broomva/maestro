@@ -21,7 +21,15 @@ const RAIL_STAGES = [
   { id: "done", label: "Done" },
 ] as const;
 
-/** Where each OrchState sits on the rail (its current stage index). `blocked` sits at Running. */
+/**
+ * Where each OrchState sits on the rail (its current stage index). `blocked` sits at Running.
+ * `canceled` is TERMINAL-NEUTRAL: index -1 → no stage is passed or current, so the rail stays inert
+ * (all upcoming, gray) rather than fabricating a completed run. This mirrors the prototype, whose
+ * MC_RAIL_INDEX has no `canceled` entry (cur = undefined → every stage falls to upcoming); a canceled
+ * item claims no progression (and its `sessionId` may be undefined — the honest stub then reads "No
+ * run yet", which an all-blue "reached Done" rail would flatly contradict). PLAIN_VOICE also pins
+ * canceled to a muted/gray tone, never the blue of a real `done`.
+ */
 const RAIL_INDEX: Record<OrchState, number> = {
   proposed: 0,
   reviewing: 0,
@@ -30,10 +38,8 @@ const RAIL_INDEX: Record<OrchState, number> = {
   blocked: 1,
   review: 2,
   done: 3,
-  canceled: 3,
+  canceled: -1,
 };
-
-type StagePhase = "passed" | "current" | "warn" | "upcoming";
 
 export function LifecycleRail({ state }: { state: OrchState }) {
   const cur = RAIL_INDEX[state];
@@ -44,16 +50,11 @@ export function LifecycleRail({ state }: { state: OrchState }) {
           which stage the item is on (the header badge announces the state; the rail adds progression). */}
       <ol className="mc-rail" aria-label="Lifecycle">
         {RAIL_STAGES.map((s, i) => {
-          const phase: StagePhase =
-            i < cur ? "passed" : i === cur ? (blocked ? "warn" : "current") : "upcoming";
+          // The stage's phase class, straight from its position relative to the current index — passed
+          // behind it, current (or warn, if Stuck) on it, upcoming (inert) ahead. cur = -1 (canceled)
+          // lands every stage in the upcoming/inert branch.
           const cls =
-            phase === "passed"
-              ? " is-passed"
-              : phase === "warn"
-                ? " is-warn"
-                : phase === "current"
-                  ? " is-current"
-                  : "";
+            i < cur ? " is-passed" : i === cur ? (blocked ? " is-warn" : " is-current") : "";
           return (
             <li
               key={s.id}
