@@ -112,20 +112,26 @@ describe("Shell — the tab strip is work-surface chrome (BRO-1896)", () => {
   // The prototype frames the full-page views (History/Knowledge/Settings/Account) with NO tab strip;
   // the tab strip belongs to the Maestro plane (/), files (/file/$), and sessions (/session/$). The
   // sidebar + top bar stay on every route (the way back to Maestro).
-  test("present on the work surface: the board /, a file, and a session", async () => {
+  test("present on the work surface: the board /, a file, and a session (+ the FS pane, fsOpen defaults true)", async () => {
     for (const at of ["/", "/file/spec.md", "/session/s1"]) {
       const html = await renderShell(undefined, at);
       expect(html).toContain('data-testid="tab-strip"');
+      // The FS pane is work-surface chrome too; fsOpen defaults true, so it renders here.
+      expect(html).toContain('data-testid="fs-rpane"');
     }
   });
 
-  test("ABSENT on the full-page-view routes, but the sidebar + top bar stay", async () => {
+  test("ABSENT on the full-page-view routes (tab strip AND FS pane), but the sidebar + top bar stay", async () => {
     for (const at of ["/history", "/knowledge", "/settings", "/account"]) {
       const html = await renderShell(undefined, at);
       expect(html).not.toContain('data-testid="tab-strip"');
-      // chrome the views keep: the sidebar (brand mark) + the top bar (⌘K command field).
+      // The FS pane is gated by `workSurface && fsOpen`; fsOpen defaults true, so its absence here proves
+      // the work-surface conjunct (a `showFs = fsOpen` regression would leak the pane onto views).
+      expect(html).not.toContain('data-testid="fs-rpane"');
+      // chrome the views keep: the sidebar (brand mark) + the top bar (⌘K command field). Assert on
+      // testids, not class strings, so the sentinel survives cosmetic class edits.
       expect(html).toContain('data-testid="brand-mark"');
-      expect(html).toContain('class="mcc-cmd"');
+      expect(html).toContain('data-testid="cmd-field"');
     }
   });
 });

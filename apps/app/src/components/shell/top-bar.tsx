@@ -60,6 +60,7 @@ export function TopBar({
       <button
         type="button"
         className="mcc-cmd"
+        data-testid="cmd-field"
         onClick={onCommand}
         aria-label="Ask, find, or start work (Command K)"
       >
