@@ -1,0 +1,511 @@
+/* Shell chrome — the prototype's app-shell classes, ported verbatim (porting-notes.md
+ * §"CSS class names — keep verbatim; they compose tokens"). Source of truth for the look:
+ * handoff/ui_kits/desktop/styles.css (.bv-*) + handoff/apps/maestro/concepts.css (.mcc-*)
+ * + handoff/apps/maestro/styles.css (.mc-*). These compose @maestro/tokens vars only — no
+ * raw values (CLAUDE.md canon rule). Consumed by components/shell/* (BRO-1884, design fidelity).
+ *
+ * The prototype rode the desktop UI-kit which set `body { overflow:hidden }` + `height:100%`
+ * on html/body/#root; here the app root owns full height instead (.bv-app is 100dvh), so the
+ * shell is self-contained and does not depend on ancestor height. */
+
+/* ── Window shell ───────────────────────────────────────── */
+.bv-app {
+  height: 100dvh;
+  display: grid;
+  /* the sidebar column width is driven inline from the store (prefs.cols.nav / collapsed rail);
+     this is the fallback for a bare render. */
+  grid-template-columns: var(--bv-w-sidebar) 1fr;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--bv-font-sans);
+  font-size: 14px;
+  overflow: hidden;
+}
+.bv-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ── Sidebar ────────────────────────────────────────────── */
+.bv-sidebar {
+  background: var(--sidebar);
+  display: flex;
+  flex-direction: column;
+  padding: 10px 8px;
+  gap: 4px;
+  border-right: 1px solid var(--sidebar-border);
+  min-width: 0;
+}
+.mcc-nav {
+  overflow-y: auto;
+}
+.bv-ws-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: var(--foreground);
+  padding: 8px 10px;
+  border-radius: var(--bv-radius-lg);
+  margin-bottom: 6px;
+  text-align: left;
+}
+.bv-ws-switch:hover {
+  background: var(--sidebar-accent);
+}
+.bv-ws-name {
+  font-size: 13px;
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.bv-sb-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 10px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  color: var(--foreground);
+  border-radius: var(--bv-radius-lg);
+  text-align: left;
+  width: 100%;
+}
+.bv-sb-item:hover {
+  background: var(--sidebar-accent);
+}
+.bv-sb-item.is-active {
+  background: var(--sidebar-accent);
+  font-weight: 500;
+}
+.bv-sb-item svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.bv-sb-section-label {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  padding: 14px 12px 4px;
+}
+.bv-sb-badge {
+  margin-left: auto;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 10.5px;
+  font-weight: 500;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.bv-sb-spacer {
+  flex: 1;
+}
+.mcc-sb-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mcc-sb-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+/* Sidebar initiative rows (mc-init-progress from styles.css) */
+.mc-init-progress {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* ── Lens bar (IA4 tree-led primary) ────────────────────── */
+.mcc-lensbar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0 6px;
+}
+.mcc-lens {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--bv-radius-lg);
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.mcc-lens > svg {
+  flex-shrink: 0;
+}
+.mcc-lens:hover {
+  background: var(--bv-frost-8);
+  color: var(--foreground);
+}
+.mcc-lens.is-active {
+  background: var(--bv-frost-12);
+  color: var(--foreground);
+}
+.mcc-lens-badge {
+  margin-left: auto;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 99px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── Nav footer (feedback / settings / profile) ─────────── */
+.mcc-nav-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bv-border-5);
+}
+.mcc-foot-btn {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--bv-radius-lg);
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition:
+    background var(--bv-dur-fast) var(--bv-ease-standard),
+    color var(--bv-dur-fast);
+}
+.mcc-foot-btn > svg {
+  flex-shrink: 0;
+}
+.mcc-foot-btn:hover {
+  background: var(--bv-frost-8);
+  color: var(--foreground);
+}
+.mcc-foot-btn.is-active {
+  background: var(--bv-frost-12);
+  color: var(--foreground);
+  font-weight: 500;
+}
+.mcc-foot-btn.is-active > svg {
+  color: var(--bv-blue);
+}
+.mcc-foot-profile {
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bv-border-5);
+  color: var(--foreground);
+}
+.mcc-foot-profile span {
+  font-weight: 500;
+}
+
+/* ── Collapsed rail (minimized sidebar) ─────────────────── */
+.mcc-rail {
+  width: 52px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0;
+  border-right: 1px solid var(--bv-border-5);
+  background: var(--sidebar);
+}
+.mcc-rail--side {
+  width: 100%;
+  height: 100%;
+  gap: 5px;
+  overflow-y: auto;
+}
+.mcc-rail-btn {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--bv-radius-lg);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background var(--bv-dur-fast) var(--bv-ease-standard),
+    color var(--bv-dur-fast);
+}
+.mcc-rail-btn:hover {
+  background: var(--bv-frost-8);
+  color: var(--foreground);
+}
+.mcc-rail-btn.is-on {
+  background: var(--bv-frost-12);
+  color: var(--bv-blue);
+}
+.mcc-rail-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 99px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.mcc-rail-div {
+  width: 22px;
+  height: 1px;
+  background: var(--bv-border-15);
+  margin: 3px 0;
+  flex-shrink: 0;
+}
+.mcc-rail-avatar {
+  padding: 0;
+}
+
+/* ── Top bar ────────────────────────────────────────────── */
+/* Base classes come first; the `.mcv-top`-scoped grid overrides + media queries
+ * follow at the end of this section, so specificity ascends (biome noDescendingSpecificity). */
+.bv-top-bar {
+  height: var(--bv-h-header);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  padding: 0 12px 0 24px;
+  font-size: 13px;
+  color: var(--muted-foreground);
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  flex-shrink: 0;
+}
+.mc-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mcv-narr-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.mcc-narr {
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 400;
+}
+.mcc-narr b {
+  font-weight: 500;
+  color: var(--foreground);
+}
+.mcc-quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--bv-radius-full);
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-quiet:hover {
+  background: var(--bv-frost-8);
+  color: var(--foreground);
+}
+
+/* command field (⌘K) */
+.mcc-cmd {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--bv-border-15);
+  border-radius: var(--bv-radius-full);
+  background: var(--bv-canvas-soft);
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: text;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-cmd:hover {
+  background: var(--bv-frost-8);
+}
+.mcc-cmd-ph {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.mcc-cmd-kbd {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border: 1px solid var(--bv-border-15);
+  border-radius: 5px;
+  background: var(--card);
+  flex-shrink: 0;
+}
+
+/* attention chip ("N needs you") */
+.mcc-attn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 99px;
+  background: var(--bv-frost-12);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--foreground);
+}
+.mcc-attn-btn {
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  color: inherit;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-attn-btn:hover {
+  background: var(--bv-frost-8);
+}
+.mc-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  flex-shrink: 0;
+}
+
+/* tick-timer ring */
+.mcc-timer {
+  position: relative;
+}
+.mcc-orch-meta {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.mcc-orch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px 0 9px;
+  border: 1px solid var(--bv-border-15);
+  border-radius: var(--bv-radius-full);
+  background: var(--bv-canvas-soft);
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background var(--bv-dur-fast) var(--bv-ease-standard);
+}
+.mcc-orch-chip:hover {
+  background: var(--bv-frost-8);
+}
+.mcc-orch-chip:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.mcc-ring {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.mcc-ring-arc {
+  transition: stroke-dashoffset 0.4s var(--bv-ease-standard);
+}
+
+/* ── The merged top-bar grid (scoped overrides, highest specificity last) ─── */
+/* narration (L) · command field (center axis) · live signal (R) */
+.mcv-top {
+  grid-template-columns: 1fr minmax(220px, 520px) 1fr;
+  gap: 14px;
+}
+.mcv-narr {
+  grid-column: 1;
+  justify-self: start;
+  min-width: 0;
+  max-width: 100%;
+}
+.mcv-top .mcc-cmd {
+  grid-column: 2;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+.mcv-top .mc-topbar-right {
+  grid-column: 3;
+  justify-self: end;
+}
+@media (max-width: 1080px) {
+  .mcv-narr-text {
+    display: none;
+  }
+}
+@media (max-width: 1280px) {
+  .mcv-top .mcc-orch-meta {
+    display: none;
+  }
+}

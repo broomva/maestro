@@ -1,150 +1,90 @@
-import { Avatar, BlackholeMark, DotComet } from "@maestro/ui";
-import { Link } from "@tanstack/react-router";
-import { Boxes, FileText, History, type LucideIcon, Settings } from "lucide-react";
+// Shell — the chrome the whole product lives in (BRO-1771 → BRO-1884 design fidelity, canon per
+// docs/canon-map.md: the IA4 tree-led sidebar + McvTopBar). The mission-shell skeleton: a fixed
+// matte workspace-tree sidebar + a 52px top bar + flex main. **The shell never scrolls — only the
+// inner panels do** (the sidebar owns its overflow; the main owns its own; `.bv-app` is h-dvh +
+// overflow-hidden). The sidebar width + collapse are the store's persisted UI-prefs (navOpen /
+// cols.nav); the tree, the "needs you" count, and the narration are real server-truth selectors.
+//
+// It is the layout host: the matched product view renders into `children` (the layout's `<Outlet/>`,
+// wired in routes/app.tsx, which also opens the one SSE connection). The mission plane replaces the
+// placeholder board in a later fidelity ticket.
+
 import type { ReactNode } from "react";
-import { ThemeToggle } from "./theme-toggle";
+import { useEffect, useMemo } from "react";
+import { useStore } from "zustand";
+import { maestroStore, selectNarration, selectNeedsYouCount, selectSidebarTree } from "@/store";
+import { Sidebar } from "./shell/sidebar";
+import { TopBar } from "./shell/top-bar";
 
-/**
- * Shell — the chrome the whole product lives in (BRO-1771, BUILD-PLAN §M2, CLAUDE.md §Layout).
- * 200px fixed matte sidebar + 52px top bar + flex main. **The shell never scrolls — only the
- * inner panels do** (the sidebar and the main both own their overflow; the shell is h-dvh +
- * overflow-hidden). It is the layout route (BRO-1824): the nav is TanStack `<Link>`s to the product
- * views and the matched view renders into `children` (the layout's `<Outlet/>`). The placeholder below
- * only shows when the shell is rendered with no child (a standalone/test render).
- */
+/** The default sidebar width when nothing is persisted (CLAUDE.md §Layout: 200px). */
+const NAV_WIDTH_DEFAULT = 200;
+/** The collapsed icon-rail width. */
+const RAIL_WIDTH = 56;
 
-const NAV: { icon: LucideIcon; label: string; to: string }[] = [
-  { icon: Boxes, label: "Board", to: "/" },
-  { icon: FileText, label: "Knowledge", to: "/knowledge" },
-  { icon: History, label: "History", to: "/history" },
-  { icon: Settings, label: "Settings", to: "/settings" },
-];
+/** Open the command palette (a later surface); dispatch the event the palette will listen for. */
+function openCommandPalette() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("bv:command-open"));
+  }
+}
 
-function NavItem({ icon: Icon, label, to }: (typeof NAV)[number]) {
+export function Shell({ children }: { children?: ReactNode }) {
+  // Select the STABLE `server` slice reference (changes only when the reducer applies an event) and
+  // derive the chrome inputs in `useMemo` keyed on it — deriving selectors inline would return fresh
+  // objects every render and thrash useSyncExternalStore. The derivations are pure + cheap.
+  const server = useStore(maestroStore, (s) => s.server);
+  const navOpen = useStore(maestroStore, (s) => s.navOpen);
+  const navWidth = useStore(maestroStore, (s) => s.cols.nav ?? NAV_WIDTH_DEFAULT);
+  const toggleNav = useStore(maestroStore, (s) => s.toggleNav);
+
+  const tree = useMemo(() => selectSidebarTree(server), [server]);
+  const needsYou = useMemo(() => selectNeedsYouCount(server), [server]);
+  const narration = useMemo(() => selectNarration(server), [server]);
+
+  // ⌘K is global — open the palette from anywhere in the shell (the field in the top bar is one
+  // affordance; the shortcut is another). The palette itself is a later fidelity ticket.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        openCommandPalette();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
-    <Link
-      to={to}
-      // `/` is a prefix of every path, so match it EXACTLY (else Board reads active on every view).
-      activeOptions={{ exact: to === "/" }}
-      className="flex h-9 items-center gap-2 rounded-row px-2.5 text-left text-sm transition-colors"
-      // TanStack merges these onto the base className by active state (mutually exclusive → no
-      // conflicting text-color classes) and sets aria-current="page" on the active link.
-      activeProps={{ className: "bg-[var(--bv-frost-8)] font-medium text-foreground" }}
-      inactiveProps={{
-        className: "text-muted-foreground hover:bg-[var(--bv-frost-8)] hover:text-foreground",
+    <div
+      className="bv-app"
+      style={{
+        gridTemplateColumns: `${navOpen ? navWidth : RAIL_WIDTH}px 1fr`,
+        transition: "grid-template-columns 0.15s var(--bv-ease-standard)",
       }}
     >
-      <Icon size={16} strokeWidth={2} className="shrink-0" />
-      <span className="flex-1 truncate">{label}</span>
-    </Link>
-  );
-}
+      <Sidebar tree={tree} needsYou={needsYou} collapsed={!navOpen} />
 
-/**
- * The blackhole brand mark on its own dark cool-axis chip (BUILD-PLAN §M2: the mark rides a
- * dark/frosted surface, never a bare tile). The glyph is the shared `BlackholeMark` from
- * `@maestro/ui` (BRO-1766 extracted it out of this inline SVG) — not the raster asset, which was
- * an opaque baseline JPEG that painted a pure-#000 square on the light sidebar (BRO-1771 P20).
- * `--bv-ink` is the barely-blue near-black (stable across themes, cool-axis, never #000 per
- * CLAUDE.md §Color), so the chip stays a consistent dark brand tile in light and dark; the chip's
- * `text-[var(--bv-white)]` sets the mark's `currentColor` to brand-white.
- */
-function BrandMark() {
-  return (
-    <span
-      data-testid="brand-mark"
-      className="grid size-6 shrink-0 place-items-center rounded-lg bg-[var(--bv-ink)] text-[var(--bv-white)] ring-1 ring-[var(--bv-border-15)] ring-inset"
-    >
-      <BlackholeMark size={16} />
-    </span>
-  );
-}
-
-/**
- * The orchestrator's presence — an agent, not a settings button. The tidepool DotComet is the
- * presence signal; the chip opens the orchestrator's session (wired in a later milestone).
- */
-function PresenceChip() {
-  return (
-    <Link
-      to="/session/$sessionId"
-      params={{ sessionId: "orchestrator" }}
-      title="Open the orchestrator"
-      className="inline-flex items-center gap-2 rounded-row px-2 py-1 text-left transition-colors hover:bg-[var(--bv-frost-8)]"
-    >
-      <DotComet size={13} />
-      <span className="font-medium text-sm">maestro</span>
-      <span className="text-muted-foreground text-xs">standing</span>
-    </Link>
-  );
-}
-
-const PLACEHOLDER_ROWS = Array.from({ length: 40 }, (_, i) => `Panel row ${i + 1}`);
-
-function ShellPlaceholder() {
-  return (
-    <div className="flex flex-col gap-3">
-      <h1 className="text-h2">The shell</h1>
-      <p className="max-w-[520px] text-muted-foreground text-sm">
-        200px sidebar, 52px top bar, flex main. The shell never scrolls; this panel does. The board,
-        knowledge, history, and settings surfaces mount here as routing lands.
-      </p>
-      {/* Tall filler so the main panel scrolls while the chrome holds (M2 verify). */}
-      <div className="flex flex-col gap-2">
-        {PLACEHOLDER_ROWS.map((label) => (
-          <div
-            key={label}
-            className="rounded-card border border-border bg-card px-3.5 py-3 text-sm"
-          >
-            {label}
-          </div>
-        ))}
+      <div className="bv-main">
+        <TopBar
+          needsYou={needsYou}
+          narration={narration}
+          collapsed={!navOpen}
+          onToggleCollapsed={toggleNav}
+          onCommand={openCommandPalette}
+        />
+        <main className="min-h-0 flex-1 overflow-y-auto p-6" data-testid="shell-main">
+          {children ?? <ShellPlaceholder />}
+        </main>
       </div>
     </div>
   );
 }
 
-export function Shell({ children }: { children?: ReactNode }) {
+/** Shown only on a standalone/test render with no child view. */
+function ShellPlaceholder() {
   return (
-    <div className="grid h-dvh grid-cols-[200px_1fr] overflow-hidden bg-background text-foreground">
-      <aside className="flex flex-col gap-1 overflow-y-auto border-border border-r bg-sidebar px-2 py-3">
-        <button
-          type="button"
-          title="Switch workspace"
-          className="flex items-center gap-2 rounded-row px-1.5 py-1 text-left transition-colors hover:bg-[var(--bv-frost-8)]"
-        >
-          <BrandMark />
-          <span className="flex-1 truncate font-medium text-sm">Broomva</span>
-        </button>
-
-        <nav className="mt-1 flex flex-col gap-0.5">
-          {NAV.map((item) => (
-            <NavItem key={item.label} {...item} />
-          ))}
-        </nav>
-
-        <div className="flex-1" />
-
-        <Link
-          to="/account"
-          className="flex h-9 items-center gap-2 rounded-row px-1.5 text-left text-sm transition-colors"
-          activeProps={{ className: "bg-[var(--bv-frost-8)] font-medium" }}
-          inactiveProps={{ className: "hover:bg-[var(--bv-frost-8)]" }}
-        >
-          <Avatar name="Ana Diaz" size={22} color="var(--bv-gray-600)" />
-          <span className="flex-1 truncate">Ana Diaz</span>
-        </Link>
-      </aside>
-
-      <div className="grid grid-rows-[52px_1fr] overflow-hidden">
-        <header className="flex h-[52px] shrink-0 items-center justify-between border-border border-b px-4">
-          <PresenceChip />
-          <ThemeToggle />
-        </header>
-        <main className="overflow-y-auto p-6" data-testid="shell-main">
-          {children ?? <ShellPlaceholder />}
-        </main>
-      </div>
+    <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
+      The board, knowledge, history, and settings surfaces mount here.
     </div>
   );
 }
