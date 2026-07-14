@@ -10,6 +10,7 @@
 import { Composer } from "@maestro/ui";
 import { useParams } from "@tanstack/react-router";
 import { useMemo } from "react";
+import { useStore } from "zustand";
 import { ChatFeed } from "@/chat/chat-feed";
 import {
   FixtureChatTransport,
@@ -20,6 +21,9 @@ import {
 } from "@/chat/fixture-transport";
 import { type ChatTransport, RuntimeChatTransport } from "@/chat/transport";
 import { useBvChat } from "@/chat/use-bv-chat";
+import { GateQueue } from "@/components/gate/gate-queue";
+import { postIntent } from "@/intents/client";
+import { maestroStore, selectGateQueue } from "@/store";
 
 /** The chat surface for ONE session. Split out from the param-reading route so it can be KEYED by
  *  sessionId (P20 slice-B MAJOR): a `$sessionId` change fully remounts this, giving the new session a
@@ -37,14 +41,27 @@ function SessionChat({ sessionId }: { sessionId: string }) {
 
   const { messages, status, busy, sendMessage, stop } = useBvChat({ transport });
 
+  // The gate queue is the ORCHESTRATOR's — it holds every open gate (all review/blocked leaves), so it
+  // docks at the orchestrator session foot only (the prototype's MccMaestroChat; a fresh worker session
+  // shows just its composer). Read the STABLE server slice + derive in useMemo — deriving inline returns
+  // a fresh array every render and thrashes useSyncExternalStore (the FID-2 getSnapshot lesson).
+  const isOrchestrator = sessionId === "orchestrator";
+  const server = useStore(maestroStore, (s) => s.server);
+  const gateItems = useMemo(
+    () => (isOrchestrator ? selectGateQueue(server) : []),
+    [server, isOrchestrator],
+  );
+
   return (
     <div className="flex h-full min-h-0" data-testid="session-view">
       {/* The thread — the conversation column. The feed grows and scrolls; the composer sits in a
           bottom footer, both centered to the canon 768px measure (the DS class centers the feed; the
-          footer matches). This is the primary surface. */}
+          footer matches). The gate queue (rung 2) stacks above the composer at the orchestrator's foot —
+          the disclosure-ladder "look, then act with verbs" surface (BRO-1888). */}
       <section className="flex min-w-0 flex-1 flex-col" aria-label="Thread">
         <ChatFeed messages={messages} status={status} label="Conversation" />
-        <div className="mx-auto w-full max-w-[768px] shrink-0 px-4 pt-2 pb-4">
+        <div className="mx-auto flex w-full max-w-[768px] shrink-0 flex-col gap-2.5 px-4 pt-2 pb-4">
+          {isOrchestrator ? <GateQueue items={gateItems} onIntent={postIntent} /> : null}
           <Composer
             placeholder="Message Maestro"
             busy={busy}

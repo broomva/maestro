@@ -7,7 +7,12 @@
 
 import { describe, expect, test } from "bun:test";
 import type { LiveNode, LiveSession } from "@maestro/protocol";
-import { selectNarration, selectNeedsYouCount, selectSidebarTree } from "./project";
+import {
+  selectGateQueue,
+  selectNarration,
+  selectNeedsYouCount,
+  selectSidebarTree,
+} from "./project";
 import { emptyServerTruth, type ServerTruth } from "./types";
 
 let seq = 0;
@@ -264,5 +269,40 @@ describe("selectNeedsYouCount + selectNarration", () => {
     ]);
     two.sessions.s1 = session({ id: "s1", nodeId: "w1", branch: "run/cd34" });
     expect(selectNarration(two)).toBe("run/cd34 + 1 more at your gate");
+  });
+});
+
+describe("selectGateQueue — the rung-2 gate queue (BRO-1888)", () => {
+  test("keeps only LEAF review + blocked; drops containers and non-attention states", () => {
+    const s = server([
+      node({ id: "rev", kind: "task", state: "review", title: "gate me" }),
+      node({ id: "blk", kind: "task", state: "blocked", title: "stuck" }),
+      node({ id: "run", kind: "task", state: "running", title: "live" }),
+      node({ id: "done", kind: "task", state: "done", title: "shipped" }),
+      node({ id: "prop", kind: "task", state: "proposed", title: "queued" }),
+      // A container folder in review must NEVER surface — the queue is actionable leaves (selectPlaneItems).
+      node({ id: "proj", kind: "project", state: "review", title: "a project folder" }),
+      node({ id: "init", kind: "initiative", state: "blocked", title: "an initiative folder" }),
+    ]);
+    expect(selectGateQueue(s).map((i) => i.id)).toEqual(["rev", "blk"]);
+  });
+
+  test("review sorts before blocked; within a state the OLDEST-waiting is first (no gate rots at the bottom)", () => {
+    const s = server([
+      node({ id: "rev-new", kind: "task", state: "review", title: "newer gate", updatedAt: 300 }),
+      node({ id: "rev-old", kind: "task", state: "review", title: "older gate", updatedAt: 100 }),
+      node({ id: "blk", kind: "task", state: "blocked", title: "stuck", updatedAt: 50 }),
+    ]);
+    // review (attention-first) before blocked; older review before newer review (ascending attention age).
+    expect(selectGateQueue(s).map((i) => i.id)).toEqual(["rev-old", "rev-new", "blk"]);
+  });
+
+  test("empty when nothing needs a human", () => {
+    const s = server([
+      node({ id: "run", kind: "task", state: "running", title: "live" }),
+      node({ id: "done", kind: "task", state: "done", title: "shipped" }),
+    ]);
+    expect(selectGateQueue(s)).toEqual([]);
+    expect(selectGateQueue(emptyServerTruth())).toEqual([]);
   });
 });

@@ -16,7 +16,7 @@
 //   - `created` — optional + unconsumed today (contract §7 "unconsumed → optional").
 
 import type { LiveNode, WorkItem } from "@maestro/protocol";
-import { WK_GROUP_ORDER } from "@maestro/protocol";
+import { compareGateQueue, isInGateQueue, WK_GROUP_ORDER } from "@maestro/protocol";
 import type { ServerTruth } from "./types";
 
 /** Format epoch-ms to ISO, tolerating a corrupt/out-of-range clock (sentinel, never a throw). */
@@ -157,6 +157,33 @@ export function selectBoard(s: ServerTruth): BoardGroup[] {
  */
 export function selectPlaneItems(s: ServerTruth): WorkItem[] {
   return selectWorkItems(s).filter((i) => i.kind !== "initiative" && i.kind !== "project");
+}
+
+/** Epoch ms a card entered its attention state — the gate's `openedAt` / block ts (gate.ts
+ *  `GateQueueOrder.attentionSince`). No such field is projected, so `lastEventAt ?? updatedAt` is the
+ *  proxy: for a `review` node the gate-open event is its last event; a corrupt ts sorts as 0 (oldest). */
+function attentionSince(i: WorkItem): number {
+  const t = Date.parse(i.lastEventAt ?? i.updatedAt);
+  return Number.isNaN(t) ? 0 : t;
+}
+
+/**
+ * The gate queue (BRO-1888 FID-3) — the LEAF WorkItems that need a human (`review` + `blocked` =
+ * `ATTENTION_STATES`, via gate.ts's `isInGateQueue` REFERENCED not re-declared), oldest-waiting first
+ * (`compareGateQueue`: review before blocked, then ascending attention age so no gate rots at the
+ * bottom). It is a DERIVED VIEW over the same server-truth leaves the plane shows — never a separate
+ * store (gate.ts §Membership). A `review` card carries a `gateId` + `look` (work-item.ts), so the verbs
+ * dispatch off `gateId`; a `blocked` card is Stuck-and-redispatchable (no gate row), keyed on the node.
+ */
+export function selectGateQueue(s: ServerTruth): WorkItem[] {
+  return selectPlaneItems(s)
+    .filter((i) => isInGateQueue(i.state))
+    .sort((a, b) =>
+      compareGateQueue(
+        { state: a.state, attentionSince: attentionSince(a) },
+        { state: b.state, attentionSince: attentionSince(b) },
+      ),
+    );
 }
 
 /** One project folder in the sidebar workspace tree. */

@@ -114,7 +114,10 @@ test("a CLIENT-SIDE session switch tears the old one down — the new session ne
   // cleanup aborts its turn). WITHOUT the key the component is reused and orchestrator shows alpha's
   // transcript: this assertion fails in that unfixed world (verified by mutation — removing the key
   // makes this test red).
-  await page.getByRole("link", { name: /maestro/i }).click();
+  await page
+    .locator("header")
+    .getByRole("link", { name: /maestro/i })
+    .click();
   await expect(page).toHaveURL(/\/session\/orchestrator/);
   await expect(page.getByTestId("chat-empty").first()).toContainText("A fresh session");
   await expect(page.getByTestId("session-view")).not.toContainText("session alpha message");
@@ -183,7 +186,10 @@ test("navigating away mid-session and back yields a fresh mount, no stale bleed,
   await expect(page.getByTestId("view-knowledge")).toBeVisible();
 
   // Back via the presence chip → a fresh mount: empty greeting, a working composer, no crash.
-  await page.getByRole("link", { name: /maestro/i }).click();
+  await page
+    .locator("header")
+    .getByRole("link", { name: /maestro/i })
+    .click();
   await expect(page.getByTestId("chat-empty").first()).toContainText("A fresh session");
   await expect(page.getByPlaceholder("Message Maestro")).toBeVisible();
   await expect(page.getByTestId("session-view")).not.toContainText("hello there");

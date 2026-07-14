@@ -96,6 +96,11 @@ export const INTENT_TYPES = [
   "tick",
 ] as const satisfies readonly IntentType[];
 
+/** The single write endpoint (API.md §1) — POST an `Intent`, get a 202 `IntentAccepted`, results
+ *  arrive on the event stream (PATTERNS §3: intents in, events out). Pinned here so a client never
+ *  hand-writes the path literal (mirrors chat.ts's `CHAT_ENDPOINT` — the single-source idiom). */
+export const INTENTS_ENDPOINT = "/api/intents" as const;
+
 /** Header required on every intent (API.md §Intents) — a retried POST is a no-op. */
 export const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key" as const;
 
