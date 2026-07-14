@@ -6,6 +6,8 @@
 // Runs only in a real browser (it reads layout + document.activeElement) — exercised by the Playwright
 // specs, not the DOM-less unit renders.
 
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+
 const FOCUSABLE =
   'a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
@@ -22,7 +24,7 @@ export function focusableWithin(el: HTMLElement): HTMLElement[] {
  */
 export function handleTrapTab(
   container: HTMLElement | null,
-  e: KeyboardEvent | React.KeyboardEvent,
+  e: KeyboardEvent | ReactKeyboardEvent,
 ): void {
   if (!container || e.key !== "Tab") return;
   const items = focusableWithin(container);

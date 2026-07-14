@@ -11,7 +11,18 @@
 
 import { useNavigate } from "@tanstack/react-router";
 import { Search } from "lucide-react";
-import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  Fragment,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type Ref,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { toggleTheme } from "@/theme";
 import {
@@ -37,10 +48,10 @@ interface CommandPaletteViewProps {
   activeId: string | null;
   onActivate: (id: string) => void;
   onRun: (cmd: Command) => void;
-  onKeyDown: (e: React.KeyboardEvent) => void;
+  onKeyDown: (e: ReactKeyboardEvent) => void;
   onScrimDown: () => void;
-  inputRef?: React.Ref<HTMLInputElement>;
-  style?: React.CSSProperties;
+  inputRef?: Ref<HTMLInputElement>;
+  style?: CSSProperties;
 }
 
 /** Render one title with its matched substring wrapped in `<em>` (the highlight). */
@@ -238,7 +249,7 @@ export function CommandPalette({ open, onClose, onOpenFeedback }: CommandPalette
     }
   };
 
-  const onKeyDown = (e: React.KeyboardEvent) => {
+  const onKeyDown = (e: ReactKeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActiveIndex((a) => Math.min(a + 1, flat.length - 1));

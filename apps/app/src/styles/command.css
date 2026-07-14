@@ -138,20 +138,12 @@
   font: inherit;
   color: inherit;
   cursor: pointer;
-  position: relative;
 }
+/* Active state is the sanctioned frosted-blue interaction layer only — NO colored left-border strip
+   (CLAUDE.md §Color forbids them; the prototype's ::before bar is dropped). The ↵ hint + frost fill
+   carry the selection. */
 .cmdk-item.is-active {
   background: var(--bv-frost-12);
-}
-.cmdk-item.is-active::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 8px;
-  bottom: 8px;
-  width: 2.5px;
-  border-radius: 2px;
-  background: var(--bv-blue);
 }
 .cmdk-ic {
   width: 28px;
