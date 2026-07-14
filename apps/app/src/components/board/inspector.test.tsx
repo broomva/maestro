@@ -55,6 +55,41 @@ describe("Inspector — the M5 receipts stub", () => {
     expect(html).not.toContain("%");
   });
 
+  test("renders the lifecycle rail (read-only progression) + the 'Done is earned' note", () => {
+    const html = renderToStaticMarkup(<Inspector item={base} />);
+    expect(html).toContain('data-testid="inspector-rail"');
+    expect(html).toContain("mc-rail"); // the ported rail
+    // The four plain-voice stages (the app collapses proposed/reviewing/triggered → Queued).
+    expect(html).toContain("Queued");
+    expect(html).toContain("Running");
+    expect(html).toContain("Needs you"); // review label
+    expect(html).toContain("Done");
+    // review → the "Needs you" stage is the current one (the exact rendered pairing).
+    expect(html).toContain(
+      'mc-rail-stage is-current" aria-current="step"><span class="mc-rail-dot"></span><span class="mc-rail-name">Needs you',
+    );
+    expect(html).toContain("Done is earned"); // the rail note (canon copy)
+    expect(html).not.toContain("%");
+  });
+
+  test("the activity-timeline stub is honest + keyed on sessionId (plain voice — no em dash, no 'P1')", () => {
+    // A dispatched item (has a session) → the timeline opens when its run events are recorded.
+    const dispatched = renderToStaticMarkup(<Inspector item={{ ...base, sessionId: "s1" }} />);
+    // (the apostrophe in "run's" renders as &#x27; in static markup, so match around it)
+    expect(dispatched).toContain("activity timeline and diffstat open once");
+    expect(dispatched).toContain("events are recorded");
+    expect(dispatched).not.toContain("%");
+    // A never-run item (no session) → an honest "no run yet" line, never faked activity.
+    const neverRun = renderToStaticMarkup(<Inspector item={base} />);
+    expect(neverRun).toContain("No run yet");
+    expect(neverRun).not.toContain("activity timeline and diffstat");
+    // CLAUDE.md §Voice: no em dashes, no internal build-phase names in the user-facing copy.
+    for (const h of [dispatched, neverRun]) {
+      expect(h).not.toContain("—"); // em dash
+      expect(h).not.toContain("P1"); // internal build-phase jargon
+    }
+  });
+
   test("omits absent receipts (a bare item renders no branch/verdict/look rows)", () => {
     const html = renderToStaticMarkup(<Inspector item={base} />);
     expect(html).toContain("Approve the deploy");
