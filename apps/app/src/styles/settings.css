@@ -2,7 +2,9 @@
  * the Knowledge + History pages. Ported from the prototype's `.set-*` classes (settings.css); the `.usr-*`
  * account classes arrive with slice 4 (User). Two canon fixes vs the prototype: the warm hue-85/78
  * literals become the sanctioned `--bv-warning` status token (no invented oklch, one cool axis + amber
- * only as a status), and every surface is matte (glass stays on the composer). Tokens-only. */
+ * only as a status), and every surface is matte (glass stays on the composer). Tokens-first: the only
+ * raw values are the switch-track off-state background + the thumb shadow, ported verbatim from the
+ * prototype since no token exists for them (both stay on the cool axis). */
 
 /* ── Page shell + local top bar ──────────────────────────────────────────── */
 .set-page {

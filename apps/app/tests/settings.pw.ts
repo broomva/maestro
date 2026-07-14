@@ -91,3 +91,50 @@ test("Appearance > Theme is LIVE — it writes through to <html data-theme>", as
   await theme.getByRole("radio", { name: "Light" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 });
+
+test("the segmented is keyboard-operable — arrows move selection AND focus (roving tabindex)", async ({
+  page,
+}) => {
+  // This only holds if the section subtree does NOT remount on each set() (the P20 MAJOR fix): the onKey
+  // handler focuses the newly-selected radio synchronously, so a remount would drop focus to <body>.
+  const view = page.getByTestId("view-settings");
+  await view.locator(".set-secnav-btn", { hasText: "Appearance" }).click();
+  const theme = view.getByRole("radiogroup", { name: "Theme" });
+  const light = theme.getByRole("radio", { name: "Light" });
+  const dark = theme.getByRole("radio", { name: "Dark" });
+  await light.focus();
+  await page.keyboard.press("ArrowRight"); // Light -> Dark
+  await expect(dark).toBeFocused(); // focus followed selection (would land on <body> if it remounted)
+  await expect(dark).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark"); // and it wrote through
+});
+
+test("changing a member role does NOT reset the typed workspace name (no section remount)", async ({
+  page,
+}) => {
+  // Mutation-proof of the P20 MAJOR: with Section defined-in-render, changing any member role remounts the
+  // section and the uncontrolled workspace-name input snaps back to its defaultValue, dropping typed text.
+  const view = page.getByTestId("view-settings");
+  await view.locator(".set-secnav-btn", { hasText: "Workspace and members" }).click();
+  const name = view.getByRole("textbox", { name: "Workspace name" });
+  await name.fill("My Team");
+  await view
+    .getByRole("radiogroup", { name: "Role for Maya Lin" })
+    .getByRole("radio", { name: "Operator" })
+    .click();
+  await expect(name).toHaveValue("My Team"); // retained (would be "Broomva" again if it remounted)
+});
+
+test("the Appearance theme selection stays in sync with the top-bar toggle", async ({ page }) => {
+  // Mutation-proof of the theme-desync fix: the segmented subscribes to <html data-theme>, so flipping
+  // the theme from the always-visible top-bar toggle updates the Settings selection too (not a stale
+  // mount-time snapshot).
+  const view = page.getByTestId("view-settings");
+  await view.locator(".set-secnav-btn", { hasText: "Appearance" }).click();
+  const theme = view.getByRole("radiogroup", { name: "Theme" });
+  await expect(theme.getByRole("radio", { name: "Light" })).toHaveAttribute("aria-checked", "true");
+  // flip via the top-bar toggle (chrome), NOT the segmented.
+  await page.getByRole("button", { name: /^Switch to/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(theme.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
+});

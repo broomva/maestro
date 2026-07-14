@@ -24,7 +24,7 @@ import {
   Users,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
-import { getTheme, setTheme, type Theme } from "@/theme";
+import { useThemeState } from "@/theme";
 import { SetSegmented, SetSlider, SetStepper, SetSwitch } from "./controls";
 import { CREDS, MEMBERS, type MemberRole, ROUTINES, SET_SECTIONS, WAKES } from "./settings-data";
 
@@ -51,15 +51,10 @@ export function SettingsPage() {
   const [layout, setLayout] = useState<Layout>("twopane");
   const [active, setActive] = useState("runners");
 
-  // Appearance > Theme is REAL — the live theme module (guarded for SSR/test, where there is no document).
-  const [theme, setThemeState] = useState<Theme>(() =>
-    typeof document === "undefined" ? "light" : getTheme(),
-  );
-  const applyTheme = (t: string) => {
-    const th: Theme = t === "dark" ? "dark" : "light";
-    setTheme(th);
-    setThemeState(th);
-  };
+  // Appearance > Theme is REAL — shared reactive theme state (stays in sync with the top-bar toggle, and
+  // writes through to <html data-theme> live). SSR/test-safe (no document → stays "light").
+  const [theme, setTheme] = useThemeState();
+  const applyTheme = (t: string) => setTheme(t === "dark" ? "dark" : "light");
   // Appearance previews (no applied effect yet — honest, not persisted).
   const [density, setDensity] = useState("calm");
   const [blue, setBlue] = useState(1);
@@ -80,7 +75,12 @@ export function SettingsPage() {
   const [pingWhen, setPingWhen] = useState("blocks");
   const [memberRoles, setMemberRoles] = useState<MemberRole[]>(MEMBERS.map((m) => m.role));
 
-  const Section = ({ id }: { id: string }): ReactNode => {
+  // A plain render helper, NOT a component: it is CALLED (`{renderSection(id)}`), so its JSX inlines into
+  // this render with no reconciliation boundary. Defining it as a component and using `<Section/>` would
+  // give it a new function identity every render → React would remount the whole section subtree on every
+  // keystroke, dropping segmented keyboard focus, breaking slider drag, and resetting the uncontrolled
+  // workspace-name input. (Confirmed MAJOR, P20 slice-3.)
+  const renderSection = (id: string): ReactNode => {
     switch (id) {
       case "runners":
         return (
@@ -636,9 +636,7 @@ export function SettingsPage() {
             ))}
           </nav>
           <div className="set-content">
-            <div className="set-content-inner">
-              <Section id={active} />
-            </div>
+            <div className="set-content-inner">{renderSection(active)}</div>
           </div>
         </div>
       ) : (
@@ -648,7 +646,7 @@ export function SettingsPage() {
               {SET_SECTIONS.map((s, i) => (
                 <div key={s.id} className="set-scrollsec">
                   <div className="set-bignum">{String(i + 1).padStart(2, "0")}</div>
-                  <Section id={s.id} />
+                  {renderSection(s.id)}
                 </div>
               ))}
             </div>
