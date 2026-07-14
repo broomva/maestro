@@ -32,7 +32,8 @@ interface SidebarProps {
   needsYou: number;
   /** collapsed to the icon rail (driven by the store `prefs.navOpen`). */
   collapsed: boolean;
-  /** open the feedback drawer (a later surface); a no-op placeholder keeps the affordance. */
+  /** open the feedback drawer — the Shell wires this to dispatch `bv:feedback-open` (the drawer
+   *  surface lands in a later fidelity ticket, same forward-wire pattern as the ⌘K palette). */
   onFeedback?: () => void;
 }
 
@@ -101,7 +102,7 @@ export function Sidebar({ tree, needsYou, collapsed, onFeedback }: SidebarProps)
 
       <div className="bv-sb-spacer" />
 
-      <AutonomyScoreboard hours="—" />
+      <AutonomyScoreboard />
 
       <div className="mcc-nav-foot">
         <button className="mcc-foot-btn" type="button" onClick={onFeedback} title="Send feedback">

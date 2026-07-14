@@ -18,13 +18,20 @@ import { TopBar } from "./shell/top-bar";
 
 /** The default sidebar width when nothing is persisted (CLAUDE.md §Layout: 200px). */
 const NAV_WIDTH_DEFAULT = 200;
-/** The collapsed icon-rail width. */
-const RAIL_WIDTH = 56;
+/** The collapsed icon-rail width (matches `.mcc-rail` in shell.css + CLAUDE.md §Layout: 52px). */
+const RAIL_WIDTH = 52;
 
 /** Open the command palette (a later surface); dispatch the event the palette will listen for. */
 function openCommandPalette() {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent("bv:command-open"));
+  }
+}
+
+/** Open the feedback drawer (a later surface); dispatch the event the drawer will listen for. */
+function openFeedback() {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("bv:feedback-open"));
   }
 }
 
@@ -57,12 +64,12 @@ export function Shell({ children }: { children?: ReactNode }) {
   return (
     <div
       className="bv-app"
-      style={{
-        gridTemplateColumns: `${navOpen ? navWidth : RAIL_WIDTH}px 1fr`,
-        transition: "grid-template-columns 0.15s var(--bv-ease-standard)",
-      }}
+      // The collapse slide (transition on grid-template-columns) lives in the `.bv-app` CSS rule,
+      // not inline — so the prefers-reduced-motion block in shell.css can cancel it (an inline
+      // transition would win over the stylesheet and keep animating; CLAUDE.md §Motion).
+      style={{ gridTemplateColumns: `${navOpen ? navWidth : RAIL_WIDTH}px 1fr` }}
     >
-      <Sidebar tree={tree} needsYou={needsYou} collapsed={!navOpen} />
+      <Sidebar tree={tree} needsYou={needsYou} collapsed={!navOpen} onFeedback={openFeedback} />
 
       <div className="bv-main">
         <TopBar

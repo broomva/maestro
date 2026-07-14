@@ -179,6 +179,11 @@ export interface SidebarTree {
   placesCount: number;
 }
 
+// Folders are keyed by their display TITLE (the ancestry field), not node id — the tree presents
+// and groups by title, mirroring the prototype. Two sibling folders with the same explicit title
+// therefore merge into one row (their live/attn, and the initiative's done/total, combine). In
+// practice `titleOf` falls back to the unique path segment, so a collision needs a hand-authored
+// duplicate `title:`; if that ever matters, carry the ancestor id on the WorkItem and key on it.
 /** Fold a work item into a project-folder accumulator (live OR-in, attention count-up). */
 function foldProject(acc: Map<string, SidebarProject>, name: string, item: WorkItem): void {
   const p = acc.get(name) ?? { name, live: false, attn: 0 };
@@ -202,8 +207,10 @@ function orderProjects(projects: SidebarProject[]): SidebarProject[] {
  * WorkItems (the McSidebar/MccTcSidebar logic, ported from seed to store): initiatives group
  * their projects; each project carries a live dot + an attention count; each initiative carries
  * `done/total` (receipts, never a percentage — CLAUDE.md §Work states). Items with a project but
- * no initiative ancestor surface as loose root folders; items with neither are top-level nodes the
- * root count folds in. Insertion order follows `selectWorkItems` (path-sorted → stable).
+ * no initiative ancestor surface as loose root folders. A leaf with NEITHER ancestor is not a
+ * folder "place" — it has no home in the folder tree, so it is not surfaced here (it still appears
+ * in the board/feed, which render leaf WorkItems directly). Insertion order follows
+ * `selectWorkItems` (path-sorted → stable).
  */
 export function selectSidebarTree(s: ServerTruth): SidebarTree {
   const items = selectWorkItems(s);
@@ -238,10 +245,18 @@ export function selectSidebarTree(s: ServerTruth): SidebarTree {
   return { initiatives, looseProjects, placesCount: initiatives.length + looseProjects.length };
 }
 
-/** "Needs you" headline — the count of work at a gate or stuck (contract §"Reactive queries"). */
+/**
+ * "Needs you" headline — the count of LEAF work at a gate or stuck (contract §"Reactive queries").
+ * Leaf-only, to agree with `selectSidebarTree.attn` (skips containers, line ~218) and
+ * `selectNarration` (line ~259): a container folder (initiative/project) can carry an aggregate
+ * `review`/`blocked` state, and counting it here would inflate the badge above the visible tree +
+ * narration — the badge would read a number the tree cannot explain. The three selectors that feed
+ * the chrome MUST agree on what counts as needing you.
+ */
 export function selectNeedsYouCount(s: ServerTruth): number {
   let n = 0;
   for (const node of Object.values(s.nodes)) {
+    if (node.kind === "initiative" || node.kind === "project") continue;
     if (node.state === "review" || node.state === "blocked") n++;
   }
   return n;

@@ -133,7 +133,7 @@ export const WorkspaceTree = memo(function WorkspaceTree({ tree, onSelect }: Wor
           className="mcc-sb-text"
           style={{ padding: "6px 10px", color: "var(--muted-foreground)", fontSize: 12 }}
         >
-          No work yet. Add a _work.md and it appears here.
+          No work yet. Start a mission and it appears here.
         </span>
       ) : null}
     </div>

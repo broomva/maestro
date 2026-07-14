@@ -5,9 +5,10 @@
 // never percentages).
 //
 // FID-1 note: the real autonomy ledger (unsupervised hours) is BRO-1818 (P3) — until it
-// ships there is no honest data to plot, so the Shell passes empty segments and an em-dash;
-// the component renders a calm empty state ("no unsupervised runs yet") rather than the
-// prototype's hardcoded "6h 24m" demo values. Wire the real ledger here when it lands.
+// ships there is no honest data to plot, so the Shell passes no segments and no `hours`; the
+// component renders a calm empty state (the "no unsupervised runs yet" sub-line, no headline
+// glyph) rather than the prototype's hardcoded "6h 24m" demo values, and never an em-dash
+// placeholder (CLAUDE.md §Voice: no em dashes in chrome). Wire the real ledger here when it lands.
 
 import type { CSSProperties, ReactNode } from "react";
 
@@ -22,8 +23,9 @@ export interface AutonomySegment {
 export interface AutonomyScoreboardProps {
   /** default "unsupervised today". */
   label?: ReactNode;
-  /** the headline duration, e.g. "6h 24m", or "—" when there is nothing to show yet. */
-  hours: ReactNode;
+  /** the headline duration, e.g. "6h 24m"; omit it entirely when there is nothing to show yet
+   *  (the empty-state sub-line carries the message — never an em-dash placeholder). */
+  hours?: ReactNode;
   /** footnote, e.g. "2 looks · longest run 3h 50m". */
   sub?: ReactNode;
   segments?: AutonomySegment[];
@@ -68,16 +70,18 @@ export function AutonomyScoreboard({
         }}
       >
         <span>{label}</span>
-        <b
-          style={{
-            fontSize: 12.5,
-            fontWeight: 500,
-            color: "var(--foreground)",
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          {hours}
-        </b>
+        {hours != null ? (
+          <b
+            style={{
+              fontSize: 12.5,
+              fontWeight: 500,
+              color: "var(--foreground)",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {hours}
+          </b>
+        ) : null}
       </div>
       <div
         style={{

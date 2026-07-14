@@ -64,7 +64,9 @@ function workspace(): ServerTruth {
       title: "Resume sessions",
     }),
     // Container folders carry an aggregate "running" state; the actionable state lives on the leaf
-    // task (w2 blocked) — selectNeedsYouCount counts every node, so keep folders out of review/blocked.
+    // task (w2 blocked). (selectNeedsYouCount is leaf-only, so a folder's state never counts — the
+    // dedicated regression test below locks that; here the folders stay "running" to drive the tree's
+    // live dots.)
     node({
       id: "p-db",
       parentId: "i-haw",
@@ -165,11 +167,36 @@ describe("selectSidebarTree", () => {
     const tree = selectSidebarTree(emptyServerTruth());
     expect(tree).toEqual({ initiatives: [], looseProjects: [], placesCount: 0 });
   });
+
+  test("a leaf with neither ancestor is not a folder place (docstring contract)", () => {
+    // A top-level task with no project/initiative ancestor has no home in the FOLDER tree, so it is
+    // not surfaced here (it renders in the board/feed instead). placesCount counts folders, not it.
+    const tree = selectSidebarTree(
+      server([node({ id: "t", kind: "task", state: "running", title: "loose" })]),
+    );
+    expect(tree).toEqual({ initiatives: [], looseProjects: [], placesCount: 0 });
+  });
 });
 
 describe("selectNeedsYouCount + selectNarration", () => {
   test("needs-you counts review + blocked", () => {
     expect(selectNeedsYouCount(workspace())).toBe(2); // w1 review + w2 blocked
+  });
+
+  test("needs-you is leaf-only — a container folder in review/blocked never inflates the badge", () => {
+    // Regression (BRO-1884 P20 major): a container folder can carry an aggregate review/blocked
+    // state, but the badge, tree attn, and narration must AGREE — all three are leaf-only. If the
+    // count included the folder, the badge would read a number the tree/narration cannot explain.
+    const s = server([
+      node({ id: "p", kind: "project", state: "blocked", title: "api" }),
+      node({ id: "t", parentId: "p", kind: "task", state: "blocked", title: "wire it" }),
+    ]);
+    expect(selectNeedsYouCount(s)).toBe(1); // only the leaf task, not the container folder
+    expect(selectNarration(s)).toBe("1 stuck"); // narration agrees — one blocked leaf
+    // starker: a lone container in review with no leaf must not fabricate a gate.
+    const lone = server([node({ id: "i", kind: "initiative", state: "review", title: "solo" })]);
+    expect(selectNeedsYouCount(lone)).toBe(0);
+    expect(selectNarration(lone)).toBe("standing · nothing at your gate");
   });
 
   test("narration is attention-first and derived (no fabricated timestamp)", () => {

@@ -20,6 +20,8 @@
   font-family: var(--bv-font-sans);
   font-size: 14px;
   overflow: hidden;
+  /* the collapse slide (sidebar 200px ⇄ 52px); cancelled under prefers-reduced-motion below. */
+  transition: grid-template-columns 0.15s var(--bv-ease-standard);
 }
 .bv-main {
   display: flex;
@@ -86,10 +88,6 @@
 }
 .bv-sb-item:hover {
   background: var(--sidebar-accent);
-}
-.bv-sb-item.is-active {
-  background: var(--sidebar-accent);
-  font-weight: 500;
 }
 .bv-sb-item svg {
   width: 16px;
@@ -344,10 +342,6 @@
   font-size: 12.5px;
   font-weight: 400;
 }
-.mcc-narr b {
-  font-weight: 500;
-  color: var(--foreground);
-}
 .mcc-quiet {
   display: inline-flex;
   align-items: center;
@@ -473,9 +467,6 @@
   display: inline-flex;
   flex-shrink: 0;
 }
-.mcc-ring-arc {
-  transition: stroke-dashoffset 0.4s var(--bv-ease-standard);
-}
 
 /* ── The merged top-bar grid (scoped overrides, highest specificity last) ─── */
 /* narration (L) · command field (center axis) · live signal (R) */
@@ -507,5 +498,22 @@
 @media (max-width: 1280px) {
   .mcv-top .mcc-orch-meta {
     display: none;
+  }
+}
+
+/* ── Reduced motion ─────────────────────────────────────────
+   Canon (CLAUDE.md §Motion): "Everything stops under prefers-reduced-motion." The shell's own
+   chrome transitions — the collapse slide and the lens/footer/rail/command/attention/orch-chip
+   hover fades — are cancelled here. @maestro/ui primitives (DotComet, chat) self-gate their own
+   motion. (The P4 scheduler's tick-ring countdown arc re-adds `.mcc-ring-arc` here when it lands.) */
+@media (prefers-reduced-motion: reduce) {
+  .bv-app,
+  .mcc-foot-btn,
+  .mcc-rail-btn,
+  .mcc-quiet,
+  .mcc-cmd,
+  .mcc-attn-btn,
+  .mcc-orch-chip {
+    transition: none;
   }
 }
