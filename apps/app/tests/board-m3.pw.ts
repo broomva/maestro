@@ -162,6 +162,9 @@ test("selection drives the inspector — a selected card opens the receipts pane
   await expect(panel.getByTestId("inspector")).toContainText("Building the runner");
   await expect(panel.getByTestId("inspector")).not.toContainText("Approve the deploy");
   await expect(panel).not.toContainText("%"); // receipts, never a percentage
+  // The lifecycle rail renders read-only progression: a running item lights the Running stage.
+  await expect(panel.getByTestId("inspector-rail")).toBeVisible();
+  await expect(panel.locator(".mc-rail-stage.is-current")).toContainText("Running");
 
   // Escape dismisses it and the plane returns to full width.
   await page.keyboard.press("Escape");

@@ -8,6 +8,7 @@
 import type { WorkItem } from "@maestro/protocol";
 import { DotComet, StatusBadge, workStatusView } from "@maestro/ui";
 import { relativeTime } from "./board-view";
+import { LifecycleRail } from "./lifecycle-rail";
 
 /** One receipt row — a labelled fact from the work item. `mono` for identifiers (the run branch). */
 function Receipt({ label, mono, children }: { label: string; mono?: boolean; children: string }) {
@@ -56,6 +57,12 @@ export function Inspector({ item }: { item: WorkItem | null }) {
         </StatusBadge>
       </header>
 
+      {/* The lifecycle rail — where this item sits on its progression (rung-3, read-only; derived
+          purely from state, never a percentage; CLAUDE.md §Work states). */}
+      <section data-testid="inspector-rail" className="border-border border-t pt-3">
+        <LifecycleRail state={item.state} />
+      </section>
+
       {/* The gate "look" — what ran · what it decided · what it asks. The one card a "Needs you" item
           leads with (FLOWS §F5); rendered as receipts, never as a control (verbs are M5's). */}
       {item.look ? (
@@ -97,8 +104,14 @@ export function Inspector({ item }: { item: WorkItem | null }) {
         {age ? <Receipt label="Last event">{`${age} ago`}</Receipt> : null}
       </dl>
 
+      {/* Honest scope line: the RECEIPTS shown here (look, run, verdict, state, the rail) are the real,
+          projected work noun. The per-event activity timeline + full diffstat live behind the
+          session-event read path — WorkItem deliberately excludes the event stream (no chat / events /
+          budget / percent), so those land with the P1 read path, keyed on this item's sessionId. */}
       <p className="mt-1 text-muted-foreground text-xs">
-        Full look, chat, and activity land with the inspector.
+        {item.sessionId
+          ? "The full activity timeline and diffstat open with this run's events — the session read path lands in P1."
+          : "No run yet — the activity timeline appears once a session dispatches."}
       </p>
     </aside>
   );

@@ -42,6 +42,10 @@
  * walked as files. Composes tokens only; consumed by components/fs/* (BRO-1890, design fidelity). */
 @import "./fs.css";
 
+/* The inspector's lifecycle rail (.mc-rail — rung-3 receipts, read-only progression from item.state).
+ * Composes tokens only; consumed by components/board/lifecycle-rail.tsx (BRO-1891, design fidelity). */
+@import "./inspector.css";
+
 /* The component library lives in a sibling workspace package (@maestro/ui). Tailwind v4
  * auto-detection does not reach across the package boundary, so the primitives' utility
  * classes (frost/ink hover, pill radius, etc.) must be scanned explicitly or they never

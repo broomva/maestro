@@ -1,0 +1,77 @@
+/* Inspector lifecycle rail (BRO-1891 FID-5) — a verbatim port of styles.css's `.mc-rail` block
+   (the receipts panel is otherwise Tailwind-styled in inspector.tsx; only the rail's connector-line
+   geometry needs real CSS). Matte throughout (glass stays on the composer, CLAUDE.md §Glass). The
+   current-stage cue is a static frosted ring (box-shadow), not motion — nothing to stop under
+   prefers-reduced-motion. Composes `@maestro/tokens` vars only; never raw values. */
+
+.mc-rail {
+  display: flex;
+  align-items: flex-start;
+  padding: 4px 0 0;
+  margin: 0;
+  list-style: none;
+}
+.mc-rail-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+  min-width: 0;
+}
+/* The connector line to the previous stage (drawn leftward from each stage's dot). */
+.mc-rail-stage::before {
+  content: "";
+  position: absolute;
+  top: 4.5px;
+  left: -50%;
+  right: 50%;
+  height: 1.5px;
+  background: var(--bv-border-15);
+}
+.mc-rail-stage:first-child::before {
+  display: none;
+}
+.mc-rail-stage.is-passed::before {
+  background: oklch(0.6 0.12 260 / 0.45);
+}
+.mc-rail-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 99px;
+  background: var(--background);
+  border: 1.5px solid var(--bv-border-25);
+  position: relative;
+  z-index: 1;
+}
+.mc-rail-stage.is-passed .mc-rail-dot {
+  background: var(--bv-blue);
+  border-color: var(--bv-blue);
+}
+.mc-rail-stage.is-current .mc-rail-dot {
+  background: var(--bv-blue);
+  border-color: var(--bv-blue);
+  box-shadow: 0 0 0 4px var(--bv-frost-12);
+}
+.mc-rail-stage.is-warn .mc-rail-dot {
+  background: var(--bv-warning);
+  border-color: var(--bv-warning);
+  box-shadow: 0 0 0 4px oklch(0.76 0.15 85 / 0.18);
+}
+.mc-rail-name {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+.mc-rail-stage.is-current .mc-rail-name {
+  color: var(--foreground);
+  font-weight: 500;
+}
+.mc-rail-note {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  text-align: center;
+  padding-top: 2px;
+  margin: 0;
+}

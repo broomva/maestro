@@ -55,6 +55,35 @@ describe("Inspector — the M5 receipts stub", () => {
     expect(html).not.toContain("%");
   });
 
+  test("renders the lifecycle rail (read-only progression) + the 'Done is earned' note", () => {
+    const html = renderToStaticMarkup(<Inspector item={base} />);
+    expect(html).toContain('data-testid="inspector-rail"');
+    expect(html).toContain("mc-rail"); // the ported rail
+    // The four plain-voice stages (the app collapses proposed/reviewing/triggered → Queued).
+    expect(html).toContain("Queued");
+    expect(html).toContain("Running");
+    expect(html).toContain("Needs you"); // review label
+    expect(html).toContain("Done");
+    // review → the "Needs you" stage is the current one (the exact rendered pairing).
+    expect(html).toContain(
+      'mc-rail-stage is-current" aria-current="step"><span class="mc-rail-dot"></span><span class="mc-rail-name">Needs you',
+    );
+    expect(html).toContain("Done is earned"); // the rail note (canon copy)
+    expect(html).not.toContain("%");
+  });
+
+  test("the activity-timeline stub is honest + keyed on sessionId", () => {
+    // A dispatched item (has a session) → the timeline lands with the session read path.
+    const dispatched = renderToStaticMarkup(<Inspector item={{ ...base, sessionId: "s1" }} />);
+    expect(dispatched).toContain("activity timeline and diffstat");
+    expect(dispatched).toContain("lands in P1");
+    expect(dispatched).not.toContain("%");
+    // A never-run item (no session) → an honest "no run yet" line, never faked activity.
+    const neverRun = renderToStaticMarkup(<Inspector item={base} />);
+    expect(neverRun).toContain("No run yet");
+    expect(neverRun).not.toContain("activity timeline and diffstat");
+  });
+
   test("omits absent receipts (a bare item renders no branch/verdict/look rows)", () => {
     const html = renderToStaticMarkup(<Inspector item={base} />);
     expect(html).toContain("Approve the deploy");
