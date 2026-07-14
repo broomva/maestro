@@ -15,7 +15,7 @@
 //   - `look` — the gate compression is composed by the gate queue (BRO-1789).
 //   - `created` — optional + unconsumed today (contract §7 "unconsumed → optional").
 
-import type { LiveNode, WorkItem } from "@maestro/protocol";
+import type { LiveNode, OrchState, WorkItem } from "@maestro/protocol";
 import { compareGateQueue, isInGateQueue, WK_GROUP_ORDER } from "@maestro/protocol";
 import type { ServerTruth } from "./types";
 
@@ -373,4 +373,72 @@ export function selectFileTree(s: ServerTruth): FileEntry[] {
 export function selectFileNode(s: ServerTruth, path: string): WorkItem | undefined {
   const node = Object.values(s.nodes).find((n) => n.path === path);
   return node ? deriveWorkItem(node, s) : undefined;
+}
+
+/** One row on the History page (BRO-1893 FID-6) — a leaf that has run, projected as a session row. */
+export interface HistorySession {
+  /** = the WorkItem id (the row key + selection id). */
+  id: string;
+  title: string;
+  /** the work item's state — drives the row dot tone (running/done/review/blocked). */
+  state: OrchState;
+  /** who ran it: the session worker's name, else the owner handle, else "maestro" (the loop). */
+  agent: string;
+  /** "you" (a human @handle owns it) vs "loop" (autonomous — an agent / the orchestrator). */
+  kind: "you" | "loop";
+  /** the work's folder crumb (initiative / project), else the path — the session is a projection OF it. */
+  folder: string;
+  /** the run branch receipt (`run/<id>`), when the session produced one. */
+  run?: string;
+  /** the session's most-recent activity, ISO — the row's time column + the "by day" grouping key. */
+  at: string;
+}
+
+/**
+ * A leaf has RUN once it has entered (or passed through) a run state. `triggered` is Queued-not-yet-run
+ * and `proposed` / `reviewing` are backlog; `canceled` is terminal-neutral and may never have run, so
+ * — like the FID-5 lifecycle rail — it is never rendered with fabricated run receipts. The four states
+ * below are the honest, populated signal that "a session happened" (contract §Work states).
+ */
+const HISTORY_RUN_STATES: ReadonlySet<OrchState> = new Set<OrchState>([
+  "running",
+  "blocked",
+  "review",
+  "done",
+]);
+
+/**
+ * The History page's session list (BRO-1893 FID-6, `MccHistory`) — "your runs and the loop's". A
+ * session is a projection OF work (contract §the-session-is-the-verb), so History is the run history of
+ * the work: every LEAF that has entered a run state becomes a row, showing that work's real receipts
+ * (state, agent, folder, and — once the session read path lands — its run branch), most-recent first.
+ *
+ * DERIVED FROM WORK STATE, not the session-row map: the client store has no session read path yet
+ * (`/api/tree` hydrates nodes only; no SSE event creates a `session` row — reducer.ts), so a
+ * `sessionId`-keyed history would be permanently empty. Work state IS hydrated and real, captures BOTH
+ * you-started and loop-started runs (the tick/wake log is only a subset — scheduled fires), and stays
+ * forward-compatible: `run` / the deep per-run detail (duration, event count, transcript, lineage) fill
+ * in behind the same rows when the session-history read path arrives. Container nodes (initiative /
+ * project) and never-run backlog (proposed / reviewing / triggered / canceled) are excluded — not runs.
+ */
+export function selectHistory(s: ServerTruth): HistorySession[] {
+  return selectWorkItems(s)
+    .filter(
+      (it) => it.kind !== "initiative" && it.kind !== "project" && HISTORY_RUN_STATES.has(it.state),
+    )
+    .map((it) => {
+      const folder = [it.initiative, it.project].filter(Boolean).join(" / ");
+      return {
+        id: it.id,
+        title: it.title,
+        state: it.state,
+        agent: it.worker?.name ?? it.owner ?? "maestro",
+        // A human @handle → "you"; an agent owner / the orchestrator → "loop" (autonomous).
+        kind: it.owner?.startsWith("@") ? "you" : "loop",
+        folder: folder || it.path,
+        ...(it.run ? { run: it.run } : {}),
+        at: it.lastEventAt ?? it.updatedAt,
+      } satisfies HistorySession;
+    })
+    .sort((a, b) => b.at.localeCompare(a.at)); // most-recent activity first
 }

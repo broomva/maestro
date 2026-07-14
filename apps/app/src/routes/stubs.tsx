@@ -26,15 +26,7 @@ export function KnowledgeView() {
   );
 }
 
-export function HistoryView() {
-  return (
-    <StubView
-      title="History"
-      testid="view-history"
-      note="Past runs and sessions with their receipts (branch, diffstat, verdict) land here."
-    />
-  );
-}
+// HistoryView superseded by the real components/history/history-page.tsx (BRO-1893 FID-6).
 
 export function SettingsView() {
   return (

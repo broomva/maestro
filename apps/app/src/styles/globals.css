@@ -46,6 +46,10 @@
  * Composes tokens only; consumed by components/board/lifecycle-rail.tsx (BRO-1891, design fidelity). */
 @import "./inspector.css";
 
+/* The History page (.mcc-hist — the session list, "your runs and the loop's").
+ * Composes tokens only; consumed by components/history/history-page.tsx (BRO-1893, design fidelity). */
+@import "./history.css";
+
 /* The component library lives in a sibling workspace package (@maestro/ui). Tailwind v4
  * auto-detection does not reach across the package boundary, so the primitives' utility
  * classes (frost/ink hover, pill radius, etc.) must be scanned explicitly or they never
