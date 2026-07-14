@@ -3,11 +3,12 @@ import type { ReactNode } from "react";
 import { Board } from "./components/board/board";
 import { PaneErrorFallback } from "./components/error-boundary";
 import { HistoryPage } from "./components/history/history-page";
+import { KnowledgePage } from "./components/knowledge/knowledge-page";
 import { ShellLayout } from "./routes/app";
 import { FileRoute } from "./routes/file";
 import { KitchenSink } from "./routes/kitchen-sink";
 import { SessionView } from "./routes/session";
-import { AccountView, KnowledgeView, SettingsView } from "./routes/stubs";
+import { AccountView, SettingsView } from "./routes/stubs";
 
 // Code-based routing (no generated route tree) keeps routing explicit + lint-clean. The product views
 // map 1:1 to /, /knowledge, /history, /settings, /account (production-notes §1); they are CHILDREN of a
@@ -53,7 +54,7 @@ const fileRoute = createRoute({
   component: FileRoute,
   errorComponent: () => <PaneErrorFallback label="This file" />,
 });
-const knowledgeRoute = view("/knowledge", KnowledgeView, "Knowledge");
+const knowledgeRoute = view("/knowledge", KnowledgePage, "Knowledge");
 const historyRoute = view("/history", HistoryPage, "History");
 const settingsRoute = view("/settings", SettingsView, "Settings");
 const accountRoute = view("/account", AccountView, "Account");
