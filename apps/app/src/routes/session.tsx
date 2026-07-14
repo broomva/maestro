@@ -45,12 +45,11 @@ function SessionChat({ sessionId }: { sessionId: string }) {
   // docks at the orchestrator session foot only (the prototype's MccMaestroChat; a fresh worker session
   // shows just its composer). Read the STABLE server slice + derive in useMemo — deriving inline returns
   // a fresh array every render and thrashes useSyncExternalStore (the FID-2 getSnapshot lesson).
+  // Only the orchestrator subscribes to the (high-churn) server-truth slice — a worker session selects a
+  // constant `null`, so its SSE-driven mutations never re-render this view (correctness P20 nit).
   const isOrchestrator = sessionId === "orchestrator";
-  const server = useStore(maestroStore, (s) => s.server);
-  const gateItems = useMemo(
-    () => (isOrchestrator ? selectGateQueue(server) : []),
-    [server, isOrchestrator],
-  );
+  const server = useStore(maestroStore, (s) => (isOrchestrator ? s.server : null));
+  const gateItems = useMemo(() => (server ? selectGateQueue(server) : []), [server]);
 
   return (
     <div className="flex h-full min-h-0" data-testid="session-view">

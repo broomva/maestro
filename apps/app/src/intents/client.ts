@@ -4,7 +4,8 @@
 // the event stream and re-projects the store (the same SSE that feeds the mission plane). The 202 ack
 // only says "accepted". Mirrors RuntimeChatTransport: same-origin by default (the vite proxy forwards
 // /api), an injectable `fetch` for tests, and an Idempotency-Key so a retried POST is a no-op (the
-// storm killer, FLOWS F7) — the gate grace window resends under a STABLE key so no verb double-applies.
+// storm killer, FLOWS F7). The gate holds a STABLE key per decision, so if the SAME POST is retried at
+// the transport layer (browser/proxy, or an unmount flush racing the grace timer) it can't double-apply.
 
 import {
   IDEMPOTENCY_KEY_HEADER,
@@ -43,8 +44,9 @@ export interface PostIntentOptions {
   fetchImpl?: FetchLike;
   /**
    * The Idempotency-Key. A retried POST at the SAME key is a no-op (API.md §Intents), so pass a STABLE
-   * key per human decision — the gate grace window resends the chosen verdict under one key so a retry
-   * can never double-apply. Defaults to a fresh uuid per call (fine for one-shot, non-retried sends).
+   * key per human decision — the gate keys each verdict on `${id}:${label}:${chosenAt}`, so if the same
+   * POST is retried (transport/proxy, or an unmount flush racing the grace timer) it can't double-apply.
+   * Defaults to a fresh uuid per call (fine for one-shot, non-retried sends).
    */
   idempotencyKey?: string;
   signal?: AbortSignal;

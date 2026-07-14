@@ -104,6 +104,9 @@ export function KitchenSink() {
     const key = "gateId" in intent ? intent.gateId : "nodeId" in intent ? intent.nodeId : "";
     setDispatched((d) => [...d, `${intent.type}:${key}`]);
   };
+  // A mount toggle so the harness can prove the unmount-FLUSH: unmounting mid-grace must still commit the
+  // chosen verdict (gate.ts §PendingVerdict), not drop it — the live analogue is a session switch.
+  const [gateMounted, setGateMounted] = useState(true);
   return (
     <main className="flex min-h-dvh flex-col bg-background text-foreground">
       <header className="flex h-[52px] shrink-0 items-center justify-between border-border border-b px-5">
@@ -264,8 +267,16 @@ export function KitchenSink() {
 
           <Section title="Gate queue">
             <Row label="Rung 2: the human looks, then acts with verbs. Click a card to see the look + verbs; Approve is reversible for a beat (grace), Needs you is accent-blue, never red.">
-              <div className="w-full max-w-[520px]">
-                <GateQueue items={GATE_ITEMS} onIntent={onIntent} />
+              <div className="flex w-full max-w-[520px] flex-col gap-2">
+                <button
+                  type="button"
+                  data-testid="gate-mount-toggle"
+                  className="self-start text-muted-foreground text-xs underline"
+                  onClick={() => setGateMounted((m) => !m)}
+                >
+                  {gateMounted ? "unmount queue" : "remount queue"}
+                </button>
+                {gateMounted ? <GateQueue items={GATE_ITEMS} onIntent={onIntent} /> : null}
               </div>
             </Row>
             <Row label="Empty: nothing at your gate">

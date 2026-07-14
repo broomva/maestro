@@ -128,7 +128,7 @@
   color: var(--foreground);
   background: var(--bv-frost-4, var(--card));
   border: 1px solid var(--bv-border-15);
-  border-radius: var(--bv-radius-lg);
+  border-radius: var(--bv-radius-md);
 }
 .mcc-gateq-note-input:focus-visible {
   outline: 2px solid var(--ring);

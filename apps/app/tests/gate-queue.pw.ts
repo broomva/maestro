@@ -63,6 +63,27 @@ test("Approve is reversible for a beat: Undo cancels the send; letting it lapse 
   });
 });
 
+test("unmounting mid-grace COMMITS the chosen verdict (not Undo) — a session switch never silently drops an approve", async ({
+  page,
+}) => {
+  const queue = page.getByTestId("gate-queue");
+  const reviewCard = queue.locator('[data-state="review"]');
+  await reviewCard.locator(".mcc-gateq-row").click();
+
+  // Approve → grace window open, nothing dispatched yet.
+  await reviewCard.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(reviewCard.getByRole("button", { name: /Undo/ })).toBeVisible();
+  await expect(page.getByTestId("gate-dispatched")).toHaveCount(0);
+
+  // Unmount the queue WHILE the verdict is still in its grace window (the live analogue is switching
+  // sessions). gate.ts §PendingVerdict: leaving is not Undo, so the approve must still be POSTed.
+  await page.getByTestId("gate-mount-toggle").click();
+  await expect(queue).toHaveCount(0);
+  await expect(page.getByTestId("gate-dispatched")).toContainText("approve:gate-1", {
+    timeout: 3000,
+  });
+});
+
 test("Send back collects a note (a revise carries feedback); a blocked card redispatches immediately", async ({
   page,
 }) => {

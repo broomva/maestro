@@ -56,20 +56,26 @@ export function GateQueue({ items, onIntent }: GateQueueProps) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [noteFor, setNoteFor] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
-  // A coarse clock for the grace countdown label; ticks only while a grace window is open.
+  // A coarse clock: it advances the grace countdown label and each card's relative-age receipt.
   const [now, setNow] = useState(() => Date.now());
-  const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // Each graced verdict registers a timer AND a `flush` (fire-the-send-now) closure, so unmount can
+  // COMMIT a chosen-but-not-yet-sent verdict rather than drop it (gate.ts §PendingVerdict: sent exactly
+  // once, never silently dropped; only Undo cancels). Redispatch is immediate and never registers here.
+  const timers = useRef<
+    Record<string, { timer: ReturnType<typeof setTimeout>; flush: () => void }>
+  >({});
 
   const clearTimer = useCallback((id: string) => {
     const t = timers.current[id];
     if (t !== undefined) {
-      clearTimeout(t);
+      clearTimeout(t.timer);
       delete timers.current[id];
     }
   }, []);
 
-  // Send the chosen intent exactly once (called by the grace timer, or immediately for redispatch). The
-  // idempotency key is STABLE per decision so a resend can never double-apply (client.ts §idempotencyKey).
+  // Send the chosen intent exactly once (called by the grace timer, on unmount-flush, or immediately for
+  // redispatch). The idempotency key is STABLE per decision, so any retry of THIS POST at the transport
+  // layer (browser/proxy, or an unmount flush racing a timer) de-dupes server-side (client.ts §idempotencyKey).
   const send = useCallback(
     (id: string, label: string, intent: Intent, chosenAt: number) => {
       setPending((cur) => (cur[id] ? { ...cur, [id]: { ...cur[id], phase: "sending" } } : cur));
@@ -96,10 +102,13 @@ export function GateQueue({ items, onIntent }: GateQueueProps) {
       setNoteFor(null);
       if (graced) {
         clearTimer(id);
-        timers.current[id] = setTimeout(() => {
-          delete timers.current[id];
-          send(id, label, intent, chosenAt);
-        }, GATE_GRACE_WINDOW_MS);
+        timers.current[id] = {
+          timer: setTimeout(() => {
+            delete timers.current[id];
+            send(id, label, intent, chosenAt);
+          }, GATE_GRACE_WINDOW_MS),
+          flush: () => send(id, label, intent, chosenAt),
+        };
       } else {
         send(id, label, intent, chosenAt); // redispatch: no grace, fire now
       }
@@ -119,13 +128,17 @@ export function GateQueue({ items, onIntent }: GateQueueProps) {
     [clearTimer],
   );
 
-  // The countdown clock — runs only while at least one verdict is inside its grace window.
+  // The clock drives two receipts: the grace countdown (a 500ms tick while a verdict is inside its
+  // window) and each card's relative age (a calm 30s tick while any card is docked). Gating the age
+  // tick on `graceOpen` alone froze the age labels — and pinned a gate that opened after mount to "0s"
+  // (react-patterns P20). So it ticks whenever there are cards, fast only during a grace window.
   const graceOpen = Object.values(pending).some((p) => p.phase === "grace" && p.graced);
+  const hasCards = items.length > 0;
   useEffect(() => {
-    if (!graceOpen) return;
-    const t = setInterval(() => setNow(Date.now()), 500);
+    if (!graceOpen && !hasCards) return;
+    const t = setInterval(() => setNow(Date.now()), graceOpen ? 500 : 30_000);
     return () => clearInterval(t);
-  }, [graceOpen]);
+  }, [graceOpen, hasCards]);
 
   // Cleanup: when a card leaves the queue (server processed the verdict → the node left review/blocked)
   // drop its pending entry + timer, so a later reappearance of the same UUID doesn't show a stale verb.
@@ -146,11 +159,20 @@ export function GateQueue({ items, onIntent }: GateQueueProps) {
     });
   }, [liveIds, clearTimer]);
 
-  // Clear every timer on unmount (the pending sends are abandoned; the human left the surface).
+  // On unmount, COMMIT (don't drop) each pending grace verdict: the human chose it, and leaving the
+  // surface is not Undo — the only sanctioned cancel (gate.ts §PendingVerdict). Cancel the timer, then
+  // flush the send now; the stable idempotency key means a flush + an about-to-fire timer can't double-
+  // apply. `timers.current` only ever holds still-in-grace verdicts (a sent/failed timer self-deletes,
+  // an undone one is cleared), so this commits exactly the un-committed ones.
   useEffect(() => {
     const t = timers.current;
     return () => {
-      for (const id of Object.keys(t)) clearTimeout(t[id]);
+      for (const id of Object.keys(t)) {
+        const entry = t[id];
+        if (!entry) continue;
+        clearTimeout(entry.timer);
+        entry.flush();
+      }
     };
   }, []);
 
