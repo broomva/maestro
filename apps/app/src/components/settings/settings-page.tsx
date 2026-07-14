@@ -23,7 +23,7 @@ import {
   SlidersHorizontal,
   Users,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useThemeState } from "@/theme";
 import { SetSegmented, SetSlider, SetStepper, SetSwitch } from "./controls";
 import { CREDS, MEMBERS, type MemberRole, ROUTINES, SET_SECTIONS, WAKES } from "./settings-data";
@@ -74,6 +74,25 @@ export function SettingsPage() {
   const [notif, setNotif] = useState({ app: true, email: true, slack: false });
   const [pingWhen, setPingWhen] = useState("blocks");
   const [memberRoles, setMemberRoles] = useState<MemberRole[]>(MEMBERS.map((m) => m.role));
+  // One-scroll ToC scroll-spy: the active crumb reflects the section actually in view (was hardcoded to
+  // the first item — a ToC that disagrees with the scroll position). Only wired in the scroll layout;
+  // SSR/test-safe (no document → skipped). The rootMargin makes a section active while it's mid-viewport.
+  const [activeToc, setActiveToc] = useState<string>(SET_SECTIONS[0]?.id ?? "runners");
+  useEffect(() => {
+    if (layout !== "scroll" || typeof document === "undefined") return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const seen = entries.find((e) => e.isIntersecting);
+        if (seen?.target.id) setActiveToc(seen.target.id.replace("set-", ""));
+      },
+      { rootMargin: "-40% 0px -50% 0px" },
+    );
+    for (const s of SET_SECTIONS) {
+      const el = document.getElementById(`set-${s.id}`);
+      if (el) obs.observe(el);
+    }
+    return () => obs.disconnect();
+  }, [layout]);
 
   // A plain render helper, NOT a component: it is CALLED (`{renderSection(id)}`), so its JSX inlines into
   // this render with no reconciliation boundary. Defining it as a component and using `<Section/>` would
@@ -656,7 +675,8 @@ export function SettingsPage() {
                 <a
                   key={s.id}
                   href={`#set-${s.id}`}
-                  className={`set-toc-btn${i === 0 ? " is-active" : ""}`}
+                  aria-current={s.id === activeToc ? "true" : undefined}
+                  className={`set-toc-btn${s.id === activeToc ? " is-active" : ""}`}
                 >
                   <span className="set-toc-num">{String(i + 1).padStart(2, "0")}</span>
                   <span>{s.short}</span>

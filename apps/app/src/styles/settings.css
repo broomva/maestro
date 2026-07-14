@@ -2,9 +2,8 @@
  * the Knowledge + History pages. Ported from the prototype's `.set-*` classes (settings.css); the `.usr-*`
  * account classes arrive with slice 4 (User). Two canon fixes vs the prototype: the warm hue-85/78
  * literals become the sanctioned `--bv-warning` status token (no invented oklch, one cool axis + amber
- * only as a status), and every surface is matte (glass stays on the composer). Tokens-first: the only
- * raw values are the switch-track off-state background + the thumb shadow, ported verbatim from the
- * prototype since no token exists for them (both stay on the cool axis). */
+ * only as a status), and every surface is matte (glass stays on the composer). Tokens-only: no raw
+ * hex/oklch literals — the switch track + thumb map to gray/white/edge-shadow tokens. */
 
 /* ── Page shell + local top bar ──────────────────────────────────────────── */
 .set-page {
@@ -153,11 +152,11 @@
   border: none;
   cursor: pointer;
   padding: 0;
-  background: var(--bv-gray-300, oklch(0.9 0.01 265));
+  background: var(--bv-gray-300);
   transition: background var(--bv-dur-fast) var(--bv-ease-standard);
 }
 [data-theme="dark"] .set-switch {
-  background: oklch(0.32 0.02 272);
+  background: var(--bv-gray-800);
 }
 .set-switch::after {
   content: "";
@@ -167,8 +166,8 @@
   width: calc(var(--h) - 4px);
   height: calc(var(--h) - 4px);
   border-radius: 99px;
-  background: var(--bv-white, #fff);
-  box-shadow: 0 1px 2px oklch(0.2 0.04 265 / 0.25);
+  background: var(--bv-white);
+  box-shadow: var(--bv-shadow-edge);
   transition: transform var(--bv-dur-fast) var(--bv-ease-standard);
 }
 .set-switch.is-on {
@@ -310,6 +309,10 @@
   border-radius: 99px;
   background: var(--bv-border-15);
   outline: none;
+}
+.set-range:focus-visible {
+  outline: 2px solid var(--bv-blue);
+  outline-offset: 2px;
 }
 .set-range::-webkit-slider-thumb {
   -webkit-appearance: none;

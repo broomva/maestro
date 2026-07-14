@@ -138,3 +138,18 @@ test("the Appearance theme selection stays in sync with the top-bar toggle", asy
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(theme.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
 });
+
+test("the one-scroll ToC highlights the section actually in view (scroll-spy)", async ({
+  page,
+}) => {
+  // Was hardcoded to the first item (a ToC that disagreed with the scroll position); now driven by an
+  // IntersectionObserver. Scrolling to the bottom section must move the active crumb off "Runners".
+  const view = page.getByTestId("view-settings");
+  await view.getByRole("radio", { name: "One scroll" }).click();
+  await expect(view.locator(".set-toc")).toBeVisible();
+  await expect(view.locator(".set-toc-btn.is-active")).toContainText("Runners"); // first, at rest
+  await view.locator(".set-scrollwrap").evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  await expect(view.locator(".set-toc-btn.is-active")).toContainText("Members"); // reflects the scroll
+});
