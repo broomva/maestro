@@ -85,10 +85,11 @@ describe("Shell — the tree-led chrome (BRO-1884)", () => {
     expect(html).toContain("⌘K");
   });
 
-  test("the main panel owns the scroll", () => {
-    // Couple the assertion to <main> — `overflow-y-auto` is also on <aside> (mcc-nav), so a bare
-    // toContain would stay green even if <main> lost its scroll.
-    expect(html).toContain('overflow-y-auto p-6" data-testid="shell-main"');
+  test("the main region is a no-scroll frame; the matched view owns the scroll (BRO-1886)", () => {
+    // The shell frame owns NO scroll — the inner panel (the mission plane's .mcc-plane-body, or a
+    // stub's own scroll wrapper) is the one that scrolls (CLAUDE.md §Layout: the shell never scrolls;
+    // inner panels do). Coupled to <main> via its testid so it can't pass on an unrelated element.
+    expect(html).toContain('overflow-hidden" data-testid="shell-main"');
   });
 
   test("the active lens (Maestro, at /) is marked for assistive tech", () => {

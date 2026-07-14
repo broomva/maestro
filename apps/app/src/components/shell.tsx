@@ -79,7 +79,11 @@ export function Shell({ children }: { children?: ReactNode }) {
           onToggleCollapsed={toggleNav}
           onCommand={openCommandPalette}
         />
-        <main className="min-h-0 flex-1 overflow-y-auto p-6" data-testid="shell-main">
+        {/* The shell frame owns NO scroll and NO padding — the matched view is the inner panel that
+            scrolls (CLAUDE.md §Layout: the shell never scrolls; inner panels do). The mission plane
+            fills it and owns its own scroll; the simpler views (stubs) wrap themselves in a padded
+            scroll container. */}
+        <main className="min-h-0 flex-1 overflow-hidden" data-testid="shell-main">
           {children ?? <ShellPlaceholder />}
         </main>
       </div>

@@ -148,6 +148,17 @@ export function selectBoard(s: ServerTruth): BoardGroup[] {
   return groups;
 }
 
+/**
+ * The mission plane's work items — LEAF WorkItems only (BRO-1886). The plane surfaces the
+ * actionable work a human acts on; the container folders (initiative/project) are the sidebar
+ * tree's job (the disclosure ladder — the plane is rung 1, the tree is the workspace structure).
+ * Flat + path-sorted (stable, mirrors `/api/tree`); the plane component does the feed grouping /
+ * board columns client-side, exactly like the prototype (WorkPlanes.jsx filters a flat list).
+ */
+export function selectPlaneItems(s: ServerTruth): WorkItem[] {
+  return selectWorkItems(s).filter((i) => i.kind !== "initiative" && i.kind !== "project");
+}
+
 /** One project folder in the sidebar workspace tree. */
 export interface SidebarProject {
   /** project title (the `project` ancestry field). */

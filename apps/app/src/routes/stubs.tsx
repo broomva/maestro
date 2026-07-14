@@ -3,11 +3,15 @@
 // until their milestones land: Knowledge + History = BRO-1815 (M4), Settings + Account = BRO-1810 (M4).
 // Each renders inside the shell layout's main; the shell chrome (sidebar, header) is the layout route.
 
+// Each stub owns its own scroll + padding: the shell frame is now overflow-hidden (BRO-1886), so a
+// simple view wraps itself in a padded scroll container (the mission plane does this via .mcc-plane).
 function StubView({ title, note, testid }: { title: string; note: string; testid: string }) {
   return (
-    <div data-testid={testid} className="flex flex-col gap-3">
-      <h1 className="text-foreground text-h1">{title}</h1>
-      <p className="max-w-[520px] text-muted-foreground text-sm">{note}</p>
+    <div className="h-full overflow-y-auto p-6">
+      <div data-testid={testid} className="flex flex-col gap-3">
+        <h1 className="text-foreground text-h1">{title}</h1>
+        <p className="max-w-[520px] text-muted-foreground text-sm">{note}</p>
+      </div>
     </div>
   );
 }
