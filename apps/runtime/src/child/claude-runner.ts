@@ -23,7 +23,7 @@ import type { WorkContract } from "@maestro/protocol";
 import { readContractSnapshot } from "../harness/contract-snapshot";
 import { createNdjsonSplitter } from "../harness/ndjson";
 import type { ChildEmittedEvent } from "../harness/runner";
-import { parseChildArgv } from "../harness/spawn-contract";
+import { buildClaudeProviderEnv, parseChildArgv } from "../harness/spawn-contract";
 import {
   type ClaudeStreamEvent,
   newClaudeTranslatorState,
@@ -121,7 +121,10 @@ async function main(): Promise<void> {
     "--permission-mode",
     CLAUDE_PERMISSION,
     "--setting-sources",
-    "project", // NEVER the operator's user hooks/settings — the worktree has none, so this is clean
+    // Empty = load NO settings: not the operator's user hooks/settings, and NOT the (untrusted) work
+    // repo's committed `.claude/settings.json` — a `project` scope would run that repo's hooks under
+    // bypassPermissions, an injection surface. Verified: claude 2.1.211 accepts an empty list.
+    "",
     "--strict-mcp-config", // no --mcp-config given → zero MCP servers (no operator MCP contamination)
     "--append-system-prompt",
     SYSTEM_APPEND,
@@ -131,9 +134,12 @@ async function main(): Promise<void> {
   try {
     proc = Bun.spawn([CLAUDE_BIN, ...args], {
       cwd,
-      // The runner's own env is the supervisor's allowlisted child env (HOME/PATH for Keychain auth + the
-      // CLI binary); pass it through. No API key, no proxy vars — the CLI self-authenticates.
-      env: process.env,
+      // The AUTHORITATIVE bypassPermissions boundary: confine the CLI's env to the deny-by-default floor +
+      // the narrow named auth channel (USER/LOGNAME → Keychain, or CLAUDE_CODE_OAUTH_TOKEN) and drop the
+      // Anthropic key (subscription billing). No `childEnv`, so the per-session BROOMVA_MODEL_TOKEN bearer
+      // is dropped too — the CLI never dials our proxy. Idempotent even though the runner's own env was
+      // already confined by claudeSpawnChild (belt for a direct/test spawn with a full host env).
+      env: buildClaudeProviderEnv(process.env),
       stdin: "ignore", // one-shot: the mission is the positional prompt; no stdin turns to the CLI (yet)
       stdout: "pipe",
       stderr: "pipe",
@@ -148,13 +154,17 @@ async function main(): Promise<void> {
   }
 
   // Kill the CLI if the runner is asked to terminate (supervisor SIGTERM / our own exit paths) so a live
-  // model call can't outlive its supervisor.
+  // model call can't outlive its supervisor. SIGKILL, not SIGTERM: the runner is going away either way, so
+  // the grandchild CLI must die IMMEDIATELY — a CLI that lingered on SIGTERM while the runner exits would
+  // be reparented to init (the orphan-spends-the-subscription bug the F8 SIGTERM-first grace exists to
+  // avoid). The supervisor gives the runner a grace window before it SIGKILLs the runner, so this handler
+  // does get to run.
   let killed = false;
   const killCli = () => {
     if (!killed) {
       killed = true;
       try {
-        proc.kill();
+        proc.kill("SIGKILL");
       } catch {
         /* already gone */
       }
@@ -224,6 +234,10 @@ async function main(): Promise<void> {
           if (ctl.type === "ping") {
             await Bun.write(Bun.stdout, '{"type":"pong"}\n');
           } else if (ctl.type === "stop") {
+            // A stop that races in AFTER the CLI already declared its terminal receipt must NOT override
+            // the run's outcome — `emitExit` is a no-op once `exited`, but `process.exit(10)` would still
+            // flip a clean completion (0 → review) to park-blocked. Guard on the terminal flag.
+            if (exited) return;
             killCli();
             await emitExit(10, "user_stop");
             process.exit(10);

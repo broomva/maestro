@@ -22,7 +22,7 @@
 //   result                 → run.exiting {code, reason}      (success→0, max_turns→10 halt, else→1)
 //   rate_limit_event       → (dropped unless blocking — the `result` carries a real block)
 
-import type { ChildEmittedEvent } from "../harness/runner";
+import { type ChildEmittedEvent, summarizeInput } from "../harness/runner";
 
 /** One content block inside an `assistant`/`user` stream-json message. Only the fields we read are typed;
  *  the CLI carries more (signatures, cache stats) we intentionally ignore. */
@@ -166,10 +166,15 @@ export function translateClaudeEvent(
             if (state.toolNames.size >= MAX_TOOL_NAMES) state.toolNames.clear();
             state.toolNames.set(b.id, b.name);
           }
+          // Bound the input to a short, log-safe summary — the durable session.jsonl audit trail stores
+          // decisions, not raw payloads (HARNESS §6). Matches broomva-child's tool.call shape (a clamped
+          // string, never an unbounded object). Omit the field entirely when there's nothing to show.
+          const input = summarizeInput(b.input);
           out.push({
             actor: "agent",
             type: "tool.call",
-            payload: { tool: b.name ?? "tool", input: b.input },
+            payload:
+              input === undefined ? { tool: b.name ?? "tool" } : { tool: b.name ?? "tool", input },
           });
         }
         // thinking blocks are intentionally dropped (internal reasoning, not a run utterance).

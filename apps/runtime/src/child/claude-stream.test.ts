@@ -104,7 +104,9 @@ describe("claude-stream — per-event mapping", () => {
       {
         actor: "agent",
         type: "tool.call",
-        payload: { tool: "Read", input: { path: "roadmap.md" } },
+        // input is a bounded, log-safe SUMMARY (a clamped string), never the raw object — matches
+        // broomva-child's tool.call shape and keeps unbounded payloads out of the durable session.jsonl.
+        payload: { tool: "Read", input: '{"path":"roadmap.md"}' },
       },
       { actor: "system", type: "run.beat", payload: { iteration: 1 } },
       {
@@ -113,6 +115,32 @@ describe("claude-stream — per-event mapping", () => {
         payload: { tool: "Read", ok: true, summary: "# Q3 roadmap ship maestro" },
       },
     ]);
+  });
+
+  test("tool.call input is clamped to a bounded summary (no unbounded payload in the audit trail)", () => {
+    const huge = "x".repeat(5000);
+    const { emitted } = run([
+      {
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "t", name: "Bash", input: { cmd: huge } }] },
+      },
+    ]);
+    const call = emitted.find((e) => e.type === "tool.call");
+    const input = call?.payload?.input as string;
+    expect(typeof input).toBe("string");
+    expect(input.length).toBeLessThanOrEqual(200);
+    expect(input.endsWith("...")).toBe(true);
+  });
+
+  test("tool.call with no input omits the field entirely", () => {
+    const { emitted } = run([
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t", name: "Read" }] } },
+    ]);
+    expect(emitted.find((e) => e.type === "tool.call")).toEqual({
+      actor: "agent",
+      type: "tool.call",
+      payload: { tool: "Read" },
+    });
   });
 
   test("tool_result with is_error → ok:false", () => {

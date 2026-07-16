@@ -91,6 +91,11 @@ const DISPATCH_LEASE_TTL_MS = 24 * 60 * 60 * 1000;
  *  child that emits `fresh_context` forever from spinning the supervisor without limit. */
 const DEFAULT_MAX_RESPAWNS = 50;
 
+/** F8 kill grace (BRO-1912): send SIGTERM first so a child's signal handler can reap any grandchild it
+ *  spawned (the subscription `claude` CLI), then SIGKILL if it outlives cooperation. Short — the run is
+ *  ending either way; this only gives the runner a beat to tear its CLI down instead of orphaning it. */
+const DEFAULT_KILL_GRACE_MS = 2000;
+
 /** The one binary a Loop-1 child runs (HARNESS §1 argv `broomva-child --role … --session …`). */
 export const CHILD_BIN = "broomva-child";
 
@@ -159,6 +164,10 @@ export interface SupervisorDeps {
   hostEnv?: Record<string, string | undefined>;
   /** Fresh-context respawn safety bound (default 50). */
   maxRespawns?: number;
+  /** F8 kill grace window in ms before SIGKILL (default 2000) — injected small/zero in tests. */
+  killGraceMs?: number;
+  /** Grace timer (default real `setTimeout`) — injected for deterministic kill tests (no wall-time). */
+  delay?: (ms: number) => Promise<void>;
   /** Read the run diff for the Stage-2 judge (default {@link gitDiffBounded}). Injected so a test can drive
    *  the kill-during-verify race deterministically — the reap awaits this between the reap's own guards and
    *  the verifier-bearer mint, so a fixture that kills mid-read exercises the pre-mint kill guard. */
@@ -326,6 +335,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     hostEnv = process.env,
     maxRespawns = DEFAULT_MAX_RESPAWNS,
     readDiff = gitDiffBounded,
+    killGraceMs = DEFAULT_KILL_GRACE_MS,
+    delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
   } = deps;
   const registry = new RunRegistry();
   // Run ids a `kill` landed on. A fresh-context respawn consults this after each await so a kill that
@@ -1223,16 +1234,39 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   }
 
   // ── Kill switch (F8, BRO-1801) ──────────────────────────────────────────────
-  // Intent → SIGKILL the child (no cooperation — this is why runs are processes) → the run ends
-  // `canceled` + `run.killed` (the reap / respawn-check reads `cancelled` and routes to terminalKilled),
-  // worktree + branch PRESERVED. The bearer is revoked HERE so no in-flight model call survives the kill.
+  // Intent → terminate the child → the run ends `canceled` + `run.killed` (the reap / respawn-check reads
+  // `cancelled` and routes to terminalKilled), worktree + branch PRESERVED. The bearer is revoked HERE so
+  // no in-flight model call survives the kill.
+  //
+  // BRO-1912: SIGTERM-FIRST, not immediate SIGKILL. A runner that spawns a grandchild (the subscription
+  // `claude` CLI) reaps that CLI in its SIGTERM handler; a bare SIGKILL bypasses the handler and ORPHANS
+  // the CLI (it keeps spending the subscription + mutating the worktree after the operator hit kill). We
+  // still guarantee death: SIGKILL after `killGraceMs` if the child outlives cooperation. broomva-child
+  // installs no SIGTERM handler, so it simply dies on SIGTERM — same terminal, no orphan to reap.
+  async function terminateChild(child: RunEntry["child"]): Promise<void> {
+    child.kill("SIGTERM");
+    let exited = false;
+    const exitedP = child.exited.then(
+      () => {
+        exited = true;
+      },
+      () => {
+        exited = true; // a rejected `exited` (spawn error) is still "gone" — nothing left to SIGKILL
+      },
+    );
+    await Promise.race([exitedP, delay(killGraceMs)]);
+    if (!exited) child.kill("SIGKILL");
+  }
+
   function kill(runId: string): boolean {
     const entry = registry.get(runId);
     if (!entry) return false;
     // Mark cancelled FIRST — the background reap AND any in-flight respawn consult it: a killed run ends
-    // `canceled`/`run.killed`, and a respawn refuses to resurrect it with a fresh child + token.
+    // `canceled`/`run.killed`, and a respawn refuses to resurrect it with a fresh child + token. The
+    // graceful terminate runs in the background (fire-and-forget); the reap already awaits `child.exited`
+    // and, seeing `cancelled`, routes to terminalKilled regardless of the exit code the signal produced.
     cancelled.add(runId);
-    entry.child.kill("SIGKILL");
+    void terminateChild(entry.child);
     tokens.revoke(runId); // bearer invalid immediately — a mid-tool-call model request now 401s
     return true;
   }

@@ -21,6 +21,7 @@ import { parsePayload } from "./api/event-projection";
 import type { RuntimeConfig } from "./config";
 import type { IndexDb } from "./db/client";
 import { event } from "./db/schema";
+import { buildClaudeProviderEnv } from "./harness/spawn-contract";
 import { fromBunSubprocess } from "./harness/stdio";
 import { BudgetGuard, deriveDayTotal } from "./proxy/budget";
 import { fsJournalSink } from "./proxy/events";
@@ -87,20 +88,21 @@ const CLAUDE_RUNNER_ENTRY = fileURLToPath(new URL("./child/claude-runner.ts", im
  * {@link devSpawnChild} (same `fromBunSubprocess` port), so the supervisor wraps it unchanged — the only
  * difference is the child entry: this one spawns the Claude Code CLI internally and translates its stream.
  *
- * TRUST MODEL — deliberately DIFFERENT from broomva-child. broomva-child is untrusted: it gets the
- * deny-by-default allowlist env (`args.env`, no host secrets) and calls the metered proxy, so it can never
- * touch a credential. The subscription CLI is a TRUSTED provider integration: it MUST reach its own auth
- * (Keychain / OS session channel / an OAuth token env var — provider- and host-specific, not a fixed var
- * we can allowlist), so it inherits the RUNTIME's environment. `{...process.env, ...args.env}` layers the
- * BROOMVA_* contract vars (+ HOME/PATH) over the full runtime env, so the CLI authenticates exactly as the
- * operator's own `claude` would. Confinement here is the WORKTREE (cwd) + the CLI's `--permission-mode`,
- * not credential-denial — the subscription runner is intentionally allowed to spend the subscription.
+ * TRUST MODEL — still DENY-BY-DEFAULT, not `{...process.env}`. The subscription CLI authenticates on the
+ * operator's OWN channel (macOS Keychain via USER/LOGNAME, or CLAUDE_CODE_OAUTH_TOKEN on Linux/CI), so the
+ * env is the deny-by-default floor PLUS that NARROW named auth channel — never the full host env. Leaking
+ * every host secret (`ANTHROPIC_API_KEY`, `CLOUDFLARE_API_TOKEN`, …) into a `bypassPermissions` agent is
+ * the R5 KEY-EXFIL class the harness exists to prevent; `ANTHROPIC_API_KEY` is force-deleted so the CLI
+ * bills the subscription, not the API. {@link buildClaudeProviderEnv} owns that policy; `args.env` layers
+ * the supervisor's BROOMVA_* contract (BROOMVA_RUN_DIR) so the runner finds its worktree. Confinement is
+ * the WORKTREE (cwd) + `--permission-mode` + this env floor — the runner may spend the subscription, but
+ * it cannot touch an unrelated host credential.
  */
 export const claudeSpawnChild: SpawnChild = (args) =>
   fromBunSubprocess(
     Bun.spawn([...args.commandPrefix, "bun", "run", CLAUDE_RUNNER_ENTRY, ...args.argv], {
       cwd: args.cwd,
-      env: { ...process.env, ...args.env },
+      env: buildClaudeProviderEnv(process.env, args.env),
       stdout: "pipe",
       stderr: "pipe",
       stdin: "pipe",

@@ -26,6 +26,7 @@ import {
 import { type SdkOccurrence, translateSdkOccurrence } from "./runner";
 import {
   buildChildEnv,
+  buildClaudeProviderEnv,
   type ChildInvocation,
   isSecretEnvName,
   parseChildArgv,
@@ -173,6 +174,106 @@ test("isSecretEnvName flags secrets and clears the allowlist", () => {
   for (const name of ["PATH", "HOME", "LANG", "BUN_INSTALL", "TZ", "BROOMVA_RUN_DIR"]) {
     expect(isSecretEnvName(name)).toBe(false);
   }
+});
+
+// ── 2b. subscription CLI runner env (BRO-1912 — the P20 BLOCKER: no host-secret leak) ────────────────
+
+// The claude runner authenticates on the operator's own channel, so its env is the deny-by-default floor
+// PLUS a NARROW named auth passthrough — NOT `{...process.env}`. These tests are the mutation-proof that
+// the BLOCKER (every host secret, incl. ANTHROPIC_API_KEY, leaking into a bypassPermissions agent) is shut.
+const CLAUDE_HOST_ENV: Record<string, string> = {
+  ...HOSTILE_HOST_ENV,
+  // the auth channel the CLI legitimately needs
+  USER: "broomva",
+  LOGNAME: "broomva",
+  CLAUDE_CODE_OAUTH_TOKEN: "sk-oauth-subscription", // name matches the secret predicate → floor strips it
+  // non-secret runner steering
+  MAESTRO_CLAUDE_MODEL: "claude-haiku-4-5-20251001",
+  MAESTRO_CLAUDE_BIN: "/opt/claude",
+};
+
+test("buildClaudeProviderEnv drops EVERY unrelated host secret (the P20 BLOCKER)", () => {
+  const env = buildClaudeProviderEnv(CLAUDE_HOST_ENV);
+  for (const leaked of [
+    "ANTHROPIC_API_KEY", // the R5 key: never to a bypassPermissions agent, AND forces subscription billing
+    "OPENAI_API_KEY",
+    "MAESTRO_RELAY_KEY",
+    "RUNTIME_CREDENTIAL",
+    "GITHUB_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "SESSION_SECRET",
+    "MY_PASSWORD",
+    "SOME_PAT",
+    "NODE_OPTIONS", // the option-injection vector is dropped here too
+  ]) {
+    expect(env[leaked]).toBeUndefined();
+  }
+  // No leaked VALUE survives under any renamed key.
+  const values = Object.values(env);
+  for (const secret of [
+    "sk-ant-must-not-leak",
+    "ghp_must_not_leak",
+    "hunter2",
+    "aws-must-not-leak",
+  ]) {
+    expect(values).not.toContain(secret);
+  }
+});
+
+test("buildClaudeProviderEnv passes the NAMED auth channel + non-secret runner config", () => {
+  const env = buildClaudeProviderEnv(CLAUDE_HOST_ENV);
+  // Keychain identity (macOS) — the token itself lives in the Keychain, not the env.
+  expect(env.USER).toBe("broomva");
+  expect(env.LOGNAME).toBe("broomva");
+  // The explicit OAuth channel (Linux/CI). Its NAME matches the secret predicate, so it proves the
+  // named re-add — the floor stripped it and only the allowlist put it back.
+  expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-oauth-subscription");
+  expect(isSecretEnvName("CLAUDE_CODE_OAUTH_TOKEN")).toBe(true);
+  // Non-secret operator steering survives (dropped by the floor, re-added by name).
+  expect(env.MAESTRO_CLAUDE_MODEL).toBe("claude-haiku-4-5-20251001");
+  expect(env.MAESTRO_CLAUDE_BIN).toBe("/opt/claude");
+  // The floor still passes through.
+  expect(env.PATH).toBe("/usr/bin:/bin");
+  expect(env.HOME).toBe("/home/agent");
+});
+
+test("buildClaudeProviderEnv layers a childEnv overlay (BROOMVA_RUN_DIR) for the runner", () => {
+  const env = buildClaudeProviderEnv(CLAUDE_HOST_ENV, {
+    BROOMVA_RUN_DIR: "/runs/run-9",
+    BROOMVA_MODEL_TOKEN: "bearer",
+  });
+  expect(env.BROOMVA_RUN_DIR).toBe("/runs/run-9");
+  // ANTHROPIC_API_KEY is force-deleted even after the overlay.
+  expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+});
+
+test("buildClaudeProviderEnv NEVER re-opens ANTHROPIC_API_KEY via the operator passthrough", () => {
+  const env = buildClaudeProviderEnv({
+    ...CLAUDE_HOST_ENV,
+    // an operator trying (or being tricked) to re-admit the key — must be refused.
+    MAESTRO_CLAUDE_ENV_PASSTHROUGH: "ANTHROPIC_API_KEY, MY_CUSTOM_AUTH",
+    MY_CUSTOM_AUTH: "host-specific-channel",
+  });
+  expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  // a legit operator-named var IS admitted (the escape hatch works).
+  expect(env.MY_CUSTOM_AUTH).toBe("host-specific-channel");
+});
+
+test("buildClaudeProviderEnv is idempotent; re-confining drops any BROOMVA_* overlay (CLI gets no bearer)", () => {
+  const once = buildClaudeProviderEnv(CLAUDE_HOST_ENV, {
+    BROOMVA_RUN_DIR: "/runs/run-9",
+    BROOMVA_MODEL_TOKEN: "bearer",
+  });
+  // Re-applying with no childEnv (what the runner does at the CLI-spawn boundary) is a no-op EXCEPT it
+  // strips the BROOMVA_* overlay — the CLI must never hold the per-session proxy bearer.
+  const twice = buildClaudeProviderEnv(once);
+  expect(twice.BROOMVA_MODEL_TOKEN).toBeUndefined();
+  expect(twice.BROOMVA_RUN_DIR).toBeUndefined();
+  expect(twice.USER).toBe("broomva");
+  expect(twice.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-oauth-subscription");
+  expect(twice.MAESTRO_CLAUDE_MODEL).toBe("claude-haiku-4-5-20251001");
+  // and a third pass equals the second — a true fixpoint.
+  expect(buildClaudeProviderEnv(twice)).toEqual(twice);
 });
 
 // ── 3. contract snapshot round-trips ─────────────────────────────────────────
