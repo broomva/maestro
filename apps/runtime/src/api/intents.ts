@@ -685,9 +685,10 @@ async function completeApproveIfLanded(
  *      approver AND locks out a concurrent `block`/`revise` (their `WHERE verdict IS NULL` CAS now fails) so the
  *      merge can't land onto a gate a different verdict decided out from under it (which would strand merged work
  *      on a canceled node). The claim is not journaled.
- *   3. `approveMerge`. On `merged`: KEEP the claim, journal `gate.decided(approve)`, emit `gate.approved`, and
- *      transition the node → done (+ durable `_work.md`). On `stale`/`refused` (or a throw): RELEASE the claim
- *      (verdict → null) so the gate reopens re-decidable, and surface a typed refusal — NEVER a silent merge.
+ *   3. `approveMerge`. On `merged`: KEEP the claim, transition the node → done (+ durable `_work.md`) FIRST — it is
+ *      the landed-signal — THEN journal `gate.decided(approve)` + emit `gate.approved` (so a projection fault can't
+ *      strand the transition). On `stale`/`refused` (or a throw): RELEASE the claim (verdict → null) so the gate
+ *      reopens re-decidable, and surface a typed refusal — NEVER a silent merge.
  *
  * Idempotency + concurrency: a same-key retry is deduped by the lease (never reaches here). But a DIFFERENT-key
  * approve (a double-click that mints a fresh key, a second tab, two operators) can run CONCURRENTLY through this
@@ -696,10 +697,19 @@ async function completeApproveIfLanded(
  * completes the node ONLY when it is already `done` ({@link completeApproveIfLanded}) — the winner's durable
  * landed-signal — NEVER off the claim itself. Without that guard, a concurrent approve could flip the node to
  * `done` off a claim whose merge then returns `stale`/`refused` and releases it, stranding a `done` node over
- * unmerged work on a reopened, undecidable gate (the P20 corruption this guards). KNOWN residual (crash-gated,
- * non-corrupting): a crash between a LANDED merge and `completeApprove` leaves `verdict = approve` + node `review`;
- * a later observer can't auto-complete it (no false `done`), recoverable by redispatch — git-evidence self-heal is
- * a 2b-ii-B follow-up. Throws `IntentRefusal` on refusal.
+ * unmerged work on a reopened, undecidable gate (the P20 corruption this guards).
+ *
+ * KNOWN residuals (all crash- or transient-fault-gated, all NON-corrupting — no false `done`, no lost/double merge;
+ * a newer dispatch supersedes the orphaned gate via resolveGateChain's epoch guard):
+ *   (a) a crash between the CLAIM and either the merge landing OR `releaseApproveClaim` leaves `verdict = approve` +
+ *       node `review` with the run UNMERGED — stuck-but-clean (every verb no-ops/409s) until a redispatch; work is
+ *       safe on `run/<id>`.
+ *   (b) a crash / transient fault AFTER a landed merge but before `completeApprove` leaves it merged-but-not-`done`.
+ * A git-evidence self-heal (verify the merge landed → finish or reopen) covers both and is a 2b-ii-B follow-up.
+ * Because the journal is written AFTER `completeApprove` (to protect the node transition), a journal fault leaves the
+ * node correctly `done` but the decision un-journaled and NOT retry-repairable (a retry no-ops at `done`) — matters
+ * only for a `--rebuild` replay (BRO-1915, unbuilt; an open gate on a `done` node is inert — approve requires review).
+ * Throws `IntentRefusal` on refusal.
  */
 async function approveGate(
   db: IndexDb,
@@ -712,8 +722,12 @@ async function approveGate(
   // A prior approve already CLAIMED this gate (verdict = approve). The claim is a PRE-merge marker, so this
   // observer must NOT assume the merge landed — complete the node ONLY if it is already `done` (the winner's
   // durable landed-signal), never off the bare claim. NEVER re-merge (approveMerge is unsafe on an archived run).
+  // `n` from resolveGateChain can be a stale read (the winner may have just completed it); that only ever MISSES
+  // a redundant idempotent completion, never causes a false one — but re-read fresh for symmetry with the CAS-loser
+  // branch and so a genuine post-crash `done` node is repaired here too.
   if (g.verdict === "approve") {
-    await completeApproveIfLanded(db, workspace, n, now);
+    const [fresh] = await db.select().from(node).where(eq(node.id, n.id));
+    if (fresh) await completeApproveIfLanded(db, workspace, fresh, now);
     return;
   }
   if (g.verdict !== null) {
