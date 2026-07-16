@@ -28,7 +28,7 @@ import {
   serializeWorkInput,
   type WorkContractInput,
 } from "@maestro/protocol";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { IndexDb } from "../db/client";
@@ -316,12 +316,30 @@ async function decideGateVerdict(
     );
   }
 
-  // Commit point — the verdict going non-null IS the decision. Then journal it (durable), transition the
-  // node (DB projection), and emit the live update. decidedBy is the single human for now (no auth yet).
-  await db
+  // Commit the decision as a single ATOMIC conditional write — `WHERE verdict IS NULL` fuses the
+  // pending-check and the set into one indivisible step. The idempotency lease only dedupes a SAME-key
+  // retry; two DIFFERENT-key `block` requests both pass the read-side check above (both saw verdict=null),
+  // so without this only-the-winner guard both would journal a `gate.decided` + emit a `node.updated`,
+  // violating the exactly-one-decide invariant (and burdening BRO-1915's replay). Only the writer that
+  // flips null → set (rowsAffected === 1) proceeds; the loser re-reads and returns the SAME no-op / 409 a
+  // late arrival would. decidedBy is the single human for now (no auth yet).
+  const committed = await db
     .update(gate)
     .set({ verdict, decidedBy: "human", decidedAt: now, updatedAt: now })
-    .where(eq(gate.id, gateId));
+    .where(and(eq(gate.id, gateId), isNull(gate.verdict)));
+  if (committed.rowsAffected === 0) {
+    // Another decide won the race between the read above and this write (a TOCTOU the fast path can't
+    // see). Re-read to distinguish an idempotent same-verdict no-op from a conflicting verdict — mirroring
+    // the already-decided fast path, so the outcome is identical whether the conflict is seen early or here.
+    const [after] = await db.select().from(gate).where(eq(gate.id, gateId));
+    if (after?.verdict === verdict) return;
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} is already decided (${after?.verdict})`,
+      409,
+    );
+  }
+  // Winner only — journal the decision (durable), transition the node (DB projection), emit the live update.
   await db.insert(event).values({
     sessionId: g.sessionId,
     ts: now,

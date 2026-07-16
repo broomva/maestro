@@ -22,7 +22,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseWorkFile } from "@maestro/protocol";
-import { eq, like } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { createApp } from "../app";
 import { DEFAULT_PORT, type RuntimeConfig } from "../config";
 import { type IndexDb, openIndex } from "../db/client";
@@ -576,4 +576,39 @@ test("BRO-1805 slice 2a: block refuses — missing gateId (400), unknown gate (4
   const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
   expect(g?.verdict).toBe("approve");
   handle.client.close();
+});
+
+test("BRO-1805 slice 2a: concurrent different-key blocks decide each gate exactly ONCE (atomic verdict CAS)", async () => {
+  // Two DIFFERENT-key blocks on the SAME gate race across TWO connections to one file db. The lease only
+  // dedupes SAME-key, so both pass the read-side pending check; the atomic `UPDATE ... WHERE verdict IS
+  // NULL` is what makes exactly one win. Looped (the BRO-1814/1912 race-harness discipline — a single shot
+  // may not interleave). Under the fix: exactly one gate.decided + one node.updated per gate, every round.
+  const ws = mkWorkspace(false);
+  const dbPath = join(ws, "race.db");
+  const h1 = await openIndex(`file:${dbPath}`);
+  const h2 = await openIndex(`file:${dbPath}`);
+  const app1 = createApp(cfg(ws), Date.now(), h1.db);
+  const app2 = createApp(cfg(ws), Date.now(), h2.db);
+
+  const ROUNDS = 30;
+  for (let i = 0; i < ROUNDS; i++) {
+    const ids = { nodeId: `n${i}`, sessionId: `r${i}`, gateId: `g${i}` };
+    await seedOpenGate(h1.db, ids);
+    await Promise.all([
+      post(app1, { type: "block", gateId: ids.gateId }, `race-${i}-a`),
+      post(app2, { type: "block", gateId: ids.gateId }, `race-${i}-b`),
+    ]);
+    // exactly ONE decide for this gate + ONE node.updated for this node, despite the concurrent pair
+    const decided = await h1.db
+      .select()
+      .from(event)
+      .where(and(eq(event.type, "gate.decided"), eq(event.sessionId, ids.sessionId)));
+    expect(decided).toHaveLength(1);
+    const [gRow] = await h1.db.select().from(gate).where(eq(gate.id, ids.gateId));
+    expect(gRow?.verdict).toBe("block");
+    const [nRow] = await h1.db.select().from(node).where(eq(node.id, ids.nodeId));
+    expect(nRow?.state).toBe("canceled");
+  }
+  h1.client.close();
+  h2.client.close();
 });
