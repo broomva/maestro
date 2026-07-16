@@ -446,6 +446,25 @@ export async function gitUnstage(cwd: string, paths: string[]): Promise<void> {
   await git(cwd, ["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--", ...paths]);
 }
 
+/**
+ * Commit the WORKTREE content of `paths` (repo-relative) WITHOUT a separate `git add` — a
+ * pathspec-limited `git commit -- <paths>`. For paths that are ALREADY TRACKED (an existing file
+ * with worktree modifications), git records their current worktree content via a TEMPORARY index,
+ * so:
+ *   - on success only those paths land (unrelated staged/worktree changes are never swept), and
+ *   - on FAILURE (hook rejection, identity error, index.lock exhaustion) the REAL index is left
+ *     UNTOUCHED — there is no staged residual to unstage.
+ * This is the durable node-state writer's commit (BRO-1914): a failed commit needs only the
+ * worktree restored (its atomic temp+rename), never an index reset, so the rollback can never
+ * leave a staged blob that dirties the tree. Do NOT use for NEW (untracked) files — `git commit
+ * -- <path>` does not add them (that is {@link gitCommit}'s add-then-commit). Throws
+ * {@link GitError} on failure so the caller can roll back the worktree (the commit is the transaction).
+ */
+export async function gitCommitPaths(cwd: string, paths: string[], message: string): Promise<void> {
+  const commit = await git(cwd, ["commit", "-m", message, "--", ...paths]);
+  if (commit.code !== 0) throw new GitError(["commit", "-m", message], commit.code, commit.stderr);
+}
+
 // ── Approve/merge primitives (BRO-1802, D1) ─────────────────────────────────────
 // Approve = squash-merge `run/<id>` onto the workspace branch with the verdict-freshness ladder.
 // These run in the WORKSPACE repo (the runtime owns it), so like every git spawn here they inherit the

@@ -36,6 +36,7 @@ import { projectLiveNode } from "../db/project";
 import { event, gate, lease, node, session } from "../db/schema";
 import { gitCommit, gitUnstage } from "../git/git";
 import { bindIndexWriter, fsJournal, SessionTee } from "../harness/stdio";
+import { persistNodeState } from "../merge/state-writer";
 
 export interface IntentDeps {
   db: IndexDb;
@@ -262,6 +263,39 @@ async function emitNodeUpdated(db: IndexDb, nodeId: string, now: number): Promis
 }
 
 /**
+ * Durably persist a gate-decision's node-state/owner advance to `_work.md` (BRO-1914 coordinated writer).
+ * The FS is authoritative — the scanner re-derives `state`/`owner` on every reconcile (`scanIntoIndex` on
+ * boot + the live watcher), so a DB-only gate decision (`revise → triggered`, `block → canceled`,
+ * `escalate → owner`) that never touches `_work.md` gets REVERTED by the next reconcile: the node pops back
+ * to the FS's stale `state: review` with its gate already decided → a stranded, undecidable "Needs you".
+ * Writing the advance to the FS keeps the two consistent so no reconcile can resurrect the decided gate.
+ *
+ * Idempotent (a no-op when `_work.md` already holds the target) so a same-verdict retry repairs a prior
+ * partial FS write. Best-effort at the call site: a persist failure must not fail an already-committed DB
+ * decision (the reap/verdict is done), but — unlike the DB-only writes it complements — it is LOGGED, since
+ * a swallowed failure re-opens the reconcile-revert window until the next successful transition.
+ */
+async function persistGateAdvance(
+  workspace: string,
+  nodePath: string,
+  patches: Record<string, string | null>,
+  context: string,
+): Promise<void> {
+  try {
+    const outcome = await persistNodeState(workspace, nodePath, patches);
+    if (outcome.kind === "failed") {
+      console.warn(
+        `maestro · ${context}: durable _work.md write failed for ${nodePath} (${outcome.reason}) — DB advanced, but the next FS reconcile may revert it until a later transition repairs the file`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `maestro · ${context}: durable _work.md write threw for ${nodePath} (${(err as Error).message})`,
+    );
+  }
+}
+
+/**
  * Resolve `gateId → its live gate → live session → live node`, applying the epoch-ownership guard. The
  * SHARED front half of every gate action (F5): the terminating-verdict spine (`decideGateVerdict`) and the
  * NON-terminating `escalateGate` both start here, so the hard-won tombstone + epoch checks live in ONE place.
@@ -405,6 +439,11 @@ async function decideGateVerdict(
       .set({ state: target, updatedAt: now })
       .where(and(eq(node.id, n.id), eq(node.state, "review")));
     if (moved.rowsAffected === 1) await emitNodeUpdated(db, n.id, now);
+    // Coordinated durable write (BRO-1914): persist the terminal state to `_work.md` so the FS-authoritative
+    // reconcile can't revert the decided node back to `review` (a stranded gate). Called unconditionally (not
+    // gated on `moved`) because `persistNodeState` is idempotent — a same-verdict retry after a partial write
+    // repairs the file; a race-loser that reaches here already saw the matching verdict. Best-effort + logged.
+    await persistGateAdvance(workspace, n.path, { state: target }, "gate decide");
   }
 }
 
@@ -523,6 +562,9 @@ async function escalateGate(
   if (changed.rowsAffected === 1) {
     await journalGateEscalated(db, workspace, g, to, now);
     await emitNodeUpdated(db, n.id, now);
+    // Coordinated durable write (BRO-1914): escalate keeps the node at `review` but reassigns `owner`, and
+    // `owner ∈ CONTENT_KEYS`, so a DB-only owner change is reverted by the next FS reconcile. Persist it too.
+    await persistGateAdvance(workspace, n.path, { owner: to }, "gate escalate");
     return;
   }
   // A zero-row owner CAS is AMBIGUOUS — it is NOT unconditionally an idempotent no-op. Disambiguate by re-reading

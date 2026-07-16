@@ -66,6 +66,7 @@ import {
   SessionTee,
   superviseChildStdio,
 } from "../harness/stdio";
+import { persistNodeState } from "../merge/state-writer";
 import type { SessionTokenRegistry } from "../proxy/tokens";
 import type { Sandbox, SandboxFactory } from "../sandbox/sandbox";
 import { WORK_FILE } from "../scanner/scanner";
@@ -76,6 +77,11 @@ import {
   runVerification,
 } from "../verifier/run";
 import { type RunEntry, RunRegistry } from "./registry";
+
+/** The park states persisted to `_work.md` for `--rebuild` durability (BRO-1914). `review` first: it's
+ *  the "Needs you" gate a human must return to, so losing it on a rebuild is the load-bearing bug. The
+ *  other terminal park states (blocked/canceled/done) are a tracked FS-durability follow-up (BRO-1914). */
+const DURABLE_PARK_STATES = new Set<OrchState>(["review"]);
 
 /** The role every Loop-1 dispatch spawns. Verifier (Loop 2) + orchestrator (F6) are later runners. */
 const AGENT_ROLE: ChildRole = "agent";
@@ -458,6 +464,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     sessionStatus: SessionStatus,
     nodeState: OrchState,
     ended: boolean,
+    // The node's workspace-relative folder (`ctx.nodePath`) — supplied by callers that carry a RunContext
+    // so the parked state can be durably persisted to `_work.md` (BRO-1914). Omitted (kill-by-intent has
+    // only ids, no path) ⇒ DB-only, as before.
+    nodePath?: string,
   ): Promise<void> {
     const at = now();
     try {
@@ -475,6 +485,23 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
     // Propagate the state change to the live client (BRO-1913) — the watcher never sees a DB-only write.
     await emitNodeUpdated(nodeId);
+    // Durably persist the advance to `_work.md` (BRO-1914) so the FS-authoritative reconcile agrees with it:
+    // the scanner re-derives `state` from the FS on EVERY reconcile (`scanIntoIndex` on boot + the live
+    // watcher), so a DB-only `review` gets reverted to the file's dispatch-time state (a `review` node
+    // silently drops off "Needs you"). Emit-first (above) so the client sees "Needs you" immediately; the FS
+    // commit lands right after. Best-effort — the state-writer rolls back to a clean tree on failure and the
+    // reap must never wedge — but a failure IS logged, because a swallowed one lets the very next reconcile
+    // revert the DB (not only a manual `--rebuild`), so an invisible failure would silently drop the gate.
+    if (nodePath !== undefined && config?.workspace && DURABLE_PARK_STATES.has(nodeState)) {
+      const outcome = await persistNodeState(config.workspace, nodePath, {
+        state: nodeState,
+      }).catch((err: unknown) => ({ kind: "failed" as const, reason: (err as Error).message }));
+      if (outcome.kind === "failed") {
+        console.warn(
+          `maestro · park ${nodeState}: durable _work.md write failed for ${nodePath} (${outcome.reason}) — the next FS reconcile may revert node ${nodeId}`,
+        );
+      }
+    }
   }
 
   /** Release a node's dispatch lease on terminal reap (idempotent — a re-delete is a no-op). */
@@ -520,7 +547,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         // the durable event failed to append — parking below is the load-bearing change; D5 re-derives
       }
     }
-    await park(ctx.runId, ctx.nodeId, opts.sessionStatus, opts.nodeState, true);
+    await park(ctx.runId, ctx.nodeId, opts.sessionStatus, opts.nodeState, true, ctx.nodePath);
     tokens.revoke(ctx.runId);
     registry.delete(ctx.runId);
     cancelled.delete(ctx.runId);

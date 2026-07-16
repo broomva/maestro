@@ -8,6 +8,7 @@ import {
   resolveWorkContract,
   serializeWorkContract,
   serializeWorkFile,
+  setWorkFileFields,
   WorkContractError,
   type WorkContractInput,
 } from "./frontmatter";
@@ -396,5 +397,61 @@ describe("done-schema — VERIFIER §1 timeout caps + rubric refs + D8 fixture 4
   test("D8 fixture 4b — gate:auto with no deterministic check is rejected (gate_auto_no_check)", () => {
     const bad = doc("", "gate: auto\n");
     expect(codeOf(() => parseWorkContract(bad))).toBe("gate_auto_no_check");
+  });
+});
+
+// ── setWorkFileFields — comment-preserving frontmatter field patch (BRO-1914) ──
+describe("setWorkFileFields", () => {
+  // A valid `_work.md` carrying an inline comment + a body — the round-trip must keep BOTH.
+  const SOURCE = `---
+id: n0
+kind: task
+state: triggered # the run's current state
+gate: human
+owner: alice
+created: 2026-06-25
+updated: 2026-06-25
+---
+
+# do the thing
+`;
+
+  test("patches state in place, preserving the inline comment, key order, and the brief", () => {
+    const out = setWorkFileFields(SOURCE, { state: "review" });
+    expect(parseWorkFile(out).contract.state).toBe("review");
+    expect(out).toContain("state: review # the run's current state"); // comment preserved
+    expect(out).toContain("# do the thing"); // brief preserved
+    // key order unchanged: id before kind before state
+    expect(out.indexOf("id:")).toBeLessThan(out.indexOf("kind:"));
+    expect(out.indexOf("kind:")).toBeLessThan(out.indexOf("state:"));
+  });
+
+  test("patches multiple fields at once", () => {
+    const out = setWorkFileFields(SOURCE, { state: "blocked", owner: "bob" });
+    const c = parseWorkFile(out).contract;
+    expect(c.state).toBe("blocked");
+    expect(c.owner).toBe("bob");
+  });
+
+  test("a null value DELETES the key (clearing an inherited owner)", () => {
+    const out = setWorkFileFields(SOURCE, { owner: null });
+    expect(out).not.toContain("owner:");
+    expect(parseWorkFile(out).contract.owner).toBeUndefined();
+  });
+
+  test("is idempotent — patching to the same value round-trips byte-for-byte", () => {
+    const once = setWorkFileFields(SOURCE, { state: "review" });
+    const twice = setWorkFileFields(once, { state: "review" });
+    expect(twice).toBe(once);
+  });
+
+  test("throws on a malformed SOURCE (rejects exactly what the read path rejects)", () => {
+    expect(() => setWorkFileFields("no frontmatter here", { state: "review" })).toThrow(
+      WorkContractError,
+    );
+  });
+
+  test("throws when the PATCH would make the contract invalid (bad state enum)", () => {
+    expect(() => setWorkFileFields(SOURCE, { state: "bogus" })).toThrow(WorkContractError);
   });
 });

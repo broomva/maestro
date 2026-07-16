@@ -9,10 +9,10 @@
 // EXACT (session, node, event) triple, not just "something happened" — swap a mapping and a test fails.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EVENT_TYPES } from "@maestro/protocol";
+import { EVENT_TYPES, parseWorkFile } from "@maestro/protocol";
 import { and, eq } from "drizzle-orm";
 import { createApp } from "../app";
 import { loadConfig } from "../config";
@@ -200,6 +200,71 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     expect(tokens.size).toBe(0);
     expect(sup.list()).toHaveLength(0);
     expect(await h.db.select().from(lease).where(eq(lease.key, "n0"))).toHaveLength(0);
+  });
+
+  // ── BRO-1914: park → review durably persists to _work.md (survives an --rebuild rescan) ──
+  const NODE_WM = `---\nid: n0\nkind: task\nstate: triggered\ngate: human\ncreated: 2026-06-25\nupdated: 2026-06-25\n---\n\n# n0\n`;
+
+  /** Seed node n0 both in the DB (dispatchable) AND on disk as a committed, clean `_work.md`. */
+  async function seedNodeOnDisk(ws: string, h: IndexHandle): Promise<void> {
+    await seedNode(h, "n0");
+    await Bun.write(join(ws, "work", "n0", "_work.md"), NODE_WM);
+    await git(ws, ["add", "-A"]);
+    await git(ws, ["commit", "-qm", "seed n0"]);
+  }
+
+  async function diskState(ws: string): Promise<string> {
+    const onDisk = await readFile(join(ws, "work", "n0", "_work.md"), "utf8");
+    return parseWorkFile(onDisk).contract.state;
+  }
+
+  test("BRO-1914: with config.workspace, park review durably writes state:review to _work.md + tree stays CLEAN", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNodeOnDisk(ws, h);
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([
+        {
+          lines: ['{"actor":"agent","type":"agent.said","payload":{"text":"done"}}\n'],
+          exitCode: 0,
+        },
+      ]).spawn,
+      { config: loadConfig({ MAESTRO_WORKSPACE: ws }) },
+    );
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const res = await out.reaped;
+    expect(res.nodeState).toBe("review");
+
+    // the FS is durably at review — the scanner re-derives it on `--rebuild` (the DB-only write is lost there)
+    expect(await diskState(ws)).toBe("review");
+    // and the tree is CLEAN, so the clean-tree-gated approveMerge (BRO-1805 next slice) is never wedged
+    expect((await git(ws, ["status", "--porcelain"])).stdout.trim()).toBe("");
+  });
+
+  test("BRO-1914: WITHOUT config.workspace the persist is skipped — DB advances, _work.md untouched (guard)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNodeOnDisk(ws, h);
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([
+        {
+          lines: ['{"actor":"agent","type":"agent.said","payload":{"text":"done"}}\n'],
+          exitCode: 0,
+        },
+      ]).spawn,
+    ); // no config → config?.workspace undefined → durable persist skipped
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("dispatch failed");
+    const res = await out.reaped;
+    expect(res.nodeState).toBe("review"); // DB still advances (live truth)
+    expect(await diskState(ws)).toBe("triggered"); // FS untouched — the guard held
   });
 
   test("BRO-1913: supervisor state transitions emit node.updated so the LIVE board reflects running → review", async () => {

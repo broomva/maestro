@@ -511,3 +511,32 @@ export function reserializeWorkFile(source: string): string {
   const yamlOut = doc.toString({ lineWidth: 0 }).replace(/\n+$/, "");
   return brief.length > 0 ? `---\n${yamlOut}\n---\n\n${brief}\n` : `---\n${yamlOut}\n---\n`;
 }
+
+/**
+ * Patch one or more scalar frontmatter fields of a `_work.md`, preserving comments and key
+ * order (like {@link reserializeWorkFile}), returning the re-emitted source. This is the write
+ * side of the durable node-state advance (BRO-1914): a node's runtime `state`/`owner` is
+ * AUTHORITATIVE in the FS — the scanner re-derives both on an `--rebuild` rescan (its
+ * `CONTENT_KEYS` covers `state` and `owner`), so a DB-only write is LOST on rebuild. Persisting
+ * the advance to `_work.md` is what makes it survive a restart.
+ *
+ * Validates BOTH ends: the source first (parse + materialize — throws on any malformation, so
+ * this write path rejects exactly what every read path rejects) AND the patched result (so a
+ * caller cannot write a `state`/`owner` that would make the contract invalid). Each patch is set
+ * on the YAML Document CST (`doc.set` — an existing key is updated IN PLACE, keeping its line
+ * comment; a new key is appended); a `null` value DELETES the key (clearing an inherited
+ * `owner`). The yaml lib quotes/escapes scalar values, so a value cannot inject extra YAML.
+ */
+export function setWorkFileFields(source: string, patches: Record<string, string | null>): string {
+  parseWorkFile(source); // full validation of the source — throws on any malformation
+  const { yaml, brief } = splitFrontmatter(source);
+  const doc = parseDocument(yaml);
+  for (const [key, value] of Object.entries(patches)) {
+    if (value === null) doc.delete(key);
+    else doc.set(key, value);
+  }
+  const yamlOut = doc.toString({ lineWidth: 0 }).replace(/\n+$/, "");
+  const result = brief.length > 0 ? `---\n${yamlOut}\n---\n\n${brief}\n` : `---\n${yamlOut}\n---\n`;
+  parseWorkFile(result); // the patched result must STILL be a valid contract (guards a bad state/owner)
+  return result;
+}

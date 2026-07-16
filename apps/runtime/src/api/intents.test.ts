@@ -27,6 +27,7 @@ import { createApp } from "../app";
 import { DEFAULT_PORT, type RuntimeConfig } from "../config";
 import { type IndexDb, openIndex } from "../db/client";
 import { event, gate, node, session } from "../db/schema";
+import { gitIsClean } from "../git/git";
 import { scanIntoIndex } from "../scanner";
 
 const tmps: string[] = [];
@@ -982,4 +983,91 @@ test("BRO-1805 slice 2b-i: under concurrent escalate + block, escalate never pha
   }
   h1.client.close();
   h2.client.close();
+});
+
+// ── BRO-1914: the COORDINATED writer — a gate verdict must durably write `_work.md`, or the
+//    FS-authoritative reconcile resurrects the DECIDED node as a stranded `review`. ──────────────
+
+/** Seed n1's `_work.md` on disk at `state`, committed clean — simulates park's durable review write.
+ *  Also ignores the runtime's transient dirs (`/runs/`, `/.maestro/`) as a real workspace does, so the
+ *  gate journal's `runs/` write doesn't show as a dirty tree (only TRACKED content gates cleanliness). */
+function seedWorkFileAtReview(ws: string, nodeId: string): void {
+  const wm = `---\nid: ${nodeId}\nkind: task\nstate: review\ngate: human\ncreated: 2026-06-25\nupdated: 2026-06-25\n---\n\n# ${nodeId}\n`;
+  writeFileSync(join(ws, ".gitignore"), "/.maestro/\n/runs/\n");
+  mkdirSync(join(ws, "work", nodeId), { recursive: true });
+  writeFileSync(join(ws, "work", nodeId, "_work.md"), wm);
+  gitOk(ws, ["add", "-A"]);
+  gitOk(ws, ["commit", "-qm", "seed review"]);
+}
+
+test("BRO-1914: revise durably writes _work.md=triggered, so a live reconcile does NOT revert the decided node to review", async () => {
+  const ws = mkWorkspace(true); // git workspace — the verdict's coordinated write commits _work.md
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db); // DB node n1 @ review + open gate
+  seedWorkFileAtReview(ws, nodeId); // FS _work.md @ review (as park left it, BRO-1914 park slice)
+
+  const res = await post(
+    app,
+    { type: "revise", gateId, feedback: "try again" },
+    "k-revise-durable",
+  );
+  expect(res.status).toBe(202);
+
+  // DB advanced review → triggered AND the FS was advanced too (the coordinated write), tree stays clean.
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("triggered");
+  expect(
+    parseWorkFile(readFileSync(join(ws, "work", nodeId, "_work.md"), "utf8")).contract.state,
+  ).toBe("triggered");
+  expect(await gitIsClean(ws)).toBe(true);
+
+  // THE REGRESSION GUARD: a live reconcile (the fs.watch / boot path) re-derives state from _work.md.
+  // Without the coordinated write the FS would still say `review` → syncNodes would clobber the DB back to
+  // `review` → a stranded, already-decided gate. With it, FS=triggered=DB → the decision STANDS.
+  await scanIntoIndex(handle.db, ws, Date.now());
+  const [after] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(after?.state).toBe("triggered"); // NOT resurrected to review — the MAJOR is closed
+  handle.client.close();
+});
+
+test("BRO-1914: block durably writes _work.md=canceled, so a live reconcile keeps the node canceled", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db);
+  seedWorkFileAtReview(ws, nodeId);
+
+  expect((await post(app, { type: "block", gateId }, "k-block-durable")).status).toBe(202);
+  expect(
+    parseWorkFile(readFileSync(join(ws, "work", nodeId, "_work.md"), "utf8")).contract.state,
+  ).toBe("canceled");
+  expect(await gitIsClean(ws)).toBe(true);
+
+  await scanIntoIndex(handle.db, ws, Date.now());
+  const [after] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(after?.state).toBe("canceled"); // reconcile keeps it — not reverted to review
+  handle.client.close();
+});
+
+test("BRO-1914: escalate durably writes _work.md owner, so a reconcile keeps the reassignment (node stays review)", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db);
+  seedWorkFileAtReview(ws, nodeId);
+
+  expect((await post(app, { type: "escalate", gateId, to: "@lead" }, "k-esc-durable")).status).toBe(
+    202,
+  );
+  const onDisk = parseWorkFile(readFileSync(join(ws, "work", nodeId, "_work.md"), "utf8")).contract;
+  expect(onDisk.owner).toBe("@lead");
+  expect(onDisk.state).toBe("review"); // escalate is non-terminal: node STAYS at review
+  expect(await gitIsClean(ws)).toBe(true);
+
+  await scanIntoIndex(handle.db, ws, Date.now());
+  const [after] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(after?.owner).toBe("@lead"); // reconcile keeps the reassignment
+  expect(after?.state).toBe("review");
+  handle.client.close();
 });

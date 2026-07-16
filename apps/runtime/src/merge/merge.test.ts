@@ -238,7 +238,7 @@ describe("approve = squash-merge (D1 freshness ladder)", () => {
     // two concurrent approves interleave, the workspace never ends with BOTH runs silently merged. The first to
     // land commits shared.txt; the second is deferred — its files overlap the workspace change since its judged
     // base, so the ladder's overlap pre-check (or the re-read guard) returns stale:overlap. (This proves the
-    // OUTCOME, not serializeApprove in isolation — same-file runs also collide via the overlap check + re-read
+    // OUTCOME, not serializeWorkspaceGit in isolation — same-file runs also collide via the overlap check + re-read
     // guard, so removing the mutex alone need not RED this. The next test mutation-proves the mutex deterministically.)
     await seedRun(dir, "r1", base, { "shared.txt": "from-r1\n" });
     await seedRun(dir, "r2", base, { "shared.txt": "from-r2\n" });
@@ -270,8 +270,8 @@ describe("approve = squash-merge (D1 freshness ladder)", () => {
     expect(shared === "from-r1\n" || shared === "from-r2\n").toBe(true);
   });
 
-  test("serializeApprove makes concurrent approves NON-INTERLEAVED critical sections (deterministic mutex proof)", async () => {
-    // The guarantee serializeApprove uniquely provides — beyond the ladder's overlap pre-check + re-read guard — is
+  test("serializeWorkspaceGit makes concurrent approves NON-INTERLEAVED critical sections (deterministic mutex proof)", async () => {
+    // The guarantee serializeWorkspaceGit uniquely provides — beyond the ladder's overlap pre-check + re-read guard — is
     // that two approves on the SAME workspace run as fully-ordered critical sections: the first's read→stage→commit
     // completes ENTIRELY before the second reads any state. That is what prevents the D1 stage-level combine (both
     // `merge --squash` staging disjoint files into one index before either commits). Proven deterministically with an
@@ -318,7 +318,7 @@ describe("approve = squash-merge (D1 freshness ladder)", () => {
     ]);
 
     // The first approve (call order → "a") fully finishes (enter → commit) before the second enters — no interleave.
-    // MUTATION: make approveMerge call approveMergeCritical(deps) directly (drop the serializeApprove wrapper) → both
+    // MUTATION: make approveMerge call approveMergeCritical(deps) directly (drop the serializeWorkspaceGit wrapper) → both
     // isClean run during each other's yield → events become [a:enter, b:enter, a:commit, b:commit] → this REDs.
     expect(events).toEqual(["a:enter", "a:commit", "b:enter", "b:commit"]);
   });

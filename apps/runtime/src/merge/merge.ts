@@ -30,6 +30,7 @@ import {
   GitError,
   isIndexLockError,
 } from "../git/git";
+import { serializeWorkspaceGit } from "./serialize";
 
 /** Which ladder rung merged. */
 export type MergeFreshness = "base_unmoved" | "no_overlap";
@@ -72,29 +73,6 @@ const REAL_GIT: MergeGit = {
   worktreeRemove: defaultWorktreeRemove,
 };
 
-const NOOP = (): void => {};
-
-/**
- * Serialize {@link approveMerge} per workspace so the freshness decision + merge + commit + archive run as ONE
- * critical section. Without it a concurrent approve can move the workspace tip between the ladder's HEAD read
- * and the `merge --squash`, silently combining two runs' changes into a single commit that neither verdict was
- * earned against (the D1 TOCTOU: `git merge --squash` of disjoint hunks onto a moved tip reports "went well",
- * exit 0, no conflict). A runtime owns exactly one workspace (D4 runtime-lock), so an in-process promise chain
- * keyed by `cwd` is a sufficient lock; the map holds one entry per distinct workspace (one, in production) and
- * self-prunes when a chain drains. `gate:auto` (D-AUTODONE) shares this path, so the guard covers it too.
- */
-const approveChain = new Map<string, Promise<unknown>>();
-function serializeApprove<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
-  const prev = approveChain.get(cwd) ?? Promise.resolve();
-  const next = prev.then(fn, fn); // run after the previous holder regardless of its outcome
-  const tail = next.then(NOOP, NOOP); // a never-rejecting tail the next caller chains behind
-  approveChain.set(cwd, tail);
-  void tail.then(() => {
-    if (approveChain.get(cwd) === tail) approveChain.delete(cwd);
-  });
-  return next;
-}
-
 export interface ApproveMergeDeps {
   /** The workspace repo root (RuntimeConfig.workspace) — approved work squash-merges onto its checked-out branch. */
   cwd: string;
@@ -131,10 +109,10 @@ function commitMessage(title: string, runId: string, nodeId: string, attempt: nu
  * Attempt to merge an approved run onto the workspace branch, applying the D1 verdict-freshness ladder.
  * Returns a `merged` receipt (rung 1/2), a `stale` deferral the caller redispatches (rung 3), or a `refused`
  * precondition failure — it NEVER merges silently past a stale verdict or a dirty tree. Serialized per workspace
- * ({@link serializeApprove}) so the freshness decision and the merge are one critical section (D1 TOCTOU).
+ * ({@link serializeWorkspaceGit}) so the freshness decision and the merge are one critical section (D1 TOCTOU).
  */
 export async function approveMerge(deps: ApproveMergeDeps): Promise<MergeOutcome> {
-  return serializeApprove(deps.cwd, () => approveMergeCritical(deps));
+  return serializeWorkspaceGit(deps.cwd, () => approveMergeCritical(deps));
 }
 
 async function approveMergeCritical(deps: ApproveMergeDeps): Promise<MergeOutcome> {
@@ -167,7 +145,7 @@ async function approveMergeCritical(deps: ApproveMergeDeps): Promise<MergeOutcom
     freshness = "no_overlap"; // disjoint files → the check ran on the same files it judged (D1)
   }
 
-  // TOCTOU guard: serializeApprove keeps concurrent APPROVES out, but a concurrent new_mission commit could
+  // TOCTOU guard: serializeWorkspaceGit keeps concurrent APPROVES out, but a concurrent new_mission commit could
   // still advance HEAD during the read-only analysis above. Re-read HEAD immediately before the merge; if it
   // moved, the ladder judged a tip we are no longer merging onto → defer to stale rather than combine onto a
   // tip no verdict covers (nothing is staged yet, so there is nothing to roll back).
@@ -196,7 +174,7 @@ async function approveMergeCritical(deps: ApproveMergeDeps): Promise<MergeOutcom
     }
     sha = await g.commitAllStaged(cwd, commitMessage(nodeTitle, runId, nodeId, verdict.attempt));
   } catch (err) {
-    await g.resetHard(cwd, "HEAD").catch(NOOP); // best-effort — the throw, not the reset outcome, is the signal
+    await g.resetHard(cwd, "HEAD").catch(() => {}); // best-effort — the throw, not the reset outcome, is the signal
     // commit lost the index-lock race after the squash staged → the reset above restored the clean tree → report it
     // retryable, not a crash. Any other failure (empty identity, >500 exec-key fail-closed) still throws.
     if (err instanceof GitError && isIndexLockError(err.stderr)) {
