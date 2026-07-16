@@ -563,6 +563,11 @@ test("BRO-1805 slice 2a: block refuses — missing gateId (400), unknown gate (4
   expect(missing.status).toBe(404);
   expect(await jsonErr(missing)).toBe("not_found");
 
+  // a non-string reason is rejected before any lookup
+  const badReason = await post(app, { type: "block", gateId: "g", reason: 42 }, "k-b-reason");
+  expect(badReason.status).toBe(400);
+  expect(await jsonErr(badReason)).toBe("invalid_intent");
+
   // a gate already decided with a DIFFERENT verdict → 409 (never silently re-decided)
   const { gateId } = await seedOpenGate(handle.db, { nodeId: "n2", sessionId: "r2", gateId: "g2" });
   await handle.db
@@ -587,6 +592,11 @@ test("BRO-1805 slice 2a: concurrent different-key blocks decide each gate exactl
   const dbPath = join(ws, "race.db");
   const h1 = await openIndex(`file:${dbPath}`);
   const h2 = await openIndex(`file:${dbPath}`);
+  // busy_timeout so the two connections WAIT on each other's write lock instead of erroring SQLITE_BUSY
+  // under parallel-suite contention — the CAS still elects the winner; this only removes the lock-contention
+  // flake (the race being tested is the read/CAS interleave, not lock acquisition).
+  await h1.client.execute("PRAGMA busy_timeout = 5000");
+  await h2.client.execute("PRAGMA busy_timeout = 5000");
   const app1 = createApp(cfg(ws), Date.now(), h1.db);
   const app2 = createApp(cfg(ws), Date.now(), h2.db);
 
@@ -598,12 +608,15 @@ test("BRO-1805 slice 2a: concurrent different-key blocks decide each gate exactl
       post(app1, { type: "block", gateId: ids.gateId }, `race-${i}-a`),
       post(app2, { type: "block", gateId: ids.gateId }, `race-${i}-b`),
     ]);
-    // exactly ONE decide for this gate + ONE node.updated for this node, despite the concurrent pair
+    // exactly ONE decide for this gate despite the concurrent pair, and (cumulatively) exactly one
+    // node.updated per round — the conditional node transition means the race loser emits nothing.
     const decided = await h1.db
       .select()
       .from(event)
       .where(and(eq(event.type, "gate.decided"), eq(event.sessionId, ids.sessionId)));
     expect(decided).toHaveLength(1);
+    const updated = await h1.db.select().from(event).where(eq(event.type, "node.updated"));
+    expect(updated).toHaveLength(i + 1);
     const [gRow] = await h1.db.select().from(gate).where(eq(gate.id, ids.gateId));
     expect(gRow?.verdict).toBe("block");
     const [nRow] = await h1.db.select().from(node).where(eq(node.id, ids.nodeId));
@@ -611,4 +624,70 @@ test("BRO-1805 slice 2a: concurrent different-key blocks decide each gate exactl
   }
   h1.client.close();
   h2.client.close();
+});
+
+test("BRO-1805 slice 2a: block on a gate whose SESSION is tombstoned refuses (404) and cancels nothing", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  // a superseded/old run: tombstone the session that owns the gate. A newer session may now hold n1's
+  // review, so the stale gate must NOT decide it (Codex finding — the wrong-node cancel).
+  await handle.db.update(session).set({ deletedAt: Date.now() }).where(eq(session.id, sessionId));
+
+  const res = await post(app, { type: "block", gateId }, "k-tomb");
+  expect(res.status).toBe(404);
+  expect(await jsonErr(res)).toBe("not_found");
+  // the node was NOT canceled, and nothing was journaled
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("review");
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(decided).toHaveLength(0);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: a decided gate stranded on a still-review node (partial write) is repaired by a retry", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db);
+  // Simulate a partial write: the gate is decided `block`, but the node transition never landed (a
+  // crash/SQLITE_FULL between the CAS and the node update). The node is stranded at `review`.
+  await handle.db
+    .update(gate)
+    .set({ verdict: "block", decidedBy: "human", decidedAt: Date.now() })
+    .where(eq(gate.id, gateId));
+
+  const res = await post(app, { type: "block", gateId }, "k-repair");
+  expect(res.status).toBe(202);
+  // the idempotent completion REPAIRS the transition (→ canceled) rather than stranding the decided gate
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("canceled");
+  // and emits exactly one node.updated for the repair
+  const updated = await handle.db.select().from(event).where(eq(event.type, "node.updated"));
+  expect(updated).toHaveLength(1);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: a block FS-journals gate.decided to the run journal (durable, replayable)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { sessionId, gateId } = await seedOpenGate(handle.db);
+
+  const res = await post(app, { type: "block", gateId, reason: "durable" }, "k-journal");
+  expect(res.status).toBe(202);
+  // the decision is durably journaled FS-first to <ws>/runs/run-<sessionId>/session.jsonl — symmetric with
+  // slice-1's gate.opened, so it survives beyond the index row (BRO-1915 replay can reconstruct the gate).
+  const journalPath = join(ws, "runs", `run-${sessionId}`, "session.jsonl");
+  expect(existsSync(journalPath)).toBe(true);
+  const lines = readFileSync(journalPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as { type?: string; verdict?: string; gateId?: string });
+  const decided = lines.filter((l) => l.type === "gate.decided");
+  expect(decided).toHaveLength(1);
+  expect(decided[0]?.verdict).toBe("block");
+  expect(decided[0]?.gateId).toBe(gateId);
+  handle.client.close();
 });

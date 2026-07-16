@@ -35,6 +35,7 @@ import type { IndexDb } from "../db/client";
 import { projectLiveNode } from "../db/project";
 import { event, gate, lease, node, session } from "../db/schema";
 import { gitCommit, gitUnstage } from "../git/git";
+import { bindIndexWriter, fsJournal, SessionTee } from "../harness/stdio";
 
 export interface IntentDeps {
   db: IndexDb;
@@ -261,101 +262,144 @@ async function emitNodeUpdated(db: IndexDb, nodeId: string, now: number): Promis
 }
 
 /**
- * Decide a `review` node's open gate with a verdict (F5, BRO-1805 slice 2). The gate-decision SPINE the
- * four verbs share: resolve `gateId → session → node`, validate, set the gate's `verdict` (the commit
- * point), journal `gate.decided` (D-DURABILITY — payload widened so BRO-1915's rebuild projector can fold
- * the decision onto the opened row), then transition the node per `resolveGateVerdict` and emit
- * `node.updated`. Slice 2a wires ONLY `block` (→ canceled); `approve` (→ done + `approveMerge`, needing
- * the durable-done write of BRO-1914) and `revise`/`escalate` land in later sub-slices on this same spine.
+ * Decide a `review` node's open gate with a TERMINATING verdict (F5, BRO-1805 slice 2). The shared spine
+ * for the terminating verbs: resolve `gateId → live session → node`, elect a single decider with an atomic
+ * CAS, journal `gate.decided` to the DURABLE run journal (FS-first, symmetric with the slice-1 `gate.opened`
+ * write, so BRO-1915's replay projector can reconstruct the decided gate), then transition the node to the
+ * verdict's terminal state and emit `node.updated`. Slice 2a wires ONLY `block` (→ canceled); `revise`
+ * (→ triggered) fits this spine directly, but `approve` (→ done + `approveMerge`) and the NON-terminating
+ * `escalate` (stays `review`, re-decidable — gate-queue.md §4) will EXTEND it with their own semantics in
+ * later sub-slices, not merely reuse it.
  *
- * Idempotency: a gate already decided with the SAME verdict is a no-op success (a same-key retry is caught
- * earlier by the lease; a different key re-hitting a decided gate lands here); a DIFFERENT prior verdict is
- * a 409 refusal. The node transition is a DB-only projection (like the supervisor's) — durable across an
- * F9 rebuild / an interleaved rescan is BRO-1914's coordinated workspace state-writer, not this slice; a
- * crash between the gate-decide and the node-transition leaves a decided gate on a still-`review` node that
- * BRO-1914/BRO-1915 reconcile. Throws `IntentRefusal` (typed, API §4) on every rejection.
+ * Concurrency + idempotency: the idempotency lease only dedupes a SAME-key retry, so the decision is
+ * committed with an atomic conditional write (`WHERE verdict IS NULL`) electing a single winner even under
+ * two concurrent DIFFERENT-key decides — only the winner journals. The node transition is ALSO conditional
+ * (`WHERE state = 'review'`) so a stale-read race loser can't emit a duplicate `node.updated`, and a retry
+ * that follows a partial write (a decided gate left on a still-`review` node) idempotently COMPLETES the
+ * transition here rather than stranding it. `escalate` (target `review`) is a no-op transition by design.
+ *
+ * Durability scope: the gate row + node state are index writes (survive a normal restart; a `--rebuild` /
+ * an interleaved `_work.md` rescan reverts the node state — the pre-existing BRO-1914 gap, shared with the
+ * supervisor's own DB-only transitions). The `gate.decided` EVENT is FS-journaled here, so the decision
+ * itself is durable + replayable; making the node state equally rebuild-durable is BRO-1914's coordinated
+ * writer. Throws `IntentRefusal` (typed, API §4) on every rejection.
  */
 async function decideGateVerdict(
   db: IndexDb,
+  workspace: string,
   gateId: string,
   verdict: GateVerdict,
   extra: { reason?: string },
   now: number,
 ): Promise<void> {
-  const [g] = await db.select().from(gate).where(eq(gate.id, gateId));
-  if (!g || g.deletedAt !== null) {
-    throw new IntentRefusal("not_found", `no open gate ${gateId}`, 404);
-  }
-  const [s] = await db.select().from(session).where(eq(session.id, g.sessionId));
-  if (!s) throw new IntentRefusal("not_found", `gate ${gateId} has no session`, 404);
+  const [g] = await db
+    .select()
+    .from(gate)
+    .where(and(eq(gate.id, gateId), isNull(gate.deletedAt)));
+  if (!g) throw new IntentRefusal("not_found", `no open gate ${gateId}`, 404);
+  // The gate's session must be LIVE — a tombstoned/superseded session's stale gate must never decide the
+  // node it once owned (a newer session may now hold that node's review). Sessions carry tombstones and the
+  // read API filters them (reads.ts); the write path must too, or an old gate cancels the wrong review.
+  const [s] = await db
+    .select()
+    .from(session)
+    .where(and(eq(session.id, g.sessionId), isNull(session.deletedAt)));
+  if (!s) throw new IntentRefusal("not_found", `gate ${gateId} has no live session`, 404);
   const [n] = await db.select().from(node).where(eq(node.id, s.nodeId));
   if (!n || n.deletedAt !== null) {
     throw new IntentRefusal("not_found", `gate ${gateId} node is gone`, 404);
   }
 
-  // Already decided → idempotent same-verdict no-op, or a hard refusal on a conflicting prior verdict.
+  // The verdict's terminal state — `resolveGateVerdict` is defined from `review` (the only decidable
+  // state), so resolve against the literal `review` to get the target regardless of the node's CURRENT
+  // state (a completion retry may find the node already moved). Never throws for a valid verdict.
+  const target = resolveGateVerdict("review", verdict);
+
   if (g.verdict !== null) {
-    if (g.verdict === verdict) return;
-    throw new IntentRefusal(
-      "invalid_intent",
-      `gate ${gateId} is already decided (${g.verdict})`,
-      409,
-    );
+    // Already decided at read time. A conflicting verdict is refused; a MATCHING verdict falls through to
+    // the idempotent completion below, so a retry after a partial write finishes the job.
+    if (g.verdict !== verdict) {
+      throw new IntentRefusal(
+        "invalid_intent",
+        `gate ${gateId} is already decided (${g.verdict})`,
+        409,
+      );
+    }
+  } else {
+    // Fresh decision: the node must be at the gate (review) to decide it. Elect a single decider with an
+    // atomic CAS — `WHERE verdict IS NULL` fuses the pending-check and the set, so two concurrent
+    // different-key decides can't both journal (the lease only dedupes same-key). Only rowsAffected === 1
+    // journals; a race loser re-reads and either 409s (conflict) or falls to the idempotent completion.
+    if (n.state !== "review") {
+      throw new IntentRefusal(
+        "invalid_intent",
+        `gate ${gateId} node is not awaiting a decision (state ${n.state})`,
+        409,
+      );
+    }
+    const won = await db
+      .update(gate)
+      .set({ verdict, decidedBy: "human", decidedAt: now, updatedAt: now })
+      .where(and(eq(gate.id, gateId), isNull(gate.verdict), isNull(gate.deletedAt)));
+    if (won.rowsAffected === 1) {
+      await journalGateDecided(db, workspace, g, verdict, extra.reason, now);
+    } else {
+      const [after] = await db.select().from(gate).where(eq(gate.id, gateId));
+      if (after?.verdict !== verdict) {
+        throw new IntentRefusal(
+          "invalid_intent",
+          `gate ${gateId} is already decided (${after?.verdict ?? "unknown"})`,
+          409,
+        );
+      }
+    }
   }
 
-  // Pending → decide. The node must be at the gate (review); `resolveGateVerdict` throws off-review, and a
-  // gate row only opens at review (BRO-1805 slice 1), so a non-review node here is a defensive refusal.
-  let target: ReturnType<typeof resolveGateVerdict>;
-  try {
-    target = resolveGateVerdict(n.state, verdict);
-  } catch {
-    throw new IntentRefusal(
-      "invalid_intent",
-      `gate ${gateId} node is not awaiting a decision (state ${n.state})`,
-      409,
-    );
+  // Idempotent completion — runs for the fresh winner AND a same-verdict retry / race-loser. Transition the
+  // node with a CONDITIONAL write (`WHERE state = 'review'`): only the writer that actually flips
+  // review → target emits `node.updated`, so a stale-read loser can't duplicate the emit, and a retry after
+  // a partial write repairs the un-transitioned node here. If the node already moved, this is a no-op.
+  if (target !== "review") {
+    const moved = await db
+      .update(node)
+      .set({ state: target, updatedAt: now })
+      .where(and(eq(node.id, n.id), eq(node.state, "review")));
+    if (moved.rowsAffected === 1) await emitNodeUpdated(db, n.id, now);
   }
+}
 
-  // Commit the decision as a single ATOMIC conditional write — `WHERE verdict IS NULL` fuses the
-  // pending-check and the set into one indivisible step. The idempotency lease only dedupes a SAME-key
-  // retry; two DIFFERENT-key `block` requests both pass the read-side check above (both saw verdict=null),
-  // so without this only-the-winner guard both would journal a `gate.decided` + emit a `node.updated`,
-  // violating the exactly-one-decide invariant (and burdening BRO-1915's replay). Only the writer that
-  // flips null → set (rowsAffected === 1) proceeds; the loser re-reads and returns the SAME no-op / 409 a
-  // late arrival would. decidedBy is the single human for now (no auth yet).
-  const committed = await db
-    .update(gate)
-    .set({ verdict, decidedBy: "human", decidedAt: now, updatedAt: now })
-    .where(and(eq(gate.id, gateId), isNull(gate.verdict)));
-  if (committed.rowsAffected === 0) {
-    // Another decide won the race between the read above and this write (a TOCTOU the fast path can't
-    // see). Re-read to distinguish an idempotent same-verdict no-op from a conflicting verdict — mirroring
-    // the already-decided fast path, so the outcome is identical whether the conflict is seen early or here.
-    const [after] = await db.select().from(gate).where(eq(gate.id, gateId));
-    if (after?.verdict === verdict) return;
-    throw new IntentRefusal(
-      "invalid_intent",
-      `gate ${gateId} is already decided (${after?.verdict})`,
-      409,
-    );
-  }
-  // Winner only — journal the decision (durable), transition the node (DB projection), emit the live update.
-  await db.insert(event).values({
+/** Journal `gate.decided` to the gate's run journal (FS-first + index) via a `SessionTee` — the SAME
+ *  durable path the supervisor uses for `gate.opened`, so a decided gate survives beyond the index row and
+ *  BRO-1915's replay can reconstruct it. runDir = `<workspace>/runs/run-<sessionId>` (the receipt dir,
+ *  preserved until merge/janitor; `fsJournal` self-creates it). Session-scoped so it rides the per-session
+ *  stream too. The widened payload carries what a rebuild projector needs to fold onto the opened row. */
+async function journalGateDecided(
+  db: IndexDb,
+  workspace: string,
+  g: typeof gate.$inferSelect,
+  verdict: GateVerdict,
+  reason: string | undefined,
+  now: number,
+): Promise<void> {
+  const runDir = join(workspace, "runs", `run-${g.sessionId}`);
+  const tee = new SessionTee({
+    writer: bindIndexWriter(db),
+    journal: fsJournal(runDir),
     sessionId: g.sessionId,
-    ts: now,
+    now: () => now,
+  });
+  await tee.append({
     actor: "user",
     type: EVENT_TYPES.GATE_DECIDED,
-    payload: JSON.stringify({
-      gateId,
+    payload: {
+      gateId: g.id,
       kind: g.kind,
       verdict,
       decidedBy: "human",
       decidedAt: now,
-      ...(extra.reason ? { reason: extra.reason } : {}),
-    }),
+      ...(reason ? { reason } : {}),
+    },
   });
-  await db.update(node).set({ state: target, updatedAt: now }).where(eq(node.id, n.id));
-  await emitNodeUpdated(db, n.id, now);
 }
 
 /**
@@ -478,13 +522,18 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         return c.json(ok, 202);
       }
       // Decide the gate. On failure RELEASE the lease so a genuine retry re-attempts (the key guards a
-      // successful decision, not a failed one), then return the typed refusal.
+      // successful decision, not a failed one) — the completion path is idempotent, so a retry that follows
+      // a partial write repairs it rather than double-deciding. An unexpected (non-refusal) DB/FS error is
+      // mapped to a typed `intent_failed` (retryable) so the write surface never leaks an untyped 500.
       try {
-        await decideGateVerdict(db, gateId, "block", { reason: reasonRaw }, bNow);
+        await decideGateVerdict(db, workspace, gateId, "block", { reason: reasonRaw }, bNow);
       } catch (err) {
         await db.delete(lease).where(eq(lease.key, key));
         if (err instanceof IntentRefusal) return refuse(c, err);
-        throw err;
+        return refuse(
+          c,
+          new IntentRefusal("intent_failed", `block failed: ${(err as Error).message}`, 500, true),
+        );
       }
       const ok: IntentAccepted = { accepted: true };
       return c.json(ok, 202);
