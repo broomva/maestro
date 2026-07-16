@@ -24,6 +24,7 @@ import {
   DEFAULT_EVENT_PAGE_SIZE,
   type ErrorResponse,
   type EventPage,
+  type LedgerResponse,
   type LiveNode,
   MAESTRO_PROTOCOL_VERSION,
   type NodeDetail,
@@ -35,11 +36,17 @@ import {
   WK_GROUP_ORDER,
   X_MAESTRO_PROTOCOL,
 } from "@maestro/protocol";
-import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { IndexDb } from "../db/client";
 import { projectLiveNode as live } from "../db/project";
 import { event, gate, node, schedule, session } from "../db/schema";
+import {
+  defaultLedgerWindow,
+  deriveLedger,
+  formatLedgerLabel,
+  LEDGER_RUN_LIFECYCLE_TYPES,
+} from "../ledger/ledger";
 import { WORK_FILE } from "../scanner";
 import { parseSeqCursor, toEnvelope } from "./event-projection";
 
@@ -54,6 +61,18 @@ export interface ReadDeps {
 function notFound(c: Context, message: string) {
   const body: ErrorResponse = { error: { code: "not_found", message, retryable: false } };
   return c.json(body, 404);
+}
+
+/**
+ * Parse a ledger window bound from a query param, LENIENTLY: absent or non-finite (garbage, `NaN`,
+ * `Infinity`) → `fallback`. A read endpoint should serve a sensible default rather than 400 on a bad
+ * param; an inverted or empty window (`since >= until`) is not rejected here — it derives to a zero
+ * ledger naturally (no interval survives the clamp, no look falls in the half-open range).
+ */
+function parseTsParam(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 /**
@@ -109,6 +128,38 @@ export function registerReadRoutes(app: Hono, deps: ReadDeps): void {
       .where(and(eq(schedule.enabled, true), isNull(schedule.deletedAt)))
       .orderBy(sql`${schedule.nextFireAt} is null`, asc(schedule.nextFireAt));
     const body: SchedulesResponse = { schedules: rows.map(live) };
+    return c.json(body);
+  });
+
+  // GET /api/ledger?since=<ms>&until=<ms> — the autonomy scoreboard, DERIVED from the
+  // event log (never a stored %; there is no `ledger` table). The window defaults to the
+  // current UTC day ("today so far"); ?since / ?until override either bound (leniently).
+  //
+  // Fetch only what the derivation needs, NOT the whole log:
+  //   • run-lifecycle events with ts < until — so a run that STARTED before the window but
+  //     is active WITHIN it is still measured (its run.started is needed to know it was live;
+  //     a terminal at/after `until` is simply omitted → the run reads as active-at-until).
+  //   • actor-"user" looks within the window — gate decisions/escalations (and, once journaled,
+  //     chat). run.killed is a look too, but it is a run terminal already fetched by the first
+  //     arm, so this arm need not repeat it.
+  // (Scale note: the run-lifecycle arm has no lower `ts` bound and there is no ts index yet — a
+  //  bounded lookback / covering index is a follow-up if the ledger becomes hot. For a per-day
+  //  read over a young log this is a cheap scan.)
+  app.get("/api/ledger", async (c) => {
+    const def = defaultLedgerWindow(Date.now());
+    const since = parseTsParam(c.req.query("since"), def.since);
+    const until = parseTsParam(c.req.query("until"), def.until);
+    const rows = await db
+      .select({ sessionId: event.sessionId, ts: event.ts, actor: event.actor, type: event.type })
+      .from(event)
+      .where(
+        or(
+          and(inArray(event.type, [...LEDGER_RUN_LIFECYCLE_TYPES]), lt(event.ts, until)),
+          and(eq(event.actor, "user"), gte(event.ts, since), lt(event.ts, until)),
+        ),
+      );
+    const ledger = deriveLedger(rows, { since, until });
+    const body: LedgerResponse = { ...ledger, label: formatLedgerLabel(ledger) };
     return c.json(body);
   });
 

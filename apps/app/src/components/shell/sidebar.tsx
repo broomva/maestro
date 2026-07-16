@@ -8,6 +8,7 @@
 // 52px icon rail when `collapsed`; the collapse toggle lives in the top bar (it migrates to the
 // tab strip in a later fidelity ticket).
 
+import type { LedgerResponse } from "@maestro/protocol";
 import { Avatar, BlackholeMark } from "@maestro/ui";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -24,7 +25,7 @@ import {
 } from "lucide-react";
 import { useCallback } from "react";
 import type { SidebarTree } from "@/store";
-import { AutonomyScoreboard } from "./autonomy-scoreboard";
+import { AutonomyScoreboard, ledgerToScoreboardProps } from "./autonomy-scoreboard";
 import { WorkspaceTree } from "./workspace-tree";
 
 interface SidebarProps {
@@ -36,6 +37,8 @@ interface SidebarProps {
   /** open the feedback drawer — the Shell wires this to dispatch `bv:feedback-open` (the drawer
    *  surface lands in a later fidelity ticket, same forward-wire pattern as the ⌘K palette). */
   onFeedback?: () => void;
+  /** the live autonomy ledger (BRO-1818), derived server-side; null until first load → empty state. */
+  ledger?: LedgerResponse | null;
 }
 
 /** The dark cool-axis brand chip (never the opaque raster — BRO-1771 P20). */
@@ -50,7 +53,7 @@ function BrandChip() {
   );
 }
 
-export function Sidebar({ tree, needsYou, collapsed, onFeedback }: SidebarProps) {
+export function Sidebar({ tree, needsYou, collapsed, onFeedback, ledger }: SidebarProps) {
   const navigate = useNavigate();
   // Stable identity so WorkspaceTree's memo can short-circuit when only unrelated chrome state
   // changes (an inline arrow would be a fresh prop every render, defeating the memo).
@@ -105,7 +108,7 @@ export function Sidebar({ tree, needsYou, collapsed, onFeedback }: SidebarProps)
 
       <div className="bv-sb-spacer" />
 
-      <AutonomyScoreboard />
+      <AutonomyScoreboard {...ledgerToScoreboardProps(ledger ?? null)} />
 
       <div className="mcc-nav-foot">
         <button className="mcc-foot-btn" type="button" onClick={onFeedback} title="Send feedback">

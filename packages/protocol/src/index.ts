@@ -16,6 +16,7 @@ export * from "./frontmatter";
 export * from "./gate";
 export * from "./index-schema";
 export * from "./intents";
+export * from "./ledger";
 export * from "./plain-voice";
 export * from "./state";
 export * from "./version";

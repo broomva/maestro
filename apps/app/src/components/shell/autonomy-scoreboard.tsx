@@ -10,6 +10,7 @@
 // glyph) rather than the prototype's hardcoded "6h 24m" demo values, and never an em-dash
 // placeholder (CLAUDE.md §Voice: no em dashes in chrome). Wire the real ledger here when it lands.
 
+import { formatUnsupervised, type LedgerResponse } from "@maestro/protocol";
 import type { CSSProperties, ReactNode } from "react";
 
 /** One unsupervised stretch on the bar (percent units, 0–100). */
@@ -132,4 +133,34 @@ export function AutonomyScoreboard({
       {children}
     </div>
   );
+}
+
+/** The scoreboard-prop subset {@link ledgerToScoreboardProps} produces from a `LedgerResponse`. */
+export type LedgerScoreboardProps = Pick<
+  AutonomyScoreboardProps,
+  "hours" | "sub" | "segments" | "notches"
+>;
+
+/**
+ * Map the DERIVED ledger (BRO-1818 `GET /api/ledger`) to the scoreboard's props — the one place the wire
+ * shape becomes chrome. Pure (SSR-safe, unit-tested), so the fetch hook stays a thin transport.
+ *
+ * A `null` ledger (still loading, or no index) OR a genuinely empty day (no hours, no looks, no active
+ * run) → the calm empty state: no `hours`, no `sub`, an empty bar (the component shows "no unsupervised
+ * runs yet"). Never a percentage, never an em-dash placeholder (CLAUDE.md §Voice). Otherwise the headline
+ * is the unsupervised duration ("1h 0m"), the footnote counts looks + any running work ("3 looks today ·
+ * 1 running"), and the bar carries the real positional geometry the endpoint derived.
+ */
+export function ledgerToScoreboardProps(l: LedgerResponse | null): LedgerScoreboardProps {
+  if (!l || (l.unsupervisedMs === 0 && l.humanLooks === 0 && l.activeRuns === 0)) {
+    return { segments: [], notches: [] };
+  }
+  const looks = l.humanLooks === 1 ? "1 look" : `${l.humanLooks} looks`;
+  const running = l.activeRuns > 0 ? ` · ${l.activeRuns} running` : "";
+  return {
+    hours: formatUnsupervised(l.unsupervisedMs),
+    sub: `${looks} today${running}`,
+    segments: l.segments,
+    notches: l.notches,
+  };
 }

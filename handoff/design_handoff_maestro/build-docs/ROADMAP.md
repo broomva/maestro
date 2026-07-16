@@ -46,7 +46,7 @@ The deep specs behind these phases live in `specs/`: `HARNESS.md` (P2's supervis
 - Gate table + the four verdicts wired to intents (F5); `data-gate` parts; the state-machine rule enforced: no auto-done.
 - UI track **M5** (inspector, receipts, lifecycle rail).
 - The adversarial verifier eval suite (`DECISIONS.md` D8 layer 2) — this phase's exit test, as fixtures.
-- Autonomy ledger: unsupervised hours + a notch per human look, derived from events.
+- Autonomy ledger (BRO-1818, shipped): unsupervised hours (the wall-clock UNION of run-active intervals — parallel runs are one unsupervised hour, not many) + a notch per human look (a gate decision/escalation or a kill), derived from the event log on read (`GET /api/ledger` → `deriveLedger`) — there is no `ledger` table and never a stored percentage. Rendered by the ambient sidebar scoreboard (disclosure rung 1).
 
 **Exit:** a clean run parks at "Needs you"; approve merges the branch; send-back redispatches with feedback; a run that games its check is caught by the verifier (test: delete a failing test in-run — verdict must fail it).
 
