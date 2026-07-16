@@ -110,9 +110,16 @@ export const claudeSpawnChild: SpawnChild = (args) =>
   );
 
 /** Select the child spawner for a provider: the CLI runner for `claude`, else the proxy-driven
- *  broomva-child (mock / api-key path). `codex` is a follow-up on the same seam. */
+ *  broomva-child (`mock`, or unset when a test drives the mock loop directly). `codex` is declared but
+ *  NOT wired yet, so it FAILS CLOSED — a `codex` mount must never silently run the mock/broomva-child
+ *  spawner under a provider the operator did not actually get. (index.ts already gates the mount to
+ *  claude|mock, so this throw is defense-in-depth against a future caller, not a live path.) */
 function spawnerForProvider(provider: RuntimeConfig["provider"]): SpawnChild {
-  return provider === "claude" ? claudeSpawnChild : devSpawnChild;
+  if (provider === "claude") return claudeSpawnChild;
+  if (provider === "codex") {
+    throw new Error("MAESTRO_PROVIDER=codex is not wired yet — use claude or mock");
+  }
+  return devSpawnChild;
 }
 
 /** The assembled dispatch runtime — the supervisor + the served proxy + lifecycle handles. */

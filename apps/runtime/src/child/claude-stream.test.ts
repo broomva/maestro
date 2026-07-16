@@ -172,6 +172,64 @@ describe("claude-stream — per-event mapping", () => {
     ]);
   });
 
+  test("the tool-name map self-bounds: a mapping is consumed (deleted) once its result resolves", () => {
+    const state = newClaudeTranslatorState();
+    translateClaudeEvent(
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "x", name: "Read" }] } },
+      state,
+    );
+    expect(state.toolNames.size).toBe(1);
+    translateClaudeEvent(
+      {
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }] },
+      },
+      state,
+    );
+    // resolved → the mapping is dropped, so the map only ever holds still-pending calls.
+    expect(state.toolNames.size).toBe(0);
+  });
+
+  test("an over-cap tool_use evicts the OLDEST pending mapping, never a recent one (no clear-all)", () => {
+    const state = newClaudeTranslatorState();
+    // Fill exactly to the cap with pending (unresolved) tool calls id-0 … id-511.
+    for (let i = 0; i < 512; i++) {
+      translateClaudeEvent(
+        {
+          type: "assistant",
+          message: { content: [{ type: "tool_use", id: `id-${i}`, name: `T${i}` }] },
+        },
+        state,
+      );
+    }
+    expect(state.toolNames.size).toBe(512);
+    // One more pending call past the cap evicts the OLDEST (id-0), keeping the rest — a clear-all would
+    // have wiped every pending mapping and both results below would mis-label as "tool".
+    translateClaudeEvent(
+      {
+        type: "assistant",
+        message: { content: [{ type: "tool_use", id: "id-512", name: "Tnew" }] },
+      },
+      state,
+    );
+    const oldestResult = translateClaudeEvent(
+      {
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "id-0", content: "r" }] },
+      },
+      state,
+    );
+    const recentResult = translateClaudeEvent(
+      {
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "id-511", content: "r" }] },
+      },
+      state,
+    );
+    expect(oldestResult[0]?.payload?.tool).toBe("tool"); // the single evicted (oldest) mapping is gone
+    expect(recentResult[0]?.payload?.tool).toBe("T511"); // every recent pending mapping SURVIVED
+  });
+
   test("a tool_result whose id was never seen falls back to 'tool'", () => {
     const { emitted } = run([
       {

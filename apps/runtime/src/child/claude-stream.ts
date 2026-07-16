@@ -163,7 +163,14 @@ export function translateClaudeEvent(
         } else if (b.type === "tool_use") {
           acted = true;
           if (typeof b.id === "string" && typeof b.name === "string") {
-            if (state.toolNames.size >= MAX_TOOL_NAMES) state.toolNames.clear();
+            // Bound the map by evicting the OLDEST entry (Map preserves insertion order), NOT clearing
+            // ALL — a clear would drop the names of still-PENDING tool calls, so their later tool_result
+            // would mis-label as "tool". The map self-bounds anyway (delete-on-consume below); this cap is
+            // only a backstop for a pathological run with >512 truly-concurrent unresolved calls.
+            if (state.toolNames.size >= MAX_TOOL_NAMES) {
+              const oldest = state.toolNames.keys().next().value;
+              if (oldest !== undefined) state.toolNames.delete(oldest);
+            }
             state.toolNames.set(b.id, b.name);
           }
           // Bound the input to a short, log-safe summary — the durable session.jsonl audit trail stores
@@ -194,9 +201,11 @@ export function translateClaudeEvent(
       const out: ChildEmittedEvent[] = [];
       for (const b of blocks) {
         if (b.type === "tool_result") {
-          const tool =
-            (typeof b.tool_use_id === "string" ? state.toolNames.get(b.tool_use_id) : undefined) ??
-            "tool";
+          const id = typeof b.tool_use_id === "string" ? b.tool_use_id : undefined;
+          const tool = (id !== undefined ? state.toolNames.get(id) : undefined) ?? "tool";
+          // Consumed: a tool_use_id resolves to exactly one tool_result, so drop the mapping now — this
+          // keeps the map holding only PENDING calls, so the MAX_TOOL_NAMES cap rarely bites at all.
+          if (id !== undefined) state.toolNames.delete(id);
           out.push({
             actor: "agent",
             type: "tool.result",
