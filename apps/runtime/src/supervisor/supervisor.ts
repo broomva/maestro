@@ -31,6 +31,7 @@ import type {
   Actor,
   Budget,
   EventType,
+  GateKind,
   OrchState,
   SessionStatus,
   WorkContract,
@@ -539,12 +540,16 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     };
   }
 
-  /** Open a pending `question` gate on exit 20 (HARNESS §4), returning its id — or `undefined` if the
-   *  index insert faults (the run still parks review for a human; no gate row, no `gate.opened`). The
-   *  guard is what keeps a reap on the exit-20 path from rejecting and skipping cleanup. */
-  async function openQuestionGate(
+  /** Open a pending gate of `kind` on the node's run (F5), returning its id — or `undefined` if the index
+   *  insert faults (the run still parks review for a human; no gate row, no `gate.opened`). The guard is
+   *  what keeps a reap on the gate path from rejecting and skipping cleanup. Two kinds open here: the
+   *  exit-20 `question` gate (HARNESS §4 — the child asked) and the clean-pass `completion` gate (BRO-1805
+   *  slice 1 — a verifier pass parks at the human gate for the four verdicts). D-DURABILITY: the row is the
+   *  durable truth; `gate.opened` is journal-backed so a decided/pending gate survives an index loss. */
+  async function openGate(
     ctx: RunContext,
-    declared: { reason?: string } | null,
+    kind: GateKind,
+    proposal: unknown,
     emit: (ev: ChildEmittedEvent) => Promise<void>,
   ): Promise<string | undefined> {
     const gateId = randomUUID();
@@ -553,8 +558,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       await db.insert(gate).values({
         id: gateId,
         sessionId: ctx.runId,
-        kind: "question",
-        proposalJson: declared ? JSON.stringify(declared) : null,
+        kind,
+        proposalJson: proposal != null ? JSON.stringify(proposal) : null,
         verdict: null,
         decidedBy: null,
         openedAt: at,
@@ -567,7 +572,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       return undefined;
     }
     try {
-      await emit(sys(EVENT_TYPES.GATE_OPENED, { gateId, kind: "question" }));
+      await emit(sys(EVENT_TYPES.GATE_OPENED, { gateId, kind }));
     } catch {
       // gate.opened is journal-backed elsewhere (D-DURABILITY); the row above is the durable truth
     }
@@ -729,14 +734,19 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   ): Promise<ReapResult> {
     const done = ctx.contract.done;
     // No verifiable success function → nothing to check; the human gate holds it (the pre-verifier
-    // behavior). Never auto-completes (gate:human).
+    // behavior). Never auto-completes (gate:human). Open a `completion` gate (BRO-1805 slice 1) so this
+    // clean pass carries a gateId for the four verdicts — `teeEmit` is defined below (the `done` branch),
+    // so this branch owns its emitter, mirroring the exit-20 path.
     if (!done) {
+      const emit = runEmitter(ctx.runId, ctx.sandbox.runDir);
+      const gateId = await openGate(ctx, "completion", null, emit);
       return terminal(ctx, entry, {
         exitCode: 0,
         sessionStatus: "review",
         nodeState: "review",
         event: "run.finished",
         crash: false,
+        gateId,
         mismatch,
         respawns,
       });
@@ -904,12 +914,16 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       });
     }
     // park_review — a clean pass waits at the human gate (F5). Nothing auto-completes under gate:human.
+    // Open a `completion` gate (BRO-1805 slice 1) so the review carries a gateId for the four verdicts;
+    // gate.opened is journaled (D-DURABILITY) via the run tee. teeEmit is in scope (verifyAndRoute).
+    const gateId = await openGate(ctx, "completion", null, teeEmit);
     return terminal(ctx, entry, {
       exitCode: 0,
       sessionStatus: "review",
       nodeState: "review",
       event: "run.finished",
       crash: false,
+      gateId,
       mismatch,
       respawns,
     });
@@ -1002,7 +1016,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 
     if (Number.isInteger(realCode) && realCode === 20) {
       const emit = runEmitter(ctx.runId, ctx.sandbox.runDir);
-      const gateId = await openQuestionGate(ctx, declared, emit);
+      const gateId = await openGate(ctx, "question", declared, emit);
       return terminal(ctx, entry, {
         exitCode: 20,
         sessionStatus: "review",

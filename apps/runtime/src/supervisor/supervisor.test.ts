@@ -240,6 +240,50 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     expect(updates.every((r) => r.sessionId === null)).toBe(true);
   });
 
+  test("BRO-1805 slice 1: a clean pass opens a `completion` gate (row + gate.opened + gateId on the reap)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0"); // gate: human, no done.check → the !done clean-pass review path
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([
+        {
+          lines: ['{"actor":"agent","type":"agent.said","payload":{"text":"done"}}\n'],
+          exitCode: 0,
+        },
+      ]).spawn,
+    );
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const reap = await out.reaped;
+    expect(reap.nodeState).toBe("review"); // clean pass parks at the human gate
+
+    // The reap surfaces the opened gate's id (the F5 reconciliation key).
+    const gateId = reap.gateId;
+    if (!gateId) throw new Error("expected a completion gateId on a clean-pass reap");
+
+    // A single pending `completion` gate row is inserted, keyed to the run, verdict null (pending).
+    const gates = await h.db.select().from(gate);
+    expect(gates).toHaveLength(1);
+    const g = gates[0];
+    if (!g) throw new Error("unreachable");
+    expect(g.id).toBe(gateId); // the row IS the reap's gate
+    expect(g.kind).toBe("completion"); // NOT "question" — this is the clean-pass gate, not exit-20
+    expect(g.sessionId).toBe(reap.runId);
+    expect(g.verdict).toBeNull(); // pending — no verdict wired yet (slice 2)
+    expect(g.decidedAt).toBeNull();
+    expect(g.openedAt).toBeGreaterThan(0);
+
+    // gate.opened is journaled (D-DURABILITY) so the row survives an index loss — session-scoped to the run.
+    const opened = await h.db.select().from(event).where(eq(event.type, EVENT_TYPES.GATE_OPENED));
+    expect(opened).toHaveLength(1);
+    const payload = JSON.parse(opened[0]?.payload ?? "{}") as { gateId?: string; kind?: string };
+    expect(payload.gateId).toBe(gateId);
+    expect(payload.kind).toBe("completion");
+  });
+
   // ── Verifier reap (F4, Loop 2, BRO-1794 slice 1b-ii) ──────────────────────
   // An exit-0 claim now runs the deterministic verifier (Stage 0 + Stage 1) against base..run/<id>,
   // persists verdict.md, and routes on the verdict. The child fixtures exit 0 without committing, so the
@@ -283,6 +327,12 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     expect(payload.judge).toEqual({ score: null });
     expect(tokens.size).toBe(0);
     expect(sup.list()).toHaveLength(0);
+    // BRO-1805 slice 1: the verify-PASS review path (with a done.check) also opens a completion gate.
+    const gates = await h.db.select().from(gate);
+    expect(gates).toHaveLength(1);
+    expect(gates[0]?.kind).toBe("completion");
+    expect(res.gateId).toBeDefined();
+    expect(gates[0]?.id).toBe(res.gateId ?? "");
   });
 
   test("exit 0 + a failing check, maxAttempts 1 → park blocked (verifier_exhausted) + fix_plan", async () => {
