@@ -240,6 +240,121 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     expect(updates.every((r) => r.sessionId === null)).toBe(true);
   });
 
+  test("BRO-1805 slice 1: a clean pass opens a `completion` gate (row + gate.opened + gateId on the reap)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0"); // gate: human, no done.check → the !done clean-pass review path
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([
+        {
+          lines: ['{"actor":"agent","type":"agent.said","payload":{"text":"done"}}\n'],
+          exitCode: 0,
+        },
+      ]).spawn,
+    );
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const reap = await out.reaped;
+    expect(reap.nodeState).toBe("review"); // clean pass parks at the human gate
+
+    // The reap surfaces the opened gate's id (the F5 reconciliation key).
+    const gateId = reap.gateId;
+    if (!gateId) throw new Error("expected a completion gateId on a clean-pass reap");
+
+    // A single pending `completion` gate row is inserted, keyed to the run, verdict null (pending).
+    const gates = await h.db.select().from(gate);
+    expect(gates).toHaveLength(1);
+    const g = gates[0];
+    if (!g) throw new Error("unreachable");
+    expect(g.id).toBe(gateId); // the row IS the reap's gate
+    expect(g.kind).toBe("completion"); // NOT "question" — this is the clean-pass gate, not exit-20
+    expect(g.sessionId).toBe(reap.runId);
+    expect(g.verdict).toBeNull(); // pending — no verdict wired yet (slice 2)
+    expect(g.decidedAt).toBeNull();
+    expect(g.openedAt).toBeGreaterThan(0);
+
+    // gate.opened is journaled (session-scoped to the run) alongside the index row.
+    const opened = await h.db.select().from(event).where(eq(event.type, EVENT_TYPES.GATE_OPENED));
+    expect(opened).toHaveLength(1);
+    const payload = JSON.parse(opened[0]?.payload ?? "{}") as { gateId?: string; kind?: string };
+    expect(payload.gateId).toBe(gateId);
+    expect(payload.kind).toBe("completion");
+  });
+
+  test("BRO-1805 slice 1: a completion-gate insert fault parks `blocked` (gate_open_failed), never a gateless review", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0"); // same clean-pass !done path as above
+    // Force ONLY the gate insert to fault: drop the gate table so `db.insert(gate)` throws inside openGate,
+    // while node/session/event/lease writes (different tables) still succeed. openGate returns undefined →
+    // terminalReviewOrBlocked must park `blocked`, NOT surface a review node with no gate (gate-queue.md:
+    // the four verdicts key off gateId, so a gateless review is undecidable — a stranded "Needs you").
+    await h.client.execute("DROP TABLE gate");
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([
+        {
+          lines: ['{"actor":"agent","type":"agent.said","payload":{"text":"done"}}\n'],
+          exitCode: 0,
+        },
+      ]).spawn,
+    );
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const reap = await out.reaped;
+
+    // The undecidable review is refused: park blocked with a typed reason, so the run stays redispatchable.
+    expect(reap.nodeState).toBe("blocked");
+    expect(reap.sessionStatus).toBe("blocked");
+    expect(reap.event).toBe("run.finished"); // a clean halt, NOT a crash's run.failed
+    expect(reap.reason).toBe("gate_open_failed");
+    expect(reap.gateId).toBeUndefined(); // no gate was opened
+    // the node landed blocked in the index (redispatchable), not stranded at review
+    const rows = await h.db.select().from(node).where(eq(node.id, "n0"));
+    expect(rows[0]?.state).toBe("blocked");
+    // the run.finished event carries the gate_open_failed reason (D5 re-derives the halt cause)
+    const fin = await h.db
+      .select()
+      .from(event)
+      .where(and(eq(event.sessionId, "r1"), eq(event.type, EVENT_TYPES.RUN_FINISHED)));
+    expect(fin).toHaveLength(1);
+    expect(JSON.parse(fin[0]?.payload ?? "{}").reason).toBe("gate_open_failed");
+  });
+
+  test("BRO-1805 slice 1: a fresh_context respawn that then passes opens exactly ONE completion gate", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0"); // no done.check → the !done clean-pass path opens the gate at the FINAL park
+    // attempt 1 stops fresh_context (respawn, NO terminal park → no gate); attempt 2 passes clean (one gate).
+    const scripted = scriptedSpawner([
+      { lines: [runExiting(10, "fresh_context")], exitCode: 10 },
+      { lines: [runExiting(0)], exitCode: 0 },
+    ]);
+    const { sup } = makeSupervisor(ws, h, scripted.spawn);
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    const reap = await out.reaped;
+
+    expect(scripted.calls()).toBe(2); // the respawn happened
+    expect(reap.respawns).toBe(1);
+    expect(reap.nodeState).toBe("review");
+    // exactly ONE completion gate despite two attempts — the gate opens at the terminal park, not per-attempt
+    const gates = await h.db.select().from(gate);
+    expect(gates).toHaveLength(1);
+    expect(gates[0]?.kind).toBe("completion");
+    expect(reap.gateId).toBeDefined();
+    expect(gates[0]?.id).toBe(reap.gateId ?? "");
+    // and exactly one gate.opened event, not two
+    const opened = await h.db.select().from(event).where(eq(event.type, EVENT_TYPES.GATE_OPENED));
+    expect(opened).toHaveLength(1);
+  });
+
   // ── Verifier reap (F4, Loop 2, BRO-1794 slice 1b-ii) ──────────────────────
   // An exit-0 claim now runs the deterministic verifier (Stage 0 + Stage 1) against base..run/<id>,
   // persists verdict.md, and routes on the verdict. The child fixtures exit 0 without committing, so the
@@ -283,6 +398,12 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     expect(payload.judge).toEqual({ score: null });
     expect(tokens.size).toBe(0);
     expect(sup.list()).toHaveLength(0);
+    // BRO-1805 slice 1: the verify-PASS review path (with a done.check) also opens a completion gate.
+    const gates = await h.db.select().from(gate);
+    expect(gates).toHaveLength(1);
+    expect(gates[0]?.kind).toBe("completion");
+    expect(res.gateId).toBeDefined();
+    expect(gates[0]?.id).toBe(res.gateId ?? "");
   });
 
   test("exit 0 + a failing check, maxAttempts 1 → park blocked (verifier_exhausted) + fix_plan", async () => {
