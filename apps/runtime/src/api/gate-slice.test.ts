@@ -15,8 +15,10 @@
 // This runtime integration test stands in for the browser spec (the loop directive's escape hatch) and
 // adds what no per-verdict unit test covers: the WHOLE gate-slice narrative through the LIVE read + write
 // API the SPA actually consumes —
-//   ① a seeded run reaches "Needs you": `/api/board` groups it review-first AND `/api/node/:id` joins its
-//      OPEN gate (verdict null) — the exact projection `selectGateQueue` + the WorkItem `gateId` depend on;
+//   ① a seeded run reaches "Needs you": `/api/board` groups it review-FIRST (D-ORDER, asserted against a
+//      second non-attention node — not a single-group artifact) AND `/api/node/:id` joins its OPEN gate
+//      (verdict null) — the read-API SHAPE the SPA's selectGateQueue + WorkItem `gateId` consume (those
+//      client projections have their own tests; this covers the runtime shape they read);
 //   ② each of the four verdict intents lands its state over the live `/api/intents` route
 //      (approve → done + real squash-merge, revise → triggered, block → canceled, escalate → review-stays);
 //   ③ an auto-done attempt throws: there is NO wire path review→done but `approve` (`set_state` 501s), and
@@ -180,16 +182,32 @@ const getJson = async <T>(
 
 describe("BRO-1805 gate-slice E2E — the live read+write API the board renders from", () => {
   // ① Needs you: the read projection selectGateQueue + the WorkItem gateId depend on.
-  test("① a seeded run reaches Needs you — /api/board groups it review-first, /api/node/:id joins its OPEN gate", async () => {
+  test("① a seeded run reaches Needs you — /api/board groups it review-FIRST (before a non-attention node), /api/node/:id joins its OPEN gate", async () => {
     const ws = mkWorkspace();
     const { app, handle } = await mkApp(ws);
     await seedOpenGate(handle.db, { nodeId: "n1", sessionId: "r1", gateId: "g1" });
+    // A second, non-attention node so review-FIRST is genuinely asserted (a single group would pass even
+    // if review sorted last). `running` sorts after `review` in WK_GROUP_ORDER (D-ORDER: attention first).
+    const t = Date.now();
+    await handle.db.insert(node).values({
+      id: "n2",
+      path: "work/n2",
+      kind: "task",
+      state: "running",
+      gate: "human",
+      createdAt: t,
+      updatedAt: t,
+    });
 
-    // /api/board: the sole seeded node is a review card, and review is the FIRST group (D-ORDER,
-    // review-first) — exactly how the board surfaces "Needs you".
+    // /api/board: review is the FIRST group and sorts strictly BEFORE the running group — exactly how the
+    // board surfaces "Needs you" ahead of live work.
     const board = await getJson<BoardResp>(app, "/api/board");
     expect(board.groups[0]?.state).toBe("review");
     expect(board.groups[0]?.nodes.map((n) => n.id)).toContain("n1");
+    const reviewIdx = board.groups.findIndex((g) => g.state === "review");
+    const runningIdx = board.groups.findIndex((g) => g.state === "running");
+    expect(reviewIdx).toBeGreaterThanOrEqual(0);
+    expect(runningIdx).toBeGreaterThan(reviewIdx); // review-first is REAL, not a single-group artifact
 
     // /api/node/:id: the open gate (verdict null) is joined through the session — its id is the gateId the
     // verbs dispatch off (store/project.ts picks the most-recently-opened open gate as the WorkItem key).
@@ -292,8 +310,9 @@ describe("BRO-1805 gate-slice E2E — the live read+write API the board renders 
     // and `review → done` under an approve verdict is the one legal edge.
     expect(transition("review", "done", { verdict: "approve" })).toBe("done");
 
-    // The write surface offers NO auto-done bypass: `set_state` (the audited human override) is not wired,
-    // so a direct review→done override is refused `unsupported_intent` (501) — the gate is the only door.
+    // The write surface exposes NO wired path that reaches `done` around the gate: `set_state` (the audited
+    // human override that COULD move a node) is unimplemented, so a direct review→done override is refused
+    // `unsupported_intent` (501) — today there is no auto-done bypass; approve is the only door to `done`.
     const ws = mkWorkspace();
     const { app, handle } = await mkApp(ws);
     await seedOpenGate(handle.db, { nodeId: "n1", sessionId: "r1", gateId: "g1" });
