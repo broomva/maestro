@@ -541,11 +541,16 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   }
 
   /** Open a pending gate of `kind` on the node's run (F5), returning its id — or `undefined` if the index
-   *  insert faults (the run still parks review for a human; no gate row, no `gate.opened`). The guard is
-   *  what keeps a reap on the gate path from rejecting and skipping cleanup. Two kinds open here: the
-   *  exit-20 `question` gate (HARNESS §4 — the child asked) and the clean-pass `completion` gate (BRO-1805
-   *  slice 1 — a verifier pass parks at the human gate for the four verdicts). D-DURABILITY: the row is the
-   *  durable truth; `gate.opened` is journal-backed so a decided/pending gate survives an index loss. */
+   *  insert faults (the caller parks the node `blocked` so a gateless `review` is never surfaced). Two kinds
+   *  open here: the exit-20 `question` gate (HARNESS §4 — the child asked) and the clean-pass `completion`
+   *  gate (BRO-1805 slice 1 — a verifier pass parks at the human gate for the four verdicts).
+   *
+   *  Durability scope (accurate as of slice 1): the gate ROW is an index write, so it survives a NORMAL
+   *  restart (the persisted index.db is preserved; crash-recovery only reconciles the event tail). It is
+   *  NOT yet reconstructed on a full `--rebuild` / index-loss: the schema declares `gate` journal-replay
+   *  (D-DURABILITY, `TABLE_REBUILD.gate`), but no projector yet derives a gate row from the journaled
+   *  `gate.opened` (its payload also lacks the sessionId/openedAt/proposalJson a rebuild needs). That
+   *  gate-row journal-replay projector is the follow-up BRO-1915 (it also needs slice-2 `gate.decided`). */
   async function openGate(
     ctx: RunContext,
     kind: GateKind,
@@ -568,15 +573,53 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         deletedAt: null,
       });
     } catch {
-      // index closed/busy — park review without a gate row rather than reject the reap (cleanup must run)
+      // index closed/busy — signal the fault (caller parks `blocked`, never a gateless review) rather
+      // than reject the reap outright: the reap's cleanup (token revoke, lease release) must still run
       return undefined;
     }
     try {
       await emit(sys(EVENT_TYPES.GATE_OPENED, { gateId, kind }));
     } catch {
-      // gate.opened is journal-backed elsewhere (D-DURABILITY); the row above is the durable truth
+      // best-effort journal write; the row above is the index-authoritative truth for a live restart
     }
     return gateId;
+  }
+
+  /** Park the terminal reap of a clean pass at the human gate. A `review` node is only decidable if it
+   *  carries a gate — gate-queue.md keys the four verdicts (approve/revise/block/escalate) off `gateId`,
+   *  so a gateless `review` is a stranded "Needs you" with no verbs. When `openGate` returns `undefined`
+   *  (its insert faulted on a closed/busy index), park `blocked` with a typed `gate_open_failed` reason
+   *  instead: the run stays redispatchable rather than dead-ending. Both completion sites route here so
+   *  the "review ⟹ has a gate" invariant lives in exactly one place. */
+  function terminalReviewOrBlocked(
+    ctx: RunContext,
+    entry: RunEntry,
+    gateId: string | undefined,
+    mismatch: boolean,
+    respawns: number,
+  ): Promise<ReapResult> {
+    if (gateId === undefined) {
+      return terminal(ctx, entry, {
+        exitCode: 0,
+        sessionStatus: "blocked",
+        nodeState: "blocked",
+        event: "run.finished",
+        crash: false,
+        reason: "gate_open_failed",
+        mismatch,
+        respawns,
+      });
+    }
+    return terminal(ctx, entry, {
+      exitCode: 0,
+      sessionStatus: "review",
+      nodeState: "review",
+      event: "run.finished",
+      crash: false,
+      gateId,
+      mismatch,
+      respawns,
+    });
   }
 
   // ── Crash containment — a partial/failed dispatch or a child crash, contained ──
@@ -740,16 +783,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     if (!done) {
       const emit = runEmitter(ctx.runId, ctx.sandbox.runDir);
       const gateId = await openGate(ctx, "completion", null, emit);
-      return terminal(ctx, entry, {
-        exitCode: 0,
-        sessionStatus: "review",
-        nodeState: "review",
-        event: "run.finished",
-        crash: false,
-        gateId,
-        mismatch,
-        respawns,
-      });
+      return terminalReviewOrBlocked(ctx, entry, gateId, mismatch, respawns);
     }
 
     const attempt = verify.attempt + 1;
@@ -915,18 +949,10 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
     // park_review — a clean pass waits at the human gate (F5). Nothing auto-completes under gate:human.
     // Open a `completion` gate (BRO-1805 slice 1) so the review carries a gateId for the four verdicts;
-    // gate.opened is journaled (D-DURABILITY) via the run tee. teeEmit is in scope (verifyAndRoute).
+    // gate.opened is journaled via the run tee. teeEmit is in scope (verifyAndRoute). If the gate insert
+    // faults, terminalReviewOrBlocked parks `blocked` — never a gateless review.
     const gateId = await openGate(ctx, "completion", null, teeEmit);
-    return terminal(ctx, entry, {
-      exitCode: 0,
-      sessionStatus: "review",
-      nodeState: "review",
-      event: "run.finished",
-      crash: false,
-      gateId,
-      mismatch,
-      respawns,
-    });
+    return terminalReviewOrBlocked(ctx, entry, gateId, mismatch, respawns);
   }
 
   async function reap(
