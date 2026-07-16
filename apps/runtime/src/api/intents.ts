@@ -278,7 +278,6 @@ async function resolveGateChain(
   gateId: string,
 ): Promise<{
   g: typeof gate.$inferSelect;
-  s: typeof session.$inferSelect;
   n: typeof node.$inferSelect;
 }> {
   const [g] = await db
@@ -313,7 +312,7 @@ async function resolveGateChain(
       409,
     );
   }
-  return { g, s, n };
+  return { g, n };
 }
 
 /**
@@ -331,7 +330,9 @@ async function resolveGateChain(
  * two concurrent DIFFERENT-key decides — only the winner journals. The node transition is ALSO conditional
  * (`WHERE state = 'review'`) so a stale-read race loser can't emit a duplicate `node.updated`, and a retry
  * that follows a partial write (a decided gate left on a still-`review` node) idempotently COMPLETES the
- * transition here rather than stranding it. `escalate` (target `review`) is a no-op transition by design.
+ * transition here rather than stranding it. (This spine only ever runs the TERMINATING verbs — `escalate`,
+ * which stays at `review`, takes `escalateGate`, not this path; the `target !== "review"` guard below is
+ * defensive.)
  *
  * Durability scope: the gate row + node state are index writes (survive a normal restart; a `--rebuild` /
  * an interleaved `_work.md` rescan reverts the node state — the pre-existing BRO-1914 gap, shared with the
@@ -522,6 +523,23 @@ async function escalateGate(
   if (changed.rowsAffected === 1) {
     await journalGateEscalated(db, workspace, g, to, now);
     await emitNodeUpdated(db, n.id, now);
+    return;
+  }
+  // A zero-row owner CAS is AMBIGUOUS — it is NOT unconditionally an idempotent no-op. Disambiguate by re-reading
+  // the node's CURRENT state: if it left `review` (a concurrent block/revise decided the gate out from under this
+  // escalate, between the resolveGateChain read and the CAS — a non-transactional TOCTOU), the escalation cannot
+  // apply and a phantom 202 would hide that the node was actually decided. Refuse 409 instead. If it is STILL at
+  // `review`, the owner already equals `to` — a genuine idempotent re-escalate (no-op). (The residual window where
+  // the owner CAS committed but `journalGateEscalated` then failed leaves the owner set without a `gate.escalated`
+  // event — the same non-transactional CAS→journal class as BRO-1915 Scope #4, and audit-only here since
+  // `gate.escalated` has no rebuild consumer + the board self-heals on reconnect; folded to BRO-1915.)
+  const [after] = await db.select().from(node).where(eq(node.id, n.id));
+  if (!after || after.deletedAt !== null || after.state !== "review") {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} is no longer awaiting a decision (decided concurrently)`,
+      409,
+    );
   }
 }
 
@@ -697,6 +715,8 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
           new IntentRefusal("invalid_intent", "revise.feedback must be a non-empty string", 400),
         );
       }
+      // Trim to match escalate's `to` normalization — padding carries no meaning on the send-back note.
+      const feedback = feedbackRaw.trim();
       // Idempotency lease inside the typed boundary (as block) — a SQLITE_BUSY here is a typed intent_failed.
       const rNow = Date.now();
       try {
@@ -720,7 +740,7 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         );
       }
       try {
-        await decideGateVerdict(db, workspace, gateId, "revise", { feedback: feedbackRaw }, rNow);
+        await decideGateVerdict(db, workspace, gateId, "revise", { feedback }, rNow);
       } catch (err) {
         try {
           await db.delete(lease).where(eq(lease.key, key));

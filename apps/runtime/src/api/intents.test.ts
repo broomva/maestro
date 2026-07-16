@@ -913,3 +913,73 @@ test("BRO-1805 slice 2b-i: escalate refuses missing `to` (400), unknown gate (40
   expect(await jsonErr(decided)).toBe("invalid_intent");
   handle.client.close();
 });
+
+test("BRO-1805 slice 2b-i: escalate refuses (409, no phantom) when the gate is open but the node left review", async () => {
+  // The REACHABLE sibling of the concurrent-decide race: a BRO-1914 rescan-revert can leave an OPEN gate
+  // (verdict null) on a node that reverted OUT of `review`. escalate must refuse — reassigning the owner of a
+  // node no longer at the gate is meaningless, and a phantom 202 would hide it. (The same protection for the
+  // intra-request timing — node decided between the resolveGateChain read and the owner-CAS — is the re-read.)
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db);
+  // the node reverted to `triggered` while the gate row stays open (verdict still null) — the degraded state
+  await handle.db.update(node).set({ state: "triggered" }).where(eq(node.id, nodeId));
+
+  const res = await post(app, { type: "escalate", gateId, to: "alice" }, "k-esc-nonreview");
+  expect(res.status).toBe(409);
+  expect(await jsonErr(res)).toBe("invalid_intent");
+  // owner untouched, node stays triggered, NO gate.escalated (no phantom success)
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.owner).toBeNull();
+  expect(n?.state).toBe("triggered");
+  const escalated = await handle.db.select().from(event).where(eq(event.type, "gate.escalated"));
+  expect(escalated).toHaveLength(0);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-i: under concurrent escalate + block, escalate never phantom-202s", async () => {
+  // MAJOR (Codex Strata-A): an escalate that reads an open `review` gate then loses the owner-CAS to a
+  // concurrent block (node → canceled) must NOT return a phantom 202 — a zero-row owner-CAS is AMBIGUOUS
+  // (same-owner no-op vs the node left review). The re-read disambiguates it to 409 when the node was decided
+  // out from under the escalate. Race harness (two connections, many rounds — a single shot may not interleave
+  // the read→CAS window; the BRO-1814 discipline). Invariant, EVERY ordering: escalate 202 ⟹ exactly one
+  // gate.escalated for its session; escalate 409 ⟹ the gate was decided (node canceled), never a phantom.
+  const ws = mkWorkspace(false);
+  const dbPath = join(ws, "esc-race.db");
+  const h1 = await openIndex(`file:${dbPath}`);
+  const h2 = await openIndex(`file:${dbPath}`);
+  await h1.client.execute("PRAGMA busy_timeout = 5000");
+  await h2.client.execute("PRAGMA busy_timeout = 5000");
+  const app1 = createApp(cfg(ws), Date.now(), h1.db);
+  const app2 = createApp(cfg(ws), Date.now(), h2.db);
+
+  const ROUNDS = 40;
+  for (let i = 0; i < ROUNDS; i++) {
+    const ids = { nodeId: `n${i}`, sessionId: `r${i}`, gateId: `g${i}` };
+    await seedOpenGate(h1.db, ids);
+    const [escRes] = await Promise.all([
+      post(app1, { type: "escalate", gateId: ids.gateId, to: "alice" }, `esc-${i}`),
+      post(app2, { type: "block", gateId: ids.gateId }, `blk-${i}`),
+    ]);
+    const escalated = await h1.db
+      .select()
+      .from(event)
+      .where(and(eq(event.type, "gate.escalated"), eq(event.sessionId, ids.sessionId)));
+    if (escRes.status === 202) {
+      // escalate won the CAS before block canceled the node → it really applied (exactly one gate.escalated)
+      expect(escalated).toHaveLength(1);
+    } else {
+      // escalate refused because block decided the gate first → 409, NO phantom escalation, node canceled
+      expect(escRes.status).toBe(409);
+      expect(escalated).toHaveLength(0);
+      const [nRow] = await h1.db.select().from(node).where(eq(node.id, ids.nodeId));
+      expect(nRow?.state).toBe("canceled");
+    }
+    // block always decides the open gate, whether escalate ran first or not
+    const [gRow] = await h1.db.select().from(gate).where(eq(gate.id, ids.gateId));
+    expect(gRow?.verdict).toBe("block");
+  }
+  h1.client.close();
+  h2.client.close();
+});
