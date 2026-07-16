@@ -71,7 +71,7 @@ From `WK_ITEMS` (trim demo-only fields as needed):
 }
 ```
 
-The unsupervised-hours ledger (autonomy scoreboard: hours today, a notch per human look) derives from events — never stored as a percentage.
+The unsupervised-hours ledger (autonomy scoreboard: hours today, a notch per human look) derives from events — never stored as a percentage. Concretely (BRO-1818): `GET /api/ledger?since&until` runs `deriveLedger` over the `event` log for the window (default: the current UTC day). Unsupervised time is the wall-clock UNION of run-active intervals `[run.started, terminal ?? until]` clamped to the window — a union, not a sum, so N parallel runs count as one unsupervised hour. A human look is any `actor:"user"` event (a gate decision/escalation; a journaled chat turn once it lands) or a `run.killed`. The response also carries the scoreboard bar geometry as POSITIONAL percent of the window (segments + notches) — layout position, not a progress percentage. No `ledger` table exists; the KPI is computed on read and can never drift from the log.
 
 ## The wire protocol (chat)
 

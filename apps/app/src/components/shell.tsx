@@ -26,6 +26,7 @@ import { TabStrip } from "./fs/tab-strip";
 import { OverlayHost } from "./overlays/overlay-host";
 import { Sidebar } from "./shell/sidebar";
 import { TopBar } from "./shell/top-bar";
+import { useLedger } from "./shell/use-ledger";
 
 /** The default sidebar width when nothing is persisted (CLAUDE.md §Layout: 200px). */
 const NAV_WIDTH_DEFAULT = 200;
@@ -82,6 +83,9 @@ export function Shell({ children }: { children?: ReactNode }) {
   // The tab strip + FS pane are work-surface chrome, hidden on the full-page-view routes (see above).
   const workSurface = isWorkSurface(pathname);
   const showFs = workSurface && fsOpen;
+  // The ambient autonomy scoreboard's live data (BRO-1818) — derived server-side, polled calmly. Null
+  // until the first load (SSR / no index) → the scoreboard renders its calm empty state.
+  const ledger = useLedger();
 
   // ⌘K is global — open the palette from anywhere in the shell (the field in the top bar is one
   // affordance; the shortcut is another). The palette itself is a later fidelity ticket.
@@ -104,7 +108,13 @@ export function Shell({ children }: { children?: ReactNode }) {
       // transition would win over the stylesheet and keep animating; CLAUDE.md §Motion).
       style={{ gridTemplateColumns: `${navOpen ? navWidth : RAIL_WIDTH}px 1fr` }}
     >
-      <Sidebar tree={tree} needsYou={needsYou} collapsed={!navOpen} onFeedback={openFeedback} />
+      <Sidebar
+        tree={tree}
+        needsYou={needsYou}
+        collapsed={!navOpen}
+        onFeedback={openFeedback}
+        ledger={ledger}
+      />
 
       <div className="bv-main">
         <TopBar

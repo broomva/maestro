@@ -137,3 +137,40 @@ export interface BoardResponse {
 export interface SchedulesResponse {
   schedules: LiveSchedule[];
 }
+
+// ── GET /api/ledger?since=<ms>&until=<ms> — the autonomy scoreboard (BRO-1818) ─
+
+/**
+ * The autonomy ledger — the product's own KPI, DERIVED from the event log over the half-open window
+ * `[since, until)` (epoch ms), NEVER a stored percentage (design canon "the branch is the receipt /
+ * show receipts not percentages"; the product thesis is "the scarce resource is unsupervised hours").
+ * There is no `ledger` table and no stored KPI column: every field here is computed on read from `event`
+ * rows (`api/ledger` → `deriveLedger`), so it can never drift from the log it summarizes.
+ *
+ * - `unsupervisedMs` — wall-clock the system worked autonomously = the UNION of run-active intervals
+ *   intersected with the window (union, not sum: parallel runs are one unsupervised hour, not many).
+ * - `humanLooks` — a notch per human look in the window: a gate decision/escalation (actor "user") or a
+ *   kill (`run.killed`). The scarce resource trends DOWN as autonomy improves.
+ * - `activeRuns` — a receipt: how many runs are still live at `until`.
+ * - `segments` / `notches` — the scoreboard bar geometry in POSITIONAL percent of the window (0–100): a
+ *   timeline of the unsupervised stretches + the look marks. This is layout position, NOT a progress %.
+ * - `label` — the plain-voice line the chrome renders verbatim ("2h 14m unsupervised · 3 looks"); no `%`.
+ */
+export interface LedgerResponse {
+  since: number;
+  until: number;
+  unsupervisedMs: number;
+  humanLooks: number;
+  activeRuns: number;
+  segments: LedgerBarSegment[];
+  notches: number[];
+  label: string;
+}
+
+/** One unsupervised stretch on the scoreboard bar — positional percent of the window (0–100), never a
+ *  progress percentage. `live` marks the stretch still running at the window end. */
+export interface LedgerBarSegment {
+  start: number;
+  width: number;
+  live?: boolean;
+}
