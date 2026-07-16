@@ -64,6 +64,23 @@ describe("verifier-verdict — readVerdict (the inverse of renderVerdictMd, for 
   test("malformed YAML frontmatter → null (not a throw)", async () => {
     expect(await readVerdict(await runDirWith("---\nverdict: : : bad\n---\n"))).toBeNull();
   });
+
+  test("empty base → null (approveMerge must never rev-parse an empty base)", async () => {
+    const md = renderVerdictMd({ ...receipt, base: "" }, "body");
+    expect(await readVerdict(await runDirWith(md))).toBeNull();
+  });
+
+  test("non-positive / fractional attempt → null", async () => {
+    expect(
+      await readVerdict(await runDirWith(renderVerdictMd({ ...receipt, attempt: 0 }, "b"))),
+    ).toBeNull();
+    expect(
+      await readVerdict(await runDirWith(renderVerdictMd({ ...receipt, attempt: -1 }, "b"))),
+    ).toBeNull();
+    expect(
+      await readVerdict(await runDirWith(renderVerdictMd({ ...receipt, attempt: 1.5 }, "b"))),
+    ).toBeNull();
+  });
 });
 
 // ── fixtures ─────────────────────────────────────────────────────────────────────────────────────

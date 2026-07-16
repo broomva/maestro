@@ -57,10 +57,17 @@ export async function readVerdict(runDir: string): Promise<VerdictReceipt | null
   }
   if (data === null || typeof data !== "object") return null;
   const r = data as Record<string, unknown>;
+  // Validate the load-bearing fields by VALUE, not just type — approveMerge feeds `base` straight into
+  // `git rev-parse` before an irreversible merge, so an empty base or a non-positive/fractional attempt must
+  // be rejected (→ approve refuses) rather than reaching git. `verdict` is a plain string here; approveGate
+  // separately requires it to be exactly "pass".
   if (
     typeof r.verdict !== "string" ||
     typeof r.base !== "string" ||
-    typeof r.attempt !== "number"
+    r.base.trim() === "" ||
+    typeof r.attempt !== "number" ||
+    !Number.isInteger(r.attempt) ||
+    r.attempt <= 0
   ) {
     return null;
   }
