@@ -30,6 +30,7 @@ import {
   type Done,
   effectiveProtect,
   InvalidContractError,
+  materialize,
   parseWorkFile,
   WorkContractError,
 } from "@maestro/protocol";
@@ -114,10 +115,15 @@ async function seedRun(
   const wt = await realpath(await mkdtemp(join(tmpdir(), `maestro-adv-wt-${id}-`)));
   tmps.push(wt);
   await git(dir, ["worktree", "add", "-q", wt, branch]);
-  await mutate(wt);
-  await git(wt, ["add", "-A"]);
-  await git(wt, ["commit", "-qm", `run ${id}`]);
-  await git(dir, ["worktree", "remove", "--force", wt]);
+  try {
+    await mutate(wt);
+    await git(wt, ["add", "-A"]);
+    await git(wt, ["commit", "-qm", `run ${id}`]);
+  } finally {
+    // Drop the worktree even if mutate/commit throws, so a fixture failure never leaves a registered
+    // `.git/worktrees/<id>` admin entry that a later fixture (they share one base repo) could trip over.
+    await git(dir, ["worktree", "remove", "--force", wt]).catch(() => {});
+  }
   return branch;
 }
 
@@ -203,7 +209,14 @@ describe("adversarial 3 — a 400-file out-of-scope diff is caught (Stage 0 size
       await runStage0({ cwd: dir, base, branch, protect: effectiveProtect(CONTRACT_DONE) }),
     );
     expect(f.reason).toBe("diff_too_large");
-    expect(f.diffstat.files).toBe(400);
+    if (f.reason === "diff_too_large") {
+      expect(f.diffstat.files).toBe(400);
+      // Pin that it is specifically the FILE-count trip: files OVER the file limit, churn UNDER the line
+      // limit — so a future multi-line edit can't silently satisfy this via the line guard while the label
+      // still says "file-count". Self-verifying against the guard's own reported limits.
+      expect(f.diffstat.files).toBeGreaterThan(f.limit.maxFiles);
+      expect(f.diffstat.plus + f.diffstat.minus).toBeLessThanOrEqual(f.limit.maxLines);
+    }
   });
 
   test("CONTROL: a small in-scope diff (5 files) passes the size guard", async () => {
@@ -222,16 +235,18 @@ describe("adversarial 3 — a 400-file out-of-scope diff is caught (Stage 0 size
 });
 
 // ── Fixture 4 — judge-only contract trying gate:auto → refused at contract validation (VERIFIER §1) ────
-// Two real refusal surfaces, both "contract validation": (a) the DISPATCH parse refuses a judge-only
-// `_work.md` outright — `done.check` is mandatory, so "trust the judge, skip the checks" never validates
-// (`malformed_done`); (b) the gate-pairing guard refuses gate:auto with an EMPTY check list (the closest
-// structurally-valid judge-only, `check: []`) — the VERIFIER §1 "weaker gate pairs with the human gate"
-// rule in isolation (`InvalidContractError`). A judge-only run can therefore never reach auto-merge.
+// THREE real refusal surfaces: (a) the DISPATCH parse refuses a judge-only `_work.md` outright — `done.check`
+// is mandatory, so "trust the judge, skip the checks" never validates (`malformed_done`, GATE-INDEPENDENT:
+// a judge-only done is checkless-invalid whatever its gate); (b) `materialize` — the function the real
+// dispatch path (supervisor / intents / state-writer via parseWorkFile) runs — refuses `gate: auto` with no
+// check via the VERIFIER §1 gate-pairing guard (`gate_auto_no_check`), the guard the ticket NAMES, so this
+// exit-gate reds if that guard regresses; (c) `assertContractGate` proves the same pairing rule in isolation
+// (`InvalidContractError`). A judge-only run can therefore never reach auto-merge.
 describe("adversarial 4 — a judge-only contract trying gate:auto is refused at contract validation", () => {
   const judgeOnlyAuto =
     "---\nid: cheat\nkind: task\nstate: proposed\ngate: auto\ndone:\n  judge: rubric.md\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\nTrust the judge, skip the checks.\n";
 
-  test("HOSTILE (dispatch parse): a judge-only gate:auto _work.md never validates — done.check is required", () => {
+  test("HOSTILE (dispatch parse): a judge-only _work.md never validates — done.check is mandatory (gate-independent)", () => {
     let err: unknown;
     try {
       parseWorkFile(judgeOnlyAuto);
@@ -239,20 +254,56 @@ describe("adversarial 4 — a judge-only contract trying gate:auto is refused at
       err = e;
     }
     expect(err).toBeInstanceOf(WorkContractError);
-    // Refused because a done block MUST carry a deterministic check (judge is a supplement, never the
-    // sole oracle) — a judge-only contract is malformed before the gate-pairing rule is even reached.
+    // Refused because a done block MUST carry a deterministic check (judge is a supplement, never the sole
+    // oracle) — a judge-only contract is malformed regardless of gate, before the gate-pairing rule is
+    // reached. The gate:auto-SPECIFIC refusal is the next test (materialize / gate_auto_no_check).
     expect((err as WorkContractError).code).toBe("malformed_done");
   });
 
+  test("HOSTILE (real dispatch guard): materialize refuses gate:auto with no check — gate_auto_no_check", () => {
+    // `materialize` is what parseWorkFile + the real dispatch path go through; its inline gate-pairing guard
+    // is the enforcement the ticket names (VERIFIER §1). A checkless (judge-only) input with gate:auto — the
+    // reachable case, e.g. a checkless child inheriting gate:auto — hits exactly this throw, so deleting the
+    // guard reds THIS gate (the D8-layer-3 model-pin canary reruns it). assertContractGate (next) is a
+    // parallel helper the runtime does not call, so materialize is the load-bearing coverage.
+    let err: unknown;
+    try {
+      materialize({
+        id: "cheat",
+        kind: "task",
+        state: "proposed",
+        gate: "auto",
+        done: { check: [], judge: "rubric.md" },
+        created: "2026-01-01",
+        updated: "2026-01-01",
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(WorkContractError);
+    expect((err as WorkContractError).code).toBe("gate_auto_no_check");
+  });
+
   test("HOSTILE (gate-pairing rule): assertContractGate refuses gate:auto with an empty check list", () => {
-    // The VERIFIER §1 mechanical rule on the empty-check edge: judge present, checks empty, gate auto.
+    // The VERIFIER §1 mechanical rule on the empty-check edge, proven in isolation: judge present, checks
+    // empty, gate auto → InvalidContractError.
     expect(() =>
       assertContractGate({ gate: "auto", done: { check: [], judge: "rubric.md" } }),
     ).toThrow(InvalidContractError);
   });
 
-  test("CONTROL: gate:auto WITH a non-empty check is accepted (the guard discriminates)", () => {
-    expect(() => assertContractGate({ gate: "auto", done: { check: "bun test" } })).not.toThrow();
+  test("CONTROL: materialize accepts gate:auto WITH a non-empty check (the real guard discriminates)", () => {
+    expect(() =>
+      materialize({
+        id: "ok",
+        kind: "task",
+        state: "proposed",
+        gate: "auto",
+        done: { check: [{ name: "tests", run: "bun test" }] },
+        created: "2026-01-01",
+        updated: "2026-01-01",
+      }),
+    ).not.toThrow();
   });
 
   test("CONTROL: the same empty-check + judge under gate:human is accepted (weaker gate pairs with human)", () => {
