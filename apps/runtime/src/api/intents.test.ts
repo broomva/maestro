@@ -715,3 +715,201 @@ test("BRO-1805 slice 2a: a block FS-journals gate.decided to the run journal (du
   expect(decided[0]?.gateId).toBe(gateId);
   handle.client.close();
 });
+
+// ── BRO-1805 slice 2b-i: revise (→ triggered, feedback) + escalate (→ owner reassigned, re-decidable) ──────
+
+test("BRO-1805 slice 2b-i: revise { gateId, feedback } decides `revise` + triggers the node + carries feedback", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+
+  const res = await post(
+    app,
+    { type: "revise", gateId, feedback: "tighten the error path" },
+    "k-rev-1",
+  );
+  expect(res.status).toBe(202);
+  expect(await res.json()).toEqual({ accepted: true });
+
+  // the gate is decided `revise` (terminating), by the human
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBe("revise");
+  expect(g?.decidedBy).toBe("human");
+
+  // the node transitioned review → triggered (send back for a fresh dispatch)
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("triggered");
+
+  // gate.decided carries the FEEDBACK (the send-back note the redispatched run picks up), session-scoped
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(decided).toHaveLength(1);
+  expect(decided[0]?.sessionId).toBe(sessionId);
+  const dp = JSON.parse(decided[0]?.payload ?? "{}") as { verdict?: string; feedback?: string };
+  expect(dp.verdict).toBe("revise");
+  expect(dp.feedback).toBe("tighten the error path");
+
+  // node.updated on the global stream carries the triggered projection
+  const updated = await handle.db.select().from(event).where(eq(event.type, "node.updated"));
+  expect(updated).toHaveLength(1);
+  expect(updated[0]?.sessionId).toBeNull();
+  expect(JSON.parse(updated[0]?.payload ?? "{}").state).toBe("triggered");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-i: a same-key revise retry is a no-op (one gate.decided)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { gateId } = await seedOpenGate(handle.db);
+
+  const r1 = await post(app, { type: "revise", gateId, feedback: "again" }, "k-rev-idem");
+  const r2 = await post(app, { type: "revise", gateId, feedback: "again" }, "k-rev-idem");
+  expect(r1.status).toBe(202);
+  expect(r2.status).toBe(202);
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(decided).toHaveLength(1);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-i: revise refuses a missing/empty feedback (400) + unknown gate (404) + conflicting verdict (409)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { gateId } = await seedOpenGate(handle.db);
+
+  // missing feedback
+  const noFb = await post(app, { type: "revise", gateId }, "k-rev-nofb");
+  expect(noFb.status).toBe(400);
+  expect(await jsonErr(noFb)).toBe("invalid_intent");
+  // empty/whitespace feedback
+  const emptyFb = await post(app, { type: "revise", gateId, feedback: "   " }, "k-rev-emptyfb");
+  expect(emptyFb.status).toBe(400);
+  // non-string feedback
+  const badFb = await post(app, { type: "revise", gateId, feedback: 7 }, "k-rev-badfb");
+  expect(badFb.status).toBe(400);
+  // missing gateId
+  const noGate = await post(app, { type: "revise", feedback: "x" }, "k-rev-nogate");
+  expect(noGate.status).toBe(400);
+  // unknown gate
+  const unknown = await post(
+    app,
+    { type: "revise", gateId: "nope", feedback: "x" },
+    "k-rev-unknown",
+  );
+  expect(unknown.status).toBe(404);
+  expect(await jsonErr(unknown)).toBe("not_found");
+  // gate already decided differently (block) → 409 on a revise
+  await post(app, { type: "block", gateId }, "k-rev-block-first");
+  const conflict = await post(app, { type: "revise", gateId, feedback: "x" }, "k-rev-conflict");
+  expect(conflict.status).toBe(409);
+  expect(await jsonErr(conflict)).toBe("invalid_intent");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-i: escalate { gateId, to } reassigns owner, node STAYS review, gate STAYS open", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+
+  const res = await post(app, { type: "escalate", gateId, to: "alice" }, "k-esc-1");
+  expect(res.status).toBe(202);
+
+  // owner reassigned; node still at the gate (review); gate NOT decided (verdict null — re-decidable §4)
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.owner).toBe("alice");
+  expect(n?.state).toBe("review");
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBeNull();
+
+  // NO gate.decided (escalate does not decide); a gate.escalated is journaled session-scoped instead
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(decided).toHaveLength(0);
+  const escalated = await handle.db.select().from(event).where(eq(event.type, "gate.escalated"));
+  expect(escalated).toHaveLength(1);
+  expect(escalated[0]?.sessionId).toBe(sessionId);
+  const ep = JSON.parse(escalated[0]?.payload ?? "{}") as { to?: string; escalatedBy?: string };
+  expect(ep.to).toBe("alice");
+  expect(ep.escalatedBy).toBe("human");
+
+  // node.updated on the global stream carries the new owner, still review
+  const updated = await handle.db.select().from(event).where(eq(event.type, "node.updated"));
+  expect(updated).toHaveLength(1);
+  const up = JSON.parse(updated[0]?.payload ?? "{}");
+  expect(up.owner).toBe("alice");
+  expect(up.state).toBe("review");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-i: an escalated gate is RE-DECIDABLE — a later block still cancels it", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db);
+
+  const esc = await post(app, { type: "escalate", gateId, to: "bob" }, "k-esc-then-block-1");
+  expect(esc.status).toBe(202);
+  // the gate stayed open, so a block afterward still decides + cancels (escalate did NOT terminate it)
+  const blk = await post(
+    app,
+    { type: "block", gateId, reason: "changed my mind" },
+    "k-esc-then-block-2",
+  );
+  expect(blk.status).toBe(202);
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBe("block");
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("canceled");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-i: a re-escalate to the SAME owner is an idempotent no-op; a DIFFERENT owner reassigns", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db);
+
+  await post(app, { type: "escalate", gateId, to: "alice" }, "k-esc-same-1");
+  await post(app, { type: "escalate", gateId, to: "alice" }, "k-esc-same-2"); // DIFFERENT key, SAME owner
+  // same-owner re-escalate changes nothing → still exactly ONE gate.escalated + ONE node.updated
+  let escalated = await handle.db.select().from(event).where(eq(event.type, "gate.escalated"));
+  expect(escalated).toHaveLength(1);
+  let updated = await handle.db.select().from(event).where(eq(event.type, "node.updated"));
+  expect(updated).toHaveLength(1);
+
+  // a different owner DOES reassign → a second gate.escalated + node.updated
+  await post(app, { type: "escalate", gateId, to: "carol" }, "k-esc-diff");
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.owner).toBe("carol");
+  escalated = await handle.db.select().from(event).where(eq(event.type, "gate.escalated"));
+  expect(escalated).toHaveLength(2);
+  updated = await handle.db.select().from(event).where(eq(event.type, "node.updated"));
+  expect(updated).toHaveLength(2);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-i: escalate refuses missing `to` (400), unknown gate (404), an already-decided gate (409)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { gateId } = await seedOpenGate(handle.db);
+
+  const noTo = await post(app, { type: "escalate", gateId }, "k-esc-noto");
+  expect(noTo.status).toBe(400);
+  expect(await jsonErr(noTo)).toBe("invalid_intent");
+  const emptyTo = await post(app, { type: "escalate", gateId, to: "  " }, "k-esc-emptyto");
+  expect(emptyTo.status).toBe(400);
+  const unknown = await post(
+    app,
+    { type: "escalate", gateId: "nope", to: "alice" },
+    "k-esc-unknown",
+  );
+  expect(unknown.status).toBe(404);
+  // a decided gate cannot be escalated
+  await post(app, { type: "block", gateId }, "k-esc-block-first");
+  const decided = await post(app, { type: "escalate", gateId, to: "alice" }, "k-esc-on-decided");
+  expect(decided.status).toBe(409);
+  expect(await jsonErr(decided)).toBe("invalid_intent");
+  handle.client.close();
+});
