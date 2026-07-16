@@ -24,7 +24,7 @@ test("the panel shows the receipts + verbs; no percentages; NO engine-room strin
   await expect(panel.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
   await expect(panel.getByRole("button", { name: "Send back", exact: true })).toBeVisible();
   await expect(panel.getByRole("button", { name: "Block", exact: true })).toBeVisible();
-  await expect(panel.getByRole("button", { name: "Escalate", exact: true })).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Point", exact: true })).toBeVisible();
 
   // The disclosure ladder never exposes the engine room, and receipts are never a progress percentage.
   const text = (await panel.textContent()) ?? "";
@@ -86,15 +86,39 @@ test("Block drives a block intent (graced); Escalate collects a target and drive
   // Reload to a clean panel, then Escalate → a target input → an escalate intent (node stays review).
   await page.reload();
   const panel2 = page.getByTestId("inspector-harness");
-  await panel2.getByRole("button", { name: "Escalate", exact: true }).click();
+  await panel2.getByRole("button", { name: "Point", exact: true }).click();
   const target = panel2.locator(".mcc-gateq-note-input");
   await expect(target).toBeVisible();
-  await expect(panel2.getByRole("button", { name: "Escalate", exact: true })).toBeDisabled();
+  await expect(panel2.getByRole("button", { name: "Point", exact: true })).toBeDisabled();
   await target.fill("@lead");
-  await panel2.getByRole("button", { name: "Escalate", exact: true }).click();
+  await panel2.getByRole("button", { name: "Point", exact: true }).click();
   await expect(page.getByTestId("gate-dispatched")).toContainText("escalate:gate-1", {
     timeout: 8000,
   });
+});
+
+test("a live node.updated on the selected item does NOT collapse the grace window (early-commit-on-remount fix)", async ({
+  page,
+}) => {
+  const panel = page.getByTestId("inspector-harness");
+
+  // Approve → the grace window opens, nothing dispatched yet.
+  await panel.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(panel.getByTestId("gate-done")).toBeVisible();
+  await expect(page.getByTestId("gate-dispatched")).toHaveCount(0);
+
+  // A live node.updated on the SAME item bumps updatedAt. With the OLD `${id}:${updatedAt}` boundary key
+  // this force-remounted the inspector → the unmount-commit flushed the approve EARLY (before the 5s
+  // window). The fix keys on id ALONE (retry-on-crash via resetKeys), so the grace SURVIVES the update.
+  await page.getByTestId("inspector-bump-update").click();
+  await expect(panel.getByTestId("gate-done")).toBeVisible(); // still in grace
+  await expect(panel.getByRole("button", { name: /Undo/ })).toBeVisible(); // undo still offered
+  await expect(page.getByTestId("gate-dispatched")).toHaveCount(0); // NOT early-committed
+
+  // Undo cancels cleanly — the reversibility promise held across the live update.
+  await panel.getByRole("button", { name: /Undo/ }).click();
+  await expect(panel.getByRole("button", { name: "Approve", exact: true })).toBeVisible();
+  await expect(page.getByTestId("gate-dispatched")).toHaveCount(0);
 });
 
 test("a blocked (Stuck) item exposes only Redispatch — fires immediately, keyed on the node", async ({

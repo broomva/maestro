@@ -6,7 +6,12 @@
 // is one verb look and one grace rule. gate.ts §PendingVerdict: a chosen verdict is reversible for a beat
 // (GATE_GRACE_WINDOW_MS), sent exactly once, never silently dropped — only Undo cancels.
 
-import { GATE_GRACE_WINDOW_MS, type Intent, type WorkItem } from "@maestro/protocol";
+import {
+  GATE_GRACE_WINDOW_MS,
+  GATE_VERDICT_VERBS,
+  type Intent,
+  type WorkItem,
+} from "@maestro/protocol";
 import { Button } from "@maestro/ui";
 import { Check, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -61,21 +66,23 @@ export function GateActions({
     <div className="mc-detail-actions">
       {item.state === "review" ? (
         <>
+          {/* Labels come from GATE_VERDICT_VERBS (gate.ts) — the single source that keeps the wire verb
+              `escalate` surfacing in plain voice as "Point" (CLAUDE.md §Voice: never expose wire verbs). */}
           <Button variant="primary" size="sm" onClick={onApprove}>
             <Check size={13} strokeWidth={2} />
-            Approve
+            {GATE_VERDICT_VERBS.approve}
           </Button>
           <Button variant="secondary" size="sm" onClick={onSendBack}>
-            Send back
+            {GATE_VERDICT_VERBS.revise}
           </Button>
           {onBlock ? (
             <Button variant="secondary" size="sm" onClick={onBlock}>
-              Block
+              {GATE_VERDICT_VERBS.block}
             </Button>
           ) : null}
           {onEscalate ? (
             <Button variant="secondary" size="sm" onClick={onEscalate}>
-              Escalate
+              {GATE_VERDICT_VERBS.escalate}
             </Button>
           ) : null}
         </>
@@ -113,7 +120,7 @@ export function SendBackNote({
       />
       <div className="mc-detail-actions">
         <Button variant="primary" size="sm" disabled={value.trim().length === 0} onClick={onSend}>
-          Send back
+          {GATE_VERDICT_VERBS.revise}
         </Button>
         <Button variant="secondary" size="sm" onClick={onCancel}>
           Cancel
@@ -124,9 +131,9 @@ export function SendBackNote({
 }
 
 /** The escalate target — an escalate carries a `to` (intents.ts `escalate{gateId, to}`: point the gate
- *  at an owner, node STAYS at review, re-decidable). Collected inline like the send-back note; empty
- *  target can't send. */
-export function EscalateNote({
+ *  at an owner, node STAYS at review, re-decidable). Surfaces in plain voice as "Point" (the send button)
+ *  though the wire verb is `escalate`. Collected inline like the send-back note; empty target can't send. */
+function EscalateNote({
   value,
   onChange,
   onCancel,
@@ -148,7 +155,7 @@ export function EscalateNote({
       />
       <div className="mc-detail-actions">
         <Button variant="primary" size="sm" disabled={value.trim().length === 0} onClick={onSend}>
-          Escalate
+          {GATE_VERDICT_VERBS.escalate}
         </Button>
         <Button variant="secondary" size="sm" onClick={onCancel}>
           Cancel
@@ -341,7 +348,8 @@ export function GateVerbs({ item, onIntent }: { item: WorkItem; onIntent: Intent
         onSend={() => {
           const to = noteText.trim();
           if (!to) return;
-          choose("Escalated", { type: "escalate", gateId, to }, true);
+          // Plain-voice confirmation of the "Point" verb (the wire verb is `escalate`).
+          choose("Pointed", { type: "escalate", gateId, to }, true);
           setNoteText("");
         }}
       />

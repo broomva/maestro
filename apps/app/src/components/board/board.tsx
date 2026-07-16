@@ -182,9 +182,15 @@ export function Board() {
             </button>
           </div>
           {/* A crashed inspector must not take down the plane (porting-notes §Production hardening).
-              Keyed by id AND updatedAt so the boundary remounts fresh on (a) a direct A→B switch and
-              (b) a live node.updated that FIXES a transient crash. */}
-          <ErrorBoundary key={`${selectedItem.id}:${selectedItem.updatedAt}`} label="The inspector">
+              Keyed by id ALONE so an A→B switch remounts fresh, but a live node.updated on the SAME item
+              does NOT force-remount the healthy subtree — that would drop a gate verb's in-flight 5s grace
+              window (BRO-1809, early-commit-on-remount). Crash recovery is preserved via resetKeys: an
+              updatedAt change retries the boundary only when it is ERRORED. */}
+          <ErrorBoundary
+            key={selectedItem.id}
+            resetKeys={[selectedItem.updatedAt]}
+            label="The inspector"
+          >
             <Inspector item={selectedItem} onIntent={postIntent} />
           </ErrorBoundary>
         </div>

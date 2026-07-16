@@ -80,13 +80,15 @@ describe("Inspector — the M5 receipts + verbs", () => {
   });
 
   // ── M5: the verbs (rung-3 control) ────────────────────────────────────────────
-  test("a review item renders its gate verbs — approve, send back (primary) + block, escalate (secondary)", () => {
+  test("a review item renders its gate verbs — approve, send back (primary) + block, point (secondary)", () => {
     const html = render({ ...base, gateId: "g1" });
     expect(html).toContain('data-testid="inspector-verbs"');
     expect(html).toContain(">Approve<");
     expect(html).toContain("Send back");
     expect(html).toContain(">Block<");
-    expect(html).toContain(">Escalate<");
+    // escalate surfaces in plain voice as "Point" (GATE_VERDICT_VERBS) — the wire verb is never exposed.
+    expect(html).toContain(">Point<");
+    expect(html).not.toContain(">Escalate<");
     // "Needs you" verbs are accent-blue, never red (no destructive-red styling on the block verb).
     expect(html).not.toContain("%");
   });
@@ -106,17 +108,23 @@ describe("Inspector — the M5 receipts + verbs", () => {
     expect(html).not.toContain(">Approve<");
   });
 
-  test("never renders engine-room strings — no worktree paths, index.db, or the run's on-disk directory", () => {
-    // Even if a hostile projection leaked them onto the fields the inspector reads, it renders only the
-    // receipts (run branch, verdict, look) — the disclosure ladder never exposes the engine room.
+  test("renders only projected receipts — the branch shows, but never a raw internal id (sessionId) or engine-room string", () => {
+    // The engine-room exclusion is the WorkItem PROJECTION's guarantee (store/project.ts surfaces the run
+    // BRANCH / verdict / look — never worktrees, index.db, or a session's on-disk dir), and the type has no
+    // such field to carry. This guards that the inspector ADDS no raw internal identifier of its own: the
+    // sessionId drives the timeline COPY (below) but is never itself rendered — a real regression guard,
+    // since the seed DOES carry a sessionId the inspector must not surface.
     const html = render({
       ...base,
       gateId: "g1",
+      sessionId: "sess-7f3a9c-internal",
       run: "run/ab12cd",
       verdict: "2 checks passed",
       look: { ran: "e2e", decided: [], ask: "approve?" },
     });
-    for (const s of ["worktree", "index.db", ".maestro", "/runs/", "run-deploy/"]) {
+    expect(html).toContain("run/ab12cd"); // the branch receipt IS shown (the receipt, not the worktree)
+    expect(html).not.toContain("sess-7f3a9c-internal"); // the raw session id is NEVER rendered
+    for (const s of ["worktree", "index.db", ".maestro", "/runs/"]) {
       expect(html).not.toContain(s);
     }
   });
