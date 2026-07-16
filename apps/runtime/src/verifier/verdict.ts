@@ -20,13 +20,58 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Verdict, VerdictReceipt } from "@maestro/protocol";
-import { stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { fixPlanPath } from "../harness/stop-conditions";
 import type { VerifierResult } from "./verifier";
 
 /** The canonical run-dir path of the receipt (beside progress.md / fix_plan.md / checks/ / judge.json). */
 export function verdictPath(runDir: string): string {
   return join(runDir, "verdict.md");
+}
+
+/**
+ * Read a run's verdict.md back into its wire-shaped {@link VerdictReceipt} — the inverse of
+ * {@link renderVerdictMd}. The `---`-fenced frontmatter IS the receipt (VERIFIER §4). Returns `null` when the
+ * receipt is absent (the run never reached verification), or its frontmatter is missing / not valid YAML / not
+ * receipt-shaped. The F5 `approve` verb (BRO-1805) reads this to feed {@link approveMerge} the judged `base` +
+ * `attempt`, and a null/incomplete receipt must REFUSE the approve rather than merge against a phantom base —
+ * so this validates exactly the three load-bearing fields (`verdict`, `base`, `attempt`) the merge relies on.
+ * A non-ENOENT read error propagates (a real fault the caller surfaces as `intent_failed`).
+ */
+export async function readVerdict(runDir: string): Promise<VerdictReceipt | null> {
+  let raw: string;
+  try {
+    raw = await readFile(verdictPath(runDir), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  // The receipt is the first `---`-fenced block (matches renderVerdictMd: `---\n<yaml>\n---`).
+  const fenced = raw.match(/^---\n([\s\S]*?)\n---/);
+  if (!fenced?.[1]) return null;
+  let data: unknown;
+  try {
+    data = parseYaml(fenced[1]);
+  } catch {
+    return null;
+  }
+  if (data === null || typeof data !== "object") return null;
+  const r = data as Record<string, unknown>;
+  // Validate the load-bearing fields by VALUE, not just type — approveMerge feeds `base` straight into
+  // `git rev-parse` before an irreversible merge, so an empty base or a non-positive/fractional attempt must
+  // be rejected (→ approve refuses) rather than reaching git. `verdict` is a plain string here; approveGate
+  // separately requires it to be exactly "pass".
+  if (
+    typeof r.verdict !== "string" ||
+    typeof r.base !== "string" ||
+    r.base.trim() === "" ||
+    typeof r.attempt !== "number" ||
+    !Number.isInteger(r.attempt) ||
+    r.attempt <= 0
+  ) {
+    return null;
+  }
+  return data as VerdictReceipt;
 }
 
 // ── VerifierResult → VerdictReceipt ─────────────────────────────────────────────────────────────────

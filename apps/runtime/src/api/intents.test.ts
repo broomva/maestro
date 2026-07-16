@@ -21,7 +21,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseWorkFile } from "@maestro/protocol";
+import { parseWorkFile, type VerdictReceipt } from "@maestro/protocol";
 import { and, eq, like } from "drizzle-orm";
 import { createApp } from "../app";
 import { DEFAULT_PORT, type RuntimeConfig } from "../config";
@@ -29,6 +29,7 @@ import { type IndexDb, openIndex } from "../db/client";
 import { event, gate, node, session } from "../db/schema";
 import { gitIsClean } from "../git/git";
 import { scanIntoIndex } from "../scanner";
+import { renderVerdictMd } from "../verifier/verdict";
 
 const tmps: string[] = [];
 afterAll(() => {
@@ -47,6 +48,12 @@ function cfg(workspace: string): RuntimeConfig {
 function gitOk(cwd: string, args: string[]): void {
   const r = Bun.spawnSync(["git", ...args], { cwd });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+}
+
+function gitOut(cwd: string, args: string[]): string {
+  const r = Bun.spawnSync(["git", ...args], { cwd });
+  if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  return r.stdout.toString().trim();
 }
 
 /** A temp workspace; git-init'd (with a local identity so commits succeed) unless git:false. */
@@ -1069,5 +1076,236 @@ test("BRO-1914: escalate durably writes _work.md owner, so a reconcile keeps the
   const [after] = await handle.db.select().from(node).where(eq(node.id, nodeId));
   expect(after?.owner).toBe("@lead"); // reconcile keeps the reassignment
   expect(after?.state).toBe("review");
+  handle.client.close();
+});
+
+// ── BRO-1805 slice 2b-ii: the approve verb → squash-merge (D1) → node done. The ONE verdict with an
+//    irreversible side effect BEFORE it commits: CLAIM the gate, merge, KEEP the verdict only on a landed
+//    merge (stale / refused reopen the gate — never a silent merge past a stale verdict). Real git repos. ──
+
+/** Set up a real approvable run: n1's `_work.md` @ review (committed base), a `run/<sessionId>` branch with
+ *  one committed change off that base, and a passing `runs/run-<id>/verdict.md` whose `base` is the workspace
+ *  tip (rung 1). Returns the base sha. `runs/` is gitignored (seedWorkFileAtReview) so the receipt file and
+ *  the gate journal don't dirty the tree. */
+function seedApprovableRun(ws: string, nodeId: string, sessionId: string): string {
+  seedWorkFileAtReview(ws, nodeId); // base commit: _work.md @ review + .gitignore(/runs/ /.maestro/)
+  const base = gitOut(ws, ["rev-parse", "HEAD"]);
+  const runBranch = `run/${sessionId}`;
+  gitOk(ws, ["branch", runBranch, base]);
+  const wt = mkdtempSync(join(tmpdir(), `maestro-wt-${sessionId}-`));
+  tmps.push(wt);
+  gitOk(ws, ["worktree", "add", "-q", wt, runBranch]);
+  writeFileSync(join(wt, "feature.ts"), "export const A = 1;\n");
+  gitOk(wt, ["add", "-A"]);
+  gitOk(wt, ["commit", "-qm", `run ${sessionId}`]);
+  gitOk(ws, ["worktree", "remove", "--force", wt]);
+  const runDir = join(ws, "runs", `run-${sessionId}`);
+  mkdirSync(runDir, { recursive: true });
+  const receipt: VerdictReceipt = {
+    verdict: "pass",
+    attempt: 2,
+    base,
+    diffstat: { files: 1, plus: 1, minus: 0 },
+    tampering: [],
+    checks: [],
+    judge: { score: 1 },
+  };
+  writeFileSync(join(runDir, "verdict.md"), renderVerdictMd(receipt, "looks good"));
+  return base;
+}
+
+test("BRO-1805 slice 2b-ii: approve { gateId } squash-merges the run and moves the node review → done", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+
+  const res = await post(app, { type: "approve", gateId }, "k-approve-1");
+  expect(res.status).toBe(202);
+  expect(await res.json()).toEqual({ accepted: true });
+
+  // verdict committed = approve (KEPT — the merge landed), decided by the human
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBe("approve");
+  expect(g?.decidedBy).toBe("human");
+  expect(g?.decidedAt ?? 0).toBeGreaterThan(0);
+
+  // node review → done, durable on BOTH sides (DB + FS), tree clean (coordinated write committed)
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("done");
+  expect(
+    parseWorkFile(readFileSync(join(ws, "work", nodeId, "_work.md"), "utf8")).contract.state,
+  ).toBe("done");
+  expect(await gitIsClean(ws)).toBe(true);
+
+  // the run really merged: its file landed on the workspace branch; run/<id> archived (the branch is the receipt)
+  expect(existsSync(join(ws, "feature.ts"))).toBe(true);
+  const branches = gitOut(ws, ["branch", "--list"]);
+  expect(branches).toContain("archive/run-r1");
+  expect(branches).not.toContain("run/r1");
+
+  // events: gate.approved carries the merge receipt (sha + freshness), gate.decided records the verdict
+  const approved = await handle.db.select().from(event).where(eq(event.type, "gate.approved"));
+  expect(approved).toHaveLength(1);
+  const ap = JSON.parse(approved[0]?.payload ?? "{}") as {
+    gateId?: string;
+    sha?: string;
+    freshness?: string;
+  };
+  expect(ap.gateId).toBe(gateId);
+  expect(ap.sha).toMatch(/^[0-9a-f]{7,}$/);
+  expect(ap.freshness).toBe("base_unmoved");
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(JSON.parse(decided[0]?.payload ?? "{}").verdict).toBe("approve");
+
+  // THE REGRESSION GUARD (BRO-1914): a live reconcile keeps the node done, not resurrected to review
+  await scanIntoIndex(handle.db, ws, Date.now());
+  const [after] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(after?.state).toBe("done");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-ii: approve on a run stale vs the workspace tip is refused 409 and leaves the gate OPEN", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+  // advance the workspace tip touching the SAME file the run changed → rung 3 overlap → stale
+  writeFileSync(join(ws, "feature.ts"), "export const conflicting = 2;\n");
+  gitOk(ws, ["add", "-A"]);
+  gitOk(ws, ["commit", "-qm", "workspace moved onto feature.ts"]);
+
+  const res = await post(app, { type: "approve", gateId }, "k-approve-stale");
+  expect(res.status).toBe(409);
+  expect(await jsonErr(res)).toBe("invalid_intent");
+
+  // THE INVARIANT: no silent merge past a stale verdict — the gate stays OPEN, re-decidable (the claim is RELEASED).
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBeNull(); // MUTATION: drop releaseApproveClaim on the stale path → this reads "approve" → RED
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("review");
+  expect(gitOut(ws, ["branch", "--list"])).toContain("run/r1"); // NOT archived — no merge happened
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-ii: approve with no passing verdict.md is refused 409, gate stays open", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db);
+  seedWorkFileAtReview(ws, nodeId); // node @ review but NO run branch / verdict.md
+
+  const res = await post(app, { type: "approve", gateId }, "k-approve-noverdict");
+  expect(res.status).toBe(409);
+  expect(await jsonErr(res)).toBe("invalid_intent");
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBeNull(); // refused before the claim → no verdict to release
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-ii: approve refuses (retryable) when the workspace tree is dirty, gate stays open", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+  writeFileSync(join(ws, "work", nodeId, "_work.md"), "dirty uncommitted edit\n"); // dirty a TRACKED file
+
+  const res = await post(app, { type: "approve", gateId }, "k-approve-dirty");
+  expect(res.status).toBe(503);
+  const body = (await res.json()) as { error: { code: string; retryable: boolean } };
+  expect(body.error.code).toBe("intent_failed");
+  expect(body.error.retryable).toBe(true);
+  // claim RELEASED on refuse → gate open, re-decidable after the tree is cleaned
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBeNull();
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-ii: a same-key approve retry is a no-op (the run merges exactly once)", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+  const before = commitCount(ws);
+
+  const a = await post(app, { type: "approve", gateId }, "k-approve-idem");
+  const b = await post(app, { type: "approve", gateId }, "k-approve-idem");
+  expect(a.status).toBe(202);
+  expect(b.status).toBe(202);
+  // merged exactly once: the squash commit + the state:done commit = +2, never +4
+  expect(commitCount(ws) - before).toBe(2);
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("done");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-ii: approve on an already-decided (block) gate is refused 409, no merge", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+  await post(app, { type: "block", gateId }, "k-pre-block"); // decide it block first (→ canceled)
+  const before = commitCount(ws);
+
+  const res = await post(app, { type: "approve", gateId }, "k-approve-afterblock");
+  expect(res.status).toBe(409);
+  expect(await jsonErr(res)).toBe("invalid_intent");
+  expect(commitCount(ws)).toBe(before); // no merge — the run branch is untouched
+  expect(gitOut(ws, ["branch", "--list"])).toContain("run/r1");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-ii: approve on a gate ALREADY CLAIMED (verdict=approve) with the node still review does NOT flip it to done", async () => {
+  // The P20 blocker (concurrency): approve CLAIMS the gate (verdict=approve) BEFORE the irreversible merge. A
+  // DIFFERENT-key approve (double-click / second tab / second operator) can run while the claim owner is
+  // mid-merge. It must NOT read the bare claim as "merge landed" and complete the node — else a then-stale merge
+  // releases the claim, leaving a `done` node over unmerged work on a reopened, undecidable gate. Here we seed
+  // exactly that interleave state (claimed, node still review) and assert a fresh approve touches NOTHING.
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+  // Simulate the claim owner mid-merge: gate CLAIMED (verdict=approve) but the node NOT yet transitioned.
+  await handle.db
+    .update(gate)
+    .set({ verdict: "approve", decidedBy: "human", decidedAt: Date.now() })
+    .where(eq(gate.id, gateId));
+
+  const res = await post(app, { type: "approve", gateId }, "k-approve-concurrent-claim");
+  expect(res.status).toBe(202); // accepted — the claim owner owns the outcome; this caller does nothing
+
+  // THE GUARD: the node was NOT flipped to done off the bare claim (MUTATION: complete unconditionally → "done" → RED)
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("review");
+  expect(
+    parseWorkFile(readFileSync(join(ws, "work", nodeId, "_work.md"), "utf8")).contract.state,
+  ).toBe("review"); // FS untouched too
+  // no merge happened off this caller — run/<id> is still unarchived
+  expect(gitOut(ws, ["branch", "--list"])).toContain("run/r1");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-ii: a fresh-key approve retry AFTER a completed approve is an idempotent no-op (node stays done, no re-merge)", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+
+  expect((await post(app, { type: "approve", gateId }, "k-approve-first")).status).toBe(202);
+  const afterFirst = commitCount(ws); // squash + state:done commit landed
+
+  // a genuinely new key (not lease-deduped) — the completeApproveIfLanded branch sees node=done → no-op
+  const second = await post(app, { type: "approve", gateId }, "k-approve-second-freshkey");
+  expect(second.status).toBe(202);
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("done"); // stayed done
+  expect(commitCount(ws)).toBe(afterFirst); // NO re-merge (approveMerge never re-runs on an archived run)
   handle.client.close();
 });

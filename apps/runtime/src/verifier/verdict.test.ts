@@ -1,8 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { VerdictReceipt } from "@maestro/protocol";
 import { parse as parseYaml } from "yaml";
 import {
   appendVerdictFeedback,
   decideVerdictOutcome,
+  readVerdict,
   renderVerdictBody,
   renderVerdictFeedback,
   renderVerdictMd,
@@ -13,6 +18,70 @@ import {
   writeVerdict,
 } from "./verdict";
 import type { VerifierResult } from "./verifier";
+
+const readVerdictTmps: string[] = [];
+afterAll(async () => {
+  await Promise.all(
+    readVerdictTmps.map((d) => rm(d, { recursive: true, force: true }).catch(() => {})),
+  );
+});
+
+describe("verifier-verdict — readVerdict (the inverse of renderVerdictMd, for F5 approve)", () => {
+  const receipt: VerdictReceipt = {
+    verdict: "pass",
+    attempt: 3,
+    base: "abc1234",
+    diffstat: { files: 2, plus: 9, minus: 1 },
+    tampering: [],
+    checks: [{ name: "tests", ok: true, exit: 0, duration_s: 1.2, log: "checks/tests.log" }],
+    judge: { score: 1, model: "claude" },
+  };
+
+  async function runDirWith(content: string | null): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "maestro-readverdict-"));
+    readVerdictTmps.push(dir);
+    if (content !== null) await writeFile(verdictPath(dir), content, "utf8");
+    return dir;
+  }
+
+  test("round-trips a rendered receipt back into the wire shape", async () => {
+    const dir = await runDirWith(renderVerdictMd(receipt, "looks good"));
+    expect(await readVerdict(dir)).toEqual(receipt);
+  });
+
+  test("absent verdict.md (the run never verified) → null, not a throw", async () => {
+    expect(await readVerdict(await runDirWith(null))).toBeNull();
+  });
+
+  test("no frontmatter fence → null (approve must refuse, never merge a phantom base)", async () => {
+    expect(await readVerdict(await runDirWith("just a plain body, no fences\n"))).toBeNull();
+  });
+
+  test("frontmatter missing a load-bearing field (base) → null", async () => {
+    expect(await readVerdict(await runDirWith("---\nverdict: pass\nattempt: 1\n---\n"))).toBeNull();
+  });
+
+  test("malformed YAML frontmatter → null (not a throw)", async () => {
+    expect(await readVerdict(await runDirWith("---\nverdict: : : bad\n---\n"))).toBeNull();
+  });
+
+  test("empty base → null (approveMerge must never rev-parse an empty base)", async () => {
+    const md = renderVerdictMd({ ...receipt, base: "" }, "body");
+    expect(await readVerdict(await runDirWith(md))).toBeNull();
+  });
+
+  test("non-positive / fractional attempt → null", async () => {
+    expect(
+      await readVerdict(await runDirWith(renderVerdictMd({ ...receipt, attempt: 0 }, "b"))),
+    ).toBeNull();
+    expect(
+      await readVerdict(await runDirWith(renderVerdictMd({ ...receipt, attempt: -1 }, "b"))),
+    ).toBeNull();
+    expect(
+      await readVerdict(await runDirWith(renderVerdictMd({ ...receipt, attempt: 1.5 }, "b"))),
+    ).toBeNull();
+  });
+});
 
 // ── fixtures ─────────────────────────────────────────────────────────────────────────────────────
 

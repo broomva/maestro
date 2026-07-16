@@ -36,7 +36,9 @@ import { projectLiveNode } from "../db/project";
 import { event, gate, lease, node, session } from "../db/schema";
 import { gitCommit, gitUnstage } from "../git/git";
 import { bindIndexWriter, fsJournal, SessionTee } from "../harness/stdio";
+import { approveMerge, type MergeOutcome } from "../merge/merge";
 import { persistNodeState } from "../merge/state-writer";
+import { readVerdict } from "../verifier/verdict";
 
 export interface IntentDeps {
   db: IndexDb;
@@ -588,6 +590,239 @@ async function escalateGate(
   }
 }
 
+/** Emit `gate.approved` (the merge receipt — sha + freshness + archived branch) onto the session stream (F5).
+ *  Index-only + best-effort: the merge commit + the `approve` verdict are already durable, and the branch is
+ *  the receipt (the sha is recoverable from git), so a failed emit just leaves the timeline to re-derive. */
+async function emitGateApproved(
+  db: IndexDb,
+  g: typeof gate.$inferSelect,
+  outcome: Extract<MergeOutcome, { kind: "merged" }>,
+  now: number,
+): Promise<void> {
+  try {
+    await db.insert(event).values({
+      sessionId: g.sessionId,
+      ts: now,
+      actor: "system",
+      type: EVENT_TYPES.GATE_APPROVED,
+      payload: JSON.stringify({
+        gateId: g.id,
+        kind: g.kind,
+        sha: outcome.sha,
+        freshness: outcome.freshness,
+        archivedBranch: outcome.archivedBranch,
+      }),
+    });
+  } catch {
+    // best-effort — the merge + verdict are the durable truth; the timeline event is a projection
+  }
+}
+
+/** Release an approve CLAIM (verdict → null) when the merge did not land, reopening the gate as re-decidable.
+ *  Conditional on `verdict = 'approve'` so it only ever undoes THIS claim, never a verdict a concurrent decide
+ *  committed. The claim is never journaled (only a landed merge journals `gate.decided`), so a released claim
+ *  leaves no durable trace — the gate returns to exactly its pre-claim pending state. */
+async function releaseApproveClaim(db: IndexDb, gateId: string, now: number): Promise<void> {
+  await db
+    .update(gate)
+    .set({ verdict: null, decidedBy: null, decidedAt: null, updatedAt: now })
+    .where(and(eq(gate.id, gateId), eq(gate.verdict, "approve"), isNull(gate.deletedAt)));
+}
+
+/** Transition an approved node `review → done` (conditional, so a stale-read loser can't double-emit) + emit
+ *  `node.updated` + durably persist `state: done` to `_work.md` (BRO-1914, OUTSIDE the merge lock — safe: the
+ *  lock is non-reentrant and `approveMerge` already released it). Idempotent: runs for the merge winner AND a
+ *  retry that finds the verdict already committed (a partial approve whose node transition didn't land). */
+async function completeApprove(
+  db: IndexDb,
+  workspace: string,
+  n: typeof node.$inferSelect,
+  now: number,
+): Promise<void> {
+  const moved = await db
+    .update(node)
+    .set({ state: "done", updatedAt: now })
+    .where(and(eq(node.id, n.id), eq(node.state, "review")));
+  if (moved.rowsAffected === 1) await emitNodeUpdated(db, n.id, now);
+  await persistGateAdvance(workspace, n.path, { state: "done" }, "gate approve");
+}
+
+/**
+ * Idempotent-completion guard for a caller that OBSERVES an existing `approve` claim (a retry, or a CONCURRENT
+ * approve with a different idempotency key) but did NOT itself run the merge. The claim (`gate.verdict = approve`)
+ * is written BEFORE the irreversible merge, so it is NOT proof the merge landed — the merge may still be in flight
+ * on the claim owner, or have returned `stale`/`refused` and be about to release the claim. The DURABLE landed-
+ * signal is `node.state`: ONLY the merge winner transitions it to `done` (after `outcome.kind === "merged"`).
+ *   - `done`   → the winner already completed. Re-run `completeApprove` idempotently (a no-op, or it repairs a
+ *                partial where the DB moved to `done` but `_work.md` was not yet persisted).
+ *   - `review` → the winner still owns the outcome (mid-merge / releasing / crashed). Touch NOTHING — flipping the
+ *                node here off the bare claim is the concurrent-approve corruption (P20): a then-`stale` merge
+ *                releases the claim, leaving `done` over unmerged work on a reopened, undecidable gate.
+ * KNOWN residual (crash-gated, NON-corrupting): a crash strictly between a LANDED merge and `completeApprove`
+ * leaves `verdict = approve` + `node = review`; a later observer can't auto-complete it (node not `done`), so the
+ * gate is stuck-but-clean (no false `done`), recoverable by redispatch. Verifying merge-landed from git evidence
+ * to self-heal is a 2b-ii-B follow-up.
+ */
+async function completeApproveIfLanded(
+  db: IndexDb,
+  workspace: string,
+  n: typeof node.$inferSelect,
+  now: number,
+): Promise<void> {
+  if (n.state === "done") await completeApprove(db, workspace, n, now);
+}
+
+/**
+ * Decide a `review` node's open gate with `approve` (F5, BRO-1805 slice 2b-ii) — the ONE verdict that runs an
+ * irreversible side effect (the squash-merge, {@link approveMerge}, D1) BEFORE it can commit. It therefore does
+ * NOT use the terminal `decideGateVerdict` spine (which CASes the verdict THEN transitions): a `stale` / `refused`
+ * merge legitimately leaves the gate OPEN, so the verdict can only be committed once the merge is durable.
+ *
+ * The order — CLAIM, merge, confirm-or-release:
+ *   1. resolve the chain + load the run's `verdict.md` receipt (no passing receipt → refuse; never merge a
+ *      phantom base).
+ *   2. CLAIM the gate with an atomic verdict CAS (`WHERE verdict IS NULL`) BEFORE the merge. This elects a single
+ *      approver AND locks out a concurrent `block`/`revise` (their `WHERE verdict IS NULL` CAS now fails) so the
+ *      merge can't land onto a gate a different verdict decided out from under it (which would strand merged work
+ *      on a canceled node). The claim is not journaled.
+ *   3. `approveMerge`. On `merged`: KEEP the claim, transition the node → done (+ durable `_work.md`) FIRST — it is
+ *      the landed-signal — THEN journal `gate.decided(approve)` + emit `gate.approved` (so a projection fault can't
+ *      strand the transition). On `stale`/`refused` (or a throw): RELEASE the claim (verdict → null) so the gate
+ *      reopens re-decidable, and surface a typed refusal — NEVER a silent merge.
+ *
+ * Idempotency + concurrency: a same-key retry is deduped by the lease (never reaches here). But a DIFFERENT-key
+ * approve (a double-click that mints a fresh key, a second tab, two operators) can run CONCURRENTLY through this
+ * function while the claim owner is mid-merge — the claim (`verdict = approve`) is written BEFORE the merge, so it
+ * is NOT proof the merge landed. An observer of the bare claim (the top-of-fn branch, or the CAS loser) therefore
+ * completes the node ONLY when it is already `done` ({@link completeApproveIfLanded}) — the winner's durable
+ * landed-signal — NEVER off the claim itself. Without that guard, a concurrent approve could flip the node to
+ * `done` off a claim whose merge then returns `stale`/`refused` and releases it, stranding a `done` node over
+ * unmerged work on a reopened, undecidable gate (the P20 corruption this guards).
+ *
+ * KNOWN residuals (all crash- or transient-fault-gated, all NON-corrupting — no false `done`, no lost/double merge;
+ * a newer dispatch supersedes the orphaned gate via resolveGateChain's epoch guard):
+ *   (a) a crash between the CLAIM and either the merge landing OR `releaseApproveClaim` leaves `verdict = approve` +
+ *       node `review` with the run UNMERGED — stuck-but-clean (every verb no-ops/409s) until a redispatch; work is
+ *       safe on `run/<id>`.
+ *   (b) a crash / transient fault AFTER a landed merge but before `completeApprove` leaves it merged-but-not-`done`.
+ * A git-evidence self-heal (verify the merge landed → finish or reopen) covers both and is a 2b-ii-B follow-up.
+ * Because the journal is written AFTER `completeApprove` (to protect the node transition), a journal fault leaves the
+ * node correctly `done` but the decision un-journaled and NOT retry-repairable (a retry no-ops at `done`) — matters
+ * only for a `--rebuild` replay (BRO-1915, unbuilt; an open gate on a `done` node is inert — approve requires review).
+ * Throws `IntentRefusal` on refusal.
+ */
+async function approveGate(
+  db: IndexDb,
+  workspace: string,
+  gateId: string,
+  now: number,
+): Promise<void> {
+  const { g, n } = await resolveGateChain(db, gateId);
+
+  // A prior approve already CLAIMED this gate (verdict = approve). The claim is a PRE-merge marker, so this
+  // observer must NOT assume the merge landed — complete the node ONLY if it is already `done` (the winner's
+  // durable landed-signal), never off the bare claim. NEVER re-merge (approveMerge is unsafe on an archived run).
+  // `n` from resolveGateChain can be a stale read (the winner may have just completed it); that only ever MISSES
+  // a redundant idempotent completion, never causes a false one — but re-read fresh for symmetry with the CAS-loser
+  // branch and so a genuine post-crash `done` node is repaired here too.
+  if (g.verdict === "approve") {
+    const [fresh] = await db.select().from(node).where(eq(node.id, n.id));
+    if (fresh) await completeApproveIfLanded(db, workspace, fresh, now);
+    return;
+  }
+  if (g.verdict !== null) {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} is already decided (${g.verdict})`,
+      409,
+    );
+  }
+  if (n.state !== "review") {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} node is not awaiting a decision (state ${n.state})`,
+      409,
+    );
+  }
+
+  // Load the run's verifier receipt (verdict.md) — approveMerge needs the judged `base` + `attempt`. A run with
+  // no passing receipt cannot be approved (a gate only opens on a pass, but guard defensively vs a lost file).
+  const runDir = join(workspace, "runs", `run-${g.sessionId}`);
+  const receipt = await readVerdict(runDir);
+  // `receipt?.verdict !== "pass"` also refuses a null receipt (undefined !== "pass") — never merge a phantom base.
+  if (receipt?.verdict !== "pass") {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} has no passing verdict to approve`,
+      409,
+    );
+  }
+
+  // CLAIM before the irreversible merge (see the fn doc). Loses the CAS only to a concurrent decide.
+  const claimed = await db
+    .update(gate)
+    .set({ verdict: "approve", decidedBy: "human", decidedAt: now, updatedAt: now })
+    .where(and(eq(gate.id, gateId), isNull(gate.verdict), isNull(gate.deletedAt)));
+  if (claimed.rowsAffected !== 1) {
+    const [after] = await db.select().from(gate).where(eq(gate.id, gateId));
+    if (after?.verdict === "approve") {
+      // A concurrent approve won the claim and owns the merge outcome. Re-read the node fresh (the winner may
+      // have completed it since our stale read) and complete ONLY if it landed (`done`) — never off the claim.
+      const [fresh] = await db.select().from(node).where(eq(node.id, n.id));
+      if (fresh) await completeApproveIfLanded(db, workspace, fresh, now);
+      return;
+    }
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} was decided concurrently (${after?.verdict ?? "unknown"})`,
+      409,
+    );
+  }
+
+  let outcome: MergeOutcome;
+  try {
+    outcome = await approveMerge({
+      cwd: workspace,
+      runId: g.sessionId,
+      nodeId: n.id,
+      nodeTitle: n.title ?? n.id,
+      verdict: receipt,
+    });
+  } catch (err) {
+    await releaseApproveClaim(db, gateId, now); // the merge machinery threw → reopen the gate, surface the error
+    throw err;
+  }
+
+  if (outcome.kind !== "merged") {
+    await releaseApproveClaim(db, gateId, now); // stale / refused → reopen the gate (no verdict, re-decidable)
+    if (outcome.kind === "stale") {
+      throw new IntentRefusal(
+        "invalid_intent",
+        `gate ${gateId} run is stale vs the workspace tip (${outcome.reason}); rebase onto ${outcome.rebaseOnto} and re-verify before approving`,
+        409,
+      );
+    }
+    // dirty_workspace / workspace_busy are transient (a concurrent index-lock holder) → retryable; not_pass /
+    // empty_run are permanent preconditions → not. The gate stays open (claim released) either way.
+    const retryable = outcome.reason === "dirty_workspace" || outcome.reason === "workspace_busy";
+    throw new IntentRefusal(
+      retryable ? "intent_failed" : "invalid_intent",
+      `gate ${gateId} approve refused (${outcome.reason})`,
+      retryable ? 503 : 409,
+      retryable,
+    );
+  }
+
+  // Merged + durable. Transition the node → done FIRST — it is the durable landed-signal a concurrent/retry
+  // approve keys off ({@link completeApproveIfLanded}), so writing it before the journal/emit means a fault in
+  // those later, non-critical projections can never STRAND the done-transition (the winner already recorded it;
+  // a retry sees `done` and idempotently finishes). Then journal the verdict (FS-first, for BRO-1915 replay) +
+  // emit the merge receipt. All outside the now-released merge lock (the shared git lock is non-reentrant).
+  await completeApprove(db, workspace, n, now);
+  await journalGateDecided(db, workspace, g, "approve", {}, now);
+  await emitGateApproved(db, g, outcome, now);
+}
+
 /**
  * Mount POST /api/intents. Requires the open index (the idempotency lease lives there),
  * so it registers behind the same `if (index)` gate as the reads + stream in createApp.
@@ -856,6 +1091,62 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
           new IntentRefusal(
             "intent_failed",
             `escalate failed: ${(err as Error).message}`,
+            500,
+            true,
+          ),
+        );
+      }
+      const ok: IntentAccepted = { accepted: true };
+      return c.json(ok, 202);
+    }
+    // F5 (BRO-1805 slice 2b-ii): approve { gateId } → squash-merge the run (approveMerge, D1) → node `done`.
+    // The ONE verdict with an irreversible side effect BEFORE it commits: `approveGate` CLAIMS the gate, merges,
+    // and only KEEPS the verdict on a landed merge (stale / refused reopen the gate — never a silent merge). The
+    // gate.approved + node.updated events reach the client on the stream, not this 202. Lease shape as block/revise.
+    if (type === "approve") {
+      const gateId = (body as { gateId?: unknown }).gateId;
+      if (typeof gateId !== "string" || gateId.trim() === "") {
+        return refuse(
+          c,
+          new IntentRefusal("invalid_intent", "approve.gateId must be a non-empty string", 400),
+        );
+      }
+      // Idempotency lease inside the typed boundary (as block/revise) — a SQLITE_BUSY here is a typed intent_failed.
+      const aNow = Date.now();
+      try {
+        const aIns = await db
+          .insert(lease)
+          .values({ key, holder: RUNTIME_HOLDER, acquiredAt: aNow, expiresAt: aNow + LEASE_TTL_MS })
+          .onConflictDoNothing({ target: lease.key });
+        if (aIns.rowsAffected === 0) {
+          const ok: IntentAccepted = { accepted: true };
+          return c.json(ok, 202);
+        }
+      } catch (err) {
+        return refuse(
+          c,
+          new IntentRefusal(
+            "intent_failed",
+            `approve lease failed: ${(err as Error).message}`,
+            500,
+            true,
+          ),
+        );
+      }
+      try {
+        await approveGate(db, workspace, gateId, aNow);
+      } catch (err) {
+        try {
+          await db.delete(lease).where(eq(lease.key, key));
+        } catch {
+          // best-effort release — the lease TTL reaps it; a failed delete must not mask the real error
+        }
+        if (err instanceof IntentRefusal) return refuse(c, err);
+        return refuse(
+          c,
+          new IntentRefusal(
+            "intent_failed",
+            `approve failed: ${(err as Error).message}`,
             500,
             true,
           ),
