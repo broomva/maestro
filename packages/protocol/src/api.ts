@@ -154,7 +154,10 @@ export interface SchedulesResponse {
  * - `activeRuns` — a receipt: how many runs are still live at `until`.
  * - `segments` / `notches` — the scoreboard bar geometry in POSITIONAL percent of the window (0–100): a
  *   timeline of the unsupervised stretches + the look marks. This is layout position, NOT a progress %.
- * - `label` — the plain-voice line the chrome renders verbatim ("2h 14m unsupervised · 3 looks"); no `%`.
+ * - `label` — a canonical single-line plain-voice rendering ("2h 14m unsupervised · 3 looks"; no `%`) for
+ *   single-line surfaces (a tooltip, a notification, a CLI). The sidebar scoreboard does NOT use it — it
+ *   splits the numeric fields into its two-tier hours/looks layout — but the string stays the one place
+ *   the plain-voice form is defined, so any single-line consumer reads identically.
  */
 export interface LedgerResponse {
   since: number;

@@ -1,6 +1,7 @@
 // Shared autonomy-ledger formatters (BRO-1818). Pure, presentation-only, and used on BOTH sides: the
-// runtime builds `LedgerResponse.label` from them, and the app chrome (AutonomyScoreboard) renders the
-// same strings — so the plain-voice line reads identically wherever it appears. The DERIVATION
+// runtime builds `LedgerResponse.label` (the single-line form) with `formatLedgerLabel`, and the app
+// chrome (AutonomyScoreboard) calls `formatUnsupervised` to render the hours portion of its two-tier
+// hours/looks layout — so the plain-voice duration reads identically wherever it appears. The DERIVATION
 // (`deriveLedger`, which reads the event log) lives server-side in apps/runtime; only these formatters,
 // which act on the already-derived aggregate, are shared here.
 //
