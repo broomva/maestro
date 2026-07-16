@@ -190,7 +190,10 @@ const CLAUDE_CONFIG_PASSTHROUGH = [
  * `ANTHROPIC_API_KEY` is force-DELETED at the end: it must never reach the CLI, both to keep the key
  * away from an autonomous agent AND so the CLI bills the SUBSCRIPTION, not the API (the CLI prefers the
  * key when present). An operator may name host-specific auth vars via `MAESTRO_CLAUDE_ENV_PASSTHROUGH`
- * (comma-separated) — `ANTHROPIC_API_KEY` can never be re-opened that way.
+ * (comma-separated) — but NO secret-named var can be re-opened that way (the extras themselves pass
+ * through {@link isSecretEnvName}), so neither `ANTHROPIC_API_KEY` nor an alternate billing / endpoint
+ * channel like `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` can be smuggled back in. A genuinely-needed
+ * secret auth channel is a code change to {@link CLAUDE_AUTH_PASSTHROUGH}, never a runtime env toggle.
  *
  * Idempotent: re-applying it to its own output is a no-op except it drops any BROOMVA_* overlay (the CLI
  * must not hold the per-session bearer), which is why the runner passes NO `childEnv` when confining the
@@ -204,7 +207,10 @@ export function buildClaudeProviderEnv(
   const extras = (hostEnv.MAESTRO_CLAUDE_ENV_PASSTHROUGH ?? "")
     .split(",")
     .map((s) => s.trim())
-    .filter((s) => s !== "" && s !== "ANTHROPIC_API_KEY"); // the exfil/billing key is never re-openable
+    // No secret-named var is re-openable via the operator escape hatch — not ANTHROPIC_API_KEY, and not an
+    // alternate billing/endpoint channel (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL). The hatch is for
+    // host-specific NON-secret channels (e.g. a socket path); a secret auth var is a code change instead.
+    .filter((s) => s !== "" && !isSecretEnvName(s));
   for (const name of [...CLAUDE_AUTH_PASSTHROUGH, ...CLAUDE_CONFIG_PASSTHROUGH, ...extras]) {
     const v = hostEnv[name];
     if (v !== undefined) env[name] = v;

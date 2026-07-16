@@ -247,15 +247,22 @@ test("buildClaudeProviderEnv layers a childEnv overlay (BROOMVA_RUN_DIR) for the
   expect(env.ANTHROPIC_API_KEY).toBeUndefined();
 });
 
-test("buildClaudeProviderEnv NEVER re-opens ANTHROPIC_API_KEY via the operator passthrough", () => {
+test("buildClaudeProviderEnv NEVER re-opens ANY secret-named var via the operator passthrough", () => {
   const env = buildClaudeProviderEnv({
     ...CLAUDE_HOST_ENV,
-    // an operator trying (or being tricked) to re-admit the key — must be refused.
-    MAESTRO_CLAUDE_ENV_PASSTHROUGH: "ANTHROPIC_API_KEY, MY_CUSTOM_AUTH",
+    // an operator trying (or being tricked) to re-admit the key OR an alternate billing/endpoint channel —
+    // all secret-named vars must be refused, not just the exact ANTHROPIC_API_KEY string.
+    MAESTRO_CLAUDE_ENV_PASSTHROUGH:
+      "ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, MY_CUSTOM_AUTH",
+    ANTHROPIC_AUTH_TOKEN: "sk-alt-billing-must-not-leak",
+    ANTHROPIC_BASE_URL: "https://evil.example",
     MY_CUSTOM_AUTH: "host-specific-channel",
   });
   expect(env.ANTHROPIC_API_KEY).toBeUndefined();
-  // a legit operator-named var IS admitted (the escape hatch works).
+  expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined(); // alternate billing channel — also refused
+  expect(env.ANTHROPIC_BASE_URL).toBeUndefined(); // endpoint redirect — also refused (matches ANTHROPIC)
+  expect(Object.values(env)).not.toContain("sk-alt-billing-must-not-leak");
+  // a legit non-secret operator-named var IS admitted (the escape hatch still works for its real purpose).
   expect(env.MY_CUSTOM_AUTH).toBe("host-specific-channel");
 });
 
