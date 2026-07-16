@@ -22,11 +22,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseWorkFile } from "@maestro/protocol";
-import { like } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { createApp } from "../app";
 import { DEFAULT_PORT, type RuntimeConfig } from "../config";
-import { openIndex } from "../db/client";
-import { node } from "../db/schema";
+import { type IndexDb, openIndex } from "../db/client";
+import { event, gate, node, session } from "../db/schema";
 import { scanIntoIndex } from "../scanner";
 
 const tmps: string[] = [];
@@ -421,5 +421,297 @@ test("a kill seam that throws → intent_failed 500 and the lease is released (r
   // the lease was released → a same-key retry re-attempts (now succeeds)
   const second = await app.request("/api/intents", { method: "POST", headers, body });
   expect(second.status).toBe(202);
+  handle.client.close();
+});
+
+// ── F5 gate verdicts (BRO-1805 slice 2a — block) ─────────────────────────────
+// The write path that decides a review node's open gate. Slice 2a wires `block` (→ canceled); the
+// gate-decision spine (`decideGateVerdict`) is shared by the other three verdicts in later sub-slices.
+
+/** Seed a node@review + its session + an OPEN completion gate (verdict null) — the F5 decision setup. */
+async function seedOpenGate(
+  db: IndexDb,
+  ids: { nodeId: string; sessionId: string; gateId: string } = {
+    nodeId: "n1",
+    sessionId: "r1",
+    gateId: "g1",
+  },
+): Promise<{ nodeId: string; sessionId: string; gateId: string }> {
+  const now = Date.now();
+  await db.insert(node).values({
+    id: ids.nodeId,
+    path: `work/${ids.nodeId}`,
+    kind: "task",
+    state: "review",
+    gate: "human",
+    createdAt: now,
+    updatedAt: now,
+  });
+  await db.insert(session).values({
+    id: ids.sessionId,
+    nodeId: ids.nodeId,
+    branch: `run/${ids.sessionId}`,
+    status: "review",
+    startedAt: now,
+    updatedAt: now,
+  });
+  await db.insert(gate).values({
+    id: ids.gateId,
+    sessionId: ids.sessionId,
+    kind: "completion",
+    proposalJson: null,
+    verdict: null,
+    decidedBy: null,
+    openedAt: now,
+    decidedAt: null,
+    updatedAt: now,
+    deletedAt: null,
+  });
+  return ids;
+}
+
+const jsonErr = async (r: Response): Promise<string> =>
+  ((await r.json()) as { error: { code: string } }).error.code;
+
+test("BRO-1805 slice 2a: block { gateId } decides the gate + cancels the node (gate.decided + node.updated)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+
+  const res = await post(app, { type: "block", gateId, reason: "not this way" }, "k-block-1");
+  expect(res.status).toBe(202);
+  expect(await res.json()).toEqual({ accepted: true });
+
+  // the gate is decided `block`, by the human, with a timestamp (verdict was pending → now set)
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBe("block");
+  expect(g?.decidedBy).toBe("human");
+  expect(g?.decidedAt ?? 0).toBeGreaterThan(0);
+
+  // the node transitioned review → canceled (D-GATE)
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("canceled");
+
+  // gate.decided journaled session-scoped, carrying the widened payload (BRO-1915's rebuild projector)
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(decided).toHaveLength(1);
+  expect(decided[0]?.sessionId).toBe(sessionId);
+  const dp = JSON.parse(decided[0]?.payload ?? "{}") as {
+    gateId?: string;
+    verdict?: string;
+    kind?: string;
+    decidedBy?: string;
+    reason?: string;
+  };
+  expect(dp.gateId).toBe(gateId);
+  expect(dp.verdict).toBe("block");
+  expect(dp.kind).toBe("completion");
+  expect(dp.decidedBy).toBe("human");
+  expect(dp.reason).toBe("not this way");
+
+  // node.updated on the GLOBAL stream (sessionId null) carries the canceled projection (live board)
+  const updated = await handle.db.select().from(event).where(eq(event.type, "node.updated"));
+  expect(updated).toHaveLength(1);
+  expect(updated[0]?.sessionId).toBeNull();
+  expect(JSON.parse(updated[0]?.payload ?? "{}").state).toBe("canceled");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: a same-key block retry is a no-op (one gate.decided, node stays canceled once)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { gateId } = await seedOpenGate(handle.db);
+
+  const r1 = await post(app, { type: "block", gateId }, "k-block-idem");
+  const r2 = await post(app, { type: "block", gateId }, "k-block-idem");
+  expect(r1.status).toBe(202);
+  expect(r2.status).toBe(202);
+  // the second (same-key) POST is guarded by the idempotency lease → NOT re-decided
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(decided).toHaveLength(1);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: a DIFFERENT-key block on an already-blocked gate is an idempotent no-op", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { gateId } = await seedOpenGate(handle.db);
+
+  const r1 = await post(app, { type: "block", gateId }, "k-block-a");
+  const r2 = await post(app, { type: "block", gateId }, "k-block-b"); // new key, gate already block
+  expect(r1.status).toBe(202);
+  expect(r2.status).toBe(202);
+  // the spine's same-verdict short-circuit fires (past the lease) → still exactly ONE decide
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(decided).toHaveLength(1);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: block refuses — missing gateId (400), unknown gate (404), decided-differently (409)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+
+  const bad = await post(app, { type: "block" }, "k-b-missing");
+  expect(bad.status).toBe(400);
+  expect(await jsonErr(bad)).toBe("invalid_intent");
+
+  const missing = await post(app, { type: "block", gateId: "nope" }, "k-b-unknown");
+  expect(missing.status).toBe(404);
+  expect(await jsonErr(missing)).toBe("not_found");
+
+  // a non-string reason is rejected before any lookup
+  const badReason = await post(app, { type: "block", gateId: "g", reason: 42 }, "k-b-reason");
+  expect(badReason.status).toBe(400);
+  expect(await jsonErr(badReason)).toBe("invalid_intent");
+
+  // a gate already decided with a DIFFERENT verdict → 409 (never silently re-decided)
+  const { gateId } = await seedOpenGate(handle.db, { nodeId: "n2", sessionId: "r2", gateId: "g2" });
+  await handle.db
+    .update(gate)
+    .set({ verdict: "approve", decidedBy: "human", decidedAt: Date.now() })
+    .where(eq(gate.id, gateId));
+  const conflict = await post(app, { type: "block", gateId }, "k-b-conflict");
+  expect(conflict.status).toBe(409);
+  expect(await jsonErr(conflict)).toBe("invalid_intent");
+  // the conflicting POST did NOT overwrite the prior approve verdict
+  const [g] = await handle.db.select().from(gate).where(eq(gate.id, gateId));
+  expect(g?.verdict).toBe("approve");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: concurrent different-key blocks decide each gate exactly ONCE (atomic verdict CAS)", async () => {
+  // Two DIFFERENT-key blocks on the SAME gate race across TWO connections to one file db. The lease only
+  // dedupes SAME-key, so both pass the read-side pending check; the atomic `UPDATE ... WHERE verdict IS
+  // NULL` is what makes exactly one win. Looped (the BRO-1814/1912 race-harness discipline — a single shot
+  // may not interleave). Under the fix: exactly one gate.decided + one node.updated per gate, every round.
+  const ws = mkWorkspace(false);
+  const dbPath = join(ws, "race.db");
+  const h1 = await openIndex(`file:${dbPath}`);
+  const h2 = await openIndex(`file:${dbPath}`);
+  // busy_timeout so the two connections WAIT on each other's write lock instead of erroring SQLITE_BUSY
+  // under parallel-suite contention — the CAS still elects the winner; this only removes the lock-contention
+  // flake (the race being tested is the read/CAS interleave, not lock acquisition).
+  await h1.client.execute("PRAGMA busy_timeout = 5000");
+  await h2.client.execute("PRAGMA busy_timeout = 5000");
+  const app1 = createApp(cfg(ws), Date.now(), h1.db);
+  const app2 = createApp(cfg(ws), Date.now(), h2.db);
+
+  const ROUNDS = 30;
+  for (let i = 0; i < ROUNDS; i++) {
+    const ids = { nodeId: `n${i}`, sessionId: `r${i}`, gateId: `g${i}` };
+    await seedOpenGate(h1.db, ids);
+    await Promise.all([
+      post(app1, { type: "block", gateId: ids.gateId }, `race-${i}-a`),
+      post(app2, { type: "block", gateId: ids.gateId }, `race-${i}-b`),
+    ]);
+    // exactly ONE decide for this gate despite the concurrent pair, and (cumulatively) exactly one
+    // node.updated per round — the conditional node transition means the race loser emits nothing.
+    const decided = await h1.db
+      .select()
+      .from(event)
+      .where(and(eq(event.type, "gate.decided"), eq(event.sessionId, ids.sessionId)));
+    expect(decided).toHaveLength(1);
+    const updated = await h1.db.select().from(event).where(eq(event.type, "node.updated"));
+    expect(updated).toHaveLength(i + 1);
+    const [gRow] = await h1.db.select().from(gate).where(eq(gate.id, ids.gateId));
+    expect(gRow?.verdict).toBe("block");
+    const [nRow] = await h1.db.select().from(node).where(eq(node.id, ids.nodeId));
+    expect(nRow?.state).toBe("canceled");
+  }
+  h1.client.close();
+  h2.client.close();
+});
+
+test("BRO-1805 slice 2a: block on a gate whose SESSION is tombstoned refuses (404) and cancels nothing", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  // a superseded/old run: tombstone the session that owns the gate. A newer session may now hold n1's
+  // review, so the stale gate must NOT decide it (Codex finding — the wrong-node cancel).
+  await handle.db.update(session).set({ deletedAt: Date.now() }).where(eq(session.id, sessionId));
+
+  const res = await post(app, { type: "block", gateId }, "k-tomb");
+  expect(res.status).toBe(404);
+  expect(await jsonErr(res)).toBe("not_found");
+  // the node was NOT canceled, and nothing was journaled
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("review");
+  const decided = await handle.db.select().from(event).where(eq(event.type, "gate.decided"));
+  expect(decided).toHaveLength(0);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: block on a gate superseded by a NEWER review session refuses (409), cancels nothing", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db); // gate on session r1
+  // a NEWER live session re-reviews the same node (the BRO-1914 rescan-revert epoch) — later startedAt.
+  await handle.db.insert(session).values({
+    id: "r-new",
+    nodeId,
+    branch: "run/r-new",
+    status: "review",
+    startedAt: Date.now() + 10_000,
+    updatedAt: Date.now(),
+  });
+
+  const res = await post(app, { type: "block", gateId }, "k-superseded");
+  expect(res.status).toBe(409);
+  expect(await jsonErr(res)).toBe("invalid_intent");
+  // the OLD gate did NOT cancel the review the newer session now owns
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("review");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: a decided gate stranded on a still-review node (partial write) is repaired by a retry", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db);
+  // Simulate a partial write: the gate is decided `block`, but the node transition never landed (a
+  // crash/SQLITE_FULL between the CAS and the node update). The node is stranded at `review`.
+  await handle.db
+    .update(gate)
+    .set({ verdict: "block", decidedBy: "human", decidedAt: Date.now() })
+    .where(eq(gate.id, gateId));
+
+  const res = await post(app, { type: "block", gateId }, "k-repair");
+  expect(res.status).toBe(202);
+  // the idempotent completion REPAIRS the transition (→ canceled) rather than stranding the decided gate
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("canceled");
+  // and emits exactly one node.updated for the repair
+  const updated = await handle.db.select().from(event).where(eq(event.type, "node.updated"));
+  expect(updated).toHaveLength(1);
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2a: a block FS-journals gate.decided to the run journal (durable, replayable)", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { sessionId, gateId } = await seedOpenGate(handle.db);
+
+  const res = await post(app, { type: "block", gateId, reason: "durable" }, "k-journal");
+  expect(res.status).toBe(202);
+  // the decision is durably journaled FS-first to <ws>/runs/run-<sessionId>/session.jsonl — symmetric with
+  // slice-1's gate.opened, so it survives beyond the index row (BRO-1915 replay can reconstruct the gate).
+  const journalPath = join(ws, "runs", `run-${sessionId}`, "session.jsonl");
+  expect(existsSync(journalPath)).toBe(true);
+  const lines = readFileSync(journalPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l) as { type?: string; verdict?: string; gateId?: string });
+  const decided = lines.filter((l) => l.type === "gate.decided");
+  expect(decided).toHaveLength(1);
+  expect(decided[0]?.verdict).toBe("block");
+  expect(decided[0]?.gateId).toBe(gateId);
   handle.client.close();
 });
