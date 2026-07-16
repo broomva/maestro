@@ -12,6 +12,8 @@ import {
 } from "@maestro/ui";
 import { Paperclip, Plus, Search, Settings } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { Inspector } from "../components/board/inspector";
+import { ErrorBoundary } from "../components/error-boundary";
 import { GateQueue } from "../components/gate/gate-queue";
 import { ThemeToggle } from "../components/theme-toggle";
 
@@ -107,6 +109,13 @@ export function KitchenSink() {
   // A mount toggle so the harness can prove the unmount-FLUSH: unmounting mid-grace must still commit the
   // chosen verdict (gate.ts §PendingVerdict), not drop it — the live analogue is a session switch.
   const [gateMounted, setGateMounted] = useState(true);
+  // The inspector harness mirrors board.tsx's wiring (ErrorBoundary key=id + resetKeys=[updatedAt]) so a
+  // pw test can prove a live node.updated (updatedAt bump) does NOT collapse a verb's grace window.
+  const [inspItem, setInspItem] = useState<WorkItem | null>(GATE_ITEMS[0] ?? null);
+  const bumpInsp = () =>
+    setInspItem((it) =>
+      it ? { ...it, updatedAt: new Date(Date.parse(it.updatedAt) + 1000).toISOString() } : it,
+    );
   return (
     <main className="flex min-h-dvh flex-col bg-background text-foreground">
       <header className="flex h-[52px] shrink-0 items-center justify-between border-border border-b px-5">
@@ -295,6 +304,42 @@ export function KitchenSink() {
                 </ul>
               </Row>
             )}
+          </Section>
+
+          <Section title="Inspector (M5 verbs)">
+            <Row label="Rung 3: verify, then decide. The gate verbs (approve / send back / block / point) dispatch real intents; approve is reversible for a beat. Bump simulates a live node.updated on the SAME item — the grace window must survive it.">
+              <div className="flex w-full max-w-[420px] flex-col gap-2">
+                <button
+                  type="button"
+                  data-testid="inspector-bump-update"
+                  className="self-start text-muted-foreground text-xs underline"
+                  onClick={bumpInsp}
+                >
+                  simulate live update (bump updatedAt)
+                </button>
+                {/* Mirror board.tsx exactly: key by id ALONE, retry-on-update via resetKeys. */}
+                <div
+                  data-testid="inspector-harness"
+                  className="rounded-card border border-border bg-card p-4"
+                >
+                  <ErrorBoundary
+                    key={inspItem?.id}
+                    resetKeys={[inspItem?.updatedAt]}
+                    label="The inspector"
+                  >
+                    <Inspector item={inspItem} onIntent={onIntent} />
+                  </ErrorBoundary>
+                </div>
+              </div>
+            </Row>
+            <Row label="Blocked (Stuck): the only verb is Redispatch">
+              <div
+                data-testid="inspector-harness-blocked"
+                className="w-full max-w-[420px] rounded-card border border-border bg-card p-4"
+              >
+                <Inspector item={GATE_ITEMS[1] ?? null} onIntent={onIntent} />
+              </div>
+            </Row>
           </Section>
         </div>
       </div>

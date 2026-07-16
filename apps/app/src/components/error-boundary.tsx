@@ -42,6 +42,12 @@ interface Props {
   children: ReactNode;
   /** Plain-voice name of what crashed (e.g. "The inspector") — leads the fallback line. */
   label?: string;
+  /** When the boundary is ERRORED, a change to any of these keys clears the error and re-renders the
+   *  children (react-error-boundary's resetKeys). This lets a parent retry a crashed subtree on a fresh
+   *  signal (e.g. a live node.updated) WITHOUT force-remounting the HEALTHY subtree via `key` — a `key`
+   *  bump on every update would drop in-flight child state like a gate verb's 5s grace window (BRO-1809:
+   *  an updatedAt-keyed remount was early-committing an in-grace approve). Only resets while errored. */
+  resetKeys?: readonly unknown[];
 }
 interface State {
   errored: boolean;
@@ -62,6 +68,16 @@ export class ErrorBoundary extends Component<Props, State> {
   override componentDidCatch(error: Error, info: ErrorInfo): void {
     // Log for diagnosis; the user never sees the stack (CLAUDE.md §Voice).
     console.error("[maestro] pane error boundary caught", error, info.componentStack);
+  }
+
+  override componentDidUpdate(prev: Props): void {
+    // Retry a CRASHED subtree when the parent's resetKeys change (a fresh render signal). A no-op while
+    // healthy, so a benign prop update never disturbs a mounted, working subtree.
+    if (!this.state.errored) return;
+    const a = prev.resetKeys ?? [];
+    const b = this.props.resetKeys ?? [];
+    const changed = a.length !== b.length || a.some((k, i) => !Object.is(k, b[i]));
+    if (changed) this.setState({ errored: false });
   }
 
   override render(): ReactNode {

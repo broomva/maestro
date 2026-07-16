@@ -1,12 +1,16 @@
-// Inspector (BRO-1825, M3 stub of the M5 panel) — the right panel, rung 3 of the disclosure ladder:
-// for VERIFYING, not operating (CLAUDE.md §disclosure ladder). Selection drives it — a selected work
-// item shows its RECEIPTS (run branch, verdict, reason, the gate "look", worker, age), never worktrees /
+// Inspector (BRO-1825 M3 stub → BRO-1809 M5) — the right panel, rung 3 of the disclosure ladder: for
+// VERIFYING, not operating (CLAUDE.md §disclosure ladder). Selection drives it — a selected work item
+// shows its RECEIPTS (run branch, verdict, reason, the gate "look", worker, age), never worktrees /
 // index.db / the engine room, and NEVER a progress percentage (CLAUDE.md §Work states: receipts, not
-// progress). This is the persistent ~45% panel M5 fills in with look/chat/activity tabs + the human
-// verbs (approve, send back, grant, point); M3 wires selection → a read-only receipts view.
+// progress). M5 adds the human VERBS at the gate: a `review` item leads with the look, then approve /
+// send back (primary) + block / escalate (secondary) — the SAME grace-windowed machine the gate queue
+// uses (gate-verbs.ts). "The gate is the human's": the inspector is where you verify AND decide. The
+// per-event activity timeline + full diffstat (the other M5 receipts) ride the session-events read path
+// (BRO-1895) and land in a follow-up; this slice ships the verbs + the receipts the WorkItem carries.
 
 import type { WorkItem } from "@maestro/protocol";
 import { DotComet, StatusBadge, workStatusView } from "@maestro/ui";
+import { GateVerbs, type IntentDispatch } from "../gate/gate-verbs";
 import { relativeTime } from "./board-view";
 import { LifecycleRail } from "./lifecycle-rail";
 
@@ -22,7 +26,14 @@ function Receipt({ label, mono, children }: { label: string; mono?: boolean; chi
   );
 }
 
-export function Inspector({ item }: { item: WorkItem | null }) {
+export function Inspector({
+  item,
+  onIntent,
+}: {
+  item: WorkItem | null;
+  /** The intent dispatcher for the gate verbs (`postIntent` in production). */
+  onIntent: IntentDispatch;
+}) {
   if (item === null) {
     return (
       <aside
@@ -89,6 +100,15 @@ export function Inspector({ item }: { item: WorkItem | null }) {
             ) : null}
             {item.look.ask ? <Receipt label="Asks">{item.look.ask}</Receipt> : null}
           </dl>
+        </section>
+      ) : null}
+
+      {/* The verbs — rung-3 control (M5, gate-verbs.ts). A `review` item leads with the look above,
+          then acts: approve / send back (primary) + block / escalate (secondary); a `blocked` item
+          redispatches. The grace window (reversible for a beat) is the shared machine the queue uses. */}
+      {(item.state === "review" && item.gateId) || item.state === "blocked" ? (
+        <section data-testid="inspector-verbs" className="border-border border-t pt-3">
+          <GateVerbs item={item} onIntent={onIntent} />
         </section>
       ) : null}
 
