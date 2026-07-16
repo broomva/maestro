@@ -648,6 +648,31 @@ async function completeApprove(
 }
 
 /**
+ * Idempotent-completion guard for a caller that OBSERVES an existing `approve` claim (a retry, or a CONCURRENT
+ * approve with a different idempotency key) but did NOT itself run the merge. The claim (`gate.verdict = approve`)
+ * is written BEFORE the irreversible merge, so it is NOT proof the merge landed — the merge may still be in flight
+ * on the claim owner, or have returned `stale`/`refused` and be about to release the claim. The DURABLE landed-
+ * signal is `node.state`: ONLY the merge winner transitions it to `done` (after `outcome.kind === "merged"`).
+ *   - `done`   → the winner already completed. Re-run `completeApprove` idempotently (a no-op, or it repairs a
+ *                partial where the DB moved to `done` but `_work.md` was not yet persisted).
+ *   - `review` → the winner still owns the outcome (mid-merge / releasing / crashed). Touch NOTHING — flipping the
+ *                node here off the bare claim is the concurrent-approve corruption (P20): a then-`stale` merge
+ *                releases the claim, leaving `done` over unmerged work on a reopened, undecidable gate.
+ * KNOWN residual (crash-gated, NON-corrupting): a crash strictly between a LANDED merge and `completeApprove`
+ * leaves `verdict = approve` + `node = review`; a later observer can't auto-complete it (node not `done`), so the
+ * gate is stuck-but-clean (no false `done`), recoverable by redispatch. Verifying merge-landed from git evidence
+ * to self-heal is a 2b-ii-B follow-up.
+ */
+async function completeApproveIfLanded(
+  db: IndexDb,
+  workspace: string,
+  n: typeof node.$inferSelect,
+  now: number,
+): Promise<void> {
+  if (n.state === "done") await completeApprove(db, workspace, n, now);
+}
+
+/**
  * Decide a `review` node's open gate with `approve` (F5, BRO-1805 slice 2b-ii) — the ONE verdict that runs an
  * irreversible side effect (the squash-merge, {@link approveMerge}, D1) BEFORE it can commit. It therefore does
  * NOT use the terminal `decideGateVerdict` spine (which CASes the verdict THEN transitions): a `stale` / `refused`
@@ -664,12 +689,17 @@ async function completeApprove(
  *      transition the node → done (+ durable `_work.md`). On `stale`/`refused` (or a throw): RELEASE the claim
  *      (verdict → null) so the gate reopens re-decidable, and surface a typed refusal — NEVER a silent merge.
  *
- * Idempotency: a same-key retry is deduped by the lease (never reaches here). A retry after a PARTIAL approve
- * (claim committed + merged, node transition not yet landed) finds `verdict === "approve"` and idempotently
- * COMPLETES the node (no re-merge). KNOWN residual (documented, follow-up): a crash in the microsecond window
- * between a `stale`/`refused` merge and `releaseApproveClaim` leaves an orphaned `approve` claim with no merge;
- * a later retry would complete the node to `done` without a merge. Extraordinarily rare (no I/O in the window);
- * hardening (completeApprove verifies the merge landed) is a 2b-ii-B follow-up. Throws `IntentRefusal` on refusal.
+ * Idempotency + concurrency: a same-key retry is deduped by the lease (never reaches here). But a DIFFERENT-key
+ * approve (a double-click that mints a fresh key, a second tab, two operators) can run CONCURRENTLY through this
+ * function while the claim owner is mid-merge — the claim (`verdict = approve`) is written BEFORE the merge, so it
+ * is NOT proof the merge landed. An observer of the bare claim (the top-of-fn branch, or the CAS loser) therefore
+ * completes the node ONLY when it is already `done` ({@link completeApproveIfLanded}) — the winner's durable
+ * landed-signal — NEVER off the claim itself. Without that guard, a concurrent approve could flip the node to
+ * `done` off a claim whose merge then returns `stale`/`refused` and releases it, stranding a `done` node over
+ * unmerged work on a reopened, undecidable gate (the P20 corruption this guards). KNOWN residual (crash-gated,
+ * non-corrupting): a crash between a LANDED merge and `completeApprove` leaves `verdict = approve` + node `review`;
+ * a later observer can't auto-complete it (no false `done`), recoverable by redispatch — git-evidence self-heal is
+ * a 2b-ii-B follow-up. Throws `IntentRefusal` on refusal.
  */
 async function approveGate(
   db: IndexDb,
@@ -679,10 +709,11 @@ async function approveGate(
 ): Promise<void> {
   const { g, n } = await resolveGateChain(db, gateId);
 
-  // A prior approve already committed its verdict (retry after a partial write) — the merge already landed, so
-  // just complete the node idempotently. NEVER re-merge (approveMerge is not safe to re-run on an archived run).
+  // A prior approve already CLAIMED this gate (verdict = approve). The claim is a PRE-merge marker, so this
+  // observer must NOT assume the merge landed — complete the node ONLY if it is already `done` (the winner's
+  // durable landed-signal), never off the bare claim. NEVER re-merge (approveMerge is unsafe on an archived run).
   if (g.verdict === "approve") {
-    await completeApprove(db, workspace, n, now);
+    await completeApproveIfLanded(db, workspace, n, now);
     return;
   }
   if (g.verdict !== null) {
@@ -721,7 +752,10 @@ async function approveGate(
   if (claimed.rowsAffected !== 1) {
     const [after] = await db.select().from(gate).where(eq(gate.id, gateId));
     if (after?.verdict === "approve") {
-      await completeApprove(db, workspace, n, now); // a concurrent approve won the claim — complete idempotently
+      // A concurrent approve won the claim and owns the merge outcome. Re-read the node fresh (the winner may
+      // have completed it since our stale read) and complete ONLY if it landed (`done`) — never off the claim.
+      const [fresh] = await db.select().from(node).where(eq(node.id, n.id));
+      if (fresh) await completeApproveIfLanded(db, workspace, fresh, now);
       return;
     }
     throw new IntentRefusal(
@@ -765,11 +799,14 @@ async function approveGate(
     );
   }
 
-  // Merged + durable. Keep the claim: journal the verdict (spine-symmetric, FS-first for BRO-1915 replay), emit
-  // the merge receipt, then transition the node → done + persist `_work.md` (outside the now-released merge lock).
+  // Merged + durable. Transition the node → done FIRST — it is the durable landed-signal a concurrent/retry
+  // approve keys off ({@link completeApproveIfLanded}), so writing it before the journal/emit means a fault in
+  // those later, non-critical projections can never STRAND the done-transition (the winner already recorded it;
+  // a retry sees `done` and idempotently finishes). Then journal the verdict (FS-first, for BRO-1915 replay) +
+  // emit the merge receipt. All outside the now-released merge lock (the shared git lock is non-reentrant).
+  await completeApprove(db, workspace, n, now);
   await journalGateDecided(db, workspace, g, "approve", {}, now);
   await emitGateApproved(db, g, outcome, now);
-  await completeApprove(db, workspace, n, now);
 }
 
 /**

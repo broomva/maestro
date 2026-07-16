@@ -1259,3 +1259,53 @@ test("BRO-1805 slice 2b-ii: approve on an already-decided (block) gate is refuse
   expect(gitOut(ws, ["branch", "--list"])).toContain("run/r1");
   handle.client.close();
 });
+
+test("BRO-1805 slice 2b-ii: approve on a gate ALREADY CLAIMED (verdict=approve) with the node still review does NOT flip it to done", async () => {
+  // The P20 blocker (concurrency): approve CLAIMS the gate (verdict=approve) BEFORE the irreversible merge. A
+  // DIFFERENT-key approve (double-click / second tab / second operator) can run while the claim owner is
+  // mid-merge. It must NOT read the bare claim as "merge landed" and complete the node — else a then-stale merge
+  // releases the claim, leaving a `done` node over unmerged work on a reopened, undecidable gate. Here we seed
+  // exactly that interleave state (claimed, node still review) and assert a fresh approve touches NOTHING.
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+  // Simulate the claim owner mid-merge: gate CLAIMED (verdict=approve) but the node NOT yet transitioned.
+  await handle.db
+    .update(gate)
+    .set({ verdict: "approve", decidedBy: "human", decidedAt: Date.now() })
+    .where(eq(gate.id, gateId));
+
+  const res = await post(app, { type: "approve", gateId }, "k-approve-concurrent-claim");
+  expect(res.status).toBe(202); // accepted — the claim owner owns the outcome; this caller does nothing
+
+  // THE GUARD: the node was NOT flipped to done off the bare claim (MUTATION: complete unconditionally → "done" → RED)
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("review");
+  expect(
+    parseWorkFile(readFileSync(join(ws, "work", nodeId, "_work.md"), "utf8")).contract.state,
+  ).toBe("review"); // FS untouched too
+  // no merge happened off this caller — run/<id> is still unarchived
+  expect(gitOut(ws, ["branch", "--list"])).toContain("run/r1");
+  handle.client.close();
+});
+
+test("BRO-1805 slice 2b-ii: a fresh-key approve retry AFTER a completed approve is an idempotent no-op (node stays done, no re-merge)", async () => {
+  const ws = mkWorkspace(true);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, sessionId, gateId } = await seedOpenGate(handle.db);
+  seedApprovableRun(ws, nodeId, sessionId);
+
+  expect((await post(app, { type: "approve", gateId }, "k-approve-first")).status).toBe(202);
+  const afterFirst = commitCount(ws); // squash + state:done commit landed
+
+  // a genuinely new key (not lease-deduped) — the completeApproveIfLanded branch sees node=done → no-op
+  const second = await post(app, { type: "approve", gateId }, "k-approve-second-freshkey");
+  expect(second.status).toBe(202);
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("done"); // stayed done
+  expect(commitCount(ws)).toBe(afterFirst); // NO re-merge (approveMerge never re-runs on an archived run)
+  handle.client.close();
+});
