@@ -17,6 +17,7 @@ import { STATUS_DOT_VAR } from "@maestro/ui";
 import { X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "zustand";
+import { postIntent } from "@/intents/client";
 import { maestroStore, selectPlaneItems } from "@/store";
 import { ErrorBoundary } from "../error-boundary";
 import { Inspector } from "./inspector";
@@ -184,7 +185,7 @@ export function Board() {
               Keyed by id AND updatedAt so the boundary remounts fresh on (a) a direct A→B switch and
               (b) a live node.updated that FIXES a transient crash. */}
           <ErrorBoundary key={`${selectedItem.id}:${selectedItem.updatedAt}`} label="The inspector">
-            <Inspector item={selectedItem} />
+            <Inspector item={selectedItem} onIntent={postIntent} />
           </ErrorBoundary>
         </div>
       ) : null}

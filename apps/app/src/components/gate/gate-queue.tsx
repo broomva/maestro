@@ -9,38 +9,28 @@
 // on the event stream and re-projects the node (review→done), which is what DEQUEUES the card. So the
 // component never mutates the store; it overlays the pending/undo/sent state and lets server truth win.
 //
-// Verb scope (this slice): review → Approve (grace) + Send back with a note (grace); blocked →
-// Redispatch (immediate, non-destructive). Grant / Point need a capability / target and are the
-// inspector's rung-3 controls (gate.ts: "Block / Point are secondary in the inspector") — FID-5.
+// The verb PRESENTATION (GateActions / SendBackNote / GateDone) + the grace helpers live in gate-verbs.ts,
+// shared with the inspector's single-item machine (BRO-1809 M5). This queue keeps its OWN per-card machine:
+// a card can LEAVE the queue (the server processed its verdict) and must DROP its pending, not commit it —
+// a distinction the single-item inspector does not have. Verb scope here: review → Approve (grace) + Send
+// back with a note (grace); blocked → Redispatch (immediate). Block / Escalate are the inspector's controls.
 
 import { GATE_GRACE_WINDOW_MS, type Intent, type WorkItem } from "@maestro/protocol";
-import { Button, STATUS_DOT_VAR, workStatusView } from "@maestro/ui";
-import { Check, Undo2 } from "lucide-react";
+import { STATUS_DOT_VAR, workStatusView } from "@maestro/ui";
+import { Check } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { relativeTime } from "../board/board-view";
+import {
+  errText,
+  GateActions,
+  GateDone,
+  type IntentDispatch,
+  type Pending,
+  SendBackNote,
+  secondsLeft,
+} from "./gate-verbs";
 
-/** The dispatch seam — `postIntent` in production, a double in tests. Resolves on the 202 ack. */
-export type IntentDispatch = (
-  intent: Intent,
-  opts?: { idempotencyKey?: string },
-) => Promise<unknown>;
-
-/** A verdict the human chose but that has not yet committed (mirrors gate.ts `GracePhase`). During
- *  `grace` it is undoable and the intent is NOT sent; the timer fires the send exactly once. */
-interface Pending {
-  /** the plain-voice label shown once chosen ("Approved" · "Sent back" · "Redispatching"). */
-  label: string;
-  intent: Intent;
-  phase: "grace" | "sending" | "sent" | "failed";
-  /** epoch ms the human clicked — the grace window is [chosenAt, chosenAt + GATE_GRACE_WINDOW_MS). */
-  chosenAt: number;
-  /** whether this verb is grace-windowed (verdicts) or fires immediately (redispatch). */
-  graced: boolean;
-  error?: string;
-}
-
-const secondsLeft = (chosenAt: number, now: number): number =>
-  Math.max(0, Math.ceil((GATE_GRACE_WINDOW_MS - (now - chosenAt)) / 1000));
+export type { IntentDispatch } from "./gate-verbs";
 
 export interface GateQueueProps {
   /** The gate-queue items — server-truth leaves that need a human (`selectGateQueue`). */
@@ -292,121 +282,4 @@ function GateLook({ item }: { item: WorkItem }) {
       ))}
     </div>
   );
-}
-
-/** The verb row (rung-2 control). Review → Approve (primary) + Send back (secondary); blocked (Stuck,
- *  no gate) → Redispatch. Siblings of the disclosure toggle, so no propagation dance is needed. */
-function GateActions({
-  item,
-  onApprove,
-  onSendBack,
-  onRedispatch,
-}: {
-  item: WorkItem;
-  onApprove: () => void;
-  onSendBack: () => void;
-  onRedispatch: () => void;
-}) {
-  return (
-    <div className="mc-detail-actions">
-      {item.state === "review" ? (
-        <>
-          <Button variant="primary" size="sm" onClick={onApprove}>
-            <Check size={13} strokeWidth={2} />
-            Approve
-          </Button>
-          <Button variant="secondary" size="sm" onClick={onSendBack}>
-            Send back
-          </Button>
-        </>
-      ) : (
-        <Button variant="secondary" size="sm" onClick={onRedispatch}>
-          Redispatch
-        </Button>
-      )}
-    </div>
-  );
-}
-
-/** The send-back note — a revise carries feedback (intents.ts `revise{gateId, feedback}`), so the verb
- *  collects it inline (rung 2 stays verbs; the rich edit is the inspector, FID-5). Empty note can't send. */
-function SendBackNote({
-  value,
-  onChange,
-  onCancel,
-  onSend,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onCancel: () => void;
-  onSend: () => void;
-}) {
-  return (
-    <div className="mcc-gateq-note">
-      <textarea
-        className="mcc-gateq-note-input"
-        placeholder="What should change? (sent back with notes)"
-        aria-label="What should change? Sent back with notes"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        rows={2}
-      />
-      <div className="mc-detail-actions">
-        <Button variant="primary" size="sm" disabled={value.trim().length === 0} onClick={onSend}>
-          Send back
-        </Button>
-        <Button variant="secondary" size="sm" onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-/** The chosen state — reversible for a beat (grace), then "takes effect on the next tick"; a failed send
- *  re-surfaces with an error chip (never a silent drop, gate.ts §PendingVerdict). */
-function GateDone({
-  pending,
-  secondsLeft,
-  onUndo,
-}: {
-  pending: Pending;
-  secondsLeft: number;
-  onUndo: () => void;
-}) {
-  if (pending.phase === "failed") {
-    return (
-      <div className="mcc-gateq-done" data-testid="gate-failed">
-        <span className="mcc-gateq-error">Could not send · {pending.error ?? "try again"}</span>
-        <Button variant="secondary" size="sm" className="mcc-gateq-undo" onClick={onUndo}>
-          Dismiss
-        </Button>
-      </div>
-    );
-  }
-  const graceable = pending.phase === "grace" && pending.graced;
-  return (
-    <div className="mcc-gateq-done" data-testid="gate-done">
-      <Check size={14} strokeWidth={2} />
-      {pending.label}
-      <span className="mcc-gateq-done-note">
-        {pending.phase === "sent"
-          ? "takes effect on the next tick"
-          : pending.phase === "sending"
-            ? "sending…"
-            : "reversible for a beat"}
-      </span>
-      {graceable ? (
-        <Button variant="secondary" size="sm" className="mcc-gateq-undo" onClick={onUndo}>
-          <Undo2 size={13} strokeWidth={2} />
-          Undo · {secondsLeft}s
-        </Button>
-      ) : null}
-    </div>
-  );
-}
-
-function errText(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return typeof e === "string" ? e : "network error";
 }

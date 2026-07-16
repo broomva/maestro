@@ -12,6 +12,7 @@ import {
 } from "@maestro/ui";
 import { Paperclip, Plus, Search, Settings } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { Inspector } from "../components/board/inspector";
 import { GateQueue } from "../components/gate/gate-queue";
 import { ThemeToggle } from "../components/theme-toggle";
 
@@ -295,6 +296,25 @@ export function KitchenSink() {
                 </ul>
               </Row>
             )}
+          </Section>
+
+          <Section title="Inspector (M5 verbs)">
+            <Row label="Rung 3: verify, then decide. The gate verbs (approve / send back / block / escalate) dispatch real intents; approve is reversible for a beat. The same harness echo captures the intent below.">
+              <div
+                data-testid="inspector-harness"
+                className="w-full max-w-[420px] rounded-card border border-border bg-card p-4"
+              >
+                <Inspector item={GATE_ITEMS[0]} onIntent={onIntent} />
+              </div>
+            </Row>
+            <Row label="Blocked (Stuck): the only verb is Redispatch">
+              <div
+                data-testid="inspector-harness-blocked"
+                className="w-full max-w-[420px] rounded-card border border-border bg-card p-4"
+              >
+                <Inspector item={GATE_ITEMS[1]} onIntent={onIntent} />
+              </div>
+            </Row>
           </Section>
         </div>
       </div>
