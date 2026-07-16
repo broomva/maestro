@@ -49,6 +49,13 @@ jobs:
         # supervisor + proxy + a scripted mock upstream with ZERO tokens and NO API key set here.
         # --pass-with-no-tests keeps the gate resilient if a package has none yet.
         run: bun test --pass-with-no-tests
+      - name: Adversarial verifier exit-suite (BRO-1813)
+        # The D8-layer-2 exit gate: a fixture workspace + four HOSTILE runs the verifier must fail/refuse
+        # (delete a failing test → tampering, stub package.json → tampering, 400-file diff → diff_too_large,
+        # judge-only gate:auto → contract rejection), each paired with a passing control. Named explicitly
+        # (not only folded into the sweep above) so P3's exit test is a first-class, addressable gate and
+        # the D8-layer-3 model-pin canary reruns THIS suite.
+        run: bun run test:adversarial
 
   secrets:
     name: secrets

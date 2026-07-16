@@ -18,7 +18,8 @@
     "check:icons": "bun run scripts/check-icons.ts",
     "check": "biome check . && bun run typecheck && bun run check:icons",
     "test": "bun test",
-    "test:loops": "bun test apps/runtime/src/proxy/loops.test.ts apps/runtime/src/proxy/mock-model.test.ts"
+    "test:loops": "bun test apps/runtime/src/proxy/loops.test.ts apps/runtime/src/proxy/mock-model.test.ts",
+    "test:adversarial": "bun test apps/runtime/src/verifier/adversarial.test.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2",
