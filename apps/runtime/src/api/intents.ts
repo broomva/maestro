@@ -28,7 +28,7 @@ import {
   serializeWorkInput,
   type WorkContractInput,
 } from "@maestro/protocol";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull, ne, or } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { IndexDb } from "../db/client";
@@ -262,44 +262,29 @@ async function emitNodeUpdated(db: IndexDb, nodeId: string, now: number): Promis
 }
 
 /**
- * Decide a `review` node's open gate with a TERMINATING verdict (F5, BRO-1805 slice 2). The shared spine
- * for the terminating verbs: resolve `gateId → live session → node`, elect a single decider with an atomic
- * CAS, journal `gate.decided` to the DURABLE run journal (FS-first, symmetric with the slice-1 `gate.opened`
- * write, so BRO-1915's replay projector can reconstruct the decided gate), then transition the node to the
- * verdict's terminal state and emit `node.updated`. Slice 2a wires ONLY `block` (→ canceled); `revise`
- * (→ triggered) fits this spine directly, but `approve` (→ done + `approveMerge`) and the NON-terminating
- * `escalate` (stays `review`, re-decidable — gate-queue.md §4) will EXTEND it with their own semantics in
- * later sub-slices, not merely reuse it.
+ * Resolve `gateId → its live gate → live session → live node`, applying the epoch-ownership guard. The
+ * SHARED front half of every gate action (F5): the terminating-verdict spine (`decideGateVerdict`) and the
+ * NON-terminating `escalateGate` both start here, so the hard-won tombstone + epoch checks live in ONE place.
  *
- * Concurrency + idempotency: the idempotency lease only dedupes a SAME-key retry, so the decision is
- * committed with an atomic conditional write (`WHERE verdict IS NULL`) electing a single winner even under
- * two concurrent DIFFERENT-key decides — only the winner journals. The node transition is ALSO conditional
- * (`WHERE state = 'review'`) so a stale-read race loser can't emit a duplicate `node.updated`, and a retry
- * that follows a partial write (a decided gate left on a still-`review` node) idempotently COMPLETES the
- * transition here rather than stranding it. `escalate` (target `review`) is a no-op transition by design.
- *
- * Durability scope: the gate row + node state are index writes (survive a normal restart; a `--rebuild` /
- * an interleaved `_work.md` rescan reverts the node state — the pre-existing BRO-1914 gap, shared with the
- * supervisor's own DB-only transitions). The `gate.decided` EVENT is FS-journaled here, so the decision
- * itself is durable + replayable; making the node state equally rebuild-durable is BRO-1914's coordinated
- * writer. Throws `IntentRefusal` (typed, API §4) on every rejection.
+ * A tombstoned/superseded session's stale gate must never act on the node it once owned — the read API filters
+ * tombstones (reads.ts), and the write path must too. The epoch guard refuses when a NEWER live session exists
+ * for the node (a rescan-revert — the BRO-1914 gap — can strand an OLD session's pending gate while a newer run
+ * re-reviews the node); filtering `deletedAt` alone is insufficient because a superseded session stays live. The
+ * residual check→act TOCTOU on the epoch is the same non-transactional class BRO-1914's coordinated writer closes.
+ * Throws a typed `IntentRefusal` on any miss.
  */
-async function decideGateVerdict(
+async function resolveGateChain(
   db: IndexDb,
-  workspace: string,
   gateId: string,
-  verdict: GateVerdict,
-  extra: { reason?: string },
-  now: number,
-): Promise<void> {
+): Promise<{
+  g: typeof gate.$inferSelect;
+  n: typeof node.$inferSelect;
+}> {
   const [g] = await db
     .select()
     .from(gate)
     .where(and(eq(gate.id, gateId), isNull(gate.deletedAt)));
   if (!g) throw new IntentRefusal("not_found", `no open gate ${gateId}`, 404);
-  // The gate's session must be LIVE — a tombstoned/superseded session's stale gate must never decide the
-  // node it once owned (a newer session may now hold that node's review). Sessions carry tombstones and the
-  // read API filters them (reads.ts); the write path must too, or an old gate cancels the wrong review.
   const [s] = await db
     .select()
     .from(session)
@@ -309,12 +294,6 @@ async function decideGateVerdict(
   if (!n || n.deletedAt !== null) {
     throw new IntentRefusal("not_found", `gate ${gateId} node is gone`, 404);
   }
-  // Epoch ownership: the gate must belong to the node's CURRENT review, not a superseded one. A node leaves
-  // review only via a verdict or a rescan-revert (the BRO-1914 gap); the latter can strand an OLD session's
-  // still-pending gate while a NEWER session re-reviews the node. Refuse if any newer live session exists for
-  // the node — an old gate must never cancel the review a newer run now owns. (Filtering `deletedAt` alone —
-  // Codex round 2 — is insufficient: a superseded session stays live.) A residual check→CAS TOCTOU on the
-  // epoch is the same non-transactional class BRO-1914's coordinated writer closes.
   const [newer] = await db
     .select({ id: session.id })
     .from(session)
@@ -333,6 +312,43 @@ async function decideGateVerdict(
       409,
     );
   }
+  return { g, n };
+}
+
+/**
+ * Decide a `review` node's open gate with a TERMINATING verdict (F5, BRO-1805 slice 2). The shared spine
+ * for the terminating verbs: resolve the gate chain (`resolveGateChain`), elect a single decider with an atomic
+ * CAS, journal `gate.decided` to the DURABLE run journal (FS-first, symmetric with the slice-1 `gate.opened`
+ * write, so BRO-1915's replay projector can reconstruct the decided gate), then transition the node to the
+ * verdict's terminal state and emit `node.updated`. Wires `block` (→ canceled, slice 2a) and `revise`
+ * (→ triggered + `feedback`, slice 2b-i). The NON-terminating `escalate` (stays `review`, re-decidable —
+ * gate-queue.md §4) does NOT use this spine: it must not commit a verdict, so it takes `escalateGate`. `approve`
+ * (→ done + `approveMerge`) extends this spine with the merge in a later sub-slice.
+ *
+ * Concurrency + idempotency: the idempotency lease only dedupes a SAME-key retry, so the decision is
+ * committed with an atomic conditional write (`WHERE verdict IS NULL`) electing a single winner even under
+ * two concurrent DIFFERENT-key decides — only the winner journals. The node transition is ALSO conditional
+ * (`WHERE state = 'review'`) so a stale-read race loser can't emit a duplicate `node.updated`, and a retry
+ * that follows a partial write (a decided gate left on a still-`review` node) idempotently COMPLETES the
+ * transition here rather than stranding it. (This spine only ever runs the TERMINATING verbs — `escalate`,
+ * which stays at `review`, takes `escalateGate`, not this path; the `target !== "review"` guard below is
+ * defensive.)
+ *
+ * Durability scope: the gate row + node state are index writes (survive a normal restart; a `--rebuild` /
+ * an interleaved `_work.md` rescan reverts the node state — the pre-existing BRO-1914 gap, shared with the
+ * supervisor's own DB-only transitions). The `gate.decided` EVENT is FS-journaled here, so the decision
+ * itself is durable + replayable; making the node state equally rebuild-durable is BRO-1914's coordinated
+ * writer. Throws `IntentRefusal` (typed, API §4) on every rejection.
+ */
+async function decideGateVerdict(
+  db: IndexDb,
+  workspace: string,
+  gateId: string,
+  verdict: GateVerdict,
+  extra: { reason?: string; feedback?: string },
+  now: number,
+): Promise<void> {
+  const { g, n } = await resolveGateChain(db, gateId);
 
   // The verdict's terminal state — `resolveGateVerdict` is defined from `review` (the only decidable
   // state), so resolve against the literal `review` to get the target regardless of the node's CURRENT
@@ -366,7 +382,7 @@ async function decideGateVerdict(
       .set({ verdict, decidedBy: "human", decidedAt: now, updatedAt: now })
       .where(and(eq(gate.id, gateId), isNull(gate.verdict), isNull(gate.deletedAt)));
     if (won.rowsAffected === 1) {
-      await journalGateDecided(db, workspace, g, verdict, extra.reason, now);
+      await journalGateDecided(db, workspace, g, verdict, extra, now);
     } else {
       const [after] = await db.select().from(gate).where(eq(gate.id, gateId));
       if (after?.verdict !== verdict) {
@@ -402,7 +418,7 @@ async function journalGateDecided(
   workspace: string,
   g: typeof gate.$inferSelect,
   verdict: GateVerdict,
-  reason: string | undefined,
+  extra: { reason?: string; feedback?: string },
   now: number,
 ): Promise<void> {
   const runDir = join(workspace, "runs", `run-${g.sessionId}`);
@@ -421,9 +437,110 @@ async function journalGateDecided(
       verdict,
       decidedBy: "human",
       decidedAt: now,
-      ...(reason ? { reason } : {}),
+      // `reason` rides a `block`, `feedback` rides a `revise` (the send-back note the redispatched run picks
+      // up). Only the present one is written — the payload a BRO-1915 rebuild folds onto the opened row.
+      ...(extra.reason ? { reason: extra.reason } : {}),
+      ...(extra.feedback ? { feedback: extra.feedback } : {}),
     },
   });
+}
+
+/**
+ * Journal `gate.escalated` to the gate's run journal (FS-first + index) via a `SessionTee` — the SAME durable
+ * path as `gate.decided`, but for the NON-terminating escalate: the gate is NOT decided (verdict stays null,
+ * re-decidable — gate-queue.md §4), so this records the owner reassignment as its own event rather than a
+ * verdict. runDir = `<workspace>/runs/run-<sessionId>`; session-scoped so it rides the per-session stream.
+ */
+async function journalGateEscalated(
+  db: IndexDb,
+  workspace: string,
+  g: typeof gate.$inferSelect,
+  to: string,
+  now: number,
+): Promise<void> {
+  const runDir = join(workspace, "runs", `run-${g.sessionId}`);
+  const tee = new SessionTee({
+    writer: bindIndexWriter(db),
+    journal: fsJournal(runDir),
+    sessionId: g.sessionId,
+    now: () => now,
+  });
+  await tee.append({
+    actor: "user",
+    type: EVENT_TYPES.GATE_ESCALATED,
+    payload: {
+      gateId: g.id,
+      kind: g.kind,
+      to,
+      escalatedBy: "human",
+      escalatedAt: now,
+    },
+  });
+}
+
+/**
+ * Reassign a `review` node's owner via the NON-terminating `escalate` verb (point — gate-queue.md §4). Unlike
+ * the terminating verdicts, escalate must NOT commit a gate verdict: the gate stays OPEN so it can still be
+ * approved / revised / blocked afterward. Requires an open gate (verdict null) on a `review` node; reassigns
+ * `node.owner` with a CONDITIONAL write (`state = 'review'` AND an actual owner change) so a re-escalate to the
+ * SAME owner is an idempotent no-op (no duplicate journal / emit). On a real change: journal `gate.escalated`
+ * (FS-first) then emit `node.updated`. Throws a typed `IntentRefusal` on any rejection.
+ *
+ * Durability scope mirrors `decideGateVerdict`: `node.owner` is an index write (reverts on a `_work.md` rescan
+ * — the BRO-1914 gap), while the `gate.escalated` EVENT is FS-journaled and durable.
+ */
+async function escalateGate(
+  db: IndexDb,
+  workspace: string,
+  gateId: string,
+  to: string,
+  now: number,
+): Promise<void> {
+  const { g, n } = await resolveGateChain(db, gateId);
+  if (g.verdict !== null) {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} is already decided (${g.verdict}) and cannot be escalated`,
+      409,
+    );
+  }
+  if (n.state !== "review") {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} node is not awaiting a decision (state ${n.state})`,
+      409,
+    );
+  }
+  // Reassign owner, keeping the gate open + the node at review. Conditional on `state = 'review'` AND an actual
+  // owner change (NULL-safe: `owner IS NULL OR owner != to`) so a re-escalate to the same owner is a no-op and a
+  // stale-read loser can't duplicate the emit. Only the writer that actually changes the owner journals + emits.
+  const changed = await db
+    .update(node)
+    .set({ owner: to, updatedAt: now })
+    .where(
+      and(eq(node.id, n.id), eq(node.state, "review"), or(isNull(node.owner), ne(node.owner, to))),
+    );
+  if (changed.rowsAffected === 1) {
+    await journalGateEscalated(db, workspace, g, to, now);
+    await emitNodeUpdated(db, n.id, now);
+    return;
+  }
+  // A zero-row owner CAS is AMBIGUOUS — it is NOT unconditionally an idempotent no-op. Disambiguate by re-reading
+  // the node's CURRENT state: if it left `review` (a concurrent block/revise decided the gate out from under this
+  // escalate, between the resolveGateChain read and the CAS — a non-transactional TOCTOU), the escalation cannot
+  // apply and a phantom 202 would hide that the node was actually decided. Refuse 409 instead. If it is STILL at
+  // `review`, the owner already equals `to` — a genuine idempotent re-escalate (no-op). (The residual window where
+  // the owner CAS committed but `journalGateEscalated` then failed leaves the owner set without a `gate.escalated`
+  // event — the same non-transactional CAS→journal class as BRO-1915 Scope #4, and audit-only here since
+  // `gate.escalated` has no rebuild consumer + the board self-heals on reconnect; folded to BRO-1915.)
+  const [after] = await db.select().from(node).where(eq(node.id, n.id));
+  if (!after || after.deletedAt !== null || after.state !== "review") {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} is no longer awaiting a decision (decided concurrently)`,
+      409,
+    );
+  }
 }
 
 /**
@@ -518,8 +635,8 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
     // F5 (BRO-1805 slice 2a): block { gateId, reason? } → decide the review node's gate `block` → canceled
     // (D-GATE, gate-queue.md §4). The gate.decided + node.updated events reach the client on the stream
     // (intents-in, events-out), NOT this 202. NO reconcile — a rescan would revert the DB-only node.state
-    // (the BRO-1914 durability gap, shared with the supervisor's transitions). The other three verdicts
-    // (approve/revise/escalate) ride the same `decideGateVerdict` spine in later sub-slices.
+    // (the BRO-1914 durability gap, shared with the supervisor's transitions). `revise` shares this spine
+    // (below); the non-terminating `escalate` takes its own path; `approve` (+ merge) is a later sub-slice.
     if (type === "block") {
       const gateId = (body as { gateId?: unknown }).gateId;
       if (typeof gateId !== "string" || gateId.trim() === "") {
@@ -575,6 +692,128 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         return refuse(
           c,
           new IntentRefusal("intent_failed", `block failed: ${(err as Error).message}`, 500, true),
+        );
+      }
+      const ok: IntentAccepted = { accepted: true };
+      return c.json(ok, 202);
+    }
+    // F5 (BRO-1805 slice 2b-i): revise { gateId, feedback } → decide the gate `revise` → triggered (send back
+    // for a fresh dispatch). The SAME terminating spine as block; the `feedback` note rides the gate.decided
+    // payload so the redispatched run can pick it up. Events on the stream, not this 202.
+    if (type === "revise") {
+      const gateId = (body as { gateId?: unknown }).gateId;
+      if (typeof gateId !== "string" || gateId.trim() === "") {
+        return refuse(
+          c,
+          new IntentRefusal("invalid_intent", "revise.gateId must be a non-empty string", 400),
+        );
+      }
+      const feedbackRaw = (body as { feedback?: unknown }).feedback;
+      if (typeof feedbackRaw !== "string" || feedbackRaw.trim() === "") {
+        return refuse(
+          c,
+          new IntentRefusal("invalid_intent", "revise.feedback must be a non-empty string", 400),
+        );
+      }
+      // Trim to match escalate's `to` normalization — padding carries no meaning on the send-back note.
+      const feedback = feedbackRaw.trim();
+      // Idempotency lease inside the typed boundary (as block) — a SQLITE_BUSY here is a typed intent_failed.
+      const rNow = Date.now();
+      try {
+        const rIns = await db
+          .insert(lease)
+          .values({ key, holder: RUNTIME_HOLDER, acquiredAt: rNow, expiresAt: rNow + LEASE_TTL_MS })
+          .onConflictDoNothing({ target: lease.key });
+        if (rIns.rowsAffected === 0) {
+          const ok: IntentAccepted = { accepted: true };
+          return c.json(ok, 202);
+        }
+      } catch (err) {
+        return refuse(
+          c,
+          new IntentRefusal(
+            "intent_failed",
+            `revise lease failed: ${(err as Error).message}`,
+            500,
+            true,
+          ),
+        );
+      }
+      try {
+        await decideGateVerdict(db, workspace, gateId, "revise", { feedback }, rNow);
+      } catch (err) {
+        try {
+          await db.delete(lease).where(eq(lease.key, key));
+        } catch {
+          // best-effort release — the lease TTL reaps it; a failed delete must not mask the real error
+        }
+        if (err instanceof IntentRefusal) return refuse(c, err);
+        return refuse(
+          c,
+          new IntentRefusal("intent_failed", `revise failed: ${(err as Error).message}`, 500, true),
+        );
+      }
+      const ok: IntentAccepted = { accepted: true };
+      return c.json(ok, 202);
+    }
+    // F5 (BRO-1805 slice 2b-i): escalate { gateId, to } → reassign the review node's owner ("point"). NON-
+    // terminating (gate-queue.md §4): the gate STAYS open + re-decidable — no verdict is committed. The
+    // node.updated + gate.escalated events reach the client on the stream, not this 202.
+    if (type === "escalate") {
+      const gateId = (body as { gateId?: unknown }).gateId;
+      if (typeof gateId !== "string" || gateId.trim() === "") {
+        return refuse(
+          c,
+          new IntentRefusal("invalid_intent", "escalate.gateId must be a non-empty string", 400),
+        );
+      }
+      const toRaw = (body as { to?: unknown }).to;
+      if (typeof toRaw !== "string" || toRaw.trim() === "") {
+        return refuse(
+          c,
+          new IntentRefusal("invalid_intent", "escalate.to must be a non-empty string", 400),
+        );
+      }
+      const to = toRaw.trim();
+      // Idempotency lease inside the typed boundary (as block/revise).
+      const eNow = Date.now();
+      try {
+        const eIns = await db
+          .insert(lease)
+          .values({ key, holder: RUNTIME_HOLDER, acquiredAt: eNow, expiresAt: eNow + LEASE_TTL_MS })
+          .onConflictDoNothing({ target: lease.key });
+        if (eIns.rowsAffected === 0) {
+          const ok: IntentAccepted = { accepted: true };
+          return c.json(ok, 202);
+        }
+      } catch (err) {
+        return refuse(
+          c,
+          new IntentRefusal(
+            "intent_failed",
+            `escalate lease failed: ${(err as Error).message}`,
+            500,
+            true,
+          ),
+        );
+      }
+      try {
+        await escalateGate(db, workspace, gateId, to, eNow);
+      } catch (err) {
+        try {
+          await db.delete(lease).where(eq(lease.key, key));
+        } catch {
+          // best-effort release — the lease TTL reaps it; a failed delete must not mask the real error
+        }
+        if (err instanceof IntentRefusal) return refuse(c, err);
+        return refuse(
+          c,
+          new IntentRefusal(
+            "intent_failed",
+            `escalate failed: ${(err as Error).message}`,
+            500,
+            true,
+          ),
         );
       }
       const ok: IntentAccepted = { accepted: true };

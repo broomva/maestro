@@ -85,6 +85,7 @@ export const EVENT_TYPES = {
   // gate.*
   GATE_OPENED: "gate.opened",
   GATE_DECIDED: "gate.decided",
+  GATE_ESCALATED: "gate.escalated", // FLOWS F5 — the NON-terminating escalate (point): owner reassigned, gate stays open + re-decidable (gate-queue.md §4). Distinct from gate.decided: no verdict is committed.
   GATE_APPROVED: "gate.approved", // FLOWS F5
   // budget.* — the budget-in-path guard (HARNESS §3, F3.1). BRO-1788 named `refused`
   // (pre-forward refusal) + `metered` (post-response accounting); `exhausted` is the
