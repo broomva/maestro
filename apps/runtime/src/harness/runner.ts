@@ -43,7 +43,7 @@ function pruneUndefined(o: Record<string, unknown>): Record<string, unknown> {
 }
 
 /** A short, log-safe summary of a tool input (the audit trail stores decisions, not payloads). */
-function summarizeInput(input: unknown): string | undefined {
+export function summarizeInput(input: unknown): string | undefined {
   if (input === undefined || input === null) return undefined;
   let s: string;
   if (typeof input === "string") {

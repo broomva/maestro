@@ -542,6 +542,78 @@ describe("reap containment + attempt-scoping + kill race (P20 fixes)", () => {
     expect(sup.list()).toHaveLength(0); // registry entry dropped
   });
 
+  test("MAJOR (BRO-1912): F8 kill sends SIGTERM FIRST, then SIGKILL after grace (no orphaned CLI)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    // A live child whose exit we control (stays registered until we resolve it) + a signal recorder.
+    let resolveExit: (code: number) => void = () => {};
+    const exited = new Promise<number>((r) => {
+      resolveExit = r;
+    });
+    const signals: string[] = [];
+    // Control the grace window deterministically: terminateChild's `delay` resolves only when released.
+    let releaseGrace: () => void = () => {};
+    const grace = new Promise<void>((r) => {
+      releaseGrace = r;
+    });
+    const { sup, tokens } = makeSupervisor(
+      ws,
+      h,
+      () => fakePort({ lines: [], exitCode: exited, signals }),
+      { killGraceMs: 1, delay: () => grace },
+    );
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+
+    // The BLOCKER-adjacent fix: SIGTERM first (so a runner's SIGTERM handler reaps the subscription CLI
+    // it spawned), NOT an immediate SIGKILL that would orphan that CLI. Bearer revoked at once regardless.
+    expect(sup.kill(out.runId)).toBe(true);
+    expect(signals).toEqual(["SIGTERM"]);
+    expect(tokens.size).toBe(0);
+
+    // The child ignores SIGTERM (never exits within the window) → escalate to SIGKILL after the grace.
+    releaseGrace();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+
+    // Let the (killed) child finally exit → the reap ends canceled + run.killed (F8), worktree preserved.
+    resolveExit(137);
+    const res = await out.reaped;
+    expect(res.event).toBe("run.killed");
+  });
+
+  test("MAJOR (BRO-1912): a child that exits within the grace is NOT SIGKILLed (cooperation honored)", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    let resolveExit: (code: number) => void = () => {};
+    const exited = new Promise<number>((r) => {
+      resolveExit = r;
+    });
+    const signals: string[] = [];
+    // A grace that NEVER releases — so if the child cooperates (exits first), the race is won by the exit
+    // and no SIGKILL is ever sent. A bug that SIGKILLed unconditionally would still add "SIGKILL" here.
+    const neverGrace = new Promise<void>(() => {});
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      () => fakePort({ lines: [], exitCode: exited, signals }),
+      { killGraceMs: 1_000_000, delay: () => neverGrace },
+    );
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+
+    expect(sup.kill(out.runId)).toBe(true);
+    expect(signals).toEqual(["SIGTERM"]);
+    // The child exits promptly on SIGTERM (cooperated) → terminateChild's race resolves via exit, not grace.
+    resolveExit(143);
+    const res = await out.reaped;
+    expect(res.event).toBe("run.killed");
+    expect(signals).toEqual(["SIGTERM"]); // no SIGKILL — cooperation was honored
+  });
+
   test("MAJOR: a respawned attempt that does not re-declare run.exiting parks blocked (attempt-scoped read)", async () => {
     const ws = await makeWorkspace();
     const h = await openMem();

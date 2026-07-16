@@ -21,6 +21,7 @@ import { parsePayload } from "./api/event-projection";
 import type { RuntimeConfig } from "./config";
 import type { IndexDb } from "./db/client";
 import { event } from "./db/schema";
+import { buildClaudeProviderEnv } from "./harness/spawn-contract";
 import { fromBunSubprocess } from "./harness/stdio";
 import { BudgetGuard, deriveDayTotal } from "./proxy/budget";
 import { fsJournalSink } from "./proxy/events";
@@ -78,6 +79,48 @@ export const devSpawnChild: SpawnChild = (args) =>
       stdin: "pipe",
     }),
   );
+
+/** The Claude Code CLI runner entry (BRO-1912) — the subscription provider's child. */
+const CLAUDE_RUNNER_ENTRY = fileURLToPath(new URL("./child/claude-runner.ts", import.meta.url));
+
+/**
+ * The `claude` subscription spawner: `bun run <claude-runner.ts> <argv>`. Identical stdio/tee contract to
+ * {@link devSpawnChild} (same `fromBunSubprocess` port), so the supervisor wraps it unchanged — the only
+ * difference is the child entry: this one spawns the Claude Code CLI internally and translates its stream.
+ *
+ * TRUST MODEL — still DENY-BY-DEFAULT, not `{...process.env}`. The subscription CLI authenticates on the
+ * operator's OWN channel (macOS Keychain via USER/LOGNAME, or CLAUDE_CODE_OAUTH_TOKEN on Linux/CI), so the
+ * env is the deny-by-default floor PLUS that NARROW named auth channel — never the full host env. Leaking
+ * every host secret (`ANTHROPIC_API_KEY`, `CLOUDFLARE_API_TOKEN`, …) into a `bypassPermissions` agent is
+ * the R5 KEY-EXFIL class the harness exists to prevent; `ANTHROPIC_API_KEY` is force-deleted so the CLI
+ * bills the subscription, not the API. {@link buildClaudeProviderEnv} owns that policy; `args.env` layers
+ * the supervisor's BROOMVA_* contract (BROOMVA_RUN_DIR) so the runner finds its worktree. Confinement is
+ * the WORKTREE (cwd) + `--permission-mode` + this env floor — the runner may spend the subscription, but
+ * it cannot touch an unrelated host credential.
+ */
+export const claudeSpawnChild: SpawnChild = (args) =>
+  fromBunSubprocess(
+    Bun.spawn([...args.commandPrefix, "bun", "run", CLAUDE_RUNNER_ENTRY, ...args.argv], {
+      cwd: args.cwd,
+      env: buildClaudeProviderEnv(process.env, args.env),
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "pipe",
+    }),
+  );
+
+/** Select the child spawner for a provider: the CLI runner for `claude`, else the proxy-driven
+ *  broomva-child (`mock`, or unset when a test drives the mock loop directly). `codex` is declared but
+ *  NOT wired yet, so it FAILS CLOSED — a `codex` mount must never silently run the mock/broomva-child
+ *  spawner under a provider the operator did not actually get. (index.ts already gates the mount to
+ *  claude|mock, so this throw is defense-in-depth against a future caller, not a live path.) */
+function spawnerForProvider(provider: RuntimeConfig["provider"]): SpawnChild {
+  if (provider === "claude") return claudeSpawnChild;
+  if (provider === "codex") {
+    throw new Error("MAESTRO_PROVIDER=codex is not wired yet — use claude or mock");
+  }
+  return devSpawnChild;
+}
 
 /** The assembled dispatch runtime — the supervisor + the served proxy + lifecycle handles. */
 export interface DispatchRuntime {
@@ -139,7 +182,7 @@ export async function mountDispatch(deps: MountDispatchDeps): Promise<DispatchRu
       factory: createWorktreeSandboxFactory({ workspace: deps.config.workspace }),
       tokens,
       proxy: { url: proxyServer.url },
-      spawnChild: deps.spawnChild ?? devSpawnChild,
+      spawnChild: deps.spawnChild ?? spawnerForProvider(deps.config.provider),
       hostEnv: deps.hostEnv ?? process.env,
       config: deps.config,
       ...(deps.mintRunId ? { mintRunId: deps.mintRunId } : {}),

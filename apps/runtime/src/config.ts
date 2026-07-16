@@ -88,6 +88,14 @@ export interface RuntimeConfig {
    * the "live locally" path is a follow-up. Default false.
    */
   mockModel?: boolean;
+  /**
+   * The model provider that mounts the dispatch loop (MAESTRO_PROVIDER). The subscription-native path
+   * (BRO-1912): `claude` spawns the Claude Code CLI as the runner (its own Keychain OAuth — no key, no
+   * proxy); `codex` is the same seam for ChatGPT (follow-up); `mock` is the token-free scripted upstream
+   * (the former MAESTRO_MOCK_MODEL=1, still honored as an alias). Undefined leaves the runtime read-only.
+   * Selects the spawnChild in dispatch.ts.
+   */
+  provider?: "claude" | "codex" | "mock";
 }
 
 /** Default runtime port when MAESTRO_PORT is unset or invalid. */
@@ -163,9 +171,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   // Judge diff byte cap (BRO-1794): a positive override wins, else the VERIFIER §2 default.
   const judgeDiffMaxBytes =
     positiveInt(env.MAESTRO_JUDGE_DIFF_MAX_BYTES) ?? DEFAULT_JUDGE_DIFF_MAX_BYTES;
-  // Mock-model mode is an explicit opt-in (only "1" enables it) — the dispatch mount is a spawn-capable
-  // surface, so it stays off unless the operator asks for the token-free mock loop.
-  const mockModel = env.MAESTRO_MOCK_MODEL === "1";
+  // The provider selects the dispatch runner (BRO-1912). Explicit opt-in — the dispatch mount is a
+  // spawn-capable surface, so it stays off (read-only) unless the operator names a provider. MAESTRO_MOCK_MODEL=1
+  // is kept as an alias for MAESTRO_PROVIDER=mock so existing CI/scripts keep working.
+  const provider = resolveProvider(env);
+  const mockModel = provider === "mock";
   return {
     port,
     workspace,
@@ -184,7 +194,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     verifierMaxAttempts,
     judgeDiffMaxBytes,
     mockModel,
+    provider,
   };
+}
+
+/** Resolve MAESTRO_PROVIDER (claude|codex|mock), honoring MAESTRO_MOCK_MODEL=1 as a `mock` alias.
+ *  An unrecognized value → undefined (read-only), never a silent wrong provider. */
+function resolveProvider(
+  env: Record<string, string | undefined>,
+): "claude" | "codex" | "mock" | undefined {
+  const p = env.MAESTRO_PROVIDER?.trim().toLowerCase();
+  if (p === "claude" || p === "codex" || p === "mock") return p;
+  if (env.MAESTRO_MOCK_MODEL === "1") return "mock";
+  return undefined;
 }
 
 /** A strictly-positive integer from an env string, or undefined (use the default). */

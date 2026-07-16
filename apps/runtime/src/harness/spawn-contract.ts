@@ -158,3 +158,64 @@ export function buildChildEnv(
 export function buildCheckEnv(hostEnv: Record<string, string | undefined>): Record<string, string> {
   return filterPassthroughEnv(hostEnv);
 }
+
+// The subscription CLI runner (BRO-1912) authenticates on the OPERATOR's own channel — NOT the metered
+// proxy and NOT the Anthropic API key — so it needs a NARROW set of auth-carrying vars ON TOP of the
+// deny-by-default floor. This is the ONE deliberate widening of the child env, and it stays an explicit
+// NAME allowlist (never `...process.env`):
+//   - USER / LOGNAME — the macOS login-Keychain owner. The subscription OAuth token lives in the
+//     Keychain (never in an env var; verified: item "Claude Code-credentials"), so forwarding the
+//     *username* is what lets the CLI read it. Not secrets.
+//   - CLAUDE_CODE_OAUTH_TOKEN — the explicit OAuth-token channel (Linux / CI, where there is no
+//     Keychain). The ONE credential the subscription runner is designed to spend. Its NAME matches the
+//     secret predicate, so filterPassthroughEnv strips it — it can only be re-added HERE, by name.
+export const CLAUDE_AUTH_PASSTHROUGH = ["USER", "LOGNAME", "CLAUDE_CODE_OAUTH_TOKEN"] as const;
+
+// Non-secret operator steering for the runner (model / bin / permission / extra-passthrough). Dropped by
+// the floor (not in the allowlist), re-added by explicit name so `MAESTRO_CLAUDE_MODEL=…` reaches the runner.
+const CLAUDE_CONFIG_PASSTHROUGH = [
+  "MAESTRO_CLAUDE_BIN",
+  "MAESTRO_CLAUDE_MODEL",
+  "MAESTRO_CLAUDE_PERMISSION",
+  "MAESTRO_CLAUDE_ENV_PASSTHROUGH",
+] as const;
+
+/**
+ * The env for the subscription `claude` CLI runner (BRO-1912) — the deny-by-default {@link
+ * filterPassthroughEnv} floor PLUS the narrow, named {@link CLAUDE_AUTH_PASSTHROUGH} auth channel and
+ * non-secret runner config. Deliberately NOT `{...process.env}`: the CLI runs under `bypassPermissions`,
+ * so leaking every host secret (`ANTHROPIC_API_KEY`, `CLOUDFLARE_API_TOKEN`, `HOSTINGER_API_TOKEN`, …)
+ * into it is the R5 KEY-EXFIL class the harness exists to prevent.
+ *
+ * `ANTHROPIC_API_KEY` is force-DELETED at the end: it must never reach the CLI, both to keep the key
+ * away from an autonomous agent AND so the CLI bills the SUBSCRIPTION, not the API (the CLI prefers the
+ * key when present). An operator may name host-specific auth vars via `MAESTRO_CLAUDE_ENV_PASSTHROUGH`
+ * (comma-separated) — but NO secret-named var can be re-opened that way (the extras themselves pass
+ * through {@link isSecretEnvName}), so neither `ANTHROPIC_API_KEY` nor an alternate billing / endpoint
+ * channel like `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` can be smuggled back in. A genuinely-needed
+ * secret auth channel is a code change to {@link CLAUDE_AUTH_PASSTHROUGH}, never a runtime env toggle.
+ *
+ * Idempotent: re-applying it to its own output is a no-op except it drops any BROOMVA_* overlay (the CLI
+ * must not hold the per-session bearer), which is why the runner passes NO `childEnv` when confining the
+ * CLI's env while the spawner passes the supervisor's `args.env` so the RUNNER keeps its BROOMVA_RUN_DIR.
+ */
+export function buildClaudeProviderEnv(
+  hostEnv: Record<string, string | undefined>,
+  childEnv?: Record<string, string>,
+): Record<string, string> {
+  const env = filterPassthroughEnv(hostEnv); // deny-by-default floor — every host secret dropped
+  const extras = (hostEnv.MAESTRO_CLAUDE_ENV_PASSTHROUGH ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    // No secret-named var is re-openable via the operator escape hatch — not ANTHROPIC_API_KEY, and not an
+    // alternate billing/endpoint channel (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL). The hatch is for
+    // host-specific NON-secret channels (e.g. a socket path); a secret auth var is a code change instead.
+    .filter((s) => s !== "" && !isSecretEnvName(s));
+  for (const name of [...CLAUDE_AUTH_PASSTHROUGH, ...CLAUDE_CONFIG_PASSTHROUGH, ...extras]) {
+    const v = hostEnv[name];
+    if (v !== undefined) env[name] = v;
+  }
+  if (childEnv) Object.assign(env, childEnv); // BROOMVA_* contract (run dir) over the floor — RUNNER only
+  delete env.ANTHROPIC_API_KEY; // belt: force subscription billing + keep the R5 key from the CLI
+  return env;
+}

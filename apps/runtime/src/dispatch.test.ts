@@ -245,6 +245,17 @@ describe("dispatch mount (BRO-1822 slice 1) — the loop assembled into the runt
     expect(metered.some((e) => typeof e.usd === "number" && e.usd > 0)).toBe(true);
   });
 
+  test("MAJOR (CodeRabbit): an unwired codex provider FAILS CLOSED — never silently spawns the mock child", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    // provider=codex is declared but not wired. Mounting it must THROW, not fall back to devSpawnChild —
+    // a silent fallback would run the mock/broomva-child under a provider the operator did not get.
+    const config = { ...loadConfig({}), workspace: ws, provider: "codex" as const };
+    await expect(mountDispatch({ db: h.db, config, upstream: createMockModel() })).rejects.toThrow(
+      /codex is not wired/,
+    );
+  });
+
   test("the F8 kill seam kills a live mounted child mid-run → canceled + run.killed", async () => {
     // Park the child mid-model-call so the F8 kill lands on a genuinely live child: the mock records the
     // forwarded request then hangs (delayMs). We hang it with a NEVER-RESOLVING promise, not a real timer,
