@@ -17,11 +17,14 @@ import { join, relative, resolve, sep } from "node:path";
 import {
   type ErrorCode,
   type ErrorResponse,
+  EVENT_TYPES,
+  type GateVerdict,
   IDEMPOTENCY_KEY_HEADER,
   type Intent,
   type IntentAccepted,
   KINDS,
   parseWorkFile,
+  resolveGateVerdict,
   serializeWorkInput,
   type WorkContractInput,
 } from "@maestro/protocol";
@@ -29,7 +32,8 @@ import { eq } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { IndexDb } from "../db/client";
-import { lease } from "../db/schema";
+import { projectLiveNode } from "../db/project";
+import { event, gate, lease, node, session } from "../db/schema";
 import { gitCommit, gitUnstage } from "../git/git";
 
 export interface IntentDeps {
@@ -233,6 +237,110 @@ async function pathExists(p: string): Promise<boolean> {
 }
 
 /**
+ * Emit a `node.updated` stream event after an intent-driven `node.state` write — the SAME projection
+ * the supervisor (BRO-1913) + the FS watcher (BRO-1804) use (`projectLiveNode`, single definition in
+ * `db/project.ts`, so the sources can never drift), `sessionId: null` so it rides the GLOBAL stream the
+ * shell subscribes to. Best-effort: a failed read/insert just leaves the client to re-derive on reconnect
+ * (D5); the DB `node.state` write is the durable truth. Standalone (not the supervisor's closure) because
+ * the write path has no run context.
+ */
+async function emitNodeUpdated(db: IndexDb, nodeId: string, now: number): Promise<void> {
+  try {
+    const [row] = await db.select().from(node).where(eq(node.id, nodeId));
+    if (!row || row.deletedAt !== null) return; // a tombstoned node never crosses the wire
+    await db.insert(event).values({
+      sessionId: null,
+      ts: now,
+      actor: "system",
+      type: EVENT_TYPES.NODE_UPDATED,
+      payload: JSON.stringify(projectLiveNode(row)),
+    });
+  } catch {
+    // best-effort — the DB node.state write is the durable truth; a reload re-derives the view
+  }
+}
+
+/**
+ * Decide a `review` node's open gate with a verdict (F5, BRO-1805 slice 2). The gate-decision SPINE the
+ * four verbs share: resolve `gateId → session → node`, validate, set the gate's `verdict` (the commit
+ * point), journal `gate.decided` (D-DURABILITY — payload widened so BRO-1915's rebuild projector can fold
+ * the decision onto the opened row), then transition the node per `resolveGateVerdict` and emit
+ * `node.updated`. Slice 2a wires ONLY `block` (→ canceled); `approve` (→ done + `approveMerge`, needing
+ * the durable-done write of BRO-1914) and `revise`/`escalate` land in later sub-slices on this same spine.
+ *
+ * Idempotency: a gate already decided with the SAME verdict is a no-op success (a same-key retry is caught
+ * earlier by the lease; a different key re-hitting a decided gate lands here); a DIFFERENT prior verdict is
+ * a 409 refusal. The node transition is a DB-only projection (like the supervisor's) — durable across an
+ * F9 rebuild / an interleaved rescan is BRO-1914's coordinated workspace state-writer, not this slice; a
+ * crash between the gate-decide and the node-transition leaves a decided gate on a still-`review` node that
+ * BRO-1914/BRO-1915 reconcile. Throws `IntentRefusal` (typed, API §4) on every rejection.
+ */
+async function decideGateVerdict(
+  db: IndexDb,
+  gateId: string,
+  verdict: GateVerdict,
+  extra: { reason?: string },
+  now: number,
+): Promise<void> {
+  const [g] = await db.select().from(gate).where(eq(gate.id, gateId));
+  if (!g || g.deletedAt !== null) {
+    throw new IntentRefusal("not_found", `no open gate ${gateId}`, 404);
+  }
+  const [s] = await db.select().from(session).where(eq(session.id, g.sessionId));
+  if (!s) throw new IntentRefusal("not_found", `gate ${gateId} has no session`, 404);
+  const [n] = await db.select().from(node).where(eq(node.id, s.nodeId));
+  if (!n || n.deletedAt !== null) {
+    throw new IntentRefusal("not_found", `gate ${gateId} node is gone`, 404);
+  }
+
+  // Already decided → idempotent same-verdict no-op, or a hard refusal on a conflicting prior verdict.
+  if (g.verdict !== null) {
+    if (g.verdict === verdict) return;
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} is already decided (${g.verdict})`,
+      409,
+    );
+  }
+
+  // Pending → decide. The node must be at the gate (review); `resolveGateVerdict` throws off-review, and a
+  // gate row only opens at review (BRO-1805 slice 1), so a non-review node here is a defensive refusal.
+  let target: ReturnType<typeof resolveGateVerdict>;
+  try {
+    target = resolveGateVerdict(n.state, verdict);
+  } catch {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} node is not awaiting a decision (state ${n.state})`,
+      409,
+    );
+  }
+
+  // Commit point — the verdict going non-null IS the decision. Then journal it (durable), transition the
+  // node (DB projection), and emit the live update. decidedBy is the single human for now (no auth yet).
+  await db
+    .update(gate)
+    .set({ verdict, decidedBy: "human", decidedAt: now, updatedAt: now })
+    .where(eq(gate.id, gateId));
+  await db.insert(event).values({
+    sessionId: g.sessionId,
+    ts: now,
+    actor: "user",
+    type: EVENT_TYPES.GATE_DECIDED,
+    payload: JSON.stringify({
+      gateId,
+      kind: g.kind,
+      verdict,
+      decidedBy: "human",
+      decidedAt: now,
+      ...(extra.reason ? { reason: extra.reason } : {}),
+    }),
+  });
+  await db.update(node).set({ state: target, updatedAt: now }).where(eq(node.id, n.id));
+  await emitNodeUpdated(db, n.id, now);
+}
+
+/**
  * Mount POST /api/intents. Requires the open index (the idempotency lease lives there),
  * so it registers behind the same `if (index)` gate as the reads + stream in createApp.
  */
@@ -317,6 +425,48 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
           c,
           new IntentRefusal("not_found", `no live run for session ${sessionId}`, 404),
         );
+      }
+      const ok: IntentAccepted = { accepted: true };
+      return c.json(ok, 202);
+    }
+    // F5 (BRO-1805 slice 2a): block { gateId, reason? } → decide the review node's gate `block` → canceled
+    // (D-GATE, gate-queue.md §4). The gate.decided + node.updated events reach the client on the stream
+    // (intents-in, events-out), NOT this 202. NO reconcile — a rescan would revert the DB-only node.state
+    // (the BRO-1914 durability gap, shared with the supervisor's transitions). The other three verdicts
+    // (approve/revise/escalate) ride the same `decideGateVerdict` spine in later sub-slices.
+    if (type === "block") {
+      const gateId = (body as { gateId?: unknown }).gateId;
+      if (typeof gateId !== "string" || gateId.trim() === "") {
+        return refuse(
+          c,
+          new IntentRefusal("invalid_intent", "block.gateId must be a non-empty string", 400),
+        );
+      }
+      const reasonRaw = (body as { reason?: unknown }).reason;
+      if (reasonRaw !== undefined && typeof reasonRaw !== "string") {
+        return refuse(
+          c,
+          new IntentRefusal("invalid_intent", "block.reason must be a string when present", 400),
+        );
+      }
+      // Idempotency lease (as new_mission/kill) — a retried same-key block is a no-op 202, not a re-decide.
+      const bNow = Date.now();
+      const bIns = await db
+        .insert(lease)
+        .values({ key, holder: RUNTIME_HOLDER, acquiredAt: bNow, expiresAt: bNow + LEASE_TTL_MS })
+        .onConflictDoNothing({ target: lease.key });
+      if (bIns.rowsAffected === 0) {
+        const ok: IntentAccepted = { accepted: true };
+        return c.json(ok, 202);
+      }
+      // Decide the gate. On failure RELEASE the lease so a genuine retry re-attempts (the key guards a
+      // successful decision, not a failed one), then return the typed refusal.
+      try {
+        await decideGateVerdict(db, gateId, "block", { reason: reasonRaw }, bNow);
+      } catch (err) {
+        await db.delete(lease).where(eq(lease.key, key));
+        if (err instanceof IntentRefusal) return refuse(c, err);
+        throw err;
       }
       const ok: IntentAccepted = { accepted: true };
       return c.json(ok, 202);
