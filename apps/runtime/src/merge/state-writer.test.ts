@@ -124,6 +124,49 @@ describe("persistNodeState — durable node-state writer (BRO-1914)", () => {
     expect(await tmpLeftovers(dir)).toEqual([]);
   });
 
+  test("double fault (commit throws AND rollback write throws): surfaced distinctly as failed + treeDirty", async () => {
+    // CodeRabbit MAJOR (BRO-1914 review): if the commit fails AND the rollback `atomicWrite(orig)` ALSO
+    // fails, the path is left PATCHED-but-uncommitted (a dirty tree that silently wedges every later
+    // approveMerge). Prove it is now reported distinctly (`treeDirty`) instead of blending into the ordinary
+    // rollback-succeeded `failed`. Inject: forward write lands real patched bytes; the rollback (2nd write
+    // call) throws — deterministic and root-safe (no permission-mode trick that root would bypass).
+    const dir = await makeRepo();
+    const filePath = join(dir, "work", "n0", "_work.md");
+    const before = await head(dir);
+    let writeCalls = 0;
+    const out = await persistNodeState(
+      dir,
+      "work/n0",
+      { state: "review" },
+      {
+        git: {
+          commit: async () => {
+            throw new Error("simulated commit fault");
+          },
+        },
+        atomicWrite: async (p, c) => {
+          writeCalls += 1;
+          if (writeCalls === 1) {
+            await writeFile(p, c, "utf8"); // forward write: land the patched bytes on disk for real
+            return;
+          }
+          throw new Error("simulated rollback ENOSPC"); // rollback: the second write fails
+        },
+      },
+    );
+
+    expect(out.kind).toBe("failed");
+    if (out.kind === "failed") {
+      expect(out.treeDirty).toBe(true); // the distinct double-fault signal (MUTATION: revert the fix → undefined → RED)
+      expect(out.reason).toContain("simulated commit fault");
+      expect(out.reason).toContain("ROLLBACK ALSO FAILED");
+      expect(out.reason).toContain("work/n0/_work.md");
+    }
+    // faithful to the failure: the worktree is genuinely left at the patched content (NOT rolled back)
+    expect(parseWorkFile(await readFile(filePath, "utf8")).contract.state).toBe("review");
+    expect(await head(dir)).toBe(before); // nothing committed
+  });
+
   test("MUTATION GUARD: without the atomic write + commit, the tree would be dirty (approve wedge)", async () => {
     // This asserts the observable property the design hinges on: after a written persist the tree is CLEAN.
     // A bare `writeFile` without the commit (the reverted BRO-1913 naive approach) would leave the tree

@@ -20,6 +20,9 @@
 // `git commit -- <path>` ({@link gitCommitPaths}), so a commit fault leaves the INDEX untouched — the ONLY
 // undo is the worktree write, rolled back to the exact pre-call bytes. A failed persist thus leaves NOTHING
 // half-written and the path clean — then reports `failed` (never a false success). The commit is the transaction.
+// The one exception is a DOUBLE fault (commit fails AND the rollback write also fails): the path is then left
+// patched-but-uncommitted, and that is reported distinctly as `failed` + `treeDirty` so it is not mistaken for
+// a clean-rollback failure (an un-rolled-back `_work.md` wedges every later `approveMerge` with `dirty_workspace`).
 
 import { randomBytes } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -29,12 +32,15 @@ import { gitCommitPaths as defaultGitCommitPaths } from "../git/git";
 import { WORK_FILE } from "../scanner/scanner";
 import { serializeWorkspaceGit } from "./serialize";
 
-/** Injectable git seam (tests drive commit failure to exercise the rollback). Defaults to the real helper. */
+/** Injectable seams (tests drive commit/rollback failure to exercise the fault paths). Default to reals. */
 export interface PersistNodeStateDeps {
   git?: {
     /** Commit the `_work.md` worktree content, no pre-`add` — a failure leaves the index untouched. */
     commit?: typeof defaultGitCommitPaths;
   };
+  /** Atomic file replace, used for BOTH the forward write and the rollback. A test can fail the rollback
+   *  call (the second invocation) deterministically to exercise the double-fault `treeDirty` path. */
+  atomicWrite?: (path: string, content: string) => Promise<void>;
 }
 
 export type PersistNodeStateOutcome =
@@ -46,8 +52,12 @@ export type PersistNodeStateOutcome =
    *  NOTHING to keep consistent: the next reconcile TOMBSTONES it, it never reverts to a stale `review`.
    *  Benign, distinct from `failed` (a real fault the caller should surface). */
   | { kind: "absent" }
-  /** Could not patch/write/commit (a real fault) → NOTHING half-written, tree rolled back to clean. */
-  | { kind: "failed"; reason: string };
+  /** Could not patch/write/commit (a real fault). Normally NOTHING is left half-written — the worktree is
+   *  rolled back to the exact pre-call bytes, so the path is CLEAN. `treeDirty` is set ONLY in the rare
+   *  double-fault where the commit failed AND the rollback write ALSO failed: the path is then left patched
+   *  -but-uncommitted, which will make every later `approveMerge` refuse `dirty_workspace` until the tree is
+   *  reset. A caller can alert/retry on that distinctly instead of blending it into the clean-rollback case. */
+  | { kind: "failed"; reason: string; treeDirty?: true };
 
 /** Atomic file replace: full content to a unique temp, then `rename` onto `path` (atomic overwrite — a
  *  concurrent reader sees old-full or new-full, never torn; `rename` never leaves the path absent). */
@@ -88,6 +98,7 @@ export async function persistNodeState(
   deps: PersistNodeStateDeps = {},
 ): Promise<PersistNodeStateOutcome> {
   const commit = deps.git?.commit ?? defaultGitCommitPaths;
+  const write = deps.atomicWrite ?? atomicWrite;
   const pathspec = nodePath === "" ? WORK_FILE : `${nodePath}/${WORK_FILE}`;
   const filePath = join(cwd, pathspec);
 
@@ -112,7 +123,7 @@ export async function persistNodeState(
     if (patched === orig) return { kind: "unchanged" }; // idempotent — never an empty commit
 
     try {
-      await atomicWrite(filePath, patched);
+      await write(filePath, patched);
     } catch (err) {
       return { kind: "failed", reason: `write _work.md: ${(err as Error).message}` };
     }
@@ -127,8 +138,21 @@ export async function persistNodeState(
       await commit(cwd, [pathspec], commitMessage(patches));
       return { kind: "written" };
     } catch (err) {
-      await atomicWrite(filePath, orig).catch(() => {}); // restore the exact pre-call working-tree bytes
-      return { kind: "failed", reason: `commit _work.md: ${(err as Error).message}` };
+      const commitReason = `commit _work.md: ${(err as Error).message}`;
+      try {
+        await write(filePath, orig); // restore the exact pre-call working-tree bytes
+      } catch (rollbackErr) {
+        // Double fault: commit failed AND the rollback write failed (transient ENOSPC, a permission
+        // change, …). The path is now left PATCHED-but-uncommitted — a dirty tree that will make every
+        // later `approveMerge` silently refuse `dirty_workspace`. Surface it distinctly (`treeDirty`) so a
+        // caller can alert/retry on it, instead of blending into the ordinary rollback-succeeded failure.
+        return {
+          kind: "failed",
+          reason: `${commitReason}; ROLLBACK ALSO FAILED, tree left dirty at ${pathspec}: ${(rollbackErr as Error).message}`,
+          treeDirty: true,
+        };
+      }
+      return { kind: "failed", reason: commitReason };
     }
   });
 }

@@ -284,8 +284,11 @@ async function persistGateAdvance(
   try {
     const outcome = await persistNodeState(workspace, nodePath, patches);
     if (outcome.kind === "failed") {
+      const tail = outcome.treeDirty
+        ? "the tree is LEFT DIRTY at this path — every later approveMerge will refuse dirty_workspace until it is reset"
+        : "DB advanced, but the next FS reconcile may revert it until a later transition repairs the file";
       console.warn(
-        `maestro · ${context}: durable _work.md write failed for ${nodePath} (${outcome.reason}) — DB advanced, but the next FS reconcile may revert it until a later transition repairs the file`,
+        `maestro · ${context}: durable _work.md write failed for ${nodePath} (${outcome.reason}) — ${tail}`,
       );
     }
   } catch (err) {

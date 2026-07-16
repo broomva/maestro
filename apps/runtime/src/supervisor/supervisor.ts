@@ -497,8 +497,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         state: nodeState,
       }).catch((err: unknown) => ({ kind: "failed" as const, reason: (err as Error).message }));
       if (outcome.kind === "failed") {
+        const tail =
+          "treeDirty" in outcome && outcome.treeDirty
+            ? "the tree is LEFT DIRTY at this path — every later approveMerge will refuse dirty_workspace until it is reset"
+            : `the next FS reconcile may revert node ${nodeId}`;
         console.warn(
-          `maestro · park ${nodeState}: durable _work.md write failed for ${nodePath} (${outcome.reason}) — the next FS reconcile may revert node ${nodeId}`,
+          `maestro · park ${nodeState}: durable _work.md write failed for ${nodePath} (${outcome.reason}) — ${tail}`,
         );
       }
     }
