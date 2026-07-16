@@ -304,7 +304,7 @@ export function KitchenSink() {
                 data-testid="inspector-harness"
                 className="w-full max-w-[420px] rounded-card border border-border bg-card p-4"
               >
-                <Inspector item={GATE_ITEMS[0]} onIntent={onIntent} />
+                <Inspector item={GATE_ITEMS[0] ?? null} onIntent={onIntent} />
               </div>
             </Row>
             <Row label="Blocked (Stuck): the only verb is Redispatch">
@@ -312,7 +312,7 @@ export function KitchenSink() {
                 data-testid="inspector-harness-blocked"
                 className="w-full max-w-[420px] rounded-card border border-border bg-card p-4"
               >
-                <Inspector item={GATE_ITEMS[1]} onIntent={onIntent} />
+                <Inspector item={GATE_ITEMS[1] ?? null} onIntent={onIntent} />
               </div>
             </Row>
           </Section>
