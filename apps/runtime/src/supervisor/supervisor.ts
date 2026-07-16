@@ -50,6 +50,7 @@ import {
   type RuntimeConfig,
 } from "../config";
 import type { IndexDb } from "../db/client";
+import { projectLiveNode } from "../db/project";
 import { event, gate, lease, node, runBudget, session } from "../db/schema";
 import { gitDiffBounded, gitHead, gitShowBounded } from "../git/git";
 import { writeContractSnapshot } from "../harness/contract-snapshot";
@@ -422,6 +423,34 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 
   /** Best-effort: park the session row + node row. Each guarded — a closed/full index leaves the child
    *  dealt with and D5 reconcile re-derives on restart; neither throw wedges the reap. */
+  /**
+   * Emit a `node.updated` stream event after a SUPERVISOR-driven node.state write (BRO-1913). The FS
+   * watcher emits `node.updated` only for `_work.md` changes; run-lifecycle transitions (running →
+   * review / blocked / done / canceled) are DB-only writes the watcher never sees, so WITHOUT this the
+   * LIVE board (store reducer `node.updated` → `selectBoard` → "Needs you") + the top-bar gate count
+   * never reflect a run's state until a full reload re-hydrates from `/api/tree`. The payload is
+   * `projectLiveNode(row)` — the SAME shape the watcher emits (single definition, `db/project.ts`, so
+   * the two projection sources can never drift) — with `sessionId: null` so it rides the GLOBAL stream
+   * (`stream.ts` `tailWhere`) the shell subscribes to. Best-effort: a failed read/insert just leaves the
+   * client to re-derive on reconnect (D5); the DB `node.state` write is the durable truth.
+   */
+  async function emitNodeUpdated(nodeId: string): Promise<void> {
+    try {
+      const rows = await db.select().from(node).where(eq(node.id, nodeId));
+      const row = rows[0];
+      if (!row || row.deletedAt !== null) return; // a tombstoned node never crosses the wire
+      await db.insert(event).values({
+        sessionId: null,
+        ts: now(),
+        actor: "system",
+        type: EVENT_TYPES.NODE_UPDATED,
+        payload: JSON.stringify(projectLiveNode(row)),
+      });
+    } catch {
+      // best-effort — the DB node.state write above is the durable truth; a reload re-derives the view
+    }
+  }
+
   async function park(
     runId: string,
     nodeId: string,
@@ -443,6 +472,8 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     } catch {
       // as above
     }
+    // Propagate the state change to the live client (BRO-1913) — the watcher never sees a DB-only write.
+    await emitNodeUpdated(nodeId);
   }
 
   /** Release a node's dispatch lease on terminal reap (idempotent — a re-delete is a no-op). */
@@ -1211,12 +1242,14 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     const { entry, watermark } = launched;
 
     // 7. node.state → running. (The CHILD emits run.started per HARNESS §6 — the supervisor does NOT,
-    //    to avoid a double run.started.)
+    //    to avoid a double run.started.) Then emit node.updated so the LIVE board moves the card to
+    //    "Running" without waiting for a reload (BRO-1913 — a DB-only write is invisible to the watcher).
     try {
       await db.update(node).set({ state: "running", updatedAt: now() }).where(eq(node.id, nodeId));
     } catch {
       // index hiccup — the session row already records the run; a rescan reconciles node.state
     }
+    await emitNodeUpdated(nodeId);
 
     // 8. Start the reap in the background (do NOT await — dispatch returns once the child is LIVE). reap
     //    never rejects (it contains its own throws), but the `.catch` is the belt to that suspenders so a

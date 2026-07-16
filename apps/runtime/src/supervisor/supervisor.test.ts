@@ -202,6 +202,44 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     expect(await h.db.select().from(lease).where(eq(lease.key, "n0"))).toHaveLength(0);
   });
 
+  test("BRO-1913: supervisor state transitions emit node.updated so the LIVE board reflects running → review", async () => {
+    const ws = await makeWorkspace();
+    const h = await openMem();
+    await seedNode(h, "n0");
+    const { sup } = makeSupervisor(
+      ws,
+      h,
+      scriptedSpawner([
+        {
+          lines: ['{"actor":"agent","type":"agent.said","payload":{"text":"done"}}\n'],
+          exitCode: 0,
+        },
+      ]).spawn,
+    );
+
+    const out = await sup.dispatch("n0");
+    if (!out.dispatched) throw new Error("unreachable");
+    await out.reaped;
+
+    // The FS watcher never sees a DB-only state write, so WITHOUT these emits the client board would
+    // stay "Queued" through the whole run. Assert the supervisor emitted a node.updated for BOTH
+    // supervisor-driven transitions — running (dispatch) then review (terminal park) — in seq order.
+    const updates = (
+      await h.db.select().from(event).where(eq(event.type, EVENT_TYPES.NODE_UPDATED))
+    ).sort((a, b) => a.seq - b.seq);
+    const payloads = updates.map(
+      (r) => JSON.parse(r.payload ?? "{}") as { id?: string; state?: string; deletedAt?: unknown },
+    );
+    expect(payloads.map((p) => p.state)).toEqual(["running", "review"]);
+    // each carries the PROJECTED live node — the node id, with the index-internal tombstone stripped.
+    for (const p of payloads) {
+      expect(p.id).toBe("n0");
+      expect(p).not.toHaveProperty("deletedAt");
+    }
+    // node.updated is a NODE-level event → sessionId null, so it rides the GLOBAL stream the shell tails.
+    expect(updates.every((r) => r.sessionId === null)).toBe(true);
+  });
+
   // ── Verifier reap (F4, Loop 2, BRO-1794 slice 1b-ii) ──────────────────────
   // An exit-0 claim now runs the deterministic verifier (Stage 0 + Stage 1) against base..run/<id>,
   // persists verdict.md, and routes on the verdict. The child fixtures exit 0 without committing, so the
