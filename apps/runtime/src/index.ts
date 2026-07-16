@@ -195,12 +195,16 @@ if (import.meta.main) {
   // without it there is nothing to forward to and the runtime stays read-only (the kill seam then finds no
   // live run). Guarded + dynamic-imported like the index open (a mount failure must degrade to reads-only,
   // never crash a healthy read runtime). Needs the open index; skipped when reads are disabled.
-  if (index && config.mockModel) {
+  const dispatchProvider =
+    config.provider === "claude" || config.provider === "mock" ? config.provider : undefined;
+  if (index && dispatchProvider) {
     try {
       const { mountDispatch } = await import("./dispatch");
       dispatch = await mountDispatch({ db: index, config, hostEnv: process.env });
+      const how =
+        dispatchProvider === "claude" ? "claude subscription CLI" : "mock-model (token-free)";
       console.log(
-        `maestro runtime · dispatch mounted (mock-model) · proxy ${dispatch.proxyServer.url}`,
+        `maestro runtime · dispatch mounted (${how}) · proxy ${dispatch.proxyServer.url}`,
       );
     } catch (err) {
       console.warn(
@@ -208,9 +212,13 @@ if (import.meta.main) {
       );
       dispatch = undefined;
     }
-  } else if (index && !config.mockModel) {
+  } else if (index && config.provider === "codex") {
     console.log(
-      "maestro runtime · dispatch not mounted (set MAESTRO_MOCK_MODEL=1 for the token-free mock loop; no real model upstream yet)",
+      "maestro runtime · dispatch not mounted (MAESTRO_PROVIDER=codex is a follow-up; use claude or mock)",
+    );
+  } else if (index) {
+    console.log(
+      "maestro runtime · dispatch not mounted (set MAESTRO_PROVIDER=claude for the live subscription loop, or mock for the token-free loop)",
     );
   }
 

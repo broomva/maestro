@@ -79,6 +79,40 @@ export const devSpawnChild: SpawnChild = (args) =>
     }),
   );
 
+/** The Claude Code CLI runner entry (BRO-1912) — the subscription provider's child. */
+const CLAUDE_RUNNER_ENTRY = fileURLToPath(new URL("./child/claude-runner.ts", import.meta.url));
+
+/**
+ * The `claude` subscription spawner: `bun run <claude-runner.ts> <argv>`. Identical stdio/tee contract to
+ * {@link devSpawnChild} (same `fromBunSubprocess` port), so the supervisor wraps it unchanged — the only
+ * difference is the child entry: this one spawns the Claude Code CLI internally and translates its stream.
+ *
+ * TRUST MODEL — deliberately DIFFERENT from broomva-child. broomva-child is untrusted: it gets the
+ * deny-by-default allowlist env (`args.env`, no host secrets) and calls the metered proxy, so it can never
+ * touch a credential. The subscription CLI is a TRUSTED provider integration: it MUST reach its own auth
+ * (Keychain / OS session channel / an OAuth token env var — provider- and host-specific, not a fixed var
+ * we can allowlist), so it inherits the RUNTIME's environment. `{...process.env, ...args.env}` layers the
+ * BROOMVA_* contract vars (+ HOME/PATH) over the full runtime env, so the CLI authenticates exactly as the
+ * operator's own `claude` would. Confinement here is the WORKTREE (cwd) + the CLI's `--permission-mode`,
+ * not credential-denial — the subscription runner is intentionally allowed to spend the subscription.
+ */
+export const claudeSpawnChild: SpawnChild = (args) =>
+  fromBunSubprocess(
+    Bun.spawn([...args.commandPrefix, "bun", "run", CLAUDE_RUNNER_ENTRY, ...args.argv], {
+      cwd: args.cwd,
+      env: { ...process.env, ...args.env },
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "pipe",
+    }),
+  );
+
+/** Select the child spawner for a provider: the CLI runner for `claude`, else the proxy-driven
+ *  broomva-child (mock / api-key path). `codex` is a follow-up on the same seam. */
+function spawnerForProvider(provider: RuntimeConfig["provider"]): SpawnChild {
+  return provider === "claude" ? claudeSpawnChild : devSpawnChild;
+}
+
 /** The assembled dispatch runtime — the supervisor + the served proxy + lifecycle handles. */
 export interface DispatchRuntime {
   /** The live supervisor (F2 dispatch / F8 kill / F10 control). The dispatch TRIGGER (slice 2) uses it. */
@@ -139,7 +173,7 @@ export async function mountDispatch(deps: MountDispatchDeps): Promise<DispatchRu
       factory: createWorktreeSandboxFactory({ workspace: deps.config.workspace }),
       tokens,
       proxy: { url: proxyServer.url },
-      spawnChild: deps.spawnChild ?? devSpawnChild,
+      spawnChild: deps.spawnChild ?? spawnerForProvider(deps.config.provider),
       hostEnv: deps.hostEnv ?? process.env,
       config: deps.config,
       ...(deps.mintRunId ? { mintRunId: deps.mintRunId } : {}),
