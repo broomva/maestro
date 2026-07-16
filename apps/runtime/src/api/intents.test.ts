@@ -646,6 +646,30 @@ test("BRO-1805 slice 2a: block on a gate whose SESSION is tombstoned refuses (40
   handle.client.close();
 });
 
+test("BRO-1805 slice 2a: block on a gate superseded by a NEWER review session refuses (409), cancels nothing", async () => {
+  const ws = mkWorkspace(false);
+  const handle = await openIndex(":memory:");
+  const app = createApp(cfg(ws), Date.now(), handle.db);
+  const { nodeId, gateId } = await seedOpenGate(handle.db); // gate on session r1
+  // a NEWER live session re-reviews the same node (the BRO-1914 rescan-revert epoch) — later startedAt.
+  await handle.db.insert(session).values({
+    id: "r-new",
+    nodeId,
+    branch: "run/r-new",
+    status: "review",
+    startedAt: Date.now() + 10_000,
+    updatedAt: Date.now(),
+  });
+
+  const res = await post(app, { type: "block", gateId }, "k-superseded");
+  expect(res.status).toBe(409);
+  expect(await jsonErr(res)).toBe("invalid_intent");
+  // the OLD gate did NOT cancel the review the newer session now owns
+  const [n] = await handle.db.select().from(node).where(eq(node.id, nodeId));
+  expect(n?.state).toBe("review");
+  handle.client.close();
+});
+
 test("BRO-1805 slice 2a: a decided gate stranded on a still-review node (partial write) is repaired by a retry", async () => {
   const ws = mkWorkspace(false);
   const handle = await openIndex(":memory:");

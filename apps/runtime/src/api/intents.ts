@@ -28,7 +28,7 @@ import {
   serializeWorkInput,
   type WorkContractInput,
 } from "@maestro/protocol";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { IndexDb } from "../db/client";
@@ -309,6 +309,30 @@ async function decideGateVerdict(
   if (!n || n.deletedAt !== null) {
     throw new IntentRefusal("not_found", `gate ${gateId} node is gone`, 404);
   }
+  // Epoch ownership: the gate must belong to the node's CURRENT review, not a superseded one. A node leaves
+  // review only via a verdict or a rescan-revert (the BRO-1914 gap); the latter can strand an OLD session's
+  // still-pending gate while a NEWER session re-reviews the node. Refuse if any newer live session exists for
+  // the node — an old gate must never cancel the review a newer run now owns. (Filtering `deletedAt` alone —
+  // Codex round 2 — is insufficient: a superseded session stays live.) A residual check→CAS TOCTOU on the
+  // epoch is the same non-transactional class BRO-1914's coordinated writer closes.
+  const [newer] = await db
+    .select({ id: session.id })
+    .from(session)
+    .where(
+      and(
+        eq(session.nodeId, s.nodeId),
+        isNull(session.deletedAt),
+        gt(session.startedAt, s.startedAt),
+      ),
+    )
+    .limit(1);
+  if (newer) {
+    throw new IntentRefusal(
+      "invalid_intent",
+      `gate ${gateId} is superseded by a newer review session`,
+      409,
+    );
+  }
 
   // The verdict's terminal state — `resolveGateVerdict` is defined from `review` (the only decidable
   // state), so resolve against the literal `review` to get the target regardless of the node's CURRENT
@@ -512,23 +536,41 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         );
       }
       // Idempotency lease (as new_mission/kill) — a retried same-key block is a no-op 202, not a re-decide.
+      // The lease acquisition is INSIDE the typed boundary so a SQLITE_BUSY / closed-db there returns a
+      // typed intent_failed, never an untyped framework 500 (the write-surface contract, API §4).
       const bNow = Date.now();
-      const bIns = await db
-        .insert(lease)
-        .values({ key, holder: RUNTIME_HOLDER, acquiredAt: bNow, expiresAt: bNow + LEASE_TTL_MS })
-        .onConflictDoNothing({ target: lease.key });
-      if (bIns.rowsAffected === 0) {
-        const ok: IntentAccepted = { accepted: true };
-        return c.json(ok, 202);
+      try {
+        const bIns = await db
+          .insert(lease)
+          .values({ key, holder: RUNTIME_HOLDER, acquiredAt: bNow, expiresAt: bNow + LEASE_TTL_MS })
+          .onConflictDoNothing({ target: lease.key });
+        if (bIns.rowsAffected === 0) {
+          const ok: IntentAccepted = { accepted: true };
+          return c.json(ok, 202);
+        }
+      } catch (err) {
+        return refuse(
+          c,
+          new IntentRefusal(
+            "intent_failed",
+            `block lease failed: ${(err as Error).message}`,
+            500,
+            true,
+          ),
+        );
       }
-      // Decide the gate. On failure RELEASE the lease so a genuine retry re-attempts (the key guards a
-      // successful decision, not a failed one) — the completion path is idempotent, so a retry that follows
-      // a partial write repairs it rather than double-deciding. An unexpected (non-refusal) DB/FS error is
-      // mapped to a typed `intent_failed` (retryable) so the write surface never leaks an untyped 500.
+      // Decide the gate. On failure RELEASE the lease (best-effort — a failed release must not mask the real
+      // error) so a genuine retry re-attempts; the completion path is idempotent, so a retry after a partial
+      // write repairs it rather than double-deciding. An unexpected (non-refusal) DB/FS error maps to a typed
+      // `intent_failed` (retryable) so the write surface never leaks an untyped 500.
       try {
         await decideGateVerdict(db, workspace, gateId, "block", { reason: reasonRaw }, bNow);
       } catch (err) {
-        await db.delete(lease).where(eq(lease.key, key));
+        try {
+          await db.delete(lease).where(eq(lease.key, key));
+        } catch {
+          // best-effort release — the lease TTL reaps it; a failed delete must not mask the real error
+        }
         if (err instanceof IntentRefusal) return refuse(c, err);
         return refuse(
           c,
