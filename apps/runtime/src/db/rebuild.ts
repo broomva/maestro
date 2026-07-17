@@ -88,13 +88,16 @@ export async function rebuildIndex(
   if (indexPath === ":memory:") {
     throw new Error("rebuildIndex needs a file index path, not :memory:");
   }
-  // Remove the index and its libSQL WAL/SHM siblings so the reopen is a clean, empty db.
+  // Remove the index and ALL its SQLite sibling files so the reopen is a clean, empty db.
+  // bun:sqlite defaults to rollback-journal mode (`<path>-journal`); `-wal`/`-shm` only exist
+  // if WAL is ever enabled — remove all three so the rebuild is clean under any journal mode.
   await Promise.all([
     rm(indexPath, { force: true }),
+    rm(`${indexPath}-journal`, { force: true }),
     rm(`${indexPath}-wal`, { force: true }),
     rm(`${indexPath}-shm`, { force: true }),
   ]);
-  // Ensure the parent dir exists — libSQL creates the FILE, not the dir. A first-ever rebuild
+  // Ensure the parent dir exists — bun:sqlite creates the FILE, not the dir. A first-ever rebuild
   // on a workspace whose `.maestro/` does not exist yet would otherwise fail with SQLite error
   // 14 ("unable to open database file"). Mirrors the startup path in index.ts.
   await mkdir(dirname(indexPath), { recursive: true });
@@ -108,7 +111,7 @@ export async function rebuildIndex(
     };
   } catch (err) {
     // Symmetric with the index.ts startup catch: if the scan throws AFTER openIndex succeeded,
-    // close the handle before rethrowing so the failed rebuild does not leak the libSQL client/fd.
+    // close the handle before rethrowing so the failed rebuild does not leak the SQLite db/fd.
     handle.client.close();
     throw err;
   }

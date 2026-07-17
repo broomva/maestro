@@ -598,13 +598,13 @@ test("BRO-1805 slice 2a: concurrent different-key blocks decide each gate exactl
   // may not interleave). Under the fix: exactly one gate.decided + one node.updated per gate, every round.
   const ws = mkWorkspace(false);
   const dbPath = join(ws, "race.db");
-  const h1 = await openIndex(`file:${dbPath}`);
-  const h2 = await openIndex(`file:${dbPath}`);
+  const h1 = await openIndex(dbPath);
+  const h2 = await openIndex(dbPath);
   // busy_timeout so the two connections WAIT on each other's write lock instead of erroring SQLITE_BUSY
   // under parallel-suite contention — the CAS still elects the winner; this only removes the lock-contention
   // flake (the race being tested is the read/CAS interleave, not lock acquisition).
-  await h1.client.execute("PRAGMA busy_timeout = 5000");
-  await h2.client.execute("PRAGMA busy_timeout = 5000");
+  h1.client.exec("PRAGMA busy_timeout = 5000");
+  h2.client.exec("PRAGMA busy_timeout = 5000");
   const app1 = createApp(cfg(ws), Date.now(), h1.db);
   const app2 = createApp(cfg(ws), Date.now(), h2.db);
 
@@ -955,10 +955,10 @@ test("BRO-1805 slice 2b-i: under concurrent escalate + block, escalate never pha
   // gate.escalated for its session; escalate 409 ⟹ the gate was decided (node canceled), never a phantom.
   const ws = mkWorkspace(false);
   const dbPath = join(ws, "esc-race.db");
-  const h1 = await openIndex(`file:${dbPath}`);
-  const h2 = await openIndex(`file:${dbPath}`);
-  await h1.client.execute("PRAGMA busy_timeout = 5000");
-  await h2.client.execute("PRAGMA busy_timeout = 5000");
+  const h1 = await openIndex(dbPath);
+  const h2 = await openIndex(dbPath);
+  h1.client.exec("PRAGMA busy_timeout = 5000");
+  h2.client.exec("PRAGMA busy_timeout = 5000");
   const app1 = createApp(cfg(ws), Date.now(), h1.db);
   const app2 = createApp(cfg(ws), Date.now(), h2.db);
 

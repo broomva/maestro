@@ -3,7 +3,7 @@
 // FS is the system of record; the index is a derived, transactional projection
 // that never writes truth back (ARCHITECTURE §3, PATTERNS §1-2 "two-store,
 // one-way authority"). This module pins the SHAPES of the seven index tables +
-// the scan cursor — the *contract*. The drizzle-orm/libsql table definitions and
+// the scan cursor — the *contract*. The drizzle-orm/sqlite-core table definitions and
 // migrations live in apps/runtime (BRO-1796), never here: `@maestro/protocol`
 // ships to the browser bundle and must stay dependency-free, and DATA-MODEL §B is
 // explicit that "types are the contract, columns a sketch".

@@ -40,8 +40,8 @@ export interface ReconcileResult {
  * Re-scan the workspace, reconcile it into the index, and append one `node.updated` event per
  * inserted/changed LIVE node. Reuses `scanWorkspace` + `syncNodes` (which does the content diff
  * and reports `changedIds`); re-reads the upserted rows so the payload is the exact indexed
- * shape (with the assigned `updatedAt`). Not wrapped in `db.transaction()` — libsql's tx opens a
- * separate connection, so a `:memory:` db tx hits an empty database (same reason as syncNodes).
+ * shape (with the assigned `updatedAt`). Not wrapped in `db.transaction()` — atomicity is not
+ * required here (same reason as syncNodes): the reconcile writes are idempotent and single-flighted.
  */
 export async function reconcileAndEmit(
   db: IndexDb,
@@ -139,8 +139,8 @@ export interface SchedulerOptions {
  *   - DEBOUNCE: a burst of `schedule()` calls within `debounceMs` collapses to ONE reconcile.
  *   - SINGLE-FLIGHT: reconciles never overlap. A real reconcile (recursive scan + N sequential
  *     db round-trips) can outlast the debounce, and two overlapping passes would collide on the
- *     `node.id` INSERT — `syncNodes` is deliberately non-transactional (libsql `:memory:` tx
- *     opens a fresh connection), so the loser throws a UNIQUE violation, its change batch is
+ *     `node.id` INSERT — `syncNodes` is deliberately non-transactional, so the loser throws a
+ *     UNIQUE violation, its change batch is
  *     dropped, and (phase 1 already deleted the changed rows) the index silently diverges from
  *     disk. So at most one reconcile runs at a time; a `schedule()` that lands mid-pass sets a
  *     `pending` flag and the in-flight pass re-runs exactly once when it finishes (trailing-edge

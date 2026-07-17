@@ -357,7 +357,7 @@ describe("reap exit-code matrix (HARNESS §4)", () => {
     // while node/session/event/lease writes (different tables) still succeed. openGate returns undefined →
     // terminalReviewOrBlocked must park `blocked`, NOT surface a review node with no gate (gate-queue.md:
     // the four verdicts key off gateId, so a gateless review is undecidable — a stranded "Needs you").
-    await h.client.execute("DROP TABLE gate");
+    h.client.run("DROP TABLE gate");
     const { sup } = makeSupervisor(
       ws,
       h,

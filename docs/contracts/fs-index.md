@@ -2,7 +2,7 @@
 
 > **Seam BRO-1754.** A contract-writing ticket: this doc + the row-shape types in
 > `packages/protocol` are agreed and merged *before* any dependent starts. It pins the shape of
-> the control-plane index and the one rule that governs it. The drizzle-orm/libsql tables and
+> the control-plane index and the one rule that governs it. The drizzle-orm/bun-sqlite tables and
 > migrations that implement these shapes are **BRO-1796** (`p1-index-schema`), in `apps/runtime`.
 >
 > **Types:** [`packages/protocol/src/index-schema.ts`](../../packages/protocol/src/index-schema.ts)
@@ -207,11 +207,11 @@ monotonic `seq` in `compareReplay` order (§6), then advances `byteOffset`/`last
 ## 7. Decision — why row-shapes in `packages/protocol`, not drizzle
 
 The handoff left one architecture decision open: where do the index-schema types live? **Decided:
-plain-TS row-shape interfaces in `packages/protocol/src/index-schema.ts`; the `drizzle-orm/libsql`
+plain-TS row-shape interfaces in `packages/protocol/src/index-schema.ts`; the `drizzle-orm/bun-sqlite`
 table definitions + migrations are deferred to BRO-1796 in `apps/runtime`.**
 
 - `@maestro/protocol` is imported by **both** `apps/runtime` (Bun) and `apps/app` (the browser Vite
-  SPA) and is dependency-free by design (PATTERNS §10). `drizzle-orm/libsql` is a server/node dep — it
+  SPA) and is dependency-free by design (PATTERNS §10). `drizzle-orm/bun-sqlite` is a server/node dep — it
   must never reach the browser bundle. Row *shapes* are pure TS and ship anywhere.
 - DATA-MODEL §B is explicit: **"types are the contract, columns a sketch."** The contract is the shape;
   the ORM binding is an implementation detail BRO-1796 owns.
@@ -220,7 +220,7 @@ table definitions + migrations are deferred to BRO-1796 in `apps/runtime`.**
 
 ## 8. Out of scope (adjacent seams own these)
 
-- **`drizzle-orm/libsql` tables + migrations** → BRO-1796 (`p1-index-schema`).
+- **`drizzle-orm/bun-sqlite` tables + migrations** → BRO-1796 (`p1-index-schema`).
 - **The board / gate attention comparator (D-ORDER)** → seam-gate-queue (BRO-1789). This doc *cites*
   D-ORDER (`review, blocked, running, triggered, reviewing, proposed, done, canceled`) but does not
   define the comparator, to avoid a double definition across parallel seams.

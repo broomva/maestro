@@ -9,14 +9,28 @@
 //  2. RUNTIME: applying to a fresh db creates every table and stamps
 //     `user_version`; a re-apply is a no-op (restart idempotency without a folder).
 
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createClient } from "@libsql/client";
 import { INDEX_TABLES } from "@maestro/protocol";
 import { applyEmbeddedMigrations, EMBEDDED_MIGRATIONS } from "./embedded-migrations";
 import journal from "./migrations/meta/_journal.json" with { type: "json" };
+
+/** Table names in the db, sorted — the `bun:sqlite` read the assertions share. */
+function tableNames(db: Database): Set<string> {
+  const rows = db
+    .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    .all() as { name: string }[];
+  return new Set(rows.map((r) => r.name));
+}
+
+/** The stored `PRAGMA user_version` (0 on a fresh db). */
+function userVersion(db: Database): number {
+  const row = db.query("PRAGMA user_version").get() as { user_version: number } | null;
+  return row ? Number(row.user_version) : 0;
+}
 
 describe("embedded migrations — the journal seam", () => {
   test("the embedded list matches the drizzle journal tag-for-tag, in order", () => {
@@ -35,32 +49,28 @@ describe("embedded migrations — the journal seam", () => {
 });
 
 describe("applyEmbeddedMigrations — apply + idempotency", () => {
-  test("a fresh db gains every index table and a stamped user_version", async () => {
-    const client = createClient({ url: ":memory:" });
+  test("a fresh db gains every index table and a stamped user_version", () => {
+    const db = new Database(":memory:");
     try {
-      const applied = await applyEmbeddedMigrations(client);
+      const applied = applyEmbeddedMigrations(db);
       expect(applied).toBe(EMBEDDED_MIGRATIONS.length);
 
-      const tables = await client.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-      );
-      const names = new Set(tables.rows.map((r) => String(r.name)));
+      const names = tableNames(db);
       // The physical `scan_cursor` table is not in the protocol IndexTable enum;
       // assert the seven contract tables all exist.
       for (const t of INDEX_TABLES) expect(names.has(t)).toBe(true);
       expect(names.has("scan_cursor")).toBe(true);
 
-      const uv = await client.execute("PRAGMA user_version");
-      expect(Number(uv.rows[0]?.user_version)).toBe(EMBEDDED_MIGRATIONS.length);
+      expect(userVersion(db)).toBe(EMBEDDED_MIGRATIONS.length);
     } finally {
-      client.close();
+      db.close();
     }
   });
 
-  test("self-heals a crash-interrupted partial apply (some tables, user_version still 0)", async () => {
+  test("self-heals a crash-interrupted partial apply (some tables, user_version still 0)", () => {
     // Simulate a first apply that created SOME tables then crashed before the version
     // stamp: run only the first statements of migration 0000, leaving user_version 0.
-    const client = createClient({ url: ":memory:" });
+    const db = new Database(":memory:");
     const m0 = EMBEDDED_MIGRATIONS[0];
     if (!m0) throw new Error("expected at least one embedded migration");
     try {
@@ -69,40 +79,34 @@ describe("applyEmbeddedMigrations — apply + idempotency", () => {
         .map((s) => s.trim())
         .filter((s) => s.length > 0)
         .slice(0, 3);
-      for (const stmt of firstThree) await client.execute(stmt);
-      const uvBefore = await client.execute("PRAGMA user_version");
-      expect(Number(uvBefore.rows[0]?.user_version)).toBe(0); // partial, unstamped
+      for (const stmt of firstThree) db.run(stmt);
+      expect(userVersion(db)).toBe(0); // partial, unstamped
 
       // Recovery: applyEmbeddedMigrations must create the MISSING tables (skipping the
       // present ones), not wedge on "table already exists".
-      const applied = await applyEmbeddedMigrations(client);
+      const applied = applyEmbeddedMigrations(db);
       expect(applied).toBe(EMBEDDED_MIGRATIONS.length);
 
-      const tables = await client.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-      );
-      const names = new Set(tables.rows.map((r) => String(r.name)));
+      const names = tableNames(db);
       for (const t of INDEX_TABLES) expect(names.has(t)).toBe(true);
-      expect(Number((await client.execute("PRAGMA user_version")).rows[0]?.user_version)).toBe(
-        EMBEDDED_MIGRATIONS.length,
-      );
+      expect(userVersion(db)).toBe(EMBEDDED_MIGRATIONS.length);
     } finally {
-      client.close();
+      db.close();
     }
   });
 
-  test("re-applying to an already-migrated file is a no-op (no 'table exists' throw)", async () => {
+  test("re-applying to an already-migrated file is a no-op (no 'table exists' throw)", () => {
     // A FILE db (not :memory:, which mints a fresh db per connection) proves the
     // user_version stamp persists across a reconnect — the 24/7 restart path.
     const dir = mkdtempSync(join(tmpdir(), "maestro-embed-"));
-    const url = `file:${join(dir, "index.db")}`;
+    const path = join(dir, "index.db");
     try {
-      const first = createClient({ url });
-      expect(await applyEmbeddedMigrations(first)).toBe(EMBEDDED_MIGRATIONS.length);
+      const first = new Database(path);
+      expect(applyEmbeddedMigrations(first)).toBe(EMBEDDED_MIGRATIONS.length);
       first.close();
 
-      const second = createClient({ url });
-      expect(await applyEmbeddedMigrations(second)).toBe(0); // already at user_version
+      const second = new Database(path);
+      expect(applyEmbeddedMigrations(second)).toBe(0); // already at user_version
       second.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

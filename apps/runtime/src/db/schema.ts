@@ -1,9 +1,9 @@
-// The control-plane index — drizzle-orm/libsql table definitions (BRO-1796).
+// The control-plane index — drizzle-orm/sqlite-core table definitions (BRO-1796).
 //
 // This is the ORM binding of the row-shape contract in
 // `@maestro/protocol/src/index-schema.ts`. The contract lives in the protocol
 // package (it ships to the browser bundle and must stay dependency-free);
-// drizzle-orm/libsql is a server dep, so the physical tables live HERE, in the
+// the drizzle-orm ORM binding is a server dep, so the physical tables live HERE, in the
 // runtime, and never reach the client (fs-index.md §7). The `$inferSelect` of
 // every table is asserted structurally equal to its protocol row shape in
 // schema.test.ts — that assertion is the seam: change a column and the contract
