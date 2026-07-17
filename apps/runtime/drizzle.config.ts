@@ -2,12 +2,12 @@
 //
 // `generate` runs offline (no DB connection): it diffs src/db/schema.ts against
 // the last snapshot and emits SQLite DDL into src/db/migrations/. The runtime
-// applies that folder with drizzle-orm/libsql's migrator (src/db/client.ts).
+// applies that folder via the compiled-safe embedded migrator (src/db/embedded-migrations.ts).
 //
-// dialect: "sqlite" — libSQL is a SQLite fork, so the emitted DDL runs verbatim
-// on the embedded libSQL file. The migration journal format is dialect-agnostic,
-// so the libsql migrator consumes a sqlite-generated folder unchanged (fs-index
-// §7: "types are the contract, the ORM binding is an implementation detail").
+// dialect: "sqlite" — the index driver is `bun:sqlite` (drizzle-orm/bun-sqlite,
+// BRO-1841), so the emitted SQLite DDL runs verbatim on the embedded file. The
+// migration journal format is dialect-agnostic (fs-index §7: "types are the
+// contract, the ORM binding is an implementation detail").
 //
 // Regenerate after any schema.ts change:  bun run --filter @maestro/runtime db:generate
 

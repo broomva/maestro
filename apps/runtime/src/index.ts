@@ -8,14 +8,15 @@
 // `node` table (FLOWS §F9 step 1 — populated BEFORE the read API opens), then serves
 // the API §1 reads. The wire contract is imported from @maestro/protocol (PATTERNS §10).
 //
-// COMPILED-BINARY CAVEAT (BRO-1841 follow-up): the libSQL driver is a native addon
-// (`@libsql/<platform>`) that `bun build --compile` cannot embed in the single
-// binary — a STATIC import of ./db/client would crash the binary at load, before any
-// handler runs. So the index is opened behind a DYNAMIC import inside a try/catch:
-//   - dev / `bun run` (native addon present in node_modules) → index opens, reads served;
-//   - the compiled binary (addon unresolved) → the open throws, is caught, and the
-//     runtime degrades to a /health-only stub with a warning, never crashing.
-// Resolving the native-driver story (bun:sqlite swap, or shipping the addon) is BRO-1841.
+// COMPILED-BINARY OPEN (BRO-1841, RESOLVED): the index driver is now `bun:sqlite`
+// (drizzle-orm/bun-sqlite, db/client.ts) — compiled INTO the Bun runtime, so it embeds
+// cleanly in `bun build --compile`. The single-binary self-host opens the index and
+// serves reads (`/api/tree`), which the prior `@libsql/client` native addon could not.
+// The open stays behind a DYNAMIC import inside a try/catch as DEFENSE-IN-DEPTH: a
+// genuinely unopenable index (corrupt file, failed migration, locked/permission-denied
+// path) is caught and the runtime degrades to a /health-only stub with a warning, never
+// crashing — P0-exit liveness holds even when reads cannot. (Pre-1841 this guard also
+// caught the native-addon load failure; that failure mode is now gone.)
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";

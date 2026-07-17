@@ -1236,14 +1236,15 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     if (!row || row.deletedAt !== null) return { dispatched: false, reason: "node_not_found" };
 
     // 2. Lease the node id — free-before-claim via an atomic insert-or-conflict on the PK. Held →
-    //    someone else is dispatching this node → drop silently (idempotency, NOT an error). No
-    //    db.transaction() (libSQL :memory: opens a separate connection — a tx there hits an empty db).
+    //    someone else is dispatching this node → drop silently (idempotency, NOT an error). The
+    //    atomic insert-or-conflict needs no db.transaction() — the CAS is inherently atomic.
     const at = now();
     const ins = await db
       .insert(lease)
       .values({ key: nodeId, holder, acquiredAt: at, expiresAt: at + DISPATCH_LEASE_TTL_MS })
-      .onConflictDoNothing({ target: lease.key });
-    if (ins.rowsAffected === 0) return { dispatched: false, reason: "lease_held" };
+      .onConflictDoNothing({ target: lease.key })
+      .returning({ key: lease.key });
+    if (ins.length === 0) return { dispatched: false, reason: "lease_held" };
 
     // 3. Mint the run id + reconstruct the contract/budget.
     const runId = mintRunId();

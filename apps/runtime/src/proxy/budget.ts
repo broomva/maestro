@@ -160,8 +160,9 @@ export class BudgetGuard {
           iterations: sql`${runBudget.iterations} + 1`,
           lastCallAt: this.#now(),
         })
-        .where(and(...conds));
-      rowsAffected = res.rowsAffected;
+        .where(and(...conds))
+        .returning({ sessionId: runBudget.sessionId });
+      rowsAffected = res.length;
     } catch (err) {
       this.#releaseDayReservation(reserve); // never strand a day reservation on a DB error
       throw err;

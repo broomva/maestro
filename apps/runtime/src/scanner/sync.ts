@@ -81,9 +81,7 @@ export interface SyncOptions {
  * The reconciliation is idempotent — an unchanged re-scan writes NOTHING, so
  * `updatedAt` (the team-tier LWW clock, fs-index.md §4) is never churned.
  *
- * NOT wrapped in `db.transaction()`: libsql's transaction API opens a separate
- * connection, and a `:memory:` db is per-connection, so a tx there hits an empty
- * database. Atomicity is not required — F9 step 4 opens the API only AFTER reconcile
+ * NOT wrapped in `db.transaction()`: atomicity is not required — F9 step 4 opens the API only AFTER reconcile
  * completes (no reader sees a partial index), and because phase 2 never collides the
  * reconcile cannot wedge; a crash mid-reconcile leaves a subset written that the next
  * idempotent scan completes (fs-index.md "cache with teeth").

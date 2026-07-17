@@ -419,8 +419,9 @@ async function decideGateVerdict(
     const won = await db
       .update(gate)
       .set({ verdict, decidedBy: "human", decidedAt: now, updatedAt: now })
-      .where(and(eq(gate.id, gateId), isNull(gate.verdict), isNull(gate.deletedAt)));
-    if (won.rowsAffected === 1) {
+      .where(and(eq(gate.id, gateId), isNull(gate.verdict), isNull(gate.deletedAt)))
+      .returning({ id: gate.id });
+    if (won.length === 1) {
       await journalGateDecided(db, workspace, g, verdict, extra, now);
     } else {
       const [after] = await db.select().from(gate).where(eq(gate.id, gateId));
@@ -442,8 +443,9 @@ async function decideGateVerdict(
     const moved = await db
       .update(node)
       .set({ state: target, updatedAt: now })
-      .where(and(eq(node.id, n.id), eq(node.state, "review")));
-    if (moved.rowsAffected === 1) await emitNodeUpdated(db, n.id, now);
+      .where(and(eq(node.id, n.id), eq(node.state, "review")))
+      .returning({ id: node.id });
+    if (moved.length === 1) await emitNodeUpdated(db, n.id, now);
     // Coordinated durable write (BRO-1914): persist the terminal state to `_work.md` so the FS-authoritative
     // reconcile can't revert the decided node back to `review` (a stranded gate). Called unconditionally (not
     // gated on `moved`) because `persistNodeState` is idempotent — a same-verdict retry after a partial write
@@ -563,8 +565,9 @@ async function escalateGate(
     .set({ owner: to, updatedAt: now })
     .where(
       and(eq(node.id, n.id), eq(node.state, "review"), or(isNull(node.owner), ne(node.owner, to))),
-    );
-  if (changed.rowsAffected === 1) {
+    )
+    .returning({ id: node.id });
+  if (changed.length === 1) {
     await journalGateEscalated(db, workspace, g, to, now);
     await emitNodeUpdated(db, n.id, now);
     // Coordinated durable write (BRO-1914): escalate keeps the node at `review` but reassigns `owner`, and
@@ -642,8 +645,9 @@ async function completeApprove(
   const moved = await db
     .update(node)
     .set({ state: "done", updatedAt: now })
-    .where(and(eq(node.id, n.id), eq(node.state, "review")));
-  if (moved.rowsAffected === 1) await emitNodeUpdated(db, n.id, now);
+    .where(and(eq(node.id, n.id), eq(node.state, "review")))
+    .returning({ id: node.id });
+  if (moved.length === 1) await emitNodeUpdated(db, n.id, now);
   await persistGateAdvance(workspace, n.path, { state: "done" }, "gate approve");
 }
 
@@ -762,8 +766,9 @@ async function approveGate(
   const claimed = await db
     .update(gate)
     .set({ verdict: "approve", decidedBy: "human", decidedAt: now, updatedAt: now })
-    .where(and(eq(gate.id, gateId), isNull(gate.verdict), isNull(gate.deletedAt)));
-  if (claimed.rowsAffected !== 1) {
+    .where(and(eq(gate.id, gateId), isNull(gate.verdict), isNull(gate.deletedAt)))
+    .returning({ id: gate.id });
+  if (claimed.length !== 1) {
     const [after] = await db.select().from(gate).where(eq(gate.id, gateId));
     if (after?.verdict === "approve") {
       // A concurrent approve won the claim and owns the merge outcome. Re-read the node fresh (the winner may
@@ -883,8 +888,9 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
           acquiredAt: killNow,
           expiresAt: killNow + LEASE_TTL_MS,
         })
-        .onConflictDoNothing({ target: lease.key });
-      if (killIns.rowsAffected === 0) {
+        .onConflictDoNothing({ target: lease.key })
+        .returning({ key: lease.key });
+      if (killIns.length === 0) {
         const ok: IntentAccepted = { accepted: true };
         return c.json(ok, 202);
       }
@@ -940,8 +946,9 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         const bIns = await db
           .insert(lease)
           .values({ key, holder: RUNTIME_HOLDER, acquiredAt: bNow, expiresAt: bNow + LEASE_TTL_MS })
-          .onConflictDoNothing({ target: lease.key });
-        if (bIns.rowsAffected === 0) {
+          .onConflictDoNothing({ target: lease.key })
+          .returning({ key: lease.key });
+        if (bIns.length === 0) {
           const ok: IntentAccepted = { accepted: true };
           return c.json(ok, 202);
         }
@@ -1003,8 +1010,9 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         const rIns = await db
           .insert(lease)
           .values({ key, holder: RUNTIME_HOLDER, acquiredAt: rNow, expiresAt: rNow + LEASE_TTL_MS })
-          .onConflictDoNothing({ target: lease.key });
-        if (rIns.rowsAffected === 0) {
+          .onConflictDoNothing({ target: lease.key })
+          .returning({ key: lease.key });
+        if (rIns.length === 0) {
           const ok: IntentAccepted = { accepted: true };
           return c.json(ok, 202);
         }
@@ -1061,8 +1069,9 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         const eIns = await db
           .insert(lease)
           .values({ key, holder: RUNTIME_HOLDER, acquiredAt: eNow, expiresAt: eNow + LEASE_TTL_MS })
-          .onConflictDoNothing({ target: lease.key });
-        if (eIns.rowsAffected === 0) {
+          .onConflictDoNothing({ target: lease.key })
+          .returning({ key: lease.key });
+        if (eIns.length === 0) {
           const ok: IntentAccepted = { accepted: true };
           return c.json(ok, 202);
         }
@@ -1117,8 +1126,9 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
         const aIns = await db
           .insert(lease)
           .values({ key, holder: RUNTIME_HOLDER, acquiredAt: aNow, expiresAt: aNow + LEASE_TTL_MS })
-          .onConflictDoNothing({ target: lease.key });
-        if (aIns.rowsAffected === 0) {
+          .onConflictDoNothing({ target: lease.key })
+          .returning({ key: lease.key });
+        if (aIns.length === 0) {
           const ok: IntentAccepted = { accepted: true };
           return c.json(ok, 202);
         }
@@ -1180,8 +1190,9 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
     const ins = await db
       .insert(lease)
       .values({ key, holder: RUNTIME_HOLDER, acquiredAt: now, expiresAt: now + LEASE_TTL_MS })
-      .onConflictDoNothing({ target: lease.key });
-    if (ins.rowsAffected === 0) {
+      .onConflictDoNothing({ target: lease.key })
+      .returning({ key: lease.key });
+    if (ins.length === 0) {
       const ok: IntentAccepted = { accepted: true };
       return c.json(ok, 202);
     }

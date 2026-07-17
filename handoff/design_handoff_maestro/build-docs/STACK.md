@@ -7,7 +7,7 @@ The concrete tool choices for the `ARCHITECTURE.md` topology, and the reasoning.
 | Tier | Choice |
 |---|---|
 | Runtime | **Bun + TypeScript + Hono**, compiled to a single binary (`bun build --compile`) |
-| Runtime index | **libSQL embedded** (local file) via `drizzle-orm/libsql` — SQLite-class, Turso-compatible later (see `DATA-MODEL.md` Part B) |
+| Runtime index | **`bun:sqlite` embedded** (local file) via `drizzle-orm/bun-sqlite` — compiles INTO the single binary. **Decision (BRO-1841):** libSQL/`@libsql/client` was the original choice (Turso-swap story), but its native addon (`@libsql/<platform>.node`) cannot embed in `bun build --compile`, so the compiled self-host crashed opening the index. The single-binary self-host is the day-one deliverable, so the driver swapped to `bun:sqlite` (compiled into Bun). Turso-cloud adoption stays a driver swap for a later team tier — the schema is driver-agnostic `drizzle-orm/sqlite-core` and the `$inferSelect ≡ protocol` seam is unchanged (see `DATA-MODEL.md` Part B) |
 | Agent loop (Loop 1) | Claude Agent SDK, spawned as a child process per run |
 | Verifier (Loop 2) | Separate child process — writer ≠ judge is a process boundary |
 | Relay | Small Hono service (Fly.io or similar); auth via Clerk (WorkOS if teams/SSO arrive early) |

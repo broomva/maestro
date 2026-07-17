@@ -1,7 +1,7 @@
 // Compiled-safe schema application (BRO-1812).
 //
 // `bun build --compile` produces a single binary that carries NO on-disk
-// migrations/ folder, so drizzle-orm/libsql's folder migrator
+// migrations/ folder, so drizzle-orm's folder migrator
 // (`migrate(db, { migrationsFolder })`) cannot run inside the shipped supervisor —
 // it would throw "migrations folder not found" the moment the runtime opened the
 // index. Instead we STATICALLY text-import each generated migration `.sql` — Bun
@@ -15,7 +15,7 @@
 // exists" is the right semantics, not multi-environment migration history —
 // `user_version` is exactly that, embedded in the SQLite file itself.
 
-import type { Client } from "@libsql/client";
+import type { Database } from "bun:sqlite";
 import migration0000 from "./migrations/0000_shallow_cassandra_nova.sql" with { type: "text" };
 
 /** One embedded migration — its journal tag plus the raw DDL text. */
@@ -56,13 +56,13 @@ function isAlreadyExists(err: unknown): boolean {
  * leaves a PARTIAL schema at version 0. Re-running the whole script per-statement then
  * re-creates only the MISSING objects and skips the present ones — the derived index
  * heals on the next open instead of wedging on a "table already exists" (the failure
- * `executeMultiple` in one shot would produce, aborting the whole script on the first
+ * a one-shot `db.exec(sql)` would produce, aborting the whole script on the first
  * present table and leaving the rest uncreated forever).
  */
-async function applyMigrationStatements(client: Client, sql: string): Promise<void> {
+function applyMigrationStatements(db: Database, sql: string): void {
   for (const stmt of splitStatements(sql)) {
     try {
-      await client.execute(stmt);
+      db.run(stmt);
     } catch (err) {
       if (!isAlreadyExists(err)) throw err;
     }
@@ -70,27 +70,26 @@ async function applyMigrationStatements(client: Client, sql: string): Promise<vo
 }
 
 /**
- * Bring a libSQL database up to the embedded schema, idempotently. Reads
+ * Bring a SQLite database up to the embedded schema, idempotently. Reads
  * `PRAGMA user_version` (0 on a fresh db), applies every migration at or beyond the
  * stored version (see {@link applyMigrationStatements} — per-statement, already-exists-
  * tolerant, so a crash-interrupted first apply self-heals), then stamps `user_version`
  * to the migration count. A reopen finds `user_version` already at the count and applies
  * nothing — so a restarted 24/7 supervisor never re-runs `CREATE TABLE` needlessly.
- * Returns how many migrations it applied.
+ * Returns how many migrations it applied. (Synchronous — `bun:sqlite` is a sync driver.)
  */
-export async function applyEmbeddedMigrations(client: Client): Promise<number> {
-  const res = await client.execute("PRAGMA user_version");
-  const row = res.rows[0];
+export function applyEmbeddedMigrations(db: Database): number {
+  const row = db.query("PRAGMA user_version").get() as { user_version: number } | null;
   const current = row ? Number(row.user_version) : 0;
   let applied = 0;
   for (const migration of EMBEDDED_MIGRATIONS.slice(current)) {
-    await applyMigrationStatements(client, migration.sql);
+    applyMigrationStatements(db, migration.sql);
     applied++;
   }
   if (applied > 0) {
     // PRAGMA cannot bind a parameter; the stamp is an integer literal we control
     // (the migration count), never user input — no injection surface.
-    await client.execute(`PRAGMA user_version = ${EMBEDDED_MIGRATIONS.length}`);
+    db.run(`PRAGMA user_version = ${EMBEDDED_MIGRATIONS.length}`);
   }
   return applied;
 }
