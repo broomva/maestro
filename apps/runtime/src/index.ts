@@ -32,6 +32,7 @@ import type { DispatchRuntime } from "./dispatch";
 import type { RuntimeLock } from "./runtime-lock";
 // Type-only — erased at compile time, so the compiled /health-only stub never references
 // the watcher module (which is dynamically imported below, native-addon-safe).
+import type { SchedulerHandle } from "./scheduler/scheduler";
 import type { WatcherHandle } from "./watcher";
 
 const config = loadConfig();
@@ -46,6 +47,7 @@ const rebuildMode = import.meta.main && Bun.argv.includes("--rebuild");
 let index: IndexDb | undefined;
 let handle: IndexHandle | undefined;
 let watcher: WatcherHandle | undefined;
+let scheduler: SchedulerHandle | undefined;
 let indexNodes = 0;
 let scanErrorCount = 0;
 if (!rebuildMode) {
@@ -166,6 +168,7 @@ if (import.meta.main) {
         console.error(`maestro runtime · refusing to start: ${err.message}`);
         handle?.client.close();
         watcher?.stop();
+        scheduler?.stop();
         process.exit(1);
       }
       throw err;
@@ -223,6 +226,21 @@ if (import.meta.main) {
     );
   }
 
+  // F7 (BRO-1749): start the trigger scheduler once the index is live + recovery has run. It fires
+  // due schedules FROM THE INDEX (not from ticks — ORCHESTRATOR §7) and emits `schedule.fired`; the F6
+  // tick (BRO-1772) consumes those to dispatch. Its own dynamic import + try (the /health-only stub
+  // never loads it) — a scheduler-start failure must not cost the read API.
+  if (index) {
+    try {
+      const { startScheduler } = await import("./scheduler/scheduler");
+      scheduler = startScheduler(index);
+    } catch (schedErr) {
+      console.warn(
+        `maestro runtime · scheduler unavailable, reads stay up (no triggers fire): ${(schedErr as Error).message}`,
+      );
+    }
+  }
+
   const server = Bun.serve({ port: config.port, fetch: app.fetch });
   const indexStatus = index
     ? `index ${indexNodes} nodes${scanErrorCount ? ` (${scanErrorCount} scan errors)` : ""}`
@@ -241,6 +259,7 @@ if (import.meta.main) {
     void lock?.release(); // best-effort — a stale lock is stealable anyway; don't block exit on the unlink
     dispatch?.shutdown(); // SIGKILL live runs + stop the proxy server (BRO-1822)
     watcher?.stop();
+    scheduler?.stop();
     handle?.client.close();
     server.stop();
     process.exit(code);
