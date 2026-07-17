@@ -420,6 +420,33 @@ describe("store: connectStream", () => {
     expect(es?.closed).toBe(true);
   });
 
+  test("hydrate carries /api/tree sessions + gates into the store → cards derive run + gateId (BRO-1941)", async () => {
+    const store = createMaestroStore({ storage: inspectableStorage(), name: "cs-spine" });
+    // The tree read now returns the full live work state, not just nodes: a review
+    // node + its session (the run branch) + its OPEN gate. Before BRO-1941 the client
+    // passed only `body.nodes` to hydrate, so these stayed undefined — a runless card
+    // with dead gate verbs even against a live runtime.
+    const tree = {
+      nodes: [node({ id: "rev", path: "rev", state: "review" })],
+      sessions: [session({ id: "s1", nodeId: "rev", branch: "run/ab12" })],
+      gates: [gate({ id: "g1", sessionId: "s1" })],
+    };
+    const fetchImpl = (async () => ({
+      ok: true,
+      json: async () => tree,
+    })) as unknown as typeof fetch;
+    connectStream(store, { fetchImpl, eventSourceFactory: (url) => new FakeES(url) });
+    // Let the hydrate promise chain settle.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The session join lights up off the hydrated rows: run branch + session id + the
+    // open gate (surfaced at review) all derive — the whole point of the slice.
+    const item = selectWorkItem(store.getState().server, "rev");
+    expect(item?.run).toBe("run/ab12");
+    expect(item?.sessionId).toBe("s1");
+    expect(item?.gateId).toBe("g1");
+  });
+
   test("a non-ok /api/tree reports onError and skips hydration but still subscribes", async () => {
     const store = createMaestroStore({ storage: inspectableStorage(), name: "cs2" });
     const fetchImpl = (async () => ({

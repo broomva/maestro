@@ -411,13 +411,15 @@ const HISTORY_RUN_STATES: ReadonlySet<OrchState> = new Set<OrchState>([
  * The History page's session list (BRO-1893 FID-6, `MccHistory`) — "your runs and the loop's". A
  * session is a projection OF work (contract §the-session-is-the-verb), so History is the run history of
  * the work: every LEAF that has entered a run state becomes a row, showing that work's real receipts
- * (state, agent, folder, and — once the session read path lands — its run branch), most-recent first.
+ * (state, agent, folder, and its run branch — the session join now hydrates at load, BRO-1941),
+ * most-recent first.
  *
- * DERIVED FROM WORK STATE, not the session-row map: the client store has no session read path yet
- * (`/api/tree` hydrates nodes only; no SSE event creates a `session` row — reducer.ts), so a
- * `sessionId`-keyed history would be permanently empty. Work state IS hydrated and real, captures BOTH
- * you-started and loop-started runs (the tick/wake log is only a subset — scheduled fires), and stays
- * forward-compatible: `run` / the deep per-run detail (duration, event count, transcript, lineage) fill
+ * DERIVED FROM WORK STATE, not the session-row map — by design. `/api/tree` now hydrates the session +
+ * gate rows at load (BRO-1941), so the run branch joins in; but the reducer still creates no `session`
+ * row from an SSE event (reducer.ts — deferred to the live new-session path), so a `sessionId`-keyed
+ * history would miss any run that starts after load until a reload. Work state IS hydrated and live,
+ * captures BOTH you-started and loop-started runs (the tick/wake log is only a subset — scheduled fires),
+ * and stays forward-compatible: the deep per-run detail (duration, event count, transcript, lineage) fills
  * in behind the same rows when the session-history read path arrives. Container nodes (initiative /
  * project) and never-run backlog (proposed / reviewing / triggered / canceled) are excluded — not runs.
  */

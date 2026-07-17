@@ -89,10 +89,32 @@ export function registerReadRoutes(app: Hono, deps: ReadDeps): void {
     c.header(X_MAESTRO_PROTOCOL, String(MAESTRO_PROTOCOL_VERSION));
   });
 
-  // GET /api/tree — the work tree: live nodes, path-sorted (parent before child).
+  // GET /api/tree — the full live work state: nodes (path-sorted, parent before
+  // child) PLUS every live session + gate across the tree. The client's node→session
+  // join derives each card's run branch / open gate / session id at load from these
+  // (BRO-1941); omitting them leaves cards runless and the gate verbs dead. Gates join
+  // to sessions via `gate.sessionId` (a node has no direct gate column) — mirrors the
+  // per-node `/api/node/:id` query, unscoped (all sessions, not one node's).
   app.get("/api/tree", async (c) => {
     const rows = await db.select().from(node).where(isNull(node.deletedAt)).orderBy(asc(node.path));
-    const body: TreeResponse = { nodes: rows.map(live) };
+    const sessions = await db
+      .select()
+      .from(session)
+      .where(isNull(session.deletedAt))
+      .orderBy(desc(session.startedAt));
+    const sessionIds = sessions.map((s) => s.id);
+    const gates = sessionIds.length
+      ? await db
+          .select()
+          .from(gate)
+          .where(and(inArray(gate.sessionId, sessionIds), isNull(gate.deletedAt)))
+          .orderBy(desc(gate.openedAt))
+      : [];
+    const body: TreeResponse = {
+      nodes: rows.map(live),
+      sessions: sessions.map(live),
+      gates: gates.map(live),
+    };
     return c.json(body);
   });
 

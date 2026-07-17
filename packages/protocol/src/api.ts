@@ -46,12 +46,26 @@ export type LiveSchedule = Omit<ScheduleRow, "deletedAt">;
 // ── GET /api/tree — the work tree (live node rows; nesting via `parentId`) ─────
 
 /**
- * The work tree. A FLAT array of live nodes, sorted by `path` (a parent always
- * precedes its children, so a client folds the tree from `parentId` in one pass).
- * The board and the tree both derive from this same live-node set.
+ * The full live work state — what a client hydrates once at load (`clients hydrate
+ * once, then live off the stream`).
+ *
+ * `nodes` is a FLAT array of live nodes, sorted by `path` (a parent always precedes
+ * its children, so a client folds the tree from `parentId` in one pass); the board
+ * and the tree both derive from this set.
+ *
+ * `sessions` + `gates` are every live session/gate ACROSS the tree — carried here so
+ * the client's node→session join derives each card's run branch, open gate, and
+ * session id at LOAD, in the single hydrate fetch. Without them the join is empty:
+ * cards render runless and the gate verbs are dead (no `gateId`) even against a live
+ * runtime (BRO-1941). The per-node `/api/node/:id` (`NodeDetail`) carries the same
+ * rows scoped to one node; the tree carries all of them. Gates join to sessions via
+ * `gate.sessionId` (a node has no direct gate column). Clients key both by id, so no
+ * ordering is promised here.
  */
 export interface TreeResponse {
   nodes: LiveNode[];
+  sessions: LiveSession[];
+  gates: LiveGate[];
 }
 
 // ── GET /api/node/:id — one node: its row + its sessions + its gates ───────────
