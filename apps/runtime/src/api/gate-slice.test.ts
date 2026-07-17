@@ -3,14 +3,13 @@
 // (`bun test apps/runtime --filter gate`).
 //
 // The done.check also names `playwright test gate-slice.spec` (a browser E2E). A faithful all-four-
-// verdicts BROWSER path is disproportionate to this slice, for two structural reasons this test
-// documents rather than fights:
-//   1. The SPA's gate-queue learns a gate's id ONLY from a live SSE `gate.opened` — the boot hydration
-//      fetches `/api/tree` (nodes-only) and no view polls `/api/node/:id` for gates (store/stream.ts,
-//      store/project.ts §gateId). A hand-seeded gate therefore never surfaces a gateId to drive a verb.
-//   2. approve needs a run that produced a REAL mergeable diff + a passing `verdict.md`; the mock model
-//      (the only dispatch mode with no upstream) produces neither. So the browser approve path would need
-//      new mock-dispatch-to-gate + mergeable-mock infrastructure — out of proportion to the gate slice.
+// verdicts BROWSER path is disproportionate to this slice, for a structural reason this test documents
+// rather than fights: approve needs a run that produced a REAL mergeable diff + a passing `verdict.md`,
+// and the mock model (the only dispatch mode with no upstream) produces neither. So the browser approve
+// path would need new mock-dispatch-to-gate + mergeable-mock infrastructure — out of proportion to the
+// gate slice. (A prior second reason no longer holds: the SPA used to learn a gate id only from a live
+// SSE `gate.opened`, since boot hydration fetched `/api/tree` nodes-only — BRO-1941 now hydrates sessions
+// + gates at load, so a hand-seeded gate on a live session surfaces its `gateId` at boot.)
 //
 // This runtime integration test stands in for the browser spec (the loop directive's escape hatch) and
 // adds what no per-verdict unit test covers: the WHOLE gate-slice narrative through the LIVE read + write

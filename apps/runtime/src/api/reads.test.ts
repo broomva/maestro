@@ -197,6 +197,34 @@ describe("read routes — seeded index", () => {
       deletedAt: null,
     });
 
+    // Tombstones — a deleted session (on `blk`) + a deleted gate (on the LIVE `s-rev`).
+    // They must NEVER cross the wire: the tree's live-only filter (BRO-1941) excludes
+    // both, and node/:id keeps `blk` empty + rev's gates = [g1] (isNull(deletedAt)).
+    // Without these, the tree's "live-only" claim would be a vacuous pass.
+    await h.db.insert(session).values({
+      id: "s-ghost",
+      nodeId: "blk",
+      branch: "run/s-ghost",
+      status: "done",
+      startedAt: 500,
+      endedAt: 550,
+      diffstatJson: null,
+      updatedAt: 500,
+      deletedAt: 9999,
+    });
+    await h.db.insert(gate).values({
+      id: "g-ghost",
+      sessionId: "s-rev",
+      kind: "completion",
+      proposalJson: null,
+      verdict: null,
+      decidedBy: null,
+      openedAt: 210,
+      decidedAt: null,
+      updatedAt: 210,
+      deletedAt: 9999,
+    });
+
     // Schedules — one enabled routine (the bench), one disabled (excluded).
     await h.db.insert(schedule).values([
       {
@@ -224,7 +252,7 @@ describe("read routes — seeded index", () => {
 
   afterEach(() => h.client.close());
 
-  test("GET /api/tree returns live nodes, path-sorted, with no deletedAt on the wire", async () => {
+  test("GET /api/tree returns the full live work state — nodes + sessions + gates, live-only", async () => {
     const res = await h.app.request("/api/tree");
     expect(res.status).toBe(200);
     const body = (await res.json()) as TreeResponse;
@@ -240,6 +268,21 @@ describe("read routes — seeded index", () => {
     // Path-sorted: "" (root) first, then lexicographic.
     expect(body.nodes.map((n) => n.path)).toEqual(["", "blk", "done1", "prop", "rev", "run"]);
     expect(body.nodes[0]).not.toHaveProperty("deletedAt");
+
+    // Every live session across the tree (BRO-1941) — the node→session join source that
+    // lets a card derive its run branch + session id at load. `s-ghost` is tombstoned →
+    // excluded (live-only, not vacuous — the seed has a deleted session to filter out).
+    expect(body.sessions.map((s) => s.id).sort()).toEqual(["s-rev", "s-run", "s-run2"]);
+    // The run branch receipt rides the session row — this is what lights up a card.
+    expect(body.sessions.find((s) => s.id === "s-rev")?.branch).toBe("run/s-rev");
+    expect(body.sessions[0]).not.toHaveProperty("deletedAt");
+
+    // Every live gate across the tree — joined to a session via `gate.sessionId`, so an
+    // open gate resolves to its node at load (functional approve/send-back). `g-ghost`
+    // sits on the LIVE `s-rev` yet is tombstoned → excluded by the gate live-only filter.
+    expect(body.gates.map((g) => g.id).sort()).toEqual(["g1", "g2"]);
+    expect(body.gates.find((g) => g.id === "g1")?.sessionId).toBe("s-rev");
+    expect(body.gates[0]).not.toHaveProperty("deletedAt");
   });
 
   test("every /api/* response carries the protocol version header", async () => {

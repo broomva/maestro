@@ -27,7 +27,7 @@
 //
 // Injectable `fetchImpl` / `eventSourceFactory` keep it unit-testable without a DOM.
 
-import type { EventEnvelope, LiveNode } from "@maestro/protocol";
+import type { EventEnvelope, TreeResponse } from "@maestro/protocol";
 import type { MaestroStoreApi } from "./store";
 
 /** The minimal EventSource surface this module uses (a subset of the DOM type). */
@@ -61,11 +61,6 @@ export interface ConnectOptions {
 /** A live subscription — call `close()` to end it. */
 export interface StreamHandle {
   close(): void;
-}
-
-/** The runtime `/api/tree` response (the read API's `TreeResponse`). */
-interface TreeResponse {
-  nodes: LiveNode[];
 }
 
 /**
@@ -115,7 +110,12 @@ export function connectStream(store: MaestroStoreApi, opts: ConnectOptions = {})
         return r.json() as Promise<TreeResponse>;
       })
       .then((body) => {
-        if (!closed) store.getState().hydrate({ nodes: body.nodes });
+        // Hydrate the full live work state (BRO-1941): sessions + gates seed the
+        // node→session join so cards carry their run branch + open gate at load.
+        if (!closed)
+          store
+            .getState()
+            .hydrate({ nodes: body.nodes, sessions: body.sessions, gates: body.gates });
       })
       .catch((err) => onError?.(err))
       .finally(subscribe);
