@@ -347,7 +347,9 @@ test("P3 exit ①: a clean run dispatched from the app parks at Needs you; appro
 });
 
 // ② The send-back path — a `revise` redispatches the run: the gate is decided `revise`, the node → `triggered`.
-test("P3 exit ②: send-back redispatches the run with feedback", async ({ page }) => {
+test("P3 exit ②: send-back decides the gate revise → node returns to triggered (re-queued for dispatch) with feedback", async ({
+  page,
+}) => {
   test.setTimeout(120_000);
   const workspace = makeGitWorkspace("maestro-p3-revise-", {
     "feat/_work.md": wmDone({ id: "feat", check: "test -f feature.txt", title: "Ship" }),

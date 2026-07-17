@@ -161,10 +161,13 @@ export async function mountDispatch(deps: MountDispatchDeps): Promise<DispatchRu
   // Budget events are DURABLE — journaled to the run's session.jsonl (the `event` table is a projection),
   // NOT a memory tap. A data-loss advisory-write here is exactly the class of bug P20 caught on BRO-1811.
   const guard = new BudgetGuard(deps.db, fsJournalSink(), { dayTotalUsd });
-  // Default to the scripted mock; when MAESTRO_MOCK_SCRIPT names a JSON script file (the P3-exit E2E's
-  // mock-dispatch-to-gate seam, BRO-1821), the spawned runtime's mock drives a real run to a completion
-  // gate. Unset → the bare "ok" mock, unchanged. Never consulted for a claude/codex provider.
-  const upstream = deps.upstream ?? createMockModel(loadMockScriptFromEnv());
+  // Default to the mock upstream. ONLY in mock mode do we consult MAESTRO_MOCK_SCRIPT (the P3-exit E2E's
+  // mock-dispatch-to-gate seam, BRO-1821 — a JSON script whose child drives a real run to a completion
+  // gate); unset → the bare "ok" mock, unchanged. In claude mode the child never dials this proxy
+  // (claude-runner.ts), so the mock upstream is dead code there — and NOT reading the env keeps a stale
+  // MAESTRO_MOCK_SCRIPT from throwing at mount and silently degrading the runtime to reads-only (P20 BRO-1821).
+  const mockScript = deps.config.provider === "mock" ? loadMockScriptFromEnv() : undefined;
+  const upstream = deps.upstream ?? createMockModel(mockScript);
   const proxyApp = createModelProxy({
     guard,
     tokens,

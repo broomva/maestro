@@ -9,7 +9,7 @@ export default defineConfig({
   testDir: "./tests",
   testMatch: "**/*.pw.ts",
   fullyParallel: true,
-  // One worker: the two phase-exit specs (p1-exit, p2-exit) each boot a REAL runtime on the fixed
+  // One worker: the phase-exit specs (p1-exit, p2-exit, p3-exit) each boot a REAL runtime on the fixed
   // proxy port 4319 (the single shared vite-preview `/api` target), so they must never run
   // concurrently or they collide on the bind. The suite is small and local-only (CI never installs a
   // browser — Playwright is the local P11 gate), so serializing every spec is a cheap, deterministic
