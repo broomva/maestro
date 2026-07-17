@@ -25,7 +25,7 @@ import { buildClaudeProviderEnv } from "./harness/spawn-contract";
 import { fromBunSubprocess } from "./harness/stdio";
 import { BudgetGuard, deriveDayTotal } from "./proxy/budget";
 import { fsJournalSink } from "./proxy/events";
-import { createMockModel } from "./proxy/mock-model";
+import { createMockModel, loadMockScriptFromEnv } from "./proxy/mock-model";
 import { createModelProxy, type ModelUpstream, type ProxyServer, serveProxy } from "./proxy/proxy";
 import { SessionTokenRegistry } from "./proxy/tokens";
 import { createWorktreeSandboxFactory } from "./sandbox/worktree";
@@ -161,7 +161,10 @@ export async function mountDispatch(deps: MountDispatchDeps): Promise<DispatchRu
   // Budget events are DURABLE — journaled to the run's session.jsonl (the `event` table is a projection),
   // NOT a memory tap. A data-loss advisory-write here is exactly the class of bug P20 caught on BRO-1811.
   const guard = new BudgetGuard(deps.db, fsJournalSink(), { dayTotalUsd });
-  const upstream = deps.upstream ?? createMockModel();
+  // Default to the scripted mock; when MAESTRO_MOCK_SCRIPT names a JSON script file (the P3-exit E2E's
+  // mock-dispatch-to-gate seam, BRO-1821), the spawned runtime's mock drives a real run to a completion
+  // gate. Unset → the bare "ok" mock, unchanged. Never consulted for a claude/codex provider.
+  const upstream = deps.upstream ?? createMockModel(loadMockScriptFromEnv());
   const proxyApp = createModelProxy({
     guard,
     tokens,

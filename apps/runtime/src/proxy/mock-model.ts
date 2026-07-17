@@ -10,6 +10,7 @@
 // `body` is a minimal Anthropic Messages response (the child's SDK speaks that shape; the fixture child
 // only needs a 200 vs the proxy's 402), and `delayMs` lets a call hang so a kill can land mid-call.
 
+import { readFileSync } from "node:fs";
 import type { ChildRole } from "../harness/spawn-contract";
 import type { ModelUpstream, UpstreamResult } from "./proxy";
 
@@ -148,5 +149,35 @@ export function createMockModel(opts: MockModelOptions = {}): MockModel {
     get calls() {
       return calls;
     },
+  };
+}
+
+/**
+ * Load a mock script for the DISPATCH-mounted mock (the spawned runtime's token-free upstream) from
+ * `MAESTRO_MOCK_SCRIPT` — a JSON file path holding `{ script?, fallback?, usagePerCallUsd? }`, the same
+ * shape `createMockModel` takes. Returns `undefined` when the env is unset, so the DEFAULT dispatch mock
+ * (a bare "ok" that ends a turn WITHOUT reaching a gate — the behavior p2-exit relies on) is unchanged;
+ * the script is strictly opt-in.
+ *
+ * This is the mock-dispatch-to-gate seam the P3-exit E2E needs (BRO-1821): a script whose child EDITS a
+ * file then completes drives a REAL run to a completion gate with a mergeable diff — the "one live gated
+ * run end-to-end" evidence gate-slice.test.ts flagged as missing. Only ever consulted in mock mode
+ * (`createMockModel` is dispatch's upstream only there). A malformed/missing file throws — a misconfigured
+ * test setup should fail loudly (index.ts's mount-catch then degrades the runtime to reads).
+ */
+export function loadMockScriptFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): MockModelOptions | undefined {
+  const path = env.MAESTRO_MOCK_SCRIPT;
+  if (!path) return undefined;
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+    script?: readonly MockResponse[];
+    fallback?: MockResponse;
+    usagePerCallUsd?: number;
+  };
+  return {
+    script: parsed.script,
+    fallback: parsed.fallback,
+    usagePerCallUsd: parsed.usagePerCallUsd,
   };
 }

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "check:icons": "bun run ../../scripts/check-icons.ts --scope app",
-    "test:m0": "bun run build && bun test src/m0.test.ts && playwright test"
+    "test:m0": "bun run build && bun test src/m0.test.ts && playwright test",
+    "test:p3-exit": "bun run build && playwright test tests/p3-exit.pw.ts"
   },
   "dependencies": {
     "@maestro/protocol": "workspace:*",

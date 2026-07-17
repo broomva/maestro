@@ -4,7 +4,10 @@
 // Anti-vacuity [[self-hosting-vacuous-pass]]: exact status/usage/body/order assertions.
 
 import { describe, expect, test } from "bun:test";
-import { createMockModel, DEFAULT_MOCK_USAGE_USD } from "./mock-model";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createMockModel, DEFAULT_MOCK_USAGE_USD, loadMockScriptFromEnv } from "./mock-model";
 
 const req = (n = 0) => ({
   model: "claude-opus-4-8",
@@ -74,5 +77,59 @@ describe("mock-model — scripted upstream", () => {
     const r = await mock.forward(req());
     expect(r.status).toBe(500);
     expect(r.body).toEqual({ error: "boom" });
+  });
+});
+
+// The MAESTRO_MOCK_SCRIPT injection (BRO-1821) — the spawned runtime's mock-dispatch-to-gate seam. The
+// default (env unset) must stay undefined so dispatch's bare `createMockModel()` behavior is unchanged.
+describe("loadMockScriptFromEnv — the dispatch mock-script injection", () => {
+  test("returns undefined when the env is unset (the default mock is unchanged)", () => {
+    expect(loadMockScriptFromEnv({})).toBeUndefined();
+    expect(loadMockScriptFromEnv({ MAESTRO_MOCK_SCRIPT: "" })).toBeUndefined();
+  });
+
+  test("loads {script, fallback, usagePerCallUsd} from the JSON file the env names", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mock-script-"));
+    try {
+      const path = join(dir, "script.json");
+      const toolUse = {
+        body: {
+          content: [{ type: "tool_use", id: "e", name: "shell", input: { command: "echo x > f" } }],
+          stop_reason: "tool_use",
+        },
+      };
+      writeFileSync(
+        path,
+        JSON.stringify({
+          script: [toolUse],
+          fallback: { body: { content: [{ type: "text", text: "done" }] } },
+          usagePerCallUsd: 0.25,
+        }),
+      );
+      const opts = loadMockScriptFromEnv({ MAESTRO_MOCK_SCRIPT: path });
+      expect(opts?.script).toHaveLength(1);
+      expect(opts?.usagePerCallUsd).toBe(0.25);
+      // The loaded options drive a real mock: first call → the tool_use edit, then the fallback text.
+      const mock = createMockModel(opts);
+      // (fidelity: tool_use only survives when the request advertises tools)
+      const withTools = {
+        model: "m",
+        role: "agent" as const,
+        payload: { tools: [{ name: "shell" }] },
+        apiKey: "x",
+      };
+      return Promise.all([mock.forward(withTools), mock.forward(withTools)]).then(([r1, r2]) => {
+        expect(JSON.stringify(r1.body)).toContain("tool_use");
+        expect(JSON.stringify(r2.body)).toContain("done");
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("throws on a missing file (a misconfigured test fails loudly)", () => {
+    expect(() =>
+      loadMockScriptFromEnv({ MAESTRO_MOCK_SCRIPT: "/no/such/mock-script.json" }),
+    ).toThrow();
   });
 });
