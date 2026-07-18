@@ -16,7 +16,7 @@ import { and, eq, inArray, isNull, max, sql } from "drizzle-orm";
 import type { IndexDb } from "../db/client";
 import { event, node, runBudget, schedule, session } from "../db/schema";
 import { deriveDayTotalUsdFromIndex } from "../ledger/day-total";
-import { readLastWakeLog, type WakeLog } from "./tick";
+import { readLastWakeLog, type WakeLog } from "./wake-log";
 
 /** Concurrency cap (ORCHESTRATOR §3 — "default 3, runtime config"). No config field yet; a constant
  *  until one lands. The ledger surfaces `activeRuns` vs this so a tick knows if it may dispatch. */

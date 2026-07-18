@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { EVENT_TYPES } from "@maestro/protocol";
 import { and, eq } from "drizzle-orm";
 import { type IndexHandle, openIndex } from "../db/client";
-import { event, lease } from "../db/schema";
+import { event, lease, node, session } from "../db/schema";
 import { readLastWakeLog, runTick } from "./tick";
 
 async function countType(h: IndexHandle, type: (typeof EVENT_TYPES)[keyof typeof EVENT_TYPES]) {
@@ -22,10 +22,16 @@ describe("runTick", () => {
       const r = await runTick(h.db, "interval", 1000, "t1");
       expect(r).toEqual({ skipped: false, cause: "interval", tickId: "t1" });
       expect(await countType(h, EVENT_TYPES.TICK_FIRED)).toBe(1);
-      expect(await readLastWakeLog(h.db)).toEqual({
-        tickId: "t1",
-        cause: "interval",
-        wokeAt: 1000,
+      // the record carries the engine fields + the s2b narrative/summary (an empty board → a nothing tick).
+      const wl = await readLastWakeLog(h.db);
+      expect(wl).toMatchObject({ tickId: "t1", cause: "interval", wokeAt: 1000 });
+      expect(wl?.narrative).toContain("Did nothing new this tick.");
+      expect(wl?.summary).toEqual({
+        dispatched: 0,
+        nudged: 0,
+        needsHuman: 0,
+        attention: 0,
+        deferred: 0,
       });
     } finally {
       h.client.close();
@@ -96,7 +102,11 @@ describe("runTick", () => {
       expect((await readLastWakeLog(h.db))?.tickId).toBe("t1");
       await runTick(h.db, "manual", 2000, "t2");
       // the LAST wake log is the most recent tick — what the next tick's briefing §2.7 reads.
-      expect(await readLastWakeLog(h.db)).toEqual({ tickId: "t2", cause: "manual", wokeAt: 2000 });
+      expect(await readLastWakeLog(h.db)).toMatchObject({
+        tickId: "t2",
+        cause: "manual",
+        wokeAt: 2000,
+      });
     } finally {
       h.client.close();
     }
@@ -129,6 +139,107 @@ describe("runTick", () => {
       const r = await runTick(h.db, "manual", 1000);
       expect(r.skipped).toBe(false);
       expect(r.tickId).toMatch(/^[0-9a-f-]{36}$/); // a uuid
+    } finally {
+      h.client.close();
+    }
+  });
+});
+
+// ── s2b: the tick runs the policy + ACTS (dispatch) + narrates honestly ──────────
+const MIN = 60_000;
+async function seedNode(h: IndexHandle, id: string, state: string, updatedAt: number) {
+  await h.db.insert(node).values({
+    id,
+    path: `work/${id}`,
+    parentId: null,
+    kind: "task",
+    state: state as never,
+    owner: null,
+    gate: "human",
+    budgetJson: null,
+    doneJson: null,
+    title: id,
+    createdAt: 1,
+    updatedAt,
+    deletedAt: null,
+  });
+}
+
+describe("runTick — s2b execution + honest narrative", () => {
+  test("DISPATCHES the runnable work its policy decides, via the seam, and narrates 'Started'", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      await seedNode(h, "t1", "triggered", 1000); // triggered → dispatched
+      const calls: string[] = [];
+      await runTick(h.db, "interval", 2000, "tk", {
+        dispatch: async (nodeId) => {
+          calls.push(nodeId);
+          return true;
+        },
+      });
+      expect(calls).toEqual(["t1"]); // the tick actually called the dispatch seam
+      const wl = await readLastWakeLog(h.db);
+      expect(wl?.narrative).toContain("Started [t1](#node/t1).");
+      expect(wl?.summary?.dispatched).toBe(1);
+      expect(wl?.summary?.deferred).toBe(0);
+    } finally {
+      h.client.close();
+    }
+  });
+
+  test("READ-ONLY (no dispatch seam) — surfaces runnable work honestly, starts nothing", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      await seedNode(h, "t1", "triggered", 1000);
+      await runTick(h.db, "interval", 2000, "tk"); // no opts.dispatch → read-only
+      const wl = await readLastWakeLog(h.db);
+      expect(wl?.summary?.dispatched).toBe(0);
+      expect(wl?.summary?.deferred).toBe(1);
+      // honest: it did NOT claim to start t1; it left it alone with a plain reason.
+      expect(wl?.narrative).not.toContain("Started [t1]");
+      expect(wl?.narrative).toContain("[t1](#node/t1): nothing to run it yet.");
+    } finally {
+      h.client.close();
+    }
+  });
+
+  test("a dispatch that FAILS to start is narrated as 'could not start', not 'Started'", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      await seedNode(h, "t1", "triggered", 1000);
+      await runTick(h.db, "interval", 2000, "tk", { dispatch: async () => false });
+      const wl = await readLastWakeLog(h.db);
+      expect(wl?.summary?.dispatched).toBe(0);
+      expect(wl?.narrative).not.toContain("Started [t1]");
+      expect(wl?.narrative).toContain("[t1](#node/t1): could not start it just now.");
+    } finally {
+      h.client.close();
+    }
+  });
+
+  test("a stale run is SURFACED to the human (not nudged) — honest copy, no false 'even after a nudge'", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      const now = 100 * 86_400_000; // past a day boundary
+      await seedNode(h, "nrun", "running", now - 40 * MIN);
+      await h.db.insert(session).values({
+        id: "s-run",
+        nodeId: "nrun",
+        branch: "run/s-run",
+        status: "running" as never,
+        startedAt: now - 40 * MIN, // silent 40 min → stale (no events)
+        endedAt: null,
+        diffstatJson: null,
+        updatedAt: now - 40 * MIN,
+        deletedAt: null,
+      });
+      await runTick(h.db, "interval", now, "tk"); // no nudge seam (s2b-i)
+      const wl = await readLastWakeLog(h.db);
+      expect(wl?.summary?.needsHuman).toBe(1);
+      expect(wl?.summary?.nudged).toBe(0);
+      expect(wl?.narrative).toContain("has been quiet 40 minutes, worth a look.");
+      expect(wl?.narrative).not.toContain("even after a nudge");
+      expect(wl?.narrative).not.toContain("Nudged");
     } finally {
       h.client.close();
     }
