@@ -71,8 +71,11 @@ describe("event type namespaces + synthetics", () => {
       "gate.opened",
       "gate.decided",
       "schedule.fired",
+      "tick.fired",
+      "tick.skipped",
     ]);
     expect(isSyntheticEventType("node.updated")).toBe(true);
+    expect(isSyntheticEventType("tick.fired")).toBe(true);
     expect(isSyntheticEventType("node.created")).toBe(false);
   });
 

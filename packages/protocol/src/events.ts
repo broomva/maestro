@@ -38,6 +38,8 @@ export const SYNTHETIC_EVENT_TYPES = [
   "gate.opened",
   "gate.decided",
   "schedule.fired",
+  "tick.fired",
+  "tick.skipped",
 ] as const;
 export type SyntheticEventType = (typeof SYNTHETIC_EVENT_TYPES)[number];
 
@@ -96,6 +98,8 @@ export const EVENT_TYPES = {
   // synthetics (projected by the runtime)
   NODE_UPDATED: "node.updated",
   SCHEDULE_FIRED: "schedule.fired",
+  TICK_FIRED: "tick.fired", // F6 wake log — the tick's durable "why I woke" record; the next tick reads the last one (§2.7)
+  TICK_SKIPPED: "tick.skipped", // F6.2 — a wake coalesced into an in-flight tick { cause, reason }
 } as const satisfies Record<string, EventType>;
 
 /**

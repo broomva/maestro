@@ -233,7 +233,15 @@ if (import.meta.main) {
   if (index) {
     try {
       const { startScheduler } = await import("./scheduler/scheduler");
-      scheduler = startScheduler(index);
+      const { runTick } = await import("./tick/tick");
+      const idx = index; // capture the narrowed handle for the onFire closure
+      scheduler = startScheduler(idx, {
+        // F6 (BRO-1772): a schedule firing is an `interval` wake — run a coalesced tick to narrate it.
+        // Fire-and-forget: a tick failure (or an in-flight-tick coalesce) must never stall the poll.
+        onFire: () => {
+          void runTick(idx, "interval", Date.now()).catch(() => {});
+        },
+      });
     } catch (schedErr) {
       console.warn(
         `maestro runtime · scheduler unavailable, reads stay up (no triggers fire): ${(schedErr as Error).message}`,
