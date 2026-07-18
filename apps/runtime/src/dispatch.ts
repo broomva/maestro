@@ -15,50 +15,21 @@
 // F10 chat endpoint's auto-dispatch); slice 1 exposes `supervisor` so that + tests can drive it.
 
 import { fileURLToPath } from "node:url";
-import { EVENT_TYPES } from "@maestro/protocol";
-import { eq } from "drizzle-orm";
-import { parsePayload } from "./api/event-projection";
 import type { RuntimeConfig } from "./config";
 import type { IndexDb } from "./db/client";
-import { event } from "./db/schema";
 import { buildClaudeProviderEnv } from "./harness/spawn-contract";
 import { fromBunSubprocess } from "./harness/stdio";
-import { BudgetGuard, deriveDayTotal } from "./proxy/budget";
+// deriveDayTotalUsdFromIndex moved to a leaf module (BRO-1784 s2) so the tick graph (briefing.ts →
+// day-total) doesn't drag dispatch.ts's supervisor/proxy/sandbox deps in. dispatch's own mount (below)
+// still consumes it; the tick's briefing imports it from the leaf directly.
+import { deriveDayTotalUsdFromIndex } from "./ledger/day-total";
+import { BudgetGuard } from "./proxy/budget";
 import { fsJournalSink } from "./proxy/events";
 import { createMockModel, loadMockScriptFromEnv } from "./proxy/mock-model";
 import { createModelProxy, type ModelUpstream, type ProxyServer, serveProxy } from "./proxy/proxy";
 import { SessionTokenRegistry } from "./proxy/tokens";
 import { createWorktreeSandboxFactory } from "./sandbox/worktree";
 import { createSupervisor, type SpawnChild, type Supervisor } from "./supervisor/supervisor";
-
-/** UTC day length in ms — the BudgetGuard's day bucket (proxy/budget.ts `dayBucket`). */
-const DAY_MS = 86_400_000;
-
-/**
- * Seed today's metered spend from the DURABLE budget events so the per-day cap is NOT reset to zero on
- * every runtime restart (BRO-1822 latent gap; `deriveDayTotal` was documented as this seed but never
- * wired). By mount time, F9 recovery (index.ts, before the mount) has replayed every journal-only
- * `budget.metered` into the index, so reading them here is sound (they are absent from the index before
- * recovery — the BRO-1814 replay is what makes this correct). Best-effort: a read failure just starts the
- * day total at 0 (a fresh, never-blocking cap), never throws into the mount.
- */
-export async function deriveDayTotalUsdFromIndex(db: IndexDb, nowMs: number): Promise<number> {
-  const dayStartMs = Math.floor(nowMs / DAY_MS) * DAY_MS;
-  try {
-    const rows = await db.select().from(event).where(eq(event.type, EVENT_TYPES.BUDGET_METERED));
-    const metered = rows.map((r) => {
-      const p = parsePayload(r.payload) as { session?: unknown; usd?: unknown } | undefined;
-      return {
-        session: typeof p?.session === "string" ? p.session : "",
-        usd: typeof p?.usd === "number" ? p.usd : 0,
-        ts: r.ts,
-      };
-    });
-    return deriveDayTotal(metered, dayStartMs);
-  } catch {
-    return 0;
-  }
-}
 
 /** The real child entry, resolved from this module — spawned via `bun run` (no compiled bin yet). */
 const CHILD_ENTRY = fileURLToPath(new URL("./child/broomva-child.ts", import.meta.url));

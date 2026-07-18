@@ -5,11 +5,17 @@
 // seeded index. The orchestrator SESSION that consumes this briefing (formatting it into the prompt) is
 // BRO-1784; slice 2 owns the assembly + its shape.
 
-import { type TickCause, WK_GROUP_ORDER } from "@maestro/protocol";
+import {
+  type Budget,
+  contractRunnableReason,
+  type Done,
+  type TickCause,
+  WK_GROUP_ORDER,
+} from "@maestro/protocol";
 import { and, eq, inArray, isNull, max, sql } from "drizzle-orm";
 import type { IndexDb } from "../db/client";
 import { event, node, runBudget, schedule, session } from "../db/schema";
-import { deriveDayTotalUsdFromIndex } from "../dispatch";
+import { deriveDayTotalUsdFromIndex } from "../ledger/day-total";
 import { readLastWakeLog, type WakeLog } from "./tick";
 
 /** Concurrency cap (ORCHESTRATOR §3 — "default 3, runtime config"). No config field yet; a constant
@@ -27,6 +33,15 @@ export interface BriefingNode {
   state: string;
   /** now − updatedAt (ms) — how long it has sat in this state. */
   ageMs: number;
+}
+
+/** §2.4 — a queue node (proposed | triggered) plus its ORCHESTRATOR §3.3 dispatch-runnability, so the
+ *  policy reasons over the briefing without re-reading the board. `runnable` gates whether a `proposed`
+ *  node may be dispatched (triggered nodes dispatch first regardless); `notRunnableReason` feeds the wake
+ *  log's "left it queued, why" line. Computed from the node's frontmatter contract at assembly. */
+export interface BriefingQueueNode extends BriefingNode {
+  runnable: boolean;
+  notRunnableReason: string | null;
 }
 
 /** §2.3 — a live run, with the staleness + spend signals a tick reasons over. */
@@ -65,7 +80,7 @@ export interface Briefing {
   cause: TickCause;
   attention: BriefingNode[];
   activeRuns: BriefingRun[];
-  queue: BriefingNode[];
+  queue: BriefingQueueNode[];
   bench: BriefingSchedule[];
   ledger: BriefingLedger;
   lastWakeLog: WakeLog | null;
@@ -107,6 +122,24 @@ export async function assembleBriefing(
     state: n.state,
     ageMs: now - n.updatedAt,
   });
+  // Malformed contract JSON in the index shouldn't happen (the scanner writes it), but a parse failure
+  // must not crash the tick — treat an unreadable contract as absent (→ not runnable, surfaced honestly).
+  const safeParse = <T>(json: string | null): T | undefined => {
+    if (!json) return undefined;
+    try {
+      return JSON.parse(json) as T;
+    } catch {
+      return undefined;
+    }
+  };
+  const toQueueNode = (n: typeof node.$inferSelect): BriefingQueueNode => {
+    const reason = contractRunnableReason(
+      safeParse<Done>(n.doneJson),
+      safeParse<Budget>(n.budgetJson),
+      n.gate,
+    );
+    return { ...toNode(n), runnable: reason === null, notRunnableReason: reason };
+  };
 
   // §2.2 attention — every node the human should see (blocked | review), attention-ordered, capped.
   const attentionRows = await db
@@ -123,7 +156,7 @@ export async function assembleBriefing(
     .select()
     .from(node)
     .where(and(isNull(node.deletedAt), inArray(node.state, ["triggered", "proposed"])));
-  const queue = queueRows.map(toNode).sort(byAttentionThenAge).slice(0, BRIEFING_SECTION_CAP);
+  const queue = queueRows.map(toQueueNode).sort(byAttentionThenAge).slice(0, BRIEFING_SECTION_CAP);
 
   // §2.3 active runs — running sessions with iteration/spend (run_budget) + LAST-EVENT staleness.
   const runningRows = await db

@@ -96,10 +96,38 @@ export function normalizeChecks(check: Done["check"]): DoneCheck[] {
   return typeof check === "string" ? [{ name: "check", run: check }] : check;
 }
 
-/** True when the contract has at least one runnable deterministic check. */
+/** True when the contract has at least one runnable deterministic check — one whose `run` command is
+ *  non-blank. A `check: ""` (or a whitespace-only / blank-`run` entry) is NOT a check: `normalizeChecks`
+ *  sugars the empty string into one entry with `run: ""`, and a gate:auto against an empty command would
+ *  "pass" vacuously ([[self-hosting-vacuous-pass]]) — so it must not count here or in gate-pairing. */
 export function hasCheck(done: Done | undefined): boolean {
   if (!done) return false;
-  return normalizeChecks(done.check).length > 0;
+  return normalizeChecks(done.check).some((c) => c.run.trim() !== "");
+}
+
+/** True when a budget block carries at least one real guardrail (an empty `{}` is not a budget). */
+function hasBudgetBlock(budget: Budget | undefined): boolean {
+  if (!budget) return false;
+  return budget.per_run_usd != null || budget.per_day_usd != null || budget.max_iterations != null;
+}
+
+/**
+ * ORCHESTRATOR §3.3 dispatch-runnability — the orchestrator may dispatch a `proposed` node only when the
+ * contract carries (a) a VERIFICATION signal (a non-empty `done.check`, OR a `judge` with `gate: human` —
+ * a judge is never the sole gate for `gate: auto`, VERIFIER §1), and (b) a real budget block. §3.3 also
+ * names a "brief", which lives in the `_work.md` BODY (not indexed): the FS-reading orchestrator agent
+ * enforces that; this frontmatter-level predicate covers the two index-checkable conditions. Returns the
+ * reason for the FIRST failing condition (the wake log's "left it queued, why" line), or null = runnable.
+ */
+export function contractRunnableReason(
+  done: Done | undefined,
+  budget: Budget | undefined,
+  gate: GateMode,
+): string | null {
+  const hasVerification = hasCheck(done) || (Boolean(done?.judge) && gate === "human");
+  if (!hasVerification) return "no done.check or judge rubric";
+  if (!hasBudgetBlock(budget)) return "no budget block";
+  return null;
 }
 
 /** Thrown when a work contract violates a VERIFIER §1 invariant. */
