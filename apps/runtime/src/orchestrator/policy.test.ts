@@ -96,11 +96,15 @@ describe("§3.1 safety — stale runs", () => {
 
   test("a run still silent AFTER a prior nudge → recommend the human look, not a re-nudge", () => {
     const d = decidePolicy(
-      briefing({ activeRuns: [run({ sessionId: "s1", lastEventAgeMs: stale })] }),
+      briefing({ activeRuns: [run({ sessionId: "s1", nodeId: "n1", lastEventAgeMs: stale })] }),
       { nudgedSessionIds: new Set(["s1"]) },
     );
     expect(d.needsHuman.map((n) => n.sessionId)).toEqual(["s1"]);
+    expect(d.needsHuman[0]?.afterNudge).toBe(true);
     expect(d.nudges).toEqual([]);
+    // the afterNudge:true branch renders the "even after a nudge" copy (the nudge did not revive it).
+    expect(d.wakeLog).toContain("[n1](#node/n1) has been quiet");
+    expect(d.wakeLog).toContain("even after a nudge, worth a look.");
   });
 
   test("a run within the staleness window → neither nudged nor escalated (positive control)", () => {

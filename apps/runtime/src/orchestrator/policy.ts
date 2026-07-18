@@ -46,6 +46,10 @@ export interface RunAttention {
   nodeId: string;
   /** how long the run has been silent (its last-event age). */
   ageMs: number;
+  /** on a `needsHuman` entry: was this run already nudged (→ "even after a nudge, worth a look") or is it
+   *  simply surfaced un-nudged (→ "quiet, worth a look")? The tick's execution layer sets this so the wake
+   *  log's copy matches reality — a stale run surfaced WITHOUT a nudge must not claim one happened. */
+  afterNudge?: boolean;
 }
 /** §3.3 — a node dispatched this tick. */
 export interface DispatchDecision {
@@ -115,7 +119,10 @@ export function decidePolicy(
       nodeId: r.nodeId,
       ageMs: r.lastEventAgeMs,
     };
-    (nudged.has(r.sessionId) ? needsHuman : nudges).push(line);
+    // already nudged in this stale window → hand to the human (afterNudge: the nudge didn't revive it);
+    // otherwise a first-stale run to nudge.
+    if (nudged.has(r.sessionId)) needsHuman.push({ ...line, afterNudge: true });
+    else nudges.push(line);
   }
 
   // §3.2 surface, don't clear — the attention list is for the human; make it visible, never decide it.
@@ -188,6 +195,9 @@ const PLAIN_REASON: Record<string, string> = {
   "no budget block": "no spending limit set",
   "no done.check or judge rubric": "no way to check when it's done",
   "not runnable": "not ready to run yet",
+  // tick execution-layer reasons (BRO-1784 s2b) — a runnable node the tick could not START this tick.
+  "no runner available": "nothing to run it yet",
+  "could not start": "could not start it just now",
 };
 const plainReason = (reason: string): string => PLAIN_REASON[reason] ?? reason;
 
@@ -203,6 +213,8 @@ export const DEFERRAL_REASONS = [
   "no budget block",
   "no done.check or judge rubric",
   "not runnable",
+  "no runner available",
+  "could not start",
 ] as const;
 
 /** Soften a technical deferral reason to coffee-voice for the wake log (exported for the coverage guard). */
@@ -224,8 +236,12 @@ export function renderWakeLog(d: OrchestratorDecision): string {
   // (CLAUDE.md §Voice — no em dashes in user-facing copy; the wake log is read by a person).
   const needs: string[] = [];
   for (const h of d.needsHuman) {
+    // "even after a nudge" only when a nudge actually happened (afterNudge) — else it is a plain surface
+    // of a stale run the tick did not nudge (s2b-i), and claiming a nudge would be a forward-honesty lie.
     needs.push(
-      `${nodeRef(h.nodeId)} has been quiet ${minutes(h.ageMs)} even after a nudge, worth a look.`,
+      h.afterNudge
+        ? `${nodeRef(h.nodeId)} has been quiet ${minutes(h.ageMs)} even after a nudge, worth a look.`
+        : `${nodeRef(h.nodeId)} has been quiet ${minutes(h.ageMs)}, worth a look.`,
     );
   }
   for (const a of d.attention) {

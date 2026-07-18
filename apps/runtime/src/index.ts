@@ -33,6 +33,7 @@ import type { RuntimeLock } from "./runtime-lock";
 // Type-only — erased at compile time, so the compiled /health-only stub never references
 // the watcher module (which is dynamically imported below, native-addon-safe).
 import type { SchedulerHandle } from "./scheduler/scheduler";
+import type { RunTickOptions } from "./tick/tick";
 import type { WatcherHandle } from "./watcher";
 
 const config = loadConfig();
@@ -235,11 +236,18 @@ if (import.meta.main) {
       const { startScheduler } = await import("./scheduler/scheduler");
       const { runTick } = await import("./tick/tick");
       const idx = index; // capture the narrowed handle for the onFire closure
+      // BRO-1784 s2b: give the tick a DISPATCH seam so it starts the runnable work its policy decides —
+      // the same supervisor the chat path uses (in-process, the runtime's own code, not a spawned model;
+      // safe without BRO-1944). Read-only (no dispatch mounted) → no seam → the tick narrates, starts none.
+      const disp = dispatch;
+      const tickOpts: RunTickOptions = disp
+        ? { dispatch: (nodeId) => disp.supervisor.dispatch(nodeId).then((o) => o.dispatched) }
+        : {};
       scheduler = startScheduler(idx, {
-        // F6 (BRO-1772): a schedule firing is an `interval` wake — run a coalesced tick to narrate it.
+        // F6 (BRO-1772): a schedule firing is an `interval` wake — run a coalesced tick to narrate + act.
         // Fire-and-forget: a tick failure (or an in-flight-tick coalesce) must never stall the poll.
         onFire: () => {
-          void runTick(idx, "interval", Date.now()).catch(() => {});
+          void runTick(idx, "interval", Date.now(), undefined, tickOpts).catch(() => {});
         },
       });
     } catch (schedErr) {
