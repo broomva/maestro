@@ -22,8 +22,9 @@ import { loadConfig } from "../config";
 import type { IndexDb } from "../db/client";
 import { type IndexHandle, openIndex } from "../db/client";
 import { event, node } from "../db/schema";
-import { type DispatchRuntime, deriveDayTotalUsdFromIndex, mountDispatch } from "../dispatch";
+import { type DispatchRuntime, mountDispatch } from "../dispatch";
 import { git } from "../git/git";
+import { deriveDayTotalUsdFromIndex } from "../ledger/day-total";
 import { createMockModel, type MockModelOptions } from "../proxy/mock-model";
 import { extractLatestUserMessage, streamSession } from "./chat";
 

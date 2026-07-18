@@ -13,7 +13,15 @@ const NOW = 1_000_000;
 
 async function seedNode(
   h: IndexHandle,
-  o: { id: string; state: string; updatedAt: number; title?: string; deletedAt?: number },
+  o: {
+    id: string;
+    state: string;
+    updatedAt: number;
+    title?: string;
+    deletedAt?: number;
+    doneJson?: string | null;
+    budgetJson?: string | null;
+  },
 ) {
   await h.db.insert(node).values({
     id: o.id,
@@ -23,8 +31,8 @@ async function seedNode(
     state: o.state as never,
     owner: null,
     gate: "human",
-    budgetJson: null,
-    doneJson: null,
+    budgetJson: o.budgetJson ?? null,
+    doneJson: o.doneJson ?? null,
     title: o.title ?? o.id,
     createdAt: 1,
     updatedAt: o.updatedAt,
@@ -232,6 +240,44 @@ describe("assembleBriefing", () => {
         concurrencyCap: 3,
       });
       expect(b.lastWakeLog).toBeNull();
+    } finally {
+      h.client.close();
+    }
+  });
+
+  test("§2.4 queue nodes carry §3.3 runnability derived from the frontmatter contract", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      // runnable: a done.check + a budget block.
+      await seedNode(h, {
+        id: "ok",
+        state: "proposed",
+        updatedAt: 900_000,
+        doneJson: JSON.stringify({ check: "bun test" }),
+        budgetJson: JSON.stringify({ per_run_usd: 0.5 }),
+      });
+      // not runnable: has a check but NO budget block.
+      await seedNode(h, {
+        id: "nobudget",
+        state: "triggered",
+        updatedAt: 950_000,
+        doneJson: JSON.stringify({ check: "bun test" }),
+        budgetJson: null,
+      });
+      // not runnable: no contract at all.
+      await seedNode(h, { id: "bare", state: "proposed", updatedAt: 800_000 });
+
+      const b = await assembleBriefing(h.db, "interval", NOW);
+      const byId = new Map(b.queue.map((n) => [n.nodeId, n]));
+      expect(byId.get("ok")).toMatchObject({ runnable: true, notRunnableReason: null });
+      expect(byId.get("nobudget")).toMatchObject({
+        runnable: false,
+        notRunnableReason: "no budget block",
+      });
+      expect(byId.get("bare")).toMatchObject({
+        runnable: false,
+        notRunnableReason: "no done.check or judge rubric",
+      });
     } finally {
       h.client.close();
     }

@@ -2,6 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   assertContractGate,
+  contractRunnableReason,
   DEFAULT_CHECK_TIMEOUT_S,
   DEFAULT_DIFF_MAX_FILES,
   DEFAULT_DIFF_MAX_LINES,
@@ -36,6 +37,11 @@ describe("done schema (VERIFIER §1)", () => {
     expect(hasCheck(undefined)).toBe(false);
     expect(hasCheck({ check: "bun test" })).toBe(true);
     expect(hasCheck({ check: [] })).toBe(false);
+    // a blank command is NOT a check — an empty/whitespace string, or a blank-run named entry, would
+    // "pass" a gate:auto vacuously ([[self-hosting-vacuous-pass]]).
+    expect(hasCheck({ check: "" })).toBe(false);
+    expect(hasCheck({ check: "   " })).toBe(false);
+    expect(hasCheck({ check: [{ name: "x", run: "" }] })).toBe(false);
   });
   test("the numeric defaults match canon", () => {
     expect(DEFAULT_CHECK_TIMEOUT_S).toBe(600);
@@ -43,6 +49,46 @@ describe("done schema (VERIFIER §1)", () => {
     expect(DEFAULT_DIFF_MAX_FILES).toBe(30);
     expect(DEFAULT_DIFF_MAX_LINES).toBe(2000);
     expect(VERIFIER_MAX_ATTEMPTS).toBe(5);
+  });
+});
+
+describe("dispatch-runnability (ORCHESTRATOR §3.3, contractRunnableReason)", () => {
+  const budget = { per_run_usd: 0.5 };
+  test("a done.check + a budget block → runnable (null reason)", () => {
+    expect(contractRunnableReason({ check: "bun test" }, budget, "human")).toBeNull();
+    expect(contractRunnableReason({ check: "bun test" }, budget, "auto")).toBeNull();
+  });
+  test("a judge + gate:human (no check) → runnable; judge without a human gate → not", () => {
+    const judgeOnly: Done = { check: [], judge: "rubric.md" };
+    expect(contractRunnableReason(judgeOnly, budget, "human")).toBeNull();
+    // a judge is never the sole gate for gate:auto (VERIFIER §1) → no verification signal.
+    expect(contractRunnableReason(judgeOnly, budget, "auto")).toBe("no done.check or judge rubric");
+  });
+  test("no verification signal → 'no done.check or judge rubric' (checked first)", () => {
+    expect(contractRunnableReason(undefined, budget, "human")).toBe(
+      "no done.check or judge rubric",
+    );
+    expect(contractRunnableReason({ check: [] }, budget, "human")).toBe(
+      "no done.check or judge rubric",
+    );
+    // a blank done.check is vacuous — not runnable (P20 slice-2 MAJOR).
+    expect(contractRunnableReason({ check: "" }, budget, "human")).toBe(
+      "no done.check or judge rubric",
+    );
+    expect(contractRunnableReason({ check: "  " }, budget, "human")).toBe(
+      "no done.check or judge rubric",
+    );
+  });
+  test("a verification signal but no budget → 'no budget block'", () => {
+    expect(contractRunnableReason({ check: "bun test" }, undefined, "human")).toBe(
+      "no budget block",
+    );
+    // an empty budget object is not a budget block.
+    expect(contractRunnableReason({ check: "bun test" }, {}, "human")).toBe("no budget block");
+  });
+  test("any single budget guardrail counts as a block", () => {
+    expect(contractRunnableReason({ check: "x" }, { max_iterations: 5 }, "human")).toBeNull();
+    expect(contractRunnableReason({ check: "x" }, { per_day_usd: 5 }, "human")).toBeNull();
   });
 });
 
