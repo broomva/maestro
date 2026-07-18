@@ -104,6 +104,49 @@ export const INTENTS_ENDPOINT = "/api/intents" as const;
 /** Header required on every intent (API.md §Intents) — a retried POST is a no-op. */
 export const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key" as const;
 
+/** The wire header carrying the CALLER's actor on a POST /api/intents (default "user" when absent — the
+ *  human SPA sends no actor header, so absence MUST read as human or the UI's own gate decisions break).
+ *  The runtime reads it to enforce the ORCHESTRATOR §4 human-verb gate server-side.
+ *
+ *  TRUST MODEL (read before relying on this): the header is only as trustworthy as the code that SETS it.
+ *  Today nothing sets it to an agent value — no agent-side intent path exists yet (the orchestrator session
+ *  is not wired), so the gate is CORRECT BUT INERT. For the gate to actually fence an autonomous
+ *  orchestrator, its intent path must (a) be issued by host tool code that pins this header to `agent:*`
+ *  (the model never composes the raw request), and (b) run in a harness with no shell / no arbitrary
+ *  network egress, so the model cannot bypass the tool and POST `X-Maestro-Actor: user` itself. Neither
+ *  (a) nor (b) is implemented here — they are BLOCKING preconditions on the orchestrator-wiring slice, not
+ *  facts this comment may assume. This is a coarse in-process guard, not un-spoofable auth; token-scoped
+ *  caller identity is P6 / relay. */
+export const MAESTRO_ACTOR_HEADER = "X-Maestro-Actor" as const;
+
+/** ORCHESTRATOR §4 — the four gate verbs + the kill switch + the audited state override are HUMAN-ONLY:
+ *  the runtime rejects them from an `agent:*` actor regardless of prompt content ("defense sits in the
+ *  API, not the prompt"). The intents an agent MAY issue are the rest — new_mission, dispatch, set_routine,
+ *  tick (`nudge` is a chat message, not a wire verb; see the Intent doc comment above). */
+export const HUMAN_ONLY_INTENT_TYPES = [
+  "approve",
+  "revise",
+  "block",
+  "escalate",
+  "grant",
+  "kill",
+  "set_state",
+] as const satisfies readonly IntentType[];
+
+/** True when `actor` is an agent — bare `agent` or a namespaced `agent:*` such as `agent:maestro` — the
+ *  class the §4 human-verb gate rejects. Any non-agent actor (the default `user`, plus `system` / `tool`)
+ *  passes: matching `agent:` as a PREFIX (not `agent` anywhere) keeps a name like `user:agentsmith` human.
+ *
+ *  The value is trimmed + lower-cased before matching so a trusted caller that sets ` Agent:Maestro ` (a
+ *  casing / whitespace slip) still gates rather than silently falling open. Normalization is for the
+ *  predicate only — callers keep the original string for identity / audit. This does NOT make the gate
+ *  fail-closed on unknown values (an unrecognized actor stays human): the header is host-set, and the
+ *  human SPA's no-header default must remain human. Fail-closed identity is P6's job, not this guard's. */
+export function isAgentActor(actor: string): boolean {
+  const a = actor.trim().toLowerCase();
+  return a === "agent" || a.startsWith("agent:");
+}
+
 /** The 202 ack for an accepted intent — results follow on the stream (API.md §Intents). */
 export interface IntentAccepted {
   accepted: true;

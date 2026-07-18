@@ -19,10 +19,13 @@ import {
   type ErrorResponse,
   EVENT_TYPES,
   type GateVerdict,
+  HUMAN_ONLY_INTENT_TYPES,
   IDEMPOTENCY_KEY_HEADER,
   type Intent,
   type IntentAccepted,
+  isAgentActor,
   KINDS,
+  MAESTRO_ACTOR_HEADER,
   parseWorkFile,
   resolveGateVerdict,
   serializeWorkInput,
@@ -856,6 +859,26 @@ export function registerIntentRoutes(app: Hono, deps: IntentDeps): void {
     const type = (body as { type?: unknown } | null)?.type;
     if (typeof type !== "string") {
       return refuse(c, new IntentRefusal("invalid_intent", "intent.type is required", 400));
+    }
+    // 3. ORCHESTRATOR §4 human-verb gate (BRO-1784): the four gate verbs + kill + set_state are
+    //    HUMAN-ONLY — rejected from an `agent:*` actor regardless of what the model asks (defense in the
+    //    API, not the prompt). The caller's actor rides `X-Maestro-Actor` (absent → "user": the human SPA
+    //    sends no header). We reject here, BEFORE any per-type handler runs — so no lease is acquired and
+    //    no side effect (merge/kill/event) fires on a refused intent; a rejected key is never consumed.
+    //    TRUST: this is only as strong as the code that SETS the header (see MAESTRO_ACTOR_HEADER). Nothing
+    //    posts agent intents yet, so the gate is correct-but-inert; a host-pinned header + a shell-less,
+    //    network-confined orchestrator harness are BLOCKING preconditions on the wiring slice (BRO-1944),
+    //    not guarantees this code may assume. Un-spoofable token-scoped identity is P6/relay.
+    const actor = c.req.header(MAESTRO_ACTOR_HEADER) ?? "user";
+    if (isAgentActor(actor) && (HUMAN_ONLY_INTENT_TYPES as readonly string[]).includes(type)) {
+      return refuse(
+        c,
+        new IntentRefusal(
+          "unauthorized",
+          `${type} is a human-only verb; ${actor} may not use it`,
+          403,
+        ),
+      );
     }
     // F8 (BRO-1801): kill { sessionId } → SIGKILL the run (canceled + run.killed on the stream). The
     // seam is `deps.kill`; without it (supervisor not wired) the intent is a typed unsupported_intent.
