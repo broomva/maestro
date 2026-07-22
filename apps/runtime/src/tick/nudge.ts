@@ -107,6 +107,10 @@ export function createNudger(deps: NudgerDeps): Nudge {
     // (1) Route it in. `control.chat` is best-effort by contract (writing to a dead child's stdin is
     // swallowed, never thrown — the reap path owns lifecycle), so liveness in the registry is the
     // strongest delivery evidence available; that is what `live()` returning a channel means.
+    // `role: "user"` is the WIRE shape, not a claim of authorship: the child's `chat` control line
+    // folds a UIMessage into the conversation as a user turn, and that is the only turn kind it
+    // accepts. Who actually sent it is recorded honestly below (`run.nudged`, actor `system`), and
+    // the copy never speaks as the human.
     await channel.chat({
       id: `nudge-${target.sessionId}-${target.at}`,
       role: "user",
@@ -148,6 +152,15 @@ export function createNudger(deps: NudgerDeps): Nudge {
  * utterance) means the run revived, so it drops out and earns a fresh first nudge if it goes quiet
  * again. A tie (activity at the same millisecond as the nudge) reads as REVIVED — the tick will not
  * claim "even after a nudge" unless the nudge is demonstrably the last word.
+ *
+ * WHY "any non-nudge event" is a sound proxy for "the worker spoke": the caller only ever asks about
+ * sessions the briefing reports as still `running` (§2.3). The `system`-actor events that are NOT
+ * worker activity — `run.hung`, `run.failed`, `run.killed`, `gate.*` — all accompany the session
+ * leaving `running` (the supervisor parks or reaps it as it writes them), so they are never in this
+ * population; and the synthetics that could be (`node.updated`, `schedule.fired`, `tick.*`) carry a
+ * NULL sessionId, which `inArray` excludes. What remains on a live run is the child's own stream plus
+ * its budget accounting: genuine activity. If a future event type breaks that property, this filter
+ * is where it must be narrowed.
  *
  * Pure read; returns an empty set for an empty input (no query issued).
  */
