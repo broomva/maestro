@@ -11,9 +11,11 @@
 //    issues intents. (Dispatch does spawn a WORKER child, but that is the pre-existing, confined worker
 //    path, not the orchestrator; a live orchestrator SESSION issuing gate verbs stays gated behind BRO-1944.)
 //
-// DEFERRED to s2b-ii: NUDGE execution (a chat into a stale session) + the `nudgedSessionIds` derivation;
-// this slice SURFACES a stale run to the human instead. Also deferred: the FS mirror of the wake log to
-// routines/maestro/runs/run-<tick-id>/ (the index `tick.fired` event is already the durable record).
+//  - SLICE 2b-ii (BRO-1945): the two decision classes s2b deferred. The tick now NUDGES a first-stale
+//    run (one goal-restating chat into the live child, nudge.ts) instead of only surfacing it, derives
+//    `nudgedSessionIds` from the index so the §3.1 escalation ("even after a nudge") is reachable in
+//    production, and MIRRORS the rendered §7 narrative to `routines/maestro/runs/run-<tick-id>/` so the
+//    orchestrator's own node shows its runs on the board like any routine (§8, no invisible privileges).
 //
 // COALESCING (§8): a global `tick` lease means ONE tick at a time. A wake that arrives while a tick is
 // in flight coalesces — it emits `tick.skipped{cause,reason}` and drops (a hook storm produces one
@@ -21,6 +23,8 @@
 // settles, so the next wake ticks; the TTL is only a crash safety net.
 
 import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { EVENT_TYPES, type TickCause } from "@maestro/protocol";
 import { and, eq, lt } from "drizzle-orm";
 import type { IndexDb } from "../db/client";
@@ -33,8 +37,10 @@ import {
   type DeferDecision,
   type DispatchDecision,
   type OrchestratorDecision,
+  type RunAttention,
   renderWakeLog,
 } from "../orchestrator/policy";
+import type { Nudge } from "./nudge";
 import type { WakeLog, WakeSummary } from "./wake-log";
 
 // Re-exported so existing importers (`./tick`) keep resolving after the leaf split (BRO-1784 s2b).
@@ -66,6 +72,14 @@ export interface RunTickOptions {
   /** start a node's run — the same supervisor dispatch the chat path uses; resolves true iff it started.
    *  Absent → the runtime is read-only (no model loop), so the tick surfaces runnable work but starts none. */
   dispatch?: (nodeId: string) => Promise<boolean>;
+  /** §3.1 — route one goal-restating chat into a stale run (nudge.ts); resolves true iff the nudge went
+   *  out AND its record landed. Absent → the tick cannot nudge, so a stale run surfaces to the human
+   *  instead (honest copy: "worth a look", never "even after a nudge"). */
+  nudge?: Nudge;
+  /** the workspace root. Present → the rendered §7 narrative is mirrored to
+   *  `routines/maestro/runs/run-<tick-id>/` (F6.3-4). Absent → index-only (the `tick.fired` event is
+   *  the durable record either way; the FS copy is the receipt the board reads). */
+  workspace?: string;
   /** passed through to computeOrchestratorTick (day budget, staleness threshold, nudgedSessionIds). */
   orchestrator?: OrchestratorTickOptions;
 }
@@ -118,19 +132,70 @@ export async function runTick(
     const { narrative, summary } = await narrateAndAct(db, cause, now, opts);
     // §7 — the durable wake log: a synthetic `tick.fired` the next tick reads (readLastWakeLog), streamed
     // to the wake-log UI, and the §2.7 continuity for the next tick.
+    const record: WakeLog = { tickId, cause, wokeAt: now, narrative, summary };
     await db.insert(event).values({
       sessionId: null,
       ts: now,
       actor: "system",
       type: EVENT_TYPES.TICK_FIRED,
-      payload: JSON.stringify({ tickId, cause, wokeAt: now, narrative, summary } satisfies WakeLog),
+      payload: JSON.stringify(record),
     });
+    // F6.3-4 (BRO-1945) — mirror the narrative to the orchestrator's own run dir, so its node carries
+    // receipts on disk like every other routine (§8 "no invisible privileges"). Best-effort by design:
+    // the `tick.fired` row above is the durable record, so a read-only/absent workspace must not fail a
+    // tick that already decided and acted.
+    if (opts.workspace) await mirrorWakeLog(opts.workspace, record);
     return { skipped: false, cause, tickId };
   } finally {
     // Fenced release: delete ONLY the lease WE still hold (key + our tickId). If a later tick already
     // took over an expired lease, its holder differs → this is a no-op, so we never steal a live tick's
     // lease. Runs even if the body threw — a live tick never strands the lease (only a crash can).
     await db.delete(lease).where(and(eq(lease.key, TICK_LEASE_KEY), eq(lease.holder, tickId)));
+  }
+}
+
+// ── F6.3-4: the wake log's FS receipt ────────────────────────────────────────
+
+/** The orchestrator's standing node (ORCHESTRATOR §1) — its runs live under `<node>/runs/run-<id>/`,
+ *  the same receipts layout every other node uses (DATA-MODEL §A.1). */
+export const ORCHESTRATOR_NODE_PATH = "routines/maestro";
+/** The file the tick's §7 narrative is mirrored to inside its run dir. */
+export const WAKE_LOG_FILE = "wake-log.md";
+
+/** A tick id safe to use as a single path segment. `runTick` accepts an INJECTED tickId, so this is a
+ *  real boundary, not a formality: a `../` or `/` in it would write the receipt outside the run dir. */
+const isSafeTickId = (id: string): boolean => /^[A-Za-z0-9_-]+$/.test(id);
+
+/** The run dir for a tick: `<workspace>/routines/maestro/runs/run-<tick-id>/`. */
+export function tickRunDir(workspace: string, tickId: string): string {
+  return join(workspace, ORCHESTRATOR_NODE_PATH, "runs", `run-${tickId}`);
+}
+
+/**
+ * Mirror a tick's rendered §7 narrative to its run dir (F6.3-4). Best-effort: a failure is warned and
+ * swallowed — the `tick.fired` index row is the durable record; this is the on-disk receipt.
+ */
+async function mirrorWakeLog(workspace: string, log: WakeLog): Promise<void> {
+  if (!isSafeTickId(log.tickId)) {
+    console.warn(
+      `maestro tick · wake log not mirrored: unsafe tick id ${JSON.stringify(log.tickId)}`,
+    );
+    return;
+  }
+  try {
+    const dir = tickRunDir(workspace, log.tickId);
+    await mkdir(dir, { recursive: true });
+    const body = [
+      `# Wake log · run-${log.tickId}`,
+      "",
+      new Date(log.wokeAt).toISOString(),
+      "",
+      log.narrative ?? "",
+      "",
+    ].join("\n");
+    await writeFile(join(dir, WAKE_LOG_FILE), body, "utf8");
+  } catch (err) {
+    console.warn(`maestro tick · could not mirror the wake log: ${(err as Error).message}`);
   }
 }
 
@@ -190,18 +255,41 @@ async function narrateAndAct(
     else notStarted.push({ nodeId: wanted.nodeId, reason: "could not start" });
   }
 
+  // EXECUTE the nudge decisions (s2b-ii, BRO-1945). §3.1: a first-stale run gets ONE chat restating its
+  // goal (the task-drift defense), routed into the live child through the F10 control channel. The seam
+  // records `run.nudged` on the session's timeline, which is what makes the run leave the stale set and
+  // what the NEXT tick reads to decide "already nudged in this window" (nudge.ts contracts (a)+(b)).
+  // Without a nudge seam (read-only runtime) nothing is nudged and every stale run surfaces instead.
+  const nudged: RunAttention[] = [];
+  const notNudged: RunAttention[] = [];
+  for (const target of decision.nudges) {
+    if (!opts.nudge) {
+      notNudged.push(target);
+      continue;
+    }
+    const ok = await opts
+      .nudge({
+        sessionId: target.sessionId,
+        nodeId: target.nodeId,
+        ageMs: target.ageMs,
+        at: now,
+      })
+      .catch(() => false);
+    if (ok) nudged.push(target);
+    else notNudged.push(target);
+  }
+
   // Reconcile the PLAN into what ACTUALLY happened, so the narrative never claims an unrun action
-  // (forward-honesty): dispatched = only what started; the rest join the deferrals with why; every stale
-  // run the tick did NOT nudge (nudge = s2b-ii) surfaces to the human (afterNudge: false — no nudge claimed).
+  // (forward-honesty): dispatched = only what started; the rest join the deferrals with why. Nudges the
+  // tick actually SENT stay nudges ("Nudged X (quiet N minutes)"); a stale run it could not nudge (no
+  // seam, run not live, record failed) surfaces to the human with `afterNudge: false` — "worth a look",
+  // never the "even after a nudge" copy, which would claim a nudge that did not happen.
   const effective: OrchestratorDecision = {
     ...decision,
     dispatches: started,
     deferrals: [...decision.deferrals, ...notStarted],
-    needsHuman: [
-      ...decision.needsHuman,
-      ...decision.nudges.map((n) => ({ ...n, afterNudge: false })),
-    ],
-    nudges: [],
+    needsHuman: [...decision.needsHuman, ...notNudged.map((n) => ({ ...n, afterNudge: false }))],
+    nudges: nudged,
   };
   return {
     narrative: renderWakeLog(effective),

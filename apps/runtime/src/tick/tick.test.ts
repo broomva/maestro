@@ -4,6 +4,10 @@
 // by the next tick. (The briefing snapshot test is slice 2.) Driven over a real `:memory:` index.
 
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EVENT_TYPES } from "@maestro/protocol";
 import { and, eq } from "drizzle-orm";
 import { type IndexHandle, openIndex } from "../db/client";
@@ -233,13 +237,218 @@ describe("runTick — s2b execution + honest narrative", () => {
         updatedAt: now - 40 * MIN,
         deletedAt: null,
       });
-      await runTick(h.db, "interval", now, "tk"); // no nudge seam (s2b-i)
+      await runTick(h.db, "interval", now, "tk"); // no nudge seam → cannot nudge
       const wl = await readLastWakeLog(h.db);
       expect(wl?.summary?.needsHuman).toBe(1);
       expect(wl?.summary?.nudged).toBe(0);
       expect(wl?.narrative).toContain("has been quiet 40 minutes, worth a look.");
       expect(wl?.narrative).not.toContain("even after a nudge");
       expect(wl?.narrative).not.toContain("Nudged");
+    } finally {
+      h.client.close();
+    }
+  });
+});
+
+// ── s2b-ii (BRO-1945): the tick NUDGES, escalates after a nudge, and mirrors its receipt ──────────
+
+/** Seed a `running` session whose last word was `lastEventTs` (no event → falls back to startedAt). */
+async function seedRun(h: IndexHandle, sessionId: string, nodeId: string, startedAt: number) {
+  await h.db.insert(session).values({
+    id: sessionId,
+    nodeId,
+    branch: `run/${sessionId}`,
+    status: "running" as never,
+    startedAt,
+    endedAt: null,
+    diffstatJson: null,
+    updatedAt: startedAt,
+    deletedAt: null,
+  });
+}
+
+describe("runTick — s2b-ii nudge execution + escalation", () => {
+  test("done.check — a stale run is NUDGED; still stale after its nudge → 'even after a nudge'", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      const t0 = 100 * 86_400_000;
+      await seedNode(h, "nrun", "running", t0 - 40 * MIN);
+      await seedRun(h, "s-run", "nrun", t0 - 40 * MIN); // silent 40 min at t0 → stale
+
+      // The nudge seam stands in for the F10 control channel + the run.nudged record (nudge.ts owns
+      // both; here we prove the TICK reaches for it and narrates the result honestly).
+      const nudged: string[] = [];
+      const nudge = async (target: { sessionId: string; nodeId: string; at: number }) => {
+        nudged.push(target.sessionId);
+        await h.db.insert(event).values({
+          sessionId: target.sessionId,
+          ts: target.at,
+          actor: "system",
+          type: EVENT_TYPES.RUN_NUDGED,
+          payload: null,
+        });
+        return true;
+      };
+
+      // TICK 1 — first stale: it NUDGES (it does not merely surface).
+      await runTick(h.db, "interval", t0, "tk1", { nudge });
+      expect(nudged).toEqual(["s-run"]);
+      const wl1 = await readLastWakeLog(h.db);
+      expect(wl1?.summary?.nudged).toBe(1);
+      expect(wl1?.summary?.needsHuman).toBe(0);
+      expect(wl1?.narrative).toContain("Nudged [nrun](#node/nrun) (quiet 40 minutes).");
+      expect(wl1?.narrative).not.toContain("worth a look");
+
+      // Contract (a) in effect: the nudge moved the run's last-event ts, so it is NOT stale right after.
+      await runTick(h.db, "interval", t0 + 5 * MIN, "tk2", { nudge });
+      expect(nudged).toEqual(["s-run"]); // no second nudge — the window reset
+      expect((await readLastWakeLog(h.db))?.summary).toMatchObject({ nudged: 0, needsHuman: 0 });
+
+      // TICK 3 — 40 min after the nudge with no worker word since: ESCALATE, do not re-nudge.
+      await runTick(h.db, "interval", t0 + 40 * MIN, "tk3", { nudge });
+      expect(nudged).toEqual(["s-run"]); // still one nudge total
+      const wl3 = await readLastWakeLog(h.db);
+      expect(wl3?.summary?.needsHuman).toBe(1);
+      expect(wl3?.summary?.nudged).toBe(0);
+      expect(wl3?.narrative).toContain(
+        "[nrun](#node/nrun) has been quiet 40 minutes even after a nudge, worth a look.",
+      );
+    } finally {
+      h.client.close();
+    }
+  });
+
+  test("REVIVED then re-stale earns a FRESH nudge, not an escalation (contract (b))", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      const t0 = 100 * 86_400_000;
+      await seedNode(h, "nrun", "running", t0 - 40 * MIN);
+      await seedRun(h, "s-run", "nrun", t0 - 40 * MIN);
+      const nudge = async (t: { sessionId: string; at: number }) => {
+        await h.db.insert(event).values({
+          sessionId: t.sessionId,
+          ts: t.at,
+          actor: "system",
+          type: EVENT_TYPES.RUN_NUDGED,
+          payload: null,
+        });
+        return true;
+      };
+      await runTick(h.db, "interval", t0, "tk1", { nudge }); // nudged
+      // the nudge worked: the run spoke again...
+      await h.db.insert(event).values({
+        sessionId: "s-run",
+        ts: t0 + 10 * MIN,
+        actor: "agent",
+        type: EVENT_TYPES.AGENT_SAID,
+        payload: null,
+      });
+      // ...and then went quiet for another 40 minutes.
+      await runTick(h.db, "interval", t0 + 50 * MIN, "tk2", { nudge });
+      const wl = await readLastWakeLog(h.db);
+      expect(wl?.summary?.nudged).toBe(1); // a FRESH first nudge
+      expect(wl?.summary?.needsHuman).toBe(0);
+      expect(wl?.narrative).not.toContain("even after a nudge");
+    } finally {
+      h.client.close();
+    }
+  });
+
+  test("a nudge that could NOT go out surfaces to the human, never claims 'even after a nudge'", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      const t0 = 100 * 86_400_000;
+      await seedNode(h, "nrun", "running", t0 - 40 * MIN);
+      await seedRun(h, "s-run", "nrun", t0 - 40 * MIN);
+      await runTick(h.db, "interval", t0, "tk", { nudge: async () => false });
+      const wl = await readLastWakeLog(h.db);
+      expect(wl?.summary?.nudged).toBe(0);
+      expect(wl?.summary?.needsHuman).toBe(1);
+      expect(wl?.narrative).toContain("has been quiet 40 minutes, worth a look.");
+      expect(wl?.narrative).not.toContain("even after a nudge");
+      expect(wl?.narrative).not.toContain("Nudged");
+    } finally {
+      h.client.close();
+    }
+  });
+
+  test("a nudge seam that THROWS degrades to surfacing, never fails the tick", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      const t0 = 100 * 86_400_000;
+      await seedNode(h, "nrun", "running", t0 - 40 * MIN);
+      await seedRun(h, "s-run", "nrun", t0 - 40 * MIN);
+      const r = await runTick(h.db, "interval", t0, "tk", {
+        nudge: async () => {
+          throw new Error("stdin closed");
+        },
+      });
+      expect(r.skipped).toBe(false);
+      expect((await readLastWakeLog(h.db))?.summary).toMatchObject({ nudged: 0, needsHuman: 1 });
+    } finally {
+      h.client.close();
+    }
+  });
+});
+
+describe("runTick — F6.3-4 wake-log FS mirror", () => {
+  test("mirrors the rendered narrative to routines/maestro/runs/run-<tick-id>/", async () => {
+    const h = await openIndex(":memory:");
+    const ws = await mkdtemp(join(tmpdir(), "maestro-tick-"));
+    try {
+      await seedNode(h, "t1", "triggered", 1000);
+      await runTick(h.db, "interval", 2000, "tk-abc", {
+        workspace: ws,
+        dispatch: async () => true,
+      });
+      const file = join(ws, "routines/maestro/runs/run-tk-abc/wake-log.md");
+      const body = await readFile(file, "utf8");
+      expect(body).toContain("# Wake log · run-tk-abc");
+      // the FS receipt carries the SAME narrative the durable tick.fired row does (one truth, mirrored).
+      const wl = await readLastWakeLog(h.db);
+      expect(wl?.narrative).toBeTruthy();
+      expect(body).toContain(wl?.narrative as string);
+      expect(body).toContain("Started [t1](#node/t1).");
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+      h.client.close();
+    }
+  });
+
+  test("no workspace → no mirror, and the tick still records its durable wake log", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      const r = await runTick(h.db, "interval", 2000, "tk-nows");
+      expect(r.skipped).toBe(false);
+      expect(await readLastWakeLog(h.db)).toMatchObject({ tickId: "tk-nows" });
+    } finally {
+      h.client.close();
+    }
+  });
+
+  test("an UNSAFE tick id is refused, not written outside the run dir (path-traversal boundary)", async () => {
+    const h = await openIndex(":memory:");
+    const ws = await mkdtemp(join(tmpdir(), "maestro-tick-"));
+    try {
+      const r = await runTick(h.db, "interval", 2000, "../../escape", { workspace: ws });
+      expect(r.skipped).toBe(false); // the tick still ran + recorded durably
+      expect(await readLastWakeLog(h.db)).toMatchObject({ tickId: "../../escape" });
+      // nothing was written anywhere under the workspace.
+      expect(existsSync(join(ws, "routines"))).toBe(false);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+      h.client.close();
+    }
+  });
+
+  test("an unwritable workspace does not fail the tick (the index row is the durable record)", async () => {
+    const h = await openIndex(":memory:");
+    try {
+      const r = await runTick(h.db, "interval", 2000, "tk-bad", {
+        workspace: "/proc/nonexistent-maestro-mirror",
+      });
+      expect(r.skipped).toBe(false);
+      expect(await readLastWakeLog(h.db)).toMatchObject({ tickId: "tk-bad" });
     } finally {
       h.client.close();
     }

@@ -7,10 +7,16 @@
 // EMIT half (slice 2b / F6.3-4), deliberately split off: (1) it keeps this pure + replay-testable over a
 // seeded index, and (2) live intent-issuing needs the confined orchestrator harness (BRO-1944) before an
 // agent identity may drive the write path. This slice ships the brain; the hands come next.
+//
+// BRO-1945 (s2b-ii): it now READS one more signal before deciding — which active runs were already
+// nudged in their CURRENT stale window (derived from the index per the §3.1 contract, see nudge.ts).
+// That makes the policy's `afterNudge` escalation reachable in production; it stays a read, so this
+// function is still side-effect-free.
 
 import type { TickCause } from "@maestro/protocol";
 import type { IndexDb } from "../db/client";
 import { assembleBriefing, type BriefingOptions } from "../tick/briefing";
+import { deriveNudgedSessionIds } from "../tick/nudge";
 import { decidePolicy, type OrchestratorDecision, type OrchestratorOptions } from "./policy";
 
 export interface OrchestratorTickOptions extends OrchestratorOptions {
@@ -21,6 +27,10 @@ export interface OrchestratorTickOptions extends OrchestratorOptions {
 /**
  * Compute one orchestrator tick's decisions over the live index at `now`, deterministically. Assembles the
  * §2 briefing then runs the §3 policy; returns the decision + §7 wake log without side effects.
+ *
+ * `nudgedSessionIds` is DERIVED from the index (BRO-1945) unless the caller supplies it — the derivation
+ * is scoped to each run's current stale window (nudge.ts contract (b)), so a run the nudge revived is not
+ * escalated on its next quiet spell. An explicit `opts.nudgedSessionIds` still wins (tests inject it).
  */
 export async function computeOrchestratorTick(
   db: IndexDb,
@@ -29,5 +39,11 @@ export async function computeOrchestratorTick(
   opts: OrchestratorTickOptions = {},
 ): Promise<OrchestratorDecision> {
   const briefing = await assembleBriefing(db, cause, now, opts.briefing);
-  return decidePolicy(briefing, opts);
+  const nudgedSessionIds =
+    opts.nudgedSessionIds ??
+    (await deriveNudgedSessionIds(
+      db,
+      briefing.activeRuns.map((r) => r.sessionId),
+    ));
+  return decidePolicy(briefing, { ...opts, nudgedSessionIds });
 }

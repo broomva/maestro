@@ -235,14 +235,34 @@ if (import.meta.main) {
     try {
       const { startScheduler } = await import("./scheduler/scheduler");
       const { runTick } = await import("./tick/tick");
+      const { createNudger } = await import("./tick/nudge");
       const idx = index; // capture the narrowed handle for the onFire closure
       // BRO-1784 s2b: give the tick a DISPATCH seam so it starts the runnable work its policy decides —
       // the same supervisor the chat path uses (in-process, the runtime's own code, not a spawned model;
       // safe without BRO-1944). Read-only (no dispatch mounted) → no seam → the tick narrates, starts none.
+      // BRO-1945 s2b-ii: plus a NUDGE seam over the same supervisor's F10 control channel, and the
+      // workspace root so each tick mirrors its §7 narrative to routines/maestro/runs/run-<tick-id>/.
       const disp = dispatch;
       const tickOpts: RunTickOptions = disp
-        ? { dispatch: (nodeId) => disp.supervisor.dispatch(nodeId).then((o) => o.dispatched) }
-        : {};
+        ? {
+            dispatch: (nodeId) => disp.supervisor.dispatch(nodeId).then((o) => o.dispatched),
+            nudge: createNudger({
+              db: idx,
+              // Only a LIVE run can be nudged — there is no child to speak to otherwise, and the tick
+              // must not claim a nudge it could not deliver (it surfaces the run to the human instead).
+              live: (sessionId) => {
+                const entry = disp.supervisor.get(sessionId);
+                return entry
+                  ? {
+                      chat: (m) => entry.supervised.control.chat(m),
+                      runDir: entry.sandbox.runDir,
+                    }
+                  : null;
+              },
+            }),
+            workspace: config.workspace,
+          }
+        : { workspace: config.workspace };
       scheduler = startScheduler(idx, {
         // F6 (BRO-1772): a schedule firing is an `interval` wake — run a coalesced tick to narrate + act.
         // Fire-and-forget: a tick failure (or an in-flight-tick coalesce) must never stall the poll.
