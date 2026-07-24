@@ -1,0 +1,105 @@
+{
+  "upstream": {
+    "repo": "broomva/bstack",
+    "ref": "v0.37.1"
+  },
+  "maestro_only": [
+    "check-bstack-vendor.test.ts",
+    "check-bstack-vendor.ts",
+    "check-icons.test.ts",
+    "check-icons.ts",
+    "p0-exit.sh"
+  ],
+  "files": [
+    {
+      "local": "arc-continuation-hook.sh",
+      "upstream": "scripts/arc-continuation-hook.sh",
+      "local_sha256": "e64cf794597143f108695c31fd2b10e38ff3a596e21ccff512d3c34fcac4d44e",
+      "upstream_sha256": "e64cf794597143f108695c31fd2b10e38ff3a596e21ccff512d3c34fcac4d44e"
+    },
+    {
+      "local": "auth-preflight-hook.sh",
+      "upstream": "scripts/auth-preflight-hook.sh",
+      "local_sha256": "3e7924bceec7a470c9fa23f9ee8b261760706a95724ecb57d0f6f542e0cfb6a1",
+      "upstream_sha256": "3e7924bceec7a470c9fa23f9ee8b261760706a95724ecb57d0f6f542e0cfb6a1"
+    },
+    {
+      "local": "autonomous-arc.sh",
+      "upstream": "scripts/autonomous-arc.sh",
+      "local_sha256": "ccd5fc2d9cf4ba6b7025fc4e48c18d6d6f4df2ca208f3e72a43cc7a932bb9c36",
+      "upstream_sha256": "ccd5fc2d9cf4ba6b7025fc4e48c18d6d6f4df2ca208f3e72a43cc7a932bb9c36"
+    },
+    {
+      "local": "autonomous-posture-hook.sh",
+      "upstream": "scripts/autonomous-posture-hook.sh",
+      "local_sha256": "6cbbc367ba3b94529dabbd60bc786db7373dda983ffeb13877ac33c24c4c7d9c",
+      "upstream_sha256": "6cbbc367ba3b94529dabbd60bc786db7373dda983ffeb13877ac33c24c4c7d9c"
+    },
+    {
+      "local": "bstack-autoupdate-hook.sh",
+      "upstream": "scripts/bstack-autoupdate-hook.sh",
+      "local_sha256": "f51deaf159d789ab3dc7ce015007b8d96145e51d8b06a2f7d5161807a99dcd6b",
+      "upstream_sha256": "f51deaf159d789ab3dc7ce015007b8d96145e51d8b06a2f7d5161807a99dcd6b"
+    },
+    {
+      "local": "control-gate-hook.sh",
+      "upstream": "scripts/control-gate-hook.sh",
+      "local_sha256": "6b31cfeb9cc73c6b2d19728ae4b65dcf65e75c015dc83fc8d909c60ad700f926",
+      "upstream_sha256": "0345d9227ae9ce84b1bb7f7d569bfd671d2bd073f97424921a59af095548a1b2",
+      "divergence": "header comment rewritten `bstack/scripts/` -> `scripts/` at vendor time"
+    },
+    {
+      "local": "conversation-bridge-hook.sh",
+      "upstream": "scripts/conversation-bridge-hook.sh",
+      "local_sha256": "2014aae1e8ed29c853885618a25888434f0507d1669286b0c0cb5bdf82c4036d",
+      "upstream_sha256": "9d8f590f7769ddf9c6e3381c5a099b5bb46145478f2f58e321225d4e57343a0d",
+      "divergence": "header comment rewritten `bstack/scripts/` -> `scripts/` at vendor time"
+    },
+    {
+      "local": "knowledge-catalog-refresh-hook.sh",
+      "upstream": "scripts/knowledge-catalog-refresh-hook.sh",
+      "local_sha256": "33503aac469d6a79b8cb669084f5c602606adc97cc4129263b0d5b90308d2144",
+      "upstream_sha256": "ff3a8e175f356fd057d6d934470043970d60c6c3c0af49e5aa4382dc4dab12ed",
+      "divergence": "header comment rewritten `bstack/scripts/` -> `scripts/` at vendor time"
+    },
+    {
+      "local": "knowledge-wakeup-hook.sh",
+      "upstream": "scripts/knowledge-wakeup-hook.sh",
+      "local_sha256": "31ea140275d49be126e7d40b86ab04725140b7c95378fb34343eb4cb0cc201ab",
+      "upstream_sha256": "31ea140275d49be126e7d40b86ab04725140b7c95378fb34343eb4cb0cc201ab"
+    },
+    {
+      "local": "l3-rate-gate.sh",
+      "upstream": "scripts/l3-rate-gate.sh",
+      "local_sha256": "9b0200d5cec41de2e4bfaf41543bdfc996a606c6f67c37b7222ccb57290dd144",
+      "upstream_sha256": "1ed8c66e6afffa55c7da2a0bfa167194fb0ae5f2108a1917a47e776b083d0608",
+      "divergence": "header comment rewrite, plus the references pointer rewritten to the public repo URL (no bstack/ dir in this repo)"
+    },
+    {
+      "local": "l3-stability-pretool-hook.sh",
+      "upstream": "scripts/l3-stability-pretool-hook.sh",
+      "local_sha256": "aefe262912584911f3d1fd1de0bad2e6d8c2b535fa70f58772248b71040e4ac3",
+      "upstream_sha256": "94180593f32aa0be466ec66de851b26e90c276deccefb04d656318fe29f87fc3",
+      "divergence": "STALE \u2014 predates bstack BRO-1926, so it lacks the non-bstack-workspace scope guard, and it still points at `./bin/bstack compute-lambda` which does not exist here. Tracked on BRO-1974; re-syncing a live PreToolUse gate is its own change."
+    },
+    {
+      "local": "leverage-sensor.py",
+      "upstream": "scripts/leverage-sensor.py",
+      "local_sha256": "7f80116da74edfcb75cb512928cf87a729ce0560acec1fc31ad53b90ec71f4fa",
+      "upstream_sha256": "7f80116da74edfcb75cb512928cf87a729ce0560acec1fc31ad53b90ec71f4fa"
+    },
+    {
+      "local": "leverage-ship-sensor.py",
+      "upstream": "scripts/leverage-ship-sensor.py",
+      "local_sha256": "6229129bedf2440f942d42bea607ff4f3a216193b0ee91172afde156b285441e",
+      "upstream_sha256": "6229129bedf2440f942d42bea607ff4f3a216193b0ee91172afde156b285441e"
+    },
+    {
+      "local": "skill-freshness-hook.sh",
+      "upstream": "scripts/skill-freshness-hook.sh",
+      "local_sha256": "078331930e2ba3b637292fe3374f0ea1b422b753a5059e937aec235eeed305b8",
+      "upstream_sha256": "884891754341b97b664ea4a648f0b2cf7bbadf1116725c341ab5c2a7575a33cb",
+      "divergence": "header comment rewritten `bstack/scripts/` -> `scripts/` at vendor time"
+    }
+  ]
+}
