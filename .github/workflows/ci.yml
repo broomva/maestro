@@ -43,6 +43,15 @@ jobs:
         # conform to canon. The brand mark is exempt by living outside that dir. Fails the gate on
         # a mixed library or a non-canon glyph.
         run: bun run check:icons
+      - name: Vendored bstack script drift (BRO-1973)
+        # This repo COPIES ~14 scripts from github.com/broomva/bstack, because the hooks in
+        # .claude/settings.json resolve $CLAUDE_PROJECT_DIR/scripts/<hook> and so must exist in a
+        # fresh clone / CI / worktree with no user-level bstack install. Copies rot: leverage-sensor.py
+        # sat one commit behind a real bug fix. This asserts every vendored file still hashes to what
+        # scripts/bstack-vendor.json records, every difference from upstream carries a written reason,
+        # and no new script slips into scripts/ unaccounted for. Offline — the upstream-moved check
+        # (`--upstream`) needs network and is run deliberately at re-sync time, not on every PR.
+        run: bun run check:bstack-vendor
       - name: Test
         # Runs every *.test.ts across the workspace — including the D8-layer-1 mock-model loop
         # tests (BRO-1806, `bun run test:loops`), which drive full F2→F3 flows through the real
