@@ -12,7 +12,8 @@ import { event } from "../db/schema";
 export interface WakeSummary {
   /** work actually started this tick (a real supervisor dispatch, not a plan). */
   dispatched: number;
-  /** running sessions nudged this tick (a chat restating the goal). s2b-i: always 0 (nudge = s2b-ii). */
+  /** running sessions nudged this tick (a chat restating the goal that actually went out — BRO-1945).
+   *  0 on a read-only runtime (no nudge seam) or when no run was stale. */
   nudged: number;
   /** running sessions surfaced for the human (stale, and the tick could not or did not revive them). */
   needsHuman: number;
