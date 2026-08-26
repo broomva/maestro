@@ -1,0 +1,4 @@
+- 2026-07-09 23:56:01 — session 64bb486f-e641-4eb8-9c2f-65df4afed1d8 (bstack minimal bridge; install knowledge-graph-memory for full capture)
+- 2026-07-15 23:45:46 — session 71d2489e-6056-4f5f-af15-9868e66184e5 (bstack minimal bridge; install knowledge-graph-memory for full capture)
+- 2026-07-16 00:08:52 — session 3235afb7-48e6-4d52-846f-a4ecf51014a4 (bstack minimal bridge; install knowledge-graph-memory for full capture)
+- 2026-07-16 00:15:19 — session 9e9dadb3-9386-497b-b77e-67c08abae83b (bstack minimal bridge; install knowledge-graph-memory for full capture)
