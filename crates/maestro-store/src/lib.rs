@@ -52,12 +52,12 @@ impl Store {
 
     /// Read every YAML file in a workspace directory as a document, with `parse`.
     /// A file the listing skipped (not a regular file) is an error, not a silence.
-    fn yaml_docs_with(
+    fn yaml_docs_with<T>(
         &self,
         dir: &str,
         suffixes: &[&str],
-        parse: impl Fn(&str) -> Result<(serde_json::Value, Vec<String>), String>,
-    ) -> Section<Vec<(String, serde_json::Value)>> {
+        parse: impl Fn(&str) -> Result<(T, Vec<String>), String>,
+    ) -> Section<Vec<(String, T)>> {
         let label = self.tree.label(dir);
         let listing = match self.tree.list(dir, suffixes) {
             Ok(listing) => listing,

@@ -1,0 +1,3 @@
+asks:
+  - id: vstr
+    v: !<tag:yaml.org,2002:str> 12

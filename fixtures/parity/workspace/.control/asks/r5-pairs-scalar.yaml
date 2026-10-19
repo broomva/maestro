@@ -1,0 +1,3 @@
+asks:
+  - id: okay
+    v: !!pairs [a]

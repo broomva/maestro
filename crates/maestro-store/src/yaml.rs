@@ -45,7 +45,8 @@
 //! - Collections nested deeper than [`MAX_DEPTH`] are refused. The plugin's limit
 //!   is its engine's stack, which differs between node and bun.
 
-use serde_json::{Map, Number, Value};
+use maestro_core::js::JsValue;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser, Tag};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
@@ -66,12 +67,28 @@ pub const MAX_DEPTH: usize = 256;
 /// A ledger read as the plugin reads it, plus anything read differently that the caller must report.
 #[derive(Debug)]
 pub struct Read {
-    pub value: Value,
+    pub value: JsValue,
     pub warnings: Vec<String>,
 }
 
+/// The stack the parser runs on. Conversion recurses once or twice per nesting level, up to
+/// [`MAX_DEPTH`] levels; a dedicated stack makes that bound hold whatever thread calls (a
+/// 2 MiB tokio blocking thread, a test thread). Reserved, not committed: only what is used costs.
+const PARSE_STACK: usize = 64 << 20;
+
 /// Parse one YAML document to the JavaScript value `toJS()` would build.
 pub fn parse(source: &str) -> Result<Read, String> {
+    let owned = source.to_string();
+    std::thread::Builder::new()
+        .name("maestro-yaml".into())
+        .stack_size(PARSE_STACK)
+        .spawn(move || parse_here(&owned))
+        .map_err(|e| format!("could not start the YAML reader: {e}"))?
+        .join()
+        .map_err(|_| "the YAML reader failed".to_string())?
+}
+
+fn parse_here(source: &str) -> Result<Read, String> {
     // A leading byte-order mark is not content: the package skips it, and so must the key it would prefix.
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     if let Some(version) = yaml_version(source)
@@ -82,10 +99,18 @@ pub fn parse(source: &str) -> Result<Read, String> {
         ));
     }
     // The package's lexer breaks lines on `\n` only: a lone `\r` is content to it, where
-    // yaml-rust2 would break the line. Carry each as U+FDD1 (a Unicode noncharacter, so no
-    // ledger text holds it), which scans as content, and put the `\r` back once resolved.
+    // yaml-rust2 would break the line. Carry each as a private-use char this document does
+    // not hold (so it can stand for nothing else), which scans as content, and put the `\r`
+    // back once resolved.
     let has_lone_cr =
         source.bytes().enumerate().any(|(i, b)| b == b'\r' && source.as_bytes().get(i + 1) != Some(&b'\n'));
+    let cr_mark = if has_lone_cr {
+        let held: std::collections::HashSet<char> =
+            source.chars().filter(|c| ('\u{E000}'..='\u{F8FF}').contains(c)).collect();
+        ('\u{E000}'..='\u{F8FF}').find(|c| !held.contains(c)).ok_or("no private-use char is free to carry a lone CR")?
+    } else {
+        '\u{E000}'
+    };
     let mut text = if has_lone_cr {
         let mut out = String::with_capacity(source.len() + 8);
         let mut chars = source.chars().peekable();
@@ -108,7 +133,7 @@ pub fn parse(source: &str) -> Result<Read, String> {
                         return Err("a lone carriage return right after a `-` or `?` indicator: the plugin reads it as the node's first column, which Maestro cannot reproduce".into())
                     }
                 }
-                out.push(LONE_CR);
+                out.push(cr_mark);
             } else {
                 out.push(c);
             }
@@ -125,10 +150,13 @@ pub fn parse(source: &str) -> Result<Read, String> {
     // so the cost is two parses, never one per site. Anything that pass misses is repaired
     // where the scanner points, a bounded number of times.
     let mut normalized = false;
+    // The text before any tab became a space: the same chars at the same places, so the
+    // tab-indentation checks read the tabs the document really has.
+    let mut tabs_as_written: Option<String> = None;
     for _ in 0..MAX_REPAIRS {
-        match parse_events(&text) {
+        match parse_events(&text, tabs_as_written.as_deref()) {
             Ok(value) => {
-                let value = if has_lone_cr { restore_cr(value) } else { value };
+                let value = if has_lone_cr { restore_cr(value, cr_mark) } else { value };
                 let warnings = if lone > 0 {
                     vec![format!(
                         "{lone} lone surrogate escape(s) read as U+FFFD: the plugin keeps them, so these entries hash differently"
@@ -139,13 +167,17 @@ pub fn parse(source: &str) -> Result<Read, String> {
                 return Ok(Read { value, warnings });
             }
             Err((e, _)) if repairable(&e) && !normalized => {
-                let (fixed, n) = normalize(&text);
+                let (fixed, written, n) = normalize(&text);
                 normalized = true;
                 lone += n;
                 text = std::borrow::Cow::Owned(fixed);
+                tabs_as_written = Some(written);
             }
             Err((e, Some(at))) if e.contains("invalid Unicode character escape") => {
                 let Some((fixed, n)) = repair_quoted_scalar(&text, at) else { return Err(e) };
+                if let Some(written) = &tabs_as_written {
+                    tabs_as_written = repair_quoted_scalar(written, at).map(|(w, _)| w);
+                }
                 lone += n;
                 text = std::borrow::Cow::Owned(fixed);
             }
@@ -153,6 +185,7 @@ pub fn parse(source: &str) -> Result<Read, String> {
                 if e.contains("must be followed by a valid YAML whitespace") || e.contains("expected whitespace") =>
             {
                 let Some(fixed) = repair_tab_separator(&text, at) else { return Err(e) };
+                tabs_as_written.get_or_insert_with(|| text.to_string());
                 text = std::borrow::Cow::Owned(fixed);
             }
             Err((e, _)) => return Err(e),
@@ -174,9 +207,12 @@ fn repairable(e: &str) -> bool {
 /// rewritten (a pair to `\U`, a lone half to `\uFFFD`); outside quoted scalars, block scalars
 /// and comments, a tab run right after `:` becomes spaces. A tab becomes a space, so no char
 /// moves and every check by position still holds. Returns the text and the lone-half count.
-fn normalize(text: &str) -> (String, usize) {
+fn normalize(text: &str) -> (String, String, usize) {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
+    // Char positions (in `out`) of the tabs made spaces, to give the as-written copy its tabs back.
+    let mut spaced: Vec<usize> = Vec::new();
+    let mut out_len = 0usize;
     let mut lone = 0;
     let mut i = 0;
     // Indent of the line holding a block scalar header, while inside its content.
@@ -251,6 +287,8 @@ fn normalize(text: &str) -> (String, usize) {
                 out.push(':');
                 i += 1;
                 while i < chars.len() && chars[i] == '\t' {
+                    out_len = out.chars().count();
+                    spaced.push(out_len);
                     out.push(' ');
                     i += 1;
                 }
@@ -273,14 +311,19 @@ fn normalize(text: &str) -> (String, usize) {
             }
         }
     }
-    (out, lone)
+    let _ = out_len;
+    let mut written: Vec<char> = out.chars().collect();
+    for at in spaced {
+        written[at] = '\t';
+    }
+    (out, written.into_iter().collect(), lone)
 }
 
 /// Whether the block scalar whose header is at char `header` holds a line that is only
 /// whitespace, has a tab, and starts less indented than the scalar's content: the package
 /// reads that tab as content on an under-indented line and refuses it, where yaml-rust2
 /// takes the line as blank. The scalar runs until a line with text at a lesser indent.
-fn block_scalar_has_short_tab_line(src: &[char], mark: usize) -> bool {
+fn block_scalar_has_short_tab_line(src: &[char], line_starts: &[usize], mark: usize) -> bool {
     // The event's mark may sit on the content; the header (`|`/`>` and its indicators) is
     // the last `|`/`>` before it, past whitespace and the chomping/indent indicators.
     let mut i = mark.min(src.len());
@@ -290,20 +333,25 @@ fn block_scalar_has_short_tab_line(src: &[char], mark: usize) -> bool {
     while i > 0 && matches!(src[i - 1], '+' | '-' | '0'..='9') {
         i -= 1;
     }
-    let header = if i > 0 && matches!(src[i - 1], '|' | '>') { i - 1 } else { mark };
-    let text: String = src.iter().collect();
-    let byte = text.char_indices().nth(header).map_or(text.len(), |(i, _)| i);
-    let Some(nl) = text[byte..].find('\n') else { return false };
-    let lines: Vec<&str> = text[byte + nl + 1..].split('\n').collect();
-    let indent_of = |l: &str| l.chars().take_while(|&c| c == ' ').count();
-    let Some(content_indent) = lines.iter().find(|l| !l.trim().is_empty()).map(|l| indent_of(l)) else { return false };
-    for line in lines {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let blank = line.chars().all(|c| c == ' ' || c == '\t');
-        if !blank && indent_of(line) < content_indent {
+    let header = if i > 0 && matches!(src[i - 1], '|' | '>') { i - 1 } else { mark.min(src.len()) };
+    // The lines after the header's, as char ranges: no copies, and each scalar stops where it ends.
+    let first = line_starts.partition_point(|&s| s <= header);
+    let line = |n: usize| -> &[char] {
+        let start = line_starts[n];
+        let end = line_starts.get(n + 1).map_or(src.len(), |&e| e - 1);
+        &src[start..end.max(start)]
+    };
+    let indent_of = |l: &[char]| l.iter().take_while(|&&c| c == ' ').count();
+    let blank = |l: &[char]| l.iter().all(|&c| matches!(c, ' ' | '\t' | '\r'));
+    let Some(content_indent) = (first..line_starts.len()).map(line).find(|l| !blank(l)).map(indent_of) else {
+        return false;
+    };
+    for n in first..line_starts.len() {
+        let l = line(n);
+        if !blank(l) && indent_of(l) < content_indent {
             return false; // the scalar has ended
         }
-        if blank && line.contains('\t') && indent_of(line) < content_indent {
+        if blank(l) && l.contains(&'\t') && indent_of(l) < content_indent {
             return true;
         }
     }
@@ -333,17 +381,13 @@ fn follows_indicator(before: &str) -> Indicator {
     }
 }
 
-/// A lone carriage return, carried through the scanner as content.
-const LONE_CR: char = '\u{FDD1}';
-
-/// Every [`LONE_CR`] in a resolved value, keys included, back to `\r`.
-fn restore_cr(value: Value) -> Value {
+/// Every `mark` in a resolved value, keys included, back to the `\r` it carried.
+fn restore_cr(value: JsValue, mark: char) -> JsValue {
+    let back = |s: String| if s.contains(mark) { s.replace(mark, "\r") } else { s };
     match value {
-        Value::String(s) => Value::String(s.replace(LONE_CR, "\r")),
-        Value::Array(items) => Value::Array(items.into_iter().map(restore_cr).collect()),
-        Value::Object(map) => {
-            Value::Object(map.into_iter().map(|(k, v)| (k.replace(LONE_CR, "\r"), restore_cr(v))).collect())
-        }
+        JsValue::Str(s) => JsValue::Str(back(s)),
+        JsValue::Arr(items) => JsValue::Arr(items.into_iter().map(|v| restore_cr(v, mark)).collect()),
+        JsValue::Obj(map) => JsValue::Obj(map.into_iter().map(|(k, v)| (back(k), restore_cr(v, mark))).collect()),
         other => other,
     }
 }
@@ -416,8 +460,13 @@ fn repair_quoted_scalar(source: &str, at: usize) -> Option<(String, usize)> {
 }
 
 /// Parse events into a value. An error carries the scanner's char index, when it names one.
-fn parse_events(source: &str) -> Result<Value, (String, Option<usize>)> {
+fn parse_events(source: &str, as_written: Option<&str>) -> Result<JsValue, (String, Option<usize>)> {
     let mut builder = Builder { src: source.chars().collect(), ..Builder::default() };
+    // The tab checks read the document's own tabs, which a separator repair turned into spaces.
+    let written: Vec<char> = match as_written {
+        Some(w) => w.chars().collect(),
+        None => builder.src.clone(),
+    };
     let mut parser = Parser::new_from_str(source);
     // Drive the parser one event at a time. Its own `load` recurses once per nesting level,
     // which a deep enough document turns into a stack overflow; this loop does not, and it
@@ -439,26 +488,31 @@ fn parse_events(source: &str) -> Result<Value, (String, Option<usize>)> {
     // The package refuses a tab where a block node's indentation is: in the whitespace that
     // opens the node's line, when only block indicators (`- `, `? `, `: `) stand between that
     // whitespace and the node. A tab after an indicator is separation, and allowed.
+    let line_starts: Vec<usize> =
+        std::iter::once(0).chain(written.iter().enumerate().filter(|(_, c)| **c == '\n').map(|(i, _)| i + 1)).collect();
     for &header in &builder.block_scalars {
-        if block_scalar_has_short_tab_line(&builder.src, header) {
+        if block_scalar_has_short_tab_line(&written, &line_starts, header) {
             return Err(("Block scalar lines must not be less indented than their first line".into(), Some(header)));
         }
     }
     // A block collection opened after an indicator on the same line (`-\tid: x`) takes its
     // indentation from what follows the indicator, so a tab there is indentation too.
     for &(at, collection) in &builder.block_starts {
-        let at = at.min(builder.src.len());
-        let line_start = builder.src[..at].iter().rposition(|&c| c == '\n').map_or(0, |i| i + 1);
-        let prefix = &builder.src[line_start..at];
+        let at = at.min(written.len());
+        let line_start = line_starts[line_starts.partition_point(|&s| s <= at) - 1];
+        let prefix = &written[line_start..at];
         let indent = prefix.iter().take_while(|&&c| c == ' ' || c == '\t').count();
         let rest_is_indicators = prefix[indent..].iter().all(|&c| matches!(c, '-' | '?' | ':' | ' ' | '\t'));
-        let tab_in_indent = prefix[..indent].contains(&'\t') || (collection && prefix[indent..].contains(&'\t'));
+        // An explicit key (`?\tk`) opens its mapping at the `?`, so a tab after it only separates.
+        let explicit_key = prefix[indent..].contains(&'?');
+        let tab_in_indent =
+            prefix[..indent].contains(&'\t') || (collection && !explicit_key && prefix[indent..].contains(&'\t'));
         if rest_is_indicators && tab_in_indent {
             return Err(("Tabs are not allowed as indentation".into(), Some(at)));
         }
     }
     match builder.root {
-        None => Ok(Value::Null),
+        None => Ok(JsValue::Null),
         Some(node) => {
             let mut cx = Cx { anchors: &builder.anchors, budget: MAX_NODES, aliases: HashMap::new() };
             to_js(&node, &mut cx, 0).map_err(|e| (e, None))
@@ -537,7 +591,7 @@ impl MarkedEventReceiver for Builder {
             // A block sequence's mark can sit on its first item, past its own `-`: anchor it
             // on that `-`, so the separator after its own indicator is not read as indentation.
             let mut at = mark.index();
-            if block_collection && matches!(ev, Event::SequenceStart(..)) {
+            if block_collection && matches!(ev, Event::SequenceStart(..)) && self.src.get(at) != Some(&'-') {
                 let mut i = at.min(self.src.len());
                 while i > 0 && matches!(self.src[i - 1], ' ' | '\t') {
                     i -= 1;
@@ -614,25 +668,25 @@ enum Js {
 }
 
 impl Js {
-    fn into_value(self) -> Value {
+    fn into_value(self) -> JsValue {
         match self {
-            Js::Null => Value::Null,
-            Js::Bool(b) => Value::Bool(b),
-            Js::Num(x) => js_num(x),
-            Js::Str(s) => Value::String(s),
+            Js::Null => JsValue::Null,
+            Js::Bool(b) => JsValue::Bool(b),
+            Js::Num(x) => JsValue::Num(x),
+            Js::Str(s) => JsValue::Str(s),
             // `canonical` turns a Date into `toISOString()`.
-            Js::Date(ms) => Value::String(iso_string(ms)),
+            Js::Date(ms) => JsValue::Str(iso_string(ms)),
             // `canonical` sees a byte array as an object of index keys.
-            Js::Bytes(b) => {
-                Value::Object(b.into_iter().enumerate().map(|(i, v)| (i.to_string(), Value::from(v))).collect())
-            }
+            Js::Bytes(b) => JsValue::Obj(
+                b.into_iter().enumerate().map(|(i, v)| (i.to_string(), JsValue::Num(f64::from(v)))).collect(),
+            ),
         }
     }
 }
 
 /// `depth` counts collections as resolved, aliases included: a chain of anchors each
 /// wrapping the last nests deeper than any one of them was written, so the cap applies here too.
-fn to_js(node: &Node, cx: &mut Cx<'_>, depth: usize) -> Result<Value, String> {
+fn to_js(node: &Node, cx: &mut Cx<'_>, depth: usize) -> Result<JsValue, String> {
     cx.budget = cx.budget.checked_sub(1).ok_or("Excessive alias count: the document expands past its limit")?;
     if depth > MAX_DEPTH {
         return Err(format!("collections nested deeper than {MAX_DEPTH} levels once aliases are resolved"));
@@ -643,15 +697,44 @@ fn to_js(node: &Node, cx: &mut Cx<'_>, depth: usize) -> Result<Value, String> {
             let target = alias_target(*id, cx)?;
             to_js(target, cx, depth)
         }
-        Node::Seq(tag, items) => {
-            let values: Vec<Value> = items.iter().map(|n| to_js(n, cx, depth + 1)).collect::<Result<_, _>>()?;
-            // `!!omap` is a JavaScript Map: `canonical` finds no own keys on it.
-            Ok(if core_tag(tag.as_ref()) == Some("omap") { Value::Object(Map::new()) } else { Value::Array(values) })
-        }
+        Node::Seq(tag, items) => match core_tag(tag.as_ref()) {
+            // `!!pairs` and `!!omap`: each item one pair, a scalar item a key with a null value.
+            Some(kind @ ("pairs" | "omap")) => {
+                let mut pairs: Vec<(String, JsValue)> = Vec::new();
+                for item in items {
+                    pairs.push(match item {
+                        Node::Map(_, kv) if kv.len() == 1 => {
+                            let key = key_scalar(&kv[0].0, cx)?;
+                            (key_string(&key)?, to_js(&kv[0].1, cx, depth + 2)?)
+                        }
+                        Node::Map(..) => return Err("Each pair must have its own sequence indicator".into()),
+                        other => (key_string(&key_scalar(other, cx)?)?, JsValue::Null),
+                    });
+                }
+                if kind == "omap" {
+                    let mut seen = std::collections::HashSet::new();
+                    if pairs.iter().any(|(k, _)| !seen.insert(k.clone())) {
+                        return Err("Ordered maps must not include duplicate keys".into());
+                    }
+                    // A JavaScript Map: `canonical` finds no own keys on it.
+                    return Ok(JsValue::Obj(BTreeMap::new()));
+                }
+                Ok(JsValue::Arr(pairs.into_iter().map(|(k, v)| JsValue::Obj(BTreeMap::from([(k, v)]))).collect()))
+            }
+            _ => items.iter().map(|n| to_js(n, cx, depth + 1)).collect::<Result<_, _>>().map(JsValue::Arr),
+        },
         Node::Map(tag, pairs) => {
-            let mut out = Map::new();
+            let mut out: BTreeMap<String, JsValue> = BTreeMap::new();
             let mut seen = std::collections::HashSet::new();
+            let is_set = core_tag(tag.as_ref()) == Some("set");
             for (k, v) in pairs {
+                // A key tagged `!!merge` merges its value's keys, whatever the key reads.
+                if let Node::Scalar { tag: Some(t), .. } = k
+                    && core_tag(Some(t)) == Some("merge")
+                {
+                    merge_into(&mut out, v, cx, depth)?;
+                    continue;
+                }
                 let key = key_scalar(k, cx)?;
                 // `uniqueKeys` compares two scalar *nodes* by value; an alias key is a different node.
                 if matches!(k, Node::Scalar { .. })
@@ -660,24 +743,55 @@ fn to_js(node: &Node, cx: &mut Cx<'_>, depth: usize) -> Result<Value, String> {
                 {
                     return Err("Map keys must be unique".into());
                 }
-                let name = key_string(&key)?;
-                out.insert(name, to_js(v, cx, depth + 1)?);
-            }
-            // `!!set` is a JavaScript Set: `canonical` finds no own keys on it. Its items must be
-            // keys alone, as the package checks.
-            if core_tag(tag.as_ref()) == Some("set") {
-                if out.values().any(|v| !v.is_null()) {
+                let value = to_js(v, cx, depth + 1)?;
+                // `!!set` items are keys alone: checked per pair, before keys collide as JS keys.
+                if is_set && !value.is_null() {
                     return Err("Set items must all have null values".into());
                 }
-                return Ok(Value::Object(Map::new()));
+                out.insert(key_string(&key)?, value);
             }
-            Ok(Value::Object(out))
+            // A JavaScript Set: `canonical` finds no own keys on it.
+            Ok(if is_set { JsValue::Obj(BTreeMap::new()) } else { JsValue::Obj(out) })
         }
     }
 }
 
+/// The package's `addMergeToJSMap`: the source (a map, an alias to one, or a list of those)
+/// gives each of its keys the map does not hold yet. Earlier sources win; keys written later
+/// in the map still overwrite.
+fn merge_into(out: &mut BTreeMap<String, JsValue>, source: &Node, cx: &mut Cx<'_>, depth: usize) -> Result<(), String> {
+    fn resolved(n: &Node, cx: &mut Cx<'_>, depth: usize) -> Result<JsValue, String> {
+        let v = to_js(n, cx, depth + 1)?;
+        if v.is_object() { Ok(v) } else { Err("Merge sources must be maps or map aliases".into()) }
+    }
+    let sources: Vec<JsValue> = match source {
+        Node::Seq(_, items) => items.iter().map(|n| resolved(n, cx, depth)).collect::<Result<_, _>>()?,
+        Node::Alias(id) => {
+            let target = alias_target(*id, cx)?;
+            match target {
+                Node::Seq(_, items) => items.iter().map(|n| resolved(n, cx, depth)).collect::<Result<_, _>>()?,
+                other => vec![resolved(other, cx, depth)?],
+            }
+        }
+        other => vec![resolved(other, cx, depth)?],
+    };
+    for src in sources {
+        if let JsValue::Obj(map) = src {
+            for (k, v) in map {
+                out.entry(k).or_insert(v);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The core tag a node carries, by shorthand (`!!int`) or verbatim (`!<tag:yaml.org,2002:int>`).
 fn core_tag(tag: Option<&Tag>) -> Option<&str> {
-    tag.filter(|t| t.handle == CORE).map(|t| t.suffix.as_str())
+    let tag = tag?;
+    if tag.handle == CORE {
+        return Some(tag.suffix.as_str());
+    }
+    tag.suffix.strip_prefix(CORE).filter(|_| tag.handle.is_empty() || tag.handle == "!")
 }
 
 /// Resolve an alias, counting it as the package's `Alias.resolve` does: the anchor's count
@@ -761,7 +875,7 @@ fn key_string(key: &Js) -> Result<String, String> {
 
 fn scalar(value: &str, style: TScalarStyle, tag: Option<&Tag>) -> Result<Js, String> {
     Ok(match tag {
-        Some(tag) if tag.handle == CORE => tagged(value, &tag.suffix)?,
+        Some(t) if let Some(suffix) = core_tag(Some(t)) => tagged(value, suffix)?,
         // A non-specific `!` or any local/unknown tag: the scalar is its text.
         Some(_) => Js::Str(value.to_string()),
         None if style == TScalarStyle::Plain => plain(value),
@@ -885,27 +999,6 @@ fn float_of(s: &str) -> Option<f64> {
         return None;
     }
     s.parse::<f64>().ok()
-}
-
-/// A JavaScript number as JSON: integral doubles within 2^53 as integers, and a non-finite one
-/// as a marked string ([`maestro_core::ask::NONFINITE`]), so it still hashes as `null` and reads
-/// as `Infinity` or `NaN`.
-fn js_num(x: f64) -> Value {
-    const SAFE: f64 = 9_007_199_254_740_992.0;
-    if !x.is_finite() {
-        let name = if x.is_nan() {
-            "NaN"
-        } else if x > 0.0 {
-            "Infinity"
-        } else {
-            "-Infinity"
-        };
-        return Value::String(format!("{}{name}", maestro_core::ask::NONFINITE));
-    }
-    if x.fract() == 0.0 && x.abs() <= SAFE {
-        return Value::from(x as i64); // -0 becomes 0, as JSON.stringify prints it
-    }
-    Number::from_f64(x).map_or(Value::Null, Value::Number)
 }
 
 /// `!!binary`: base64 decoded leniently, as Node's `Buffer.from(s, 'base64')` decodes it
@@ -1138,8 +1231,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn js(source: &str) -> Value {
-        parse(source).unwrap().value
+    /// The value as a caller sees it (JSON): what the tests compare.
+    fn js(source: &str) -> serde_json::Value {
+        parse(source).unwrap().value.to_json()
     }
 
     #[test]
@@ -1198,7 +1292,7 @@ mod tests {
     #[test]
     fn surrogate_escapes_pair_or_report() {
         let r = parse("a: \"\\uD83D\\uDE00\"\nb: \"cut \\uD83D x\"\n").unwrap();
-        assert_eq!(r.value, json!({"a": "\u{1F600}", "b": "cut \u{FFFD} x"}));
+        assert_eq!(r.value.to_json(), json!({"a": "\u{1F600}", "b": "cut \u{FFFD} x"}));
         assert_eq!(r.warnings.len(), 1);
         assert!(parse("a: \"\\uD83D\\uDE00\"\n").unwrap().warnings.is_empty(), "a valid pair is no loss");
     }
@@ -1284,8 +1378,8 @@ mod tests {
     #[test]
     fn surrogate_repair_stays_inside_the_failing_scalar() {
         let r = parse("a: \"x \\\\uD83D \\uDE00\"\nw: 'lit \\uD83D\\uDE00'\n").unwrap();
-        assert_eq!(r.value["w"], "lit \\uD83D\\uDE00", "a single-quoted scalar has no escapes");
-        assert_eq!(r.value["a"], "x \\uD83D \u{FFFD}", "an escaped backslash is text, not an escape");
+        assert_eq!(r.value.to_json()["w"], "lit \\uD83D\\uDE00", "a single-quoted scalar has no escapes");
+        assert_eq!(r.value.to_json()["a"], "x \\uD83D \u{FFFD}", "an escaped backslash is text, not an escape");
         assert_eq!(r.warnings.len(), 1);
         assert!(r.warnings[0].starts_with("1 lone"));
     }
@@ -1308,7 +1402,7 @@ mod tests {
     #[test]
     fn tab_indentation_and_lone_cr_separators_follow_the_package() {
         // yaml-rust2 read these two; the package refuses them, and so does Maestro now.
-        for refused in ["\ta: 1\n", "a:\n  \tb: 1\n", "asks:\n  -\tid: x\n", "asks:\n  - \tid: x\n"] {
+        for refused in ["\ta: 1\n", "a:\n  \tb: 1\n", "asks:\n  -\tid: x\n", "asks:\n  - \tid: x\n", "v:\n  -\t- x\n"] {
             assert!(parse(refused).unwrap_err().contains("Tabs are not allowed as indentation"), "{refused:?}");
         }
         // These both parsers refuse, each in its own words.

@@ -266,7 +266,7 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                 .collect();
             match matches.as_slice() {
                 [ask] => Ok(
-                    json!({ "source": section.source, "state": ask.state(), "hash": ask.hash(), "ask": maestro_core::ask::display(&json!(ask)), "row": maestro_core::ask::display(&ask.row) }),
+                    json!({ "source": section.source, "state": ask.state(), "hash": ask.hash(), "ask": ask, "row": ask.row }),
                 ),
                 [] if !unread.is_empty() => Ok(json!({
                     "source": section.source,

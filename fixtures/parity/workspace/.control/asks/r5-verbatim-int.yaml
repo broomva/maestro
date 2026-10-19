@@ -1,0 +1,2 @@
+asks:
+  - id: !<tag:yaml.org,2002:int> 42

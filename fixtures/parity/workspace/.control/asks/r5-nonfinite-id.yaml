@@ -1,0 +1,4 @@
+asks:
+  - id: .inf
+  - id: fine
+    answer: .nan

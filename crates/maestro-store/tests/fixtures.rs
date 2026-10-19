@@ -394,7 +394,7 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
         checked += 1;
     }
     // Every ledger is accounted for: compared to the byte, refused as the plugin refuses it, or a pinned gap.
-    assert_eq!((checked, refused, golden.as_object().unwrap().len()), (39, 13, 55));
+    assert_eq!((checked, refused, golden.as_object().unwrap().len()), (47, 18, 68));
 }
 
 #[test]

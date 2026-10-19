@@ -319,6 +319,123 @@
    "{\"a\":\"1e3\",\"b\":\"true\",\"c\":\"null\",\"d\":\"tab\\there\",\"e\":\"éA   \",\"f\":\"block\\ntext\\n\",\"g\":\"folded text\",\"id\":\"0004\"}"
   ]
  },
+ "r5-merge-explicit.yaml": {
+  "asks": [
+   {
+    "id": "okay",
+    "hash": "e3b08b331d517fce",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"x\",\"id\":\"okay\"}"
+  ]
+ },
+ "r5-merge-seq.yaml": {
+  "asks": [
+   {
+    "id": "okay2",
+    "hash": "581ec2c8f14418b0",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":1,\"b\":2,\"c\":3,\"id\":\"okay2\"}"
+  ]
+ },
+ "r5-nonfinite-id.yaml": {
+  "asks": [
+   {
+    "id": "Infinity",
+    "hash": "185486091df0b98c",
+    "state": "open"
+   },
+   {
+    "id": "fine",
+    "hash": "6c24f1f82844a5a3",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"id\":null}",
+   "{\"answer\":null,\"id\":\"fine\"}"
+  ]
+ },
+ "r5-omap-dup.yaml": {
+  "error": "it has a YAML error: Ordered maps must not include duplicate keys: a at line 3, column 8:"
+ },
+ "r5-omap-two.yaml": {
+  "error": "it has a YAML error: Each pair must have its own sequence indicator at line 3, column 8:"
+ },
+ "r5-pairs-scalar.yaml": {
+  "asks": [
+   {
+    "id": "okay",
+    "hash": "01caa3cf32ad8f29",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"okay\",\"v\":[{\"a\":null}]}"
+  ]
+ },
+ "r5-self-alias.yaml": {
+  "error": "Maximum call stack size exceeded."
+ },
+ "r5-sentinel-fdd0.yaml": {
+  "asks": [
+   {
+    "id": "﷐Infinity",
+    "hash": "e997330ec8b0ff7a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"﷐Infinity\",\"status\":\"open\"}"
+  ]
+ },
+ "r5-sentinel-fdd1.yaml": {
+  "asks": [
+   {
+    "id": "﷑keep",
+    "hash": "f8358f5ad77902ee",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"﷑keep\",\"note\":\"a\\rb\"}"
+  ]
+ },
+ "r5-set-collide.yaml": {
+  "error": "it has a YAML error: Set items must all have null values at line 3, column 8:"
+ },
+ "r5-tab-nested-seq.yaml": {
+  "error": "it has a YAML error: Tabs are not allowed as indentation at line 4, column 8:"
+ },
+ "r5-verbatim-int.yaml": {
+  "asks": [
+   {
+    "id": "42",
+    "hash": "17b4db064e17f487",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":42}"
+  ]
+ },
+ "r5-verbatim-str.yaml": {
+  "asks": [
+   {
+    "id": "vstr",
+    "hash": "eaf9c06b47084536",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"vstr\",\"v\":\"12\"}"
+  ]
+ },
  "surrogate.yaml": {
   "asks": [
    {
