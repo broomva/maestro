@@ -1,0 +1,19 @@
+arc: alt-key
+open_asks:
+  - id: alt-blocking
+    ask: "Held under the corpus's other spelling?"
+    class: decision
+    gates: [alt]
+    blocking: true
+    preanswerable: true
+    project: demo
+    exhausted: ["read: x", "default: y"]
+  - id: resolved-by-resolution
+    ask: "Answered under the resolution key?"
+    class: decision
+    gates: [alt]
+    blocking: true
+    preanswerable: true
+    exhausted: ["read: x", "default: y"]
+    resolution: "merged in #12"
+  - "not a mapping"

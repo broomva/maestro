@@ -1,0 +1,19 @@
+[package]
+name = "maestro-mcp"
+description = "Maestro's MCP server: read tools, context prompts and resources for any agent harness."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+maestro-core.workspace = true
+maestro-store.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

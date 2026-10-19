@@ -1,0 +1,10 @@
+id: silent
+title: Silent loop
+purpose: Produces tick receipts but never wrote one.
+owner: coordinator
+scope: broomva
+substrate: {kind: launchd, ref: com.example.silent}
+cadence: hourly
+contract:
+  produces: loop.tick.started and loop.tick.ended receipts
+review_by: '2020-01-01'

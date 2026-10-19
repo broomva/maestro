@@ -1,0 +1,2 @@
+{"ts":"2026-10-03T00:00:00Z","type":"turn.ended","actor":"agent","outcome":"completed"}
+{"ts":"2026-10-03T00:31:00Z","type":"loop.flagged","actor":"maestro","kind":"quiet","reason":"no turn for 30 min"}

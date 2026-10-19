@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maestro in Rust: a typed governance metalayer over any harness</title>
+<link rel="stylesheet" href="../../design-system/broomva/broomva-foundation.css">
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; background: var(--background); color: var(--foreground); font-family: var(--bv-font-sans); line-height: 1.55; }
+  main { max-width: 960px; margin: 0 auto; padding: var(--bv-space-12) var(--bv-space-6) var(--bv-space-12); }
+  h1 { font-size: var(--bv-text-h1); font-weight: 600; line-height: 1.2; margin: 0 0 var(--bv-space-3); }
+  h2 { font-size: var(--bv-text-xl); font-weight: 600; margin: var(--bv-space-12) 0 var(--bv-space-3); }
+  h3 { font-size: var(--bv-text-lg); font-weight: 500; margin: var(--bv-space-6) 0 var(--bv-space-2); }
+  p, li { font-size: var(--bv-text-base); }
+  .lede { font-size: var(--bv-text-lg); color: var(--muted-foreground); margin: 0 0 var(--bv-space-6); }
+  .meta { color: var(--muted-foreground); font-size: var(--bv-text-sm); }
+  code { font-family: var(--bv-font-mono); font-size: 13px; background: var(--muted); padding: 1px var(--bv-space-1); border-radius: var(--bv-radius-chip); }
+  pre { font-family: var(--bv-font-mono); font-size: 13px; background: var(--muted); padding: var(--bv-space-4); border-radius: var(--bv-radius-lg); overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--bv-radius-xl); padding: var(--bv-space-5) var(--bv-space-6); margin: var(--bv-space-4) 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--bv-space-4); }
+  .grid .card { margin: 0; }
+  .card h3 { margin-top: 0; }
+  .table-wrap { overflow-x: auto; margin: var(--bv-space-4) 0; }
+  table { border-collapse: collapse; width: 100%; font-size: var(--bv-text-sm); }
+  th, td { text-align: left; vertical-align: top; padding: var(--bv-space-2) var(--bv-space-3); border-bottom: 1px solid var(--border); }
+  th { font-weight: 600; color: var(--muted-foreground); }
+  .state { display: inline-block; font-size: var(--bv-text-xs); font-weight: 600; padding: 2px var(--bv-space-2); border-radius: var(--bv-radius-full); border: 1px solid var(--border); }
+  .s-queued { color: var(--muted-foreground); }
+  .s-running { color: var(--bv-blue); border-color: var(--bv-blue); }
+  .s-stuck { color: var(--bv-warning); border-color: var(--bv-warning); }
+  .s-needs { color: var(--bv-blue-accent); border-color: var(--bv-blue-accent); }
+  .s-done { color: var(--bv-success); border-color: var(--bv-success); }
+  .s-standing { color: var(--muted-foreground); border-style: dashed; }
+  figure { margin: var(--bv-space-6) 0; }
+  figcaption { color: var(--muted-foreground); font-size: var(--bv-text-sm); margin-top: var(--bv-space-2); }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { font-family: var(--bv-font-sans); fill: var(--foreground); }
+  svg .sub { fill: var(--muted-foreground); font-size: 11px; }
+  svg .box { fill: var(--card); stroke: var(--bv-border-25); stroke-width: 1; }
+  svg .core { fill: var(--accent); stroke: var(--bv-blue); stroke-width: 1.25; }
+  svg .wire { stroke: var(--bv-gray-500); stroke-width: 1.25; fill: none; }
+  svg .readonly { stroke-dasharray: 4 3; }
+  .phase { border-left: 3px solid var(--bv-border-25); padding-left: var(--bv-space-4); margin: var(--bv-space-4) 0; }
+  .phase.now { border-left-color: var(--bv-blue); }
+  .finding { border-left: 3px solid var(--bv-warning); padding-left: var(--bv-space-4); }
+</style>
+</head>
+<body>
+<main>
+<p class="meta">Spec · 2026-10-18 · BRO-3188 · status: phase 0 implemented</p>
+<h1>Maestro in Rust: a typed governance metalayer over any harness</h1>
+<p class="lede">One typed model of the orchestration we learned on Paseo, exposed as a CLI and an MCP server, so any agent harness can read the fleet's governance state, get the right context injected, and later act through owner-verified verbs.</p>
+
+<div class="card">
+  <h3>The four questions Maestro answers</h3>
+  <ol>
+    <li>What is happening? Work states, loops and their last tick, and the fleet census.</li>
+    <li>What changed? Tick receipts, and answers waiting to land.</li>
+    <li>What evidence exists? Every section names its source and its read errors.</li>
+    <li>What do you need from me? Needs: only concrete holds on the owner.</li>
+  </ol>
+</div>
+
+<h2>Position</h2>
+<p>Three Maestros came before this one. Each left lessons, and this project types them:</p>
+<ul>
+  <li><code>broomva/maestro-legacy</code> is the TypeScript app, chat-first, with work as folders and the gate as the human's verb. It was archived on 2026-10-18.</li>
+  <li><code>broomva/maestro-paseo</code> is the live Paseo plugin. It holds the work store, owner verbs with an 8 second undo, answer landing and routing, the wake loop, and the fleet and loops readers.</li>
+  <li>The T3 MCP proof of concept is a TypeScript stdio server with three tools and a 1.3k-line web app. It answered asks from a second process, outside the owner path, and the BRO-3186 contract names that as the defect to avoid.</li>
+</ul>
+<p>The new Maestro is harness-agnostic. Harnesses are adapters: T3 Code, Claude Code, Codex, Paseo and Gemini. The substrate stays where it is. The fleet skill does census and agent mail, bstack does hooks and gates, and <code>.control/</code> and <code>.broomva/loops/</code> hold the truth. Maestro types that substrate, reads it, derives shared views, and injects context. Orchestrator sessions drive the work, with Maestro as their governance surface.</p>
+
+<figure>
+<svg viewBox="0 0 920 470" role="img" aria-labelledby="arch-title arch-desc">
+  <title id="arch-title">Maestro architecture</title>
+  <desc id="arch-desc">Harnesses at the top connect through MCP, the CLI and hooks to maestro-core and maestro-store, which read the control plane files at the bottom. The fleet skill and bstack sit beside the control plane and keep writing it.</desc>
+  <g>
+    <rect class="box" x="20" y="16" width="200" height="54" rx="12"/><text x="120" y="40" text-anchor="middle" font-size="14" font-weight="600">T3 Code</text><text class="sub" x="120" y="58" text-anchor="middle">threads, schedule_task, thread_send</text>
+    <rect class="box" x="245" y="16" width="200" height="54" rx="12"/><text x="345" y="40" text-anchor="middle" font-size="14" font-weight="600">Claude Code</text><text class="sub" x="345" y="58" text-anchor="middle">hooks, MCP, subagents</text>
+    <rect class="box" x="470" y="16" width="200" height="54" rx="12"/><text x="570" y="40" text-anchor="middle" font-size="14" font-weight="600">Codex · Gemini</text><text class="sub" x="570" y="58" text-anchor="middle">MCP</text>
+    <rect class="box" x="695" y="16" width="205" height="54" rx="12"/><text x="797" y="40" text-anchor="middle" font-size="14" font-weight="600">Paseo</text><text class="sub" x="797" y="58" text-anchor="middle">plugin, heartbeats (today's writer)</text>
+  </g>
+  <path class="wire" d="M120 70 V110"/><path class="wire" d="M345 70 V110"/><path class="wire" d="M570 70 V110"/><path class="wire" d="M797 70 V110"/>
+  <g>
+    <rect class="box" x="20" y="110" width="880" height="56" rx="12"/>
+    <text x="40" y="134" font-size="14" font-weight="600">Surfaces</text>
+    <text class="sub" x="40" y="153">maestro mcp (tools, maestro_context prompt, maestro:// resources) · maestro CLI (--json = the same dispatch) · maestro context --format hook</text>
+  </g>
+  <path class="wire" d="M460 166 V196"/>
+  <g>
+    <rect class="core" x="20" y="196" width="430" height="110" rx="12"/>
+    <text x="40" y="222" font-size="14" font-weight="600">maestro-core</text>
+    <text class="sub" x="40" y="242">OrchState and its transitions · WorkState labels</text>
+    <text class="sub" x="40" y="258">Ask, AskState, Rung, AnswerStage · Need</text>
+    <text class="sub" x="40" y="274">LoopSpec, Drift · Tick, due_tiers · Initiative, Driver</text>
+    <text class="sub" x="40" y="290">SessionRef{host} · Authority, Principal, OwnerVerb · ContextPacket</text>
+    <rect class="core" x="470" y="196" width="430" height="110" rx="12"/>
+    <text x="490" y="222" font-size="14" font-weight="600">maestro-store</text>
+    <text class="sub" x="490" y="242">Tree: origin/main by default (the home rule) or the worktree</text>
+    <text class="sub" x="490" y="258">Section&lt;T&gt;: source and per-file errors; unread is not empty</text>
+    <text class="sub" x="490" y="274">views: needs, loop_rows, snapshot, context, unlanded</text>
+    <text class="sub" x="490" y="290">git cat-file --batch: one process for all ledgers</text>
+  </g>
+  <path class="wire readonly" d="M235 306 V350"/><path class="wire readonly" d="M685 306 V350"/>
+  <text class="sub" x="460" y="336" text-anchor="middle">phase 0 reads only (dashed)</text>
+  <g>
+    <rect class="box" x="20" y="350" width="660" height="100" rx="12"/>
+    <text x="40" y="376" font-size="14" font-weight="600">Control plane (source of truth)</text>
+    <text class="sub" x="40" y="396">.control/asks/*.yaml · .control/initiatives/*.yaml · .control/preauth.yaml · .control/policy.yaml</text>
+    <text class="sub" x="40" y="412">.broomva/loops/*.yaml · ~/.broomva/ledger/loops/ticks.jsonl (hash-chained)</text>
+    <text class="sub" x="40" y="428">~/maestro/&lt;slug&gt;/_work.md + _events.jsonl · fleet-reconcile/&lt;scope&gt;/ticks/N/report.json</text>
+    <rect class="box" x="700" y="350" width="200" height="100" rx="12"/>
+    <text x="800" y="380" text-anchor="middle" font-size="14" font-weight="600">Writers today</text>
+    <text class="sub" x="800" y="400" text-anchor="middle">fleet skill · bstack scripts</text>
+    <text class="sub" x="800" y="416" text-anchor="middle">Paseo plugin · coordinators</text>
+    <text class="sub" x="800" y="432" text-anchor="middle">ask_ledger.py validates</text>
+  </g>
+</svg>
+<figcaption>Harnesses are adapters. Maestro types and reads the control plane. Today's writers keep writing until a phase moves a ledger's ownership to Maestro.</figcaption>
+</figure>
+
+<h2>Data model</h2>
+<p>Field names follow the on-disk contracts verbatim. Enums that are open-ended on disk carry an <code>Other</code> arm, so an unknown value is reported, never dropped. Every record keeps unknown keys in <code>extra</code>, so nothing Maestro rewrites later can lose a field.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Type</th><th>Source</th><th>Writer today</th><th>Key rule</th></tr></thead>
+<tbody>
+<tr><td><code>OrchState</code>, <code>WorkItem</code></td><td><code>~/maestro/&lt;slug&gt;/_work.md</code></td><td>Paseo plugin</td><td>8 stored states with the plugin's transition table. Done is reachable only from running, blocked or review.</td></tr>
+<tr><td><code>WorkState</code></td><td>derived</td><td>none</td><td>Exact labels. Standing is running plus the quiet flag.</td></tr>
+<tr><td><code>AskLedger</code>, <code>Ask</code></td><td><code>.control/asks/*.yaml</code></td><td>agents, Paseo plugin (answers)</td><td>The list is <code>asks</code> or <code>open_asks</code>. The raw entry is kept, so state and hash are computed from it. State is a port of the plugin's <code>stateOf</code>. The hash is the plugin's <code>entryHash</code>, which its answer path rechecks. Both match the plugin on all 234 real asks.</td></tr>
+<tr><td><code>Rung</code></td><td><code>exhausted[]</code></td><td>agents</td><td>An entry is <code>"rung: text"</code> or a one-key map, because YAML parses <code>- read: x</code> as a map.</td></tr>
+<tr><td><code>AnswerStage</code></td><td>derived</td><td>Paseo plugin</td><td>The stages unlanded, unrouted, acted, superseded, before and conductor stay separate. Answering never implies execution.</td></tr>
+<tr><td><code>Need</code></td><td>derived</td><td>none</td><td>Open blocking asks, plus queued work flagged <code>yours</code> or <code>failed</code> (the plugin's <code>onlyYouStart</code>). Work paused on a permission prompt is also a hold, but that is live host state and arrives with host adapters.</td></tr>
+<tr><td><code>LoopSpec</code>, <code>Drift</code>, <code>Notice</code></td><td><code>.broomva/loops/*.yaml</code></td><td>agents (<code>loop_ledger.py</code>)</td><td>All 15 plugin drift classes are typed and carry the plugin's meaning. Phase 0 claims only <code>tick_unclosed</code>, using the plugin's limit (max of 60 minutes and twice the median tick length). Maestro's own signals, <code>review_overdue</code> and <code>no_tick_receipts</code>, are notices, not drift.</td></tr>
+<tr><td><code>LedgerEvent</code>, <code>Tick</code></td><td><code>ticks.jsonl</code></td><td>coordinators (<code>broomva_home.py</code>)</td><td>A start pairs with its end by <code>cause</code>. <code>prev</code> is null only on the chain's first event.</td></tr>
+<tr><td><code>Tier</code>, <code>due_tiers</code></td><td>tick state</td><td>coordinators</td><td>The tiers are every, hourly, 4h and daily. A tier that has never run is due.</td></tr>
+<tr><td><code>Initiative</code>, <code>Driver</code></td><td><code>.control/initiatives/*.yaml</code></td><td>agents</td><td>The driver grammar is <code>owner|fleet|none|coordinator:&lt;8hex&gt;|session:&lt;id&gt;</code>.</td></tr>
+<tr><td><code>Grant</code></td><td><code>.control/preauth.yaml</code></td><td>owner answers only</td><td><code>granted: false</code> means always ask.</td></tr>
+<tr><td><code>FleetReport</code></td><td><code>fleet-reconcile/&lt;scope&gt;/ticks/N</code></td><td>fleet skill</td><td>Maestro reads the highest-numbered tick and never acts on the fleet's behalf.</td></tr>
+<tr><td><code>SessionRef</code></td><td>derived</td><td>none</td><td><code>host:env/id</code>. A T3 thread id never stands in for a Paseo agent id.</td></tr>
+</tbody></table></div>
+
+<h3>Canonical work states</h3>
+<p>
+  <span class="state s-queued">Queued</span>
+  <span class="state s-running">Running</span>
+  <span class="state s-stuck">Stuck</span>
+  <span class="state s-needs">Needs you</span>
+  <span class="state s-done">Done</span>
+  <span class="state s-standing">Standing</span>
+</p>
+<p class="meta">The mapping is the plugin's <code>PLAIN_VOICE</code>. Stored proposed, reviewing and triggered map to Queued. Running maps to Running, or to Standing when the last event is a quiet flag. Blocked maps to Stuck, and review to Needs you, marked finished when no hold exists. Done and canceled map to Done. Counts are reported by stored state; only the needs list is the Needs you count.</p>
+
+<h2>Authority</h2>
+<div class="grid">
+  <div class="card"><h3>Reads</h3><p>Scoped observations for coordinators and dashboards. Any caller can read. This is every tool in phase 0.</p></div>
+  <div class="card"><h3>Agent requests</h3><p>File a validated ask, queue owner-gated work, or request one exact held action. These need a session whose identity was checked against its host's registry.</p></div>
+  <div class="card"><h3>Owner actions</h3><p>The verbs are <code>ask.answer</code>, <code>approval.decide</code>, <code>work.verdict</code>, <code>work.dispatch</code>, <code>verb.undo</code>, <code>fleet.review</code>, <code>conductor.decide</code> and <code>initiatives.review</code>. They need a verified owner principal and have an 8 second undo.</p></div>
+</div>
+<p>A model-visible tool is never proof of the owner, and a client-supplied <code>actor: human</code> is not a principal. <code>Principal::Unverified</code> may only read. A test fails if any owner verb becomes reachable through MCP.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Invariant</th><th>Rule</th></tr></thead>
+<tbody>
+<tr><td>A1</td><td>Work never reaches Done on its session's say-so; only gates, checks or the owner close it.</td></tr>
+<tr><td>A8</td><td>Loops, routing and agent requests start nothing; dispatch is an owner verb.</td></tr>
+<tr><td>B4</td><td>Every owner verb has an undo window and is re-checked when it applies.</td></tr>
+<tr><td>one-governor</td><td>One governor per scope; never run a second active governor.</td></tr>
+<tr><td>unread-is-not-empty</td><td>An unread source is reported as unread, never as empty.</td></tr>
+</tbody></table></div>
+
+<h2>Context injection</h2>
+<p>A context packet is built from one snapshot and scoped to the session. Maestro infers the project from the cwd (<code>core/maestro</code> gives <code>maestro</code>). It infers the initiative from <code>links.repos</code> or a matching id. The packet carries the session's holds, the open asks in its scope (so it does not re-ask them), its initiative's next action, loops needing attention, unread sources and the standing rules. Only the envelope changes per harness.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Strategy</th><th>Envelope</th><th>Harnesses</th></tr></thead>
+<tbody>
+<tr><td>Session start</td><td><code>maestro context --format hook --stdin --event SessionStart</code></td><td>Claude Code, T3 Code on the Claude provider, and Codex hooks</td></tr>
+<tr><td>Per prompt</td><td>The same, with <code>--event UserPromptSubmit</code> and a small <code>--max-needs</code></td><td>Claude Code</td></tr>
+<tr><td>MCP prompt</td><td><code>prompts/get maestro_context {cwd}</code></td><td>Any MCP client</td></tr>
+<tr><td>MCP resource</td><td><code>maestro://context</code>, <code>maestro://needs</code>, <code>maestro://snapshot</code></td><td>Any MCP client</td></tr>
+<tr><td>Thread message</td><td>An orchestrator renders the packet and delivers it with <code>t3_thread_send</code> or <code>paseo send</code></td><td>T3 Code, Paseo (phase 3)</td></tr>
+</tbody></table></div>
+
+<h2>Governor and ticks</h2>
+<p>A tick is one bounded fire of a standing loop. It opens with <code>loop.tick.started</code> and works its due tiers within a call budget. It then writes its state file atomically and closes with <code>loop.tick.ended</code>, caused by the start. Maestro types this lifecycle today and reports its drift. In phase 3 it becomes the governor: for each scope, one orchestrator session owns the tick. Maestro picks that session's host by capability, not by name, and injects its context. Maestro verifies the receipts and does not run the work itself.</p>
+
+<h2>Phases</h2>
+<div class="phase now"><h3>Phase 0: typed reads everywhere (this change)</h3>
+<p>Cargo workspace with core, store, MCP and CLI. Nine read tools, a context prompt and three resources. The hook format never fails a session, whether it gets a bad argument or overruns its 5 second budget. Git reads resolve one commit per store and use <code>ls-tree -z</code>. Unlanded answers are detected. 47 tests run against a fixture machine, with golden values from the plugin's own functions, and 9 guards were checked by mutation. The binary is installed at <code>~/.local/bin/maestro</code>, and both POC registrations (Claude Code local, Codex) now point to it.</p></div>
+<div class="phase"><h3>Phase 1: agent requests</h3>
+<p>File an ask through <code>ask_ledger.py</code> validation and the shared lock protocol (<code>~/.local/state/control-asks/locks</code>). Queue owner-gated work. Check host identity for T3 and Paseo callers. Read live work holds from host adapters, so permission prompts become needs.</p></div>
+<div class="phase"><h3>Phase 2: owner path</h3>
+<p>An authenticated owner principal: a local signed token or a verified host confirmation. Owner verbs get receipts, <code>appliesAt</code> and an 8 second undo. Answer landing and routing move to Maestro, and the plugin's writer retires in the same change, so there is always one writer.</p></div>
+<div class="phase"><h3>Phase 3: governor over host adapters</h3>
+<p>Launch, send, interrupt, archive and schedule adapters for T3, Paseo and Claude Code. Each scope has exclusive ownership recorded in the loop registry. Thread-message context injection and lifecycle ingestion. A T3 schedule substrate with busy, restart and duplicate-delivery tests.</p></div>
+<div class="phase"><h3>Phase 4: owner surface</h3>
+<p>An MCP App view built on the Broomva agentic-work profile (RunCard, WorkState, Receipt) from the same snapshot. Its sections are Feed, Decisions, Work, Health and Initiatives. Mobile state survives in the backend.</p></div>
+
+<h2>First live run, 2026-10-18</h2>
+<div class="finding">
+<ul>
+  <li>All 77 ask ledgers parse at <code>origin/main</code>. Before the fix, 6 failed on map-shaped <code>exhausted</code> entries. The tick ledger failed separately, on the genesis <code>prev: null</code>.</li>
+  <li>One answer is waiting to land. <code>bro-2827-answers-landing.yaml#answers-pr-auto-merge</code> is answered in the local checkout but open on main.</li>
+  <li><code>t3-maintainer-tick</code> is registered with a contract that produces tick receipts, and the ledger holds none for it (BRO-3189). Only <code>coordinator-tick</code> writes receipts. Its last tick started 2026-10-18T00:36Z, more than 24 hours before this run.</li>
+  <li>Needs you is 4. Four queued work items are flagged <code>yours</code> by the loop. The 45 review items are finished and are not holds unless a permission prompt is open, which matches the plugin's <code>needsYouOf</code>.</li><li>There are 30 open asks, against 37 before the port of <code>stateOf</code>. Seven answered asks use <code>resolution</code>, <code>outcome</code> or status prefixes.</li>
+  <li>A full snapshot takes about 0.2 s with the release build.</li>
+</ul>
+</div>
+
+<h2>Defaults taken</h2>
+<ul>
+  <li>The repository is <code>broomva/maestro</code>, private, at <code>~/broomva/core/maestro</code>. The legacy repository was renamed to <code>maestro-legacy</code> and archived, and its local checkout is at <code>~/broomva/archive/maestro-legacy</code>.</li>
+  <li>Reads default to <code>origin/main</code>, per the home rule.</li>
+  <li>The design profile is foundation, because there is no web surface yet. The agentic-work reference is vendored for phase 4.</li>
+</ul>
+</main>
+</body>
+</html>
