@@ -195,6 +195,10 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
     if store.tree.source == crate::TreeSource::WorkingTree {
         return Section::ok("worktree", Vec::new());
     }
+    // No local asks directory holds no local answers: nothing waits, and nothing is unread.
+    if !store.paths.workspace.join(crate::ASKS_DIR).is_dir() {
+        return Section::ok(format!("worktree:{}", crate::ASKS_DIR), Vec::new());
+    }
     let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree).asks();
     let errors: Vec<SourceError> = local
         .errors
@@ -336,9 +340,10 @@ pub fn snapshot_of(store: &Store, reads: &Reads, at: jiff::Timestamp) -> Snapsho
     }
 }
 
-/// Infer a project name from a cwd: the git repository holding it, when that is a
-/// repository inside the workspace other than the workspace itself (`core/maestro` →
-/// `maestro`). A directory of the workspace repo (`research/notes`) names no project.
+/// Infer a project name from a cwd: the outermost git repository holding it below the
+/// workspace (`core/maestro` → `maestro`). Outermost, so a worktree checked out inside
+/// its repo (`core/life/.claude/worktrees/feat-x`) still names `life`. A directory of
+/// the workspace repo itself (`research/notes`) names no project.
 /// A cwd not on this disk (a hook payload from elsewhere) cannot be looked at, so it
 /// falls back to the layout rule: the second path part, as in `<group>/<repo>/…`.
 pub fn project_of(cwd: &Path, workspace: &Path) -> Option<String> {
@@ -350,7 +355,7 @@ pub fn project_of(cwd: &Path, workspace: &Path) -> Option<String> {
             _ => None,
         };
     }
-    let repo = cwd.ancestors().take_while(|d| *d != workspace).find(|d| d.join(".git").exists())?;
+    let repo = cwd.ancestors().take_while(|d| *d != workspace).filter(|d| d.join(".git").exists()).last()?;
     repo.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 

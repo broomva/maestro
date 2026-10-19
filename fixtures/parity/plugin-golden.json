@@ -1,0 +1,334 @@
+{
+ "anchors.yaml": {
+  "asks": [
+   {
+    "id": "anchored",
+    "hash": "c90022e6e797635f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"anchored\",\"merged\":{\"<<\":{\"x\":1,\"y\":[1,2]},\"z\":3},\"ref\":{\"x\":1,\"y\":[1,2]}}"
+  ]
+ },
+ "bool-forms.yaml": {
+  "asks": [
+   {
+    "id": "bools",
+    "hash": "2571c1c530e03d16",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":true,\"b\":false,\"blocking\":true,\"c\":\"yes\",\"d\":\"on\",\"e\":\"tRue\",\"id\":\"bools\",\"preanswerable\":false}"
+  ]
+ },
+ "complex-key.yaml": {
+  "asks": [
+   {
+    "id": "complex",
+    "hash": "bd82365aef9b54b3",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"[ a, b ]\":\"v\",\"id\":\"complex\"}"
+  ]
+ },
+ "dup-keys.yaml": {
+  "error": "it has a YAML error: Map keys must be unique at line 4, column 5:"
+ },
+ "dup-typed-keys.yaml": {
+  "asks": [
+   {
+    "id": "dup-typed",
+    "hash": "0bed706c005053e1",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"dup-typed\",\"meta\":{\"1\":\"string\"}}"
+  ]
+ },
+ "float-forms.yaml": {
+  "asks": [
+   {
+    "id": "floats",
+    "hash": "6149f7d5f2c4b6c4",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":1,\"b\":1000,\"c\":0.5,\"d\":5,\"e\":1.5e-7,\"f\":1e+21,\"g\":-0.25,\"h\":1000,\"i\":null,\"id\":\"floats\",\"j\":2.5}"
+  ]
+ },
+ "float-special.yaml": {
+  "asks": [
+   {
+    "id": "inf",
+    "hash": "1806bc7877e49f82",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":null,\"b\":null,\"c\":null,\"d\":null,\"e\":null,\"id\":\"inf\"}"
+  ]
+ },
+ "flow.yaml": {
+  "asks": [
+   {
+    "id": "flow",
+    "hash": "dd474dbac47d15b2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"blocking\":true,\"gates\":[\"a\",\"b\"],\"id\":\"flow\",\"n\":16}"
+  ]
+ },
+ "id-bool.yaml": {
+  "asks": [
+   {
+    "id": "true",
+    "hash": "9f391e5c3a1fb729",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":true}",
+   "{\"id\":null}",
+   "{\"ask\":\"no id\"}"
+  ]
+ },
+ "id-float.yaml": {
+  "asks": [
+   {
+    "id": "1",
+    "hash": "d98d7ca9524c112c",
+    "state": "open"
+   },
+   {
+    "id": "2.5",
+    "hash": "bd621707fa67ee9c",
+    "state": "open"
+   },
+   {
+    "id": "26",
+    "hash": "3e274452df66d992",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"ask\":\"float id\",\"id\":1}",
+   "{\"id\":2.5}",
+   "{\"id\":26}"
+  ]
+ },
+ "inf-answer.yaml": {
+  "asks": [
+   {
+    "id": "inf-answer",
+    "hash": "0b6e9f64e5bc514c",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":null,\"blocking\":true,\"id\":\"inf-answer\"}"
+  ]
+ },
+ "int-big.yaml": {
+  "asks": [
+   {
+    "id": "approve-prod",
+    "hash": "ea5924b50a02bb3b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"blocking\":true,\"d20\":20261019123456790000,\"id\":\"approve-prod\",\"neg\":-9223372036854776000,\"safe\":9007199254740992,\"u\":18446744073709552000}"
+  ]
+ },
+ "int-forms.yaml": {
+  "asks": [
+   {
+    "id": "forms",
+    "hash": "5f741e810f6d422b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":5,\"b\":0,\"c\":15,\"d\":31,\"e\":\"0b101\",\"f\":\"1_000\",\"g\":\"0x\",\"h\":8,\"id\":\"forms\"}"
+  ]
+ },
+ "int-leading-zero.yaml": {
+  "asks": [
+   {
+    "id": "4",
+    "hash": "35be57b8c2ae30e1",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"ask\":\"lead?\",\"blocking\":true,\"id\":4,\"n\":10}"
+  ]
+ },
+ "keys.yaml": {
+  "asks": [
+   {
+    "id": "keys",
+    "hash": "a90b42d63323e614",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"keys\",\"meta\":{\"1\":\"float\",\"2\":\"two\",\"3\":\"three\",\"7\":\"lead\",\"10\":\"ten\",\"16\":\"hex\",\"\":\"nullkey\",\"true\":\"boolkey\"}}"
+  ]
+ },
+ "multi-doc.yaml": {
+  "error": "it has a YAML error: Source contains multiple documents; please use YAML.parseAllDocuments() at line 3, column 1:"
+ },
+ "nan-status.yaml": {
+  "asks": [
+   {
+    "id": "nan-status",
+    "hash": "30c9f0f91074e563",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"nan-status\",\"status\":null}"
+  ]
+ },
+ "nested-weird.yaml": {
+  "asks": [
+   {
+    "id": "nested",
+    "hash": "b670d8b6ff1f4d3d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"exhausted\":{\"read\":\"x\"},\"gates\":[1,true,null,\"g\"],\"id\":\"nested\",\"options\":[{\"id\":1,\"label\":\"one\",\"recommended\":true},{\"id\":\"two\",\"reversible\":\"yes\"}]}"
+  ]
+ },
+ "null-forms.yaml": {
+  "asks": [
+   {
+    "id": "nulls",
+    "hash": "ab8a6d4dcb8106e3",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":null,\"b\":null,\"c\":null,\"d\":null,\"e\":null,\"f\":\"nUll\",\"id\":\"nulls\"}"
+  ]
+ },
+ "plain-backslash.yaml": {
+  "asks": [
+   {
+    "id": "plain-bs",
+    "hash": "818c086464a1def1",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"plain-bs\",\"note\":\"literal \\\\uD83D text\"}"
+  ]
+ },
+ "quoted.yaml": {
+  "asks": [
+   {
+    "id": "0004",
+    "hash": "df0e1eafb630dd81",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"1e3\",\"b\":\"true\",\"c\":\"null\",\"d\":\"tab\\there\",\"e\":\"éA   \",\"f\":\"block\\ntext\\n\",\"g\":\"folded text\",\"id\":\"0004\"}"
+  ]
+ },
+ "surrogate.yaml": {
+  "asks": [
+   {
+    "id": "rotate",
+    "hash": "93bf1c71efb5657f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"blocking\":true,\"id\":\"rotate\",\"note\":\"cut \\ud83d alone\",\"pair\":\"😀\"}"
+  ]
+ },
+ "tag-binary.yaml": {
+  "asks": [
+   {
+    "id": "bin",
+    "hash": "be94ebd085fadef2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"b\":{\"0\":104,\"1\":105},\"id\":\"bin\"}"
+  ]
+ },
+ "tag-core.yaml": {
+  "asks": [
+   {
+    "id": "tags",
+    "hash": "b5c4f5fc32722cdb",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"123\",\"b\":42,\"c\":\"1\",\"d\":true,\"e\":null,\"f\":\"true\",\"id\":\"tags\"}"
+  ]
+ },
+ "tag-local.yaml": {
+  "asks": [
+   {
+    "id": "local",
+    "hash": "8174a4411a265552",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"local\",\"x\":\"foo\"}"
+  ]
+ },
+ "tag-timestamp.yaml": {
+  "asks": [
+   {
+    "id": "ts",
+    "hash": "36e346a33c61d27c",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"ts\",\"plain\":\"2026-10-19\",\"t\":\"2026-10-19T00:00:00.000Z\"}"
+  ]
+ },
+ "unicode-keys.yaml": {
+  "asks": [
+   {
+    "id": "uni",
+    "hash": "b5bbb063cee0ac25",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"uni\",\"meta\":{\"B\":\"c\",\"a\":\"d\",\"😀\":\"b\",\"｡\":\"a\"}}"
+  ]
+ },
+ "yaml11.yaml": {
+  "asks": [
+   {
+    "id": "y11",
+    "hash": "ec113051ee0f5867",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"blocking\":true,\"false\":8,\"id\":\"y11\"}"
+  ]
+ }
+}

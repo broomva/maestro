@@ -1,0 +1,7 @@
+asks:
+  - id: nested
+    options:
+      - {id: 1, label: one, recommended: true}
+      - {id: two, reversible: "yes"}
+    exhausted: {read: x}
+    gates: [1, true, ~, "g"]

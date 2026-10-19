@@ -1,0 +1,13 @@
+asks:
+  - id: "0004"
+    a: '1e3'
+    b: "true"
+    c: 'null'
+    d: "tab\there"
+    e: "\u00e9\x41\N\_\L\P"
+    f: |
+      block
+      text
+    g: >-
+      folded
+      text

@@ -40,6 +40,13 @@ impl std::str::FromStr for TreeSource {
     }
 }
 
+/// A directory listing: the files to read, and entries skipped with the reason.
+#[derive(Debug, Default)]
+pub struct Listing {
+    pub names: Vec<String>,
+    pub skipped: Vec<(String, String)>,
+}
+
 /// One file of a batch read: its path and its contents or the reason it failed.
 pub type FileRead = (String, Result<String, TreeError>);
 
@@ -78,9 +85,14 @@ impl Tree {
                 return tree;
             }
             let spec = format!("{rev}^{{commit}}");
-            match tree.git(&["rev-parse", "--verify", "--quiet", "--end-of-options", &spec]) {
+            // No `--end-of-options` (git >= 2.30): the leading-dash check above already keeps
+            // the revision from reading as an option, and older git would refuse the flag.
+            match tree.git(&["rev-parse", "--verify", "--quiet", &spec]) {
                 Ok(out) if !out.trim().is_empty() => tree.commit = Some(out.trim().to_string()),
-                Ok(_) => tree.unresolved = Some("no such commit".into()),
+                // `--quiet` fails with no message when the revision names nothing.
+                Ok(_) | Err(TreeError::Git { .. }) => {
+                    tree.unresolved = Some(format!("no commit is named `{rev}` in {}", tree.root.display()))
+                }
                 Err(e) => tree.unresolved = Some(e.to_string()),
             }
         }
@@ -107,35 +119,51 @@ impl Tree {
         }
     }
 
-    /// File names (not paths) directly under `dir` ending in `suffix`, sorted.
-    pub fn list(&self, dir: &str, suffix: &str) -> Result<Vec<String>, TreeError> {
-        let mut names = match &self.source {
+    /// Regular files directly under `dir` ending in one of `suffixes`, sorted, and
+    /// the matching names that are not regular files (a symlink, a directory named
+    /// `x.yaml`). Dot files are never listed.
+    pub fn list(&self, dir: &str, suffixes: &[&str]) -> Result<Listing, TreeError> {
+        let wanted = |n: &str| suffixes.iter().any(|s| n.ends_with(s)) && !n.starts_with('.');
+        let mut listing = Listing::default();
+        match &self.source {
             TreeSource::WorkingTree => {
-                let mut out = Vec::new();
                 for entry in std::fs::read_dir(self.root.join(dir))? {
                     let entry = entry?;
-                    if entry.file_type()?.is_file() {
-                        out.push(entry.file_name().to_string_lossy().into_owned());
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if !wanted(&name) {
+                        continue;
+                    }
+                    let kind = entry.file_type()?;
+                    if kind.is_file() {
+                        listing.names.push(name);
+                    } else if !kind.is_dir() {
+                        listing.skipped.push((name, "not a regular file".into()));
                     }
                 }
-                out
             }
             TreeSource::GitRev(_) => {
                 let spec = format!("{}:{}", self.rev()?, dir.trim_end_matches('/'));
                 // -z: names come back verbatim, never quoted, whatever bytes they hold.
-                // Each record is `<mode> <type> <oid>\t<name>`; only blobs are files.
+                // Each record is `<mode> <type> <oid>\t<name>`. A regular file is a blob of
+                // mode 100644 or 100755; 120000 is a symlink, and a tree is a directory.
                 let out = self.git(&["ls-tree", "-z", &spec])?;
-                out.split('\0')
-                    .filter_map(|record| {
-                        let (meta, name) = record.split_once('\t')?;
-                        (meta.split(' ').nth(1) == Some("blob")).then(|| name.to_string())
-                    })
-                    .collect()
+                for record in out.split('\0') {
+                    let Some((meta, name)) = record.split_once('\t') else { continue };
+                    if !wanted(name) {
+                        continue;
+                    }
+                    let mut fields = meta.split(' ');
+                    match (fields.next(), fields.next()) {
+                        (Some("100644" | "100755"), Some("blob")) => listing.names.push(name.to_string()),
+                        (_, Some("tree")) => {}
+                        _ => listing.skipped.push((name.to_string(), "not a regular file".into())),
+                    }
+                }
             }
-        };
-        names.retain(|n| n.ends_with(suffix) && !n.starts_with('.'));
-        names.sort();
-        Ok(names)
+        }
+        listing.names.sort();
+        listing.skipped.sort();
+        Ok(listing)
     }
 
     pub fn read(&self, rel: &str) -> Result<String, TreeError> {
@@ -264,7 +292,8 @@ mod tests {
         for rev in ["no-such-branch", "-x"] {
             let tree = Tree::resolved(tmp.path(), TreeSource::GitRev(rev.into()));
             assert!(tree.commit.is_none() && tree.unresolved.is_some(), "{rev}");
-            assert!(matches!(tree.list(".control/asks", ".yaml"), Err(TreeError::Unresolved { .. })), "{rev}");
+            assert!(matches!(tree.list(".control/asks", &[".yaml"]), Err(TreeError::Unresolved { .. })), "{rev}");
+            assert!(tree.unresolved.as_deref().is_some_and(|r| !r.trim().is_empty()), "a reason, not an empty one");
             assert!(matches!(tree.read("a.yaml"), Err(TreeError::Unresolved { .. })), "{rev}");
             let many = tree.read_many(&["a.yaml".to_string()]);
             assert!(many[0].1.as_ref().is_err_and(|e| e.to_string().contains("did not resolve")), "{rev}");

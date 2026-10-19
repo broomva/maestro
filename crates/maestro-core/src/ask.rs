@@ -350,6 +350,13 @@ fn canonical_json(value: &serde_json::Value, out: &mut String) {
     }
 }
 
+/// `JSON.stringify(canonical(row))`: the exact bytes an entry hash covers.
+pub fn canonical_string(row: &serde_json::Value) -> String {
+    let mut s = String::new();
+    canonical_json(row, &mut s);
+    s
+}
+
 /// The plugin's `entryHash`: the first 16 hex of sha256 over the canonical row.
 /// It covers the whole entry, answers included: an entry changed since it was
 /// read is not answered. This is the hash the plugin's answer path rechecks.

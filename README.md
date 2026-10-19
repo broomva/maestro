@@ -55,10 +55,25 @@ read, that count becomes a lower bound and the error is reported under `worktree
   - Fields go through `text`, `textsOf` and `optionsOf`, and a flag counts only when it is `=== true`.
     So a numeric id, a string `blocking`, a single-string `gates` list or an option without a label
     never drops an entry.
+  - Ledgers (`.yaml` or `.yml`, as the plugin's `LEDGER` names them) are parsed as the plugin's
+    `yaml` package parses them. This uses the YAML 1.2 core schema, with scalars resolved by the
+    package's own rules (`crates/maestro-store/src/yaml.rs`):
+    - `0004` is 4, `0b101` is a string and big integers round;
+    - `!!float 1` is `"1"`;
+    - keys stringify as `toJS` makes them, and duplicate keys are an error.
   - Entry hashes are `JSON.stringify` byte for byte, including JavaScript number printing and
     object key order.
-  - Work flags come from the plugin's `parseEvents`, so a torn last line in `_events.jsonl` never
-    hides a flag.
+  - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.
+    So a torn last line, a huge number or a lone surrogate never hides or resurrects a flag.
+  - The proof is `fixtures/parity/plugin-golden.json`: the plugin's own reading of an edge corpus,
+    written by `scripts/plugin-golden.ts`. The test `every_ledger_reads_as_the_plugin_reads_it`
+    holds it to the byte. Regenerate the file whenever the plugin's readers change.
+  - Known gaps. Each is refused or reported, and each is pinned by that test:
+    - A `%YAML 1.1` document is refused, because the plugin would read it with YAML 1.1 rules.
+    - A non-finite number (`.inf`, `1e400`) hashes the same, but reads as no text. So
+      `answer: .inf` is answered in the plugin and open here.
+    - A lone surrogate escape is read as U+FFFD and reported, so that entry's hash differs.
+    - A collection map key that needs quoting in flow form is refused.
 - **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
   50).
 

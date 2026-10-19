@@ -7,6 +7,7 @@
 pub mod paths;
 pub mod tree;
 pub mod views;
+pub mod yaml;
 
 use maestro_core::ask::AskLedger;
 use maestro_core::fleet::{FleetReport, FleetSummary};
@@ -47,23 +48,43 @@ impl Store {
         Self { paths, tree }
     }
 
-    /// Read every YAML file in a workspace directory as a document.
-    fn yaml_docs(&self, dir: &str) -> Section<Vec<(String, serde_json::Value)>> {
+    /// Read every YAML file in a workspace directory as a document, with `parse`.
+    /// A file the listing skipped (not a regular file) is an error, not a silence.
+    fn yaml_docs_with(
+        &self,
+        dir: &str,
+        suffixes: &[&str],
+        parse: impl Fn(&str) -> Result<(serde_json::Value, Vec<String>), String>,
+    ) -> Section<Vec<(String, serde_json::Value)>> {
         let label = self.tree.label(dir);
-        let names = match self.tree.list(dir, ".yaml") {
-            Ok(names) => names,
+        let listing = match self.tree.list(dir, suffixes) {
+            Ok(listing) => listing,
             Err(e) => return Section::unavailable(label, e.to_string()),
         };
-        let rels: Vec<String> = names.iter().map(|n| format!("{dir}/{n}")).collect();
+        let mut errors: Vec<SourceError> = listing
+            .skipped
+            .into_iter()
+            .map(|(name, reason)| SourceError { at: format!("{dir}/{name}"), reason })
+            .collect();
+        let rels: Vec<String> = listing.names.iter().map(|n| format!("{dir}/{n}")).collect();
         let mut items = Vec::new();
-        let mut errors = Vec::new();
-        for (name, (rel, text)) in names.into_iter().zip(self.tree.read_many(&rels)) {
-            match text.map_err(|e| e.to_string()).and_then(|t| serde_yaml::from_str(&t).map_err(|e| e.to_string())) {
-                Ok(value) => items.push((name, value)),
+        for (name, (rel, text)) in listing.names.into_iter().zip(self.tree.read_many(&rels)) {
+            match text.map_err(|e| e.to_string()).and_then(|t| parse(&t)) {
+                Ok((value, warnings)) => {
+                    errors.extend(warnings.into_iter().map(|reason| SourceError { at: rel.clone(), reason }));
+                    items.push((name, value));
+                }
                 Err(reason) => errors.push(SourceError { at: rel, reason }),
             }
         }
         Section::partial(label, items, errors)
+    }
+
+    /// Typed YAML (initiatives, loops): serde_yaml, whose reading no hash depends on.
+    fn yaml_docs(&self, dir: &str) -> Section<Vec<(String, serde_json::Value)>> {
+        self.yaml_docs_with(dir, &[".yaml"], |t| {
+            serde_yaml::from_str(t).map(|v| (v, Vec::new())).map_err(|e| e.to_string())
+        })
     }
 
     fn yaml_dir<T: DeserializeOwned>(&self, dir: &str) -> Section<Vec<T>> {
@@ -84,8 +105,10 @@ impl Store {
     }
 
     /// Ask ledgers. A ledger that does not parse, and each entry inside one that does not, is an error.
+    /// Ledgers are named as the plugin's `LEDGER` names them (`.yaml` or `.yml`) and read
+    /// with [`yaml::parse`], so every value, and so every entry hash, is the plugin's.
     pub fn asks(&self) -> Section<Vec<LedgerFile>> {
-        let docs = self.yaml_docs(ASKS_DIR);
+        let docs = self.yaml_docs_with(ASKS_DIR, &[".yaml", ".yml"], |t| yaml::parse(t).map(|r| (r.value, r.warnings)));
         let mut errors = docs.errors;
         let data = docs.data.map(|docs| {
             let mut out = Vec::new();
@@ -237,18 +260,41 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), String> {
 
 /// The plugin's `parseEvents`: one JSON object per line, kept when it has a
 /// string `ts` and `type`. Blank lines are skipped; anything else counts as bad.
+///
+/// `JSON.parse` accepts what serde_json refuses: a number past f64 range, and a
+/// lone surrogate escape. A line is first split into raw members, which checks
+/// syntax without parsing numbers, so a huge number never makes a line bad.
+/// Each member is then parsed on its own, a lone surrogate read as U+FFFD, and
+/// a member that still fails is null. A later duplicate key wins, as in JavaScript.
 pub fn parse_events(text: &str) -> (Vec<serde_json::Value>, usize) {
     let mut events = Vec::new();
     let mut bad = 0;
     for line in text.split('\n').filter(|l| !l.trim().is_empty()) {
-        match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(v) if v.get("ts").is_some_and(|t| t.is_string()) && v.get("type").is_some_and(|t| t.is_string()) => {
+        match event_of(line) {
+            Some(v) if v.get("ts").is_some_and(|t| t.is_string()) && v.get("type").is_some_and(|t| t.is_string()) => {
                 events.push(v)
             }
             _ => bad += 1,
         }
     }
     (events, bad)
+}
+
+fn event_of(line: &str) -> Option<serde_json::Value> {
+    use serde_json::value::RawValue;
+    let members: std::collections::BTreeMap<String, Box<RawValue>> = serde_json::from_str(line)
+        .ok()
+        .or_else(|| serde_json::from_str(&yaml::lone_surrogates_to_replacement(line)).ok())?;
+    let object = members
+        .into_iter()
+        .map(|(k, raw)| {
+            let value = serde_json::from_str(raw.get())
+                .or_else(|_| serde_json::from_str(&yaml::lone_surrogates_to_replacement(raw.get())))
+                .unwrap_or(serde_json::Value::Null);
+            (k, value)
+        })
+        .collect();
+    Some(serde_json::Value::Object(object))
 }
 
 /// The loop's current flag: the last parsed event, when it is `loop.flagged`
@@ -327,6 +373,23 @@ mod tests {
             assert_eq!(flag(&text).map(|f| f.kind), Some(FlagKind::Yours), "tail {tail}");
             assert_eq!(parse_events(&text).1, 1);
         }
+    }
+
+    #[test]
+    fn a_line_json_parse_accepts_is_an_event_here_too() {
+        // JSON.parse keeps both tails as the last event, so the earlier flag is cleared.
+        let flagged = "{\"ts\":\"1\",\"type\":\"loop.flagged\",\"kind\":\"yours\"}\n";
+        for tail in [
+            "{\"ts\":\"2\",\"type\":\"note\",\"text\":\"cut \\ud83d\"}",
+            "{\"ts\":\"2\",\"type\":\"note\",\"n\":1e400}",
+            "{\"ts\":\"2\",\"type\":\"loop.flagged\",\"kind\":\"yours\",\"type\":\"note\"}",
+        ] {
+            let text = format!("{flagged}{tail}\n");
+            assert!(flag(&text).is_none(), "tail {tail}");
+            assert_eq!(parse_events(&text), (parse_events(&text).0, 0), "tail {tail}");
+        }
+        let (events, _) = parse_events("{\"ts\":\"\\ud83d\",\"type\":\"x\"}");
+        assert_eq!(events[0]["ts"], "\u{FFFD}", "a lone surrogate in ts is still a string");
     }
 
     #[test]

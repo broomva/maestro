@@ -1,0 +1,9 @@
+asks:
+  - id: bools
+    blocking: True
+    a: TRUE
+    b: false
+    c: yes
+    d: on
+    e: tRue
+    preanswerable: FALSE
