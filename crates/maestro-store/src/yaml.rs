@@ -39,6 +39,9 @@
 //!   flow form with each scalar's original quoting, which this reader does not keep.
 //! - A lone surrogate escape (`"\uD83D"`) cannot live in a Rust string. It is
 //!   read as U+FFFD and reported, so that entry's hash differs from the plugin's.
+//! - A lone carriage return right after a `-` or `?` indicator is refused. The plugin
+//!   reads it as the first column of the node that follows, a column this reader would
+//!   shift by one.
 //! - Collections nested deeper than [`MAX_DEPTH`] are refused. The plugin's limit
 //!   is its engine's stack, which differs between node and bun.
 
@@ -78,13 +81,52 @@ pub fn parse(source: &str) -> Result<Read, String> {
             "a %YAML {version} document: the plugin reads it with YAML {version} rules, which Maestro does not implement"
         ));
     }
-    let mut text = std::borrow::Cow::Borrowed(source);
+    // The package's lexer breaks lines on `\n` only: a lone `\r` is content to it, where
+    // yaml-rust2 would break the line. Carry each as U+FDD1 (a Unicode noncharacter, so no
+    // ledger text holds it), which scans as content, and put the `\r` back once resolved.
+    let has_lone_cr =
+        source.bytes().enumerate().any(|(i, b)| b == b'\r' && source.as_bytes().get(i + 1) != Some(&b'\n'));
+    let mut text = if has_lone_cr {
+        let mut out = String::with_capacity(source.len() + 8);
+        let mut chars = source.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\r' && chars.peek() != Some(&'\n') {
+                // In a directive line a CR is only whitespace (`%YAML\r 1.2`).
+                if out.rsplit('\n').next().is_some_and(|line| line.starts_with('%')) {
+                    out.push(' ');
+                    continue;
+                }
+                // The package's "followed by whitespace" test counts a CR, so after an indicator
+                // it also separates: `a:\rb` is `{a: "\rb"}`, and `---\r…` opens a document.
+                match follows_indicator(&out) {
+                    Indicator::None => {}
+                    Indicator::Separator => out.push(' '),
+                    // After `-` or `?` the CR is the first column of the node that follows. The
+                    // separating space this reader must add moves that node one column right,
+                    // and lines aligned to it then read differently: refused, not misread.
+                    Indicator::NodeStart => {
+                        return Err("a lone carriage return right after a `-` or `?` indicator: the plugin reads it as the node's first column, which Maestro cannot reproduce".into())
+                    }
+                }
+                out.push(LONE_CR);
+            } else {
+                out.push(c);
+            }
+        }
+        std::borrow::Cow::Owned(out)
+    } else {
+        std::borrow::Cow::Borrowed(source)
+    };
     let mut lone = 0;
-    // yaml-rust2 refuses a surrogate half in a `\u` escape, which the package keeps. Repair only
-    // the double-quoted scalar the scanner names, then parse again; each pass fixes one scalar.
+    // Two refusals yaml-rust2 makes where the package reads, each repaired where the scanner
+    // points, then parsed again (one site per pass):
+    // - a surrogate half in a `\u` escape: only that double-quoted scalar is rewritten;
+    // - a tab separating `:` from its value: the package takes tabs as separation, so the
+    //   tab run becomes spaces, which changes no value.
     for _ in 0..=source.len() {
         match parse_events(&text) {
             Ok(value) => {
+                let value = if has_lone_cr { restore_cr(value) } else { value };
                 let warnings = if lone > 0 {
                     vec![format!(
                         "{lone} lone surrogate escape(s) read as U+FFFD: the plugin keeps them, so these entries hash differently"
@@ -99,10 +141,110 @@ pub fn parse(source: &str) -> Result<Read, String> {
                 lone += n;
                 text = std::borrow::Cow::Owned(fixed);
             }
+            Err((e, Some(at)))
+                if e.contains("must be followed by a valid YAML whitespace") || e.contains("expected whitespace") =>
+            {
+                let Some(fixed) = repair_tab_separator(&text, at) else { return Err(e) };
+                text = std::borrow::Cow::Owned(fixed);
+            }
             Err((e, _)) => return Err(e),
         }
     }
-    Err("too many surrogate escapes to repair".into())
+    Err("too many repairs in one document".into())
+}
+
+/// Whether the block scalar whose header is at char `header` holds a line that is only
+/// whitespace, has a tab, and starts less indented than the scalar's content: the package
+/// reads that tab as content on an under-indented line and refuses it, where yaml-rust2
+/// takes the line as blank. The scalar runs until a line with text at a lesser indent.
+fn block_scalar_has_short_tab_line(src: &[char], mark: usize) -> bool {
+    // The event's mark may sit on the content; the header (`|`/`>` and its indicators) is
+    // the last `|`/`>` before it, past whitespace and the chomping/indent indicators.
+    let mut i = mark.min(src.len());
+    while i > 0 && src[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && matches!(src[i - 1], '+' | '-' | '0'..='9') {
+        i -= 1;
+    }
+    let header = if i > 0 && matches!(src[i - 1], '|' | '>') { i - 1 } else { mark };
+    let text: String = src.iter().collect();
+    let byte = text.char_indices().nth(header).map_or(text.len(), |(i, _)| i);
+    let Some(nl) = text[byte..].find('\n') else { return false };
+    let lines: Vec<&str> = text[byte + nl + 1..].split('\n').collect();
+    let indent_of = |l: &str| l.chars().take_while(|&c| c == ' ').count();
+    let Some(content_indent) = lines.iter().find(|l| !l.trim().is_empty()).map(|l| indent_of(l)) else { return false };
+    for line in lines {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let blank = line.chars().all(|c| c == ' ' || c == '\t');
+        if !blank && indent_of(line) < content_indent {
+            return false; // the scalar has ended
+        }
+        if blank && line.contains('\t') && indent_of(line) < content_indent {
+            return true;
+        }
+    }
+    false
+}
+
+/// What a lone CR completes when it follows `before`.
+enum Indicator {
+    None,
+    /// `:`, or a `---`/`...` marker: the CR separates, and what follows keeps its column.
+    Separator,
+    /// `-` or `?` with only whitespace or other indicators before it on the line.
+    NodeStart,
+}
+
+fn follows_indicator(before: &str) -> Indicator {
+    let line = before.rsplit('\n').next().unwrap_or(before);
+    if line == "---" || line == "..." || line.ends_with(':') {
+        return Indicator::Separator;
+    }
+    // `-` or `?` at the start of a token: the line's first, or after whitespace or a flow opener.
+    match line.strip_suffix(['-', '?']) {
+        Some(head) if head.chars().next_back().is_none_or(|c| matches!(c, ' ' | '\t' | '[' | ',' | '{')) => {
+            Indicator::NodeStart
+        }
+        _ => Indicator::None,
+    }
+}
+
+/// A lone carriage return, carried through the scanner as content.
+const LONE_CR: char = '\u{FDD1}';
+
+/// Every [`LONE_CR`] in a resolved value, keys included, back to `\r`.
+fn restore_cr(value: Value) -> Value {
+    match value {
+        Value::String(s) => Value::String(s.replace(LONE_CR, "\r")),
+        Value::Array(items) => Value::Array(items.into_iter().map(restore_cr).collect()),
+        Value::Object(map) => {
+            Value::Object(map.into_iter().map(|(k, v)| (k.replace(LONE_CR, "\r"), restore_cr(v))).collect())
+        }
+        other => other,
+    }
+}
+
+/// The scanner stopped at char index `at` because a tab follows an indicator (`:`, `?`, `-`).
+/// Make that tab run spaces, when the indicator precedes it; anything else is not this case.
+fn repair_tab_separator(source: &str, at: usize) -> Option<String> {
+    let mut chars: Vec<char> = source.chars().collect();
+    // The marker sits on the tab run or just past it.
+    let mut end = at.min(chars.len());
+    while end < chars.len() && chars[end] == '\t' {
+        end += 1;
+    }
+    let mut start = end;
+    while start > 0 && chars[start - 1] == '\t' {
+        start -= 1;
+    }
+    if start == end || start == 0 || !matches!(chars[start - 1], ':' | '?' | '-') {
+        return None;
+    }
+    for c in &mut chars[start..end] {
+        *c = ' ';
+    }
+    Some(chars.into_iter().collect())
 }
 
 /// The version of any `%YAML` directive before the first document marker.
@@ -152,7 +294,7 @@ fn repair_quoted_scalar(source: &str, at: usize) -> Option<(String, usize)> {
 
 /// Parse events into a value. An error carries the scanner's char index, when it names one.
 fn parse_events(source: &str) -> Result<Value, (String, Option<usize>)> {
-    let mut builder = Builder::default();
+    let mut builder = Builder { src: source.chars().collect(), ..Builder::default() };
     let mut parser = Parser::new_from_str(source);
     // Drive the parser one event at a time. Its own `load` recurses once per nesting level,
     // which a deep enough document turns into a stack overflow; this loop does not, and it
@@ -170,6 +312,27 @@ fn parse_events(source: &str) -> Result<Value, (String, Option<usize>)> {
     }
     if builder.documents > 1 {
         return Err(("Source contains multiple documents; the plugin reads one".into(), None));
+    }
+    // The package refuses a tab where a block node's indentation is: in the whitespace that
+    // opens the node's line, when only block indicators (`- `, `? `, `: `) stand between that
+    // whitespace and the node. A tab after an indicator is separation, and allowed.
+    for &header in &builder.block_scalars {
+        if block_scalar_has_short_tab_line(&builder.src, header) {
+            return Err(("Block scalar lines must not be less indented than their first line".into(), Some(header)));
+        }
+    }
+    // A block collection opened after an indicator on the same line (`-\tid: x`) takes its
+    // indentation from what follows the indicator, so a tab there is indentation too.
+    for &(at, collection) in &builder.block_starts {
+        let at = at.min(builder.src.len());
+        let line_start = builder.src[..at].iter().rposition(|&c| c == '\n').map_or(0, |i| i + 1);
+        let prefix = &builder.src[line_start..at];
+        let indent = prefix.iter().take_while(|&&c| c == ' ' || c == '\t').count();
+        let rest_is_indicators = prefix[indent..].iter().all(|&c| matches!(c, '-' | '?' | ':' | ' ' | '\t'));
+        let tab_in_indent = prefix[..indent].contains(&'\t') || (collection && prefix[indent..].contains(&'\t'));
+        if rest_is_indicators && tab_in_indent {
+            return Err(("Tabs are not allowed as indentation".into(), Some(at)));
+        }
     }
     match builder.root {
         None => Ok(Value::Null),
@@ -200,6 +363,19 @@ struct Builder {
     root: Option<Node>,
     documents: usize,
     error: Option<String>,
+    /// Flow collections open around the current event: tabs separate freely inside one.
+    flow: usize,
+    /// For each open collection, whether it is a flow one (`[` or `{` at its mark).
+    open_is_flow: Vec<bool>,
+    /// The source as chars, to tell a flow collection from a block one by its first char.
+    src: Vec<char>,
+    /// Where each block node begins (char index), and whether it is a collection: checked
+    /// against tab indentation once parsed.
+    block_starts: Vec<(usize, bool)>,
+    /// A block mapping just opened: its first key is where its indentation shows.
+    first_key: bool,
+    /// Where each literal or folded block scalar's header (`|`, `>`) sits.
+    block_scalars: Vec<usize>,
 }
 
 impl Builder {
@@ -219,7 +395,7 @@ impl Builder {
 }
 
 impl MarkedEventReceiver for Builder {
-    fn on_event(&mut self, ev: Event, _mark: Marker) {
+    fn on_event(&mut self, ev: Event, mark: Marker) {
         // Once the document is refused, build nothing more: the error is the result.
         if self.error.is_some() {
             return;
@@ -227,6 +403,42 @@ impl MarkedEventReceiver for Builder {
         if matches!(ev, Event::SequenceStart(..) | Event::MappingStart(..)) && self.stack.len() >= MAX_DEPTH {
             self.error = Some(format!("collections nested deeper than {MAX_DEPTH} levels"));
             return;
+        }
+        let starts_node =
+            matches!(ev, Event::Scalar(..) | Event::SequenceStart(..) | Event::MappingStart(..) | Event::Alias(_));
+        if starts_node && self.flow == 0 {
+            let block_collection = matches!(ev, Event::SequenceStart(..) | Event::MappingStart(..))
+                && !matches!(self.src.get(mark.index()), Some('[' | '{'));
+            // A block mapping's first key carries the mapping's indentation.
+            let collection = block_collection || std::mem::take(&mut self.first_key);
+            // A block sequence's mark can sit on its first item, past its own `-`: anchor it
+            // on that `-`, so the separator after its own indicator is not read as indentation.
+            let mut at = mark.index();
+            if block_collection && matches!(ev, Event::SequenceStart(..)) {
+                let mut i = at.min(self.src.len());
+                while i > 0 && matches!(self.src[i - 1], ' ' | '\t') {
+                    i -= 1;
+                }
+                if i > 0 && self.src[i - 1] == '-' {
+                    at = i - 1;
+                }
+            }
+            self.block_starts.push((at, collection));
+            if block_collection && matches!(ev, Event::MappingStart(..)) {
+                self.first_key = true;
+            }
+        }
+        match &ev {
+            Event::SequenceStart(..) | Event::MappingStart(..) => {
+                let is_flow = self.flow > 0 || matches!(self.src.get(mark.index()), Some('[' | '{'));
+                self.open_is_flow.push(is_flow);
+                self.flow += usize::from(is_flow);
+            }
+            Event::SequenceEnd | Event::MappingEnd if self.open_is_flow.pop() == Some(true) => self.flow -= 1,
+            _ => {}
+        }
+        if let Event::Scalar(_, TScalarStyle::Literal | TScalarStyle::Folded, ..) = &ev {
+            self.block_scalars.push(mark.index());
         }
         match ev {
             Event::DocumentStart => self.documents += 1,
@@ -328,8 +540,15 @@ fn to_js(node: &Node, cx: &mut Cx<'_>, depth: usize) -> Result<Value, String> {
                 let name = key_string(&key)?;
                 out.insert(name, to_js(v, cx, depth + 1)?);
             }
-            // `!!set` is a JavaScript Set: `canonical` finds no own keys on it.
-            Ok(if core_tag(tag.as_ref()) == Some("set") { Value::Object(Map::new()) } else { Value::Object(out) })
+            // `!!set` is a JavaScript Set: `canonical` finds no own keys on it. Its items must be
+            // keys alone, as the package checks.
+            if core_tag(tag.as_ref()) == Some("set") {
+                if out.values().any(|v| !v.is_null()) {
+                    return Err("Set items must all have null values".into());
+                }
+                return Ok(Value::Object(Map::new()));
+            }
+            Ok(Value::Object(out))
         }
     }
 }
@@ -946,6 +1165,57 @@ mod tests {
         assert_eq!(r.value["a"], "x \\uD83D \u{FFFD}", "an escaped backslash is text, not an escape");
         assert_eq!(r.warnings.len(), 1);
         assert!(r.warnings[0].starts_with("1 lone"));
+    }
+
+    #[test]
+    fn line_breaks_and_tabs_are_read_as_the_package_reads_them() {
+        // A lone CR is content to the package: kept in a value, and no line break.
+        assert_eq!(js("a: \"x\ry\"\nb: x\ry\n"), json!({"a": "x\ry", "b": "x\ry"}));
+        assert!(parse("a: 1\rb: 2\r").is_err(), "CR-only lines are one line to the package, which refuses it");
+        assert_eq!(js("a: 1\r\nb: 2\r\n"), json!({"a": 1, "b": 2}), "CRLF is a line break");
+        // A tab after `:` separates, in block and flow; a tab as indentation does not.
+        assert_eq!(
+            js("a:\tx\nasks:\n  - id:\t\ty\nf: {k:\tv}\n"),
+            json!({"a": "x", "asks": [{"id": "y"}], "f": {"k": "v"}})
+        );
+        assert!(parse("a:\n\tb: 1\n").is_err());
+        assert_eq!(js("a: \"in\tquotes\"\n"), json!({"a": "in\tquotes"}), "a tab in a value is content");
+    }
+
+    #[test]
+    fn tab_indentation_and_lone_cr_separators_follow_the_package() {
+        // yaml-rust2 read these two; the package refuses them, and so does Maestro now.
+        for refused in ["\ta: 1\n", "a:\n  \tb: 1\n", "asks:\n  -\tid: x\n", "asks:\n  - \tid: x\n"] {
+            assert!(parse(refused).unwrap_err().contains("Tabs are not allowed as indentation"), "{refused:?}");
+        }
+        // These both parsers refuse, each in its own words.
+        for refused in ["a:\n\t- x\n", "- a: 1\n \tb: 2\n", "asks:\n\t  - id: x\n"] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+        assert_eq!(js("a: x\n  \ty\n"), json!({"a": "x y"}), "a tab inside a plain continuation is separation");
+        assert_eq!(js("{a: 1,\n\tb: 2}\n"), json!({"a": 1, "b": 2}), "flow content may follow tabs");
+        assert_eq!(js("?\ta\n: b\n"), json!({"a": "b"}), "a tab after `?` separates");
+        assert_eq!(js("- \tx\n-\ty\n"), json!(["x", "y"]), "before a scalar, a tab after `-` separates");
+        assert_eq!(js("v:\n-\t x\n"), json!({"v": ["x"]}), "an indentless sequence: the tab follows its own `-`");
+        assert_eq!(js("a:\n  v:\n  -\t x\n"), json!({"a": {"v": ["x"]}}));
+        assert_eq!(js("%YAML\r 1.2\n---\na: 1\n"), json!({"a": 1}), "a CR in a directive is whitespace");
+        assert!(
+            parse("a: >-\n  folded\n\t").unwrap_err().contains("less indented"),
+            "a short tab line in a block scalar"
+        );
+        assert_eq!(
+            js("a: |\n  x\n  \ty\nb: 1\n"),
+            json!({"a": "x\n\ty\n", "b": 1}),
+            "a tab past the indent is content"
+        );
+        assert_eq!(js("a:\rb\n"), json!({"a": "\rb"}), "a CR after `:` separates, then is content");
+        assert!(parse("---\rasks:\r  - id: x\r").is_err(), "a CR after `---` puts content on the marker's line");
+        assert!(
+            parse("asks:\n  -\r id: x\n").unwrap_err().contains("right after a `-` or `?`"),
+            "refused, not misread"
+        );
+        assert!(parse("s: !!set {a: , b: 1}\n").unwrap_err().contains("null values"));
+        assert_eq!(js("a: 1 #c\rb: 2\n"), json!({"a": 1}), "a comment runs past a lone CR to the newline");
     }
 
     #[test]

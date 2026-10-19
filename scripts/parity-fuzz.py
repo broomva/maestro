@@ -37,6 +37,7 @@ KNOWN_GAPS = {
     "lone surrogate": "a lone surrogate reads as U+FFFD (reported)",
     "nested deeper than": "nesting past MAX_DEPTH is refused",
     "tagged map key": "a date or bytes key is refused",
+    "right after a `-` or `?` indicator": "a lone CR after `-`/`?` is refused",
 }
 
 NUMBERS = [
@@ -116,7 +117,76 @@ def ledger(rng: random.Random, i: int) -> str:
         text = text.replace(": ", ":\t", 1)
     if rng.random() < 0.05:
         text += "  - id: dupkey\n    a: 1\n    'a': 2\n"
+    # Syntax the two parsers must accept and refuse alike.
+    for _ in range(rng.choice([0, 0, 1, 2, 3])):
+        text = syntax_noise(rng, text)
     return text
+
+
+SYNTAX_ROWS = [
+    "  - id: s{n}\n    v: |+\n      keep\n\n",
+    "  - id: s{n}\n    v: |-\n      strip\n",
+    "  - id: s{n}\n    v: |2\n       indented\n",
+    "  - id: s{n}\n    v: >\n      folded\n\n      para\n",
+    "  - id: s{n}\n    v: plain\n      continued\n      again\n",
+    "  - id: s{n}\n    v: plain\n      with: colon\n",
+    "  - id: s{n}\n    v: plain # comment\n",
+    "  - id: s{n}\n    v: plain#nocomment\n",
+    "  - id: s{n}\n    v: [a,\n      b, c]\n",
+    "  - id: s{n}\n    v: {a: 1,\n      b: 2}\n",
+    "  - id: s{n}\n    v: \"multi\n      line quoted\"\n",
+    "  - id: s{n}\n    v: 'multi\n\n      single'\n",
+    "  - id: s{n}\n    ? explicit\n    : value\n",
+    "  - id: s{n}\n    \"quoted key\": 1\n",
+    "  - id: s{n}\n    v: &anc scalar\n    w: *anc\n",
+    "  - id: s{n}\n    v:\n    - unindented\n    - seq\n",
+    "  - id: s{n}\n    v: -dash\n    w: - not a seq\n",
+    "  - id: s{n}\n    v: a: b\n",
+    "  - id: s{n}\n    v: x # c\n    # full line\n    w: y\n",
+    "  - id: s{n}\n    v: ''\n    w: \"\"\n    x:\n",
+    "  - id: s{n}\n    v: @reserved\n",
+    "  - id: s{n}\n    v: `tick\n",
+    "  - id: s{n}\n    v: %percent\n",
+    "  - id: s{n}\n    v: !\n",
+    "  - id: s{n}\n    v: [a, b,]\n",
+    "  - id: s{n}\n    v: {a, b: 1}\n",
+    "  - id: s{n}\n    v: [a: 1, b]\n",
+    "  - id: s{n}\n    v: \"esc \\a \\e \\0 \\/ \\  x\"\n",
+    "  - id: s{n}\n    v: \"bad \\q\"\n",
+    "  - id: s{n}\n    v: 'it''s'\n",
+    "  - id: s{n}\n    v: >-\n\n      leading blank\n",
+    "  - id: s{n}\n    v: |\n    under-indented\n",
+    "  - id: s{n}\n    v:   spaced   \n",
+    "  - id: s{n}\n    v: x\n     w: misaligned\n",
+    "  - id: s{n}\n    v: ? a\n",
+    "  - id: s{n}\n    v: [[a, [b]], {c: [d]}]\n",
+    "  - id: s{n}\n    v: a\u00a0b\n",
+    "  - id: s{n}\n    v: \u2028x\n",
+]
+
+
+def syntax_noise(rng: random.Random, text: str) -> str:
+    pick = rng.random()
+    if pick < 0.45:
+        return text + rng.choice(SYNTAX_ROWS).replace("{n}", str(rng.randint(0, 999)))
+    if pick < 0.6:  # a tab somewhere after a separator
+        idx = [i for i, c in enumerate(text) if c in ":-" and i + 1 < len(text) and text[i + 1] == " "]
+        if idx:
+            i = rng.choice(idx)
+            return text[: i + 1] + rng.choice(["\t", " \t", "\t "]) + text[i + 2 :]
+    if pick < 0.7:  # a tab at the start of a line
+        lines = text.split("\n")
+        j = rng.randrange(len(lines))
+        lines[j] = "\t" + lines[j]
+        return "\n".join(lines)
+    if pick < 0.8:  # a lone CR inside a line
+        idx = [i for i, c in enumerate(text) if c == " "]
+        if idx:
+            i = rng.choice(idx)
+            return text[:i] + "\r" + text[i:]
+    if pick < 0.9:  # trailing spaces or tabs at line ends
+        return text.replace("\n", rng.choice([" \n", "\t\n"]), rng.randint(1, 3))
+    return text.replace("    ", "   ", 1)  # one under-indented line
 
 
 def main() -> int:

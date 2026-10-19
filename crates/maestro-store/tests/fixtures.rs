@@ -394,7 +394,7 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
         checked += 1;
     }
     // Every ledger is accounted for: compared to the byte, refused as the plugin refuses it, or a pinned gap.
-    assert_eq!((checked, refused, golden.as_object().unwrap().len()), (34, 8, 45));
+    assert_eq!((checked, refused, golden.as_object().unwrap().len()), (39, 13, 55));
 }
 
 #[test]
@@ -458,4 +458,36 @@ fn no_local_asks_directory_is_no_local_answer() {
     let waiting = views::unlanded(&s, s.asks().data.as_deref().unwrap());
     assert!(waiting.errors.is_empty() && waiting.data.unwrap().is_empty());
     assert!(!views::snapshot(&s).asks.is_degraded(), "a healthy read is not made to look partial");
+}
+
+#[test]
+fn a_ledger_over_the_plugin_limit_is_refused_and_huge_files_are_never_read_whole() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let dir = ws.join(".control/asks");
+    std::fs::create_dir_all(&dir).unwrap();
+    // One byte past LEDGER_LIMIT: valid YAML, refused as the plugin's readLedger refuses it.
+    let mut big = String::from("asks:\n  - id: a\n#");
+    big.push_str(&"x".repeat(maestro_store::LEDGER_LIMIT + 1 - big.len()));
+    assert_eq!(big.len(), maestro_store::LEDGER_LIMIT + 1);
+    std::fs::write(dir.join("big.yaml"), &big).unwrap();
+    // Past the read cap: refused before it is read, in both modes.
+    std::fs::write(dir.join("huge.yaml"), vec![b'#'; maestro_store::tree::MAX_READ + 1]).unwrap();
+    std::fs::write(dir.join("ok.yaml"), "asks:\n  - id: ok\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    for source in [TreeSource::WorkingTree, TreeSource::GitRev("main".into())] {
+        if matches!(source, TreeSource::GitRev(_)) {
+            git(&ws, &["init", "-q", "-b", "main"]);
+            git(&ws, &["add", "."]);
+            git(&ws, &["commit", "-q", "-m", "seed"]);
+        }
+        let asks = Store::new(paths.clone(), source.clone()).asks();
+        let files: Vec<_> = asks.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
+        assert_eq!(files, ["ok.yaml"], "{source}");
+        let reason =
+            |f: &str| asks.errors.iter().find(|e| e.at.ends_with(f)).map(|e| e.reason.clone()).unwrap_or_default();
+        assert!(reason("big.yaml").contains("over 1048576 bytes"), "{source}: {}", reason("big.yaml"));
+        assert!(reason("huge.yaml").contains("read limit"), "{source}: {}", reason("huge.yaml"));
+    }
 }

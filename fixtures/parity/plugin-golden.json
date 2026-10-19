@@ -331,6 +331,87 @@
    "{\"blocking\":true,\"id\":\"rotate\",\"note\":\"cut \\ud83d alone\",\"pair\":\"😀\"}"
   ]
  },
+ "syn-block-short-tab.yaml": {
+  "error": "it has a YAML error: Block scalar lines must not be less indented than their first line at line 5, column 1:"
+ },
+ "syn-bom-yaml12.yaml": {
+  "asks": [
+   {
+    "id": "bom12",
+    "hash": "2f4a371cecd1627e",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"bom12\"}"
+  ]
+ },
+ "syn-cr-only.yaml": {
+  "error": "it has a YAML error: Nested mappings are not allowed in compact mappings at line 1, column 6:"
+ },
+ "syn-crlf.yaml": {
+  "asks": [
+   {
+    "id": "crlf",
+    "hash": "fad22c08ee251de3",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"crlf\",\"v\":1}"
+  ]
+ },
+ "syn-lone-cr-after-colon.yaml": {
+  "asks": [
+   {
+    "id": "cr2",
+    "hash": "192cd7685b37e14a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"\\rb\",\"id\":\"cr2\"}"
+  ]
+ },
+ "syn-lone-cr-content.yaml": {
+  "asks": [
+   {
+    "id": "cr1",
+    "hash": "44255d82a4b4981a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"x\\ry\",\"b\":\"x\\ry\",\"c\":1,\"id\":\"cr1\"}"
+  ]
+ },
+ "syn-set-values.yaml": {
+  "error": "it has a YAML error: Set items must all have null values at line 3, column 8:"
+ },
+ "syn-tab-indent-key.yaml": {
+  "error": "it has a YAML error: Tabs are not allowed as indentation at line 1, column 1:"
+ },
+ "syn-tab-indent.yaml": {
+  "error": "it has a YAML error: Tabs are not allowed as indentation at line 2, column 4:"
+ },
+ "syn-tab-separator.yaml": {
+  "asks": [
+   {
+    "id": "t1",
+    "hash": "3c585fe9565f84f1",
+    "state": "open"
+   },
+   {
+    "id": "t2",
+    "hash": "182681b65f9731c2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"f\":{\"k\":\"v\"},\"id\":\"t1\",\"v\":\"x\"}",
+   "{\"id\":\"t2\",\"w\":\"x continued\"}"
+  ]
+ },
  "tag-binary.yaml": {
   "asks": [
    {

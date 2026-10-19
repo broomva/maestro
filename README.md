@@ -72,6 +72,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
     - A `%YAML 1.1` document is refused, because the plugin would read it with YAML 1.1 rules.
     - A lone surrogate escape is read as U+FFFD and reported, so that entry's hash differs.
     - A collection map key that needs quoting in flow form is refused.
+    - A lone carriage return right after a `-` or `?` indicator is refused. The plugin reads it as
+      the node's first column, which this reader would shift by one.
     - Collections nested deeper than 256 levels are refused. The plugin's limit is its engine's stack:
       node fails near 1 000 levels and bun near 8 000.
 - **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default

@@ -267,6 +267,12 @@ fn read_batch(mut reader: impl BufRead, rev: &str, rels: &[String]) -> Result<Ve
                 stderr: format!("unexpected header `{header}`"),
             });
         };
+        if size > MAX_READ {
+            // Skip the blob to stay in step with the stream, without holding it.
+            std::io::copy(&mut std::io::Read::take(&mut reader, size as u64 + 1), &mut std::io::sink())?;
+            out.push((rel.clone(), Err(TreeError::TooLarge { rel: rel.clone(), size: size as u64 })));
+            continue;
+        }
         let mut buf = vec![0u8; size + 1]; // trailing newline
         reader.read_exact(&mut buf)?;
         buf.pop();
