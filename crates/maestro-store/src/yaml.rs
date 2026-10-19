@@ -124,7 +124,7 @@ fn parse_events(source: &str) -> Result<Value, String> {
         None => Ok(Value::Null),
         Some(node) => {
             let mut budget = MAX_NODES;
-            to_js(&node, &builder.anchors, &mut budget)
+            to_js(&node, &builder.anchors, &mut budget, 0)
         }
     }
 }
@@ -206,20 +206,27 @@ fn spend(budget: &mut usize) -> Result<(), String> {
     Ok(())
 }
 
-fn to_js(node: &Node, anchors: &HashMap<usize, Node>, budget: &mut usize) -> Result<Value, String> {
+/// `depth` counts collections as resolved, aliases included: a chain of anchors each
+/// wrapping the last nests deeper than any one of them was written, so the cap applies here too.
+fn to_js(node: &Node, anchors: &HashMap<usize, Node>, budget: &mut usize, depth: usize) -> Result<Value, String> {
     spend(budget)?;
+    if depth > MAX_DEPTH {
+        return Err(format!("collections nested deeper than {MAX_DEPTH} levels once aliases are resolved"));
+    }
     match node {
         Node::Scalar { value, style, tag } => Ok(scalar(value, *style, tag.as_ref())),
         Node::Alias(id) => {
             let target = anchors.get(id).ok_or("an alias names no anchor")?;
-            to_js(target, anchors, budget)
+            to_js(target, anchors, budget, depth)
         }
-        Node::Seq(items) => items.iter().map(|n| to_js(n, anchors, budget)).collect::<Result<_, _>>().map(Value::Array),
+        Node::Seq(items) => {
+            items.iter().map(|n| to_js(n, anchors, budget, depth + 1)).collect::<Result<_, _>>().map(Value::Array)
+        }
         Node::Map(pairs) => {
             let mut out = Map::new();
             let mut seen: Vec<Value> = Vec::new();
             for (k, v) in pairs {
-                let key_value = to_js(k, anchors, budget)?;
+                let key_value = to_js(k, anchors, budget, depth + 1)?;
                 if is_scalar(k, anchors) {
                     if seen.iter().any(|s| same_scalar(s, &key_value)) {
                         return Err("Map keys must be unique".into());
@@ -227,7 +234,7 @@ fn to_js(node: &Node, anchors: &HashMap<usize, Node>, budget: &mut usize) -> Res
                     seen.push(key_value.clone());
                 }
                 let key = key_string(&key_value, k, anchors)?;
-                out.insert(key, to_js(v, anchors, budget)?);
+                out.insert(key, to_js(v, anchors, budget, depth + 1)?);
             }
             Ok(Value::Object(out))
         }
@@ -626,6 +633,13 @@ mod tests {
         assert!(run(block(MAX_DEPTH - 1)).expect("no stack overflow at the cap").is_ok(), "at the cap it reads");
         let flow = run(format!("x: {}{}\n", "[".repeat(300), "]".repeat(300))).expect("no stack overflow");
         assert!(flow.is_err());
+        // Each anchor wraps the previous one: shallow as written, deep once resolved.
+        let mut chain = String::from("a0: &a0 [v]\n");
+        for i in 1..2000 {
+            chain.push_str(&format!("a{i}: &a{i} [*a{}]\n", i - 1));
+        }
+        let aliased = run(chain).expect("no stack overflow through aliases");
+        assert!(aliased.unwrap_err().contains("deeper than"));
     }
 
     #[test]
