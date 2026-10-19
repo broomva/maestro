@@ -176,6 +176,37 @@ pub struct WorkFrontmatter {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlagKind {
+    /// Queued work only the owner may start: an owner step.
+    Yours,
+    /// A start that failed before A8: also an owner step.
+    Failed,
+    /// A run with no turn for 30 minutes: Standing, watched, never a hold.
+    Quiet,
+    #[serde(untagged)]
+    Other(String),
+}
+
+/// The loop's current flag on a work item: its last event, when that event is
+/// `loop.flagged` (the plugin's `flagOf`). Any later event clears it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Flag {
+    pub kind: FlagKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+impl Flag {
+    /// Whether the flag makes the work an owner step (`onlyYouStart`).
+    pub fn only_you_start(&self) -> bool {
+        matches!(self.kind, FlagKind::Yours | FlagKind::Failed)
+    }
+}
+
 /// A work item as Maestro reports it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkItem {
@@ -188,6 +219,20 @@ pub struct WorkItem {
     /// Timestamp of the last line in `_events.jsonl`, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<Flag>,
+    /// At the gate with no hold known: finished work that gates or the owner close (BRO-2999).
+    /// Labelled `Needs you` as the plugin labels review, but never counted as a need.
+    #[serde(default)]
+    pub finished: bool,
+}
+
+impl WorkItem {
+    /// Whether this item is a hold on the owner from on-disk data alone: queued work only
+    /// the owner may start. A permission prompt at the gate is live host state, not on disk.
+    pub fn owner_step(&self) -> bool {
+        self.front.state != OrchState::Review && self.flag.as_ref().is_some_and(Flag::only_you_start)
+    }
 }
 
 #[cfg(test)]

@@ -128,11 +128,11 @@
 <tbody>
 <tr><td><code>OrchState</code>, <code>WorkItem</code></td><td><code>~/maestro/&lt;slug&gt;/_work.md</code></td><td>Paseo plugin</td><td>8 stored states with the plugin's transition table. Done is reachable only from running, blocked or review.</td></tr>
 <tr><td><code>WorkState</code></td><td>derived</td><td>none</td><td>Exact labels. Standing is running plus the quiet flag.</td></tr>
-<tr><td><code>AskLedger</code>, <code>Ask</code></td><td><code>.control/asks/*.yaml</code></td><td>agents, Paseo plugin (answers)</td><td>State is open, answered or archived. A content hash excludes the answer fields, so a stale answer can be refused.</td></tr>
+<tr><td><code>AskLedger</code>, <code>Ask</code></td><td><code>.control/asks/*.yaml</code></td><td>agents, Paseo plugin (answers)</td><td>The list is <code>asks</code> or <code>open_asks</code>. The raw entry is kept, so state and hash are computed from it. State is a port of the plugin's <code>stateOf</code>. The hash is the plugin's <code>entryHash</code>, which its answer path rechecks. Both match the plugin on all 234 real asks.</td></tr>
 <tr><td><code>Rung</code></td><td><code>exhausted[]</code></td><td>agents</td><td>An entry is <code>"rung: text"</code> or a one-key map, because YAML parses <code>- read: x</code> as a map.</td></tr>
 <tr><td><code>AnswerStage</code></td><td>derived</td><td>Paseo plugin</td><td>The stages unlanded, unrouted, acted, superseded, before and conductor stay separate. Answering never implies execution.</td></tr>
-<tr><td><code>Need</code></td><td>derived</td><td>none</td><td>Only open blocking asks in phase 0. Work becomes a hold only while its session waits on a permission prompt, which is live host state.</td></tr>
-<tr><td><code>LoopSpec</code>, <code>Drift</code></td><td><code>.broomva/loops/*.yaml</code></td><td>agents (<code>loop_ledger.py</code>)</td><td>All 15 drift classes are typed. Maestro reports only the classes its data proves: expiring, tick unclosed, tick missing.</td></tr>
+<tr><td><code>Need</code></td><td>derived</td><td>none</td><td>Open blocking asks, plus queued work flagged <code>yours</code> or <code>failed</code> (the plugin's <code>onlyYouStart</code>). Work paused on a permission prompt is also a hold, but that is live host state and arrives with host adapters.</td></tr>
+<tr><td><code>LoopSpec</code>, <code>Drift</code>, <code>Notice</code></td><td><code>.broomva/loops/*.yaml</code></td><td>agents (<code>loop_ledger.py</code>)</td><td>All 15 plugin drift classes are typed and carry the plugin's meaning. Phase 0 claims only <code>tick_unclosed</code>, using the plugin's limit (max of 60 minutes and twice the median tick length). Maestro's own signals, <code>review_overdue</code> and <code>no_tick_receipts</code>, are notices, not drift.</td></tr>
 <tr><td><code>LedgerEvent</code>, <code>Tick</code></td><td><code>ticks.jsonl</code></td><td>coordinators (<code>broomva_home.py</code>)</td><td>A start pairs with its end by <code>cause</code>. <code>prev</code> is null only on the chain's first event.</td></tr>
 <tr><td><code>Tier</code>, <code>due_tiers</code></td><td>tick state</td><td>coordinators</td><td>The tiers are every, hourly, 4h and daily. A tier that has never run is due.</td></tr>
 <tr><td><code>Initiative</code>, <code>Driver</code></td><td><code>.control/initiatives/*.yaml</code></td><td>agents</td><td>The driver grammar is <code>owner|fleet|none|coordinator:&lt;8hex&gt;|session:&lt;id&gt;</code>.</td></tr>
@@ -150,7 +150,7 @@
   <span class="state s-done">Done</span>
   <span class="state s-standing">Standing</span>
 </p>
-<p class="meta">Stored proposed, reviewing and triggered map to Queued; running to Running, or Standing when quiet; blocked to Stuck; review to Needs you; done and canceled to Done. Counts are reported by stored state, because a count labelled Needs you would claim holds that only live session state can confirm.</p>
+<p class="meta">The mapping is the plugin's <code>PLAIN_VOICE</code>. Stored proposed, reviewing and triggered map to Queued. Running maps to Running, or to Standing when the last event is a quiet flag. Blocked maps to Stuck, and review to Needs you, marked finished when no hold exists. Done and canceled map to Done. Counts are reported by stored state; only the needs list is the Needs you count.</p>
 
 <h2>Authority</h2>
 <div class="grid">
@@ -186,7 +186,7 @@
 
 <h2>Phases</h2>
 <div class="phase now"><h3>Phase 0: typed reads everywhere (this change)</h3>
-<p>Cargo workspace with core, store, MCP and CLI. Nine read tools, a context prompt and three resources. The hook format never fails a session. Git-revision reads, unlanded-answer detection, and drift proven from data. 37 tests run against a fixture machine, and the key guards were checked by mutation. The binary is installed at <code>~/.local/bin/maestro</code>, and both POC registrations (Claude Code local, Codex) now point to it.</p></div>
+<p>Cargo workspace with core, store, MCP and CLI. Nine read tools, a context prompt and three resources. The hook format never fails a session, whether it gets a bad argument or overruns its 5 second budget. Git reads resolve one commit per store and use <code>ls-tree -z</code>. Unlanded answers are detected. 47 tests run against a fixture machine, with golden values from the plugin's own functions, and 9 guards were checked by mutation. The binary is installed at <code>~/.local/bin/maestro</code>, and both POC registrations (Claude Code local, Codex) now point to it.</p></div>
 <div class="phase"><h3>Phase 1: agent requests</h3>
 <p>File an ask through <code>ask_ledger.py</code> validation and the shared lock protocol (<code>~/.local/state/control-asks/locks</code>). Queue owner-gated work. Check host identity for T3 and Paseo callers. Read live work holds from host adapters, so permission prompts become needs.</p></div>
 <div class="phase"><h3>Phase 2: owner path</h3>
@@ -201,8 +201,8 @@
 <ul>
   <li>All 77 ask ledgers parse at <code>origin/main</code>. Before the fix, 6 failed on map-shaped <code>exhausted</code> entries. The tick ledger failed separately, on the genesis <code>prev: null</code>.</li>
   <li>One answer is waiting to land. <code>bro-2827-answers-landing.yaml#answers-pr-auto-merge</code> is answered in the local checkout but open on main.</li>
-  <li><code>t3-maintainer-tick</code> is registered with a contract that produces tick receipts, and the ledger holds none for it. Only <code>coordinator-tick</code> writes receipts. Its last tick started 2026-10-18T00:36Z, more than 24 hours before this run.</li>
-  <li>The work root holds 45 items in review. The plugin counts them as holds only while a permission prompt is open, so phase 0 reports 0 holds rather than 45.</li>
+  <li><code>t3-maintainer-tick</code> is registered with a contract that produces tick receipts, and the ledger holds none for it (BRO-3189). Only <code>coordinator-tick</code> writes receipts. Its last tick started 2026-10-18T00:36Z, more than 24 hours before this run.</li>
+  <li>Needs you is 4. Four queued work items are flagged <code>yours</code> by the loop. The 45 review items are finished and are not holds unless a permission prompt is open, which matches the plugin's <code>needsYouOf</code>.</li><li>There are 30 open asks, against 37 before the port of <code>stateOf</code>. Seven answered asks use <code>resolution</code>, <code>outcome</code> or status prefixes.</li>
   <li>A full snapshot takes about 0.2 s with the release build.</li>
 </ul>
 </div>

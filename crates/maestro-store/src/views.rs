@@ -9,22 +9,21 @@ use maestro_core::ask::{AskRef, AskState};
 use maestro_core::context::{AskBrief, ContextPacket, ContextScope, InitiativeBrief, LoopBrief};
 use maestro_core::fleet::FleetSummary;
 use maestro_core::initiative::Initiative;
-use maestro_core::loops::{Desired, Drift, DriftClass, LoopSpec};
+use maestro_core::loops::{Desired, Drift, DriftClass, LoopSpec, Notice, NoticeKind, TICK_CLOSE_SECS};
 use maestro_core::need::{Need, NeedKind, NeedSource};
 use maestro_core::tick::Tick;
 use maestro_core::work::{WorkItem, WorkState};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-
-/// An open tick older than this is reported as unclosed.
-pub const UNCLOSED_AFTER_SECS: i64 = 2 * 3_600;
 
 pub fn now() -> jiff::Timestamp {
     jiff::Timestamp::now()
 }
 
-/// Holds on the owner: open blocking asks. Work holds need live session state (see below).
+/// Holds on the owner from on-disk data: open blocking asks, and queued work only
+/// the owner may start (`onlyYouStart`). Work paused on a permission prompt is a
+/// hold too, but that prompt is live host state and joins with host adapters.
 pub fn needs(asks: &[LedgerFile], work: &[WorkItem]) -> Vec<Need> {
     let mut out = Vec::new();
     for lf in asks {
@@ -32,7 +31,7 @@ pub fn needs(asks: &[LedgerFile], work: &[WorkItem]) -> Vec<Need> {
             if ask.state() != AskState::Open || !ask.blocking {
                 continue;
             }
-            let r = AskRef { ledger: lf.file.clone(), id: ask.uid.clone().unwrap_or_else(|| ask.id.clone()) };
+            let r = AskRef { ledger: lf.file.clone(), id: ask.handle().to_string() };
             out.push(Need {
                 kind: NeedKind::Ask,
                 source: NeedSource::Asks,
@@ -45,10 +44,18 @@ pub fn needs(asks: &[LedgerFile], work: &[WorkItem]) -> Vec<Need> {
             });
         }
     }
-    // Work at the gate is a hold only while its session is paused on a permission
-    // prompt (`holdsApproval` in the plugin). That is live session state, not on
-    // disk, so phase 0 counts no work holds rather than over-count finished work.
-    let _ = work;
+    for item in work.iter().filter(|w| w.owner_step()) {
+        out.push(Need {
+            kind: NeedKind::OwnerStep,
+            source: NeedSource::Work,
+            key: format!("work:{}", item.front.id),
+            title: item.title.clone(),
+            since: item.flag.as_ref().and_then(|f| f.since.clone()).or_else(|| item.last_event_at.clone()),
+            ask: None,
+            project: None,
+            unblocks: vec![],
+        });
+    }
     out
 }
 
@@ -63,8 +70,12 @@ pub struct LoopRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_tick: Option<Tick>,
     pub ticks_recorded: usize,
+    /// Plugin drift classes, with the plugin's meaning. Only those the ticks ledger proves.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub drift: Vec<Drift>,
+    /// Maestro's own signals from the registry and ledger; not drift classes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<Notice>,
 }
 
 fn substrate_label(spec: &LoopSpec) -> String {
@@ -74,7 +85,28 @@ fn substrate_label(spec: &LoopSpec) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-/// Join the registry with the ticks ledger. Only drift this data can prove is reported.
+fn secs(ts: &str) -> Option<i64> {
+    ts.parse::<jiff::Timestamp>().ok().map(|t| t.as_second())
+}
+
+fn median(values: &mut [i64]) -> i64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let mid = values.len() / 2;
+    if values.len() % 2 == 1 { values[mid] } else { (values[mid - 1] + values[mid]) / 2 }
+}
+
+/// The plugin's unclosed limit: max(`TICK_CLOSE_SECS`, 2 x the row's median closed tick length).
+pub fn unclosed_limit(ticks: &[&Tick]) -> i64 {
+    let mut lengths: Vec<i64> =
+        ticks.iter().filter_map(|t| Some(secs(t.ended_at.as_deref()?)? - secs(&t.started_at)?)).collect();
+    TICK_CLOSE_SECS.max(2 * median(&mut lengths))
+}
+
+/// Join the registry with the ticks ledger. `ticks` is `None` when the ledger is unread:
+/// then nothing about ticks is claimed.
 pub fn loop_rows(specs: &[LoopSpec], ticks: Option<&[Tick]>, now: jiff::Timestamp) -> Vec<LoopRow> {
     let mut by_loop: BTreeMap<&str, Vec<&Tick>> = BTreeMap::new();
     for t in ticks.unwrap_or_default() {
@@ -86,34 +118,41 @@ pub fn loop_rows(specs: &[LoopSpec], ticks: Option<&[Tick]>, now: jiff::Timestam
         .map(|spec| {
             let mine = by_loop.get(spec.id.as_str()).cloned().unwrap_or_default();
             let last = mine.iter().max_by(|a, b| a.started_at.cmp(&b.started_at)).map(|t| (*t).clone());
-            let mut drift = Vec::new();
             let active = spec.desired() == Desired::Active;
-            if active && spec.review_by.as_str() < today.as_str() {
-                drift.push(Drift {
-                    class: DriftClass::Expiring,
+            let mut drift = Vec::new();
+            let mut notices = Vec::new();
+
+            if let Some(t) = &last
+                && !t.is_closed()
+            {
+                let limit = unclosed_limit(&mine);
+                if secs(&t.started_at).is_some_and(|s| now.as_second() - s > limit) {
+                    drift.push(Drift {
+                        class: DriftClass::TickUnclosed,
+                        loop_id: spec.id.clone(),
+                        detail: format!("the tick started at {} has not ended after {} min", t.started_at, limit / 60),
+                    });
+                }
+            }
+            // A date sorts as text; a non-date review_by is left alone rather than guessed at.
+            let review_is_date = spec.review_by.len() == 10 && spec.review_by.parse::<jiff::civil::Date>().is_ok();
+            if active && review_is_date && spec.review_by < today {
+                notices.push(Notice {
+                    kind: NoticeKind::ReviewOverdue,
                     loop_id: spec.id.clone(),
                     detail: format!("review_by {} has passed", spec.review_by),
                 });
             }
-            if let Some(t) = &last
-                && !t.is_closed()
-            {
-                let age = t.started_at.parse::<jiff::Timestamp>().ok().map(|s| now.as_second() - s.as_second());
-                if age.is_some_and(|a| a > UNCLOSED_AFTER_SECS) {
-                    drift.push(Drift {
-                        class: DriftClass::TickUnclosed,
-                        loop_id: spec.id.clone(),
-                        detail: format!("tick {} started {} has no end", t.start_id, t.started_at),
-                    });
-                }
-            }
-            let produces_ticks =
-                spec.contract.as_ref().and_then(|c| c.produces.as_deref()).is_some_and(|p| p.contains("loop.tick"));
-            if active && ticks.is_some() && produces_ticks && mine.is_empty() {
-                drift.push(Drift {
-                    class: DriftClass::TickMissing,
+            let names_receipts = spec
+                .contract
+                .as_ref()
+                .and_then(|c| c.produces.as_deref())
+                .is_some_and(|p| p.contains("loop.tick.started") || p.contains("loop.tick.ended"));
+            if active && ticks.is_some() && names_receipts && mine.is_empty() {
+                notices.push(Notice {
+                    kind: NoticeKind::NoTickReceipts,
                     loop_id: spec.id.clone(),
-                    detail: "contract produces tick receipts but the ledger has none".into(),
+                    detail: "the contract names tick receipts and the ledger holds none for this loop".into(),
                 });
             }
             LoopRow {
@@ -126,6 +165,7 @@ pub fn loop_rows(specs: &[LoopSpec], ticks: Option<&[Tick]>, now: jiff::Timestam
                 last_tick: last,
                 ticks_recorded: mine.len(),
                 drift,
+                notices,
             }
         })
         .collect()
@@ -150,17 +190,19 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Vec<AskRef> {
     }
     let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree).asks();
     let Some(local) = local.data else { return Vec::new() };
-    let answered_here: std::collections::BTreeSet<(String, String)> = local
+    let answered_here: BTreeSet<(String, String)> = local
         .iter()
         .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
         .filter(|(_, a)| a.state() != AskState::Open)
-        .map(|(lf, a)| (lf.file.clone(), a.id.clone()))
+        .map(|(lf, a)| (lf.file.clone(), a.handle().to_string()))
         .collect();
     at_rev
         .iter()
         .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        .filter(|(lf, a)| a.state() == AskState::Open && answered_here.contains(&(lf.file.clone(), a.id.clone())))
-        .map(|(lf, a)| AskRef { ledger: lf.file.clone(), id: a.uid.clone().unwrap_or_else(|| a.id.clone()) })
+        .filter(|(lf, a)| {
+            a.state() == AskState::Open && answered_here.contains(&(lf.file.clone(), a.handle().to_string()))
+        })
+        .map(|(lf, a)| AskRef { ledger: lf.file.clone(), id: a.handle().to_string() })
         .collect()
 }
 
@@ -179,14 +221,60 @@ pub fn ask_counts(asks: &[LedgerFile]) -> AskCounts {
     c
 }
 
-/// Counts by stored state. Canonical labels are per item; a count labelled
-/// `Needs you` would claim holds that only live session state can confirm.
+/// Counts by stored state. A count labelled `Needs you` would claim holds that only
+/// the needs list can make.
 pub fn work_counts(work: &[WorkItem]) -> BTreeMap<&'static str, usize> {
     let mut out = BTreeMap::new();
     for item in work {
         *out.entry(item.front.state.as_str()).or_insert(0) += 1;
     }
     out
+}
+
+/// Every source read once. Snapshot and context both derive from one of these.
+pub struct Reads {
+    pub asks: Section<Vec<LedgerFile>>,
+    pub work: Section<Vec<WorkItem>>,
+    pub ticks: Section<Vec<Tick>>,
+    pub loops: Section<Vec<LoopSpec>>,
+    pub initiatives: Section<Vec<Initiative>>,
+    pub fleet: Section<Vec<FleetSummary>>,
+}
+
+impl Reads {
+    pub fn of(store: &Store) -> Self {
+        Self {
+            asks: store.asks(),
+            work: store.work(),
+            ticks: store.ticks(),
+            loops: store.loops(),
+            initiatives: store.initiatives(),
+            fleet: store.fleet(),
+        }
+    }
+
+    /// Needs are unknown when the asks are unread, and a lower bound when anything they read is partial.
+    pub fn needs(&self) -> Section<Vec<Need>> {
+        let mut errors = self.asks.errors.clone();
+        errors.extend(self.work.errors.clone());
+        let source = format!("{} + {}", self.asks.source, self.work.source);
+        match &self.asks.data {
+            None => Section { source, data: None, errors },
+            Some(asks) => {
+                if self.work.data.is_none() && errors.is_empty() {
+                    errors.push(maestro_core::SourceError { at: self.work.source.clone(), reason: "unread".into() });
+                }
+                Section::partial(source, needs(asks, self.work.data.as_deref().unwrap_or_default()), errors)
+            }
+        }
+    }
+
+    pub fn loop_rows(&self, now: jiff::Timestamp) -> Section<Vec<LoopRow>> {
+        let mut errors = self.loops.errors.clone();
+        errors.extend(self.ticks.errors.clone());
+        let rows = self.loops.data.as_deref().map(|specs| loop_rows(specs, self.ticks.data.as_deref(), now));
+        Section { source: format!("{} + {}", self.loops.source, self.ticks.source), data: rows, errors }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,44 +290,21 @@ pub struct Snapshot {
     pub fleet: Section<Vec<FleetSummary>>,
 }
 
-/// Every read in one place. Needs are degraded if either of their sources is.
 pub fn snapshot(store: &Store) -> Snapshot {
-    let at = now();
-    let asks = store.asks();
-    let work = store.work();
-    let ticks = store.ticks();
-    let loops = store.loops();
-    let initiatives = store.initiatives();
+    snapshot_of(store, &Reads::of(store), now())
+}
 
-    let needs = {
-        let list = needs(asks.data.as_deref().unwrap_or_default(), work.data.as_deref().unwrap_or_default());
-        let mut errors = asks.errors.clone();
-        errors.extend(work.errors.clone());
-        let source = format!("{} + {}", asks.source, work.source);
-        if asks.data.is_none() {
-            Section { source, data: None, errors }
-        } else {
-            Section::partial(source, list, errors)
-        }
-    };
-    let loop_rows = {
-        let mut errors = loops.errors.clone();
-        errors.extend(ticks.errors.clone());
-        let rows = loops.data.as_deref().map(|specs| loop_rows(specs, ticks.data.as_deref(), at));
-        Section { source: format!("{} + {}", loops.source, ticks.source), data: rows, errors }
-    };
-    let live = initiatives.map(|v| v.into_iter().filter(|i| i.status.is_live()).collect());
-
+pub fn snapshot_of(store: &Store, reads: &Reads, at: jiff::Timestamp) -> Snapshot {
     Snapshot {
         generated_at: at.to_string(),
         workspace: store.paths.workspace.display().to_string(),
-        tree: store.tree.source.to_string(),
-        needs,
-        asks: asks.as_ref().map(|a| AskCounts { unlanded: unlanded(store, a).len(), ..ask_counts(a) }),
-        work: work.as_ref().map(|w| work_counts(w)),
-        loops: loop_rows,
-        initiatives: live,
-        fleet: store.fleet(),
+        tree: store.tree.label("").trim_end_matches(':').to_string(),
+        needs: reads.needs(),
+        asks: reads.asks.as_ref().map(|a| AskCounts { unlanded: unlanded(store, a).len(), ..ask_counts(a) }),
+        work: reads.work.as_ref().map(|w| work_counts(w)),
+        loops: reads.loop_rows(at),
+        initiatives: reads.initiatives.as_ref().map(|v| v.iter().filter(|i| i.status.is_live()).cloned().collect()),
+        fleet: reads.fleet.clone(),
     }
 }
 
@@ -277,7 +342,9 @@ fn initiative_for<'a>(
 
 /// Build the packet injected into a session scoped to `scope`.
 pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
-    let snap = snapshot(store);
+    let at = now();
+    let reads = Reads::of(store);
+    let snap = snapshot_of(store, &reads, at);
     let workspace = &store.paths.workspace;
     let cwd_rel = scope
         .cwd
@@ -287,8 +354,8 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
     if scope.project.is_none() {
         scope.project = scope.cwd.as_deref().and_then(|c| project_of(Path::new(c), workspace));
     }
-    let initiatives = store.initiatives();
-    let init = initiatives.data.as_deref().and_then(|list| initiative_for(list, &scope, cwd_rel.as_deref())).cloned();
+    let init =
+        reads.initiatives.data.as_deref().and_then(|list| initiative_for(list, &scope, cwd_rel.as_deref())).cloned();
     if scope.initiative.is_none() {
         scope.initiative = init.as_ref().map(|i| i.id.clone());
     }
@@ -300,41 +367,46 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
 
-    let all_needs = snap.needs.data.clone().unwrap_or_default();
     let scoped = scope.project.is_some() || scope.initiative.is_some();
+    let in_scope = |ledger: Option<&str>, project: Option<&String>| {
+        !scoped
+            || project.is_some() && project == scope.project.as_ref()
+            || ledger.is_some_and(|l| linked_ledgers.iter().any(|x| x == l))
+    };
+    let all_needs = snap.needs.data.clone();
     let needs: Vec<Need> = all_needs
         .iter()
-        .filter(|n| {
-            !scoped
-                || n.project.is_some() && n.project == scope.project
-                || n.ask.as_ref().is_some_and(|a| linked_ledgers.contains(&a.ledger))
-        })
+        .flatten()
+        .filter(|n| in_scope(n.ask.as_ref().map(|a| a.ledger.as_str()), n.project.as_ref()))
         .cloned()
         .collect();
-
-    let in_scope = |ledger: &str, project: Option<&String>| {
-        scoped && (project.is_some() && project == scope.project.as_ref() || linked_ledgers.iter().any(|l| l == ledger))
+    let open_asks = if scoped {
+        reads
+            .asks
+            .data
+            .iter()
+            .flatten()
+            .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
+            .filter(|(lf, a)| {
+                a.state() == AskState::Open && !a.blocking && in_scope(Some(&lf.file), a.project.as_ref())
+            })
+            .map(|(lf, a)| AskBrief { key: format!("ask:{}#{}", lf.file, a.handle()), title: a.title().to_string() })
+            .collect()
+    } else {
+        Vec::new()
     };
-    let asks = store.asks();
-    let open_asks = asks
-        .data
-        .iter()
-        .flatten()
-        .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        .filter(|(lf, a)| a.state() == AskState::Open && !a.blocking && in_scope(&lf.file, a.project.as_ref()))
-        .map(|(lf, a)| AskBrief {
-            key: format!("ask:{}#{}", lf.file, a.uid.as_ref().unwrap_or(&a.id)),
-            title: a.title().to_string(),
-        })
-        .collect();
 
     let loops = snap
         .loops
         .data
         .iter()
         .flatten()
-        .flat_map(|row| row.drift.iter())
-        .map(|d| LoopBrief { id: d.loop_id.clone(), note: d.detail.clone() })
+        .flat_map(|row| {
+            row.drift
+                .iter()
+                .map(|d| LoopBrief { id: d.loop_id.clone(), note: d.detail.clone() })
+                .chain(row.notices.iter().map(|n| LoopBrief { id: n.loop_id.clone(), note: n.detail.clone() }))
+        })
         .collect();
 
     let mut degraded = Vec::new();
@@ -342,7 +414,7 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
         ("asks", snap.asks.is_degraded()),
         ("work", snap.work.is_degraded()),
         ("loops", snap.loops.is_degraded()),
-        ("initiatives", snap.initiatives.is_degraded()),
+        ("initiatives", reads.initiatives.is_degraded()),
         ("fleet", snap.fleet.is_degraded()),
     ] {
         if bad {
@@ -353,7 +425,8 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
     ContextPacket {
         generated_at: snap.generated_at,
         scope,
-        needs_you: all_needs.len(),
+        needs_you: all_needs.as_ref().map(Vec::len),
+        needs_complete: !snap.needs.is_degraded(),
         needs,
         open_asks,
         initiative: init.map(|i| InitiativeBrief {
@@ -371,7 +444,7 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
     }
 }
 
-/// Count work items by canonical state, for compact human output.
+/// Work items with a canonical state, or all of them.
 pub fn work_by_state(work: &[WorkItem], state: Option<WorkState>) -> Vec<&WorkItem> {
     work.iter().filter(|w| state.is_none_or(|s| w.work_state == s)).collect()
 }

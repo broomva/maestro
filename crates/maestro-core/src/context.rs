@@ -62,8 +62,10 @@ pub struct LoopBrief {
 pub struct ContextPacket {
     pub generated_at: String,
     pub scope: ContextScope,
-    /// Total holds on the owner across all scopes.
-    pub needs_you: usize,
+    /// Total holds on the owner across all scopes; `None` when the ask ledgers could not be read.
+    pub needs_you: Option<usize>,
+    /// False when some ledgers or work items failed to read: the count is a lower bound.
+    pub needs_complete: bool,
     /// Holds relevant to this scope, most relevant first.
     pub needs: Vec<Need>,
     /// Open, non-blocking asks in this scope.
@@ -95,12 +97,18 @@ impl ContextPacket {
         if !scope.is_empty() {
             let _ = writeln!(out, "Scope: {}.", scope.join(", "));
         }
-        let _ = writeln!(
-            out,
-            "Needs you: {} open hold{} on the owner.",
-            self.needs_you,
-            if self.needs_you == 1 { "" } else { "s" }
-        );
+        match self.needs_you {
+            None => {
+                let _ = writeln!(
+                    out,
+                    "Needs you: unknown. The ask ledgers could not be read; do not assume nothing is held."
+                );
+            }
+            Some(n) => {
+                let bound = if self.needs_complete { "" } else { "at least " };
+                let _ = writeln!(out, "Needs you: {bound}{n} open hold{} on the owner.", if n == 1 { "" } else { "s" });
+            }
+        }
 
         if let Some(init) = &self.initiative {
             let _ = writeln!(out);
@@ -179,7 +187,8 @@ mod tests {
         let packet = ContextPacket {
             generated_at: "now".into(),
             scope: ContextScope { project: Some("maestro".into()), ..Default::default() },
-            needs_you: 5,
+            needs_you: Some(5),
+            needs_complete: true,
             needs: (0..5).map(need).collect(),
             open_asks: vec![],
             initiative: None,
@@ -193,5 +202,25 @@ mod tests {
         assert!(md.contains("and 3 more"));
         assert!(md.contains("Unread sources (treat as unknown, not empty): fleet."));
         assert!(md.contains("A8:"));
+    }
+
+    #[test]
+    fn unread_needs_render_as_unknown_and_partial_as_a_bound() {
+        let mut packet = ContextPacket {
+            generated_at: "now".into(),
+            scope: ContextScope::default(),
+            needs_you: None,
+            needs_complete: false,
+            needs: vec![],
+            open_asks: vec![],
+            initiative: None,
+            loops: vec![],
+            degraded: vec!["asks".into()],
+        };
+        let md = packet.render_markdown(8);
+        assert!(md.contains("Needs you: unknown"));
+        assert!(!md.contains("Needs you: 0"));
+        packet.needs_you = Some(2);
+        assert!(packet.render_markdown(8).contains("Needs you: at least 2 open holds"));
     }
 }

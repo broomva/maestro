@@ -14,11 +14,11 @@ use maestro_core::grant::Preauth;
 use maestro_core::initiative::Initiative;
 use maestro_core::loops::LoopSpec;
 use maestro_core::tick::{LedgerEvent, Tick, pair_ticks};
-use maestro_core::work::{WorkFrontmatter, WorkItem, WorkState};
+use maestro_core::work::{Flag, FlagKind, OrchState, WorkFrontmatter, WorkItem, WorkState};
 use maestro_core::{Section, SourceError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use paths::Paths;
 pub use tree::{Tree, TreeSource};
@@ -41,13 +41,14 @@ pub struct Store {
 }
 
 impl Store {
+    /// A git revision is resolved to one commit here, so every read of this store sees the same tree.
     pub fn new(paths: Paths, source: TreeSource) -> Self {
-        let tree = Tree::new(paths.workspace.clone(), source);
+        let tree = Tree::resolved(paths.workspace.clone(), source);
         Self { paths, tree }
     }
 
-    /// Parse every YAML file in a workspace directory into `T`.
-    fn yaml_dir<T: DeserializeOwned>(&self, dir: &str) -> Section<Vec<(String, T)>> {
+    /// Read every YAML file in a workspace directory as a document.
+    fn yaml_docs(&self, dir: &str) -> Section<Vec<(String, serde_json::Value)>> {
         let label = self.tree.label(dir);
         let names = match self.tree.list(dir, ".yaml") {
             Ok(names) => names,
@@ -57,8 +58,7 @@ impl Store {
         let mut items = Vec::new();
         let mut errors = Vec::new();
         for (name, (rel, text)) in names.into_iter().zip(self.tree.read_many(&rels)) {
-            match text.map_err(|e| e.to_string()).and_then(|t| serde_yaml::from_str::<T>(&t).map_err(|e| e.to_string()))
-            {
+            match text.map_err(|e| e.to_string()).and_then(|t| serde_yaml::from_str(&t).map_err(|e| e.to_string())) {
                 Ok(value) => items.push((name, value)),
                 Err(reason) => errors.push(SourceError { at: rel, reason }),
             }
@@ -66,17 +66,51 @@ impl Store {
         Section::partial(label, items, errors)
     }
 
+    fn yaml_dir<T: DeserializeOwned>(&self, dir: &str) -> Section<Vec<T>> {
+        let docs = self.yaml_docs(dir);
+        let mut errors = docs.errors;
+        let data = docs.data.map(|docs| {
+            docs.into_iter()
+                .filter_map(|(name, doc)| match serde_json::from_value::<T>(doc) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        errors.push(SourceError { at: format!("{dir}/{name}"), reason: e.to_string() });
+                        None
+                    }
+                })
+                .collect()
+        });
+        Section { source: docs.source, data, errors }
+    }
+
+    /// Ask ledgers. A ledger that does not parse, and each entry inside one that does not, is an error.
     pub fn asks(&self) -> Section<Vec<LedgerFile>> {
-        self.yaml_dir::<AskLedger>(ASKS_DIR)
-            .map(|v| v.into_iter().map(|(file, ledger)| LedgerFile { file, ledger }).collect())
+        let docs = self.yaml_docs(ASKS_DIR);
+        let mut errors = docs.errors;
+        let data = docs.data.map(|docs| {
+            let mut out = Vec::new();
+            for (file, doc) in docs {
+                match AskLedger::from_value(doc) {
+                    Ok((ledger, bad)) => {
+                        for (i, reason) in bad {
+                            errors.push(SourceError { at: format!("{ASKS_DIR}/{file}#{i}"), reason });
+                        }
+                        out.push(LedgerFile { file, ledger });
+                    }
+                    Err(reason) => errors.push(SourceError { at: format!("{ASKS_DIR}/{file}"), reason }),
+                }
+            }
+            out
+        });
+        Section { source: docs.source, data, errors }
     }
 
     pub fn initiatives(&self) -> Section<Vec<Initiative>> {
-        self.yaml_dir::<Initiative>(INITIATIVES_DIR).map(|v| v.into_iter().map(|(_, i)| i).collect())
+        self.yaml_dir(INITIATIVES_DIR)
     }
 
     pub fn loops(&self) -> Section<Vec<LoopSpec>> {
-        self.yaml_dir::<LoopSpec>(LOOPS_DIR).map(|v| v.into_iter().map(|(_, l)| l).collect())
+        self.yaml_dir(LOOPS_DIR)
     }
 
     pub fn preauth(&self) -> Section<Preauth> {
@@ -113,20 +147,19 @@ impl Store {
     pub fn fleet(&self) -> Section<Vec<FleetSummary>> {
         let root = &self.paths.fleet_state;
         let label = format!("fs:{}", root.display());
-        let scopes = match std::fs::read_dir(root) {
-            Ok(rd) => rd,
-            Err(e) => return Section::unavailable(label, e.to_string()),
-        };
-        let mut out = Vec::new();
         let mut errors = Vec::new();
-        let mut scope_dirs: Vec<_> = scopes.filter_map(Result::ok).map(|e| e.path()).collect();
+        let mut scope_dirs = match entries(root, &mut errors) {
+            Ok(dirs) => dirs,
+            Err(e) => return Section::unavailable(label, e),
+        };
         scope_dirs.sort();
+        let mut out = Vec::new();
         for dir in scope_dirs {
             let ticks = dir.join("ticks");
             if !ticks.is_dir() {
                 continue;
             }
-            match latest_report(&ticks) {
+            match latest_report(&ticks, &mut errors) {
                 Ok(Some(report)) => out.push(FleetSummary::from(&report)),
                 Ok(None) => {}
                 Err(reason) => errors.push(SourceError { at: ticks.display().to_string(), reason }),
@@ -139,14 +172,14 @@ impl Store {
     pub fn work(&self) -> Section<Vec<WorkItem>> {
         let root = &self.paths.work_root;
         let label = format!("fs:{}", root.display());
-        let entries = match std::fs::read_dir(root) {
-            Ok(rd) => rd,
-            Err(e) => return Section::unavailable(label, e.to_string()),
+        let mut errors = Vec::new();
+        let dirs = match entries(root, &mut errors) {
+            Ok(dirs) => dirs,
+            Err(e) => return Section::unavailable(label, e),
         };
         let mut items = Vec::new();
-        let mut errors = Vec::new();
-        for entry in entries.filter_map(Result::ok) {
-            let file = entry.path().join("_work.md");
+        for dir in dirs {
+            let file = dir.join("_work.md");
             if !file.is_file() {
                 continue;
             }
@@ -160,12 +193,23 @@ impl Store {
     }
 }
 
-fn latest_report(ticks: &Path) -> Result<Option<FleetReport>, String> {
-    let mut best: Option<(u64, std::path::PathBuf)> = None;
-    for entry in std::fs::read_dir(ticks).map_err(|e| e.to_string())?.filter_map(Result::ok) {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(n) = name.parse::<u64>() else { continue };
-        let report = entry.path().join("report.json");
+/// Directory entries of `dir`. A failed entry is recorded, not skipped silently.
+fn entries(dir: &Path, errors: &mut Vec<SourceError>) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        match entry {
+            Ok(e) => out.push(e.path()),
+            Err(e) => errors.push(SourceError { at: dir.display().to_string(), reason: e.to_string() }),
+        }
+    }
+    Ok(out)
+}
+
+fn latest_report(ticks: &Path, errors: &mut Vec<SourceError>) -> Result<Option<FleetReport>, String> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    for path in entries(ticks, errors)? {
+        let Some(n) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<u64>().ok()) else { continue };
+        let report = path.join("report.json");
         if report.is_file() && best.as_ref().is_none_or(|(b, _)| n > *b) {
             best = Some((n, report));
         }
@@ -175,20 +219,69 @@ fn latest_report(ticks: &Path) -> Result<Option<FleetReport>, String> {
     serde_json::from_str(&text).map(Some).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Split `---\n<yaml>\n---\n<body>` and parse the frontmatter.
+/// Split `---\n<yaml>\n---\n<body>`. Delimiters are lines that are exactly `---`.
+fn split_frontmatter(text: &str) -> Result<(&str, &str), String> {
+    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")).ok_or("no frontmatter")?;
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end_matches(['\n', '\r']) == "---" {
+            return Ok((&rest[..offset], &rest[offset + line.len()..]));
+        }
+        offset += line.len();
+    }
+    Err("unterminated frontmatter".into())
+}
+
+/// The loop's current flag: the last event, when it is `loop.flagged` (the plugin's `flagOf`).
+fn flag_of(events: &str) -> Option<Flag> {
+    let last = events.lines().rev().find(|l| !l.trim().is_empty())?;
+    let v: serde_json::Value = serde_json::from_str(last).ok()?;
+    if v.get("type")?.as_str()? != "loop.flagged" {
+        return None;
+    }
+    let kind: FlagKind = serde_json::from_value(v.get("kind")?.clone()).ok()?;
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    Some(Flag { kind, reason: text("reason"), since: text("since") })
+}
+
+/// Read one work item: frontmatter, title, last event and the loop's flag.
 pub fn read_work(file: &Path) -> Result<WorkItem, String> {
     let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
-    let rest = text.strip_prefix("---\n").ok_or("no frontmatter")?;
-    let (yaml, body) = rest.split_once("\n---").ok_or("unterminated frontmatter")?;
+    let (yaml, body) = split_frontmatter(&text)?;
     let front: WorkFrontmatter = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
     let slug = file.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let title = body.lines().find_map(|l| l.strip_prefix("# ")).map(str::trim).unwrap_or(&slug).to_string();
-    let last_event_at = std::fs::read_to_string(file.with_file_name("_events.jsonl"))
-        .ok()
-        .and_then(|t| t.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_string))
-        .and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+    let events = std::fs::read_to_string(file.with_file_name("_events.jsonl")).unwrap_or_default();
+    let last_event_at = events
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .and_then(|v| v.get("ts").and_then(|t| t.as_str()).map(str::to_string));
-    // The quiet flag lives in the plugin's live state, not on disk; phase 0 reports Running.
-    let work_state = WorkState::of(front.state, false);
-    Ok(WorkItem { slug, title, work_state, front, last_event_at })
+    let flag = flag_of(&events);
+    let quiet = flag.as_ref().is_some_and(|f| f.kind == FlagKind::Quiet);
+    let work_state = WorkState::of(front.state, quiet);
+    let finished = front.state == OrchState::Review;
+    Ok(WorkItem { slug, title, work_state, front, last_event_at, flag, finished })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frontmatter_delimiter_is_a_whole_line() {
+        let (yaml, body) = split_frontmatter("---\nid: a\nnote: ----\n---\n# T\n").unwrap();
+        assert_eq!(yaml, "id: a\nnote: ----\n");
+        assert_eq!(body, "# T\n");
+        assert!(split_frontmatter("---\nid: a\n----\n").is_err());
+    }
+
+    #[test]
+    fn only_a_trailing_flag_counts() {
+        let flagged = "{\"type\":\"state\"}\n{\"type\":\"loop.flagged\",\"kind\":\"yours\",\"reason\":\"r\"}\n";
+        assert_eq!(flag_of(flagged).unwrap().kind, FlagKind::Yours);
+        let cleared = "{\"type\":\"loop.flagged\",\"kind\":\"yours\"}\n{\"type\":\"note\"}\n";
+        assert!(flag_of(cleared).is_none());
+    }
 }

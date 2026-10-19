@@ -79,7 +79,7 @@ pub struct WorkArgs {
 pub struct LoopsArgs {
     /// One loop id; omit for all.
     pub id: Option<String>,
-    /// Only loops with drift.
+    /// Only loops with drift or notices.
     #[serde(default)]
     pub drifting: bool,
 }
@@ -112,7 +112,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "maestro_needs_list",
         title: "Needs you",
-        description: "Holds on the owner: open blocking asks. Work paused on a permission prompt is live session state and joins this list when a host adapter reports it. This list is the Needs you count; nothing else is.",
+        description: "Holds on the owner: open blocking asks, and queued work only the owner may start. Work paused on a permission prompt is live host state and joins when a host adapter reports it. This list is the Needs you count; nothing else is. data null means the asks could not be read: the count is unknown, not zero.",
         authority: Authority::Read,
         schema: schema_of::<NeedsArgs>,
     },
@@ -126,21 +126,21 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "maestro_ask_get",
         title: "Ask",
-        description: "One ask in full, with its content hash. An answer made against an older hash is refused.",
+        description: "One ask in full, with its entry hash: the Paseo plugin's entryHash over the raw entry, which its answer path rechecks. Any change to the entry, an answer included, changes the hash.",
         authority: Authority::Read,
         schema: schema_of::<AskGetArgs>,
     },
     ToolSpec {
         name: "maestro_work_list",
         title: "Work",
-        description: "Work items with their canonical state (Queued, Running, Stuck, Needs you, Done, Standing).",
+        description: "Work items with their canonical state (Queued, Running, Stuck, Needs you, Done, Standing), labelled as the Paseo plugin labels them. Work at the gate is labelled Needs you with finished: true; it is not a need unless it appears in maestro_needs_list.",
         authority: Authority::Read,
         schema: schema_of::<WorkArgs>,
     },
     ToolSpec {
         name: "maestro_loops_get",
         title: "Loops",
-        description: "Standing loops from .broomva/loops joined with their tick receipts, and the drift that data can prove (expiring review, unclosed tick, missing ticks).",
+        description: "Standing loops from .broomva/loops joined with their tick receipts. drift holds plugin drift classes the ticks ledger proves (tick_unclosed); notices holds Maestro's own signals (review_overdue, no_tick_receipts). Substrate drift needs host adapters and is not claimed.",
         authority: Authority::Read,
         schema: schema_of::<LoopsArgs>,
     },
@@ -214,7 +214,7 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                 .map(|(lf, ask)| {
                     json!({
                         "ledger": lf.file,
-                        "id": ask.uid.as_ref().unwrap_or(&ask.id),
+                        "id": ask.handle(),
                         "title": ask.title(),
                         "state": ask.state(),
                         "class": ask.class,
@@ -223,29 +223,35 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                         "asked_at": ask.asked_at,
                         "recommended": ask.recommended().map(|o| &o.id),
                         "hash": ask.hash(),
-                        "waiting_to_land": waiting.iter().any(|r| r.ledger == lf.file && r.id == *ask.uid.as_ref().unwrap_or(&ask.id)),
+                        "waiting_to_land": waiting.iter().any(|r| r.ledger == lf.file && r.id == ask.handle()),
                     })
                 })
                 .collect();
-            Ok(json!({ "source": section.source, "errors": section.errors, "asks": rows }))
+            Ok(
+                json!({ "source": section.source, "errors": section.errors, "readable": section.data.is_some(), "asks": rows }),
+            )
         }
         "maestro_ask_get" => {
             let a: AskGetArgs = parse(args)?;
             let section = store.asks();
-            let found = section
+            // A uid names one ask; a bare id names one only when no other uid-less ask shares it.
+            let matches: Vec<_> = section
                 .data
                 .iter()
                 .flatten()
                 .filter(|lf| lf.file == a.ledger)
                 .flat_map(|lf| lf.ledger.asks.iter())
-                .find(|ask| ask.uid.as_deref() == Some(&a.id) || ask.id == a.id);
-            match found {
-                Some(ask) => {
-                    Ok(json!({ "source": section.source, "state": ask.state(), "hash": ask.hash(), "ask": ask }))
-                }
-                None => {
+                .filter(|ask| ask.uid.as_deref() == Some(&a.id) || (ask.uid.is_none() && ask.id == a.id))
+                .collect();
+            match matches.as_slice() {
+                [ask] => Ok(json!({ "source": section.source, "state": ask.state(), "hash": ask.hash(), "ask": ask })),
+                [] => {
                     Err(McpError::invalid_params(format!("no ask {}#{} in {}", a.ledger, a.id, section.source), None))
                 }
+                _ => Err(McpError::invalid_params(
+                    format!("{}#{} names {} asks; address it by uid", a.ledger, a.id, matches.len()),
+                    None,
+                )),
             }
         }
         "maestro_work_list" => {
@@ -265,7 +271,10 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
             let a: LoopsArgs = parse(args)?;
             let mut section = views::snapshot(store).loops;
             if let Some(rows) = section.data.as_mut() {
-                rows.retain(|r| a.id.as_deref().is_none_or(|id| r.id == id) && (!a.drifting || !r.drift.is_empty()));
+                rows.retain(|r| {
+                    a.id.as_deref().is_none_or(|id| r.id == id)
+                        && (!a.drifting || !r.drift.is_empty() || !r.notices.is_empty())
+                });
             }
             Ok(json!(section))
         }

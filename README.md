@@ -31,7 +31,7 @@ maestro asks [--project P] [--blocking] [--state open|answered|archived|all]
 maestro asks show <ledger.yaml> <id> # one ask in full, with its content hash
 maestro asks validate <ledger.yaml>  # runs the workspace's ask_ledger.py, the validator of record
 maestro work [--state "Needs you"]   # canonical states: Queued, Running, Stuck, Needs you, Done, Standing
-maestro loops [--drifting]           # loop registry joined with tick receipts
+maestro loops [--drifting]           # loop registry joined with tick receipts: drift and notices
 maestro initiatives [--all]
 maestro fleet
 maestro context [--cwd D] [--format markdown|json|hook]

@@ -108,6 +108,29 @@ pub enum DriftClass {
     Unregistered,
 }
 
+/// Signals Maestro can prove from the registry and the ticks ledger alone. They are
+/// not drift classes: the plugin's classes need substrate observations (fires,
+/// sessions, schedules) that arrive with host adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeKind {
+    /// An active row's `review_by` date has passed.
+    ReviewOverdue,
+    /// The contract names tick receipts and the ledger holds none for this loop.
+    NoTickReceipts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Notice {
+    pub kind: NoticeKind,
+    pub loop_id: String,
+    pub detail: String,
+}
+
+/// A started tick with no end is unclosed after max(this, 2 x the row's median tick length),
+/// measured from its start (`TICK_CLOSE_MS` in `maestro-paseo/server/loops-model.ts`).
+pub const TICK_CLOSE_SECS: i64 = 60 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drift {
     pub class: DriftClass,

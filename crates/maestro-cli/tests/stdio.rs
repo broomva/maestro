@@ -52,14 +52,14 @@ fn mcp_handshake_lists_and_calls_tools() {
 
     send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"maestro_needs_list","arguments":{}}}));
     let needs = recv();
-    assert_eq!(needs["result"]["structuredContent"]["data"].as_array().unwrap().len(), 1);
+    assert_eq!(needs["result"]["structuredContent"]["data"].as_array().unwrap().len(), 3);
 
     send(
         json!({"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"maestro_context","arguments":{"project":"demo"}}}),
     );
     let prompt = recv();
     let text = prompt["result"]["messages"][0]["content"]["text"].as_str().unwrap();
-    assert!(text.contains("Needs you: 1 open hold"));
+    assert!(text.contains("Needs you: at least 3 open holds"), "{text}");
 
     send(json!({"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"maestro://needs"}}));
     let res = recv();
@@ -102,4 +102,31 @@ fn hook_never_fails_the_session() {
         .output()
         .unwrap();
     assert!(output.status.success());
+}
+
+#[test]
+fn a_bad_argument_on_the_hook_path_still_exits_zero() {
+    let output = maestro().args(["context", "--format", "hook", "--bogus"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    // Off the hook path the same mistake is a usage error.
+    assert!(!maestro().args(["context", "--bogus"]).output().unwrap().status.success());
+}
+
+#[test]
+fn the_hook_gives_up_silently_when_over_budget() {
+    // --stdin with an open, silent pipe would wait forever; the budget ends it.
+    let mut child = maestro()
+        .env("MAESTRO_HOOK_TIMEOUT_MS", "300")
+        .args(["context", "--format", "hook", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _keep_open = child.stdin.take();
+    let started = std::time::Instant::now();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }

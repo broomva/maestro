@@ -48,10 +48,12 @@ fn every_tool_answers_on_the_fixture() {
 fn asks_list_filters_and_hashes() {
     let s = store();
     let open = call(&s, "maestro_asks_list", json!({})).unwrap();
-    assert_eq!(open["asks"].as_array().unwrap().len(), 2);
-    let blocking = call(&s, "maestro_asks_list", json!({ "blocking": true })).unwrap();
+    assert_eq!(open["readable"], true);
+    assert_eq!(open["asks"].as_array().unwrap().len(), 3);
+    let blocking = call(&s, "maestro_asks_list", json!({ "blocking": true, "project": "demo" })).unwrap();
     let rows = blocking["asks"].as_array().unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
+    let rows: Vec<_> = rows.iter().filter(|r| r["ledger"] == "demo-arc.yaml").collect();
     assert_eq!(rows[0]["recommended"], "merge");
     let full = call(&s, "maestro_ask_get", json!({ "ledger": "demo-arc.yaml", "id": "merge-now" })).unwrap();
     assert_eq!(full["hash"], rows[0]["hash"]);
@@ -62,7 +64,11 @@ fn asks_list_filters_and_hashes() {
 fn work_state_filter_uses_canonical_labels() {
     let s = store();
     let v = call(&s, "maestro_work_list", json!({ "state": "Needs you" })).unwrap();
-    assert_eq!(v["items"].as_array().unwrap().len(), 1);
+    let items = v["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["finished"], true);
+    let standing = call(&s, "maestro_work_list", json!({ "state": "Standing" })).unwrap();
+    assert_eq!(standing["items"].as_array().unwrap().len(), 1);
     assert!(call(&s, "maestro_work_list", json!({ "state": "review" })).is_err());
 }
 
@@ -71,5 +77,33 @@ fn context_returns_markdown_and_packet() {
     let s = store();
     let v = call(&s, "maestro_context", json!({ "project": "demo" })).unwrap();
     assert!(v["markdown"].as_str().unwrap().starts_with("## Maestro context"));
-    assert_eq!(v["packet"]["needs_you"], 1);
+    assert_eq!(v["packet"]["needs_you"], 3);
+}
+
+#[test]
+fn unreadable_asks_are_not_an_empty_list() {
+    let s = Store::new(Paths::under("/nonexistent/maestro-test"), TreeSource::WorkingTree);
+    let asks = call(&s, "maestro_asks_list", json!({})).unwrap();
+    assert_eq!(asks["readable"], false);
+    let needs = call(&s, "maestro_needs_list", json!({})).unwrap();
+    assert!(needs["data"].is_null());
+    let ctx = call(&s, "maestro_context", json!({})).unwrap();
+    assert!(ctx["packet"]["needs_you"].is_null());
+}
+
+#[test]
+fn an_ambiguous_bare_id_is_refused() {
+    let tmp = std::env::temp_dir().join(format!("maestro-ambiguous-{}", std::process::id()));
+    let asks = tmp.join("workspace/.control/asks");
+    std::fs::create_dir_all(&asks).unwrap();
+    std::fs::write(
+        asks.join("dup.yaml"),
+        "asks:\n  - id: a\n    ask: one?\n  - id: a\n    ask: two?\n  - id: a\n    uid: u1\n    ask: three?\n",
+    )
+    .unwrap();
+    let s = Store::new(Paths::under(&tmp), TreeSource::WorkingTree);
+    assert!(call(&s, "maestro_ask_get", json!({ "ledger": "dup.yaml", "id": "a" })).is_err());
+    let by_uid = call(&s, "maestro_ask_get", json!({ "ledger": "dup.yaml", "id": "u1" })).unwrap();
+    assert_eq!(by_uid["ask"]["ask"], "three?");
+    let _ = std::fs::remove_dir_all(&tmp);
 }

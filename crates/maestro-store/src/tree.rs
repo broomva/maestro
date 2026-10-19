@@ -48,15 +48,38 @@ pub enum TreeError {
 pub struct Tree {
     pub root: PathBuf,
     pub source: TreeSource,
+    /// The commit a `GitRev` resolved to. Every read uses it, so a fetch mid-read cannot mix trees.
+    pub commit: Option<String>,
 }
 
 impl Tree {
     pub fn new(root: impl Into<PathBuf>, source: TreeSource) -> Self {
-        Self { root: root.into(), source }
+        Self { root: root.into(), source, commit: None }
+    }
+
+    /// Like [`Tree::new`], resolving a git revision to its commit once.
+    pub fn resolved(root: impl Into<PathBuf>, source: TreeSource) -> Self {
+        let mut tree = Self::new(root, source);
+        if let TreeSource::GitRev(rev) = &tree.source {
+            let spec = format!("{rev}^{{commit}}");
+            tree.commit = tree.git(&["rev-parse", "--verify", "--quiet", &spec]).ok().map(|s| s.trim().to_string());
+        }
+        tree
+    }
+
+    /// The revision to read: the resolved commit, else the name as given (which then fails visibly).
+    fn rev(&self) -> Option<&str> {
+        match &self.source {
+            TreeSource::WorkingTree => None,
+            TreeSource::GitRev(rev) => Some(self.commit.as_deref().unwrap_or(rev)),
+        }
     }
 
     pub fn label(&self, rel: &str) -> String {
-        format!("{}:{rel}", self.source)
+        match (&self.source, &self.commit) {
+            (TreeSource::GitRev(rev), Some(c)) => format!("git:{rev}@{}:{rel}", &c[..c.len().min(12)]),
+            _ => format!("{}:{rel}", self.source),
+        }
     }
 
     /// File names (not paths) directly under `dir` ending in `suffix`, sorted.
@@ -72,10 +95,11 @@ impl Tree {
                 }
                 out
             }
-            TreeSource::GitRev(rev) => {
-                let spec = format!("{rev}:{}", dir.trim_end_matches('/'));
-                let out = self.git(&["ls-tree", "--name-only", &spec])?;
-                out.lines().map(str::to_string).collect()
+            TreeSource::GitRev(_) => {
+                let spec = format!("{}:{}", self.rev().unwrap_or_default(), dir.trim_end_matches('/'));
+                // -z: names come back verbatim, never quoted, whatever bytes they hold.
+                let out = self.git(&["ls-tree", "-z", "--name-only", &spec])?;
+                out.split('\0').filter(|n| !n.is_empty()).map(str::to_string).collect()
             }
         };
         names.retain(|n| n.ends_with(suffix) && !n.starts_with('.'));
@@ -86,7 +110,7 @@ impl Tree {
     pub fn read(&self, rel: &str) -> Result<String, TreeError> {
         match &self.source {
             TreeSource::WorkingTree => Ok(std::fs::read_to_string(self.root.join(rel))?),
-            TreeSource::GitRev(rev) => self.git(&["show", &format!("{rev}:{rel}")]),
+            TreeSource::GitRev(_) => self.git(&["show", &format!("{}:{rel}", self.rev().unwrap_or_default())]),
         }
     }
 
@@ -94,7 +118,11 @@ impl Tree {
     pub fn read_many(&self, rels: &[String]) -> Vec<FileRead> {
         match &self.source {
             TreeSource::WorkingTree => rels.iter().map(|r| (r.clone(), self.read(r))).collect(),
-            TreeSource::GitRev(rev) => match self.cat_file_batch(rev, rels) {
+            // The batch protocol is line-based; a path holding a newline is read on its own.
+            TreeSource::GitRev(_) if rels.iter().any(|r| r.contains('\n')) => {
+                rels.iter().map(|r| (r.clone(), self.read(r))).collect()
+            }
+            TreeSource::GitRev(_) => match self.cat_file_batch(self.rev().unwrap_or_default(), rels) {
                 Ok(results) => results,
                 Err(e) => {
                     let reason = e.to_string();
@@ -125,14 +153,27 @@ impl Tree {
             let mut header = String::new();
             reader.read_line(&mut header)?;
             let header = header.trim_end();
-            if header.ends_with(" missing") || header.is_empty() {
+            if header == format!("{rev}:{rel} missing") {
                 out.push((
                     rel.clone(),
                     Err(TreeError::Git { args: format!("show {rev}:{rel}"), stderr: "missing".into() }),
                 ));
                 continue;
             }
-            let size: usize = header.rsplit(' ').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            // `<oid> <type> <size>`. Anything else means the stream is out of step: stop, do not guess.
+            let parts: Vec<&str> = header.split(' ').collect();
+            let size = match parts.as_slice() {
+                [_, _, size] => size.parse::<usize>().ok(),
+                _ => None,
+            };
+            let Some(size) = size else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(TreeError::Git {
+                    args: "cat-file --batch".into(),
+                    stderr: format!("unexpected header `{header}`"),
+                });
+            };
             let mut buf = vec![0u8; size + 1]; // trailing newline
             reader.read_exact(&mut buf)?;
             buf.pop();

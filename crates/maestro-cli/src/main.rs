@@ -148,28 +148,65 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("")
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let store = store(&cli);
+/// Whether argv asks for the hook format. Decided before parsing, so even a bad
+/// argument on the hook path exits 0 instead of blocking the session (exit 2 blocks).
+fn is_hook(args: &[String]) -> bool {
+    args.iter().any(|a| a == "context")
+        && args
+            .iter()
+            .enumerate()
+            .any(|(i, a)| a == "--format=hook" || (a == "--format" && args.get(i + 1).is_some_and(|v| v == "hook")))
+}
 
-    // The hook path must never block a session: any failure prints nothing and exits 0.
-    if let Command::Context { format: Format::Hook, .. } = &cli.command {
-        if let Ok(out) = context(&cli, &store) {
+/// How long the hook may take before it gives up silently (`MAESTRO_HOOK_TIMEOUT_MS`, default 5000).
+fn hook_budget() -> std::time::Duration {
+    let ms = std::env::var("MAESTRO_HOOK_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5_000);
+    std::time::Duration::from_millis(ms)
+}
+
+fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    let hook = is_hook(&args);
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(_) if hook => return std::process::ExitCode::SUCCESS,
+        Err(e) => e.exit(),
+    };
+
+    // The hook path never blocks a session: any failure or overrun prints nothing and exits 0.
+    if hook {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let store = store(&cli);
+            let _ = tx.send(context(&cli, &store));
+        });
+        if let Ok(Ok(out)) = rx.recv_timeout(hook_budget()) {
             println!("{out}");
         }
-        return Ok(());
+        return std::process::ExitCode::SUCCESS;
     }
 
+    match run(&cli) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("maestro: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: &Cli) -> Result<()> {
+    let store = store(cli);
     match &cli.command {
         Command::Mcp => {
-            maestro_mcp::serve_stdio(store).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            runtime.block_on(maestro_mcp::serve_stdio(store)).map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        Command::Context { .. } => println!("{}", context(&cli, &store)?),
+        Command::Context { .. } => println!("{}", context(cli, &store)?),
         Command::Authority => authority(cli.json),
         Command::Hosts => hosts(cli.json),
         Command::Asks { command: Some(AsksCommand::Validate { file }), .. } => validate(&store, file)?,
-        _ => read(&cli, &store)?,
+        _ => read(cli, &store)?,
     }
     Ok(())
 }
@@ -199,14 +236,22 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
         "maestro_snapshot" => human_snapshot(&v),
         "maestro_needs_list" => {
             print_errors(&v);
-            let list = v["data"].as_array().cloned().unwrap_or_default();
-            println!("Needs you: {}", list.len());
+            let Some(list) = v["data"].as_array().cloned() else {
+                println!("Needs you: unknown (the ask ledgers could not be read)");
+                return Ok(());
+            };
+            let bound = if v["errors"].as_array().is_some_and(|e| !e.is_empty()) { "at least " } else { "" };
+            println!("Needs you: {bound}{}", list.len());
             for n in &list {
                 println!("  {}  {}", s(&n["key"]), s(&n["title"]));
             }
         }
         "maestro_asks_list" => {
             print_errors(&v);
+            if v["readable"].as_bool() == Some(false) {
+                println!("asks: unreadable ({})", s(&v["source"]));
+                return Ok(());
+            }
             let list = v["asks"].as_array().cloned().unwrap_or_default();
             println!("{} ask{}", list.len(), if list.len() == 1 { "" } else { "s" });
             for a in &list {
@@ -233,6 +278,9 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
                 println!("  {:<28} {:<16} {:<8} {tick}", s(&l["id"]), s(&l["substrate"]), s(&l["desired"]));
                 for d in l["drift"].as_array().into_iter().flatten() {
                     println!("      drift {}: {}", s(&d["class"]), s(&d["detail"]));
+                }
+                for n in l["notices"].as_array().into_iter().flatten() {
+                    println!("      notice {}: {}", s(&n["kind"]), s(&n["detail"]));
                 }
             }
         }
@@ -275,8 +323,11 @@ fn human_snapshot(v: &Value) {
         };
         println!("  {name:<12} {mark:<11} {line}");
     };
-    let needs = v["needs"]["data"].as_array().map_or(0, Vec::len);
-    section("needs", format!("{needs} hold{} on the owner", if needs == 1 { "" } else { "s" }));
+    let needs = match v["needs"]["data"].as_array() {
+        None => "unknown".to_string(),
+        Some(list) => format!("{} hold{} on the owner", list.len(), if list.len() == 1 { "" } else { "s" }),
+    };
+    section("needs", needs);
     let a = &v["asks"]["data"];
     section(
         "asks",
@@ -292,8 +343,11 @@ fn human_snapshot(v: &Value) {
         .unwrap_or_default();
     section("work", work);
     let loops = v["loops"]["data"].as_array().cloned().unwrap_or_default();
-    let drifting = loops.iter().filter(|l| l["drift"].as_array().is_some_and(|d| !d.is_empty())).count();
-    section("loops", format!("{} registered, {drifting} with drift", loops.len()));
+    let count = |key: &str| loops.iter().filter(|l| l[key].as_array().is_some_and(|d| !d.is_empty())).count();
+    section(
+        "loops",
+        format!("{} registered, {} with drift, {} with notices", loops.len(), count("drift"), count("notices")),
+    );
     let inits = v["initiatives"]["data"].as_array().map_or(0, Vec::len);
     section("initiatives", format!("{inits} live"));
     let fleet = v["fleet"]["data"].as_array().cloned().unwrap_or_default();
@@ -307,7 +361,7 @@ fn context(cli: &Cli, store: &Store) -> Result<String> {
         unreachable!()
     };
     let mut cwd = cwd.clone();
-    if *stdin {
+    if *stdin && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
         if let Ok(payload) = serde_json::from_str::<Value>(&buf) {
