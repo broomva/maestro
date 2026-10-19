@@ -1,0 +1,18 @@
+title = "maestro gitleaks config"
+
+# Keep gitleaks' default rules; only the allowlist below is added.
+[extend]
+useDefault = true
+
+# ── Pen design files: the document "fileToken" ──────────────────────────────
+# Pen mints a top-level "fileToken" per .pen file: a random UUIDv4 document id
+# (crypto.randomUUID). It is sent to Pen's share service only when the owner
+# shares a design, authenticated by the owner's separate auth token; on its own
+# it grants nothing. Same rule as broomva/workspace (BRO-3193), maestro-paseo
+# (BRO-2670) and skene (BRO-2913), for docs/design/maestro-system.pen.
+# Matches one line shape only — a "fileToken" key holding a UUIDv4 — and has no
+# `paths` entry, so any other finding in a .pen file is still reported.
+[[allowlists]]
+description = "Pen document fileToken: a UUIDv4 document id, not a credential"
+regexTarget = "line"
+regexes = ['''^\s*"fileToken": "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",?\s*$''']
