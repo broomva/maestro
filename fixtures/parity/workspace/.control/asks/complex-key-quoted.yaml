@@ -1,0 +1,4 @@
+asks:
+  - id: cquoted
+    ? [ "a", b ]
+    : value

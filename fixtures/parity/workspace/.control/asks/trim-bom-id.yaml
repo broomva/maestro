@@ -1,0 +1,5 @@
+asks:
+  - id: "\uFEFF"
+  - id: "\u0085"
+    ask: nel
+  - id: "\u3000x\u2028"

@@ -1,0 +1,5 @@
+asks:
+  - id: omap
+    x: !!omap
+      - a: 1
+      - b: 2

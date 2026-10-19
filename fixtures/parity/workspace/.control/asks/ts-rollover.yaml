@@ -1,0 +1,7 @@
+asks:
+  - id: roll
+    a: !!timestamp 2026-02-31
+    b: !!timestamp 2026-13-45
+    c: !!timestamp 0050-01-01
+    d: !!timestamp 2026-10-19 23:59:60.1234 +5
+    e: !!timestamp 2026-10-19t10:30:00-03:30

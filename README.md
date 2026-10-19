@@ -70,8 +70,6 @@ read, that count becomes a lower bound and the error is reported under `worktree
     holds it to the byte. Regenerate the file whenever the plugin's readers change.
   - Known gaps. Each is refused or reported, and each is pinned by that test:
     - A `%YAML 1.1` document is refused, because the plugin would read it with YAML 1.1 rules.
-    - A non-finite number (`.inf`, `1e400`) hashes the same, but reads as no text. So
-      `answer: .inf` is answered in the plugin and open here.
     - A lone surrogate escape is read as U+FFFD and reported, so that entry's hash differs.
     - A collection map key that needs quoting in flow form is refused.
     - Collections nested deeper than 256 levels are refused. The plugin's limit is its engine's stack:

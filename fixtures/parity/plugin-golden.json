@@ -1,4 +1,34 @@
 {
+ "alias-empty.yaml": {
+  "asks": [
+   {
+    "id": "aempty",
+    "hash": "ed34c23b0c953301",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"base\":[],\"copies\":[[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]],\"id\":\"aempty\"}"
+  ]
+ },
+ "alias-scalar.yaml": {
+  "error": "Excessive alias count indicates a resource exhaustion attack"
+ },
+ "alias100.yaml": {
+  "error": "Excessive alias count indicates a resource exhaustion attack"
+ },
+ "alias99.yaml": {
+  "asks": [
+   {
+    "id": "a99",
+    "hash": "0e3d95dff842052f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"base\":[\"x\"],\"copies\":[[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"]],\"id\":\"a99\"}"
+  ]
+ },
  "anchors.yaml": {
   "asks": [
    {
@@ -21,6 +51,18 @@
   ],
   "rows": [
    "{\"a\":true,\"b\":false,\"blocking\":true,\"c\":\"yes\",\"d\":\"on\",\"e\":\"tRue\",\"id\":\"bools\",\"preanswerable\":false}"
+  ]
+ },
+ "complex-key-quoted.yaml": {
+  "asks": [
+   {
+    "id": "cquoted",
+    "hash": "8c8303a6fcfd9764",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"[ \\\"a\\\", b ]\":\"value\",\"id\":\"cquoted\"}"
   ]
  },
  "complex-key.yaml": {
@@ -48,6 +90,18 @@
   ],
   "rows": [
    "{\"id\":\"dup-typed\",\"meta\":{\"1\":\"string\"}}"
+  ]
+ },
+ "escaped-backslash.yaml": {
+  "asks": [
+   {
+    "id": "ebs",
+    "hash": "cb3e609501e346b5",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"ebs\",\"lone\":\"\\ud83d\",\"note\":\"C:\\\\uD83D\\ude00\"}"
   ]
  },
  "float-forms.yaml": {
@@ -136,6 +190,9 @@
    "{\"answer\":null,\"blocking\":true,\"id\":\"inf-answer\"}"
   ]
  },
+ "inf-dup-keys.yaml": {
+  "error": "it has a YAML error: Map keys must be unique at line 5, column 7:"
+ },
  "int-big.yaml": {
   "asks": [
    {
@@ -187,6 +244,18 @@
  "multi-doc.yaml": {
   "error": "it has a YAML error: Source contains multiple documents; please use YAML.parseAllDocuments() at line 3, column 1:"
  },
+ "nan-keys.yaml": {
+  "asks": [
+   {
+    "id": "nankeys",
+    "hash": "501ee32c16ea9320",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"nankeys\",\"meta\":{\"-Infinity\":\"c\",\"NaN\":\"b\"}}"
+  ]
+ },
  "nan-status.yaml": {
   "asks": [
    {
@@ -210,6 +279,9 @@
   "rows": [
    "{\"exhausted\":{\"read\":\"x\"},\"gates\":[1,true,null,\"g\"],\"id\":\"nested\",\"options\":[{\"id\":1,\"label\":\"one\",\"recommended\":true},{\"id\":\"two\",\"reversible\":\"yes\"}]}"
   ]
+ },
+ "null-dup-keys.yaml": {
+  "error": "it has a YAML error: Map keys must be unique at line 5, column 7:"
  },
  "null-forms.yaml": {
   "asks": [
@@ -295,6 +367,54 @@
    "{\"id\":\"local\",\"x\":\"foo\"}"
   ]
  },
+ "tag-map-seq.yaml": {
+  "asks": [
+   {
+    "id": "mapseq",
+    "hash": "ad18d2652cb0957d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"c\":{\"a\":1},\"id\":\"mapseq\",\"m\":{\"a\":1},\"s\":[1,2]}"
+  ]
+ },
+ "tag-omap.yaml": {
+  "asks": [
+   {
+    "id": "omap",
+    "hash": "9960e58a1a20c835",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"omap\",\"x\":{}}"
+  ]
+ },
+ "tag-pairs.yaml": {
+  "asks": [
+   {
+    "id": "pairs",
+    "hash": "f05b47f463db1ac5",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"pairs\",\"x\":[{\"a\":1},{\"a\":2}]}"
+  ]
+ },
+ "tag-set.yaml": {
+  "asks": [
+   {
+    "id": "set",
+    "hash": "a0329173f9f4facd",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"set\",\"x\":{}}"
+  ]
+ },
  "tag-timestamp.yaml": {
   "asks": [
    {
@@ -305,6 +425,43 @@
   ],
   "rows": [
    "{\"id\":\"ts\",\"plain\":\"2026-10-19\",\"t\":\"2026-10-19T00:00:00.000Z\"}"
+  ]
+ },
+ "trim-bom-id.yaml": {
+  "asks": [
+   {
+    "id": "",
+    "hash": "d30e8dd90817e3e0",
+    "state": "open"
+   },
+   {
+    "id": "x",
+    "hash": "11e5e7b6444a9846",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"﻿\"}",
+   "{\"ask\":\"nel\",\"id\":\"\"}",
+   "{\"id\":\"　x \"}"
+  ]
+ },
+ "ts-bad-offset.yaml": {
+  "error": "it has a YAML error: !!timestamp expects a date, starting with yyyy-mm-dd at line 3, column 8:"
+ },
+ "ts-not-a-date.yaml": {
+  "error": "it has a YAML error: !!timestamp expects a date, starting with yyyy-mm-dd at line 3, column 8:"
+ },
+ "ts-rollover.yaml": {
+  "asks": [
+   {
+    "id": "roll",
+    "hash": "88ba07c686348aee",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"2026-03-03T00:00:00.000Z\",\"b\":\"2027-02-14T00:00:00.000Z\",\"c\":\"1950-01-01T00:00:00.000Z\",\"d\":\"2026-10-19T19:00:00.123Z\",\"e\":\"2026-10-19T14:00:00.000Z\",\"id\":\"roll\"}"
   ]
  },
  "unicode-keys.yaml": {

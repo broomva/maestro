@@ -186,15 +186,51 @@ pub enum AskState {
     Archived,
 }
 
+/// Marks a string that stands for a non-finite JavaScript number (`Infinity`, `-Infinity`,
+/// `NaN`), which JSON cannot hold. U+FDD0 is a Unicode noncharacter, reserved for exactly this
+/// internal use and never valid in interchange, so no ledger text can collide with it. A
+/// marked string hashes as `JSON.stringify` prints the number (`null`) and reads as `String(n)`.
+pub const NONFINITE: char = '\u{FDD0}';
+
+/// The JavaScript text of a marked non-finite number, if `s` is one.
+pub fn nonfinite(s: &str) -> Option<&str> {
+    s.strip_prefix(NONFINITE)
+}
+
+/// A value for callers: every marked non-finite number becomes `null`, as JSON prints it.
+pub fn display(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) if nonfinite(s).is_some() => Value::Null,
+        Value::Array(items) => Value::Array(items.iter().map(display).collect()),
+        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), display(v))).collect()),
+        other => other.clone(),
+    }
+}
+
 /// The plugin's `text()`: a trimmed non-empty string, or a number or bool as
 /// text. A number reads as JavaScript's `String(n)` would print it.
 pub fn text(value: Option<&serde_json::Value>) -> Option<String> {
     match value? {
-        serde_json::Value::String(s) => Some(s.trim()).filter(|s| !s.is_empty()).map(str::to_string),
+        serde_json::Value::String(s) if nonfinite(s).is_some() => nonfinite(s).map(str::to_string),
+        serde_json::Value::String(s) => Some(js_trim(s)).filter(|s| !s.is_empty()).map(str::to_string),
         serde_json::Value::Number(n) => Some(js_number(n)),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
+}
+
+/// `String.prototype.trim`: JavaScript's WhiteSpace and LineTerminator, which is not Rust's
+/// `char::is_whitespace` (JavaScript trims U+FEFF and keeps U+0085; Rust does the opposite).
+pub fn js_trim(s: &str) -> &str {
+    const fn js_space(c: char) -> bool {
+        matches!(
+            c,
+            '\u{9}' | '\u{a}' | '\u{b}' | '\u{c}' | '\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+                ..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
+        )
+    }
+    s.trim_matches(js_space)
 }
 
 /// The plugin's `textsOf`: the texts of a list, a lone value being a list of one.
@@ -261,7 +297,7 @@ pub fn js_number(n: &serde_json::Number) -> String {
 
 /// ECMA-262 Number::toString(x) for a finite double: the shortest round-trip
 /// digits, in decimal for exponents in [-7, 21) and exponential outside it.
-fn js_double(x: f64) -> String {
+pub fn js_double(x: f64) -> String {
     if x == 0.0 {
         return "0".into(); // -0 too
     }
@@ -346,6 +382,7 @@ fn canonical_json(value: &serde_json::Value, out: &mut String) {
             out.push(']');
         }
         Value::Number(n) => out.push_str(&js_number(n)),
+        Value::String(s) if nonfinite(s).is_some() => out.push_str("null"),
         other => out.push_str(&other.to_string()),
     }
 }
@@ -610,6 +647,27 @@ mod tests {
         assert_eq!(a.state(), AskState::Open, "state reads the raw row");
         assert!(Ask::from_row(json!({"id": [1]})).is_err());
         assert!(Ask::from_row(json!("x")).is_err());
+    }
+
+    #[test]
+    fn a_marked_non_finite_number_reads_and_hashes_as_javascript_does() {
+        let inf = json!(format!("{NONFINITE}Infinity"));
+        assert_eq!(text(Some(&inf)).as_deref(), Some("Infinity"));
+        assert_eq!(canonical_string(&json!({"answer": inf.clone()})), r#"{"answer":null}"#);
+        assert_eq!(
+            state_of(&json!({"id": "a", "answer": inf.clone()})),
+            AskState::Answered,
+            "text(Infinity) is answered"
+        );
+        assert_eq!(Ask::from_row(json!({"id": inf.clone()})).unwrap().id, "Infinity");
+        assert_eq!(display(&json!({"a": [inf]})), json!({"a": [null]}));
+    }
+
+    #[test]
+    fn text_trims_as_javascript_trims() {
+        assert_eq!(text(Some(&json!("\u{feff}"))), None, "U+FEFF is JavaScript whitespace");
+        assert_eq!(text(Some(&json!("\u{85}"))).as_deref(), Some("\u{85}"), "U+0085 is not");
+        assert_eq!(text(Some(&json!("\u{3000}x\u{2028}"))).as_deref(), Some("x"));
     }
 
     #[test]

@@ -196,7 +196,9 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
         return Section::ok("worktree", Vec::new());
     }
     // No local asks directory holds no local answers: nothing waits, and nothing is unread.
-    if !store.paths.workspace.join(crate::ASKS_DIR).is_dir() {
+    // Anything else in its place (a file, a dangling link) is unread, and the read reports it.
+    let local_dir = store.paths.workspace.join(crate::ASKS_DIR);
+    if std::fs::symlink_metadata(&local_dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
         return Section::ok(format!("worktree:{}", crate::ASKS_DIR), Vec::new());
     }
     let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree).asks();
@@ -342,21 +344,42 @@ pub fn snapshot_of(store: &Store, reads: &Reads, at: jiff::Timestamp) -> Snapsho
 
 /// Infer a project name from a cwd: the outermost git repository holding it below the
 /// workspace (`core/maestro` → `maestro`). Outermost, so a worktree checked out inside
-/// its repo (`core/life/.claude/worktrees/feat-x`) still names `life`. A directory of
-/// the workspace repo itself (`research/notes`) names no project.
-/// A cwd not on this disk (a hook payload from elsewhere) cannot be looked at, so it
-/// falls back to the layout rule: the second path part, as in `<group>/<repo>/…`.
+/// its repo (`core/life/.claude/worktrees/feat-x`) still names `life`. The workspace's own
+/// directories (`research/notes`) and its own worktrees (`.claude/worktrees/x`) name no
+/// project, and neither does a cwd that is not on this disk: its repo cannot be known.
 pub fn project_of(cwd: &Path, workspace: &Path) -> Option<String> {
-    let rel = cwd.strip_prefix(workspace).ok()?;
-    if !cwd.exists() {
-        let parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-        return match parts.as_slice() {
-            [_, name, ..] => Some(name.clone()),
-            _ => None,
-        };
+    let cwd = lexical(cwd);
+    let workspace = lexical(workspace);
+    cwd.strip_prefix(&workspace).ok()?;
+    let workspace_git = workspace.join(".git");
+    cwd.ancestors()
+        .take_while(|d| *d != workspace)
+        .filter(|d| match std::fs::read_to_string(d.join(".git")) {
+            // A `.git` file is a worktree: it is the workspace's own when its gitdir lies in the workspace's `.git`.
+            Ok(link) => !link
+                .strip_prefix("gitdir:")
+                .map(|g| lexical(&d.join(g.trim())))
+                .is_some_and(|g| g.starts_with(&workspace_git)),
+            Err(_) => d.join(".git").is_dir(),
+        })
+        .last()
+        .and_then(|repo| repo.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
+/// A path with `.` and `..` resolved by the text alone, so `core/maestro/../life` is `core/life`.
+fn lexical(p: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
     }
-    let repo = cwd.ancestors().take_while(|d| *d != workspace).filter(|d| d.join(".git").exists()).last()?;
-    repo.file_name().map(|n| n.to_string_lossy().into_owned())
+    out
 }
 
 fn initiative_for<'a>(

@@ -1,0 +1,6 @@
+asks:
+  - id: nankeys
+    meta:
+      .nan: a
+      .NaN: b
+      -.inf: c

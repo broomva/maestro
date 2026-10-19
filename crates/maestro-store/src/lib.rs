@@ -28,6 +28,8 @@ pub const ASKS_DIR: &str = ".control/asks";
 pub const INITIATIVES_DIR: &str = ".control/initiatives";
 pub const PREAUTH_FILE: &str = ".control/preauth.yaml";
 pub const LOOPS_DIR: &str = ".broomva/loops";
+/// The plugin's `LEDGER_LIMIT`: a ledger over this size is refused, not cut.
+pub const LEDGER_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LedgerFile {
@@ -108,7 +110,12 @@ impl Store {
     /// Ledgers are named as the plugin's `LEDGER` names them (`.yaml` or `.yml`) and read
     /// with [`yaml::parse`], so every value, and so every entry hash, is the plugin's.
     pub fn asks(&self) -> Section<Vec<LedgerFile>> {
-        let docs = self.yaml_docs_with(ASKS_DIR, &[".yaml", ".yml"], |t| yaml::parse(t).map(|r| (r.value, r.warnings)));
+        let docs = self.yaml_docs_with(ASKS_DIR, &[".yaml", ".yml"], |t| {
+            if t.len() > LEDGER_LIMIT {
+                return Err(format!("it is over {LEDGER_LIMIT} bytes"));
+            }
+            yaml::parse(t).map(|r| (r.value, r.warnings))
+        });
         let mut errors = docs.errors;
         let data = docs.data.map(|docs| {
             let mut out = Vec::new();

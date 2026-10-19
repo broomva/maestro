@@ -40,6 +40,9 @@ impl std::str::FromStr for TreeSource {
     }
 }
 
+/// The most any one read takes in. Ledgers stop at a quarter of this (`LEDGER_LIMIT`).
+pub const MAX_READ: usize = 4 * 1024 * 1024;
+
 /// A directory listing: the files to read, and entries skipped with the reason.
 #[derive(Debug, Default)]
 pub struct Listing {
@@ -56,6 +59,9 @@ pub enum TreeError {
     Io(#[from] std::io::Error),
     #[error("git {args}: {stderr}")]
     Git { args: String, stderr: String },
+    /// A file past [`MAX_READ`]: not read, so no file can make a read allocate without bound.
+    #[error("{rel} is {size} bytes, over the {MAX_READ}-byte read limit")]
+    TooLarge { rel: String, size: u64 },
     /// The revision named no commit, so nothing is read from it: not the raw name, not a guess.
     #[error("revision `{rev}` did not resolve: {reason}")]
     Unresolved { rev: String, reason: String },
@@ -133,10 +139,11 @@ impl Tree {
                     if !wanted(&name) {
                         continue;
                     }
-                    let kind = entry.file_type()?;
-                    if kind.is_file() {
+                    // As the plugin's `lstat`: anything but a regular file, a symlink or a
+                    // directory named like a ledger included, is reported, never skipped.
+                    if entry.file_type()?.is_file() {
                         listing.names.push(name);
-                    } else if !kind.is_dir() {
+                    } else {
                         listing.skipped.push((name, "not a regular file".into()));
                     }
                 }
@@ -155,7 +162,6 @@ impl Tree {
                     let mut fields = meta.split(' ');
                     match (fields.next(), fields.next()) {
                         (Some("100644" | "100755"), Some("blob")) => listing.names.push(name.to_string()),
-                        (_, Some("tree")) => {}
                         _ => listing.skipped.push((name.to_string(), "not a regular file".into())),
                     }
                 }
@@ -168,7 +174,15 @@ impl Tree {
 
     pub fn read(&self, rel: &str) -> Result<String, TreeError> {
         match &self.source {
-            TreeSource::WorkingTree => Ok(std::fs::read_to_string(self.root.join(rel))?),
+            TreeSource::WorkingTree => {
+                let path = self.root.join(rel);
+                let size = std::fs::metadata(&path)?.len();
+                if size > MAX_READ as u64 {
+                    return Err(TreeError::TooLarge { rel: rel.to_string(), size });
+                }
+                // Invalid UTF-8 reads as U+FFFD, as the plugin's `readFile(path, "utf8")` reads it.
+                Ok(String::from_utf8_lossy(&std::fs::read(path)?).into_owned())
+            }
             TreeSource::GitRev(_) => self.git(&["show", &format!("{}:{rel}", self.rev()?)]),
         }
     }

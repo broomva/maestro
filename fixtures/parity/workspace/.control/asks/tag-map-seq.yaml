@@ -1,0 +1,5 @@
+asks:
+  - id: mapseq
+    m: !!map {a: 1}
+    s: !!seq [1, 2]
+    c: !custom {a: 1}

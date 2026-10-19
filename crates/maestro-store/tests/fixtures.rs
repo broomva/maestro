@@ -99,9 +99,28 @@ fn fleet_takes_the_highest_numbered_tick() {
     assert_eq!(fleet[0].sessions, 2);
 }
 
+/// Copy a directory tree (the fixtures are small and hold no links).
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
 #[test]
 fn context_scopes_to_the_initiative_of_the_cwd() {
-    let s = store();
+    // The project comes from the repo holding the cwd, so the cwd must exist and sit in one.
+    let tmp = tempfile::tempdir().unwrap();
+    copy_tree(&fixture(), tmp.path());
+    let s = Store::new(Paths::under(tmp.path()), TreeSource::WorkingTree);
+    std::fs::create_dir_all(s.paths.workspace.join("apps/demo/.git")).unwrap();
+    std::fs::create_dir_all(s.paths.workspace.join("apps/demo/src")).unwrap();
     let cwd = s.paths.workspace.join("apps/demo/src");
     let packet = views::context(
         &s,
@@ -222,7 +241,9 @@ fn a_directory_named_like_a_ledger_is_not_read_in_git_mode() {
     let asks = Store::new(paths, TreeSource::GitRev("main".into())).asks();
     let files: Vec<_> = asks.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
     assert_eq!(files, ["real.yaml"]);
-    assert!(asks.errors.is_empty(), "{:?}", asks.errors);
+    // Not parsed as a ledger, and reported, as the plugin's `lstat` reports "not a regular file".
+    assert_eq!(asks.errors.len(), 1, "{:?}", asks.errors);
+    assert!(asks.errors[0].at.ends_with("folder.yaml") && asks.errors[0].reason.contains("not a regular file"));
 }
 
 #[test]
@@ -279,11 +300,8 @@ fn project_is_the_repo_not_the_second_path_part() {
     assert_eq!(views::project_of(&ws.join("research/notes"), &ws), None, "a folder of the workspace repo");
     assert_eq!(views::project_of(&ws, &ws), None);
     assert_eq!(views::project_of(Path::new("/elsewhere"), &ws), None);
-    assert_eq!(
-        views::project_of(&ws.join("apps/absent/src"), &ws).as_deref(),
-        Some("absent"),
-        "not on disk: layout rule"
-    );
+    assert_eq!(views::project_of(&ws.join("apps/absent/src"), &ws), None, "not on disk: its repo cannot be known");
+    assert_eq!(views::project_of(&ws.join("core/maestro/../maestro/crates/x"), &ws).as_deref(), Some("maestro"));
 }
 
 /// The plugin's own reading of an edge corpus (`scripts/plugin-golden.ts`), held to the
@@ -301,16 +319,26 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
     let ledgers = asks.data.as_ref().unwrap();
     let error_for = |file: &str| asks.errors.iter().find(|e| e.at == format!(".control/asks/{file}")).cloned();
     let mut checked = 0;
+    let mut refused = 0;
     for (file, want) in golden.as_object().unwrap() {
-        if file == "yaml11.yaml" {
-            assert!(error_for(file).unwrap().reason.contains("1.1"), "a %YAML 1.1 document is refused loudly");
+        // Known gaps refused loudly where the plugin reads: each pinned to its reason.
+        let refused_gap = match file.as_str() {
+            "yaml11.yaml" => Some("1.1"),
+            "complex-key.yaml" | "complex-key-quoted.yaml" => Some("collection used as a map key"),
+            _ => None,
+        };
+        if let Some(reason) = refused_gap {
+            assert!(want.get("error").is_none(), "{file}: the plugin reads it, so this is a gap, not parity");
+            let got = error_for(file).unwrap_or_else(|| panic!("{file}: a known gap must be refused loudly"));
+            assert!(got.reason.contains(reason), "{file}: {}", got.reason);
             continue;
         }
         if let Some(reason) = want.get("error") {
             assert!(error_for(file).is_some(), "{file}: the plugin refuses it ({reason}) and so must Maestro");
+            refused += 1;
             continue;
         }
-        if file != "surrogate.yaml" {
+        if file != "surrogate.yaml" && file != "escaped-backslash.yaml" {
             assert!(error_for(file).is_none(), "{file}: {:?}", error_for(file));
         }
         let ledger = ledgers.iter().find(|l| &l.file == file).unwrap_or_else(|| panic!("{file} not read"));
@@ -340,19 +368,18 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
             .collect();
         let rows: Vec<&str> = want["rows"].as_array().unwrap().iter().filter_map(|r| r.as_str()).collect();
         match file.as_str() {
-            // Same bytes, so the same hash; but text(Infinity) is "Infinity" in the plugin, so it is answered there.
-            "inf-answer.yaml" => {
-                assert_eq!(expected[0].2, "answered");
-                expected[0].2 = "open".into();
-            }
             // The lone surrogate is U+FFFD here: that entry hashes differently, and the read says so.
-            "surrogate.yaml" => {
+            "surrogate.yaml" | "escaped-backslash.yaml" => {
                 assert_ne!(got[0].1, expected[0].1);
                 expected[0].1 = got[0].1.clone();
                 let warned =
                     asks.errors.iter().any(|e| e.at.ends_with(file.as_str()) && e.reason.contains("surrogate"));
                 assert!(warned, "the substitution is reported");
-                assert!(rows[0].contains("\\ud83d") && !rows[0].contains('\u{FFFD}'));
+                assert!(
+                    rows[0].contains("\\ud8") || rows[0].contains("\\ude"),
+                    "the plugin keeps the half: {}",
+                    rows[0]
+                );
                 checked += 1;
                 assert_eq!(got, expected, "{file}");
                 continue;
@@ -366,7 +393,8 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
         }
         checked += 1;
     }
-    assert!(checked >= 24, "only {checked} ledgers compared");
+    // Every ledger is accounted for: compared to the byte, refused as the plugin refuses it, or a pinned gap.
+    assert_eq!((checked, refused, golden.as_object().unwrap().len()), (34, 8, 45));
 }
 
 #[test]
@@ -379,6 +407,11 @@ fn a_worktree_inside_its_repo_names_the_repo() {
     std::fs::create_dir_all(wt.join("src")).unwrap();
     std::fs::write(wt.join(".git"), "gitdir: ../../../.git/worktrees/feat-x\n").unwrap();
     assert_eq!(views::project_of(&wt.join("src"), &ws).as_deref(), Some("life"));
+    // A worktree of the workspace itself names no project: its gitdir is in the workspace's `.git`.
+    let own = ws.join(".claude/worktrees/feat-y");
+    std::fs::create_dir_all(own.join("src")).unwrap();
+    std::fs::write(own.join(".git"), format!("gitdir: {}\n", ws.join(".git/worktrees/feat-y").display())).unwrap();
+    assert_eq!(views::project_of(&own.join("src"), &ws), None);
 }
 
 #[test]

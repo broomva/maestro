@@ -1,0 +1,5 @@
+asks:
+  - id: infdup
+    meta:
+      .inf: a
+      .Inf: b
