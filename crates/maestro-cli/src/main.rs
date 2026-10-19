@@ -118,13 +118,13 @@ enum Format {
     Hook,
 }
 
-fn store(cli: &Cli) -> Store {
+fn store(cli: &Cli) -> Result<Store> {
     let mut paths = Paths::from_env();
     if let Some(ws) = &cli.workspace {
         paths.workspace = ws.clone();
     }
-    let source: TreeSource = cli.tree.parse().expect("infallible");
-    Store::new(paths, source)
+    let source: TreeSource = cli.tree.parse().map_err(|e: String| anyhow::anyhow!("--tree: {e}"))?;
+    Ok(Store::new(paths, source))
 }
 
 fn call(store: &Store, tool: &str, args: Value) -> Result<Value> {
@@ -177,8 +177,7 @@ fn main() -> std::process::ExitCode {
     if hook {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let store = store(&cli);
-            let _ = tx.send(context(&cli, &store));
+            let _ = tx.send(store(&cli).and_then(|store| context(&cli, &store)));
         });
         if let Ok(Ok(out)) = rx.recv_timeout(hook_budget()) {
             println!("{out}");
@@ -196,7 +195,7 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    let store = store(cli);
+    let store = store(cli)?;
     match &cli.command {
         Command::Mcp => {
             let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -253,7 +252,12 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
                 return Ok(());
             }
             let list = v["asks"].as_array().cloned().unwrap_or_default();
-            println!("{} ask{}", list.len(), if list.len() == 1 { "" } else { "s" });
+            let total = v["total"].as_u64().unwrap_or(list.len() as u64);
+            if v["truncated"].as_bool() == Some(true) {
+                println!("{} of {total} asks (raise --limit for the rest)", list.len());
+            } else {
+                println!("{total} ask{}", if total == 1 { "" } else { "s" });
+            }
             for a in &list {
                 let flag = if a["blocking"].as_bool() == Some(true) { "blocking " } else { "" };
                 println!("  {}#{}  {flag}{}", s(&a["ledger"]), s(&a["id"]), s(&a["title"]));

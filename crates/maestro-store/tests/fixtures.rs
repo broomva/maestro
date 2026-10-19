@@ -198,11 +198,90 @@ fn git_revision_reads_and_unlanded_answers() {
     let demo =
         |v: &[maestro_store::LedgerFile]| v.iter().find(|l| l.file == "demo-arc.yaml").unwrap().ledger.asks[0].state();
     assert_eq!(demo(asks.data.as_ref().unwrap()), AskState::Open);
-    let waiting = views::unlanded(&at_main, asks.data.as_deref().unwrap());
+    let waiting = views::unlanded(&at_main, asks.data.as_deref().unwrap()).data.unwrap();
     assert_eq!(waiting.len(), 1);
     assert_eq!(waiting[0].id, "merge-now");
 
     let local = Store::new(paths, TreeSource::WorkingTree);
     assert_eq!(demo(&local.asks().data.unwrap()), AskState::Answered);
-    assert!(views::unlanded(&local, &[]).is_empty());
+    assert!(views::unlanded(&local, &[]).data.unwrap().is_empty());
+}
+
+#[test]
+fn a_directory_named_like_a_ledger_is_not_read_in_git_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks/folder.yaml")).unwrap();
+    std::fs::write(ws.join(".control/asks/folder.yaml/inner.txt"), "x").unwrap();
+    std::fs::write(ws.join(".control/asks/real.yaml"), "asks:\n  - id: a\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let asks = Store::new(paths, TreeSource::GitRev("main".into())).asks();
+    let files: Vec<_> = asks.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
+    assert_eq!(files, ["real.yaml"]);
+    assert!(asks.errors.is_empty(), "{:?}", asks.errors);
+}
+
+#[test]
+fn an_unknown_revision_is_unreadable_not_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/real.yaml"), "asks:\n  - id: a\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let s = Store::new(paths, TreeSource::GitRev("no-such-ref".into()));
+    assert!(s.asks().data.is_none());
+    assert!(s.preauth().data.is_none());
+    assert!(views::snapshot(&s).needs.data.is_none(), "needs are unknown, not zero");
+}
+
+#[test]
+fn unlanded_reports_an_unreadable_working_tree_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks:\n  - id: a\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks: [unclosed\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let s = Store::new(paths, TreeSource::GitRev("main".into()));
+    let at_main = s.asks();
+    let waiting = views::unlanded(&s, at_main.data.as_deref().unwrap());
+    assert_eq!(waiting.errors.len(), 1, "{:?}", waiting.errors);
+    assert!(waiting.errors[0].at.starts_with("worktree:"), "{:?}", waiting.errors);
+    let snap = views::snapshot(&s);
+    assert!(
+        snap.asks.errors.iter().any(|e| e.at.starts_with("worktree:")),
+        "the snapshot shows the count is a lower bound"
+    );
+}
+
+#[test]
+fn project_is_the_repo_not_the_second_path_part() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::create_dir_all(ws.join("core/maestro/.git")).unwrap();
+    std::fs::create_dir_all(ws.join("core/maestro/crates/x")).unwrap();
+    std::fs::create_dir_all(ws.join("research/notes")).unwrap();
+    assert_eq!(views::project_of(&ws.join("core/maestro/crates/x"), &ws).as_deref(), Some("maestro"));
+    assert_eq!(views::project_of(&ws.join("core/maestro"), &ws).as_deref(), Some("maestro"));
+    assert_eq!(views::project_of(&ws.join("research/notes"), &ws), None, "a folder of the workspace repo");
+    assert_eq!(views::project_of(&ws, &ws), None);
+    assert_eq!(views::project_of(Path::new("/elsewhere"), &ws), None);
+    assert_eq!(
+        views::project_of(&ws.join("apps/absent/src"), &ws).as_deref(),
+        Some("absent"),
+        "not on disk: layout rule"
+    );
 }

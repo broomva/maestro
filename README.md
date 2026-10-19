@@ -45,7 +45,22 @@ because the CLI and the MCP server share one dispatch.
 
 By default Maestro reads the workspace at `origin/main`, because main's copy wins under the home rule.
 `--tree worktree` reads the local checkout instead. An answer present locally but not on main is
-reported as waiting to land, not as open and not as answered.
+reported as waiting to land, not as open and not as answered. If the local checkout itself cannot be
+read, that count becomes a lower bound and the error is reported under `worktree:`.
+
+- **Revisions.** A revision that does not resolve, or that starts with `-`, reads nothing. Every
+  section is then unavailable, not empty. The MCP server resolves the revision again on each request,
+  so a long-lived server follows `origin/main` as it moves.
+- **Parity with the Paseo plugin.** Asks are read the way the plugin reads them:
+  - Fields go through `text`, `textsOf` and `optionsOf`, and a flag counts only when it is `=== true`.
+    So a numeric id, a string `blocking`, a single-string `gates` list or an option without a label
+    never drops an entry.
+  - Entry hashes are `JSON.stringify` byte for byte, including JavaScript number printing and
+    object key order.
+  - Work flags come from the plugin's `parseEvents`, so a torn last line in `_events.jsonl` never
+    hides a flag.
+- **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
+  50).
 
 ## Harness registration
 

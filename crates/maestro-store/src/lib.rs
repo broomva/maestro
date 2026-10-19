@@ -184,7 +184,10 @@ impl Store {
                 continue;
             }
             match read_work(&file) {
-                Ok(item) => items.push(item),
+                Ok((item, warnings)) => {
+                    items.push(item);
+                    errors.extend(warnings);
+                }
                 Err(reason) => errors.push(SourceError { at: file.display().to_string(), reason }),
             }
         }
@@ -232,37 +235,64 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), String> {
     Err("unterminated frontmatter".into())
 }
 
-/// The loop's current flag: the last event, when it is `loop.flagged` (the plugin's `flagOf`).
-fn flag_of(events: &str) -> Option<Flag> {
-    let last = events.lines().rev().find(|l| !l.trim().is_empty())?;
-    let v: serde_json::Value = serde_json::from_str(last).ok()?;
-    if v.get("type")?.as_str()? != "loop.flagged" {
+/// The plugin's `parseEvents`: one JSON object per line, kept when it has a
+/// string `ts` and `type`. Blank lines are skipped; anything else counts as bad.
+pub fn parse_events(text: &str) -> (Vec<serde_json::Value>, usize) {
+    let mut events = Vec::new();
+    let mut bad = 0;
+    for line in text.split('\n').filter(|l| !l.trim().is_empty()) {
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) if v.get("ts").is_some_and(|t| t.is_string()) && v.get("type").is_some_and(|t| t.is_string()) => {
+                events.push(v)
+            }
+            _ => bad += 1,
+        }
+    }
+    (events, bad)
+}
+
+/// The loop's current flag: the last parsed event, when it is `loop.flagged`
+/// (the plugin's `flagOf` over `parseEvents`, so a torn tail never hides a flag).
+fn flag_of(events: &[serde_json::Value]) -> Option<Flag> {
+    let last = events.last()?;
+    if last.get("type")?.as_str()? != "loop.flagged" {
         return None;
     }
-    let kind: FlagKind = serde_json::from_value(v.get("kind")?.clone()).ok()?;
-    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let kind = match last.get("kind") {
+        Some(serde_json::Value::String(k)) => serde_json::from_value(serde_json::Value::String(k.clone())).ok()?,
+        Some(other) => FlagKind::Other(other.to_string()),
+        None => FlagKind::Other(String::new()),
+    };
+    let text = |k: &str| last.get(k).and_then(|x| x.as_str()).map(str::to_string);
     Some(Flag { kind, reason: text("reason"), since: text("since") })
 }
 
 /// Read one work item: frontmatter, title, last event and the loop's flag.
-pub fn read_work(file: &Path) -> Result<WorkItem, String> {
+/// The second value holds failures that leave the item readable, such as an
+/// `_events.jsonl` that exists but cannot be read: then the flag is unknown, and that is reported.
+pub fn read_work(file: &Path) -> Result<(WorkItem, Vec<SourceError>), String> {
     let text = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
     let (yaml, body) = split_frontmatter(&text)?;
     let front: WorkFrontmatter = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
     let slug = file.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let title = body.lines().find_map(|l| l.strip_prefix("# ")).map(str::trim).unwrap_or(&slug).to_string();
-    let events = std::fs::read_to_string(file.with_file_name("_events.jsonl")).unwrap_or_default();
-    let last_event_at = events
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .and_then(|v| v.get("ts").and_then(|t| t.as_str()).map(str::to_string));
+    let events_file = file.with_file_name("_events.jsonl");
+    let mut warnings = Vec::new();
+    let raw = match std::fs::read_to_string(&events_file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            warnings.push(SourceError { at: events_file.display().to_string(), reason: e.to_string() });
+            String::new()
+        }
+    };
+    let (events, _bad) = parse_events(&raw);
+    let last_event_at = events.last().and_then(|v| v.get("ts")).and_then(|t| t.as_str()).map(str::to_string);
     let flag = flag_of(&events);
     let quiet = flag.as_ref().is_some_and(|f| f.kind == FlagKind::Quiet);
     let work_state = WorkState::of(front.state, quiet);
     let finished = front.state == OrchState::Review;
-    Ok(WorkItem { slug, title, work_state, front, last_event_at, flag, finished })
+    Ok((WorkItem { slug, title, work_state, front, last_event_at, flag, finished }, warnings))
 }
 
 #[cfg(test)]
@@ -277,11 +307,38 @@ mod tests {
         assert!(split_frontmatter("---\nid: a\n----\n").is_err());
     }
 
+    fn flag(text: &str) -> Option<Flag> {
+        flag_of(&parse_events(text).0)
+    }
+
     #[test]
     fn only_a_trailing_flag_counts() {
-        let flagged = "{\"type\":\"state\"}\n{\"type\":\"loop.flagged\",\"kind\":\"yours\",\"reason\":\"r\"}\n";
-        assert_eq!(flag_of(flagged).unwrap().kind, FlagKind::Yours);
-        let cleared = "{\"type\":\"loop.flagged\",\"kind\":\"yours\"}\n{\"type\":\"note\"}\n";
-        assert!(flag_of(cleared).is_none());
+        let flagged = "{\"ts\":\"1\",\"type\":\"state\"}\n{\"ts\":\"2\",\"type\":\"loop.flagged\",\"kind\":\"yours\",\"reason\":\"r\"}\n";
+        assert_eq!(flag(flagged).unwrap().kind, FlagKind::Yours);
+        let cleared = "{\"ts\":\"1\",\"type\":\"loop.flagged\",\"kind\":\"yours\"}\n{\"ts\":\"2\",\"type\":\"note\"}\n";
+        assert!(flag(cleared).is_none());
+    }
+
+    #[test]
+    fn a_torn_or_untimed_tail_does_not_hide_the_flag() {
+        let flagged = "{\"ts\":\"1\",\"type\":\"loop.flagged\",\"kind\":\"yours\"}\n";
+        for tail in ["{\"ts\":\"2\",\"type\":\"no", "{\"type\":\"note\"}", "[1,2]", "{\"ts\":3,\"type\":\"note\"}"] {
+            let text = format!("{flagged}{tail}\n");
+            assert_eq!(flag(&text).map(|f| f.kind), Some(FlagKind::Yours), "tail {tail}");
+            assert_eq!(parse_events(&text).1, 1);
+        }
+    }
+
+    #[test]
+    fn an_unreadable_events_file_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("item/_work.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "---\nid: x\nkind: task\nstate: running\n---\n# T\n").unwrap();
+        assert!(read_work(&file).unwrap().1.is_empty(), "no events file is not an error");
+        std::fs::create_dir(file.with_file_name("_events.jsonl")).unwrap(); // exists, cannot be read as a file
+        let (item, warnings) = read_work(&file).unwrap();
+        assert_eq!(item.title, "T");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 }

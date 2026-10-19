@@ -107,3 +107,63 @@ fn an_ambiguous_bare_id_is_refused() {
     assert_eq!(by_uid["ask"]["ask"], "three?");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+#[test]
+fn a_long_lived_server_follows_the_revision_as_it_moves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let asks = ws.join(".control/asks");
+    std::fs::create_dir_all(&asks).unwrap();
+    std::fs::write(asks.join("one.yaml"), "asks:\n  - id: a\n    ask: first?\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "one"]);
+
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    let server = MaestroServer::new(Store::new(paths, TreeSource::GitRev("main".into())));
+    let count = |v: serde_json::Value| v["asks"].as_array().unwrap().len();
+    assert_eq!(count(server.call("maestro_asks_list", json!({ "state": "all" })).unwrap()), 1);
+
+    std::fs::write(asks.join("two.yaml"), "asks:\n  - id: b\n    ask: second?\n").unwrap();
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "two"]);
+    let after = server.call("maestro_asks_list", json!({ "state": "all" })).unwrap();
+    assert_eq!(count(after.clone()), 2, "the server read the commit it started on: {after}");
+}
+
+#[test]
+fn asks_list_reports_total_and_truncation() {
+    let s = store();
+    let all = call(&s, "maestro_asks_list", json!({ "state": "all", "limit": 1 })).unwrap();
+    assert_eq!(all["asks"].as_array().unwrap().len(), 1);
+    assert!(all["total"].as_u64().unwrap() > 1, "{all}");
+    assert_eq!(all["truncated"], true);
+    let open = call(&s, "maestro_asks_list", json!({})).unwrap();
+    assert_eq!(open["total"], 3);
+    assert_eq!(open["truncated"], false);
+}
+
+#[test]
+fn an_ask_in_an_unreadable_ledger_is_unreadable_not_missing() {
+    let s = store();
+    let broken = call(&s, "maestro_ask_get", json!({ "ledger": "broken.yaml", "id": "anything" })).unwrap();
+    assert_eq!(broken["state"], "unreadable", "{broken}");
+    assert!(!broken["errors"].as_array().unwrap().is_empty());
+    // An entry that failed inside a readable ledger makes that ledger's misses unreadable too.
+    let partial = call(&s, "maestro_ask_get", json!({ "ledger": "alt-key.yaml", "id": "gone" })).unwrap();
+    assert_eq!(partial["state"], "unreadable");
+    // A clean ledger's miss is still a plain miss.
+    assert!(call(&s, "maestro_ask_get", json!({ "ledger": "demo-arc.yaml", "id": "gone" })).is_err());
+}
