@@ -118,12 +118,14 @@ pub fn parse(source: &str) -> Result<Read, String> {
         std::borrow::Cow::Borrowed(source)
     };
     let mut lone = 0;
-    // Two refusals yaml-rust2 makes where the package reads, each repaired where the scanner
-    // points, then parsed again (one site per pass):
-    // - a surrogate half in a `\u` escape: only that double-quoted scalar is rewritten;
-    // - a tab separating `:` from its value: the package takes tabs as separation, so the
-    //   tab run becomes spaces, which changes no value.
-    for _ in 0..=source.len() {
+    // Two refusals yaml-rust2 makes where the package reads:
+    // - a surrogate half in a `\u` escape (the package keeps it; here it becomes U+FFFD);
+    // - a tab separating `:` from its value (separation to the package; no value changes).
+    // On the first, the whole document is normalized in one lexical pass and parsed once more,
+    // so the cost is two parses, never one per site. Anything that pass misses is repaired
+    // where the scanner points, a bounded number of times.
+    let mut normalized = false;
+    for _ in 0..MAX_REPAIRS {
         match parse_events(&text) {
             Ok(value) => {
                 let value = if has_lone_cr { restore_cr(value) } else { value };
@@ -135,6 +137,12 @@ pub fn parse(source: &str) -> Result<Read, String> {
                     Vec::new()
                 };
                 return Ok(Read { value, warnings });
+            }
+            Err((e, _)) if repairable(&e) && !normalized => {
+                let (fixed, n) = normalize(&text);
+                normalized = true;
+                lone += n;
+                text = std::borrow::Cow::Owned(fixed);
             }
             Err((e, Some(at))) if e.contains("invalid Unicode character escape") => {
                 let Some((fixed, n)) = repair_quoted_scalar(&text, at) else { return Err(e) };
@@ -150,7 +158,122 @@ pub fn parse(source: &str) -> Result<Read, String> {
             Err((e, _)) => return Err(e),
         }
     }
-    Err("too many repairs in one document".into())
+    Err(format!("more than {MAX_REPAIRS} separate repairs needed in one document"))
+}
+
+/// Parses one document may take: one plain, one after normalizing, then single-site repairs.
+const MAX_REPAIRS: usize = 64;
+
+fn repairable(e: &str) -> bool {
+    e.contains("invalid Unicode character escape")
+        || e.contains("must be followed by a valid YAML whitespace")
+        || e.contains("expected whitespace")
+}
+
+/// One lexical pass over the document: in every double-quoted scalar, surrogate escapes are
+/// rewritten (a pair to `\U`, a lone half to `\uFFFD`); outside quoted scalars, block scalars
+/// and comments, a tab run right after `:` becomes spaces. A tab becomes a space, so no char
+/// moves and every check by position still holds. Returns the text and the lone-half count.
+fn normalize(text: &str) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut lone = 0;
+    let mut i = 0;
+    // Indent of the line holding a block scalar header, while inside its content.
+    let mut block_parent: Option<usize> = None;
+    let mut line_start = true;
+    let indent_at = |from: usize| chars[from..].iter().take_while(|&&c| c == ' ').count();
+    while i < chars.len() {
+        let c = chars[i];
+        if line_start {
+            line_start = false;
+            if let Some(parent) = block_parent {
+                let indent = indent_at(i);
+                let rest_blank =
+                    chars[i + indent..].iter().take_while(|&&c| c != '\n').all(|&c| c == ' ' || c == '\t' || c == '\r');
+                if rest_blank || indent > parent {
+                    // A content or blank line of the block scalar: copied untouched.
+                    while i < chars.len() && chars[i] != '\n' {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
+                block_parent = None;
+            }
+        }
+        match c {
+            '\n' => {
+                out.push(c);
+                line_start = true;
+                i += 1;
+            }
+            '#' if i == 0 || matches!(chars[i - 1], ' ' | '\t') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+            }
+            '\'' | '"' if i == 0 || matches!(chars[i - 1], ' ' | '\t' | '[' | '{' | ',' | ':' | '-' | '?' | '\n') => {
+                // A quoted scalar: copy to its closing quote, rewriting surrogate escapes in a double one.
+                let quote = c;
+                let mut j = i + 1;
+                while j < chars.len() {
+                    if quote == '"' && chars[j] == '\\' {
+                        j += 2;
+                        continue;
+                    }
+                    if chars[j] == quote {
+                        if quote == '\'' && chars.get(j + 1) == Some(&'\'') {
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    j += 1;
+                }
+                let end = j.min(chars.len());
+                let body: String = chars[i + 1..end].iter().collect();
+                out.push(quote);
+                if quote == '"' {
+                    let (fixed, n) = rewrite(&body, Pair::Yaml);
+                    lone += n;
+                    out.push_str(&fixed);
+                } else {
+                    out.push_str(&body);
+                }
+                if end < chars.len() {
+                    out.push(quote);
+                }
+                i = end + 1;
+            }
+            ':' if chars.get(i + 1) == Some(&'\t') => {
+                out.push(':');
+                i += 1;
+                while i < chars.len() && chars[i] == '\t' {
+                    out.push(' ');
+                    i += 1;
+                }
+            }
+            '|' | '>' if i > 0 && matches!(chars[i - 1], ' ' | '\t' | ':' | '-') => {
+                // A block scalar header ends its line; its content lines follow, more indented.
+                let header_end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
+                let header: String = chars[i + 1..header_end].iter().collect();
+                let header = header.split('#').next().unwrap_or("").trim().to_string();
+                if header.chars().all(|c| matches!(c, '+' | '-' | '0'..='9')) {
+                    let line_from = chars[..i].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+                    block_parent = Some(indent_at(line_from));
+                }
+                out.push(c);
+                i += 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    (out, lone)
 }
 
 /// Whether the block scalar whose header is at char `header` holds a line that is only
@@ -1216,6 +1339,24 @@ mod tests {
         );
         assert!(parse("s: !!set {a: , b: 1}\n").unwrap_err().contains("null values"));
         assert_eq!(js("a: 1 #c\rb: 2\n"), json!({"a": 1}), "a comment runs past a lone CR to the newline");
+    }
+
+    #[test]
+    fn repairs_cost_two_parses_not_one_per_site() {
+        let many_tabs =
+            format!("asks:\n  - id: t\n{}", (0..20_000).map(|i| format!("    k{i}:\tv\n")).collect::<String>());
+        let started = std::time::Instant::now();
+        let v = js(&many_tabs);
+        assert_eq!(v["asks"][0]["k19999"], "v");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+        let many_surrogates = (0..5_000).map(|i| format!("s{i}: \"\\uD83D x\"\n")).collect::<String>();
+        let r = parse(&many_surrogates).unwrap();
+        assert!(r.warnings[0].starts_with("5000 lone"), "{:?}", r.warnings);
+        // Normalizing leaves block scalars, single quotes and comments alone.
+        assert_eq!(
+            js("a: |\n  x:\ty\nb: 'p:\tq'\nc: v # d:\te\nf:\tg\n"),
+            json!({"a": "x:\ty\n", "b": "p:\tq", "c": "v", "f": "g"})
+        );
     }
 
     #[test]
