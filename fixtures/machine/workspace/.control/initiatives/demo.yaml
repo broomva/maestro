@@ -1,0 +1,10 @@
+id: demo
+title: "Demo initiative"
+intent: "(not stated verbatim)"
+stated: 2026-10-01
+status: active
+next_action: "Ship the demo."
+driver: coordinator:0123abcd
+links:
+  repos: ["apps/demo"]
+  asks: ["demo-arc.yaml"]

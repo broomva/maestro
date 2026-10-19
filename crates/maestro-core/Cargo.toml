@@ -1,0 +1,16 @@
+[package]
+name = "maestro-core"
+description = "Typed domain for Maestro: work, asks, needs, loops, ticks, initiatives, grants, authority and context packets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+schemars.workspace = true
+
+[lints]
+workspace = true

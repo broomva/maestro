@@ -1,0 +1,11 @@
+id: demo-tick
+title: Demo coordinator tick
+purpose: Every 2h, work due tiers.
+owner: coordinator
+scope: broomva
+substrate: {kind: t3-schedule, ref: 'scheduled-task:abc'}
+cadence: 'interval: 2h'
+desired: active
+contract:
+  produces: a loop.tick.started/loop.tick.ended pair per fire
+review_by: '2099-01-01'

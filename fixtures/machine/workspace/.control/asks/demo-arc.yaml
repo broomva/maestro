@@ -1,0 +1,47 @@
+arc: demo-arc
+ticket: BRO-0001
+tz: America/Bogota
+lanes: [merge, naming]
+opened: 2026-10-01T10:00Z
+asks:
+  - id: merge-now
+    ask: "Merge the demo PR now?"
+    headline: "Merge the demo PR now, or hold for review?"
+    class: decision
+    gates: [merge]
+    blocking: true
+    preanswerable: true
+    project: demo
+    exhausted:
+      - read: the review ledger records a pass
+      - "default: holding is the reversible default"
+    options:
+      - id: merge
+        label: Merge now
+        consequence: Ships today.
+        reversible: true
+        recommended: true
+      - id: hold
+        label: Hold
+        consequence: Nothing changes.
+        reversible: true
+        status_quo: true
+    liveness: {kind: pr-open, ref: "demo/repo#1"}
+  - id: pick-name
+    ask: "Which name?"
+    class: idea
+    gates: [naming]
+    blocking: false
+    preanswerable: true
+    project: demo
+    exhausted: ["read: none found", "loop: asked the coordinator"]
+  - id: old-one
+    ask: "Done already?"
+    class: decision
+    gates: [merge]
+    blocking: true
+    preanswerable: true
+    exhausted: ["read: x", "default: y"]
+    answer: "yes"
+    answered_at: "2026-10-02T00:00:00Z"
+    status: resolved
