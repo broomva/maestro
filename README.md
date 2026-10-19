@@ -74,6 +74,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
       `answer: .inf` is answered in the plugin and open here.
     - A lone surrogate escape is read as U+FFFD and reported, so that entry's hash differs.
     - A collection map key that needs quoting in flow form is refused.
+    - Collections nested deeper than 256 levels are refused. The plugin's limit is its engine's stack:
+      node fails near 1 000 levels and bun near 8 000.
 - **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
   50).
 

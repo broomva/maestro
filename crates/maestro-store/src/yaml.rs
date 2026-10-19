@@ -35,6 +35,8 @@
 //!   `"Infinity"`, so `answer: .inf` is answered there and open here.
 //! - A lone surrogate escape (`"\uD83D"`) cannot live in a Rust string. It is
 //!   read as U+FFFD and reported, so that entry's hash differs from the plugin's.
+//! - Collections nested deeper than [`MAX_DEPTH`] are refused. The plugin's limit
+//!   is its engine's stack, which differs between node and bun.
 
 use serde_json::{Map, Number, Value};
 use std::collections::HashMap;
@@ -44,6 +46,12 @@ use yaml_rust2::scanner::{Marker, TScalarStyle};
 const CORE: &str = "tag:yaml.org,2002:";
 /// Values an alias may expand to in one document: the package's `maxAliasCount` guards the same blow-up.
 const MAX_NODES: usize = 1_000_000;
+/// Collections nested deeper than this are refused. yaml-rust2 caps flow nesting at 255
+/// and has no cap on block nesting, and conversion recurses once per level, so an
+/// unbounded block document would overflow the stack and abort the process (a 50 000-deep
+/// `- - - …` did, inside yaml-rust2's own recursive `load`, which is why it is not used). The plugin's own limit is its engine's stack: node fails near 1 000
+/// levels and bun near 8 000, so no exact parity exists past a few hundred.
+pub const MAX_DEPTH: usize = 256;
 
 /// A ledger read as the plugin reads it, plus anything read differently that the caller must report.
 #[derive(Debug)]
@@ -95,7 +103,17 @@ fn yaml_version(source: &str) -> Option<String> {
 fn parse_events(source: &str) -> Result<Value, String> {
     let mut builder = Builder::default();
     let mut parser = Parser::new_from_str(source);
-    parser.load(&mut builder, true).map_err(|e| e.to_string())?;
+    // Drive the parser one event at a time. Its own `load` recurses once per nesting level,
+    // which a deep enough document turns into a stack overflow; this loop does not, and it
+    // stops at the first refusal instead of parsing the rest.
+    loop {
+        let (event, mark) = parser.next_token().map_err(|e| e.to_string())?;
+        let end = event == Event::StreamEnd;
+        builder.on_event(event, mark);
+        if end || builder.error.is_some() {
+            break;
+        }
+    }
     if let Some(e) = builder.error {
         return Err(e);
     }
@@ -151,6 +169,14 @@ impl Builder {
 
 impl MarkedEventReceiver for Builder {
     fn on_event(&mut self, ev: Event, _mark: Marker) {
+        // Once the document is refused, build nothing more: the error is the result.
+        if self.error.is_some() {
+            return;
+        }
+        if matches!(ev, Event::SequenceStart(..) | Event::MappingStart(..)) && self.stack.len() >= MAX_DEPTH {
+            self.error = Some(format!("collections nested deeper than {MAX_DEPTH} levels"));
+            return;
+        }
         match ev {
             Event::DocumentStart => self.documents += 1,
             Event::Scalar(value, style, anchor, tag) => self.push(Node::Scalar { value, style, tag }, anchor),
@@ -586,6 +612,20 @@ mod tests {
         assert_eq!(js("t: !!timestamp 2026-10-19\n"), json!({"t": "2026-10-19T00:00:00.000Z"}));
         assert_eq!(js("t: !!timestamp 2026-10-19T10:30:00.5-05:00\n"), json!({"t": "2026-10-19T15:30:00.500Z"}));
         assert_eq!(js("t: 2026-10-19\n"), json!({"t": "2026-10-19"}), "untagged dates stay strings in 1.2");
+    }
+
+    #[test]
+    fn deep_nesting_is_refused_not_a_stack_overflow() {
+        let block = |n: usize| format!("x:\n  {}v\n", "- ".repeat(n));
+        // On the 2 MiB stack that std threads and tokio's blocking pool give the hook and the MCP server.
+        let run = |src: String| {
+            std::thread::Builder::new().stack_size(2 << 20).spawn(move || parse(&src).map(|_| ())).unwrap().join()
+        };
+        let deep = run(block(50_000)).expect("no stack overflow past the cap");
+        assert!(deep.unwrap_err().contains("deeper than"));
+        assert!(run(block(MAX_DEPTH - 1)).expect("no stack overflow at the cap").is_ok(), "at the cap it reads");
+        let flow = run(format!("x: {}{}\n", "[".repeat(300), "]".repeat(300))).expect("no stack overflow");
+        assert!(flow.is_err());
     }
 
     #[test]
