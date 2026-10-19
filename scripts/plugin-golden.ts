@@ -1,11 +1,14 @@
 // Golden parity file: what the Paseo plugin reads from each ledger in a directory.
 //
 // It must run with the plugin's own code and its own `yaml` package, so copy it
-// into the plugin checkout and run it there:
-//   cp scripts/plugin-golden.ts ~/broomva/apps/maestro-paseo/.golden.ts
-//   (cd ~/broomva/apps/maestro-paseo && bun .golden.ts "$PWD/fixtures/parity/workspace/.control/asks") \
-//     > fixtures/parity/plugin-golden.json
-//   trash ~/broomva/apps/maestro-paseo/.golden.ts
+// into the plugin checkout and run it there. From the maestro checkout:
+//   REPO="$PWD"; PLUGIN=~/broomva/apps/maestro-paseo
+//   cp scripts/plugin-golden.ts "$PLUGIN/.golden.ts"
+//   (cd "$PLUGIN" && bun .golden.ts "$REPO/fixtures/parity/workspace/.control/asks") > "$REPO/golden.tmp" \
+//     && mv "$REPO/golden.tmp" "$REPO/fixtures/parity/plugin-golden.json"
+//   trash "$PLUGIN/.golden.ts"
+// The repo path is taken before the `cd`, and the result lands through a temp file,
+// so a failed run never empties the committed fixture.
 //
 // Each ledger maps to {error} when the plugin refuses it, else to {asks, rows}:
 // `asks` is what decisionsOf reports (handle, entryHash, stateOf), and `rows` is
