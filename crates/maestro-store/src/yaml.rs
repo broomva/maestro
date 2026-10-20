@@ -38,16 +38,18 @@
 //! - whitespace-only lines, and a non-empty document not ending in a newline;
 //! - a lone surrogate escape in a double-quoted scalar, and an escaped line break
 //!   followed by an empty line;
-//! - a continuation line indented at or before its parent collection;
+//! - a continuation line indented at or before its parent collection, except
+//!   a flow collection's `]` or `}` alone at the parent's column;
 //! - a collection as a map key; an implicit key whose `:` is over 1024 UTF-16
-//!   units past its start (its anchor, if any), as the package measures it,
-//!   flow mappings included; and a plain scalar opening with `|`, `>`, `@`,
-//!   `` ` `` or `%`;
+//!   units past its start (its anchor, if any), as the package measures it for
+//!   block keys and flow sequence pairs (refused in flow mappings too, which the
+//!   package reads); a flow sequence pair whose `:` is not on its key's line; and
+//!   a plain scalar opening with `|`, `>`, `@`, `` ` `` or `%`;
 //! - nesting deeper than [`MAX_DEPTH`], and more than [`MAX_NODES`] values;
 //! - anything yaml-rust2 itself cannot parse.
 
 use maestro_core::js::JsValue;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use yaml_rust2::parser::{Event, MarkedEventReceiver, Parser, Tag};
 use yaml_rust2::scanner::{Marker, TScalarStyle};
@@ -163,6 +165,8 @@ fn carry_surrogate_escapes(source: &str) -> Result<(String, HashMap<char, Carrie
     };
     let mut out = String::with_capacity(source.len());
     let mut marks = HashMap::new();
+    // One marker per distinct escape text, so a repeated escape never exhausts the pool.
+    let mut by_text: HashMap<String, char> = HashMap::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i] != '\\' {
@@ -187,8 +191,18 @@ fn carry_surrogate_escapes(source: &str) -> Result<(String, HashMap<char, Carrie
             }
             _ => (None, 6),
         };
-        let mark = free.next().ok_or("too many surrogate escapes to carry")?;
-        marks.insert(mark, Carried { decoded, text: chars[i..i + len].iter().collect() });
+        let text: String = chars[i..i + len].iter().collect();
+        let mark = match by_text.get(&text) {
+            Some(&m) => m,
+            None => {
+                let m = free
+                    .next()
+                    .ok_or_else(|| format!("{OUTSIDE}: more distinct surrogate escapes than can be carried"))?;
+                by_text.insert(text.clone(), m);
+                marks.insert(m, Carried { decoded, text });
+                m
+            }
+        };
         out.push(mark);
         i += len;
     }
@@ -196,6 +210,15 @@ fn carry_surrogate_escapes(source: &str) -> Result<(String, HashMap<char, Carrie
 }
 
 fn parse_events(source: &str, marks: HashMap<char, Carried>) -> Result<JsValue, String> {
+    let builder = build(source, marks)?;
+    match &builder.root {
+        None => Ok(JsValue::Null),
+        Some(node) => resolve(&builder, node).0,
+    }
+}
+
+/// The document's nodes, as the parser's events build them.
+fn build(source: &str, marks: HashMap<char, Carried>) -> Result<Builder, String> {
     let src: Vec<char> = source.chars().collect();
     let line_starts =
         std::iter::once(0).chain(src.iter().enumerate().filter(|(_, c)| **c == '\n').map(|(i, _)| i + 1)).collect();
@@ -212,20 +235,26 @@ fn parse_events(source: &str, marks: HashMap<char, Carried>) -> Result<JsValue, 
             break;
         }
     }
-    if let Some(e) = builder.error {
+    if let Some(e) = builder.error.take() {
         return Err(e);
     }
     if builder.documents > 1 {
         return Err("Source contains multiple documents; the plugin reads one".into());
     }
-    match builder.root {
-        None => Ok(JsValue::Null),
-        Some(node) => {
-            let mut cx =
-                Cx { anchors: &builder.anchors, budget: MAX_NODES, aliases: HashMap::new(), cache: HashMap::new() };
-            to_js(&node, &mut cx, 0)
-        }
-    }
+    Ok(builder)
+}
+
+/// The document's value, and how many values the alias cache held to build it.
+fn resolve(builder: &Builder, node: &Node) -> (Result<JsValue, String>, usize) {
+    let mut cx = Cx {
+        anchors: &builder.anchors,
+        aliased: &builder.aliased,
+        budget: MAX_NODES,
+        aliases: HashMap::new(),
+        cache: HashMap::new(),
+    };
+    let value = to_js(node, &mut cx, 0);
+    (value, cx.cache.values().map(|(_, n)| n).sum())
 }
 
 #[derive(Debug)]
@@ -254,6 +283,8 @@ struct Frame {
     entries_at: Option<usize>,
     /// The line it opens on (0-based).
     line: usize,
+    /// A single-pair mapping inside a flow sequence, whose key must share a line with its `:`.
+    pair: bool,
 }
 
 #[derive(Default)]
@@ -261,6 +292,8 @@ struct Builder {
     stack: Vec<Open>,
     frames: Vec<Frame>,
     anchors: HashMap<usize, Rc<Node>>,
+    /// The anchors some alias names: only these are cached when resolved.
+    aliased: HashSet<usize>,
     root: Option<Node>,
     documents: usize,
     error: Option<String>,
@@ -324,6 +357,18 @@ impl Builder {
         self.frames.iter().rev().find(|f| !f.flow).and_then(|f| f.entries_at)
     }
 
+    /// Line `n` holds a closing `]` or `}` alone (a comment may follow). Its column needs no
+    /// check here: past the parent's the continuation check passes anyway, and below it
+    /// yaml-rust2 refuses the indentation itself.
+    fn closes_alone(&self, n: usize) -> bool {
+        let text: String = self.line(n).iter().collect();
+        let code = match text.find(" #") {
+            Some(i) => &text[..i],
+            None => &text,
+        };
+        matches!(code.trim(), "]" | "}")
+    }
+
     /// Refuse when a line in `from+1 ..= to` holding text is indented at or before `parent`.
     fn check_continuation(&mut self, from: usize, to: usize, what: &str) {
         let Some(parent) = self.parent_column() else { return };
@@ -372,7 +417,7 @@ impl Builder {
     }
 
     /// Carried surrogate escapes back into a scalar: decoded in a double-quoted one, else the text.
-    fn restore(&mut self, value: String, style: TScalarStyle) -> String {
+    fn restore(&mut self, value: String, style: TScalarStyle, at: usize) -> String {
         if self.marks.is_empty() || !value.chars().any(|c| self.marks.contains_key(&c)) {
             return value;
         }
@@ -382,7 +427,13 @@ impl Builder {
                 Some(m) if style == TScalarStyle::DoubleQuoted => match m.decoded {
                     Some(d) => out.push(d),
                     None => {
-                        self.refuse(format!("a lone surrogate escape in a double-quoted scalar (`{}`)", m.text));
+                        // The scalar starts at `at`; its first use of this marker is the escape's line.
+                        let pos = self.src.get(at..).and_then(|rest| rest.iter().position(|&x| x == c));
+                        let n = self.line_of(pos.map_or(at, |p| at + p)) + 1;
+                        self.refuse(format!(
+                            "a lone surrogate escape in a double-quoted scalar (`{}`, line {n})",
+                            m.text
+                        ));
                         return value;
                     }
                 },
@@ -401,12 +452,17 @@ impl Builder {
     /// Checks on a node about to be read as a mapping key at char `at`.
     fn check_key(&mut self, at: usize, value: Option<(&str, TScalarStyle)>) {
         let n = self.line_of(at);
-        let col = at - self.line_starts[n];
-        let before: String = self.line(n)[..col.min(self.line(n).len())].iter().collect();
-        let before = before.trim_end();
+        // Look back from the key over spaces only: copying the line up to every key is quadratic
+        // when many keys share one line.
+        let line_start = self.line_starts[n];
+        let mut j = at.min(self.src.len());
+        while j > line_start && self.src[j - 1] == ' ' {
+            j -= 1;
+        }
         // `? k`: the `?` opens a token (line start, after `- `, or in flow after `[`, `{` or `,`).
-        if let Some(head) = before.strip_suffix('?')
-            && head.chars().next_back().is_none_or(|c| matches!(c, ' ' | '-' | '[' | '{' | ','))
+        if j > line_start
+            && self.src[j - 1] == '?'
+            && (j - 1 == line_start || matches!(self.src[j - 2], ' ' | '-' | '[' | '{' | ','))
         {
             return self.refuse(format!("an explicit key `?` (line {})", n + 1));
         }
@@ -416,7 +472,11 @@ impl Builder {
                 return self.refuse(format!("an empty key (line {})", n + 1));
             }
         }
-        if let Some(units) = self.key_span(at, value)
+        let span = self.key_span(at, value);
+        if span.is_none() && self.frames.last().is_some_and(|f| f.pair) {
+            return self.refuse(format!("a flow sequence pair whose `:` is not on its key's line (line {})", n + 1));
+        }
+        if let Some(units) = span
             && units > MAX_IMPLICIT_KEY
         {
             self.refuse(format!(
@@ -463,6 +523,8 @@ impl Builder {
             }
             i = skip_spaces(i);
         } else {
+            // Back over spaces on the key's line only. An anchor on an earlier line counts for the
+            // package only in a flow sequence pair, which yaml-rust2 refuses itself.
             let mut j = at;
             while j > 0 && src[j - 1] == ' ' {
                 j -= 1;
@@ -588,30 +650,35 @@ impl MarkedEventReceiver for Builder {
                 // value of line breaks alone, which only an empty block scalar can have, is "".
                 let empty_block =
                     matches!(style, TScalarStyle::Literal | TScalarStyle::Folded) && value.chars().all(|c| c == '\n');
-                let value = if empty_block { String::new() } else { self.restore(value, style) };
+                let value = if empty_block { String::new() } else { self.restore(value, style, at) };
                 self.push(Node::Scalar { value, style }, anchor)
             }
-            Event::Alias(id) => self.push(Node::Alias(id), 0),
+            Event::Alias(id) => {
+                self.aliased.insert(id);
+                self.push(Node::Alias(id), 0)
+            }
             Event::SequenceStart(anchor, _) => {
                 if anchor > 0 && self.glued_anchor(at) {
                     return self.refuse(format!("an anchor glued to a flow collection (line {})", line + 1));
                 }
-                let flow = matches!(self.src.get(at), Some('['));
-                // A block sequence's mark can sit on its first item, past its own `-` (an indentless
-                // sequence, as PyYAML writes them): its entries begin at that `-`.
-                let mut dash = at;
-                if !flow && self.src.get(at) != Some(&'-') {
-                    while dash > 0 && self.src[dash - 1] == ' ' {
-                        dash -= 1;
-                    }
-                    if dash > 0 && self.src[dash - 1] == '-' {
-                        dash -= 1;
-                    } else {
-                        dash = at;
-                    }
+                // An indentless sequence (as PyYAML writes them) is marked on its first item, past
+                // its own `-`, and that item may itself open with `[` or `-`. A `-` before the mark,
+                // outside any block sequence, is therefore this sequence's own: its entries begin
+                // there. Inside a block sequence the `-` is the parent's entry, and the mark is ours.
+                let mut r = at.min(self.src.len());
+                while r > 0 && self.src[r - 1] == ' ' {
+                    r -= 1;
                 }
+                let own_dash = (r > 0 && self.src[r - 1] == '-').then(|| r - 1);
+                let in_block_seq =
+                    matches!(self.stack.last(), Some(Open::Seq(..))) && self.frames.last().is_some_and(|f| !f.flow);
+                let in_flow = self.frames.last().is_some_and(|f| f.flow);
+                let (flow, dash) = match own_dash {
+                    Some(d) if !in_block_seq && !in_flow => (false, d),
+                    _ => (matches!(self.src.get(at), Some('[')), at),
+                };
                 let entries_at = (!flow).then(|| dash - self.line_starts[self.line_of(dash)]);
-                self.frames.push(Frame { flow, entries_at, line });
+                self.frames.push(Frame { flow, entries_at, line, pair: false });
                 self.stack.push(Open::Seq(anchor, Vec::new()))
             }
             Event::MappingStart(anchor, _) => {
@@ -619,14 +686,22 @@ impl MarkedEventReceiver for Builder {
                     return self.refuse(format!("an anchor glued to a flow collection (line {})", line + 1));
                 }
                 let flow = matches!(self.src.get(at), Some('{'));
-                self.frames.push(Frame { flow, entries_at: None, line });
+                // A single pair in a flow sequence (`[k: v]`) opens a mapping with no `{`.
+                let pair = !flow
+                    && matches!(self.stack.last(), Some(Open::Seq(..)))
+                    && self.frames.last().is_some_and(|f| f.flow);
+                self.frames.push(Frame { flow, entries_at: None, line, pair });
                 self.stack.push(Open::Map(anchor, Vec::new(), None))
             }
             Event::SequenceEnd | Event::MappingEnd => {
                 if let Some(frame) = self.frames.pop()
                     && frame.flow
                 {
-                    self.check_continuation(frame.line, line, "flow collection");
+                    // The package lets a flow collection close on a line of its own at the parent's
+                    // column, `]` or `}` alone (JSON style); any other line must be past it. An inner
+                    // collection's closing line is still checked by the collection around it.
+                    let last = if line > frame.line && self.closes_alone(line) { line - 1 } else { line };
+                    self.check_continuation(frame.line, last, "flow collection");
                 }
                 match self.stack.pop() {
                     Some(Open::Seq(anchor, items)) => self.push(Node::Seq(items), anchor),
@@ -655,10 +730,12 @@ struct AliasData {
 /// each anchored node's value with its size. An alias returns that value, as the package's
 /// `Alias.resolve` returns `data.res`, so the aliases inside it are never counted twice. Every
 /// node spends one as it is built, and every alias copy is charged by its size, so memory stays
-/// bounded however aliases nest. The cached copy of an anchor is not charged again: it is no
-/// larger than what building it spent, and charging it would refuse a document for being anchored.
+/// bounded however aliases nest. Only an anchor some alias names is cached, and its cached copy
+/// is charged too: nested anchors would otherwise hold depth × size in copies. An anchor no alias
+/// names costs only what its value costs.
 struct Cx<'a> {
     anchors: &'a HashMap<usize, Rc<Node>>,
+    aliased: &'a HashSet<usize>,
     budget: usize,
     aliases: HashMap<usize, AliasData>,
     cache: HashMap<usize, (JsValue, usize)>,
@@ -713,7 +790,11 @@ fn to_js(node: &Node, cx: &mut Cx<'_>, depth: usize) -> Result<JsValue, String> 
         Node::Scalar { value, style } => Ok(scalar(value, *style).into_value()),
         Node::Anchored(id, inner) => {
             let value = to_js(inner, cx, depth)?;
-            cx.cache.insert(*id, (value.clone(), size(&value)));
+            if cx.aliased.contains(id) {
+                let n = size(&value);
+                cx.spend(n)?;
+                cx.cache.insert(*id, (value.clone(), n));
+            }
             Ok(value)
         }
         Node::Alias(id) => {
@@ -1055,6 +1136,30 @@ mod tests {
         assert!(refused("v: &a [*a]\n").contains("nested deeper"), "a self-alias is refused, not looped");
     }
 
+    /// How many values the alias cache held to read `source`.
+    fn cached(source: &str) -> usize {
+        let builder = build(source, HashMap::new()).unwrap();
+        let (value, held) = resolve(&builder, builder.root.as_ref().unwrap());
+        value.unwrap();
+        held
+    }
+
+    #[test]
+    fn only_an_aliased_anchor_is_cached() {
+        // Nested anchors, none aliased: no copy is held, so memory is not depth × size.
+        let mut doc = format!("[{}]", vec!["x"; 1000].join(","));
+        for i in 0..50 {
+            doc = format!("&n{i} [{doc}]");
+        }
+        assert_eq!(cached(&format!("big: {doc}\n")), 0);
+        // An aliased anchor is held once, at its size, and that copy is charged to the budget.
+        assert_eq!(cached("a: &a [x, y]\nb: *a\nc: *a\n"), 3);
+        // 2/5 of the budget: value and alias copy alone fit (4/5); with the cached copy they do not.
+        let n = MAX_NODES * 2 / 5;
+        let held = format!("big: &a [{}]\nuse: *a\n", vec!["0"; n].join(","));
+        assert!(refused(&held).contains("expands past"), "value, cached copy and alias copy: 6/5 of the budget");
+    }
+
     #[test]
     fn alias_copies_are_charged_to_the_value_budget() {
         // An anchor of empty lists has aliasCount 0, so maxAliasCount never trips; the budget does.
@@ -1106,6 +1211,55 @@ mod tests {
         assert!(parse("a: @x\n").is_err(), "a reserved indicator: yaml-rust2 refuses it");
         assert!(parse(&format!("{}: v\n", "k".repeat(1025))).is_err());
         assert!(parse(&format!("{}: v\n", "k".repeat(1024))).is_ok(), "1024 chars is still an implicit key");
+    }
+
+    #[test]
+    fn pyyaml_indentless_sequences_read_whatever_their_first_item() {
+        // The sequence is marked on its first item; a `[` or `-` there is the item, not the sequence.
+        assert_eq!(js("a:\n- [x]\nb: 1\n"), json!({"a": [["x"]], "b": 1}));
+        assert_eq!(js("k:\n- - x\n- 'a\n  b'\n"), json!({"k": [["x"], "a b"]}));
+        assert_eq!(js("k:\n- - a\n- []\n- 'q\n\n  r'\n"), json!({"k": [["a"], [], "q\nr"]}));
+        // Inside a block sequence, the `-` before a `[` or `-` is the parent's entry, so a nested
+        // sequence's entries begin at its own `-`: a continuation must pass that column.
+        assert_eq!(js("k:\n  - [x]\n  - - y\n"), json!({"k": [["x"], ["y"]]}));
+        assert!(refused("k:\n  - - 'a\n    b'\n").contains("continuation"));
+        assert_eq!(js("k:\n  - - 'a\n     b'\n"), json!({"k": [["a b"]]}));
+    }
+
+    #[test]
+    fn a_flow_collection_closes_alone_at_its_parents_column() {
+        assert_eq!(js("a:\n  o: [\n    x\n  ]\nb: 1\n"), json!({"a": {"o": ["x"]}, "b": 1}));
+        assert_eq!(js("a:\n  o: {\n    x: 1\n  } # done\n"), json!({"a": {"o": {"x": 1}}}));
+        // Only alone, and only the outermost: `]]` there is refused, as the package refuses it.
+        assert!(refused("a:\n  o: [[\n    x\n  ]]\n").starts_with(OUTSIDE));
+        assert!(refused("a:\n  o: [\n    x,\n  y]\n").starts_with(OUTSIDE));
+    }
+
+    #[test]
+    fn a_flow_sequence_pair_keeps_its_colon_on_the_keys_line() {
+        assert!(refused("o: {f: [a\n  : b]}\n").contains("pair"));
+        assert!(refused("o: [{}, n\n  : v]\n").contains("pair"));
+        assert_eq!(js("o: {f: [a: b]}\n"), json!({"o": {"f": [{"a": "b"}]}}));
+    }
+
+    #[test]
+    fn keys_sharing_a_line_are_checked_in_linear_time() {
+        let keys: Vec<String> = (0..30_000).map(|i| format!("k{i}: 1")).collect();
+        let doc = format!("x: {{{}}}\n", keys.join(", "));
+        let started = std::time::Instant::now();
+        assert!(parse(&doc).is_ok());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_repeated_escape_shares_one_carrier() {
+        // 80k uses of one escape: more than the private-use pool holds, so one carrier each would fail.
+        let doc = format!("note: {}\n", "\\uD83D ".repeat(80_000));
+        assert!(parse(&doc).is_ok(), "{:?}", parse(&doc).err());
+        assert!(refused("a: x\nb: \"\\uD800\"\n").contains("line 2"), "the lone escape's line is named");
+        // A document holding every private-use character leaves no carrier: refused, labelled.
+        let held: String = ('\u{F0000}'..='\u{FFFFD}').chain('\u{E000}'..='\u{F8FF}').collect();
+        assert!(refused(&format!("note: x{held} \\uD800\n")).starts_with(OUTSIDE));
     }
 
     #[test]

@@ -583,6 +583,156 @@
    "{\"id\":\"a\",\"q\":\"text\\n\"}"
   ]
  },
+ "r7-close-b-4.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "ca2aa81b9011cef2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"options\":[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"}]}"
+  ]
+ },
+ "r7-close-bb-4.yaml": {
+  "error": "it has a YAML error: Flow sequence in block collection must be sufficiently indented and end with a ] at line 5, column 5:"
+ },
+ "r7-close-bm-4.yaml": {
+  "error": "it has a YAML error: Unexpected scalar at node end at line 6, column 6:"
+ },
+ "r7-close-comment.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "75a2ce1fb56be9db",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"o\":{\"x\":1}}"
+  ]
+ },
+ "r7-mclose-4.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8557dab2b3ac742d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"opts\":{\"a\":1}}"
+  ]
+ },
+ "r7-nested-dash-dquote.yaml": {
+  "error": "it has a YAML error: Missing closing \"quote at line 2, column 9:"
+ },
+ "r7-nested-dash-quote-ok.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8489a5deb454a360",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\"}"
+  ]
+ },
+ "r7-nested-dash-quote.yaml": {
+  "error": "it has a YAML error: Missing closing 'quote at line 2, column 9:"
+ },
+ "r7-pair-nl-after-empty.yaml": {
+  "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 3, column 17:"
+ },
+ "r7-pair-nl-in-map.yaml": {
+  "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 3, column 17:"
+ },
+ "r7-pyy-b-pred.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8489a5deb454a360",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\"}"
+  ]
+ },
+ "r7-pyy-evidence.yaml": {
+  "asks": [
+   {
+    "id": "e",
+    "hash": "ad9b79075d2f6146",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"evidence\":[[]],\"id\":\"e\",\"question\":\"q\"}"
+  ]
+ },
+ "r7-pyy-min.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8489a5deb454a360",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\"}"
+  ]
+ },
+ "r7-pyy-min2.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8489a5deb454a360",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\"}"
+  ]
+ },
+ "r7-pyy-nested.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "fbaaf196436650c4",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"evidence\":[[\"x\",\"y\"],\"see\\nthis\"],\"id\":\"a\"}"
+  ]
+ },
+ "r7-seq-items.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "634fac386492349d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"k\":[[\"x\"],[\"y\"]]}"
+  ]
+ },
+ "r7-seqclose-dash.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "35fc3604175895cb",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"v\":[[\"x\"]]}"
+  ]
+ },
  "surrogate.yaml": {
   "asks": [
    {
