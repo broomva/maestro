@@ -95,7 +95,7 @@ read, that count becomes a lower bound and the error is reported under `worktree
   - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.
     So a torn last line, a huge number or a lone surrogate never hides or resurrects a flag.
   - **Proof:**
-    - `fixtures/parity/plugin-golden.json` is the plugin's own reading of a 83-ledger edge corpus,
+    - `fixtures/parity/plugin-golden.json` is the plugin's own reading of a 90-ledger edge corpus,
       written by `scripts/plugin-golden.ts`.
     - The test `every_ledger_reads_as_the_plugin_reads_it` holds each ledger to one class: read to the
       byte, refused by both, or refused as outside the subset. The class sizes are pinned.

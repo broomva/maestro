@@ -526,6 +526,63 @@
    "{\"id\":\"vstr\",\"v\":\"12\"}"
   ]
  },
+ "r6-b1-escnl-empty.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8658582a2d89073a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"question\":\"Ship it  today?\"}"
+  ]
+ },
+ "r6-b2-pred-dash.yaml": {
+  "error": "it has a YAML error: Missing closing \"quote at line 4, column 11:"
+ },
+ "r6-bm-anchor-glued.yaml": {
+  "error": "it has a YAML error: Tags and anchors must be separated from the next token by white space at line 3, column 10:"
+ },
+ "r6-bm-q-in-block.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "2d74f6e43c709c5f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"question\":\"? or wait\\nmore\\n\"}"
+  ]
+ },
+ "r6-c1-aken.yaml": {
+  "error": "it has a YAML error: Flow sequence in block collection must be sufficiently indented and end with a ] at line 4, column 1:"
+ },
+ "r6-c2-escaped-bs.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "571f1175076ae82a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"x\\\\uD83D\"}"
+  ]
+ },
+ "r6-c2-header-comment.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "d50a3fe31b37e159",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"text\\n\"}"
+  ]
+ },
  "surrogate.yaml": {
   "asks": [
    {

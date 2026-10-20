@@ -426,6 +426,23 @@ impl Builder {
         }
     }
 
+    /// `&a{…}` or `&a[…]`: the package wants white space after an anchor; yaml-rust2 ends the
+    /// name at the bracket and reads on.
+    fn glued_anchor(&self, at: usize) -> bool {
+        let src = &self.src;
+        match src.get(at) {
+            Some('[' | '{') => at > 0 && !src[at - 1].is_whitespace(),
+            Some('&') => {
+                let mut i = at + 1;
+                while src.get(i).is_some_and(|c| !c.is_whitespace() && !matches!(c, ',' | '[' | ']' | '{' | '}')) {
+                    i += 1;
+                }
+                matches!(src.get(i), Some('[' | '{'))
+            }
+            _ => false,
+        }
+    }
+
     /// What the package measures for `KEY_OVER_1024_CHARS`: the source from the key's start (its
     /// anchor, if it has one) to its `:` indicator, in UTF-16 units. A carried escape counts as
     /// the text it stands for. `None` when no `:` follows on the line, as in `{a, b}`.
@@ -576,6 +593,9 @@ impl MarkedEventReceiver for Builder {
             }
             Event::Alias(id) => self.push(Node::Alias(id), 0),
             Event::SequenceStart(anchor, _) => {
+                if anchor > 0 && self.glued_anchor(at) {
+                    return self.refuse(format!("an anchor glued to a flow collection (line {})", line + 1));
+                }
                 let flow = matches!(self.src.get(at), Some('['));
                 // A block sequence's mark can sit on its first item, past its own `-` (an indentless
                 // sequence, as PyYAML writes them): its entries begin at that `-`.
@@ -595,6 +615,9 @@ impl MarkedEventReceiver for Builder {
                 self.stack.push(Open::Seq(anchor, Vec::new()))
             }
             Event::MappingStart(anchor, _) => {
+                if anchor > 0 && self.glued_anchor(at) {
+                    return self.refuse(format!("an anchor glued to a flow collection (line {})", line + 1));
+                }
                 let flow = matches!(self.src.get(at), Some('{'));
                 self.frames.push(Frame { flow, entries_at: None, line });
                 self.stack.push(Open::Map(anchor, Vec::new(), None))
@@ -1083,6 +1106,14 @@ mod tests {
         assert!(parse("a: @x\n").is_err(), "a reserved indicator: yaml-rust2 refuses it");
         assert!(parse(&format!("{}: v\n", "k".repeat(1025))).is_err());
         assert!(parse(&format!("{}: v\n", "k".repeat(1024))).is_ok(), "1024 chars is still an implicit key");
+    }
+
+    #[test]
+    fn an_anchor_glued_to_a_flow_collection_is_refused() {
+        // The package wants white space after an anchor; yaml-rust2 ends the name at the bracket.
+        assert!(refused("x: &1{a: b}\n").contains("glued"));
+        assert!(refused("x: &1[a]\n").contains("glued"));
+        assert_eq!(js("x: &1 {a: b}\ny: *1\n"), json!({"x": {"a": "b"}, "y": {"a": "b"}}));
     }
 
     #[test]
