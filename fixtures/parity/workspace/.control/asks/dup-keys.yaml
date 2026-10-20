@@ -1,0 +1,4 @@
+asks:
+  - id: dup
+    status: open
+    status: answered

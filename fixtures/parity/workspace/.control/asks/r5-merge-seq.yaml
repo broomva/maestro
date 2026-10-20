@@ -1,0 +1,4 @@
+asks:
+  - id: okay2
+    a: 1
+    !!merge <<: [{a: 9, b: 2}, {c: 3}]

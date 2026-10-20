@@ -1,0 +1,7 @@
+asks:
+  - id: inf
+    a: .inf
+    b: -.Inf
+    c: .NaN
+    d: .nan
+    e: +.INF

@@ -1,0 +1,11 @@
+asks:
+  - id: keys
+    meta:
+      0x10: hex
+      1.0: float
+      07: lead
+      ~: nullkey
+      true: boolkey
+      10: ten
+      2: two
+      "3": three

@@ -200,9 +200,10 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                 other => return Err(McpError::invalid_params(format!("unknown ask state `{other}`"), None)),
             };
             let section = store.asks();
-            let waiting: Vec<_> = views::unlanded(store, section.data.as_deref().unwrap_or_default());
+            let unlanded = views::unlanded(store, section.data.as_deref().unwrap_or_default());
+            let waiting = unlanded.data.clone().unwrap_or_default();
             let limit = a.limit.unwrap_or(50);
-            let rows: Vec<Value> = section
+            let matching: Vec<_> = section
                 .data
                 .iter()
                 .flatten()
@@ -210,6 +211,10 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                 .filter(|(_, ask)| want.is_none_or(|w| ask.state() == w))
                 .filter(|(_, ask)| !a.blocking || ask.blocking)
                 .filter(|(_, ask)| a.project.is_none() || ask.project == a.project)
+                .collect();
+            let total = matching.len();
+            let rows: Vec<Value> = matching
+                .into_iter()
                 .take(limit)
                 .map(|(lf, ask)| {
                     json!({
@@ -227,9 +232,16 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                     })
                 })
                 .collect();
-            Ok(
-                json!({ "source": section.source, "errors": section.errors, "readable": section.data.is_some(), "asks": rows }),
-            )
+            let mut errors = section.errors;
+            errors.extend(unlanded.errors);
+            Ok(json!({
+                "source": section.source,
+                "errors": errors,
+                "readable": section.data.is_some(),
+                "total": total,
+                "truncated": total > rows.len(),
+                "asks": rows,
+            }))
         }
         "maestro_ask_get" => {
             let a: AskGetArgs = parse(args)?;
@@ -243,8 +255,25 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                 .flat_map(|lf| lf.ledger.asks.iter())
                 .filter(|ask| ask.uid.as_deref() == Some(&a.id) || (ask.uid.is_none() && ask.id == a.id))
                 .collect();
+            // A ledger that did not parse, or an entry in it that did not, may be the one asked for:
+            // that is "unreadable", which is not the same as "no such ask".
+            let file_at = format!("{}/{}", maestro_store::ASKS_DIR, a.ledger);
+            let unread: Vec<_> = section
+                .errors
+                .iter()
+                .filter(|e| e.at == file_at || e.at.starts_with(&format!("{file_at}#")) || e.at == section.source)
+                .cloned()
+                .collect();
             match matches.as_slice() {
-                [ask] => Ok(json!({ "source": section.source, "state": ask.state(), "hash": ask.hash(), "ask": ask })),
+                [ask] => Ok(
+                    json!({ "source": section.source, "state": ask.state(), "hash": ask.hash(), "ask": ask, "row": ask.row }),
+                ),
+                [] if !unread.is_empty() => Ok(json!({
+                    "source": section.source,
+                    "state": "unreadable",
+                    "detail": format!("{}#{} was not found, and part of {} could not be read", a.ledger, a.id, a.ledger),
+                    "errors": unread,
+                })),
                 [] => {
                     Err(McpError::invalid_params(format!("no ask {}#{} in {}", a.ledger, a.id, section.source), None))
                 }
@@ -302,14 +331,28 @@ pub const RESOURCES: &[(&str, &str, &str)] = &[
     ("maestro://context", "context", "Governance context for this server's workspace (markdown)"),
 ];
 
+/// A long-lived server. It keeps where to read, never what it read: each request
+/// builds its own [`Store`], so a git revision resolves anew per call and the server
+/// follows `origin/main` as it moves instead of answering from the commit it started on.
 #[derive(Clone)]
 pub struct MaestroServer {
-    store: Arc<Store>,
+    paths: Arc<maestro_store::Paths>,
+    source: maestro_store::TreeSource,
 }
 
 impl MaestroServer {
     pub fn new(store: Store) -> Self {
-        Self { store: Arc::new(store) }
+        Self { paths: Arc::new(store.paths), source: store.tree.source }
+    }
+
+    /// The store one request reads: resolved now, consistent within the request.
+    pub fn store(&self) -> Store {
+        Store::new((*self.paths).clone(), self.source.clone())
+    }
+
+    /// Run one tool against a store resolved for this call.
+    pub fn call(&self, name: &str, args: Value) -> Result<Value, McpError> {
+        call(&self.store(), name, args)
     }
 
     pub fn tools() -> Vec<Tool> {
@@ -330,7 +373,7 @@ impl MaestroServer {
     }
 
     fn read_resource_text(&self, uri: &str) -> Result<(String, &'static str), McpError> {
-        let store = &self.store;
+        let store = &self.store();
         match uri {
             "maestro://snapshot" => Ok((json!(views::snapshot(store)).to_string(), "application/json")),
             "maestro://needs" => Ok((json!(views::snapshot(store).needs).to_string(), "application/json")),
@@ -382,12 +425,12 @@ impl ServerHandler for MaestroServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        let store = self.store.clone();
+        let this = self.clone();
         async move {
             let name = request.name.to_string();
             let args = Value::Object(request.arguments.unwrap_or_default());
             // Reads shell out to git; keep them off the async workers.
-            let outcome = tokio::task::spawn_blocking(move || call(&store, &name, args))
+            let outcome = tokio::task::spawn_blocking(move || this.call(&name, args))
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             match outcome {
@@ -430,7 +473,7 @@ impl ServerHandler for MaestroServer {
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<GetPromptResult, McpError>> + Send + '_ {
-        let store = self.store.clone();
+        let this = self.clone();
         async move {
             if request.name != "maestro_context" {
                 return Err(McpError::invalid_params(format!("unknown prompt `{}`", request.name), None));
@@ -438,7 +481,7 @@ impl ServerHandler for MaestroServer {
             let args = request.arguments.unwrap_or_default();
             let get = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
             let scope = ContextScope { cwd: get("cwd"), project: get("project"), initiative: get("initiative") };
-            let packet = tokio::task::spawn_blocking(move || views::context(&store, scope))
+            let packet = tokio::task::spawn_blocking(move || views::context(&this.store(), scope))
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             let mut result =

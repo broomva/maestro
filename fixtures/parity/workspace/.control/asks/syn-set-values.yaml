@@ -1,0 +1,3 @@
+asks:
+  - id: setv
+    s: !!set {a: , b: 1}

@@ -1,0 +1,4 @@
+asks:
+  - id: inf-answer
+    blocking: true
+    answer: .inf

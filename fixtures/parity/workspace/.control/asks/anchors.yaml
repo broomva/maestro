@@ -1,0 +1,7 @@
+base: &b {x: 1, y: [1, 2]}
+asks:
+  - id: anchored
+    ref: *b
+    merged:
+      <<: *b
+      z: 3

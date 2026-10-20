@@ -1,0 +1,3 @@
+asks:
+  - id: okay
+    v: !!set {1: x, "1": }

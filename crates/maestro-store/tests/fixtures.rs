@@ -99,9 +99,28 @@ fn fleet_takes_the_highest_numbered_tick() {
     assert_eq!(fleet[0].sessions, 2);
 }
 
+/// Copy a directory tree (the fixtures are small and hold no links).
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
 #[test]
 fn context_scopes_to_the_initiative_of_the_cwd() {
-    let s = store();
+    // The project comes from the repo holding the cwd, so the cwd must exist and sit in one.
+    let tmp = tempfile::tempdir().unwrap();
+    copy_tree(&fixture(), tmp.path());
+    let s = Store::new(Paths::under(tmp.path()), TreeSource::WorkingTree);
+    std::fs::create_dir_all(s.paths.workspace.join("apps/demo/.git")).unwrap();
+    std::fs::create_dir_all(s.paths.workspace.join("apps/demo/src")).unwrap();
     let cwd = s.paths.workspace.join("apps/demo/src");
     let packet = views::context(
         &s,
@@ -198,11 +217,282 @@ fn git_revision_reads_and_unlanded_answers() {
     let demo =
         |v: &[maestro_store::LedgerFile]| v.iter().find(|l| l.file == "demo-arc.yaml").unwrap().ledger.asks[0].state();
     assert_eq!(demo(asks.data.as_ref().unwrap()), AskState::Open);
-    let waiting = views::unlanded(&at_main, asks.data.as_deref().unwrap());
+    let waiting = views::unlanded(&at_main, asks.data.as_deref().unwrap()).data.unwrap();
     assert_eq!(waiting.len(), 1);
     assert_eq!(waiting[0].id, "merge-now");
 
     let local = Store::new(paths, TreeSource::WorkingTree);
     assert_eq!(demo(&local.asks().data.unwrap()), AskState::Answered);
-    assert!(views::unlanded(&local, &[]).is_empty());
+    assert!(views::unlanded(&local, &[]).data.unwrap().is_empty());
+}
+
+#[test]
+fn a_directory_named_like_a_ledger_is_not_read_in_git_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks/folder.yaml")).unwrap();
+    std::fs::write(ws.join(".control/asks/folder.yaml/inner.txt"), "x").unwrap();
+    std::fs::write(ws.join(".control/asks/real.yaml"), "asks:\n  - id: a\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let asks = Store::new(paths, TreeSource::GitRev("main".into())).asks();
+    let files: Vec<_> = asks.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
+    assert_eq!(files, ["real.yaml"]);
+    // Not parsed as a ledger, and reported, as the plugin's `lstat` reports "not a regular file".
+    assert_eq!(asks.errors.len(), 1, "{:?}", asks.errors);
+    assert!(asks.errors[0].at.ends_with("folder.yaml") && asks.errors[0].reason.contains("not a regular file"));
+}
+
+#[test]
+fn an_unknown_revision_is_unreadable_not_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/real.yaml"), "asks:\n  - id: a\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let s = Store::new(paths, TreeSource::GitRev("no-such-ref".into()));
+    assert!(s.asks().data.is_none());
+    assert!(s.preauth().data.is_none());
+    assert!(views::snapshot(&s).needs.data.is_none(), "needs are unknown, not zero");
+}
+
+#[test]
+fn unlanded_reports_an_unreadable_working_tree_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks:\n  - id: a\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks: [unclosed\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let s = Store::new(paths, TreeSource::GitRev("main".into()));
+    let at_main = s.asks();
+    let waiting = views::unlanded(&s, at_main.data.as_deref().unwrap());
+    assert_eq!(waiting.errors.len(), 1, "{:?}", waiting.errors);
+    assert!(waiting.errors[0].at.starts_with("worktree:"), "{:?}", waiting.errors);
+    let snap = views::snapshot(&s);
+    assert!(
+        snap.asks.errors.iter().any(|e| e.at.starts_with("worktree:")),
+        "the snapshot shows the count is a lower bound"
+    );
+}
+
+#[test]
+fn project_is_the_repo_not_the_second_path_part() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::create_dir_all(ws.join("core/maestro/.git")).unwrap();
+    std::fs::create_dir_all(ws.join("core/maestro/crates/x")).unwrap();
+    std::fs::create_dir_all(ws.join("research/notes")).unwrap();
+    assert_eq!(views::project_of(&ws.join("core/maestro/crates/x"), &ws).as_deref(), Some("maestro"));
+    assert_eq!(views::project_of(&ws.join("core/maestro"), &ws).as_deref(), Some("maestro"));
+    assert_eq!(views::project_of(&ws.join("research/notes"), &ws), None, "a folder of the workspace repo");
+    assert_eq!(views::project_of(&ws, &ws), None);
+    assert_eq!(views::project_of(Path::new("/elsewhere"), &ws), None);
+    assert_eq!(views::project_of(&ws.join("apps/absent/src"), &ws), None, "not on disk: its repo cannot be known");
+    assert_eq!(views::project_of(&ws.join("core/maestro/../maestro/crates/x"), &ws).as_deref(), Some("maestro"));
+}
+
+/// The plugin's own reading of an edge corpus (`scripts/plugin-golden.ts`), held to the byte.
+/// Every ledger lands in exactly one class: read identically (handle, entry hash, state and
+/// canonical row), refused by both readers, or outside the YAML subset and refused with that
+/// reason named. Nothing is read differently, and the class sizes are pinned so none moves silently.
+#[test]
+fn every_ledger_reads_as_the_plugin_reads_it() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/parity");
+    let golden: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("plugin-golden.json")).unwrap()).unwrap();
+    let mut paths = Paths::under(&root);
+    paths.workspace = root.join("workspace");
+    let asks = Store::new(paths, TreeSource::WorkingTree).asks();
+    let ledgers = asks.data.as_ref().unwrap();
+    let error_for = |file: &str| asks.errors.iter().find(|e| e.at == format!(".control/asks/{file}")).cloned();
+    let (mut same, mut both_refuse, mut outside) = (0, 0, 0);
+    for (file, want) in golden.as_object().unwrap() {
+        let read = ledgers.iter().find(|l| &l.file == file);
+        if let Some(e) = error_for(file)
+            && e.reason.contains(maestro_store::yaml::OUTSIDE)
+        {
+            assert!(read.is_none(), "{file}: refused and read at once");
+            outside += 1;
+            continue;
+        }
+        if let Some(reason) = want.get("error") {
+            assert!(
+                error_for(file).is_some() && read.is_none(),
+                "{file}: the plugin refuses it ({reason}) and so must Maestro"
+            );
+            both_refuse += 1;
+            continue;
+        }
+        assert!(error_for(file).is_none(), "{file}: {:?}", error_for(file));
+        let ledger = read.unwrap_or_else(|| panic!("{file} not read"));
+        let got: Vec<(String, String, String)> = ledger
+            .ledger
+            .asks
+            .iter()
+            .map(|a| {
+                (
+                    a.handle().to_string(),
+                    a.hash(),
+                    serde_json::to_value(a.state()).unwrap().as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, String, String)> = want["asks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["id"].as_str().unwrap().into(),
+                    a["hash"].as_str().unwrap().into(),
+                    a["state"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        assert_eq!(got, expected, "{file}");
+        let rows: Vec<&str> = want["rows"].as_array().unwrap().iter().filter_map(|r| r.as_str()).collect();
+        for ask in &ledger.ledger.asks {
+            let canon = maestro_core::ask::canonical_string(&ask.row);
+            assert!(rows.contains(&canon.as_str()), "{file}#{}: {canon} not in {rows:?}", ask.id);
+        }
+        same += 1;
+    }
+    assert_eq!((same, both_refuse, outside, golden.as_object().unwrap().len()), (63, 5, 68, 136));
+}
+
+#[test]
+fn a_worktree_inside_its_repo_names_the_repo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::create_dir_all(ws.join("core/life/.git")).unwrap();
+    let wt = ws.join("core/life/.claude/worktrees/feat-x");
+    std::fs::create_dir_all(wt.join("src")).unwrap();
+    std::fs::write(wt.join(".git"), "gitdir: ../../../.git/worktrees/feat-x\n").unwrap();
+    assert_eq!(views::project_of(&wt.join("src"), &ws).as_deref(), Some("life"));
+    // A worktree of the workspace itself names no project: its gitdir is in the workspace's `.git`.
+    let own = ws.join(".claude/worktrees/feat-y");
+    std::fs::create_dir_all(own.join("src")).unwrap();
+    std::fs::write(own.join(".git"), format!("gitdir: {}\n", ws.join(".git/worktrees/feat-y").display())).unwrap();
+    assert_eq!(views::project_of(&own.join("src"), &ws), None);
+}
+
+#[test]
+fn ledgers_named_yml_are_read_and_symlinks_are_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let dir = ws.join(".control/asks");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("short.yml"), "asks:\n  - id: a\n").unwrap();
+    std::fs::write(tmp.path().join("target.yaml"), "asks:\n  - id: b\n").unwrap();
+    std::os::unix::fs::symlink(tmp.path().join("target.yaml"), dir.join("linked.yaml")).unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    let asks = Store::new(paths.clone(), TreeSource::WorkingTree).asks();
+    let files: Vec<_> = asks.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
+    assert_eq!(files, ["short.yml"]);
+    assert_eq!(asks.errors.len(), 1, "{:?}", asks.errors);
+    assert!(asks.errors[0].at.ends_with("linked.yaml") && asks.errors[0].reason.contains("not a regular file"));
+    // In git mode a symlink is a blob of mode 120000: reported the same way.
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let at_main = Store::new(paths, TreeSource::GitRev("main".into())).asks();
+    let files: Vec<_> = at_main.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
+    assert_eq!(files, ["short.yml"]);
+    let linked: Vec<_> = at_main.errors.iter().filter(|e| e.at.ends_with("linked.yaml")).collect();
+    assert_eq!(linked.len(), 1, "{:?}", at_main.errors);
+    assert!(linked[0].reason.contains("not a regular file"), "the link itself, never its target text: {linked:?}");
+}
+
+#[test]
+fn no_local_asks_directory_is_no_local_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks:\n  - id: a\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    std::fs::remove_dir_all(ws.join(".control/asks")).unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let s = Store::new(paths, TreeSource::GitRev("main".into()));
+    let waiting = views::unlanded(&s, s.asks().data.as_deref().unwrap());
+    assert!(waiting.errors.is_empty() && waiting.data.unwrap().is_empty());
+    assert!(!views::snapshot(&s).asks.is_degraded(), "a healthy read is not made to look partial");
+}
+
+#[test]
+fn a_ledger_over_the_plugin_limit_is_refused_and_huge_files_are_never_read_whole() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let dir = ws.join(".control/asks");
+    std::fs::create_dir_all(&dir).unwrap();
+    // One byte past LEDGER_LIMIT: valid YAML, refused as the plugin's readLedger refuses it.
+    let mut big = String::from("asks:\n  - id: a\n#");
+    big.push_str(&"x".repeat(maestro_store::LEDGER_LIMIT + 1 - big.len()));
+    assert_eq!(big.len(), maestro_store::LEDGER_LIMIT + 1);
+    std::fs::write(dir.join("big.yaml"), &big).unwrap();
+    // Past the read cap: refused before it is read, in both modes.
+    std::fs::write(dir.join("huge.yaml"), vec![b'#'; maestro_store::tree::MAX_READ + 1]).unwrap();
+    std::fs::write(dir.join("ok.yaml"), "asks:\n  - id: ok\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    for source in [TreeSource::WorkingTree, TreeSource::GitRev("main".into())] {
+        if matches!(source, TreeSource::GitRev(_)) {
+            git(&ws, &["init", "-q", "-b", "main"]);
+            git(&ws, &["add", "."]);
+            git(&ws, &["commit", "-q", "-m", "seed"]);
+        }
+        let asks = Store::new(paths.clone(), source.clone()).asks();
+        let files: Vec<_> = asks.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
+        assert_eq!(files, ["ok.yaml"], "{source}");
+        let reason =
+            |f: &str| asks.errors.iter().find(|e| e.at.ends_with(f)).map(|e| e.reason.clone()).unwrap_or_default();
+        assert!(reason("big.yaml").contains("over 1048576 bytes"), "{source}: {}", reason("big.yaml"));
+        assert!(reason("huge.yaml").contains("read limit"), "{source}: {}", reason("huge.yaml"));
+    }
+}
+
+#[test]
+fn a_ledger_that_is_not_utf8_is_refused_by_name_in_both_modes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let dir = ws.join(".control/asks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut bad = b"asks:\n  - id: a\n    note: x".to_vec();
+    bad.extend_from_slice(&[0xff, 0xfe]);
+    bad.push(b'\n');
+    std::fs::write(dir.join("latin.yaml"), bad).unwrap();
+    std::fs::write(dir.join("ok.yaml"), "asks:\n  - id: ok\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    for source in [TreeSource::WorkingTree, TreeSource::GitRev("main".into())] {
+        if matches!(source, TreeSource::GitRev(_)) {
+            git(&ws, &["init", "-q", "-b", "main"]);
+            git(&ws, &["add", "."]);
+            git(&ws, &["commit", "-q", "-m", "seed"]);
+        }
+        let asks = Store::new(paths.clone(), source.clone()).asks();
+        let files: Vec<_> = asks.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
+        assert_eq!(files, ["ok.yaml"], "{source}");
+        let reason =
+            asks.errors.iter().find(|e| e.at.ends_with("latin.yaml")).map(|e| e.reason.clone()).unwrap_or_default();
+        assert!(reason.contains("not valid UTF-8"), "{source}: {reason}");
+        assert!(reason.starts_with(maestro_store::yaml::OUTSIDE), "{source}: labelled outside the subset: {reason}");
+    }
 }

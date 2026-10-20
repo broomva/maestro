@@ -1,0 +1,5 @@
+asks:
+  - id: pairs
+    x: !!pairs
+      - a: 1
+      - a: 2

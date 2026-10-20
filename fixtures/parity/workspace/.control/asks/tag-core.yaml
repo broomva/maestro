@@ -1,0 +1,8 @@
+asks:
+  - id: tags
+    a: !!str 123
+    b: !!int "42"
+    c: !!float 1
+    d: !!bool "true"
+    e: !!null ''
+    f: !!str true

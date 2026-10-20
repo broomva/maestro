@@ -1,0 +1,5 @@
+asks:
+  - id: 1.0
+    ask: float id
+  - id: 2.5
+  - id: 0x1A

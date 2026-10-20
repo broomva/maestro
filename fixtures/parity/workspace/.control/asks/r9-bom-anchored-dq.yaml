@@ -1,0 +1,4 @@
+asks:
+  - id: a
+    q: &x "a﻿b"
+    r: *x

@@ -1,0 +1,5 @@
+asks:
+  - id: a
+    opts: {
+      a: 1
+    }

@@ -1,0 +1,1336 @@
+{
+ "alias-empty.yaml": {
+  "asks": [
+   {
+    "id": "aempty",
+    "hash": "ed34c23b0c953301",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"base\":[],\"copies\":[[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]],\"id\":\"aempty\"}"
+  ]
+ },
+ "alias-scalar.yaml": {
+  "error": "Excessive alias count indicates a resource exhaustion attack"
+ },
+ "alias100.yaml": {
+  "error": "Excessive alias count indicates a resource exhaustion attack"
+ },
+ "alias99.yaml": {
+  "asks": [
+   {
+    "id": "a99",
+    "hash": "0e3d95dff842052f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"base\":[\"x\"],\"copies\":[[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"],[\"x\"]],\"id\":\"a99\"}"
+  ]
+ },
+ "anchors.yaml": {
+  "asks": [
+   {
+    "id": "anchored",
+    "hash": "c90022e6e797635f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"anchored\",\"merged\":{\"<<\":{\"x\":1,\"y\":[1,2]},\"z\":3},\"ref\":{\"x\":1,\"y\":[1,2]}}"
+  ]
+ },
+ "bool-forms.yaml": {
+  "asks": [
+   {
+    "id": "bools",
+    "hash": "2571c1c530e03d16",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":true,\"b\":false,\"blocking\":true,\"c\":\"yes\",\"d\":\"on\",\"e\":\"tRue\",\"id\":\"bools\",\"preanswerable\":false}"
+  ]
+ },
+ "complex-key-quoted.yaml": {
+  "asks": [
+   {
+    "id": "cquoted",
+    "hash": "8c8303a6fcfd9764",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"[ \\\"a\\\", b ]\":\"value\",\"id\":\"cquoted\"}"
+  ]
+ },
+ "complex-key.yaml": {
+  "asks": [
+   {
+    "id": "complex",
+    "hash": "bd82365aef9b54b3",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"[ a, b ]\":\"v\",\"id\":\"complex\"}"
+  ]
+ },
+ "deep-254.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "a04788b547479dc3",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"v\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"x\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+  ]
+ },
+ "dup-keys.yaml": {
+  "error": "it has a YAML error: Map keys must be unique at line 4, column 5:"
+ },
+ "dup-typed-keys.yaml": {
+  "asks": [
+   {
+    "id": "dup-typed",
+    "hash": "0bed706c005053e1",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"dup-typed\",\"meta\":{\"1\":\"string\"}}"
+  ]
+ },
+ "escaped-backslash.yaml": {
+  "asks": [
+   {
+    "id": "ebs",
+    "hash": "cb3e609501e346b5",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"ebs\",\"lone\":\"\\ud83d\",\"note\":\"C:\\\\uD83D\\ude00\"}"
+  ]
+ },
+ "float-forms.yaml": {
+  "asks": [
+   {
+    "id": "floats",
+    "hash": "6149f7d5f2c4b6c4",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":1,\"b\":1000,\"c\":0.5,\"d\":5,\"e\":1.5e-7,\"f\":1e+21,\"g\":-0.25,\"h\":1000,\"i\":null,\"id\":\"floats\",\"j\":2.5}"
+  ]
+ },
+ "float-special.yaml": {
+  "asks": [
+   {
+    "id": "inf",
+    "hash": "1806bc7877e49f82",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":null,\"b\":null,\"c\":null,\"d\":null,\"e\":null,\"id\":\"inf\"}"
+  ]
+ },
+ "flow.yaml": {
+  "asks": [
+   {
+    "id": "flow",
+    "hash": "dd474dbac47d15b2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"blocking\":true,\"gates\":[\"a\",\"b\"],\"id\":\"flow\",\"n\":16}"
+  ]
+ },
+ "id-bool.yaml": {
+  "asks": [
+   {
+    "id": "true",
+    "hash": "9f391e5c3a1fb729",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":true}",
+   "{\"id\":null}",
+   "{\"ask\":\"no id\"}"
+  ]
+ },
+ "id-float.yaml": {
+  "asks": [
+   {
+    "id": "1",
+    "hash": "d98d7ca9524c112c",
+    "state": "open"
+   },
+   {
+    "id": "2.5",
+    "hash": "bd621707fa67ee9c",
+    "state": "open"
+   },
+   {
+    "id": "26",
+    "hash": "3e274452df66d992",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"ask\":\"float id\",\"id\":1}",
+   "{\"id\":2.5}",
+   "{\"id\":26}"
+  ]
+ },
+ "inf-answer.yaml": {
+  "asks": [
+   {
+    "id": "inf-answer",
+    "hash": "0b6e9f64e5bc514c",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":null,\"blocking\":true,\"id\":\"inf-answer\"}"
+  ]
+ },
+ "inf-dup-keys.yaml": {
+  "error": "it has a YAML error: Map keys must be unique at line 5, column 7:"
+ },
+ "int-big.yaml": {
+  "asks": [
+   {
+    "id": "approve-prod",
+    "hash": "ea5924b50a02bb3b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"blocking\":true,\"d20\":20261019123456790000,\"id\":\"approve-prod\",\"neg\":-9223372036854776000,\"safe\":9007199254740992,\"u\":18446744073709552000}"
+  ]
+ },
+ "int-forms.yaml": {
+  "asks": [
+   {
+    "id": "forms",
+    "hash": "5f741e810f6d422b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":5,\"b\":0,\"c\":15,\"d\":31,\"e\":\"0b101\",\"f\":\"1_000\",\"g\":\"0x\",\"h\":8,\"id\":\"forms\"}"
+  ]
+ },
+ "int-leading-zero.yaml": {
+  "asks": [
+   {
+    "id": "4",
+    "hash": "35be57b8c2ae30e1",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"ask\":\"lead?\",\"blocking\":true,\"id\":4,\"n\":10}"
+  ]
+ },
+ "key-anch1024.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "7487fabaffff9e1e",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":\"v\"}"
+  ]
+ },
+ "key-anch1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 8:"
+ },
+ "key-dq1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 5:"
+ },
+ "key-emoji512.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "4de5b6e5f36d55c2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\":\"v\"}"
+  ]
+ },
+ "key-emoji513.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 5:"
+ },
+ "key-fmap1025.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "29d5e13b0bffa776",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"s\":{\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":\"v\"}}"
+  ]
+ },
+ "key-fseq1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit flow sequence key at line 3, column 1034:"
+ },
+ "key-plainsurr1024.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "490f38086882fd67",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"\\\\uD83Dkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":\"v\",\"id\":\"a\"}"
+  ]
+ },
+ "key-plainsurr1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 5:"
+ },
+ "key-sp1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 5:"
+ },
+ "keys.yaml": {
+  "asks": [
+   {
+    "id": "keys",
+    "hash": "a90b42d63323e614",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"keys\",\"meta\":{\"1\":\"float\",\"2\":\"two\",\"3\":\"three\",\"7\":\"lead\",\"10\":\"ten\",\"16\":\"hex\",\"\":\"nullkey\",\"true\":\"boolkey\"}}"
+  ]
+ },
+ "multi-doc.yaml": {
+  "error": "it has a YAML error: Source contains multiple documents; please use YAML.parseAllDocuments() at line 3, column 1:"
+ },
+ "nan-keys.yaml": {
+  "asks": [
+   {
+    "id": "nankeys",
+    "hash": "501ee32c16ea9320",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"nankeys\",\"meta\":{\"-Infinity\":\"c\",\"NaN\":\"b\"}}"
+  ]
+ },
+ "nan-status.yaml": {
+  "asks": [
+   {
+    "id": "nan-status",
+    "hash": "30c9f0f91074e563",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"nan-status\",\"status\":null}"
+  ]
+ },
+ "nested-weird.yaml": {
+  "asks": [
+   {
+    "id": "nested",
+    "hash": "b670d8b6ff1f4d3d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"exhausted\":{\"read\":\"x\"},\"gates\":[1,true,null,\"g\"],\"id\":\"nested\",\"options\":[{\"id\":1,\"label\":\"one\",\"recommended\":true},{\"id\":\"two\",\"reversible\":\"yes\"}]}"
+  ]
+ },
+ "null-dup-keys.yaml": {
+  "error": "it has a YAML error: Map keys must be unique at line 5, column 7:"
+ },
+ "null-forms.yaml": {
+  "asks": [
+   {
+    "id": "nulls",
+    "hash": "ab8a6d4dcb8106e3",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":null,\"b\":null,\"c\":null,\"d\":null,\"e\":null,\"f\":\"nUll\",\"id\":\"nulls\"}"
+  ]
+ },
+ "plain-backslash.yaml": {
+  "asks": [
+   {
+    "id": "plain-bs",
+    "hash": "818c086464a1def1",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"plain-bs\",\"note\":\"literal \\\\uD83D text\"}"
+  ]
+ },
+ "ps-plain.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "800b044aefc3bb17",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"note\":\"a b\"}"
+  ]
+ },
+ "quoted.yaml": {
+  "asks": [
+   {
+    "id": "0004",
+    "hash": "df0e1eafb630dd81",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"1e3\",\"b\":\"true\",\"c\":\"null\",\"d\":\"tab\\there\",\"e\":\"éA   \",\"f\":\"block\\ntext\\n\",\"g\":\"folded text\",\"id\":\"0004\"}"
+  ]
+ },
+ "r5-merge-explicit.yaml": {
+  "asks": [
+   {
+    "id": "okay",
+    "hash": "e3b08b331d517fce",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"x\",\"id\":\"okay\"}"
+  ]
+ },
+ "r5-merge-seq.yaml": {
+  "asks": [
+   {
+    "id": "okay2",
+    "hash": "581ec2c8f14418b0",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":1,\"b\":2,\"c\":3,\"id\":\"okay2\"}"
+  ]
+ },
+ "r5-nonfinite-id.yaml": {
+  "asks": [
+   {
+    "id": "Infinity",
+    "hash": "185486091df0b98c",
+    "state": "open"
+   },
+   {
+    "id": "fine",
+    "hash": "6c24f1f82844a5a3",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"id\":null}",
+   "{\"answer\":null,\"id\":\"fine\"}"
+  ]
+ },
+ "r5-omap-dup.yaml": {
+  "error": "it has a YAML error: Ordered maps must not include duplicate keys: a at line 3, column 8:"
+ },
+ "r5-omap-two.yaml": {
+  "error": "it has a YAML error: Each pair must have its own sequence indicator at line 3, column 8:"
+ },
+ "r5-pairs-scalar.yaml": {
+  "asks": [
+   {
+    "id": "okay",
+    "hash": "01caa3cf32ad8f29",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"okay\",\"v\":[{\"a\":null}]}"
+  ]
+ },
+ "r5-self-alias.yaml": {
+  "error": "Maximum call stack size exceeded."
+ },
+ "r5-sentinel-fdd0.yaml": {
+  "asks": [
+   {
+    "id": "﷐Infinity",
+    "hash": "e997330ec8b0ff7a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"﷐Infinity\",\"status\":\"open\"}"
+  ]
+ },
+ "r5-sentinel-fdd1.yaml": {
+  "asks": [
+   {
+    "id": "﷑keep",
+    "hash": "f8358f5ad77902ee",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"﷑keep\",\"note\":\"a\\rb\"}"
+  ]
+ },
+ "r5-set-collide.yaml": {
+  "error": "it has a YAML error: Set items must all have null values at line 3, column 8:"
+ },
+ "r5-tab-nested-seq.yaml": {
+  "error": "it has a YAML error: Tabs are not allowed as indentation at line 4, column 8:"
+ },
+ "r5-verbatim-int.yaml": {
+  "asks": [
+   {
+    "id": "42",
+    "hash": "17b4db064e17f487",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":42}"
+  ]
+ },
+ "r5-verbatim-str.yaml": {
+  "asks": [
+   {
+    "id": "vstr",
+    "hash": "eaf9c06b47084536",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"vstr\",\"v\":\"12\"}"
+  ]
+ },
+ "r6-b1-escnl-empty.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8658582a2d89073a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"question\":\"Ship it  today?\"}"
+  ]
+ },
+ "r6-b2-pred-dash.yaml": {
+  "error": "it has a YAML error: Missing closing \"quote at line 4, column 11:"
+ },
+ "r6-bm-anchor-glued.yaml": {
+  "error": "it has a YAML error: Tags and anchors must be separated from the next token by white space at line 3, column 10:"
+ },
+ "r6-bm-q-in-block.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "2d74f6e43c709c5f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"question\":\"? or wait\\nmore\\n\"}"
+  ]
+ },
+ "r6-c1-aken.yaml": {
+  "error": "it has a YAML error: Flow sequence in block collection must be sufficiently indented and end with a ] at line 4, column 1:"
+ },
+ "r6-c2-escaped-bs.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "571f1175076ae82a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"x\\\\uD83D\"}"
+  ]
+ },
+ "r6-c2-header-comment.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "d50a3fe31b37e159",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"text\\n\"}"
+  ]
+ },
+ "r7-close-b-4.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "ca2aa81b9011cef2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"options\":[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\"}]}"
+  ]
+ },
+ "r7-close-bb-4.yaml": {
+  "error": "it has a YAML error: Flow sequence in block collection must be sufficiently indented and end with a ] at line 5, column 5:"
+ },
+ "r7-close-bm-4.yaml": {
+  "error": "it has a YAML error: Unexpected scalar at node end at line 6, column 6:"
+ },
+ "r7-close-comment.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "75a2ce1fb56be9db",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"o\":{\"x\":1}}"
+  ]
+ },
+ "r7-mclose-4.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8557dab2b3ac742d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"opts\":{\"a\":1}}"
+  ]
+ },
+ "r7-nested-dash-dquote.yaml": {
+  "error": "it has a YAML error: Missing closing \"quote at line 2, column 9:"
+ },
+ "r7-nested-dash-quote-ok.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8489a5deb454a360",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\"}"
+  ]
+ },
+ "r7-nested-dash-quote.yaml": {
+  "error": "it has a YAML error: Missing closing 'quote at line 2, column 9:"
+ },
+ "r7-pair-nl-after-empty.yaml": {
+  "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 3, column 17:"
+ },
+ "r7-pair-nl-in-map.yaml": {
+  "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 3, column 17:"
+ },
+ "r7-pyy-b-pred.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8489a5deb454a360",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\"}"
+  ]
+ },
+ "r7-pyy-evidence.yaml": {
+  "asks": [
+   {
+    "id": "e",
+    "hash": "ad9b79075d2f6146",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"evidence\":[[]],\"id\":\"e\",\"question\":\"q\"}"
+  ]
+ },
+ "r7-pyy-min.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8489a5deb454a360",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\"}"
+  ]
+ },
+ "r7-pyy-min2.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8489a5deb454a360",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\"}"
+  ]
+ },
+ "r7-pyy-nested.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "fbaaf196436650c4",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"evidence\":[[\"x\",\"y\"],\"see\\nthis\"],\"id\":\"a\"}"
+  ]
+ },
+ "r7-seq-items.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "634fac386492349d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"k\":[[\"x\"],[\"y\"]]}"
+  ]
+ },
+ "r7-seqclose-dash.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "35fc3604175895cb",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"v\":[[\"x\"]]}"
+  ]
+ },
+ "r8-bom-after-docstart.yaml": {
+  "asks": [],
+  "rows": []
+ },
+ "r8-bom-before-dash.yaml": {
+  "asks": [],
+  "rows": []
+ },
+ "r8-bom-in-dq-multiline.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "e105f10c48f8e152",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a ﻿b\"}"
+  ]
+ },
+ "r8-bom-in-dq-writer.yaml": {
+  "asks": [
+   {
+    "id": "bom",
+    "hash": "f46046f6496f76b9",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"a﻿b\",\"id\":\"bom\",\"status\":\"resolved\"}"
+  ]
+ },
+ "r8-bom-in-plain.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "77780b9f29ccafdd",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿b\"}"
+  ]
+ },
+ "r8-pair-anchor-prev-line.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "51d02d0bd4b3d198",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"o\":{\"f\":[{},{\"x\":\"c\"}]}}"
+  ]
+ },
+ "r8-pair-quoted-multiline.yaml": {
+  "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 4, column 7:"
+ },
+ "r8-pair-squoted-multiline.yaml": {
+  "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 4, column 7:"
+ },
+ "r9-bom-anchored-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "6c7147508280995b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿b\",\"r\":\"a﻿b\"}"
+  ]
+ },
+ "r9-bom-anchored-dq2.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "9de14dcc77a604da",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"﻿\"}"
+  ]
+ },
+ "r9-bom-block-quote.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "299873347a4d57e0",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"\\\"﻿\\\"\\n\"}"
+  ]
+ },
+ "r9-bom-comment-quote.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "f8c21175855fb361",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"x\"}"
+  ]
+ },
+ "r9-bom-crlf-dq-ml.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "e105f10c48f8e152",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a ﻿b\"}"
+  ]
+ },
+ "r9-bom-crlf-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "77780b9f29ccafdd",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿b\"}"
+  ]
+ },
+ "r9-bom-dq-escape-feff.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "b029d7450737092b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"﻿﻿\"}"
+  ]
+ },
+ "r9-bom-dq-escaped-nl.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "77780b9f29ccafdd",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿b\"}"
+  ]
+ },
+ "r9-bom-dq-inside-sq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "504322133209a50f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"\\\"﻿\\\"\"}"
+  ]
+ },
+ "r9-bom-dq-key-flow.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "47d07dd66e166616",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":{\"k﻿\":\"v\"}}"
+  ]
+ },
+ "r9-bom-dq-key.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "64697d4ec261459d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"k﻿\":\"v\"}"
+  ]
+ },
+ "r9-bom-dq-ml.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "0a4c20a677c39ac6",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a b﻿ c\"}"
+  ]
+ },
+ "r9-bom-dq-then-plain.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "5b42d83bb90dd95b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿\",\"r\":\"b﻿\"}"
+  ]
+ },
+ "r9-bom-flow-pair-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "a4341afe87565416",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":[{\"k﻿\":\"v\"}]}"
+  ]
+ },
+ "r9-bom-flow-seq-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8be6942393652fab",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":[\"a﻿\",\"﻿b\"]}"
+  ]
+ },
+ "r9-bom-plain-quote.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "b26590fd12a8b398",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a \\\"﻿\\\" b\"}"
+  ]
+ },
+ "r9-bom-plain-then-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "5b42d83bb90dd95b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿\",\"r\":\"b﻿\"}"
+  ]
+ },
+ "r9-bom-sq-inside-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "618dc10764ee5750",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"'﻿'\"}"
+  ]
+ },
+ "r9-bom-surr-adjacent.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "36eabcd6db3ffd6a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"😀﻿\\ud83d\"}"
+  ]
+ },
+ "r9-bom-surr-pair-adjacent.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "4287d9372730033d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"﻿😀﻿\"}"
+  ]
+ },
+ "r9-bom-writer-answer.yaml": {
+  "asks": [
+   {
+    "id": "w",
+    "hash": "cfbd5b626bfa953e",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"line1\\n﻿line2 \\\"q\\\" ﻿\",\"id\":\"w\",\"status\":\"resolved\"}"
+  ]
+ },
+ "surrogate.yaml": {
+  "asks": [
+   {
+    "id": "rotate",
+    "hash": "93bf1c71efb5657f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"blocking\":true,\"id\":\"rotate\",\"note\":\"cut \\ud83d alone\",\"pair\":\"😀\"}"
+  ]
+ },
+ "syn-block-short-tab.yaml": {
+  "error": "it has a YAML error: Block scalar lines must not be less indented than their first line at line 5, column 1:"
+ },
+ "syn-bom-yaml12.yaml": {
+  "asks": [
+   {
+    "id": "bom12",
+    "hash": "2f4a371cecd1627e",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"bom12\"}"
+  ]
+ },
+ "syn-cr-only.yaml": {
+  "error": "it has a YAML error: Nested mappings are not allowed in compact mappings at line 1, column 6:"
+ },
+ "syn-crlf.yaml": {
+  "asks": [
+   {
+    "id": "crlf",
+    "hash": "fad22c08ee251de3",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"crlf\",\"v\":1}"
+  ]
+ },
+ "syn-lone-cr-after-colon.yaml": {
+  "asks": [
+   {
+    "id": "cr2",
+    "hash": "192cd7685b37e14a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"\\rb\",\"id\":\"cr2\"}"
+  ]
+ },
+ "syn-lone-cr-content.yaml": {
+  "asks": [
+   {
+    "id": "cr1",
+    "hash": "44255d82a4b4981a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"x\\ry\",\"b\":\"x\\ry\",\"c\":1,\"id\":\"cr1\"}"
+  ]
+ },
+ "syn-set-values.yaml": {
+  "error": "it has a YAML error: Set items must all have null values at line 3, column 8:"
+ },
+ "syn-tab-indent-key.yaml": {
+  "error": "it has a YAML error: Tabs are not allowed as indentation at line 1, column 1:"
+ },
+ "syn-tab-indent.yaml": {
+  "error": "it has a YAML error: Tabs are not allowed as indentation at line 2, column 4:"
+ },
+ "syn-tab-separator.yaml": {
+  "asks": [
+   {
+    "id": "t1",
+    "hash": "3c585fe9565f84f1",
+    "state": "open"
+   },
+   {
+    "id": "t2",
+    "hash": "182681b65f9731c2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"f\":{\"k\":\"v\"},\"id\":\"t1\",\"v\":\"x\"}",
+   "{\"id\":\"t2\",\"w\":\"x continued\"}"
+  ]
+ },
+ "tag-binary-pyyaml.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "204c54a0580cc8a4",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"v\":{\"0\":104,\"1\":105}}"
+  ]
+ },
+ "tag-binary.yaml": {
+  "asks": [
+   {
+    "id": "bin",
+    "hash": "be94ebd085fadef2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"b\":{\"0\":104,\"1\":105},\"id\":\"bin\"}"
+  ]
+ },
+ "tag-core.yaml": {
+  "asks": [
+   {
+    "id": "tags",
+    "hash": "b5c4f5fc32722cdb",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"123\",\"b\":42,\"c\":\"1\",\"d\":true,\"e\":null,\"f\":\"true\",\"id\":\"tags\"}"
+  ]
+ },
+ "tag-local.yaml": {
+  "asks": [
+   {
+    "id": "local",
+    "hash": "8174a4411a265552",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"local\",\"x\":\"foo\"}"
+  ]
+ },
+ "tag-map-seq.yaml": {
+  "asks": [
+   {
+    "id": "mapseq",
+    "hash": "ad18d2652cb0957d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"c\":{\"a\":1},\"id\":\"mapseq\",\"m\":{\"a\":1},\"s\":[1,2]}"
+  ]
+ },
+ "tag-omap.yaml": {
+  "asks": [
+   {
+    "id": "omap",
+    "hash": "9960e58a1a20c835",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"omap\",\"x\":{}}"
+  ]
+ },
+ "tag-pairs.yaml": {
+  "asks": [
+   {
+    "id": "pairs",
+    "hash": "f05b47f463db1ac5",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"pairs\",\"x\":[{\"a\":1},{\"a\":2}]}"
+  ]
+ },
+ "tag-set.yaml": {
+  "asks": [
+   {
+    "id": "set",
+    "hash": "a0329173f9f4facd",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"set\",\"x\":{}}"
+  ]
+ },
+ "tag-timestamp.yaml": {
+  "asks": [
+   {
+    "id": "ts",
+    "hash": "36e346a33c61d27c",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"ts\",\"plain\":\"2026-10-19\",\"t\":\"2026-10-19T00:00:00.000Z\"}"
+  ]
+ },
+ "trim-bom-id.yaml": {
+  "asks": [
+   {
+    "id": "",
+    "hash": "d30e8dd90817e3e0",
+    "state": "open"
+   },
+   {
+    "id": "x",
+    "hash": "11e5e7b6444a9846",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"﻿\"}",
+   "{\"ask\":\"nel\",\"id\":\"\"}",
+   "{\"id\":\"　x \"}"
+  ]
+ },
+ "ts-bad-offset.yaml": {
+  "error": "it has a YAML error: !!timestamp expects a date, starting with yyyy-mm-dd at line 3, column 8:"
+ },
+ "ts-not-a-date.yaml": {
+  "error": "it has a YAML error: !!timestamp expects a date, starting with yyyy-mm-dd at line 3, column 8:"
+ },
+ "ts-rollover.yaml": {
+  "asks": [
+   {
+    "id": "roll",
+    "hash": "88ba07c686348aee",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"a\":\"2026-03-03T00:00:00.000Z\",\"b\":\"2027-02-14T00:00:00.000Z\",\"c\":\"1950-01-01T00:00:00.000Z\",\"d\":\"2026-10-19T19:00:00.123Z\",\"e\":\"2026-10-19T14:00:00.000Z\",\"id\":\"roll\"}"
+  ]
+ },
+ "unicode-keys.yaml": {
+  "asks": [
+   {
+    "id": "uni",
+    "hash": "b5bbb063cee0ac25",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"uni\",\"meta\":{\"B\":\"c\",\"a\":\"d\",\"😀\":\"b\",\"｡\":\"a\"}}"
+  ]
+ },
+ "writer-ls-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "58b05d1d46ccc1b9",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"a b\",\"id\":\"a\"}"
+  ]
+ },
+ "writer-nel-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "7719273cecf5917d",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"ab\",\"id\":\"a\"}"
+  ]
+ },
+ "yaml11.yaml": {
+  "asks": [
+   {
+    "id": "y11",
+    "hash": "ec113051ee0f5867",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"blocking\":true,\"false\":8,\"id\":\"y11\"}"
+  ]
+ }
+}

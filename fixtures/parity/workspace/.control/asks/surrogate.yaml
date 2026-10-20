@@ -1,0 +1,5 @@
+asks:
+  - id: rotate
+    blocking: true
+    note: "cut \uD83D alone"
+    pair: "\uD83D\uDE00"

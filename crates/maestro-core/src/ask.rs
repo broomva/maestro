@@ -4,6 +4,7 @@
 //! validator of record. These types read it faithfully and keep every unknown
 //! key, so nothing Maestro rewrites can lose a field.
 
+use crate::js::JsValue;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -73,7 +74,7 @@ impl Rung {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AskOption {
     pub id: String,
     pub label: String,
@@ -93,7 +94,7 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AskOrigin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
@@ -107,7 +108,10 @@ pub struct AskOrigin {
     pub extra: Extra,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One ask as Maestro reports it. Built from the raw row by [`Ask::from_row`],
+/// which reads every field the way the plugin does, so a value the plugin
+/// tolerates never drops an entry here.
+#[derive(Debug, Clone, Serialize)]
 pub struct Ask {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,9 +165,10 @@ pub struct Ask {
     pub status: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
-    /// The entry exactly as the ledger holds it. State and hash read this, never the typed copy.
+    /// The entry exactly as the plugin holds it: a JavaScript value, so a non-finite number stays
+    /// one. State and hash read this, never the typed copy.
     #[serde(skip)]
-    pub row: serde_json::Value,
+    pub row: JsValue,
 }
 
 /// Keys whose presence means the ask was answered, from `OUTCOME_KEYS` in
@@ -183,23 +188,147 @@ pub enum AskState {
     Archived,
 }
 
-/// The plugin's `text()`: a trimmed non-empty string, or a number or bool as text.
-fn text(value: Option<&serde_json::Value>) -> Option<String> {
+/// The plugin's `text()`: a trimmed non-empty string, or a number or bool as
+/// text. A number reads as JavaScript's `String(n)` would print it.
+pub fn text(value: Option<&JsValue>) -> Option<String> {
     match value? {
-        serde_json::Value::String(s) => Some(s.trim()).filter(|s| !s.is_empty()).map(str::to_string),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
+        JsValue::Str(s) => Some(js_trim(s)).filter(|s| !s.is_empty()).map(str::to_string),
+        JsValue::Num(x) => Some(js_string(*x)),
+        JsValue::Bool(b) => Some(b.to_string()),
         _ => None,
     }
 }
 
+/// `String(n)` for any JavaScript number, `Infinity` and `NaN` included.
+pub fn js_string(x: f64) -> String {
+    if x.is_nan() {
+        "NaN".into()
+    } else if x.is_infinite() {
+        if x > 0.0 { "Infinity" } else { "-Infinity" }.into()
+    } else {
+        js_double(x)
+    }
+}
+
+/// `String.prototype.trim`: JavaScript's WhiteSpace and LineTerminator, which is not Rust's
+/// `char::is_whitespace` (JavaScript trims U+FEFF and keeps U+0085; Rust does the opposite).
+pub fn js_trim(s: &str) -> &str {
+    const fn js_space(c: char) -> bool {
+        matches!(
+            c,
+            '\u{9}' | '\u{a}' | '\u{b}' | '\u{c}' | '\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+                ..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
+        )
+    }
+    s.trim_matches(js_space)
+}
+
+/// The plugin's `textsOf`: the texts of a list, a lone value being a list of one.
+pub fn texts_of(value: Option<&JsValue>) -> Vec<String> {
+    match value {
+        None | Some(JsValue::Null) => Vec::new(),
+        Some(JsValue::Arr(items)) => items.iter().filter_map(|v| text(Some(v))).collect(),
+        Some(one) => text(Some(one)).into_iter().collect(),
+    }
+}
+
+/// The plugin's `optionsOf`: mapping items with a text `id`; the label defaults to the id.
+pub fn options_of(value: Option<&JsValue>) -> Vec<AskOption> {
+    const KNOWN: [&str; 6] = ["id", "label", "consequence", "reversible", "recommended", "status_quo"];
+    let Some(JsValue::Arr(items)) = value else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|item| {
+            let map = item.as_object()?;
+            let id = text(map.get("id"))?;
+            Some(AskOption {
+                label: text(map.get("label")).unwrap_or_else(|| id.clone()),
+                id,
+                consequence: text(map.get("consequence")),
+                reversible: map.get("reversible").and_then(JsValue::as_bool),
+                recommended: is_true(map.get("recommended")),
+                status_quo: is_true(map.get("status_quo")),
+                extra: rest(map, &KNOWN),
+            })
+        })
+        .collect()
+}
+
+/// The keys of `map` not in `known`, kept so nothing unread is lost.
+fn rest(map: &BTreeMap<String, JsValue>, known: &[&str]) -> Extra {
+    map.iter().filter(|(k, _)| !known.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.to_json())).collect()
+}
+
+/// A flag the plugin reads as `=== true`: anything but the boolean true is false.
+fn is_true(value: Option<&JsValue>) -> bool {
+    value == Some(&JsValue::Bool(true))
+}
+
+/// A string-valued enum read from text: a known name, else kept verbatim.
+fn named<T: serde::de::DeserializeOwned>(value: Option<&JsValue>) -> Option<T> {
+    serde_json::from_value(serde_json::Value::String(text(value)?)).ok()
+}
+
+/// JavaScript's `Number.prototype.toString` (and so `JSON.stringify`) for a JSON number.
+/// Integers past 2^53 are doubles in JavaScript, so they print as the double they round to.
+pub fn js_number(n: &serde_json::Number) -> String {
+    const SAFE: u64 = 1 << 53;
+    if let Some(i) = n.as_i64() {
+        if i.unsigned_abs() <= SAFE {
+            return i.to_string();
+        }
+    } else if let Some(u) = n.as_u64()
+        && u <= SAFE
+    {
+        return u.to_string();
+    }
+    js_double(n.as_f64().unwrap_or(f64::NAN))
+}
+
+/// ECMA-262 Number::toString(x) for a finite double: the shortest round-trip
+/// digits, in decimal for exponents in [-7, 21) and exponential outside it.
+pub fn js_double(x: f64) -> String {
+    if x == 0.0 {
+        return "0".into(); // -0 too
+    }
+    if !x.is_finite() {
+        return "null".into(); // JSON.stringify's spelling; JSON numbers cannot hold these
+    }
+    let sci = format!("{:e}", x.abs()); // shortest digits: `d[.ddd]e<exp>`
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let k = digits.len() as i32;
+    let n = exp.parse::<i32>().unwrap_or(0) + 1;
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let tail = if k > 1 { format!(".{}", &digits[1..]) } else { String::new() };
+        let e = n - 1;
+        format!("{}{tail}e{}{}", &digits[..1], if e < 0 { '-' } else { '+' }, e.abs())
+    };
+    if x < 0.0 { format!("-{body}") } else { body }
+}
+
+/// A key JavaScript treats as an array index (`"0"`, `"7"`, not `"07"`): such
+/// keys come first in an object, in numeric order, whatever order they were set in.
+fn array_index(key: &str) -> Option<u32> {
+    if key.is_empty() || (key.len() > 1 && key.starts_with('0')) || !key.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    key.parse::<u32>().ok().filter(|&i| i != u32::MAX)
+}
+
 /// An ask row's state, ported from the plugin's `stateOf`.
-pub fn state_of(row: &serde_json::Value) -> AskState {
+pub fn state_of(row: &JsValue) -> AskState {
     let status = text(row.get("status")).unwrap_or_default().to_lowercase();
     if text(row.get("archived_at")).is_some() || status.starts_with("archived") {
         return AskState::Archived;
     }
-    if OUTCOME_KEYS.iter().any(|k| text(row.get(*k)).is_some())
+    if OUTCOME_KEYS.iter().any(|k| text(row.get(k)).is_some())
         || TERMINAL_STATUS_PREFIXES.iter().any(|p| status.starts_with(p))
     {
         return AskState::Answered;
@@ -207,25 +336,31 @@ pub fn state_of(row: &serde_json::Value) -> AskState {
     AskState::Open
 }
 
-/// `JSON.stringify(canonical(row))`: keys sorted at every depth, compact.
-fn canonical_json(value: &serde_json::Value, out: &mut String) {
-    use serde_json::Value;
+/// `JSON.stringify(canonical(row))` byte for byte. `canonical` sorts keys as
+/// JavaScript strings sort (UTF-16 code units), and the object it rebuilds puts
+/// array-index keys first in numeric order; numbers print as JavaScript prints them.
+fn canonical_json(value: &JsValue, out: &mut String) {
     match value {
-        Value::Object(map) => {
+        JsValue::Obj(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            keys.sort_by(|a, b| match (array_index(a), array_index(b)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.encode_utf16().cmp(b.encode_utf16()),
+            });
             out.push('{');
             for (i, key) in keys.into_iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&Value::String(key.clone()).to_string());
+                out.push_str(&serde_json::Value::String(key.clone()).to_string());
                 out.push(':');
                 canonical_json(&map[key], out);
             }
             out.push('}');
         }
-        Value::Array(items) => {
+        JsValue::Arr(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
@@ -235,14 +370,25 @@ fn canonical_json(value: &serde_json::Value, out: &mut String) {
             }
             out.push(']');
         }
-        other => out.push_str(&other.to_string()),
+        // JSON.stringify writes a non-finite number as `null`.
+        JsValue::Num(x) => out.push_str(&js_double(*x)),
+        JsValue::Str(s) => out.push_str(&serde_json::Value::String(s.clone()).to_string()),
+        JsValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        JsValue::Null => out.push_str("null"),
     }
+}
+
+/// `JSON.stringify(canonical(row))`: the exact bytes an entry hash covers.
+pub fn canonical_string(row: &JsValue) -> String {
+    let mut s = String::new();
+    canonical_json(row, &mut s);
+    s
 }
 
 /// The plugin's `entryHash`: the first 16 hex of sha256 over the canonical row.
 /// It covers the whole entry, answers included: an entry changed since it was
 /// read is not answered. This is the hash the plugin's answer path rechecks.
-pub fn entry_hash(row: &serde_json::Value) -> String {
+pub fn entry_hash(row: &JsValue) -> String {
     let mut s = String::new();
     canonical_json(row, &mut s);
     let digest = Sha256::digest(s.as_bytes());
@@ -250,12 +396,90 @@ pub fn entry_hash(row: &serde_json::Value) -> String {
 }
 
 impl Ask {
+    const KNOWN: [&'static str; 25] = [
+        "id",
+        "uid",
+        "ask",
+        "headline",
+        "question",
+        "class",
+        "gates",
+        "exhausted",
+        "blocking",
+        "preanswerable",
+        "default",
+        "no_default_because",
+        "stakes",
+        "why_you",
+        "options",
+        "project",
+        "topics",
+        "asked_at",
+        "origin",
+        "answer",
+        "answer_option",
+        "answer_note",
+        "answered_at",
+        "answered_by",
+        "status",
+    ];
+
+    /// Read one ledger entry as the plugin's `decisionOf` reads it: every field
+    /// through `text`/`textsOf`/`optionsOf`, flags as `=== true`. The only entry
+    /// refused is one the plugin also drops: not a mapping, or without a text `id`.
+    pub fn from_row(row: JsValue) -> Result<Ask, String> {
+        let map = row.as_object().ok_or("entry is not a mapping")?;
+        let id = text(map.get("id")).ok_or("entry has no id")?;
+        let t = |k: &str| text(map.get(k));
+        let origin = map.get("origin").and_then(JsValue::as_object).map(|o| AskOrigin {
+            agent_id: text(o.get("agent_id")),
+            provider: text(o.get("provider")),
+            cwd: text(o.get("cwd")),
+            session: text(o.get("session")),
+            extra: rest(o, &["agent_id", "provider", "cwd", "session"]),
+        });
+        let exhausted = match map.get("exhausted") {
+            None | Some(JsValue::Null) => Vec::new(),
+            Some(JsValue::Arr(items)) => items.iter().map(JsValue::to_json).collect(),
+            Some(one) => vec![one.to_json()],
+        };
+        Ok(Ask {
+            id,
+            uid: t("uid"),
+            ask: t("ask"),
+            headline: t("headline"),
+            question: t("question"),
+            class: named(map.get("class")),
+            gates: texts_of(map.get("gates")),
+            exhausted,
+            blocking: is_true(map.get("blocking")),
+            preanswerable: is_true(map.get("preanswerable")),
+            default: t("default"),
+            no_default_because: named(map.get("no_default_because")),
+            stakes: t("stakes"),
+            why_you: t("why_you"),
+            options: options_of(map.get("options")),
+            project: t("project"),
+            topics: texts_of(map.get("topics")),
+            asked_at: t("asked_at"),
+            origin,
+            answer: t("answer"),
+            answer_option: t("answer_option"),
+            answer_note: t("answer_note"),
+            answered_at: t("answered_at"),
+            answered_by: t("answered_by"),
+            status: t("status"),
+            extra: rest(map, &Self::KNOWN),
+            row,
+        })
+    }
+
     /// The row as written. Built from the typed fields when the ask was not read from a ledger.
-    fn row_value(&self) -> std::borrow::Cow<'_, serde_json::Value> {
+    fn row_value(&self) -> std::borrow::Cow<'_, JsValue> {
         if self.row.is_object() {
             std::borrow::Cow::Borrowed(&self.row)
         } else {
-            std::borrow::Cow::Owned(serde_json::to_value(self).unwrap_or_default())
+            std::borrow::Cow::Owned(serde_json::to_value(self).unwrap_or_default().into())
         }
     }
 
@@ -294,7 +518,13 @@ impl Ask {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for Ask {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ask::from_row(serde_json::Value::deserialize(d)?.into()).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AskLedger {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arc: Option<String>,
@@ -308,7 +538,6 @@ pub struct AskLedger {
     pub opened: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lanes: Vec<String>,
-    #[serde(default, skip_deserializing)]
     pub asks: Vec<Ask>,
     #[serde(flatten)]
     pub extra: Extra,
@@ -318,7 +547,7 @@ impl AskLedger {
     /// Parse a ledger document. The asks list is `asks`, or the corpus's other
     /// spelling `open_asks` (the plugin's `asksKey`). An entry that does not
     /// parse is returned as `(index, reason)` and the rest are kept.
-    pub fn from_value(mut doc: serde_json::Value) -> Result<(AskLedger, Vec<(usize, String)>), String> {
+    pub fn from_value(mut doc: JsValue) -> Result<(AskLedger, Vec<(usize, String)>), String> {
         let map = doc.as_object_mut().ok_or("ledger is not a mapping")?;
         let key = if map.get("asks").is_some_and(|v| v.is_array()) {
             Some("asks")
@@ -328,19 +557,22 @@ impl AskLedger {
             None
         };
         let rows = key.and_then(|k| map.remove(k)).and_then(|v| v.as_array().cloned()).unwrap_or_default();
-        let mut ledger: AskLedger = serde_json::from_value(doc).map_err(|e| e.to_string())?;
+        // The ledger's own fields read leniently too: a stray type there must not hide every ask.
+        let mut ledger = AskLedger {
+            arc: text(map.get("arc")),
+            ticket: text(map.get("ticket")),
+            pr: map.get("pr").filter(|v| !v.is_null()).map(JsValue::to_json),
+            tz: text(map.get("tz")),
+            opened: text(map.get("opened")),
+            lanes: texts_of(map.get("lanes")),
+            asks: Vec::new(),
+            extra: rest(map, &["arc", "ticket", "pr", "tz", "opened", "lanes"]),
+        };
         let mut errors = Vec::new();
         for (i, row) in rows.into_iter().enumerate() {
-            if !row.is_object() {
-                errors.push((i, "entry is not a mapping".to_string()));
-                continue;
-            }
-            match serde_json::from_value::<Ask>(row.clone()) {
-                Ok(mut ask) => {
-                    ask.row = row;
-                    ledger.asks.push(ask);
-                }
-                Err(e) => errors.push((i, e.to_string())),
+            match Ask::from_row(row) {
+                Ok(ask) => ledger.asks.push(ask),
+                Err(e) => errors.push((i, e)),
             }
         }
         Ok((ledger, errors))
@@ -380,12 +612,106 @@ pub enum AnswerStage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    fn ask(v: serde_json::Value) -> Ask {
-        let mut a: Ask = serde_json::from_value(v.clone()).unwrap();
-        a.row = v;
-        a
+    /// A JavaScript value from JSON, for the tests.
+    macro_rules! json {
+        ($($t:tt)+) => { JsValue::from(serde_json::json!($($t)+)) };
+    }
+
+    fn ask(v: JsValue) -> Ask {
+        Ask::from_row(v).unwrap()
+    }
+
+    #[test]
+    fn fields_read_as_the_plugin_reads_them() {
+        // Every value here once failed the whole entry; the plugin keeps it.
+        let a = ask(json!({
+            "id": 42, "blocking": "true", "preanswerable": true, "gates": "lane-a",
+            "options": [{"id": "go"}, {"label": "no id"}, "text", {"id": 7, "label": " ", "recommended": "yes"}],
+            "answer": {"text": "a map"}, "status": 3, "exhausted": "read: looked",
+        }));
+        assert_eq!(a.id, "42");
+        assert!(!a.blocking, "the plugin reads blocking as === true");
+        assert!(a.preanswerable);
+        assert_eq!(a.gates, ["lane-a"]);
+        let opts: Vec<_> = a.options.iter().map(|o| (o.id.as_str(), o.label.as_str(), o.recommended)).collect();
+        assert_eq!(opts, [("go", "go", false), ("7", "7", false)]);
+        assert_eq!(a.answer, None, "a map is no text");
+        assert_eq!(a.status.as_deref(), Some("3"));
+        assert_eq!(a.rungs(), vec![Rung::Read]);
+        assert_eq!(a.state(), AskState::Open, "state reads the raw row");
+        assert!(Ask::from_row(json!({"id": [1]})).is_err());
+        assert!(Ask::from_row(json!("x")).is_err());
+    }
+
+    #[test]
+    fn a_non_finite_number_reads_and_hashes_as_javascript_does() {
+        let inf = JsValue::Num(f64::INFINITY);
+        assert_eq!(text(Some(&inf)).as_deref(), Some("Infinity"));
+        assert_eq!(text(Some(&JsValue::Num(f64::NAN))).as_deref(), Some("NaN"));
+        let row = |k: &str, v: JsValue| {
+            JsValue::Obj([("id".to_string(), JsValue::Str("a".into())), (k.to_string(), v)].into())
+        };
+        assert_eq!(canonical_string(&row("answer", inf.clone())), r#"{"answer":null,"id":"a"}"#);
+        assert_eq!(state_of(&row("answer", inf.clone())), AskState::Answered, "text(Infinity) is answered");
+        assert_eq!(Ask::from_row(JsValue::Obj([("id".to_string(), inf.clone())].into())).unwrap().id, "Infinity");
+        // A string that merely looks like a marker is text, nothing else.
+        assert_eq!(text(Some(&JsValue::Str("\u{FDD0}Infinity".into()))).as_deref(), Some("\u{FDD0}Infinity"));
+    }
+
+    #[test]
+    fn text_trims_as_javascript_trims() {
+        assert_eq!(text(Some(&json!("\u{feff}"))), None, "U+FEFF is JavaScript whitespace");
+        assert_eq!(text(Some(&json!("\u{85}"))).as_deref(), Some("\u{85}"), "U+0085 is not");
+        assert_eq!(text(Some(&json!("\u{3000}x\u{2028}"))).as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn ledger_fields_never_hide_the_asks() {
+        let (l, errors) = AskLedger::from_value(json!({"arc": 9, "lanes": "one", "asks": [{"id": "a"}]})).unwrap();
+        assert!(errors.is_empty());
+        assert_eq!((l.arc.as_deref(), l.lanes.as_slice(), l.asks.len()), (Some("9"), &["one".to_string()][..], 1));
+    }
+
+    #[test]
+    fn numbers_print_as_javascript_prints_them() {
+        let cases = [
+            (json!(2.0), "2"),
+            (json!(1e3), "1000"),
+            (json!(-0.0), "0"),
+            (json!(0.5), "0.5"),
+            (json!(1.5e-7), "1.5e-7"),
+            (json!(0.000001), "0.000001"),
+            (json!(1e21), "1e+21"),
+            (json!(123456789012345680000.0), "123456789012345680000"),
+            (json!(12), "12"),
+            (json!(9007199254740993u64), "9007199254740992"),
+            (json!(-9007199254740993i64), "-9007199254740992"),
+        ];
+        for (v, want) in cases {
+            let mut out = String::new();
+            canonical_json(&v, &mut out);
+            assert_eq!(out, want, "{v:?}");
+        }
+        assert_eq!(text(Some(&json!(1.0))).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn keys_order_as_a_rebuilt_javascript_object() {
+        let mut out = String::new();
+        canonical_json(&json!({"b": 1, "10": 2, "2": 3, "07": 4, "a": 5, "\u{ff61}": 6, "\u{1f600}": 7}), &mut out);
+        // Index keys first, numerically; then UTF-16 order, where an astral char (surrogates 0xD83D…) sorts before U+FF61.
+        assert_eq!(out, "{\"2\":3,\"10\":2,\"07\":4,\"a\":5,\"b\":1,\"\u{1f600}\":7,\"\u{ff61}\":6}");
+    }
+
+    #[test]
+    fn hash_matches_the_plugin_on_a_known_row() {
+        // node -e 'const c=v=>Array.isArray(v)?v.map(c):v&&typeof v==="object"?Object.fromEntries(Object.keys(v).sort().map(k=>[k,c(v[k])])):v;
+        //   console.log(require("crypto").createHash("sha256").update(JSON.stringify(c(ROW))).digest("hex").slice(0,16))'
+        let row = json!({"id": "a", "n": 2.0, "big": 1e3, "10": "x", "2": "y"});
+        let mut s = String::new();
+        canonical_json(&row, &mut s);
+        assert_eq!(s, r#"{"2":"y","10":"x","big":1000,"id":"a","n":2}"#);
     }
 
     #[test]

@@ -1,0 +1,6 @@
+asks:
+  - id: a
+    options: [
+      {id: a, label: A},
+      {id: b, label: B}
+    ]

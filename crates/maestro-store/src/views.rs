@@ -4,7 +4,6 @@
 //! hooks) computes the same counts from the same inputs.
 
 use crate::{LedgerFile, Store};
-use maestro_core::Section;
 use maestro_core::ask::{AskRef, AskState};
 use maestro_core::context::{AskBrief, ContextPacket, ContextScope, InitiativeBrief, LoopBrief};
 use maestro_core::fleet::FleetSummary;
@@ -13,6 +12,7 @@ use maestro_core::loops::{Desired, Drift, DriftClass, LoopSpec, Notice, NoticeKi
 use maestro_core::need::{Need, NeedKind, NeedSource};
 use maestro_core::tick::Tick;
 use maestro_core::work::{WorkItem, WorkState};
+use maestro_core::{Section, SourceError};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -85,6 +85,10 @@ fn substrate_label(spec: &LoopSpec) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
+fn instant(ts: &str) -> Option<jiff::Timestamp> {
+    ts.parse::<jiff::Timestamp>().ok()
+}
+
 fn secs(ts: &str) -> Option<i64> {
     ts.parse::<jiff::Timestamp>().ok().map(|t| t.as_second())
 }
@@ -117,7 +121,8 @@ pub fn loop_rows(specs: &[LoopSpec], ticks: Option<&[Tick]>, now: jiff::Timestam
         .iter()
         .map(|spec| {
             let mine = by_loop.get(spec.id.as_str()).cloned().unwrap_or_default();
-            let last = mine.iter().max_by(|a, b| a.started_at.cmp(&b.started_at)).map(|t| (*t).clone());
+            // By instant, not text: offsets and precisions differ across writers. Unparseable sorts lowest.
+            let last = mine.iter().max_by_key(|t| (instant(&t.started_at), t.started_at.clone())).map(|t| (*t).clone());
             let active = spec.desired() == Desired::Active;
             let mut drift = Vec::new();
             let mut notices = Vec::new();
@@ -183,27 +188,45 @@ pub struct AskCounts {
 }
 
 /// Asks open at the store's git revision but answered in the workspace working tree.
-/// Empty when the store already reads the working tree.
-pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Vec<AskRef> {
+/// Empty when the store already reads the working tree. The section's errors are the
+/// working tree's own read failures: an unreadable local ledger hides answers waiting
+/// to land, so the count is then a lower bound, and `data` is `None` when nothing local was readable.
+pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
     if store.tree.source == crate::TreeSource::WorkingTree {
-        return Vec::new();
+        return Section::ok("worktree", Vec::new());
+    }
+    // No local asks directory holds no local answers: nothing waits, and nothing is unread.
+    // Anything else in its place (a file, a dangling link) is unread, and the read reports it.
+    let local_dir = store.paths.workspace.join(crate::ASKS_DIR);
+    if std::fs::symlink_metadata(&local_dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return Section::ok(format!("worktree:{}", crate::ASKS_DIR), Vec::new());
     }
     let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree).asks();
-    let Some(local) = local.data else { return Vec::new() };
+    let errors: Vec<SourceError> = local
+        .errors
+        .iter()
+        .map(|e| SourceError {
+            at: if e.at.starts_with("worktree:") { e.at.clone() } else { format!("worktree:{}", e.at) },
+            reason: e.reason.clone(),
+        })
+        .collect();
+    let source = local.source;
+    let Some(local) = local.data else { return Section { source, data: None, errors } };
     let answered_here: BTreeSet<(String, String)> = local
         .iter()
         .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
         .filter(|(_, a)| a.state() != AskState::Open)
         .map(|(lf, a)| (lf.file.clone(), a.handle().to_string()))
         .collect();
-    at_rev
+    let refs = at_rev
         .iter()
         .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
         .filter(|(lf, a)| {
             a.state() == AskState::Open && answered_here.contains(&(lf.file.clone(), a.handle().to_string()))
         })
         .map(|(lf, a)| AskRef { ledger: lf.file.clone(), id: a.handle().to_string() })
-        .collect()
+        .collect();
+    Section::partial(source, refs, errors)
 }
 
 pub fn ask_counts(asks: &[LedgerFile]) -> AskCounts {
@@ -290,6 +313,17 @@ pub struct Snapshot {
     pub fleet: Section<Vec<FleetSummary>>,
 }
 
+/// Ask counts, with the working tree's read errors joined in: they make the unlanded count a lower bound.
+fn asks_with_unlanded(store: &Store, asks: &Section<Vec<LedgerFile>>) -> Section<AskCounts> {
+    let mut section = asks.as_ref().map(|a| {
+        let waiting = unlanded(store, a);
+        (AskCounts { unlanded: waiting.data.as_ref().map_or(0, Vec::len), ..ask_counts(a) }, waiting.errors)
+    });
+    let local_errors = section.data.as_mut().map(|(_, e)| std::mem::take(e)).unwrap_or_default();
+    section.errors.extend(local_errors);
+    section.map(|(counts, _)| counts)
+}
+
 pub fn snapshot(store: &Store) -> Snapshot {
     snapshot_of(store, &Reads::of(store), now())
 }
@@ -300,7 +334,7 @@ pub fn snapshot_of(store: &Store, reads: &Reads, at: jiff::Timestamp) -> Snapsho
         workspace: store.paths.workspace.display().to_string(),
         tree: store.tree.label("").trim_end_matches(':').to_string(),
         needs: reads.needs(),
-        asks: reads.asks.as_ref().map(|a| AskCounts { unlanded: unlanded(store, a).len(), ..ask_counts(a) }),
+        asks: asks_with_unlanded(store, &reads.asks),
         work: reads.work.as_ref().map(|w| work_counts(w)),
         loops: reads.loop_rows(at),
         initiatives: reads.initiatives.as_ref().map(|v| v.iter().filter(|i| i.status.is_live()).cloned().collect()),
@@ -308,14 +342,44 @@ pub fn snapshot_of(store: &Store, reads: &Reads, at: jiff::Timestamp) -> Snapsho
     }
 }
 
-/// Infer a project name from a cwd: the repo directory under the workspace (`core/maestro` → `maestro`).
+/// Infer a project name from a cwd: the outermost git repository holding it below the
+/// workspace (`core/maestro` → `maestro`). Outermost, so a worktree checked out inside
+/// its repo (`core/life/.claude/worktrees/feat-x`) still names `life`. The workspace's own
+/// directories (`research/notes`) and its own worktrees (`.claude/worktrees/x`) name no
+/// project, and neither does a cwd that is not on this disk: its repo cannot be known.
 pub fn project_of(cwd: &Path, workspace: &Path) -> Option<String> {
-    let rel = cwd.strip_prefix(workspace).ok()?;
-    let parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-    match parts.as_slice() {
-        [_, name, ..] => Some(name.clone()),
-        _ => None,
+    let cwd = lexical(cwd);
+    let workspace = lexical(workspace);
+    cwd.strip_prefix(&workspace).ok()?;
+    let workspace_git = workspace.join(".git");
+    cwd.ancestors()
+        .take_while(|d| *d != workspace)
+        .filter(|d| match std::fs::read_to_string(d.join(".git")) {
+            // A `.git` file is a worktree: it is the workspace's own when its gitdir lies in the workspace's `.git`.
+            Ok(link) => !link
+                .strip_prefix("gitdir:")
+                .map(|g| lexical(&d.join(g.trim())))
+                .is_some_and(|g| g.starts_with(&workspace_git)),
+            Err(_) => d.join(".git").is_dir(),
+        })
+        .last()
+        .and_then(|repo| repo.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
+/// A path with `.` and `..` resolved by the text alone, so `core/maestro/../life` is `core/life`.
+fn lexical(p: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
     }
+    out
 }
 
 fn initiative_for<'a>(
@@ -447,4 +511,40 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
 /// Work items with a canonical state, or all of them.
 pub fn work_by_state(work: &[WorkItem], state: Option<WorkState>) -> Vec<&WorkItem> {
     work.iter().filter(|w| state.is_none_or(|s| w.work_state == s)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maestro_core::loops::LoopSpec;
+
+    fn tick(started_at: &str) -> Tick {
+        Tick {
+            loop_id: "l".into(),
+            actor: "a".into(),
+            started_at: started_at.into(),
+            start_id: started_at.into(),
+            ended_at: Some(started_at.into()),
+            outcome: None,
+            summary: None,
+            tiers: vec![],
+            calls: None,
+        }
+    }
+
+    #[test]
+    fn the_latest_tick_is_the_latest_instant_not_the_largest_text() {
+        let spec: LoopSpec = serde_yaml::from_str(
+            "id: l\ntitle: L\npurpose: p\nowner: o\nscope: broomva\nsubstrate: {kind: t3-schedule}\ncadence: x\nreview_by: '2099-01-01'\n",
+        )
+        .unwrap();
+        // 09:00-05:00 is 14:00Z, the latest instant, though it is the smallest text.
+        let ticks = [tick("2026-10-19T13:30:00Z"), tick("2026-10-19T09:00:00-05:00"), tick("2026-10-19T12:00:00Z")];
+        let rows = loop_rows(std::slice::from_ref(&spec), Some(&ticks), now());
+        assert_eq!(rows[0].last_tick.as_ref().unwrap().started_at, "2026-10-19T09:00:00-05:00");
+        // 16:00+02:00 is 14:00Z: the largest text, and the earlier instant.
+        let ticks = [tick("2026-10-19T16:00:00+02:00"), tick("2026-10-19T14:30:00Z")];
+        let rows = loop_rows(std::slice::from_ref(&spec), Some(&ticks), now());
+        assert_eq!(rows[0].last_tick.as_ref().unwrap().started_at, "2026-10-19T14:30:00Z");
+    }
 }

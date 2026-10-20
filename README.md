@@ -45,7 +45,67 @@ because the CLI and the MCP server share one dispatch.
 
 By default Maestro reads the workspace at `origin/main`, because main's copy wins under the home rule.
 `--tree worktree` reads the local checkout instead. An answer present locally but not on main is
-reported as waiting to land, not as open and not as answered.
+reported as waiting to land, not as open and not as answered. If the local checkout itself cannot be
+read, that count becomes a lower bound and the error is reported under `worktree:`.
+
+- **Revisions.** A revision that does not resolve, or that starts with `-`, reads nothing. Every
+  section is then unavailable, not empty. The MCP server resolves the revision again on each request,
+  so a long-lived server follows `origin/main` as it moves.
+- **Parity with the Paseo plugin.** Asks are read the way the plugin reads them:
+  - Fields go through `text`, `textsOf` and `optionsOf`, and a flag counts only when it is `=== true`.
+    So a numeric id, a string `blocking`, a single-string `gates` list or an option without a label
+    never drops an entry.
+  - Ledgers (`.yaml` or `.yml`, as the plugin's `LEDGER` names them) are read **exactly as the
+    plugin's `yaml` package reads them, within a YAML subset**: the YAML that ledger writers produce
+    (`ask_ledger.py`, PyYAML, the plugin) over the values they hold: strings, numbers, booleans,
+    null, lists and maps. A document outside the subset is **refused**, with the
+    feature named (`outside the YAML subset Maestro reads exactly: …`), and is never misread. The owner
+    chose this scope on 2026-10-20: yaml-rust2 itself disagrees with the package at its edges (block
+    scalars, NUL, byte-versus-char positions), so no rule over it reaches full parity. A Rust port of
+    the package's parser is the follow-up that would.
+    - **Inside the subset:**
+      - block and flow collections, comments;
+      - plain and quoted scalars, single- and multi-line;
+      - block scalars `|`, `|-`, `>`, `>-`;
+      - anchors and aliases, counted by the package's `maxAliasCount` and resolved to the anchor's value;
+      - a leading BOM and `---`, CRLF, any Unicode, literal NEL/LS/PS included (`JSON.stringify`
+        leaves them literal), and a literal U+FEFF inside a double-quoted scalar (likewise);
+      - surrogate escapes: a pair decodes, and a lone half reads as text outside double quotes.
+
+      Scalars resolve by the package's core-schema rules: `0004` is 4, `0b101` a string, big integers
+      round, `.inf` is `Infinity`. Keys stringify as `toJS` makes them, and duplicates are an error.
+    - **Outside the subset:**
+      - tabs, lone CRs, NUL and other control characters, invalid UTF-8, and a U+FEFF past the start
+        anywhere but inside a double-quoted scalar;
+      - directives, `...`, a later `---`;
+      - tags and explicit `?` keys. No writer emits a tag: both write JSON strings, and PyYAML
+        writes `!!binary` only for `bytes`, which no ledger holds;
+      - an implicit key whose `:` is over 1024 UTF-16 units past its start, as the package measures
+        it (refused in a flow mapping too, which the package reads);
+      - `+` chomping and indentation digits;
+      - whitespace-only lines, and a missing final newline;
+      - a lone surrogate escape in a double-quoted scalar;
+      - collection keys;
+      - nesting past 256 levels.
+
+      The full list, in the rules' own words, is the module doc of `crates/maestro-store/src/yaml.rs`.
+    - Every real ledger is inside it: `~/broomva/.control/asks` reads 237 asks with 0 errors.
+  - Ledger entries are JavaScript values (`maestro-core/src/js.rs`), so a non-finite number keeps
+    `text(Infinity)` as `Infinity` while it hashes as `null`. Entry hashes are `JSON.stringify` byte for
+    byte, including JavaScript number printing and object key order.
+  - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.
+    So a torn last line, a huge number or a lone surrogate never hides or resurrects a flag.
+  - **Proof:**
+    - `fixtures/parity/plugin-golden.json` is the plugin's own reading of a 136-ledger edge corpus,
+      written by `scripts/plugin-golden.ts`.
+    - The test `every_ledger_reads_as_the_plugin_reads_it` holds each ledger to one class: read to the
+      byte, refused by both, or refused as outside the subset. The class sizes are pinned.
+    - `scripts/parity-fuzz.py` is a differential fuzz against the plugin. Anything Maestro reads must
+      match, and anything the plugin refuses Maestro must refuse. A ledger drawn from the subset
+      grammar that the plugin reads must be read, so a reader refusing everything cannot pass.
+    - Regenerate the golden file whenever the plugin's readers change.
+- **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
+  50).
 
 ## Harness registration
 
