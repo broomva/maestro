@@ -14,6 +14,10 @@ silently shows up as a failure.
 
     python3 scripts/parity-fuzz.py [--n 1500] [--seed 7] [--maestro target/debug/maestro]
                                    [--plugin ~/broomva/apps/maestro-paseo] [--keep DIR]
+                                   [--subset-share 0.6]
+
+`--subset-share` is the share of ledgers drawn from the subset grammar, so they must read
+exactly; the rest are drawn freely, so they must read exactly or be refused as outside.
 
 Exits 0 only when every divergence is a known gap.
 """

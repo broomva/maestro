@@ -116,6 +116,13 @@ impl Store {
             }
             yaml::parse(t).map(|r| (r.value, r.warnings))
         });
+        // Invalid UTF-8 is outside the subset too: say so in the same words as every other refusal.
+        let mut docs = docs;
+        for e in &mut docs.errors {
+            if e.reason.contains("not valid UTF-8") {
+                e.reason = format!("{}: {}", yaml::OUTSIDE, e.reason);
+            }
+        }
         let mut errors = docs.errors;
         let data = docs.data.map(|docs| {
             let mut out = Vec::new();

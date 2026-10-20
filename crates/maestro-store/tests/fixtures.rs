@@ -370,7 +370,7 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
         }
         same += 1;
     }
-    assert_eq!((same, both_refuse, outside, golden.as_object().unwrap().len()), (25, 6, 37, 68));
+    assert_eq!((same, both_refuse, outside, golden.as_object().unwrap().len()), (26, 5, 37, 68));
 }
 
 #[test]
@@ -493,5 +493,6 @@ fn a_ledger_that_is_not_utf8_is_refused_by_name_in_both_modes() {
         let reason =
             asks.errors.iter().find(|e| e.at.ends_with("latin.yaml")).map(|e| e.reason.clone()).unwrap_or_default();
         assert!(reason.contains("not valid UTF-8"), "{source}: {reason}");
+        assert!(reason.starts_with(maestro_store::yaml::OUTSIDE), "{source}: labelled outside the subset: {reason}");
     }
 }
