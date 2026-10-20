@@ -733,6 +733,50 @@
    "{\"id\":\"a\",\"v\":[[\"x\"]]}"
   ]
  },
+ "r8-bom-after-docstart.yaml": {
+  "asks": [],
+  "rows": []
+ },
+ "r8-bom-before-dash.yaml": {
+  "asks": [],
+  "rows": []
+ },
+ "r8-bom-in-dq-multiline.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "e105f10c48f8e152",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a ﻿b\"}"
+  ]
+ },
+ "r8-bom-in-dq-writer.yaml": {
+  "asks": [
+   {
+    "id": "bom",
+    "hash": "f46046f6496f76b9",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"a﻿b\",\"id\":\"bom\",\"status\":\"resolved\"}"
+  ]
+ },
+ "r8-bom-in-plain.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "77780b9f29ccafdd",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿b\"}"
+  ]
+ },
  "r8-pair-anchor-prev-line.yaml": {
   "asks": [
    {

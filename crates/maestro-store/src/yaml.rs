@@ -31,7 +31,8 @@
 //!
 //! **Outside the subset** (refused, the reason naming the feature and line):
 //! - a tab, a lone carriage return, a NUL or other C0 control character, a
-//!   byte-order mark past the start, invalid UTF-8;
+//!   byte-order mark past the start outside a double-quoted scalar (inside
+//!   one, as `JSON.stringify` writes it, it reads), invalid UTF-8;
 //! - `%` directives, `...`, a `---` past the first line, more than one document;
 //! - tags (`!!int`, `!custom`, …), explicit keys (`? k`) and empty keys (`: v`);
 //! - block scalars with `+` chomping or an indentation digit;
@@ -112,7 +113,6 @@ fn outside_subset(source: &str) -> Option<String> {
             }
             '\t' => Some("a tab character"),
             '\r' if chars.peek() != Some(&'\n') => Some("a carriage return outside a CRLF line ending"),
-            '\u{feff}' => Some("a byte-order mark past the start"),
             c if (c as u32) < 0x20 && c != '\r' => Some("a NUL or other control character"),
             _ => None,
         };
@@ -238,6 +238,23 @@ fn build(source: &str, marks: HashMap<char, Carried>) -> Result<Builder, String>
     if let Some(e) = builder.error.take() {
         return Err(e);
     }
+    // A byte-order mark past the start is read alike only inside a double-quoted scalar, where
+    // `JSON.stringify` (the plugin's writer) leaves it literal. Anywhere else it is refused.
+    let mut spans = builder.dq_spans.iter().peekable();
+    for (i, &c) in builder.src.iter().enumerate() {
+        if c != '\u{feff}' {
+            continue;
+        }
+        while spans.peek().is_some_and(|&&(_, end)| end <= i) {
+            spans.next();
+        }
+        if !spans.peek().is_some_and(|&&(start, end)| start < i && i < end) {
+            let n = builder.line_of(i) + 1;
+            return Err(format!(
+                "{OUTSIDE}: a byte-order mark past the start, outside a double-quoted scalar (line {n})"
+            ));
+        }
+    }
     if builder.documents > 1 {
         return Err("Source contains multiple documents; the plugin reads one".into());
     }
@@ -302,6 +319,8 @@ struct Builder {
     line_starts: Vec<usize>,
     /// The surrogate escapes carried through the parser.
     marks: HashMap<char, Carried>,
+    /// Where each double-quoted scalar sits in `src`, quotes included, in document order.
+    dq_spans: Vec<(usize, usize)>,
 }
 
 impl Builder {
@@ -633,6 +652,9 @@ impl MarkedEventReceiver for Builder {
                     let quote = if *style == TScalarStyle::DoubleQuoted { '"' } else { '\'' };
                     if self.src.get(at) == Some(&quote) {
                         let end = self.quoted_end(at, quote);
+                        if quote == '"' {
+                            self.dq_spans.push((at, end));
+                        }
                         let last = self.line_of(end.saturating_sub(1));
                         // An escaped line break before an empty line: yaml-rust2 folds it otherwise.
                         if quote == '"' {
@@ -1278,6 +1300,24 @@ mod tests {
         // A document holding every private-use character leaves no carrier: refused, labelled.
         let held: String = ('\u{F0000}'..='\u{FFFFD}').chain('\u{E000}'..='\u{F8FF}').collect();
         assert!(refused(&format!("note: x{held} \\uD800\n")).starts_with(OUTSIDE));
+    }
+
+    #[test]
+    fn a_byte_order_mark_reads_only_inside_double_quotes() {
+        // The plugin's writer is `JSON.stringify`, which leaves U+FEFF literal in a double-quoted value.
+        assert_eq!(js("a: \"x\u{feff}y\"\nb: \"\u{feff}\"\n"), json!({"a": "x\u{feff}y", "b": "\u{feff}"}));
+        assert_eq!(js("a: \"x\n  \u{feff}y\"\n"), json!({"a": "x \u{feff}y"}));
+        // Anywhere else yaml-rust2 and the package part ways (`- ` after one reads nothing): refused.
+        for doc in [
+            "asks:\n  \u{feff}- id: a\n",
+            "---\n\u{feff}a: 1\n",
+            "a: x\u{feff}\n",
+            "a: 'x\u{feff}'\n",
+            "\u{feff}\u{feff}a: 1\n",
+        ] {
+            assert!(refused(doc).contains("byte-order mark"), "{doc:?}");
+        }
+        assert_eq!(js("\u{feff}a: 1\n"), json!({"a": 1}), "a leading one is not content");
     }
 
     #[test]

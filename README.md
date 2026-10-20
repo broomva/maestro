@@ -69,13 +69,14 @@ read, that count becomes a lower bound and the error is reported under `worktree
       - block scalars `|`, `|-`, `>`, `>-`;
       - anchors and aliases, counted by the package's `maxAliasCount` and resolved to the anchor's value;
       - a leading BOM and `---`, CRLF, any Unicode, literal NEL/LS/PS included (`JSON.stringify`
-        leaves them literal);
+        leaves them literal), and a literal U+FEFF inside a double-quoted scalar (likewise);
       - surrogate escapes: a pair decodes, and a lone half reads as text outside double quotes.
 
       Scalars resolve by the package's core-schema rules: `0004` is 4, `0b101` a string, big integers
       round, `.inf` is `Infinity`. Keys stringify as `toJS` makes them, and duplicates are an error.
     - **Outside the subset:**
-      - tabs, lone CRs, NUL and other control characters, invalid UTF-8;
+      - tabs, lone CRs, NUL and other control characters, invalid UTF-8, and a U+FEFF past the start
+        anywhere but inside a double-quoted scalar;
       - directives, `...`, a later `---`;
       - tags and explicit `?` keys. No writer emits a tag: both write JSON strings, and PyYAML
         writes `!!binary` only for `bytes`, which no ledger holds;
@@ -95,7 +96,7 @@ read, that count becomes a lower bound and the error is reported under `worktree
   - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.
     So a torn last line, a huge number or a lone surrogate never hides or resurrects a flag.
   - **Proof:**
-    - `fixtures/parity/plugin-golden.json` is the plugin's own reading of a 110-ledger edge corpus,
+    - `fixtures/parity/plugin-golden.json` is the plugin's own reading of a 115-ledger edge corpus,
       written by `scripts/plugin-golden.ts`.
     - The test `every_ledger_reads_as_the_plugin_reads_it` holds each ledger to one class: read to the
       byte, refused by both, or refused as outside the subset. The class sizes are pinned.

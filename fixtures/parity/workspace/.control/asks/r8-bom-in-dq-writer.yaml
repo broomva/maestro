@@ -1,0 +1,4 @@
+asks:
+  - id: bom
+    answer: "a﻿b"
+    status: "resolved"
