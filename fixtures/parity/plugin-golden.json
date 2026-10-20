@@ -77,6 +77,18 @@
    "{\"[ a, b ]\":\"v\",\"id\":\"complex\"}"
   ]
  },
+ "deep-254.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "a04788b547479dc3",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"v\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"x\"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+  ]
+ },
  "dup-keys.yaml": {
   "error": "it has a YAML error: Map keys must be unique at line 4, column 5:"
  },
@@ -229,6 +241,72 @@
    "{\"ask\":\"lead?\",\"blocking\":true,\"id\":4,\"n\":10}"
   ]
  },
+ "key-anch1024.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "7487fabaffff9e1e",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":\"v\"}"
+  ]
+ },
+ "key-anch1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 8:"
+ },
+ "key-dq1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 5:"
+ },
+ "key-emoji512.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "4de5b6e5f36d55c2",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\":\"v\"}"
+  ]
+ },
+ "key-emoji513.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 5:"
+ },
+ "key-fmap1025.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "29d5e13b0bffa776",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"s\":{\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":\"v\"}}"
+  ]
+ },
+ "key-fseq1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit flow sequence key at line 3, column 1034:"
+ },
+ "key-plainsurr1024.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "490f38086882fd67",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"\\\\uD83Dkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":\"v\",\"id\":\"a\"}"
+  ]
+ },
+ "key-plainsurr1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 5:"
+ },
+ "key-sp1025.yaml": {
+  "error": "it has a YAML error: The : indicator must be at most 1024 chars after the start of an implicit block mapping key at line 3, column 5:"
+ },
  "keys.yaml": {
   "asks": [
    {
@@ -305,6 +383,18 @@
   ],
   "rows": [
    "{\"id\":\"plain-bs\",\"note\":\"literal \\\\uD83D text\"}"
+  ]
+ },
+ "ps-plain.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "800b044aefc3bb17",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"note\":\"a b\"}"
   ]
  },
  "quoted.yaml": {
@@ -529,6 +619,18 @@
    "{\"id\":\"t2\",\"w\":\"x continued\"}"
   ]
  },
+ "tag-binary-pyyaml.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "204c54a0580cc8a4",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"v\":{\"0\":104,\"1\":105}}"
+  ]
+ },
  "tag-binary.yaml": {
   "asks": [
    {
@@ -672,6 +774,30 @@
   ],
   "rows": [
    "{\"id\":\"uni\",\"meta\":{\"B\":\"c\",\"a\":\"d\",\"😀\":\"b\",\"｡\":\"a\"}}"
+  ]
+ },
+ "writer-ls-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "58b05d1d46ccc1b9",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"a b\",\"id\":\"a\"}"
+  ]
+ },
+ "writer-nel-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "7719273cecf5917d",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"ab\",\"id\":\"a\"}"
   ]
  },
  "yaml11.yaml": {

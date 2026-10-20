@@ -265,9 +265,15 @@ def main() -> int:
     tmp = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="maestro-fuzz-"))
     asks = tmp / "ws/.control/asks"
     asks.mkdir(parents=True, exist_ok=True)
+    inside: set[str] = set()
     for i in range(args.n):
-        doc = subset_ledger(rng, i) if rng.random() < args.subset_share else ledger(rng, i)
-        (asks / f"f{i:05}.yaml").write_bytes(doc.encode("utf-8"))
+        name = f"f{i:05}.yaml"
+        if rng.random() < args.subset_share:
+            doc = subset_ledger(rng, i)
+            inside.add(name)
+        else:
+            doc = ledger(rng, i)
+        (asks / name).write_bytes(doc.encode("utf-8"))
 
     golden_script = Path(args.plugin) / ".parity-fuzz-golden.ts"
     shutil.copy(ROOT / "scripts/plugin-golden.ts", golden_script)
@@ -298,7 +304,12 @@ def main() -> int:
         reasons = errors.get(name, [])
         read = got.get(name, [])
         if any(OUTSIDE in r for r in reasons):
-            if read:
+            # A ledger drawn from the subset grammar that the plugin reads is inside the subset by
+            # construction: refusing it is a failure, so a reader that refuses everything as
+            # `outside` cannot pass. (The grammar also draws invalid YAML; both refuse that.)
+            if name in inside and "error" not in want:
+                failures.append((name, f"drawn inside the subset, refused as outside: {[r[:70] for r in reasons]}"))
+            elif read:
                 failures.append((name, f"refused as outside the subset and read at once: {read}"))
             else:
                 gaps["outside the subset"] = gaps.get("outside the subset", 0) + 1
@@ -315,7 +326,11 @@ def main() -> int:
             continue
         failures.append((name, f"want {expected} got {read} errors {[r[:60] for r in reasons]}"))
 
-    print(f"ledgers {len(golden)}  read identically {read_same}  refused loudly {gaps}  FAILURES {len(failures)}")
+    inside_read = sum(1 for n in inside if got.get(n) and not errors.get(n))
+    inside_valid = sum(1 for n in inside if "error" not in golden[n])
+    print(f"ledgers {len(golden)}  read identically {read_same}  refused loudly {gaps}  "
+          f"inside the subset {len(inside)} (plugin reads {inside_valid}, Maestro reads {inside_read})  "
+          f"FAILURES {len(failures)}")
     for name, why in failures[:40]:
         print(f"  FAIL {name}: {why}")
         print("    " + (asks / name).read_text(encoding="utf-8").replace("\n", "\n    ")[:600])

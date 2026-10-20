@@ -57,7 +57,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
     never drops an entry.
   - Ledgers (`.yaml` or `.yml`, as the plugin's `LEDGER` names them) are read **exactly as the
     plugin's `yaml` package reads them, within a YAML subset**: the YAML that ledger writers produce
-    (`ask_ledger.py`, PyYAML, the plugin). A document outside the subset is **refused**, with the
+    (`ask_ledger.py`, PyYAML, the plugin) over the values they hold: strings, numbers, booleans,
+    null, lists and maps. A document outside the subset is **refused**, with the
     feature named (`outside the YAML subset Maestro reads exactly: …`), and is never misread. The owner
     chose this scope on 2026-10-20: yaml-rust2 itself disagrees with the package at its edges (block
     scalars, NUL, byte-versus-char positions), so no rule over it reaches full parity. A Rust port of
@@ -67,19 +68,26 @@ read, that count becomes a lower bound and the error is reported under `worktree
       - plain and quoted scalars, single- and multi-line;
       - block scalars `|`, `|-`, `>`, `>-`;
       - anchors and aliases, counted by the package's `maxAliasCount` and resolved to the anchor's value;
-      - a leading BOM and `---`, CRLF, any Unicode.
+      - a leading BOM and `---`, CRLF, any Unicode, literal NEL/LS/PS included (`JSON.stringify`
+        leaves them literal);
+      - surrogate escapes: a pair decodes, and a lone half reads as text outside double quotes.
 
       Scalars resolve by the package's core-schema rules: `0004` is 4, `0b101` a string, big integers
       round, `.inf` is `Infinity`. Keys stringify as `toJS` makes them, and duplicates are an error.
     - **Outside the subset:**
-      - tabs, lone CRs, NUL and other control characters, literal NEL/LS/PS, invalid UTF-8;
+      - tabs, lone CRs, NUL and other control characters, invalid UTF-8;
       - directives, `...`, a later `---`;
-      - tags and explicit `?` keys;
+      - tags and explicit `?` keys. No writer emits a tag: both write JSON strings, and PyYAML
+        writes `!!binary` only for `bytes`, which no ledger holds;
+      - an implicit key whose `:` is over 1024 UTF-16 units past its start, as the package measures
+        it (in a flow mapping too, where the package allows it);
       - `+` chomping and indentation digits;
       - whitespace-only lines, and a missing final newline;
-      - surrogate escapes;
+      - a lone surrogate escape in a double-quoted scalar;
       - collection keys;
       - nesting past 256 levels.
+
+      The full list, in the rules' own words, is the module doc of `crates/maestro-store/src/yaml.rs`.
     - Every real ledger is inside it: `~/broomva/.control/asks` reads 237 asks with 0 errors.
   - Ledger entries are JavaScript values (`maestro-core/src/js.rs`), so a non-finite number keeps
     `text(Infinity)` as `Infinity` while it hashes as `null`. Entry hashes are `JSON.stringify` byte for
@@ -87,12 +95,13 @@ read, that count becomes a lower bound and the error is reported under `worktree
   - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.
     So a torn last line, a huge number or a lone surrogate never hides or resurrects a flag.
   - **Proof:**
-    - `fixtures/parity/plugin-golden.json` is the plugin's own reading of a 68-ledger edge corpus,
+    - `fixtures/parity/plugin-golden.json` is the plugin's own reading of a 83-ledger edge corpus,
       written by `scripts/plugin-golden.ts`.
     - The test `every_ledger_reads_as_the_plugin_reads_it` holds each ledger to one class: read to the
       byte, refused by both, or refused as outside the subset. The class sizes are pinned.
     - `scripts/parity-fuzz.py` is a differential fuzz against the plugin. Anything Maestro reads must
-      match, and anything the plugin refuses Maestro must refuse.
+      match, and anything the plugin refuses Maestro must refuse. A ledger drawn from the subset
+      grammar that the plugin reads must be read, so a reader refusing everything cannot pass.
     - Regenerate the golden file whenever the plugin's readers change.
 - **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
   50).

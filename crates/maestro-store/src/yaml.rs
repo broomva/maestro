@@ -39,8 +39,10 @@
 //! - a lone surrogate escape in a double-quoted scalar, and an escaped line break
 //!   followed by an empty line;
 //! - a continuation line indented at or before its parent collection;
-//! - a collection as a map key, an implicit key over 1024 chars, and a plain
-//!   scalar opening with `|`, `>`, `@`, `` ` `` or `%`;
+//! - a collection as a map key; an implicit key whose `:` is over 1024 UTF-16
+//!   units past its start (its anchor, if any), as the package measures it,
+//!   flow mappings included; and a plain scalar opening with `|`, `>`, `@`,
+//!   `` ` `` or `%`;
 //! - nesting deeper than [`MAX_DEPTH`], and more than [`MAX_NODES`] values;
 //! - anything yaml-rust2 itself cannot parse.
 
@@ -408,15 +410,71 @@ impl Builder {
         {
             return self.refuse(format!("an explicit key `?` (line {})", n + 1));
         }
-        if let Some((text, style)) = value {
+        if let Some((_, style)) = value {
             // yaml-rust2 gives an empty key as a plain `~` placed on the `:` itself; a real `~` key sits on its `~`.
             if style == TScalarStyle::Plain && self.src.get(at) == Some(&':') {
                 return self.refuse(format!("an empty key (line {})", n + 1));
             }
-            if text.chars().count() > MAX_IMPLICIT_KEY {
-                self.refuse(format!("an implicit key over {MAX_IMPLICIT_KEY} characters (line {})", n + 1));
+        }
+        if let Some(units) = self.key_span(at, value)
+            && units > MAX_IMPLICIT_KEY
+        {
+            self.refuse(format!(
+                "an implicit key whose `:` is over {MAX_IMPLICIT_KEY} UTF-16 units past its start (line {})",
+                n + 1
+            ));
+        }
+    }
+
+    /// What the package measures for `KEY_OVER_1024_CHARS`: the source from the key's start (its
+    /// anchor, if it has one) to its `:` indicator, in UTF-16 units. A carried escape counts as
+    /// the text it stands for. `None` when no `:` follows on the line, as in `{a, b}`.
+    fn key_span(&self, at: usize, value: Option<(&str, TScalarStyle)>) -> Option<usize> {
+        let src = &self.src;
+        let token = |c: char| !c.is_whitespace() && !matches!(c, ',' | '[' | ']' | '{' | '}');
+        let skip_spaces = |mut i: usize| {
+            while src.get(i) == Some(&' ') {
+                i += 1;
+            }
+            i
+        };
+        let (mut start, mut i) = (at, at);
+        if src.get(i) == Some(&'&') {
+            // The mark sits on the anchor: the key itself starts after it.
+            while src.get(i).is_some_and(|&c| token(c)) {
+                i += 1;
+            }
+            i = skip_spaces(i);
+        } else {
+            let mut j = at;
+            while j > 0 && src[j - 1] == ' ' {
+                j -= 1;
+            }
+            let mut k = j;
+            while k > 0 && token(src[k - 1]) {
+                k -= 1;
+            }
+            if k < j && src[k] == '&' {
+                start = k;
             }
         }
+        let end = match (src.get(i), value) {
+            (Some(&q), Some((_, TScalarStyle::DoubleQuoted | TScalarStyle::SingleQuoted))) => self.quoted_end(i, q),
+            (_, Some((text, _))) => i + text.chars().count(),
+            (Some('*'), None) => {
+                let mut e = i + 1;
+                while src.get(e).is_some_and(|&c| token(c)) {
+                    e += 1;
+                }
+                e
+            }
+            _ => return None,
+        };
+        let colon = skip_spaces(end);
+        if src.get(colon) != Some(&':') {
+            return None;
+        }
+        Some(src[start..colon].iter().map(|c| self.marks.get(c).map_or(c.len_utf16(), |m| m.text.len())).sum())
     }
 }
 
@@ -1025,6 +1083,30 @@ mod tests {
         assert!(parse("a: @x\n").is_err(), "a reserved indicator: yaml-rust2 refuses it");
         assert!(parse(&format!("{}: v\n", "k".repeat(1025))).is_err());
         assert!(parse(&format!("{}: v\n", "k".repeat(1024))).is_ok(), "1024 chars is still an implicit key");
+    }
+
+    #[test]
+    fn an_implicit_key_is_measured_as_the_package_measures_it() {
+        let units = |key: &str| format!("a:\n  {key}: v\n");
+        // UTF-16 units: an emoji is two, so 512 reach the limit and 513 pass it.
+        assert!(parse(&units(&"😀".repeat(512))).is_ok());
+        assert!(refused(&units(&"😀".repeat(513))).contains("UTF-16 units"));
+        // From the anchor, not the key; and a carried escape counts as the six characters it is.
+        assert!(parse(&units(&format!("&a {}", "k".repeat(1021)))).is_ok());
+        assert!(refused(&units(&format!("&a {}", "k".repeat(1022)))).starts_with(OUTSIDE));
+        assert!(parse(&units(&format!("\\uD83D{}", "k".repeat(1018)))).is_ok());
+        assert!(refused(&units(&format!("\\uD83D{}", "k".repeat(1019)))).contains("UTF-16 units"));
+        // Past BMP, where yaml-rust2's own count in chars stays short: the anchor and the quotes count.
+        let e = "😀".repeat(511);
+        assert!(parse(&units(&format!("&a {}k", "😀".repeat(510)))).is_ok());
+        assert!(refused(&units(&format!("&a {e}"))).contains("UTF-16 units"));
+        for q in ['"', '\''] {
+            assert!(parse(&units(&format!("{q}{e}{q}"))).is_ok());
+            assert!(refused(&units(&format!("{q}{e}k{q}"))).contains("UTF-16 units"));
+        }
+        // A flow sequence pair is held to it as a block key is.
+        assert!(parse(&format!("a: [{}: v]\n", "k".repeat(1024))).is_ok());
+        assert!(refused(&format!("a: [{}: v]\n", "k".repeat(1025))).contains("UTF-16 units"));
     }
 
     #[test]
