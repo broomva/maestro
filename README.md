@@ -55,27 +55,45 @@ read, that count becomes a lower bound and the error is reported under `worktree
   - Fields go through `text`, `textsOf` and `optionsOf`, and a flag counts only when it is `=== true`.
     So a numeric id, a string `blocking`, a single-string `gates` list or an option without a label
     never drops an entry.
-  - Ledgers (`.yaml` or `.yml`, as the plugin's `LEDGER` names them) are parsed as the plugin's
-    `yaml` package parses them. This uses the YAML 1.2 core schema, with scalars resolved by the
-    package's own rules (`crates/maestro-store/src/yaml.rs`):
-    - `0004` is 4, `0b101` is a string and big integers round;
-    - `!!float 1` is `"1"`;
-    - keys stringify as `toJS` makes them, and duplicate keys are an error.
-  - Entry hashes are `JSON.stringify` byte for byte, including JavaScript number printing and
-    object key order.
+  - Ledgers (`.yaml` or `.yml`, as the plugin's `LEDGER` names them) are read **exactly as the
+    plugin's `yaml` package reads them, within a YAML subset**: the YAML that ledger writers produce
+    (`ask_ledger.py`, PyYAML, the plugin). A document outside the subset is **refused**, with the
+    feature named (`outside the YAML subset Maestro reads exactly: …`), and is never misread. The owner
+    chose this scope on 2026-10-20: yaml-rust2 itself disagrees with the package at its edges (block
+    scalars, NUL, byte-versus-char positions), so no rule over it reaches full parity. A Rust port of
+    the package's parser is the follow-up that would.
+    - **Inside the subset:**
+      - block and flow collections, comments;
+      - plain and quoted scalars, single- and multi-line;
+      - block scalars `|`, `|-`, `>`, `>-`;
+      - anchors and aliases, counted by the package's `maxAliasCount` and resolved to the anchor's value;
+      - a leading BOM and `---`, CRLF, any Unicode.
+
+      Scalars resolve by the package's core-schema rules: `0004` is 4, `0b101` a string, big integers
+      round, `.inf` is `Infinity`. Keys stringify as `toJS` makes them, and duplicates are an error.
+    - **Outside the subset:**
+      - tabs, lone CRs, NUL and other control characters, literal NEL/LS/PS, invalid UTF-8;
+      - directives, `...`, a later `---`;
+      - tags and explicit `?` keys;
+      - `+` chomping and indentation digits;
+      - whitespace-only lines, and a missing final newline;
+      - surrogate escapes;
+      - collection keys;
+      - nesting past 256 levels.
+    - Every real ledger is inside it: `~/broomva/.control/asks` reads 237 asks with 0 errors.
+  - Ledger entries are JavaScript values (`maestro-core/src/js.rs`), so a non-finite number keeps
+    `text(Infinity)` as `Infinity` while it hashes as `null`. Entry hashes are `JSON.stringify` byte for
+    byte, including JavaScript number printing and object key order.
   - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.
     So a torn last line, a huge number or a lone surrogate never hides or resurrects a flag.
-  - The proof is `fixtures/parity/plugin-golden.json`: the plugin's own reading of an edge corpus,
-    written by `scripts/plugin-golden.ts`. The test `every_ledger_reads_as_the_plugin_reads_it`
-    holds it to the byte. Regenerate the file whenever the plugin's readers change.
-  - Known gaps. Each is refused or reported, and each is pinned by that test:
-    - A `%YAML 1.1` document is refused, because the plugin would read it with YAML 1.1 rules.
-    - A lone surrogate escape is read as U+FFFD and reported, so that entry's hash differs.
-    - A collection map key that needs quoting in flow form is refused.
-    - A lone carriage return right after a `-` or `?` indicator is refused. The plugin reads it as
-      the node's first column, which this reader would shift by one.
-    - Collections nested deeper than 256 levels are refused. The plugin's limit is its engine's stack:
-      node fails near 1 000 levels and bun near 8 000.
+  - **Proof:**
+    - `fixtures/parity/plugin-golden.json` is the plugin's own reading of a 68-ledger edge corpus,
+      written by `scripts/plugin-golden.ts`.
+    - The test `every_ledger_reads_as_the_plugin_reads_it` holds each ledger to one class: read to the
+      byte, refused by both, or refused as outside the subset. The class sizes are pinned.
+    - `scripts/parity-fuzz.py` is a differential fuzz against the plugin. Anything Maestro reads must
+      match, and anything the plugin refuses Maestro must refuse.
+    - Regenerate the golden file whenever the plugin's readers change.
 - **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
   50).
 

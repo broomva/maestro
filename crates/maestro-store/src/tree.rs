@@ -59,6 +59,10 @@ pub enum TreeError {
     Io(#[from] std::io::Error),
     #[error("git {args}: {stderr}")]
     Git { args: String, stderr: String },
+    /// A file that is not UTF-8. The plugin decodes it with replacement chars; Maestro reads
+    /// UTF-8 only, so its byte size is the size the plugin's ledger limit measures.
+    #[error("{rel} is not valid UTF-8")]
+    NotUtf8 { rel: String },
     /// A file past [`MAX_READ`]: not read, so no file can make a read allocate without bound.
     #[error("{rel} is {size} bytes, over the {MAX_READ}-byte read limit")]
     TooLarge { rel: String, size: u64 },
@@ -175,13 +179,14 @@ impl Tree {
     pub fn read(&self, rel: &str) -> Result<String, TreeError> {
         match &self.source {
             TreeSource::WorkingTree => {
-                let path = self.root.join(rel);
-                let size = std::fs::metadata(&path)?.len();
-                if size > MAX_READ as u64 {
-                    return Err(TreeError::TooLarge { rel: rel.to_string(), size });
+                // Read through `take`, so a file that grows after it is opened is still bounded.
+                let file = std::fs::File::open(self.root.join(rel))?;
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_READ as u64 + 1), &mut bytes)?;
+                if bytes.len() > MAX_READ {
+                    return Err(TreeError::TooLarge { rel: rel.to_string(), size: bytes.len() as u64 });
                 }
-                // Invalid UTF-8 reads as U+FFFD, as the plugin's `readFile(path, "utf8")` reads it.
-                Ok(String::from_utf8_lossy(&std::fs::read(path)?).into_owned())
+                utf8(rel, bytes)
             }
             TreeSource::GitRev(_) => self.git(&["show", &format!("{}:{rel}", self.rev()?)]),
         }
@@ -241,6 +246,10 @@ impl Tree {
     }
 }
 
+fn utf8(rel: &str, bytes: Vec<u8>) -> Result<String, TreeError> {
+    String::from_utf8(bytes).map_err(|_| TreeError::NotUtf8 { rel: rel.to_string() })
+}
+
 /// Read `cat-file --batch` answers for `rels`, in order.
 fn read_batch(mut reader: impl BufRead, rev: &str, rels: &[String]) -> Result<Vec<FileRead>, TreeError> {
     let mut out = Vec::with_capacity(rels.len());
@@ -276,7 +285,7 @@ fn read_batch(mut reader: impl BufRead, rev: &str, rels: &[String]) -> Result<Ve
         let mut buf = vec![0u8; size + 1]; // trailing newline
         reader.read_exact(&mut buf)?;
         buf.pop();
-        out.push((rel.clone(), Ok(String::from_utf8_lossy(&buf).into_owned())));
+        out.push((rel.clone(), utf8(rel, buf)));
     }
     Ok(out)
 }

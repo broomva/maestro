@@ -304,10 +304,10 @@ fn project_is_the_repo_not_the_second_path_part() {
     assert_eq!(views::project_of(&ws.join("core/maestro/../maestro/crates/x"), &ws).as_deref(), Some("maestro"));
 }
 
-/// The plugin's own reading of an edge corpus (`scripts/plugin-golden.ts`), held to the
-/// byte: every ledger it refuses is refused, and every ask it keeps has its handle,
-/// entry hash, state and canonical row. Known gaps are named, and each is pinned
-/// to how it differs, so the README's list of them cannot drift.
+/// The plugin's own reading of an edge corpus (`scripts/plugin-golden.ts`), held to the byte.
+/// Every ledger lands in exactly one class: read identically (handle, entry hash, state and
+/// canonical row), refused by both readers, or outside the YAML subset and refused with that
+/// reason named. Nothing is read differently, and the class sizes are pinned so none moves silently.
 #[test]
 fn every_ledger_reads_as_the_plugin_reads_it() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/parity");
@@ -318,30 +318,26 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
     let asks = Store::new(paths, TreeSource::WorkingTree).asks();
     let ledgers = asks.data.as_ref().unwrap();
     let error_for = |file: &str| asks.errors.iter().find(|e| e.at == format!(".control/asks/{file}")).cloned();
-    let mut checked = 0;
-    let mut refused = 0;
+    let (mut same, mut both_refuse, mut outside) = (0, 0, 0);
     for (file, want) in golden.as_object().unwrap() {
-        // Known gaps refused loudly where the plugin reads: each pinned to its reason.
-        let refused_gap = match file.as_str() {
-            "yaml11.yaml" => Some("1.1"),
-            "complex-key.yaml" | "complex-key-quoted.yaml" => Some("collection used as a map key"),
-            _ => None,
-        };
-        if let Some(reason) = refused_gap {
-            assert!(want.get("error").is_none(), "{file}: the plugin reads it, so this is a gap, not parity");
-            let got = error_for(file).unwrap_or_else(|| panic!("{file}: a known gap must be refused loudly"));
-            assert!(got.reason.contains(reason), "{file}: {}", got.reason);
+        let read = ledgers.iter().find(|l| &l.file == file);
+        if let Some(e) = error_for(file)
+            && e.reason.contains(maestro_store::yaml::OUTSIDE)
+        {
+            assert!(read.is_none(), "{file}: refused and read at once");
+            outside += 1;
             continue;
         }
         if let Some(reason) = want.get("error") {
-            assert!(error_for(file).is_some(), "{file}: the plugin refuses it ({reason}) and so must Maestro");
-            refused += 1;
+            assert!(
+                error_for(file).is_some() && read.is_none(),
+                "{file}: the plugin refuses it ({reason}) and so must Maestro"
+            );
+            both_refuse += 1;
             continue;
         }
-        if file != "surrogate.yaml" && file != "escaped-backslash.yaml" {
-            assert!(error_for(file).is_none(), "{file}: {:?}", error_for(file));
-        }
-        let ledger = ledgers.iter().find(|l| &l.file == file).unwrap_or_else(|| panic!("{file} not read"));
+        assert!(error_for(file).is_none(), "{file}: {:?}", error_for(file));
+        let ledger = read.unwrap_or_else(|| panic!("{file} not read"));
         let got: Vec<(String, String, String)> = ledger
             .ledger
             .asks
@@ -354,7 +350,7 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
                 )
             })
             .collect();
-        let mut expected: Vec<(String, String, String)> = want["asks"]
+        let expected: Vec<(String, String, String)> = want["asks"]
             .as_array()
             .unwrap()
             .iter()
@@ -366,35 +362,15 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
                 )
             })
             .collect();
-        let rows: Vec<&str> = want["rows"].as_array().unwrap().iter().filter_map(|r| r.as_str()).collect();
-        match file.as_str() {
-            // The lone surrogate is U+FFFD here: that entry hashes differently, and the read says so.
-            "surrogate.yaml" | "escaped-backslash.yaml" => {
-                assert_ne!(got[0].1, expected[0].1);
-                expected[0].1 = got[0].1.clone();
-                let warned =
-                    asks.errors.iter().any(|e| e.at.ends_with(file.as_str()) && e.reason.contains("surrogate"));
-                assert!(warned, "the substitution is reported");
-                assert!(
-                    rows[0].contains("\\ud8") || rows[0].contains("\\ude"),
-                    "the plugin keeps the half: {}",
-                    rows[0]
-                );
-                checked += 1;
-                assert_eq!(got, expected, "{file}");
-                continue;
-            }
-            _ => {}
-        }
         assert_eq!(got, expected, "{file}");
+        let rows: Vec<&str> = want["rows"].as_array().unwrap().iter().filter_map(|r| r.as_str()).collect();
         for ask in &ledger.ledger.asks {
             let canon = maestro_core::ask::canonical_string(&ask.row);
             assert!(rows.contains(&canon.as_str()), "{file}#{}: {canon} not in {rows:?}", ask.id);
         }
-        checked += 1;
+        same += 1;
     }
-    // Every ledger is accounted for: compared to the byte, refused as the plugin refuses it, or a pinned gap.
-    assert_eq!((checked, refused, golden.as_object().unwrap().len()), (47, 18, 68));
+    assert_eq!((same, both_refuse, outside, golden.as_object().unwrap().len()), (25, 6, 37, 68));
 }
 
 #[test]
@@ -489,5 +465,33 @@ fn a_ledger_over_the_plugin_limit_is_refused_and_huge_files_are_never_read_whole
             |f: &str| asks.errors.iter().find(|e| e.at.ends_with(f)).map(|e| e.reason.clone()).unwrap_or_default();
         assert!(reason("big.yaml").contains("over 1048576 bytes"), "{source}: {}", reason("big.yaml"));
         assert!(reason("huge.yaml").contains("read limit"), "{source}: {}", reason("huge.yaml"));
+    }
+}
+
+#[test]
+fn a_ledger_that_is_not_utf8_is_refused_by_name_in_both_modes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let dir = ws.join(".control/asks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut bad = b"asks:\n  - id: a\n    note: x".to_vec();
+    bad.extend_from_slice(&[0xff, 0xfe]);
+    bad.push(b'\n');
+    std::fs::write(dir.join("latin.yaml"), bad).unwrap();
+    std::fs::write(dir.join("ok.yaml"), "asks:\n  - id: ok\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    for source in [TreeSource::WorkingTree, TreeSource::GitRev("main".into())] {
+        if matches!(source, TreeSource::GitRev(_)) {
+            git(&ws, &["init", "-q", "-b", "main"]);
+            git(&ws, &["add", "."]);
+            git(&ws, &["commit", "-q", "-m", "seed"]);
+        }
+        let asks = Store::new(paths.clone(), source.clone()).asks();
+        let files: Vec<_> = asks.data.as_ref().unwrap().iter().map(|l| l.file.as_str()).collect();
+        assert_eq!(files, ["ok.yaml"], "{source}");
+        let reason =
+            asks.errors.iter().find(|e| e.at.ends_with("latin.yaml")).map(|e| e.reason.clone()).unwrap_or_default();
+        assert!(reason.contains("not valid UTF-8"), "{source}: {reason}");
     }
 }

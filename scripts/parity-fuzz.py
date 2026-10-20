@@ -30,15 +30,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Maestro's own reason for each documented gap, and what the plugin does there.
-KNOWN_GAPS = {
-    "1.1 rules": "a %YAML 1.1 document is refused",
-    "collection used as a map key": "a collection key is refused",
-    "lone surrogate": "a lone surrogate reads as U+FFFD (reported)",
-    "nested deeper than": "nesting past MAX_DEPTH is refused",
-    "tagged map key": "a date or bytes key is refused",
-    "right after a `-` or `?` indicator": "a lone CR after `-`/`?` is refused",
-}
+# A refusal for YAML outside the subset is loud and named: counted, not failed. Anything Maestro
+# reads must match the plugin exactly, and anything the plugin refuses Maestro must refuse too.
+OUTSIDE = "outside the YAML subset Maestro reads exactly"
 
 NUMBERS = [
     "0", "-0", "+0", "007", "0004", "08", "010", "+5", "-12", "1_000", "0b101", "0o17", "0o", "0x", "0x1F", "0xff",
@@ -189,6 +183,70 @@ def syntax_noise(rng: random.Random, text: str) -> str:
     return text.replace("    ", "   ", 1)  # one under-indented line
 
 
+SUBSET_BLOCKS = ["|", "|-", ">", ">-"]
+SUBSET_TEXT = ["plain words", "Ünïcödé ¿sí? 日本語 😀", "with: colon inside quotes", "a - dash", "trailing.", "#not-a-comment", "x#y"]
+
+
+def subset_value(rng: random.Random, indent: int) -> str:
+    """A value ledger writers produce: within the subset, but stressing its edges."""
+    pad = " " * (indent + 2)
+    pick = rng.random()
+    if pick < 0.30:  # a block scalar, with blank lines and deeper lines inside
+        lines = []
+        for _ in range(rng.randint(0, 4)):
+            r = rng.random()
+            lines.append("" if r < 0.2 else ("  " + rng.choice(SUBSET_TEXT) if r < 0.35 else rng.choice(SUBSET_TEXT)))
+        if rng.random() < 0.3:
+            lines += [""] * rng.randint(1, 2)  # trailing empty lines: chomping decides them
+        body = "".join(("\n" if not l else "\n" + pad + l) for l in lines)
+        return rng.choice(SUBSET_BLOCKS) + body
+    if pick < 0.45:  # a multi-line plain scalar
+        return rng.choice(["first", "a long", "words"]) + "".join("\n" + pad + rng.choice(["second", "third line", "more: no", "x"]) for _ in range(rng.randint(1, 3)))
+    if pick < 0.58:  # a multi-line double-quoted scalar, with an escaped line break sometimes
+        parts = [rng.choice(["one", "two words", "é"]) for _ in range(rng.randint(2, 3))]
+        sep = rng.choice(["\n" + pad, "\\\n" + pad, "\n\n" + pad])
+        return '"' + sep.join(parts) + '"'
+    if pick < 0.66:  # single-quoted, multi-line, with '' escapes
+        return "'" + ("it''s" if rng.random() < 0.5 else "plain") + "\n" + pad + "next'"
+    if pick < 0.76:  # flow
+        return rng.choice(["[a, b]", "[]", "{}", "{k: v, n: 1}", "[1, [2, 3], {x: y}]", "[a,\n" + pad + "b]", "{a: 1,\n" + pad + "b: 2}"])
+    if pick < 0.86:
+        return rng.choice(NUMBERS[:20] + WORDS[:10])
+    return rng.choice(['"q"', "'s'", '"\\u00e9"', '"\\N"', '"tab\\there"', '"\\U0001F600"'])
+
+
+def subset_ledger(rng: random.Random, i: int) -> str:
+    out = ["\ufeff" if rng.random() < 0.05 else "", "---\n" if rng.random() < 0.1 else "", "asks:\n"]
+    anchored = False
+    for row in range(rng.randint(1, 3)):
+        out.append(f"  - id: {rng.choice(IDS[:6]) if rng.random() < 0.3 else f'k{i}x{row}'}\n")
+        for _ in range(rng.randint(1, 5)):
+            key = rng.choice(ANSWER_KEYS) if rng.random() < 0.25 else rng.choice(["note", "body", "q", "meta2", "ask", "default"])
+            out.append(f"    {key}: {subset_value(rng, 4)}\n")
+        if rng.random() < 0.15 and not anchored:
+            out.append("    origin: &o {agent_id: z, cwd: /x}\n")
+            anchored = True
+        elif anchored and rng.random() < 0.4:
+            out.append("    origin2: *o\n")
+        if rng.random() < 0.1:
+            out.append("    # a comment line\n")
+    text = "".join(out)
+    if rng.random() < 0.1:
+        text = text.replace("\n", "\r\n")
+    # Keys must be unique per row: drop repeats so the case tests reading, not duplicate refusal.
+    rows, seen = [], set()
+    for line in text.split("\n"):
+        if line.startswith("  - id:"):
+            seen = set()
+        key = line.strip().split(":")[0] if line.startswith("    ") and not line.startswith("     ") and ":" in line else None
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        rows.append(line)
+    return "\n".join(rows)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=1500)
@@ -196,6 +254,7 @@ def main() -> int:
     ap.add_argument("--maestro", default=str(ROOT / "target/debug/maestro"))
     ap.add_argument("--plugin", default=os.path.expanduser("~/broomva/apps/maestro-paseo"))
     ap.add_argument("--keep", help="write the corpus here and keep it")
+    ap.add_argument("--subset-share", type=float, default=0.6, help="share of ledgers drawn inside the subset")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -203,7 +262,8 @@ def main() -> int:
     asks = tmp / "ws/.control/asks"
     asks.mkdir(parents=True, exist_ok=True)
     for i in range(args.n):
-        (asks / f"f{i:05}.yaml").write_text(ledger(rng, i), encoding="utf-8")
+        doc = subset_ledger(rng, i) if rng.random() < args.subset_share else ledger(rng, i)
+        (asks / f"f{i:05}.yaml").write_bytes(doc.encode("utf-8"))
 
     golden_script = Path(args.plugin) / ".parity-fuzz-golden.ts"
     shutil.copy(ROOT / "scripts/plugin-golden.ts", golden_script)
@@ -216,32 +276,42 @@ def main() -> int:
         [args.maestro, "--workspace", str(tmp / "ws"), "--tree", "worktree", "--json", "asks", "--state", "all", "--limit", "1000000"],
         capture_output=True, text=True, check=True).stdout)
 
+    # Ledger-level errors only: an entry the plugin drops silently (no id) Maestro also drops, and
+    # reports as `<ledger>#<index>`; the asks list compares those, not the report.
     errors: dict[str, list[str]] = {}
     for e in rust["errors"]:
-        errors.setdefault(e["at"].split("/")[-1].split("#")[0], []).append(e["reason"])
+        if "#" in e["at"].split("/")[-1]:
+            continue
+        errors.setdefault(e["at"].split("/")[-1], []).append(e["reason"])
     got: dict[str, list] = {}
     for a in rust["asks"]:
         got.setdefault(a["ledger"], []).append((a["id"], a["hash"], a["state"]))
 
     gaps: dict[str, int] = {}
     failures = []
+    read_same = 0
     for name, want in sorted(golden.items()):
         reasons = errors.get(name, [])
-        gap = next((g for g in KNOWN_GAPS if any(g in r for r in reasons)), None)
+        read = got.get(name, [])
+        if any(OUTSIDE in r for r in reasons):
+            if read:
+                failures.append((name, f"refused as outside the subset and read at once: {read}"))
+            else:
+                gaps["outside the subset"] = gaps.get("outside the subset", 0) + 1
+            continue
         if "error" in want:
-            if name in errors:
+            # The plugin refuses it: Maestro must read nothing from it.
+            if not read and name in errors:
                 continue
-            failures.append((name, f"plugin refuses ({want['error'][:70]}); Maestro reads {got.get(name)}"))
+            failures.append((name, f"plugin refuses ({want['error'][:70]}); Maestro reads {read} errors {[r[:50] for r in reasons]}"))
             continue
         expected = [(a["id"], a["hash"], a["state"]) for a in want["asks"]]
-        if expected == got.get(name, []):
+        if expected == read and not reasons:
+            read_same += 1
             continue
-        if gap:
-            gaps[gap] = gaps.get(gap, 0) + 1
-        else:
-            failures.append((name, f"want {expected} got {got.get(name, [])} errors {[r[:60] for r in reasons]}"))
+        failures.append((name, f"want {expected} got {read} errors {[r[:60] for r in reasons]}"))
 
-    print(f"ledgers {len(golden)}  diverging {len(failures) + sum(gaps.values())}  known gaps {sum(gaps.values())} {gaps}")
+    print(f"ledgers {len(golden)}  read identically {read_same}  refused loudly {gaps}  FAILURES {len(failures)}")
     for name, why in failures[:40]:
         print(f"  FAIL {name}: {why}")
         print("    " + (asks / name).read_text(encoding="utf-8").replace("\n", "\n    ")[:600])
