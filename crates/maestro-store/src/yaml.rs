@@ -473,10 +473,18 @@ impl Builder {
             }
         }
         let span = self.key_span(at, value);
-        if span.is_none() && self.frames.last().is_some_and(|f| f.pair) {
-            return self.refuse(format!("a flow sequence pair whose `:` is not on its key's line (line {})", n + 1));
+        // A flow sequence pair's key is on one line with its `:`: a quoted key's closing quote
+        // too. (An anchor on an earlier line is the package's to allow, and it does.)
+        if self.frames.last().is_some_and(|f| f.pair) {
+            let one_line = span.is_some_and(|(start, colon)| self.line_of(start) == self.line_of(colon));
+            if !one_line {
+                return self.refuse(format!(
+                    "a flow sequence pair whose key is not on one line with its `:` (line {})",
+                    n + 1
+                ));
+            }
         }
-        if let Some(units) = span
+        if let Some(units) = span.map(|(start, colon)| self.units(start, colon))
             && units > MAX_IMPLICIT_KEY
         {
             self.refuse(format!(
@@ -503,10 +511,15 @@ impl Builder {
         }
     }
 
-    /// What the package measures for `KEY_OVER_1024_CHARS`: the source from the key's start (its
-    /// anchor, if it has one) to its `:` indicator, in UTF-16 units. A carried escape counts as
-    /// the text it stands for. `None` when no `:` follows on the line, as in `{a, b}`.
-    fn key_span(&self, at: usize, value: Option<(&str, TScalarStyle)>) -> Option<usize> {
+    /// The source from `start` to `colon` in UTF-16 units: a carried escape counts as its text.
+    fn units(&self, start: usize, colon: usize) -> usize {
+        self.src[start..colon].iter().map(|c| self.marks.get(c).map_or(c.len_utf16(), |m| m.text.len())).sum()
+    }
+
+    /// What the package measures for `KEY_OVER_1024_CHARS`: the key's start (its anchor, if one
+    /// is on the key's line) and its `:` indicator. `None` when no `:` follows the key on the
+    /// line it ends on, as in `{a, b}`.
+    fn key_span(&self, at: usize, value: Option<(&str, TScalarStyle)>) -> Option<(usize, usize)> {
         let src = &self.src;
         let token = |c: char| !c.is_whitespace() && !matches!(c, ',' | '[' | ']' | '{' | '}');
         let skip_spaces = |mut i: usize| {
@@ -553,7 +566,7 @@ impl Builder {
         if src.get(colon) != Some(&':') {
             return None;
         }
-        Some(src[start..colon].iter().map(|c| self.marks.get(c).map_or(c.len_utf16(), |m| m.text.len())).sum())
+        Some((start, colon))
     }
 }
 
@@ -1239,6 +1252,11 @@ mod tests {
     fn a_flow_sequence_pair_keeps_its_colon_on_the_keys_line() {
         assert!(refused("o: {f: [a\n  : b]}\n").contains("pair"));
         assert!(refused("o: [{}, n\n  : v]\n").contains("pair"));
+        // A quoted key spanning lines, and an anchor on the line before the key.
+        assert!(refused("o: [{},\n  \"a\n    b\": c]\n").contains("pair"));
+        assert!(refused("o: [{},\n  'a\n    b': c]\n").contains("pair"));
+        assert_eq!(js("o: {f: [{}, &a\n  \"x\": c]}\n"), json!({"o": {"f": [{}, {"x": "c"}]}}));
+        assert_eq!(js("o: [&a \"x\": c]\n"), json!({"o": [{"x": "c"}]}));
         assert_eq!(js("o: {f: [a: b]}\n"), json!({"o": {"f": [{"a": "b"}]}}));
     }
 

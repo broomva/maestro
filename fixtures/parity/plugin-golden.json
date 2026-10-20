@@ -733,6 +733,24 @@
    "{\"id\":\"a\",\"v\":[[\"x\"]]}"
   ]
  },
+ "r8-pair-anchor-prev-line.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "51d02d0bd4b3d198",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"o\":{\"f\":[{},{\"x\":\"c\"}]}}"
+  ]
+ },
+ "r8-pair-quoted-multiline.yaml": {
+  "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 4, column 7:"
+ },
+ "r8-pair-squoted-multiline.yaml": {
+  "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 4, column 7:"
+ },
  "surrogate.yaml": {
   "asks": [
    {
