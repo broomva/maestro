@@ -370,7 +370,7 @@ fn every_ledger_reads_as_the_plugin_reads_it() {
         }
         same += 1;
     }
-    assert_eq!((same, both_refuse, outside, golden.as_object().unwrap().len()), (49, 5, 61, 115));
+    assert_eq!((same, both_refuse, outside, golden.as_object().unwrap().len()), (63, 5, 68, 136));
 }
 
 #[test]

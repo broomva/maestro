@@ -795,6 +795,258 @@
  "r8-pair-squoted-multiline.yaml": {
   "error": "it has a YAML error: Implicit keys of flow sequence pairs need to be on a single line at line 4, column 7:"
  },
+ "r9-bom-anchored-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "6c7147508280995b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿b\",\"r\":\"a﻿b\"}"
+  ]
+ },
+ "r9-bom-anchored-dq2.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "9de14dcc77a604da",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"﻿\"}"
+  ]
+ },
+ "r9-bom-block-quote.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "299873347a4d57e0",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"\\\"﻿\\\"\\n\"}"
+  ]
+ },
+ "r9-bom-comment-quote.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "f8c21175855fb361",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"x\"}"
+  ]
+ },
+ "r9-bom-crlf-dq-ml.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "e105f10c48f8e152",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a ﻿b\"}"
+  ]
+ },
+ "r9-bom-crlf-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "77780b9f29ccafdd",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿b\"}"
+  ]
+ },
+ "r9-bom-dq-escape-feff.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "b029d7450737092b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"﻿﻿\"}"
+  ]
+ },
+ "r9-bom-dq-escaped-nl.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "77780b9f29ccafdd",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿b\"}"
+  ]
+ },
+ "r9-bom-dq-inside-sq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "504322133209a50f",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"\\\"﻿\\\"\"}"
+  ]
+ },
+ "r9-bom-dq-key-flow.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "47d07dd66e166616",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":{\"k﻿\":\"v\"}}"
+  ]
+ },
+ "r9-bom-dq-key.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "64697d4ec261459d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"k﻿\":\"v\"}"
+  ]
+ },
+ "r9-bom-dq-ml.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "0a4c20a677c39ac6",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a b﻿ c\"}"
+  ]
+ },
+ "r9-bom-dq-then-plain.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "5b42d83bb90dd95b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿\",\"r\":\"b﻿\"}"
+  ]
+ },
+ "r9-bom-flow-pair-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "a4341afe87565416",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":[{\"k﻿\":\"v\"}]}"
+  ]
+ },
+ "r9-bom-flow-seq-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "8be6942393652fab",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":[\"a﻿\",\"﻿b\"]}"
+  ]
+ },
+ "r9-bom-plain-quote.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "b26590fd12a8b398",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a \\\"﻿\\\" b\"}"
+  ]
+ },
+ "r9-bom-plain-then-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "5b42d83bb90dd95b",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"a﻿\",\"r\":\"b﻿\"}"
+  ]
+ },
+ "r9-bom-sq-inside-dq.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "618dc10764ee5750",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"'﻿'\"}"
+  ]
+ },
+ "r9-bom-surr-adjacent.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "36eabcd6db3ffd6a",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"😀﻿\\ud83d\"}"
+  ]
+ },
+ "r9-bom-surr-pair-adjacent.yaml": {
+  "asks": [
+   {
+    "id": "a",
+    "hash": "4287d9372730033d",
+    "state": "open"
+   }
+  ],
+  "rows": [
+   "{\"id\":\"a\",\"q\":\"﻿😀﻿\"}"
+  ]
+ },
+ "r9-bom-writer-answer.yaml": {
+  "asks": [
+   {
+    "id": "w",
+    "hash": "cfbd5b626bfa953e",
+    "state": "answered"
+   }
+  ],
+  "rows": [
+   "{\"answer\":\"line1\\n﻿line2 \\\"q\\\" ﻿\",\"id\":\"w\",\"status\":\"resolved\"}"
+  ]
+ },
  "surrogate.yaml": {
   "asks": [
    {

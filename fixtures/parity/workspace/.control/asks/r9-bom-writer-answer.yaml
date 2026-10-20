@@ -1,0 +1,4 @@
+asks:
+  - id: w
+    answer: "line1\n﻿line2 \"q\" ﻿"
+    status: "resolved"
