@@ -184,3 +184,61 @@ fn a_hung_tailscale_does_not_hang_hosts() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["node"], Value::Null);
 }
+
+fn fake_tailscale(script: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("tailscale");
+    std::fs::write(&fake, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    dir
+}
+
+fn node_with(dir: &tempfile::TempDir, maestro_node: Option<&str>) -> (Value, std::time::Duration) {
+    let mut cmd = maestro();
+    cmd.args(["hosts", "--json"]).env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()));
+    match maestro_node {
+        Some(n) => cmd.env("MAESTRO_NODE", n),
+        None => cmd.env_remove("MAESTRO_NODE"),
+    };
+    let started = std::time::Instant::now();
+    let out = cmd.output().unwrap();
+    assert!(out.status.success());
+    (serde_json::from_slice::<Value>(&out.stdout).unwrap()["node"].clone(), started.elapsed())
+}
+
+const STATUS: &str = r#"{"Self":{"ID":"nTest","DNSName":"box.example.ts.net."}}"#;
+
+#[test]
+fn a_failed_tailscale_names_no_node_even_with_json() {
+    let ok = fake_tailscale(&format!("echo '{STATUS}'"));
+    assert_eq!(node_with(&ok, None).0, json!({ "id": "nTest", "name": "box" }));
+    let failed = fake_tailscale(&format!("echo '{STATUS}'; exit 1"));
+    assert_eq!(node_with(&failed, None).0, Value::Null);
+}
+
+#[test]
+fn a_blank_maestro_node_falls_through_to_tailscale() {
+    let ok = fake_tailscale(&format!("echo '{STATUS}'"));
+    assert_eq!(node_with(&ok, Some("  ")).0, json!({ "id": "nTest", "name": "box" }));
+    assert_eq!(node_with(&ok, Some(" nPinned ")).0, json!({ "id": "nPinned" }));
+}
+
+#[test]
+fn a_grandchild_holding_the_pipe_does_not_hang_hosts() {
+    let dir = fake_tailscale(&format!("sleep 30 &\necho '{STATUS}'"));
+    let (node, took) = node_with(&dir, None);
+    assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+    assert_eq!(node, Value::Null, "output that never closes is not trusted");
+}
+
+#[test]
+fn a_hung_tailscale_is_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let bin = fake_tailscale(&format!("echo $$ > {}\nexec sleep 30", pidfile.display()));
+    let (node, _) = node_with(&bin, None);
+    assert_eq!(node, Value::Null);
+    let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+    let alive = Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
+    assert!(!alive, "the timed-out tailscale {pid} is still running");
+}

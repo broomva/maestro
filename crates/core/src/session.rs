@@ -1,7 +1,7 @@
 //! Who drives a session, what runs it, and where.
 //!
-//! Three names, as the fleet ADR (`docs/adrs/2026-10-19-fleet-runtime-boundaries.html`)
-//! fixes them:
+//! Three names, as the fleet ADR (broomva/workspace
+//! `docs/adrs/2026-10-19-fleet-runtime-boundaries.html`) fixes them:
 //!
 //! - a [`Surface`] drives a session: Paseo, T3, or [`Surface::Direct`] for a bare
 //!   harness process (`claude -p`, `codex exec`, wave, persist, launchd);
@@ -106,7 +106,8 @@ impl fmt::Display for NodeId {
 }
 
 /// This machine as Maestro reports it: the stable ID, and its MagicDNS label for people.
-/// A report, not a proof: the authority checks a caller's ID through `tailscale whois`.
+/// A report, not a proof: under the fleet ADR the change-plane authority, not Maestro,
+/// checks a caller's ID through `tailscale whois`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,

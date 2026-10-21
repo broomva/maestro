@@ -110,7 +110,7 @@ pub enum DriftClass {
 
 /// Signals Maestro can prove from the registry and the ticks ledger alone. They are
 /// not drift classes: the plugin's classes need substrate observations (fires,
-/// sessions, schedules) that arrive with host adapters.
+/// sessions, schedules) that arrive with surface adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoticeKind {

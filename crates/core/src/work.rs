@@ -229,7 +229,7 @@ pub struct WorkItem {
 
 impl WorkItem {
     /// Whether this item is a hold on the owner from on-disk data alone: queued work only
-    /// the owner may start. A permission prompt at the gate is live host state, not on disk.
+    /// the owner may start. A permission prompt at the gate is live surface state, not on disk.
     pub fn owner_step(&self) -> bool {
         self.front.state != OrchState::Review && self.flag.as_ref().is_some_and(Flag::only_you_start)
     }

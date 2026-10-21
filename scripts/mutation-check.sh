@@ -114,6 +114,10 @@ mutate $session 'if id.is_empty() {
             // A blank ID' 'if false {
             // A blank ID'
 mutate $cli 'if std::time::Instant::now() >= deadline {' 'if false {'
+mutate $cli 'status.success().then_some(buf)' 'Some(buf)'
+mutate $cli 'let _ = child.kill();' ''
+mutate $cli 'let buf = rx.recv_timeout(left).ok()?.ok()?;' 'let buf = rx.recv().ok()?.ok()?;'
+mutate $cli '.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())' '.map(|n| n.trim().to_string())'
 # YAML: the subset admission, the package's alias limit, and the nesting and size bounds.
 mutate $yaml 'if let Some(reason) = outside_subset(source) {' 'if let Some(reason) = outside_subset(source).filter(|_| false) {'
 mutate $yaml 'if data.count.saturating_mul(data.alias_count) > MAX_ALIAS_COUNT {' 'if false {'

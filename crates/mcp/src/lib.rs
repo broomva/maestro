@@ -112,7 +112,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "maestro_needs_list",
         title: "Needs you",
-        description: "Holds on the owner: open blocking asks, and queued work only the owner may start. Work paused on a permission prompt is live host state and joins when a host adapter reports it. This list is the Needs you count; nothing else is. data null means the asks could not be read: the count is unknown, not zero.",
+        description: "Holds on the owner: open blocking asks, and queued work only the owner may start. Work paused on a permission prompt is live surface state and joins when a surface adapter reports it. This list is the Needs you count; nothing else is. data null means the asks could not be read: the count is unknown, not zero.",
         authority: Authority::Read,
         schema: schema_of::<NeedsArgs>,
     },
@@ -140,7 +140,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "maestro_loops_get",
         title: "Loops",
-        description: "Standing loops from .broomva/loops joined with their tick receipts. drift holds plugin drift classes the ticks ledger proves (tick_unclosed); notices holds Maestro's own signals (review_overdue, no_tick_receipts). Substrate drift needs host adapters and is not claimed.",
+        description: "Standing loops from .broomva/loops joined with their tick receipts. drift holds plugin drift classes the ticks ledger proves (tick_unclosed); notices holds Maestro's own signals (review_overdue, no_tick_receipts). Substrate drift needs surface adapters and is not claimed.",
         authority: Authority::Read,
         schema: schema_of::<LoopsArgs>,
     },

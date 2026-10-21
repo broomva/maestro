@@ -451,14 +451,16 @@ fn local_node() -> Option<Node> {
     Node::from_tailscale_status(&serde_json::from_slice(&out).ok()?)
 }
 
-/// A child's stdout if it exits 0 within `limit`; a hung child is killed and reads as nothing.
+/// A child's stdout if it exits 0 and its output closes within `limit`; otherwise nothing,
+/// and a child still running is killed.
 fn run_bounded(cmd: &mut std::process::Command, limit: std::time::Duration) -> Option<Vec<u8>> {
     use std::process::Stdio;
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
-        stdout.read_to_end(&mut buf).map(|_| buf)
+        let _ = tx.send(stdout.read_to_end(&mut buf).map(|_| buf));
     });
     let deadline = std::time::Instant::now() + limit;
     let status = loop {
@@ -472,7 +474,9 @@ fn run_bounded(cmd: &mut std::process::Command, limit: std::time::Duration) -> O
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    let buf = reader.join().ok()?.ok()?;
+    // A grandchild can hold the pipe open after the child exits: the deadline covers the read too.
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let buf = rx.recv_timeout(left).ok()?.ok()?;
     status.success().then_some(buf)
 }
 

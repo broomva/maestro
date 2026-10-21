@@ -23,7 +23,7 @@ pub fn now() -> jiff::Timestamp {
 
 /// Holds on the owner from on-disk data: open blocking asks, and queued work only
 /// the owner may start (`onlyYouStart`). Work paused on a permission prompt is a
-/// hold too, but that prompt is live host state and joins with host adapters.
+/// hold too, but that prompt is live surface state and joins with surface adapters.
 pub fn needs(asks: &[LedgerFile], work: &[WorkItem]) -> Vec<Need> {
     let mut out = Vec::new();
     for lf in asks {
