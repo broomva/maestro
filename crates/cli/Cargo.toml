@@ -1,5 +1,5 @@
 [package]
-name = "maestro-cli"
+name = "maestro"
 description = "The maestro binary: governance and fleet reads for people and agents, and the MCP server."
 version.workspace = true
 edition.workspace = true

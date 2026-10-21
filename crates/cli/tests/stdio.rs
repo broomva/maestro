@@ -130,3 +130,22 @@ fn the_hook_gives_up_silently_when_over_budget() {
     assert!(output.stdout.is_empty());
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+#[test]
+fn hosts_reports_surfaces_and_harnesses_apart() {
+    let out = maestro().args(["hosts", "--json"]).env("MAESTRO_NODE", "Test-Node").output().unwrap();
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["node"], "test-node");
+    let names = |key: &str, field: &str| -> Vec<String> {
+        v[key].as_array().unwrap().iter().map(|r| r[field].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(names("surfaces", "surface"), ["paseo", "t3", "direct"]);
+    assert_eq!(names("harnesses", "harness"), ["claude-code", "codex", "gemini", "agy"]);
+    for r in v["surfaces"].as_array().unwrap() {
+        assert!(r["capabilities"].get("mcp").is_none(), "a surface does not serve MCP: {r}");
+    }
+    for r in v["harnesses"].as_array().unwrap() {
+        assert!(r["capabilities"].get("launch").is_none(), "a harness does not launch sessions: {r}");
+    }
+}

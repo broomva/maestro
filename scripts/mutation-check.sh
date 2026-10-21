@@ -69,12 +69,12 @@ PY
   fi
 }
 
-ask=crates/maestro-core/src/ask.rs
-auth=crates/maestro-core/src/authority.rs
-views=crates/maestro-store/src/views.rs
-store=crates/maestro-store/src/lib.rs
-tree=crates/maestro-store/src/tree.rs
-yaml=crates/maestro-store/src/yaml.rs
+ask=crates/core/src/ask.rs
+auth=crates/core/src/authority.rs
+views=crates/store/src/views.rs
+store=crates/store/src/lib.rs
+tree=crates/store/src/tree.rs
+yaml=crates/store/src/yaml.rs
 
 # Ask state and entry hash: the plugin's stateOf and entryHash.
 mutate $ask 'if text(row.get("archived_at")).is_some() || status.starts_with("archived") {' 'if status.starts_with("archived") {'

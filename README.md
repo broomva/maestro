@@ -19,7 +19,7 @@ app (archived as `broomva/maestro-legacy`). Design and phases: [`docs/specs/2026
 ## Install
 
 ```bash
-cargo install --locked --path crates/maestro-cli --root ~/.local   # installs ~/.local/bin/maestro
+cargo install --locked --path crates/cli --root ~/.local   # installs ~/.local/bin/maestro
 ```
 
 ## Use
@@ -36,7 +36,7 @@ maestro initiatives [--all]
 maestro fleet
 maestro context [--cwd D] [--format markdown|json|hook]
 maestro authority                    # what each surface may do, and the standing invariants
-maestro hosts                        # known harness capabilities
+maestro hosts                        # this node, surfaces and harnesses, each with its capabilities
 maestro mcp                          # MCP server on stdio
 ```
 
@@ -88,9 +88,9 @@ read, that count becomes a lower bound and the error is reported under `worktree
       - collection keys;
       - nesting past 256 levels.
 
-      The full list, in the rules' own words, is the module doc of `crates/maestro-store/src/yaml.rs`.
+      The full list, in the rules' own words, is the module doc of `crates/store/src/yaml.rs`.
     - Every real ledger is inside it: `~/broomva/.control/asks` reads 237 asks with 0 errors.
-  - Ledger entries are JavaScript values (`maestro-core/src/js.rs`), so a non-finite number keeps
+  - Ledger entries are JavaScript values (`crates/core/src/js.rs`), so a non-finite number keeps
     `text(Infinity)` as `Infinity` while it hashes as `null`. Entry hashes are `JSON.stringify` byte for
     byte, including JavaScript number printing and object key order.
   - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.
@@ -140,12 +140,12 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 
 ## Layout
 
-| Crate | Role |
-|---|---|
-| `maestro-core` | Typed domain, no I/O: work states and transitions, asks, needs, loops and drift, ticks and due tiers, initiatives, grants, fleet, host-namespaced sessions, authority, context packets |
-| `maestro-store` | Readers for the on-disk control plane (working tree or a git revision) and the shared views |
-| `maestro-mcp` | MCP server: read tools, the `maestro_context` prompt, and `maestro://` resources |
-| `maestro-cli` | The `maestro` binary |
+| Directory | Package | Role |
+|---|---|---|
+| `crates/core` | `maestro-core` | Typed domain, no I/O: work states and transitions, asks, needs, loops and drift, ticks and due tiers, initiatives, grants, fleet, sessions namespaced by surface, surfaces, harnesses and nodes, authority, context packets |
+| `crates/store` | `maestro-store` | Readers for the on-disk control plane (working tree or a git revision) and the shared views |
+| `crates/mcp` | `maestro-mcp` | MCP server: read tools, the `maestro_context` prompt, and `maestro://` resources |
+| `crates/cli` | `maestro` | The `maestro` binary |
 
 ## Develop
 

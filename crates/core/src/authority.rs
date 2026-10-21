@@ -24,7 +24,7 @@ pub enum Authority {
 pub enum Principal {
     /// Verified through an owner-only channel (signed token, local app, confirmed host prompt).
     Owner { via: String },
-    /// A session whose identity was checked against its host's registry.
+    /// A session whose identity was checked against its surface's registry.
     Agent { session: SessionRef },
     /// Anything unverified, including every MCP caller in phase 0.
     Unverified,

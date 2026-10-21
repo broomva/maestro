@@ -8,7 +8,7 @@
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use maestro_core::authority::{Authority, INVARIANTS, OwnerVerb, UNDO_MS};
-use maestro_core::session::{Host, known_capabilities};
+use maestro_core::session::{Harness, NodeId, Surface, harness_capabilities, surface_capabilities};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Value, json};
 use std::io::Read as _;
@@ -98,7 +98,7 @@ enum Command {
     Mcp,
     /// What each surface may do, and the standing invariants.
     Authority,
-    /// Known harness capabilities.
+    /// This node, and the known surfaces and harnesses with their capabilities.
     Hosts,
 }
 
@@ -418,25 +418,42 @@ fn authority(as_json: bool) {
 }
 
 fn hosts(as_json: bool) {
-    let hosts = [Host::T3, Host::Paseo, Host::ClaudeCode, Host::Codex, Host::Gemini];
-    let rows: Vec<Value> = hosts.iter().map(|h| json!({ "host": h, "capabilities": known_capabilities(h) })).collect();
+    let surfaces: Vec<Value> =
+        Surface::KNOWN.iter().map(|s| json!({ "surface": s, "capabilities": surface_capabilities(s) })).collect();
+    let harnesses: Vec<Value> =
+        Harness::KNOWN.iter().map(|h| json!({ "harness": h, "capabilities": harness_capabilities(h) })).collect();
+    let node = local_node();
     if as_json {
-        println!("{}", json!(rows));
+        println!("{}", json!({ "node": node, "surfaces": surfaces, "harnesses": harnesses }));
         return;
     }
-    for r in rows {
-        let caps = r["capabilities"]
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .filter(|(_, v)| v.as_bool() == Some(true))
-                    .map(|(k, _)| k.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
-        println!("  {:<12} {caps}", s(&r["host"]));
+    println!("Node: {}", node.as_ref().map_or("unknown (set MAESTRO_NODE)", |n| n.0.as_str()));
+    for (title, rows, key) in [("Surfaces", &surfaces, "surface"), ("Harnesses", &harnesses, "harness")] {
+        println!("{title}:");
+        for r in rows {
+            println!("  {:<12} {}", s(&r[key]), true_keys(&r["capabilities"]));
+        }
     }
+}
+
+/// This machine's node: `MAESTRO_NODE`, else its tailnet name from `tailscale status`, else unknown.
+fn local_node() -> Option<NodeId> {
+    if let Some(name) = std::env::var("MAESTRO_NODE").ok().map(|n| n.trim().to_lowercase()).filter(|n| !n.is_empty()) {
+        return Some(NodeId(name));
+    }
+    let out = std::process::Command::new("tailscale").args(["status", "--json", "--peers=false"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    NodeId::from_tailscale_status(&serde_json::from_slice(&out.stdout).ok()?)
+}
+
+fn true_keys(caps: &Value) -> String {
+    caps.as_object()
+        .map(|m| {
+            m.iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
+        })
+        .unwrap_or_default()
 }
 
 fn validate(store: &Store, file: &PathBuf) -> Result<()> {
