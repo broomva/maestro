@@ -181,3 +181,42 @@ fn doctor_reads_the_bstack_it_was_given_not_an_inherited_git_dir() {
     assert_eq!(doctor(&not_a_repo), unread);
     assert_eq!(doctor(&bstack.join("references")), unread);
 }
+
+/// Each variable that points git at another repository, set alone, as a hook or a harness inside
+/// one leaves it: the workspace's revision is still the one read (P20 arc 2 r1, both strata).
+#[test]
+fn an_inherited_git_repo_variable_does_not_redirect_a_revision_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let commit = |dir: &Path| {
+        for args in [&["init", "-q", "-b", "main"][..], &["add", "-A"], &["commit", "-q", "-m", "x"]] {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@localhost"])
+                .args(args)
+                .env_remove("GIT_DIR")
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        }
+    };
+    let ws = tmp.path().join("ws");
+    workspace(&ws, "ours");
+    commit(&ws);
+    let other = tmp.path().join("other");
+    workspace(&other, "theirs");
+    commit(&other);
+    let git = other.join(".git");
+    for (key, value) in [
+        ("GIT_DIR", git.clone()),
+        ("GIT_COMMON_DIR", git.clone()),
+        ("GIT_OBJECT_DIRECTORY", git.join("objects")),
+        ("GIT_INDEX_FILE", git.join("index")),
+    ] {
+        let v = json(
+            maestro(&home).env("BROOMVA_WORKSPACE", &ws).env(key, &value).args(["--tree", "main", "asks", "--json"]),
+        );
+        assert_eq!(ask_ids(&v), ["ours"], "{key}: {v}");
+    }
+}

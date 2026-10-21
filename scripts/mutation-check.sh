@@ -177,7 +177,8 @@ mutate $doctor '            if sha == REGISTRY_SHA256 {' '            if true {'
 mutate $doctor 'Ok(text) if text == VENDORED_READER => {' 'Ok(_) => {'
 mutate $cli 'if checks.iter().any(|c| c.status != Status::Ok) {' 'if checks.iter().any(|c| c.status == Status::Stale) {'
 # git reads the repo at the root alone: no inherited GIT_DIR, and the root is a top level.
-mutate $tree '        cmd.env_remove(key);' ''
+mutate $cli '    let _ = cmd.exec();' '    let _ = cmd;'
+mutate $cli 'if !GIT_REPO_ENV.iter().any(|k| std::env::var_os(k).is_some()) {' 'if std::env::var_os("GIT_DIR").is_none() {'
 mutate $tree '                    if same_path(Path::new(top), &tree.root) {' '                    if true {'
 
 echo "mutation  $killed of $total killed"

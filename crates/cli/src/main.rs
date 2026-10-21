@@ -177,7 +177,43 @@ fn hook_budget() -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
+/// The variables that make git read another repository than the one it is pointed at. A git hook,
+/// or a harness running inside one, sets them. Maestro reads each tree by its root alone, so it
+/// drops them once, here, and every git process it starts (its own and the path registry's)
+/// inherits the clean environment.
+const GIT_REPO_ENV: [&str; 6] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+/// Re-run this binary without [`GIT_REPO_ENV`] when any of them is set (std cannot unset a
+/// variable in a running process without `unsafe`). `exec` returns only when it failed; Maestro
+/// then carries on as it is, and its git reads may be unread, never another repo's data
+/// mistaken for this one's (a root below its repo's top level is refused).
+#[cfg(unix)]
+fn drop_inherited_git_repo() {
+    use std::os::unix::process::CommandExt as _;
+    if !GIT_REPO_ENV.iter().any(|k| std::env::var_os(k).is_some()) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1));
+    for key in GIT_REPO_ENV {
+        cmd.env_remove(key);
+    }
+    let _ = cmd.exec();
+}
+
+#[cfg(not(unix))]
+fn drop_inherited_git_repo() {}
+
 fn main() -> std::process::ExitCode {
+    drop_inherited_git_repo();
     let args: Vec<String> = std::env::args().collect();
     let hook = is_hook(&args);
     let cli = match Cli::try_parse_from(&args) {

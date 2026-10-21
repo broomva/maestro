@@ -21,7 +21,7 @@ with open(sys.argv[1], "w") as out:
     out.write(open(sys.argv[2]).read())
 PY
 hook() {
-  MAESTRO_WORKSPACE=$fx/workspace MAESTRO_WORK_ROOT=$fx/work MAESTRO_FLEET_STATE=$fx/fleet-reconcile \
+  BROOMVA_WORKSPACE=$fx/workspace MAESTRO_WORK_ROOT=$fx/work MAESTRO_FLEET_STATE=$fx/fleet-reconcile \
     MAESTRO_TREE=worktree BROOMVA_HOME=$1 "$bin" context --format hook --cwd "$fx/workspace/apps/demo"
 }
 # A cut tail claims no missing receipts, so that one line is the only difference allowed.

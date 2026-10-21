@@ -269,24 +269,11 @@ impl Tree {
     }
 }
 
-/// The variables that make git read another repository than the one at `-C`. A git hook,
-/// or a harness running inside one, sets them; the registry's reader clears the first two.
-const REPO_ENV: [&str; 6] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-];
-
-/// `git -C <root>` with the repository chosen by `root` alone.
+/// `git -C <root>`. The CLI drops an inherited GIT_DIR (and the like) at startup, so the root
+/// alone names the repository.
 fn git_command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(root);
-    for key in REPO_ENV {
-        cmd.env_remove(key);
-    }
     cmd
 }
 
