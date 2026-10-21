@@ -8,7 +8,9 @@ Maestro sits on top of the existing substrate. It does not replace any of it:
 
 - the fleet skill keeps census, classification and agent-to-agent mail;
 - bstack keeps the hooks, gates and primitives;
-- `.control/` and `.broomva/loops/` stay the source of truth.
+- the workspace's `.broomva/` (legacy `.control/`) stays the source of truth. Every path comes from
+  bstack's path registry: `crates/store/src/broomva_paths.rs` is its generated reader, vendored
+  byte for byte by `scripts/vendor-paths.sh` (BRO-3266).
 
 Maestro reads those, computes the views every surface shares (needs, loop drift, context packets),
 and injects that context into agent sessions.
@@ -39,6 +41,7 @@ maestro authority                    # what each surface may do, and the standin
 maestro hosts                        # this node, surfaces and harnesses, each with its capabilities
 maestro mcp                          # MCP server on stdio
 maestro serve --http [--bind ADDR]   # MCP server over Streamable HTTP at /mcp, 127.0.0.1:7171 by default
+maestro doctor [--bstack DIR]        # is the vendored path reader the one bstack generates? exit 1 if stale or unread
 ```
 
 Every command takes `--json`. Agents should use `--json`: it is the same data the MCP tools return,
@@ -152,10 +155,15 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 
 | Variable | Default |
 |---|---|
-| `MAESTRO_WORKSPACE` | `~/broomva` |
+| `BROOMVA_WORKSPACE`, then `MAESTRO_WORKSPACE`, then `BSTACK_WORKSPACE` | `~/broomva` (the registry's workspace root; `--workspace` overrides) |
 | `MAESTRO_TREE` | `origin/main` |
-| `MAESTRO_WORK_ROOT` | `workRoot` from `~/.config/maestro-paseo/config.json`, else `~/maestro` |
+| `MAESTRO_WORK_ROOT` | `workRoot` from `$BROOMVA_HOME/config/maestro/config.json`, then from `~/.config/maestro-paseo/config.json`, else the registry's `machine.work` (`~/.broomva/work`, or the legacy `~/maestro` while only it exists) |
 | `BROOMVA_HOME` | `~/.broomva` |
+
+Inside the workspace, each name is read from `.broomva/<name>` when the tree has it and from
+`.control/<name>` otherwise, on disk and at a git revision alike; a tree holding both is a read
+error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
+`<initiative>/<slug>/_work.md` (`_unfiled` for none); any other work root is flat, `<slug>/_work.md`.
 | `MAESTRO_FLEET_STATE` | `~/.local/state/fleet-reconcile` |
 
 ## Layout

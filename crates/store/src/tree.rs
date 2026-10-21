@@ -121,6 +121,33 @@ impl Tree {
         }
     }
 
+    /// The commit a git read uses, or `None` for the working tree. Unresolved is an error.
+    pub fn commit_to_read(&self) -> Result<Option<&str>, TreeError> {
+        match self.source {
+            TreeSource::WorkingTree => Ok(None),
+            TreeSource::GitRev(_) => self.rev().map(Some),
+        }
+    }
+
+    /// `git ls-tree --full-tree <commit> -- <specs>`: (mode, path) of each entry listed.
+    pub fn ls_full(&self, commit: &str, specs: &[&str]) -> Result<Vec<(String, String)>, String> {
+        let mut args = vec!["ls-tree", "-z", "--full-tree", commit, "--"];
+        args.extend_from_slice(specs);
+        let out = self.git(&args).map_err(|e| e.to_string())?;
+        Ok(out
+            .split('\0')
+            .filter_map(|record| {
+                let (meta, path) = record.split_once('\t')?;
+                Some((meta.split(' ').next().unwrap_or("").to_string(), path.to_string()))
+            })
+            .collect())
+    }
+
+    /// Where this tree is read from: `worktree` or `git:<rev>@<commit>`.
+    pub fn place(&self) -> String {
+        self.label("").trim_end_matches(':').to_string()
+    }
+
     pub fn label(&self, rel: &str) -> String {
         match (&self.source, &self.commit) {
             (TreeSource::GitRev(rev), Some(c)) => format!("git:{rev}@{}:{rel}", &c[..c.len().min(12)]),

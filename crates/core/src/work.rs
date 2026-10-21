@@ -225,6 +225,10 @@ pub struct WorkItem {
     /// Labelled `Needs you` as the plugin labels review, but never counted as a need.
     #[serde(default)]
     pub finished: bool,
+    /// The initiative folder the item is filed under in `$BROOMVA_HOME/work/<initiative>/<slug>`;
+    /// none in a flat work root or in the `_unfiled` bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filed_under: Option<String>,
 }
 
 impl WorkItem {

@@ -158,5 +158,24 @@ mutate $mcp 'Self { paths: Arc::new(store.paths), source: store.tree.source }' '
 mutate $http 'None => Ok(Self::loopback()),' 'None => Self::named("100.64.0.1:7171".parse().unwrap()),'
 mutate $http 'SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)' 'SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT)'
 
+# Path registry (BRO-3266): .broomva before .control, both refused, the git rule equal to the
+# registry's, $BROOMVA_HOME by kind, and the stale-reader check.
+paths=crates/store/src/paths.rs
+doctor=crates/store/src/doctor.rs
+mutate $store '        if both {' '        if false && both {'
+mutate $store 'if !["040000", "100644", "100755"].contains(&mode.as_str()) {' 'if false {'
+mutate $store '            if path == new || path == old {' '            if false {'
+mutate $store '                Ok(rels[0].clone())' '                Ok(rels[rels.len() - 1].clone())'
+mutate $store '            paths.workspace = views::lexical(&abs);' '            paths.workspace = abs;'
+mutate $store 'let initiative = (name != UNFILED).then_some(name);' 'let initiative = Some(name);'
+mutate $store "                    if name.starts_with('.') {" '                    if false {'
+mutate $store 'Err(reason) => errors.push(SourceError { at: bucket.display().to_string(), reason }),' 'Err(_) => {}'
+mutate $paths 'if same_dir(&self.work_root, &self.broomva_home.join(machine_rel("work"))) {' 'if false {'
+mutate $paths "let plain = !stream.is_empty() && !stream.starts_with('.') && " 'let plain = !stream.is_empty() && '
+mutate $paths '.or_else(|| configured_work_root(&config.join("config.json")))' ''
+mutate $doctor '            if sha == REGISTRY_SHA256 {' '            if true {'
+mutate $doctor 'Ok(text) if text == VENDORED_READER => {' 'Ok(_) => {'
+mutate $cli 'if checks.iter().any(|c| c.status != Status::Ok) {' 'if checks.iter().any(|c| c.status == Status::Stale) {'
+
 echo "mutation  $killed of $total killed"
 exit $failed

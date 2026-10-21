@@ -17,8 +17,9 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "maestro", version, about = "Governance and orchestration metalayer for agent fleets")]
 struct Cli {
-    /// Workspace checkout holding .control/ and .broomva/loops/.
-    #[arg(long, global = true, env = "MAESTRO_WORKSPACE")]
+    /// Workspace checkout holding .broomva/ (legacy .control/). Default: the path registry's
+    /// workspace root (BROOMVA_WORKSPACE, then MAESTRO_WORKSPACE, then BSTACK_WORKSPACE, then ~/broomva).
+    #[arg(long, global = true)]
     workspace: Option<PathBuf>,
     /// Read the workspace at a git revision (`origin/main`, the home rule) or `worktree`.
     #[arg(long, global = true, env = "MAESTRO_TREE", default_value = "origin/main")]
@@ -39,7 +40,7 @@ enum Command {
         #[arg(long)]
         project: Option<String>,
     },
-    /// Asks from .control/asks.
+    /// Asks from the workspace's asks folder (.broomva/asks, legacy .control/asks).
     Asks {
         #[command(subcommand)]
         command: Option<AsksCommand>,
@@ -109,6 +110,12 @@ enum Command {
     Authority,
     /// This node, and the known surfaces and harnesses with their capabilities.
     Hosts,
+    /// Self-checks: is the vendored path reader the one bstack generates from its registry?
+    Doctor {
+        /// The bstack checkout to compare with, read at --tree. Default: <workspace>/bstack.
+        #[arg(long)]
+        bstack: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -128,7 +135,7 @@ enum Format {
 }
 
 fn store(cli: &Cli) -> Result<Store> {
-    let mut paths = Paths::from_env();
+    let mut paths = Paths::from_env().map_err(|e| anyhow::anyhow!("the path registry: {e}"))?;
     if let Some(ws) = &cli.workspace {
         paths.workspace = ws.clone();
     }
@@ -214,8 +221,31 @@ fn run(cli: &Cli) -> Result<()> {
         Command::Context { .. } => println!("{}", context(cli, &store)?),
         Command::Authority => authority(cli.json),
         Command::Hosts => hosts(cli.json),
+        Command::Doctor { bstack } => doctor(cli, &store, bstack.as_deref())?,
         Command::Asks { command: Some(AsksCommand::Validate { file }), .. } => validate(&store, file)?,
         _ => read(cli, &store)?,
+    }
+    Ok(())
+}
+
+fn doctor(cli: &Cli, store: &Store, bstack: Option<&std::path::Path>) -> Result<()> {
+    use maestro_store::doctor::{self, Status};
+    let bstack = bstack.map_or_else(|| store.paths.workspace.join("bstack"), std::path::Path::to_path_buf);
+    let checks = doctor::registry(&bstack, store.tree.source.clone());
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&json!({ "checks": checks }))?);
+    } else {
+        for c in &checks {
+            let status = match c.status {
+                Status::Ok => "ok    ",
+                Status::Stale => "stale ",
+                Status::Unread => "unread",
+            };
+            println!("{status} {:<8} {}", c.name, c.detail);
+        }
+    }
+    if checks.iter().any(|c| c.status != Status::Ok) {
+        bail!("the vendored path reader is not known to be current");
     }
     Ok(())
 }

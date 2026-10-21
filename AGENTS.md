@@ -8,7 +8,7 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
 ## Boundaries
 
 - **One writer per ledger.** Maestro is read-only in phase 0. Do not add a write path to
-  `.control/asks`, `.control/initiatives`, `.broomva/loops`, the work root or the loops ledger
+  the asks or initiatives folders (`.broomva/`, legacy `.control/`), `.broomva/loops`, the work root or the loops ledger
   without the phase that transfers ownership. A second writer is the defect the BRO-3186 contract
   forbids.
 - **No owner verb on a model-visible surface** until an authenticated owner path exists.
