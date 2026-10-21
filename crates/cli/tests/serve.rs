@@ -109,3 +109,27 @@ fn a_client_stalled_mid_body_does_not_hold_the_daemon_past_its_grace() {
     assert!(status.success(), "{status}");
     drop(stalled);
 }
+
+#[test]
+fn sigterm_right_after_the_readiness_line_is_a_clean_stop() {
+    // A service manager may stop the daemon the moment it reports ready: the handler must exist by then.
+    // bash's builtin `kill` lands within microseconds of the line; spawning `kill` is too slow to see the race.
+    let script = r#"bad=0
+for i in $(seq 1 20); do
+  coproc M { exec "$BIN" serve --http --bind 127.0.0.1:0 2>&1; }
+  pid=$M_PID
+  read -r line <&"${M[0]}"
+  kill -TERM "$pid"
+  wait "$pid" || bad=$((bad + 1))
+done
+echo "bad=$bad""#;
+    let daemon = maestro();
+    let out = Command::new("bash")
+        .envs(daemon.get_envs().filter_map(|(k, v)| Some((k, v?))))
+        .env("BIN", daemon.get_program())
+        .args(["-c", script])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim(), "bad=0", "SIGTERMs right after the readiness line killed the daemon by signal");
+}

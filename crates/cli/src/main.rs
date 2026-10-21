@@ -230,35 +230,39 @@ fn serve(store: Store, http: bool, bind: Option<std::net::SocketAddr>) -> Result
     runtime.block_on(async move {
         let listener = http::listen(bind).await.with_context(|| format!("listening on {}", bind.addr()))?;
         let local = listener.local_addr()?;
-        eprintln!("maestro: serving MCP on http://{local}{}", http::PATH);
         let cancel = tokio_util::sync::CancellationToken::new();
         let stop = cancel.clone();
+        let signalled = shutdown_signal()?;
         tokio::spawn(async move {
-            shutdown_signal().await;
+            signalled.await;
             stop.cancel();
         });
+        eprintln!("maestro: serving MCP on http://{local}{}", http::PATH);
         http::serve(store, listener, cancel).await?;
         Ok(())
     })
 }
 
-/// Ctrl-C, or SIGTERM from a service manager.
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(term) => term,
-            Err(_) => return std::future::pending().await,
-        };
+/// Ctrl-C, or SIGTERM from a service manager. The handlers are installed when this returns,
+/// before the readiness line, so a stop sent the moment the daemon reports ready is caught.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
+            _ = interrupt.recv() => {}
         }
-    }
-    #[cfg(not(unix))]
-    {
+    })
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    Ok(async {
         let _ = tokio::signal::ctrl_c().await;
-    }
+    })
 }
 
 fn read(cli: &Cli, store: &Store) -> Result<()> {
