@@ -8,7 +8,7 @@
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use maestro_core::authority::{Authority, INVARIANTS, OwnerVerb, UNDO_MS};
-use maestro_core::session::{Harness, NodeId, Surface, harness_capabilities, surface_capabilities};
+use maestro_core::session::{Harness, Node, NodeId, Surface, harness_capabilities, surface_capabilities};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Value, json};
 use std::io::Read as _;
@@ -427,7 +427,10 @@ fn hosts(as_json: bool) {
         println!("{}", json!({ "node": node, "surfaces": surfaces, "harnesses": harnesses }));
         return;
     }
-    println!("Node: {}", node.as_ref().map_or("unknown (set MAESTRO_NODE)", |n| n.0.as_str()));
+    match &node {
+        Some(n) => println!("Node: {} ({})", n.name.as_deref().unwrap_or("unnamed"), n.id),
+        None => println!("Node: unknown (no tailscale; set MAESTRO_NODE to its stable node ID)"),
+    }
     for (title, rows, key) in [("Surfaces", &surfaces, "surface"), ("Harnesses", &harnesses, "harness")] {
         println!("{title}:");
         for r in rows {
@@ -436,16 +439,41 @@ fn hosts(as_json: bool) {
     }
 }
 
-/// This machine's node: `MAESTRO_NODE`, else its tailnet name from `tailscale status`, else unknown.
-fn local_node() -> Option<NodeId> {
-    if let Some(name) = std::env::var("MAESTRO_NODE").ok().map(|n| n.trim().to_lowercase()).filter(|n| !n.is_empty()) {
-        return Some(NodeId(name));
+/// This machine: `MAESTRO_NODE` (a stable node ID), else `tailscale status`, else unknown.
+fn local_node() -> Option<Node> {
+    if let Some(id) = std::env::var("MAESTRO_NODE").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+        return Some(Node { id: NodeId(id), name: None });
     }
-    let out = std::process::Command::new("tailscale").args(["status", "--json", "--peers=false"]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    NodeId::from_tailscale_status(&serde_json::from_slice(&out.stdout).ok()?)
+    let out = run_bounded(
+        std::process::Command::new("tailscale").args(["status", "--json", "--peers=false"]),
+        std::time::Duration::from_secs(3),
+    )?;
+    Node::from_tailscale_status(&serde_json::from_slice(&out).ok()?)
+}
+
+/// A child's stdout if it exits 0 within `limit`; a hung child is killed and reads as nothing.
+fn run_bounded(cmd: &mut std::process::Command, limit: std::time::Duration) -> Option<Vec<u8>> {
+    use std::process::Stdio;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let buf = reader.join().ok()?.ok()?;
+    status.success().then_some(buf)
 }
 
 fn true_keys(caps: &Value) -> String {

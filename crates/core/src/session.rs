@@ -92,24 +92,45 @@ impl std::str::FromStr for Harness {
     }
 }
 
-/// A tailnet machine.
+/// A tailnet machine, by its Tailscale stable node ID (`Self.ID` in `tailscale status --json`).
+/// The fleet ADR binds a machine by this ID because names change and the WireGuard key
+/// rotates on re-authentication.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NodeId(pub String);
 
-impl NodeId {
-    /// The machine's MagicDNS label from `tailscale status --json`: the first label of
-    /// `Self.DNSName` (`carloss-macbook-pro.tailf3e897.ts.net.` names `carloss-macbook-pro`).
-    /// The OS hostname is not used: it can differ from the tailnet name.
-    pub fn from_tailscale_status(status: &serde_json::Value) -> Option<Self> {
-        let label = status.get("Self")?.get("DNSName")?.as_str()?.split('.').next()?.trim();
-        (!label.is_empty()).then(|| Self(label.to_lowercase()))
-    }
-}
-
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// This machine as Maestro reports it: the stable ID, and its MagicDNS label for people.
+/// A report, not a proof: the authority checks a caller's ID through `tailscale whois`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Node {
+    pub id: NodeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl Node {
+    /// From `tailscale status --json`: `Self.ID`, and the first label of `Self.DNSName`
+    /// (`carloss-macbook-pro.tailf3e897.ts.net.` names `carloss-macbook-pro`). No ID, no node.
+    pub fn from_tailscale_status(status: &serde_json::Value) -> Option<Self> {
+        let me = status.get("Self")?;
+        let id = me.get("ID")?.as_str()?.trim();
+        if id.is_empty() {
+            // A blank ID is no node; a name alone is not an identity.
+            return None;
+        }
+        let name = me
+            .get("DNSName")
+            .and_then(|d| d.as_str())
+            .and_then(|d| d.split('.').next())
+            .map(|l| l.trim().to_lowercase())
+            .filter(|l| !l.is_empty());
+        Some(Self { id: NodeId(id.to_string()), name })
     }
 }
 
@@ -179,14 +200,14 @@ pub fn surface_capabilities(surface: &Surface) -> SurfaceCapabilities {
     }
 }
 
-/// Harness capabilities as observed on 2026-10-18 (agy: its MCP config registers Maestro,
-/// 2026-10-19). Adapters confirm at runtime; this is the plan.
+/// Harness capabilities as observed on 2026-10-21: each known harness has a registration that
+/// runs `maestro mcp`. An unknown harness is promised nothing. Adapters confirm at runtime.
 pub fn harness_capabilities(harness: &Harness) -> HarnessCapabilities {
     match harness {
-        Harness::ClaudeCode => HarnessCapabilities { inject_context: true, mcp: true },
-        Harness::Codex | Harness::Gemini | Harness::Agy | Harness::Other(_) => {
-            HarnessCapabilities { mcp: true, ..Default::default() }
-        }
+        // Codex loads SessionStart and UserPromptSubmit hooks (`~/.codex/hooks.json`).
+        Harness::ClaudeCode | Harness::Codex => HarnessCapabilities { inject_context: true, mcp: true },
+        Harness::Gemini | Harness::Agy => HarnessCapabilities { mcp: true, ..Default::default() },
+        Harness::Other(_) => HarnessCapabilities::default(),
     }
 }
 
@@ -236,37 +257,61 @@ mod tests {
     }
 
     #[test]
-    fn node_is_the_tailnet_label() {
-        let status = serde_json::json!({ "Self": { "HostName": "Carlos’s MacBook Pro", "DNSName": "Carloss-MacBook-Pro.tailf3e897.ts.net." } });
-        assert_eq!(NodeId::from_tailscale_status(&status), Some(NodeId("carloss-macbook-pro".into())));
+    fn node_is_the_stable_id_named_by_its_dns_label() {
+        let status = serde_json::json!({ "Self": { "ID": "nwPbDUaNzo11CNTRL", "HostName": "Carlos’s MacBook Pro", "DNSName": "Carloss-MacBook-Pro.tailf3e897.ts.net." } });
+        let node = Node::from_tailscale_status(&status).unwrap();
+        assert_eq!(node.id, NodeId("nwPbDUaNzo11CNTRL".into()));
+        assert_eq!(node.name.as_deref(), Some("carloss-macbook-pro"));
+        let nameless = serde_json::json!({ "Self": { "ID": "n1", "DNSName": "" } });
+        assert_eq!(Node::from_tailscale_status(&nameless), Some(Node { id: NodeId("n1".into()), name: None }));
         for absent in [
             serde_json::json!({}),
-            serde_json::json!({ "Self": { "DNSName": "" } }),
-            serde_json::json!({ "Self": { "DNSName": 3 } }),
+            serde_json::json!({ "Self": { "DNSName": "a.ts.net." } }),
+            serde_json::json!({ "Self": { "ID": " ", "DNSName": "a.ts.net." } }),
+            serde_json::json!({ "Self": { "ID": 3 } }),
         ] {
-            assert_eq!(NodeId::from_tailscale_status(&absent), None, "{absent}");
+            assert_eq!(Node::from_tailscale_status(&absent), None, "{absent}");
         }
     }
 
     #[test]
-    fn every_known_harness_serves_mcp_and_only_claude_code_injects() {
-        // Each of the four is registered to run `maestro mcp`; only Claude Code's hooks inject.
-        for h in Harness::KNOWN {
-            let c = harness_capabilities(&h);
-            assert!(c.mcp, "{h:?} mcp");
-            assert_eq!(c.inject_context, h == Harness::ClaudeCode, "{h:?} inject_context");
+    fn harness_capabilities_are_the_observed_ones() {
+        let table = [
+            (Harness::ClaudeCode, true, true),
+            (Harness::Codex, true, true),
+            (Harness::Gemini, false, true),
+            (Harness::Agy, false, true),
+            (Harness::Other("aider".into()), false, false),
+        ];
+        for (h, inject_context, mcp) in table {
+            assert_eq!(harness_capabilities(&h), HarnessCapabilities { inject_context, mcp }, "{h:?}");
         }
     }
 
     #[test]
-    fn only_orchestrating_surfaces_reach_a_running_session() {
+    fn surface_capabilities_are_the_observed_ones() {
+        let all = SurfaceCapabilities { launch: true, send: true, interrupt: true, archive: true, schedule: true };
+        let table = [
+            (Surface::Paseo, all.clone()),
+            (Surface::T3, all),
+            (Surface::Direct, SurfaceCapabilities { launch: true, schedule: true, ..Default::default() }),
+            (Surface::Other("wave".into()), SurfaceCapabilities::default()),
+        ];
+        for (s, caps) in table {
+            assert_eq!(surface_capabilities(&s), caps, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn names_parse_to_their_variants() {
         for s in Surface::KNOWN {
-            let c = surface_capabilities(&s);
-            let orchestrated = matches!(s, Surface::Paseo | Surface::T3);
-            assert_eq!(c.send, orchestrated, "{s:?} send");
-            assert_eq!(c.interrupt, orchestrated, "{s:?} interrupt");
-            assert_eq!(c.archive, orchestrated, "{s:?} archive");
-            assert!(c.launch, "{s:?} launch");
+            assert_eq!(s.as_str().parse::<Surface>().unwrap(), s);
+            let r: SessionRef = format!("{}:-/x", s.as_str()).parse().unwrap();
+            assert_eq!(r.surface, s);
         }
+        for h in Harness::KNOWN {
+            assert_eq!(h.as_str().parse::<Harness>().unwrap(), h);
+        }
+        assert_eq!("claude".parse::<Harness>().unwrap(), Harness::ClaudeCode);
     }
 }

@@ -47,7 +47,23 @@ fn mcp_handshake_lists_and_calls_tools() {
     let tools = recv();
     let names: Vec<_> =
         tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-    assert!(names.contains(&"maestro_needs_list".to_string()));
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        [
+            "maestro_ask_get",
+            "maestro_asks_list",
+            "maestro_context",
+            "maestro_fleet_get",
+            "maestro_initiatives_list",
+            "maestro_loops_get",
+            "maestro_needs_list",
+            "maestro_snapshot",
+            "maestro_work_list",
+        ],
+        "every harness registration answers these nine tools"
+    );
     assert!(!names.iter().any(|n| n.contains("answer")), "no owner verb is listed");
 
     send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"maestro_needs_list","arguments":{}}}));
@@ -136,7 +152,7 @@ fn hosts_reports_surfaces_and_harnesses_apart() {
     let out = maestro().args(["hosts", "--json"]).env("MAESTRO_NODE", "Test-Node").output().unwrap();
     assert!(out.status.success());
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["node"], "test-node");
+    assert_eq!(v["node"], json!({ "id": "Test-Node" }));
     let names = |key: &str, field: &str| -> Vec<String> {
         v[key].as_array().unwrap().iter().map(|r| r[field].as_str().unwrap().to_string()).collect()
     };
@@ -148,4 +164,23 @@ fn hosts_reports_surfaces_and_harnesses_apart() {
     for r in v["harnesses"].as_array().unwrap() {
         assert!(r["capabilities"].get("launch").is_none(), "a harness does not launch sessions: {r}");
     }
+}
+
+#[test]
+fn a_hung_tailscale_does_not_hang_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("tailscale");
+    std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    let out = maestro()
+        .args(["hosts", "--json"])
+        .env_remove("MAESTRO_NODE")
+        .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["node"], Value::Null);
 }

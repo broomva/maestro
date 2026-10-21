@@ -594,6 +594,7 @@ dependencies = [
  "maestro-mcp",
  "maestro-store",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
