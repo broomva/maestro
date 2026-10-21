@@ -196,7 +196,7 @@ fn the_git_rule_is_the_registrys_on_every_tree_shape() {
                 "{shape}: {name}: ours {ours:?}"
             );
             // A name the tree holds is the same place on disk and at the commit.
-            let present = matches!(&shadowed, Ok(_)) && matches!(registry::tree_path(name, &ws, &commit), Ok(Some(_)));
+            let present = shadowed.is_ok() && matches!(registry::tree_path(name, &ws, &commit), Ok(Some(_)));
             if present {
                 assert_eq!(
                     ours.as_ref().map_err(|_| ()),
