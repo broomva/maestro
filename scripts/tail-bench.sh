@@ -26,7 +26,14 @@ hook() {
 }
 # A cut tail claims no missing receipts, so that one line is the only difference allowed.
 receipts='\n- `silent`: the contract names tick receipts and the ledger holds none for this loop'
-want=$(hook "$fx/broomva-home" | python3 -c 'import sys; print(sys.stdin.read().replace(sys.argv[1], "", 1), end="")' "$receipts")
+# The hook prints nothing on any failure, so an empty context must not pass as equal: the
+# fixture's own context must hold its loop and the receipts line before that line is removed.
+fixture=$(hook "$fx/broomva-home")
+for want in '`demo-tick`' "$receipts"; do
+  python3 -c 'import sys; sys.exit(sys.argv[2] not in sys.argv[1])' "$fixture" "$want" \
+    || { echo "tail-bench fixture context lacks: $want"; exit 1; }
+done
+want=$(python3 -c 'import sys; print(sys.argv[1].replace(sys.argv[2], "", 1), end="")' "$fixture" "$receipts")
 best=
 for _ in 1 2 3; do
   start=$(python3 -c 'import time; print(time.monotonic_ns())')
