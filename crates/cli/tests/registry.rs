@@ -182,8 +182,8 @@ fn doctor_reads_the_bstack_it_was_given_not_an_inherited_git_dir() {
     assert_eq!(doctor(&bstack.join("references")), unread);
 }
 
-/// Each variable that changes a revision read when set alone (GIT_INDEX_FILE and the alternates
-/// list are dropped too, but a revision read never consults them), as a hook or a harness inside
+/// Each variable below, set alone (GIT_INDEX_FILE and GIT_ALTERNATE_OBJECT_DIRECTORIES are dropped
+/// too; no fixture here tells them apart), as a hook or a harness inside
 /// one leaves it: the workspace's revision is still the one read (P20 arc 2 r1, both strata).
 #[test]
 fn an_inherited_git_repo_variable_does_not_redirect_a_revision_read() {
