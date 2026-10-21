@@ -86,8 +86,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
       - whitespace-only lines, and a missing final newline;
       - a lone surrogate escape in a double-quoted scalar;
       - collection keys, named as such inside a flow sequence pair too;
-      - nesting past 256 levels, or past 255 in flow style (yaml-rust2's own limit, refused with the
-        depth rule's wording);
+      - nesting past 256 levels, or past 255 in flow style (yaml-rust2's own limit, refused as
+        nesting, not as a parser error);
       - more than 500,000 values (`MAX_NODES`). An aliased anchor's value is counted three times:
         for itself, for its cached copy and for each alias's copy. So an aliased value holds about a
         third of the cap: a 300,000-value anchor with one alias is refused, though the plugin reads it.
@@ -99,7 +99,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
     byte, including JavaScript number printing and object key order.
   - The ticks ledger is read by its tail, cut where the plugin's `readTail` cuts it: the last
     `STREAM_TAIL` (2,097,152) UTF-16 units, from the first whole line. A tick that started before
-    the tail is not read, by either. `fixtures/parity/tail-golden.json` is the plugin's own cut on
+    the tail is not read, by either, so `no_tick_receipts` is raised only when the tail is the
+    whole ledger. `fixtures/parity/tail-golden.json` is the plugin's own cut on
     seeded cases (`scripts/tail-golden.ts`), and `scripts/parity-check.sh` fails if the pinned
     plugin's line changes. A 100 MB ledger keeps the hook under 200 ms.
   - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.

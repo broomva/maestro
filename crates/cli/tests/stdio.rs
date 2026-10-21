@@ -248,7 +248,8 @@ fn a_hung_tailscale_is_killed() {
 }
 
 /// The hook stays inside its budget however long the ticks ledger grows: a 100 MB ledger whose
-/// last lines are the fixture's reads the same context, in under 200 ms.
+/// last lines are the fixture's reads the same context, in under 200 ms. The fixture workspace is
+/// a working tree; on a real checkout the git reads add their own cost, measured in the PR.
 #[test]
 fn a_100_mb_ticks_ledger_keeps_the_hook_under_200_ms() {
     let home = tempfile::tempdir().unwrap();
@@ -284,6 +285,12 @@ fn a_100_mb_ticks_ledger_keeps_the_hook_under_200_ms() {
     hook(home.path()); // warm the page cache, as a hook run after the ledger's last write finds it
     let (took, big) = hook(home.path());
     assert!(small.contains("demo-tick"), "{small}");
-    assert_eq!(big, small, "the tail holds every fixture tick, so the context is the same");
+    // The tail holds every fixture tick, so the context is the same, except that a cut tail
+    // claims no missing receipts: the ticks before it are unread.
+    let receipts = "\n- `silent`: the contract names tick receipts and the ledger holds none for this loop";
+    let receipts = serde_json::to_string(receipts).unwrap();
+    let receipts = receipts.trim_matches('"');
+    assert!(small.contains(receipts), "{small}");
+    assert_eq!(big, small.replacen(receipts, "", 1));
     assert!(took < std::time::Duration::from_millis(200), "took {took:?}");
 }

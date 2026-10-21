@@ -7,7 +7,7 @@ use std::path::Path;
 
 #[derive(Deserialize)]
 struct Case {
-    text: String,
+    hex: String,
     limit: usize,
     tail: String,
     from: u64,
@@ -18,13 +18,15 @@ struct Case {
 fn the_tail_is_cut_where_the_plugin_cuts_it() {
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/parity/tail-golden.json");
     let cases: Vec<Case> = serde_json::from_str(&std::fs::read_to_string(golden).unwrap()).unwrap();
-    assert!(cases.len() > 400);
+    assert!(cases.len() > 600);
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("stream.jsonl");
     for c in &cases {
-        std::fs::write(&file, &c.text).unwrap();
+        let bytes: Vec<u8> =
+            (0..c.hex.len()).step_by(2).map(|i| u8::from_str_radix(&c.hex[i..i + 2], 16).unwrap()).collect();
+        std::fs::write(&file, &bytes).unwrap();
         let (tail, from) = read_tail(&file, c.limit).unwrap();
-        assert_eq!((tail.as_str(), from), (c.tail.as_str(), c.from), "{:?} at limit {}", c.text, c.limit);
+        assert_eq!((tail.as_str(), from), (c.tail.as_str(), c.from), "{} at limit {}", c.hex, c.limit);
     }
 }
 
@@ -59,7 +61,9 @@ fn a_tick_that_started_before_the_tail_is_not_read() {
     let read = Store::new(paths, TreeSource::WorkingTree).ticks();
     assert!(read.errors.is_empty(), "{:?}", read.errors);
     assert!(read.source.contains(" from byte "), "{}", read.source);
-    let ticks = read.data.unwrap();
+    let read = read.data.unwrap();
+    assert!(!read.whole());
+    let ticks = read.ticks;
     let boundary: Vec<_> = ticks.iter().filter(|t| t.loop_id == "boundary").map(|t| t.start_id.as_str()).collect();
     assert_eq!(boundary, ["NEW"]);
 
@@ -88,7 +92,9 @@ fn a_short_ledger_is_read_whole() {
     std::fs::write(&ledger, &text).unwrap();
     let read = Store::new(paths, TreeSource::WorkingTree).ticks();
     assert_eq!(read.source, format!("fs:{}", ledger.display()));
-    assert_eq!(read.data.unwrap().len(), 1);
+    let data = read.data.unwrap();
+    assert!(data.whole());
+    assert_eq!(data.ticks.len(), 1);
     let at: Vec<_> = read.errors.iter().map(|e| e.at.clone()).collect();
     assert_eq!(at, [format!("fs:{}:2", ledger.display())]);
 }

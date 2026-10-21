@@ -140,7 +140,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "maestro_loops_get",
         title: "Loops",
-        description: "Standing loops from .broomva/loops joined with their tick receipts. drift holds plugin drift classes the ticks ledger proves (tick_unclosed); notices holds Maestro's own signals (review_overdue, no_tick_receipts). Substrate drift needs surface adapters and is not claimed. Ticks are read from the ledger's tail, as the plugin reads it (its STREAM_TAIL: the last 2,097,152 UTF-16 units, from the first whole line); ticks_recorded counts those.",
+        description: "Standing loops from .broomva/loops joined with their tick receipts. drift holds plugin drift classes the ticks ledger proves (tick_unclosed); notices holds Maestro's own signals (review_overdue, no_tick_receipts). Substrate drift needs surface adapters and is not claimed. Ticks are read from the ledger's tail, as the plugin reads it (its STREAM_TAIL: the last 2,097,152 UTF-16 units, from the first whole line); ticks_recorded counts those, and no_tick_receipts is raised only when the tail is the whole ledger.",
         authority: Authority::Read,
         schema: schema_of::<LoopsArgs>,
     },

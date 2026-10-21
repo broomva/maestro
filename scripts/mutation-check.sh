@@ -132,7 +132,10 @@ mutate $store 'here >= target' 'here > target'
 mutate $store 'let cut = at + nl + 1;' 'let cut = at + nl;'
 mutate $store '.saturating_mul(3).saturating_add(3)' '.saturating_mul(3)'
 mutate $store 'if start == 0 && units <= limit {' 'if units <= limit {'
-mutate $store 'None => Ok((std::fs::read_to_string(path)?, 0)),' 'None => Ok((text.to_string(), start + skip as u64)),'
+mutate $store 'None => Ok((String::from_utf8_lossy(&std::fs::read(path)?).into_owned(), 0)),' 'None => Ok((text.into_owned(), start + skip as u64)),'
+mutate $store 'let text = String::from_utf8_lossy(raw);' 'let text = std::borrow::Cow::Borrowed(std::str::from_utf8(raw).unwrap_or_default());'
+mutate $store '.nth(breaks - 1)' '.nth(breaks)'
+mutate $views 'if active && ticks.is_some_and(TickTail::whole) && names_receipts' 'if active && ticks.is_some() && names_receipts'
 
 echo "mutation  $killed of $total killed"
 exit $failed

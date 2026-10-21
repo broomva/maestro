@@ -65,7 +65,7 @@ fn work_reads_frontmatter_title_and_last_event() {
 fn loops_report_only_provable_drift() {
     let s = store();
     let now: jiff::Timestamp = "2026-10-01T06:00:00Z".parse().unwrap();
-    let rows = views::loop_rows(s.loops().data.as_deref().unwrap(), s.ticks().data.as_deref(), now);
+    let rows = views::loop_rows(s.loops().data.as_deref().unwrap(), s.ticks().data.as_ref(), now);
     let demo = rows.iter().find(|r| r.id == "demo-tick").unwrap();
     assert_eq!(demo.ticks_recorded, 2);
     let classes: Vec<_> = demo.drift.iter().map(|d| d.class).collect();
@@ -77,7 +77,7 @@ fn loops_report_only_provable_drift() {
     assert_eq!(kinds, [NoticeKind::ReviewOverdue, NoticeKind::NoTickReceipts]);
 
     let early: jiff::Timestamp = "2026-10-01T02:30:00Z".parse().unwrap();
-    let rows = views::loop_rows(s.loops().data.as_deref().unwrap(), s.ticks().data.as_deref(), early);
+    let rows = views::loop_rows(s.loops().data.as_deref().unwrap(), s.ticks().data.as_ref(), early);
     let demo = rows.iter().find(|r| r.id == "demo-tick").unwrap();
     assert!(demo.drift.is_empty(), "30 min open is under the 60 min limit");
 }

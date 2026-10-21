@@ -34,6 +34,20 @@ pub const LEDGER_LIMIT: usize = 1024 * 1024;
 /// this many UTF-16 units, so a ledger that only grows costs the same to read every call.
 pub const STREAM_TAIL: usize = 2 * 1024 * 1024;
 
+/// Ticks read from the ledger's tail. `from` is the byte the read began at: 0 when the whole
+/// ledger was read, so only then does an absent tick mean the ledger holds none.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TickTail {
+    pub ticks: Vec<Tick>,
+    pub from: u64,
+}
+
+impl TickTail {
+    pub fn whole(&self) -> bool {
+        self.from == 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LedgerFile {
     pub file: String,
@@ -166,7 +180,7 @@ impl Store {
 
     /// Paired ticks from the loops ledger's tail ([`STREAM_TAIL`]), oldest first. A tick that
     /// started before the tail is not read, as the plugin does not read it.
-    pub fn ticks(&self) -> Section<Vec<Tick>> {
+    pub fn ticks(&self) -> Section<TickTail> {
         let path = self.paths.ticks_ledger();
         let label = format!("fs:{}", path.display());
         let (text, from) = match read_tail(&path, STREAM_TAIL) {
@@ -183,7 +197,7 @@ impl Store {
                 Err(e) => errors.push(SourceError { at: format!("{label}:{}", n + 1), reason: e.to_string() }),
             }
         }
-        Section::partial(label, pair_ticks(&events), errors)
+        Section::partial(label, TickTail { ticks: pair_ticks(&events), from }, errors)
     }
 
     /// The latest fleet-reconcile report per scope.
@@ -241,9 +255,10 @@ impl Store {
 
 /// The plugin's `readTail`: `text.slice(text.indexOf("\n", text.length - limit) + 1)` when the
 /// file is over `limit` UTF-16 units, else the whole file, with the byte offset the text starts
-/// at. JavaScript measures in UTF-16 units and a unit is at most 3 bytes of UTF-8, so the cut
-/// always lies in the last `3 * limit + 3` bytes and nothing before them is read. A tail with no
-/// line break after the cut is the whole file, as `indexOf` giving -1 makes it there.
+/// at. The bytes decode as the plugin's `readFile(path, "utf8")` decodes them: an invalid sequence
+/// is U+FFFD. JavaScript measures in UTF-16 units and a unit is at most 3 bytes of UTF-8, so the cut
+/// lies in the last `3 * limit + 3` bytes and only those are read, except when no line break
+/// follows the cut: then the tail is the whole file, as `indexOf` giving -1 makes it there.
 pub fn read_tail(path: &Path, limit: usize) -> std::io::Result<(String, u64)> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path)?;
@@ -256,11 +271,11 @@ pub fn read_tail(path: &Path, limit: usize) -> std::io::Result<(String, u64)> {
     file.take(window).read_to_end(&mut bytes)?;
     // A window that starts mid-file may start inside a character: skip its continuation bytes.
     let skip = if start == 0 { 0 } else { bytes.iter().take_while(|b| (**b & 0xC0) == 0x80).count().min(3) };
-    let invalid = |e: std::str::Utf8Error| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
-    let text = std::str::from_utf8(&bytes[skip..]).map_err(invalid)?;
+    let raw = &bytes[skip..];
+    let text = String::from_utf8_lossy(raw);
     let units: usize = text.chars().map(char::len_utf16).sum();
     if start == 0 && units <= limit {
-        return Ok((text.to_string(), 0));
+        return Ok((text.into_owned(), 0));
     }
     // `units` counts the window only; the cut is `limit` units before the end either way.
     let target = units - limit;
@@ -276,10 +291,15 @@ pub fn read_tail(path: &Path, limit: usize) -> std::io::Result<(String, u64)> {
     match text[at..].find('\n') {
         Some(nl) => {
             let cut = at + nl + 1;
-            Ok((text[cut..].to_string(), start + (skip + cut) as u64))
+            // A line break decodes from one 0x0A byte and nothing else does: the cut in the raw
+            // bytes is after as many of them.
+            let breaks = text[..cut].bytes().filter(|b| *b == b'\n').count();
+            let raw_cut =
+                raw.iter().enumerate().filter(|(_, b)| **b == b'\n').nth(breaks - 1).map_or(0, |(i, _)| i + 1);
+            Ok((text[cut..].to_string(), start + (skip + raw_cut) as u64))
         }
-        None if start == 0 => Ok((text.to_string(), 0)),
-        None => Ok((std::fs::read_to_string(path)?, 0)),
+        None if start == 0 => Ok((text.into_owned(), 0)),
+        None => Ok((String::from_utf8_lossy(&std::fs::read(path)?).into_owned(), 0)),
     }
 }
 
