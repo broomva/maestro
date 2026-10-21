@@ -97,8 +97,20 @@ impl Tree {
             let spec = format!("{rev}^{{commit}}");
             // No `--end-of-options` (git >= 2.30): the leading-dash check above already keeps
             // the revision from reading as an option, and older git would refuse the flag.
-            match tree.git(&["rev-parse", "--verify", "--quiet", &spec]) {
-                Ok(out) if !out.trim().is_empty() => tree.commit = Some(out.trim().to_string()),
+            // One call: the repo's top level, then the commit. A root below the top level would read
+            // the enclosing repo's files at paths relative to its top, so it is refused.
+            match tree.git(&["rev-parse", "--show-toplevel", "--verify", "--quiet", &spec]) {
+                Ok(out) if out.lines().count() == 2 => {
+                    let mut lines = out.lines();
+                    let top = lines.next().unwrap_or_default();
+                    let commit = lines.next().unwrap_or_default().trim();
+                    if same_path(Path::new(top), &tree.root) {
+                        tree.commit = Some(commit.to_string());
+                    } else {
+                        tree.unresolved =
+                            Some(format!("{} is not a git top level (its repo is {top})", tree.root.display()));
+                    }
+                }
                 // `--quiet` fails with no message when the revision names nothing.
                 Ok(_) | Err(TreeError::Git { .. }) => {
                     tree.unresolved = Some(format!("no commit is named `{rev}` in {}", tree.root.display()))
@@ -119,6 +131,19 @@ impl Tree {
             }),
             (TreeSource::WorkingTree, _) => Ok(""),
         }
+    }
+
+    /// The commit a git read uses, or `None` for the working tree. Unresolved is an error.
+    pub fn commit_to_read(&self) -> Result<Option<&str>, TreeError> {
+        match self.source {
+            TreeSource::WorkingTree => Ok(None),
+            TreeSource::GitRev(_) => self.rev().map(Some),
+        }
+    }
+
+    /// Where this tree is read from: `worktree` or `git:<rev>@<commit>`.
+    pub fn place(&self) -> String {
+        self.label("").trim_end_matches(':').to_string()
     }
 
     pub fn label(&self, rel: &str) -> String {
@@ -213,9 +238,7 @@ impl Tree {
     }
 
     fn cat_file_batch(&self, rev: &str, rels: &[String]) -> Result<Vec<FileRead>, TreeError> {
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let mut child = git_command(&self.root)
             .args(["--no-pager", "cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -231,7 +254,7 @@ impl Tree {
     }
 
     fn git(&self, args: &[&str]) -> Result<String, TreeError> {
-        let output = Command::new("git").arg("-C").arg(&self.root).arg("--no-pager").args(args).output()?;
+        let output = git_command(&self.root).arg("--no-pager").args(args).output()?;
         if !output.status.success() {
             return Err(TreeError::Git {
                 args: args.join(" "),
@@ -244,6 +267,18 @@ impl Tree {
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// `git -C <root>`. The CLI drops an inherited GIT_DIR (and the like) at startup, so the root
+/// alone names the repository.
+fn git_command(root: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root);
+    cmd
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
 fn utf8(rel: &str, bytes: Vec<u8>) -> Result<String, TreeError> {

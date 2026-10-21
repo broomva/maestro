@@ -4,6 +4,11 @@
 //! every file that failed. Nothing here writes; owner writes stay in the one
 //! process that owns each ledger until Maestro takes that ownership over.
 
+#[cfg(not(unix))]
+compile_error!("maestro-store reads the Broomva path registry, whose reader is Unix only (BRO-3266)");
+
+pub mod broomva_paths;
+pub mod doctor;
 pub mod paths;
 pub mod tree;
 pub mod views;
@@ -20,14 +25,24 @@ use maestro_core::{Section, SourceError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-pub use paths::Paths;
+/// The names present under both `.broomva/` and `.control/`, as the registry's `shadowed` reads
+/// them, and the commit when the store reads a git revision.
+#[derive(Debug, Clone)]
+struct Layout {
+    commit: Option<String>,
+    shadowed: Vec<String>,
+}
+
+pub use paths::{Paths, UNFILED, WorkLayout};
 pub use tree::{Tree, TreeSource};
 
-pub const ASKS_DIR: &str = ".control/asks";
-pub const INITIATIVES_DIR: &str = ".control/initiatives";
-pub const PREAUTH_FILE: &str = ".control/preauth.yaml";
-pub const LOOPS_DIR: &str = ".broomva/loops";
+/// The workspace names Maestro reads, as the path registry names them.
+pub const ASKS: &str = "asks";
+pub const INITIATIVES: &str = "initiatives";
+pub const PREAUTH: &str = "preauth";
+pub const LOOPS: &str = "loops";
 /// The plugin's `LEDGER_LIMIT`: a ledger over this size is refused, not cut.
 pub const LEDGER_LIMIT: usize = 1024 * 1024;
 /// The plugin's `STREAM_TAIL` (`server/loops.ts`): an envelope stream is judged on its last
@@ -58,13 +73,57 @@ pub struct LedgerFile {
 pub struct Store {
     pub paths: Paths,
     pub tree: Tree,
+    /// What the registry's rule needs to know about this store's tree, read once.
+    layout: OnceLock<Result<Layout, String>>,
 }
 
 impl Store {
     /// A git revision is resolved to one commit here, so every read of this store sees the same tree.
-    pub fn new(paths: Paths, source: TreeSource) -> Self {
+    /// The workspace root is made absolute and its `.` and `..` resolved by the text, as the
+    /// registry spells a root it reads from the environment (it refuses a `..` part).
+    pub fn new(mut paths: Paths, source: TreeSource) -> Self {
+        if let Ok(abs) = std::path::absolute(&paths.workspace) {
+            paths.workspace = views::lexical(&abs);
+        }
         let tree = Tree::resolved(paths.workspace.clone(), source);
-        Self { paths, tree }
+        Self { paths, tree, layout: OnceLock::new() }
+    }
+
+    /// The workspace-relative path the registry gives `name` in this store's tree: `.broomva/<path>`
+    /// when the tree has it, `.control/<path>` otherwise (on disk, or in the git revision read).
+    /// A tree holding both is an error, as is one the registry refuses (a symlinked `.control`):
+    /// which copy is the record is then unknown, so neither is read.
+    pub fn rel(&self, name: &str) -> Result<String, String> {
+        let rels = broomva_paths::repo_rels(name).map_err(|e| e.to_string())?;
+        let root = self.tree.root();
+        let layout = self.layout.get_or_init(|| self.read_layout()).as_ref().map_err(Clone::clone)?;
+        if layout.shadowed.iter().any(|n| n == name) {
+            return Err(format!(
+                "both {} and {} exist in {}: the record is one of them, so neither is read until one is removed",
+                rels[0],
+                rels[1],
+                self.tree.place()
+            ));
+        }
+        match &layout.commit {
+            None => {
+                let path = broomva_paths::repo_path(name, root).map_err(|e| e.to_string())?;
+                rels.into_iter()
+                    .find(|rel| path.ends_with(rel))
+                    .ok_or_else(|| format!("the registry put {name} at {}, outside {}", path.display(), root.display()))
+            }
+            // In neither, the registry's git reader has no answer: the name is unread at its new place.
+            Some(commit) => Ok(broomva_paths::tree_path(name, root, commit)
+                .map_err(|e| e.to_string())?
+                .unwrap_or_else(|| rels[0].clone())),
+        }
+    }
+
+    /// The registry's `shadowed`, on disk or at the commit read.
+    fn read_layout(&self) -> Result<Layout, String> {
+        let commit = self.tree.commit_to_read().map_err(|e| e.to_string())?.map(str::to_string);
+        let shadowed = broomva_paths::shadowed(self.tree.root(), commit.as_deref()).map_err(|e| e.to_string())?;
+        Ok(Layout { commit, shadowed })
     }
 
     /// Read every YAML file in a workspace directory as a document, with `parse`.
@@ -106,7 +165,13 @@ impl Store {
         })
     }
 
-    fn yaml_dir<T: DeserializeOwned>(&self, dir: &str) -> Section<Vec<T>> {
+    /// Every YAML document in the workspace folder the registry names `name`.
+    fn yaml_dir<T: DeserializeOwned>(&self, name: &str) -> Section<Vec<T>> {
+        let dir = match self.rel(name) {
+            Ok(dir) => dir,
+            Err(reason) => return Section::unavailable(self.tree.label(name), reason),
+        };
+        let dir = dir.as_str();
         let docs = self.yaml_docs(dir);
         let mut errors = docs.errors;
         let data = docs.data.map(|docs| {
@@ -127,7 +192,11 @@ impl Store {
     /// Ledgers are named as the plugin's `LEDGER` names them (`.yaml` or `.yml`) and read
     /// with [`yaml::parse`], so every value, and so every entry hash, is the plugin's.
     pub fn asks(&self) -> Section<Vec<LedgerFile>> {
-        let docs = self.yaml_docs_with(ASKS_DIR, &[".yaml", ".yml"], |t| {
+        let dir = match self.rel(ASKS) {
+            Ok(dir) => dir,
+            Err(reason) => return Section::unavailable(self.tree.label(ASKS), reason),
+        };
+        let docs = self.yaml_docs_with(&dir, &[".yaml", ".yml"], |t| {
             if t.len() > LEDGER_LIMIT {
                 return Err(format!("it is over {LEDGER_LIMIT} bytes"));
             }
@@ -147,11 +216,11 @@ impl Store {
                 match AskLedger::from_value(doc) {
                     Ok((ledger, bad)) => {
                         for (i, reason) in bad {
-                            errors.push(SourceError { at: format!("{ASKS_DIR}/{file}#{i}"), reason });
+                            errors.push(SourceError { at: format!("{dir}/{file}#{i}"), reason });
                         }
                         out.push(LedgerFile { file, ledger });
                     }
-                    Err(reason) => errors.push(SourceError { at: format!("{ASKS_DIR}/{file}"), reason }),
+                    Err(reason) => errors.push(SourceError { at: format!("{dir}/{file}"), reason }),
                 }
             }
             out
@@ -160,16 +229,20 @@ impl Store {
     }
 
     pub fn initiatives(&self) -> Section<Vec<Initiative>> {
-        self.yaml_dir(INITIATIVES_DIR)
+        self.yaml_dir(INITIATIVES)
     }
 
     pub fn loops(&self) -> Section<Vec<LoopSpec>> {
-        self.yaml_dir(LOOPS_DIR)
+        self.yaml_dir(LOOPS)
     }
 
     pub fn preauth(&self) -> Section<Preauth> {
-        let label = self.tree.label(PREAUTH_FILE);
-        match self.tree.read(PREAUTH_FILE) {
+        let file = match self.rel(PREAUTH) {
+            Ok(file) => file,
+            Err(reason) => return Section::unavailable(self.tree.label(PREAUTH), reason),
+        };
+        let label = self.tree.label(&file);
+        match self.tree.read(&file) {
             Ok(text) => match serde_yaml::from_str(&text) {
                 Ok(p) => Section::ok(label, p),
                 Err(e) => Section::unavailable(label, e.to_string()),
@@ -225,23 +298,57 @@ impl Store {
         Section::partial(label, out, errors)
     }
 
-    /// Work items under the work root (`<root>/<slug>/_work.md`).
+    /// Work items under the work root, in its [`WorkLayout`]: `<root>/<slug>/_work.md`, or
+    /// `<root>/<initiative>/<slug>/_work.md` under `$BROOMVA_HOME/work`.
     pub fn work(&self) -> Section<Vec<WorkItem>> {
         let root = &self.paths.work_root;
         let label = format!("fs:{}", root.display());
         let mut errors = Vec::new();
-        let dirs = match entries(root, &mut errors) {
+        let top = match entries(root, &mut errors) {
             Ok(dirs) => dirs,
             Err(e) => return Section::unavailable(label, e),
         };
+        let mut dirs = Vec::new();
+        match self.paths.work_layout() {
+            WorkLayout::Flat => dirs.extend(top.into_iter().map(|d| (None, d))),
+            WorkLayout::ByInitiative => {
+                for bucket in top.into_iter().filter(|d| d.is_dir()) {
+                    let name = bucket.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    // An item filed at the top, as in a flat root: read, and reported as misfiled,
+                    // so moving a flat root here never hides an item.
+                    if std::fs::symlink_metadata(bucket.join("_work.md")).is_ok() {
+                        errors.push(SourceError {
+                            at: bucket.display().to_string(),
+                            reason: format!(
+                                "a work item at the top of the work root: file it under <initiative>/ or {UNFILED}/"
+                            ),
+                        });
+                        dirs.push((None, bucket));
+                        continue;
+                    }
+                    // A bucket that cannot be listed hides its items: recorded, never an empty bucket.
+                    match entries(&bucket, &mut errors) {
+                        Ok(items) => {
+                            let initiative = (name != UNFILED).then_some(name);
+                            dirs.extend(items.into_iter().map(|d| (initiative.clone(), d)));
+                        }
+                        Err(reason) => errors.push(SourceError { at: bucket.display().to_string(), reason }),
+                    }
+                }
+            }
+        }
         let mut items = Vec::new();
-        for dir in dirs {
+        for (initiative, dir) in dirs {
             let file = dir.join("_work.md");
             if !file.is_file() {
                 continue;
             }
             match read_work(&file) {
-                Ok((item, warnings)) => {
+                Ok((mut item, warnings)) => {
+                    item.filed_under = initiative;
                     items.push(item);
                     errors.extend(warnings);
                 }
@@ -422,7 +529,7 @@ pub fn read_work(file: &Path) -> Result<(WorkItem, Vec<SourceError>), String> {
     let quiet = flag.as_ref().is_some_and(|f| f.kind == FlagKind::Quiet);
     let work_state = WorkState::of(front.state, quiet);
     let finished = front.state == OrchState::Review;
-    Ok((WorkItem { slug, title, work_state, front, last_event_at, flag, finished }, warnings))
+    Ok((WorkItem { slug, title, work_state, front, last_event_at, flag, finished, filed_under: None }, warnings))
 }
 
 #[cfg(test)]

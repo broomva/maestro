@@ -198,11 +198,19 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
     }
     // No local asks directory holds no local answers: nothing waits, and nothing is unread.
     // Anything else in its place (a file, a dangling link) is unread, and the read reports it.
-    let local_dir = store.paths.workspace.join(crate::ASKS_DIR);
+    let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree);
+    let rel = match local.rel(crate::ASKS) {
+        Ok(rel) => rel,
+        Err(reason) => {
+            let at = local.tree.label(crate::ASKS);
+            return Section { source: at.clone(), data: None, errors: vec![SourceError { at, reason }] };
+        }
+    };
+    let local_dir = store.paths.workspace.join(&rel);
     if std::fs::symlink_metadata(&local_dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
-        return Section::ok(format!("worktree:{}", crate::ASKS_DIR), Vec::new());
+        return Section::ok(format!("worktree:{rel}"), Vec::new());
     }
-    let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree).asks();
+    let local = local.asks();
     let errors: Vec<SourceError> = local
         .errors
         .iter()
@@ -369,7 +377,7 @@ pub fn project_of(cwd: &Path, workspace: &Path) -> Option<String> {
 }
 
 /// A path with `.` and `..` resolved by the text alone, so `core/maestro/../life` is `core/life`.
-fn lexical(p: &Path) -> std::path::PathBuf {
+pub(crate) fn lexical(p: &Path) -> std::path::PathBuf {
     let mut out = std::path::PathBuf::new();
     for c in p.components() {
         match c {
@@ -414,7 +422,7 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
     let cwd_rel = scope
         .cwd
         .as_deref()
-        .and_then(|c| Path::new(c).strip_prefix(workspace).ok())
+        .and_then(|c| lexical(Path::new(c)).strip_prefix(lexical(workspace)).ok().map(Path::to_path_buf))
         .map(|p| p.to_string_lossy().into_owned());
     if scope.project.is_none() {
         scope.project = scope.cwd.as_deref().and_then(|c| project_of(Path::new(c), workspace));

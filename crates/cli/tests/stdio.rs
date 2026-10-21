@@ -12,7 +12,10 @@ fn fixture() -> std::path::PathBuf {
 fn maestro() -> Command {
     let root = fixture();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_maestro"));
-    cmd.env("MAESTRO_WORKSPACE", root.join("workspace"))
+    // The name that wins (BROOMVA_WORKSPACE), and the older ones cleared: an ambient value must not leak in.
+    cmd.env("BROOMVA_WORKSPACE", root.join("workspace"))
+        .env_remove("MAESTRO_WORKSPACE")
+        .env_remove("BSTACK_WORKSPACE")
         .env("MAESTRO_WORK_ROOT", root.join("work"))
         .env("BROOMVA_HOME", root.join("broomva-home"))
         .env("MAESTRO_FLEET_STATE", root.join("fleet-reconcile"))
@@ -113,7 +116,7 @@ fn hook_format_is_harness_shaped_and_reads_cwd_from_stdin() {
 #[test]
 fn hook_never_fails_the_session() {
     let output = maestro()
-        .env("MAESTRO_WORKSPACE", "/nonexistent")
+        .env("BROOMVA_WORKSPACE", "/nonexistent")
         .args(["--tree", "origin/main", "context", "--format", "hook"])
         .output()
         .unwrap();

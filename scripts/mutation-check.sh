@@ -158,5 +158,28 @@ mutate $mcp 'Self { paths: Arc::new(store.paths), source: store.tree.source }' '
 mutate $http 'None => Ok(Self::loopback()),' 'None => Self::named("100.64.0.1:7171".parse().unwrap()),'
 mutate $http 'SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)' 'SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT)'
 
+# Path registry (BRO-3266): .broomva before .control, both refused, the git rule equal to the
+# registry's, $BROOMVA_HOME by kind, and the stale-reader check.
+paths=crates/store/src/paths.rs
+doctor=crates/store/src/doctor.rs
+mutate $store 'if std::fs::symlink_metadata(bucket.join("_work.md")).is_ok() {' 'if false {'
+mutate $store '        if layout.shadowed.iter().any(|n| n == name) {' '        if false {'
+mutate $store '                .unwrap_or_else(|| rels[0].clone())),' '                .unwrap_or_else(|| rels[rels.len() - 1].clone())),'
+mutate $paths '            Some(w) => w,' '            Some(_) => registry::workspace_root()?,'
+mutate $store '            paths.workspace = views::lexical(&abs);' '            paths.workspace = abs;'
+mutate $store 'let initiative = (name != UNFILED).then_some(name);' 'let initiative = Some(name);'
+mutate $store "                    if name.starts_with('.') {" '                    if false {'
+mutate $store 'Err(reason) => errors.push(SourceError { at: bucket.display().to_string(), reason }),' 'Err(_) => {}'
+mutate $paths 'if same_dir(&self.work_root, &self.broomva_home.join(machine_rel("work"))) {' 'if false {'
+mutate $paths "let plain = !stream.is_empty() && !stream.starts_with('.') && " 'let plain = !stream.is_empty() && '
+mutate $paths '.or_else(|| configured_work_root(&config.join("config.json")))' ''
+mutate $doctor '            if sha == REGISTRY_SHA256 {' '            if true {'
+mutate $doctor 'Ok(text) if text == VENDORED_READER => {' 'Ok(_) => {'
+mutate $cli 'if checks.iter().any(|c| c.status != Status::Ok) {' 'if checks.iter().any(|c| c.status == Status::Stale) {'
+# git reads the repo at the root alone: no inherited GIT_DIR, and the root is a top level.
+mutate $cli '    let _ = cmd.exec();' '    let _ = cmd;'
+mutate $cli 'if !GIT_REPO_ENV.iter().any(|k| std::env::var_os(k).is_some()) {' 'if std::env::var_os("GIT_DIR").is_none() {'
+mutate $tree '                    if same_path(Path::new(top), &tree.root) {' '                    if true {'
+
 echo "mutation  $killed of $total killed"
 exit $failed

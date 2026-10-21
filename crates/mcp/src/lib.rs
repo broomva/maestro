@@ -261,7 +261,11 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                 .collect();
             // A ledger that did not parse, or an entry in it that did not, may be the one asked for:
             // that is "unreadable", which is not the same as "no such ask".
-            let file_at = format!("{}/{}", maestro_store::ASKS_DIR, a.ledger);
+            // Errors name the folder the registry chose; an unresolved one names no file.
+            let file_at = match store.rel(maestro_store::ASKS) {
+                Ok(dir) => format!("{dir}/{}", a.ledger),
+                Err(_) => section.source.clone(),
+            };
             let unread: Vec<_> = section
                 .errors
                 .iter()
