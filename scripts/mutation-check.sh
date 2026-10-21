@@ -4,9 +4,8 @@
 # Prints one line per mutant, with the test that caught it, and exits non-zero if any mutant
 # survives, does not build, ends without a failing test (timeout, crash, infra), or its anchor
 # is missing. The list is the guards proven so far, not every guard in the crates.
-# Mutants are applied to a throwaway copy of the tree (tracked and untracked files, as they
-# are now), built into a target dir inside that copy: nothing in this checkout is written,
-# nothing is shared between runs, and nothing has to be restored.
+# Mutants are applied to a throwaway copy of the git-visible tree, built into a target dir
+# inside it; this checkout's files are not modified.
 # Pattern: core/life crates/cuenca/cuenca-tree/scripts/mutation-check.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
