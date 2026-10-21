@@ -368,3 +368,23 @@ async fn http_refuses_a_foreign_host_and_any_browser_origin() {
     assert_eq!(status(addr, &[("Host", &host), ("Origin", &format!("http://{host}"))]).await, 403);
     cancel.cancel();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_takes_the_bound_address_as_host() {
+    // A tailnet bind cannot be made on every machine, so serve the service built for a tailnet
+    // address from a loopback socket: `Host` is checked against the address the service was given.
+    let tailnet: std::net::SocketAddr = "100.100.100.100:7171".parse().unwrap();
+    let cancel = CancellationToken::new();
+    let mcp = http::service(MaestroServer::new(fixture()), tailnet, cancel.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, axum::Router::new().nest_service(http::PATH, mcp))
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+    });
+    assert_eq!(status(addr, &[("Host", "100.100.100.100:7171")]).await, 200);
+    assert_eq!(status(addr, &[("Host", "100.100.100.101:7171")]).await, 403);
+    cancel.cancel();
+}

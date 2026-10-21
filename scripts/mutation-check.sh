@@ -150,6 +150,7 @@ mutate $http '        .with_allowed_hosts(hosts)' '        .disable_allowed_host
 mutate $http '        .enforce_origin_validation()' '        .disable_allowed_origins()'
 mutate $http 'tokio::time::sleep(SHUTDOWN_GRACE).await;' 'std::future::pending::<()>().await;'
 mutate $http '.with_json_response(true)' '.with_json_response(false)'
+mutate $http ', local.ip().to_string()];' '];'
 mutate $mcp 'Self { paths: Arc::new(store.paths), source: store.tree.source }' 'Self { paths: Arc::new(store.paths), source: store.tree.commit.clone().map_or(store.tree.source, maestro_store::TreeSource::GitRev) }'
 mutate $http 'None => Ok(Self::loopback()),' 'None => Self::named("100.64.0.1:7171".parse().unwrap()),'
 mutate $http 'SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)' 'SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT)'

@@ -69,7 +69,8 @@ fn serve_http_answers_tools_list_and_stops_on_sigterm() {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
-    // A plain request-response is plain JSON, not an event stream (`with_json_response`).
+    // A stateless request-response is plain JSON, not an event stream (`with_json_response`;
+    // legacy sessions still answer as an event stream).
     assert!(response.to_ascii_lowercase().contains("\r\ncontent-type: application/json\r\n"), "{response:?}");
     assert!(response.contains("\"maestro_snapshot\""), "{response}");
 
