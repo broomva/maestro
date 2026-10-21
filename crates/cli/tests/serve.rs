@@ -68,8 +68,11 @@ fn serve_http_answers_tools_list_and_stops_on_sigterm() {
         body.len()
     )
     .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    // Read to EOF, or for at most 5 s: an event stream would stay open, and this test must fail, not hang.
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let response = String::from_utf8_lossy(&raw).into_owned();
     assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
     // A stateless request-response is plain JSON, not an event stream (`with_json_response`;
     // legacy sessions still answer as an event stream).

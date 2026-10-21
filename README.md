@@ -52,7 +52,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
 - **Revisions.** A revision that does not resolve, or that starts with `-`, reads nothing. Every
   section is then unavailable, not empty. The MCP server resolves the revision again on each request,
   so a long-lived server follows `origin/main` as it moves.
-- **HTTP.** `maestro serve --http` is the one daemon per machine. A client on MCP 2026-07-28 is served
+- **HTTP.** `maestro serve --http` is meant to run once per machine (as `maestrod`, installed by node
+  `deploy`); nothing stops a second instance on another port. A client on MCP 2026-07-28 is served
   statelessly; a client that opens with `initialize` gets a legacy session. It listens on loopback
   unless `--bind` names an address, and a named address must be loopback or on the tailnet
   (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`); `0.0.0.0`, `::` and every other address are refused.

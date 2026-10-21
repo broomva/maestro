@@ -96,7 +96,7 @@ enum Command {
     },
     /// Serve the MCP server on stdio.
     Mcp,
-    /// Serve the MCP server over Streamable HTTP: one daemon per machine.
+    /// Serve the MCP server over Streamable HTTP (run once per machine, as `maestrod`).
     Serve {
         /// Streamable HTTP at /mcp (the only transport `serve` offers; stdio is `maestro mcp`).
         #[arg(long)]

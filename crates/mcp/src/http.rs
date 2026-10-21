@@ -1,4 +1,5 @@
-//! Maestro over Streamable HTTP: one daemon per machine (`maestro serve --http`).
+//! Maestro over Streamable HTTP (`maestro serve --http`), meant to run once per machine as
+//! `maestrod`. Nothing here enforces that; node `deploy` (BRO-3285) installs the one service.
 //!
 //! Clients on MCP 2026-07-28 are served statelessly; older clients that open
 //! with `initialize` get a legacy session. Either way every request reads a
