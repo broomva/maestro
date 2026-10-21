@@ -24,5 +24,6 @@ tokio-util.workspace = true
 workspace = true
 
 [dev-dependencies]
+maestro-mcp.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

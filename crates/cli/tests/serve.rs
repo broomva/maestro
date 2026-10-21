@@ -3,7 +3,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn maestro() -> Command {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine");
@@ -33,8 +34,8 @@ fn serve_needs_the_http_flag() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("needs --http"));
 }
 
-#[test]
-fn serve_http_answers_tools_list_and_stops_on_sigterm() {
+/// Start `serve --http` on an ephemeral loopback port; returns the child and its `host:port`.
+fn start() -> (Child, String) {
     let mut child = maestro()
         .args(["serve", "--http", "--bind", "127.0.0.1:0"])
         .stdout(Stdio::null())
@@ -48,6 +49,13 @@ fn serve_http_answers_tools_list_and_stops_on_sigterm() {
     let (addr, path) = url.split_once('/').unwrap();
     assert!(addr.starts_with("127.0.0.1:"), "{addr}");
     assert_eq!(path, "mcp");
+    (child, addr.to_string())
+}
+
+#[test]
+fn serve_http_answers_tools_list_and_stops_on_sigterm() {
+    let (mut child, addr) = start();
+    let addr = addr.as_str();
 
     // A 2026-07-28 request needs no session: one POST, one answer.
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
@@ -61,10 +69,42 @@ fn serve_http_answers_tools_list_and_stops_on_sigterm() {
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
+    // A plain request-response is plain JSON, not an event stream (`with_json_response`).
+    assert!(response.to_ascii_lowercase().contains("\r\ncontent-type: application/json\r\n"), "{response:?}");
     assert!(response.contains("\"maestro_snapshot\""), "{response}");
 
     let killed = Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap();
     assert!(killed.success());
     let status = child.wait().unwrap();
     assert!(status.success(), "SIGTERM should be a clean stop: {status}");
+}
+
+#[test]
+fn a_client_stalled_mid_body_does_not_hold_the_daemon_past_its_grace() {
+    let (mut child, addr) = start();
+    // Headers promise 500 bytes; the body stops after 11 and the socket stays open.
+    let mut stalled = TcpStream::connect(&addr).unwrap();
+    write!(
+        stalled,
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: 500\r\n\r\n{{\"jsonrpc\":"
+    )
+    .unwrap();
+    stalled.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let asked = Instant::now();
+    assert!(Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap().success());
+    let deadline = asked + maestro_mcp::http::SHUTDOWN_GRACE + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("still running {:?} after SIGTERM with a stalled client", asked.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "{status}");
+    drop(stalled);
 }

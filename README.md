@@ -58,7 +58,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
   (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`); `0.0.0.0`, `::` and every other address are refused.
   Requests must name the bound address or a loopback name in `Host` (so a tailnet client uses the
   IP, not the MagicDNS name), and a request carrying a browser `Origin` is refused. SIGTERM or
-  Ctrl-C stops it cleanly. `crates/mcp/tests/transports.rs` holds stdio and HTTP to the same JSON.
+  Ctrl-C stops it; requests still in flight get `SHUTDOWN_GRACE` (3 s), so a stalled client cannot
+  hold it. A request body has no read deadline yet (BRO-3302 tracks it). `crates/mcp/tests/transports.rs` holds stdio and HTTP to the same JSON.
 - **Parity with the Paseo plugin.** Asks are read the way the plugin reads them:
   - Fields go through `text`, `textsOf` and `optionsOf`, and a flag counts only when it is `=== true`.
     So a numeric id, a string `blocking`, a single-string `gates` list or an option without a label

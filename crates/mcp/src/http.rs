@@ -23,6 +23,10 @@ use tokio_util::sync::CancellationToken;
 pub const DEFAULT_PORT: u16 = 7171;
 /// The HTTP path of the MCP endpoint.
 pub const PATH: &str = "/mcp";
+/// How long a stop waits for requests in flight before it drops them. Reads finish in well
+/// under this; a client that stalls (a body it never finishes, a stream it never closes)
+/// does not hold the daemon past it.
+pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// An address the daemon may listen on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,12 +110,19 @@ pub async fn listen(bind: Bind) -> std::io::Result<TcpListener> {
     TcpListener::bind(bind.addr()).await
 }
 
-/// Serve MCP on `listener` at [`PATH`] until `cancel` fires.
+/// Serve MCP on `listener` at [`PATH`] until `cancel` fires, then for at most [`SHUTDOWN_GRACE`].
 pub async fn serve(store: Store, listener: TcpListener, cancel: CancellationToken) -> std::io::Result<()> {
     let local = listener.local_addr()?;
     let mcp = service(MaestroServer::new(store), local, cancel.child_token());
     let router = axum::Router::new().nest_service(PATH, mcp);
-    axum::serve(listener, router).with_graceful_shutdown(cancel.cancelled_owned()).await
+    let graceful = axum::serve(listener, router).with_graceful_shutdown(cancel.clone().cancelled_owned());
+    tokio::select! {
+        done = graceful.into_future() => done,
+        () = async {
+            cancel.cancelled().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => Ok(()),
+    }
 }
 
 #[cfg(test)]
