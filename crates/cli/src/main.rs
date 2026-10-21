@@ -96,6 +96,15 @@ enum Command {
     },
     /// Serve the MCP server on stdio.
     Mcp,
+    /// Serve the MCP server over Streamable HTTP (run once per machine, as `maestrod`).
+    Serve {
+        /// Streamable HTTP at /mcp (the only transport `serve` offers; stdio is `maestro mcp`).
+        #[arg(long)]
+        http: bool,
+        /// Listen here instead of 127.0.0.1:7171. Only a loopback or tailnet address is accepted.
+        #[arg(long)]
+        bind: Option<std::net::SocketAddr>,
+    },
     /// What each surface may do, and the standing invariants.
     Authority,
     /// This node, and the known surfaces and harnesses with their capabilities.
@@ -201,6 +210,7 @@ fn run(cli: &Cli) -> Result<()> {
             let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
             runtime.block_on(maestro_mcp::serve_stdio(store)).map_err(|e| anyhow::anyhow!("{e}"))?;
         }
+        Command::Serve { http, bind } => serve(store, *http, *bind)?,
         Command::Context { .. } => println!("{}", context(cli, &store)?),
         Command::Authority => authority(cli.json),
         Command::Hosts => hosts(cli.json),
@@ -208,6 +218,52 @@ fn run(cli: &Cli) -> Result<()> {
         _ => read(cli, &store)?,
     }
     Ok(())
+}
+
+fn serve(store: Store, http: bool, bind: Option<std::net::SocketAddr>) -> Result<()> {
+    use maestro_mcp::http::{self, Bind};
+    if !http {
+        bail!("`serve` needs --http (stdio is `maestro mcp`)");
+    }
+    let bind = Bind::from_arg(bind)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let listener = http::listen(bind).await.with_context(|| format!("listening on {}", bind.addr()))?;
+        let local = listener.local_addr()?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stop = cancel.clone();
+        let signalled = shutdown_signal()?;
+        tokio::spawn(async move {
+            signalled.await;
+            stop.cancel();
+        });
+        eprintln!("maestro: serving MCP on http://{local}{}", http::PATH);
+        http::serve(store, listener, cancel).await?;
+        Ok(())
+    })
+}
+
+/// Ctrl-C, or SIGTERM from a service manager. The handlers are installed when this returns,
+/// before the readiness line, so a stop sent the moment the daemon reports ready is caught.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    })
+}
+
+#[cfg(windows)]
+fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+    Ok(async move {
+        ctrl_c.recv().await;
+    })
 }
 
 fn read(cli: &Cli, store: &Store) -> Result<()> {

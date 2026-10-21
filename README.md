@@ -38,6 +38,7 @@ maestro context [--cwd D] [--format markdown|json|hook]
 maestro authority                    # what each surface may do, and the standing invariants
 maestro hosts                        # this node, surfaces and harnesses, each with its capabilities
 maestro mcp                          # MCP server on stdio
+maestro serve --http [--bind ADDR]   # MCP server over Streamable HTTP at /mcp, 127.0.0.1:7171 by default
 ```
 
 Every command takes `--json`. Agents should use `--json`: it is the same data the MCP tools return,
@@ -51,6 +52,14 @@ read, that count becomes a lower bound and the error is reported under `worktree
 - **Revisions.** A revision that does not resolve, or that starts with `-`, reads nothing. Every
   section is then unavailable, not empty. The MCP server resolves the revision again on each request,
   so a long-lived server follows `origin/main` as it moves.
+- **HTTP.** `maestro serve --http` is meant to run once per machine (as `maestrod`, installed by node
+  `deploy`); nothing stops a second instance on another port. A client on MCP 2026-07-28 is served
+  statelessly; a client that opens with `initialize` gets a legacy session. It listens on loopback
+  unless `--bind` names an address, and a named address must be loopback or on the tailnet
+  (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`); `0.0.0.0`, `::` and every other address are refused.
+  Requests must name the bound address or a loopback name in `Host` (so a tailnet client uses the
+  IP, not the MagicDNS name), and a request carrying a browser `Origin` is refused. SIGTERM or
+  Ctrl-C stops it within `SHUTDOWN_GRACE` (3 s), so a stalled client cannot hold it. A request body has no read deadline yet (BRO-3302 tracks it). `crates/mcp/tests/transports.rs` holds stdio and HTTP to the same JSON.
 - **Parity with the Paseo plugin.** Asks are read the way the plugin reads them:
   - Fields go through `text`, `textsOf` and `optionsOf`, and a flag counts only when it is `=== true`.
     So a numeric id, a string `blocking`, a single-string `gates` list or an option without a label
@@ -126,7 +135,7 @@ read, that count becomes a lower bound and the error is reported under `worktree
 |---|---|
 | Claude Code (and T3 Code threads on the Claude provider) | `claude mcp add maestro -s local -- ~/.local/bin/maestro mcp` |
 | Codex (and T3 Code threads on the Codex provider) | `[mcp_servers.maestro] command = "~/.local/bin/maestro"`, `args = ["mcp"]` in `~/.codex/config.toml` |
-| Any MCP client | stdio: `maestro mcp` |
+| Any MCP client | stdio: `maestro mcp`; Streamable HTTP: `http://127.0.0.1:7171/mcp` while `maestro serve --http` runs |
 
 Context injection through a hook, for example Claude Code `SessionStart`:
 
