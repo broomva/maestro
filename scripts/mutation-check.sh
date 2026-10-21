@@ -3,75 +3,65 @@
 # fail for every one. Run from anywhere: scripts/mutation-check.sh
 # Prints one line per mutant, with the test that caught it, and exits non-zero if any mutant
 # survives, does not build, ends without a failing test (timeout, crash, infra), or its anchor
-# is missing. The source is restored after each mutant, also on interrupt, and the tree must
-# end exactly as it began. The list is the guards proven so far, not every guard in the crates.
+# is missing. The list is the guards proven so far, not every guard in the crates.
+# Mutants are applied to a throwaway copy of the tree (tracked and untracked files, as they
+# are now), never to this checkout, so nothing here has to be restored.
 # Pattern: core/life crates/cuenca/cuenca-tree/scripts/mutation-check.sh.
-set -uo pipefail
+set -euo pipefail
 cd "$(dirname "$0")/.."
-die() { echo "$*"; exit 3; }
-fingerprint() { { git diff HEAD; git ls-files --others --exclude-standard; } | git hash-object --stdin; }
-before=$(fingerprint) || die "cannot fingerprint the tree"
-backup=$(mktemp -d) || die "mktemp failed"
-cp Cargo.lock "$backup/Cargo.lock" || die "cannot back up Cargo.lock"
-restore() {
-  if [ -n "${current:-}" ]; then cp "$backup/file" "$current" || die "RESTORE FAILED: $current still holds a mutant"; fi
-  current=
-  cp "$backup/Cargo.lock" Cargo.lock || die "RESTORE FAILED: Cargo.lock"
-}
-unchanged() {
-  [ "$(fingerprint)" = "$before" ] && return
-  echo "TREE CHANGED: the harness left the tree unlike it found it"; git status --short; return 1
-}
-trap 'restore; rm -rf "$backup"; unchanged || exit 3' EXIT
-trap 'exit 130' INT TERM
-
-# Each run is bounded, so a mutant that hangs is a verdict, not a stall.
+command -v timeout >/dev/null || { echo "mutation-check needs \`timeout\` (GNU coreutils)"; exit 3; }
 limit=${MUTANT_TIMEOUT_SECS:-900}
-run_tests() {
-  if command -v timeout >/dev/null; then
-    timeout "$limit" env CARGO_TERM_COLOR=never cargo test -q --workspace --locked
-  else
-    env CARGO_TERM_COLOR=never cargo test -q --workspace --locked
-  fi
-}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target/mutants} CARGO_TERM_COLOR=never
+
+copy=$(mktemp -d)
+trap 'rm -rf "$copy"' EXIT
+trap 'exit 130' INT TERM
+git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf - | tar -xf - -C "$copy"
+git -C "$copy" init -q
+git -C "$copy" add -A
+git -C "$copy" -c core.hooksPath=/dev/null -c user.name=mutation -c user.email=mutation@localhost commit -qm base
+cd "$copy"
+run_tests() { timeout "$limit" cargo test -q --workspace --locked; }
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! run_tests >"$backup/log" 2>&1; then
-  echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
+if ! run_tests >log 2>&1; then
+  echo "baseline is red: fix the suite before reading any mutant verdict"; cat log; exit 2
 fi
 echo "baseline  green"
 
+set +e
 failed=0 killed=0 total=0
-mutate() { # file, old, new[, crash]: the anchor must occur exactly once. `crash` names the
-  # one process failure that counts as a kill, for a guard whose whole purpose is to prevent
-  # it (`stack overflow`); any other crash is still UNCLEAR.
+mutate() { # file, old, new[, crash]: the anchor must occur exactly once. `crash` names the one
+  # abort that counts as a kill, for a guard whose whole purpose is to prevent it (`stack
+  # overflow`); it must be the test binary's own fatal error, never a timeout.
   local file=$1 old=$2 new=$3 crash=${4:-} code caught
-  total=$((total + 1)); current=$file; cp "$file" "$backup/file" || die "cannot back up $file"
+  total=$((total + 1))
+  git checkout -q -- . && git clean -qfd -e log || { echo "cannot reset the copy"; exit 3; }
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
 if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
-  then echo "ANCHOR MISSING  $file: $old"; failed=1; restore; return; fi
-  run_tests >"$backup/log" 2>&1
+  then echo "ANCHOR MISSING  $file: $old"; failed=1; return; fi
+  run_tests >log 2>&1
   code=$?
   # Killed means a named test failed. A build error, a timeout, a crash or any other exit
-  # proves nothing about the guard.
-  # `cargo test -q` lists failing tests, indented, under a `failures:` line.
-  caught=$(awk '/^failures:$/ { n++; next } n >= 2 && /^    [^ ]/ { sub(/^ +/, ""); print; exit }' "$backup/log")
+  # proves nothing about the guard. `cargo test -q` lists failing tests, indented, after the
+  # second `failures:` line.
+  caught=$(awk '/^failures:$/ { n++; next } n >= 2 && /^    [^ ]/ { sub(/^ +/, ""); print; exit }' log)
   if [ "$code" = 0 ]; then
     echo "SURVIVED  $file: $old"; failed=1
-  elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' "$backup/log"; then
+  elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' log; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; failed=1
-  elif [ -n "$caught" ] && grep -q '^test result: FAILED' "$backup/log"; then
+  elif [ "$code" != 124 ] && [ -n "$caught" ] && grep -q '^test result: FAILED' log; then
     echo "killed    $file: $old  [$caught]"; killed=$((killed + 1))
-  elif [ -n "$crash" ] && grep -q "$crash" "$backup/log"; then
+  elif [ "$code" != 124 ] && [ -n "$crash" ] && grep -q "^fatal runtime error: $crash" log \
+    && grep -q 'SIGABRT' log; then
     echo "killed    $file: $old  [crash: $crash, as declared]"; killed=$((killed + 1))
   else
-    echo "UNCLEAR   $file: $old (exit $code, no failing test: timeout, crash or infra)"; tail -5 "$backup/log"; failed=1
+    echo "UNCLEAR   $file: $old (exit $code, no failing test: timeout, crash or infra)"; tail -5 log; failed=1
   fi
-  restore
 }
 
 ask=crates/maestro-core/src/ask.rs
