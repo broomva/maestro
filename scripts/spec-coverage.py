@@ -41,6 +41,8 @@ INVENTORY = [
     "wake-log.jsonl",
     "inbox.json",
     "timeline.append",
+    "Answer delivery",
+    "respondToPermission",
 ]
 
 
