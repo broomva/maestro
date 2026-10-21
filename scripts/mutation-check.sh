@@ -16,7 +16,9 @@ export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target/mutants} CARGO_TERM_COLO
 copy=$(mktemp -d)
 trap 'rm -rf "$copy"' EXIT
 trap 'exit 130' INT TERM
-git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf - | tar -xf - -C "$copy"
+# Extract with fresh mtimes (-m): the target dir is shared across runs, and a copy whose files
+# kept their old mtimes would reuse test binaries built for a previous, deleted copy.
+git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf - | tar -xmf - -C "$copy"
 git -C "$copy" init -q
 git -C "$copy" add -A
 git -C "$copy" -c core.hooksPath=/dev/null -c user.name=mutation -c user.email=mutation@localhost commit -qm base
