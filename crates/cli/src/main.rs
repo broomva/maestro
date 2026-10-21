@@ -135,10 +135,7 @@ enum Format {
 }
 
 fn store(cli: &Cli) -> Result<Store> {
-    let mut paths = Paths::from_env().map_err(|e| anyhow::anyhow!("the path registry: {e}"))?;
-    if let Some(ws) = &cli.workspace {
-        paths.workspace = ws.clone();
-    }
+    let paths = Paths::from_env_with(cli.workspace.clone()).map_err(|e| anyhow::anyhow!("the path registry: {e}"))?;
     let source: TreeSource = cli.tree.parse().map_err(|e: String| anyhow::anyhow!("--tree: {e}"))?;
     Ok(Store::new(paths, source))
 }

@@ -66,6 +66,12 @@ fn a_root_the_registry_refuses_is_an_error() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains("the path registry") && err.contains(key), "{err}");
     }
+    // An explicit --workspace does not read the workspace variables, so a bad one cannot fail it.
+    let ws = tmp.path().join("ws");
+    workspace(&ws, "a");
+    let mut cmd = maestro(&home);
+    cmd.env("BROOMVA_WORKSPACE", "relative/ws").arg("--workspace").arg(&ws);
+    assert_eq!(ask_ids(&json(cmd.args(["asks", "--json"]))), ["a"]);
     // The hook path still never fails the session.
     let out = maestro(&home).env("BROOMVA_HOME", "relative").args(["context", "--format", "hook"]).output().unwrap();
     assert!(out.status.success() && out.stdout.is_empty());

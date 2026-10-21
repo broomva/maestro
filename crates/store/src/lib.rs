@@ -128,7 +128,14 @@ impl Store {
                         return Ok(rel.clone());
                     }
                 }
-                Ok(rels[0].clone())
+                // In neither: where the registry puts a new file on disk, `.control/` while the tree
+                // has it and no name has moved to `.broomva/`, so both reads name one place.
+                let (new, old) = (broomva_paths::REPO_DIR, broomva_paths::REPO_LEGACY_DIR);
+                let control = children.keys().any(|k| k.starts_with(&format!("{old}/")));
+                let moved = broomva_paths::REPO
+                    .iter()
+                    .any(|&(_, path, legacy, _)| legacy && children.contains_key(&format!("{new}/{path}")));
+                Ok(if rels.len() > 1 && control && !moved { rels[1].clone() } else { rels[0].clone() })
             }
         }
     }
@@ -342,6 +349,18 @@ impl Store {
                 for bucket in top.into_iter().filter(|d| d.is_dir()) {
                     let name = bucket.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     if name.starts_with('.') {
+                        continue;
+                    }
+                    // An item filed at the top, as in a flat root: read, and reported as misfiled,
+                    // so moving a flat root here never hides an item.
+                    if std::fs::symlink_metadata(bucket.join("_work.md")).is_ok() {
+                        errors.push(SourceError {
+                            at: bucket.display().to_string(),
+                            reason: format!(
+                                "a work item at the top of the work root: file it under <initiative>/ or {UNFILED}/"
+                            ),
+                        });
+                        dirs.push((None, bucket));
                         continue;
                     }
                     // A bucket that cannot be listed hides its items: recorded, never an empty bucket.

@@ -41,7 +41,7 @@ maestro authority                    # what each surface may do, and the standin
 maestro hosts                        # this node, surfaces and harnesses, each with its capabilities
 maestro mcp                          # MCP server on stdio
 maestro serve --http [--bind ADDR]   # MCP server over Streamable HTTP at /mcp, 127.0.0.1:7171 by default
-maestro doctor [--bstack DIR]        # is the vendored path reader the one bstack generates? exit 1 if stale or unread
+maestro doctor [--bstack DIR]        # is the vendored path reader the one bstack generates (as of that checkout's last fetch)? exit 1 if stale or unread
 ```
 
 Every command takes `--json`. Agents should use `--json`: it is the same data the MCP tools return,

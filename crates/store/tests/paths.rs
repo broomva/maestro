@@ -125,7 +125,9 @@ fn a_moved_file_in_git_is_read_from_the_new_place() {
 }
 
 /// Maestro reads a git revision with one `ls-tree` instead of the registry's three to four git
-/// processes per name; on every tree shape below, each name's answer is the registry's.
+/// processes per name. On every tree shape below, each name's answer at the commit is the
+/// registry's `tree_path` + `shadowed` answer, and the on-disk answer for the same checkout
+/// (the registry's `repo_path` + `shadowed`, which Maestro calls directly).
 #[test]
 fn the_git_rule_is_the_registrys_on_every_tree_shape() {
     use std::os::unix::fs::symlink;
@@ -152,10 +154,15 @@ fn the_git_rule_is_the_registrys_on_every_tree_shape() {
             symlink(".control", w.join(".broomva")).unwrap();
         }),
         ("empty", |w| write(w, "README.md")),
+        ("legacy, one name moved", |w| {
+            fill(w, ".control");
+            std::fs::remove_dir_all(w.join(".control/bands")).unwrap();
+            write(w, ".broomva/bands/b.yaml");
+        }),
     ];
     // The names Maestro reads, and one of each other kind: an owner file, a folder and a file
     // without a legacy spelling, a plain file. Every name goes through the same few lines.
-    let names = ["asks", "initiatives", "preauth", "loops", "policy", "hooks", "checks", "arcs"];
+    let names = ["asks", "initiatives", "preauth", "loops", "policy", "hooks", "checks", "arcs", "bands"];
     for name in names {
         assert!(registry::REPO.iter().any(|r| r.0 == name), "{name} left the registry");
     }
@@ -168,16 +175,19 @@ fn the_git_rule_is_the_registrys_on_every_tree_shape() {
         git(&ws, &["add", "-A"]);
         git(&ws, &["commit", "-q", "-m", "shape"]);
         let store = Store::new(Paths::under(tmp.path()), TreeSource::GitRev("main".into()));
+        let disk = Store::new(Paths::under(tmp.path()), TreeSource::WorkingTree);
         let commit = store.tree.commit.clone().unwrap();
         let shadowed = registry::shadowed(&ws, Some(&commit));
         for name in &names {
             let ours = store.rel(name);
+            let on_disk = disk.rel(name).map_err(|_| ());
             let theirs: Result<String, ()> = match &shadowed {
                 Err(_) => Err(()),
                 Ok(both) if both.iter().any(|n| n == name) => Err(()),
                 Ok(_) => match registry::tree_path(name, &ws, &commit) {
                     Ok(Some(rel)) => Ok(rel),
-                    Ok(None) => Ok(registry::repo_rels(name).unwrap()[0].clone()),
+                    // In neither: the git reader has no rule of its own; the disk one decides.
+                    Ok(None) => on_disk.clone(),
                     Err(_) => Err(()),
                 },
             };
@@ -185,6 +195,11 @@ fn the_git_rule_is_the_registrys_on_every_tree_shape() {
                 ours.as_ref().map_err(|_| ()),
                 theirs.as_ref().map_err(|_| ()),
                 "{shape}: {name}: ours {ours:?}"
+            );
+            assert_eq!(
+                ours.as_ref().map_err(|_| ()),
+                on_disk.as_ref().map_err(|_| ()),
+                "{shape}: {name}: disk and git disagree"
             );
         }
     }
@@ -228,6 +243,21 @@ fn the_broomva_home_work_folder_is_read_by_initiative() {
     let mut got: Vec<_> = work.data.unwrap().into_iter().map(|w| (w.slug, w.filed_under)).collect();
     got.sort();
     assert_eq!(got, [("one".to_string(), Some("alpha".to_string())), ("two".to_string(), None)]);
+}
+
+#[test]
+fn an_item_at_the_top_of_the_broomva_home_work_folder_is_read_and_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.work_root = paths.broomva_home.join("work");
+    item(&paths.work_root, "flat-item");
+    item(&paths.work_root.join("alpha"), "one");
+    let work = Store::new(paths, TreeSource::WorkingTree).work();
+    let mut got: Vec<_> = work.data.unwrap().into_iter().map(|w| (w.slug, w.filed_under)).collect();
+    got.sort();
+    assert_eq!(got, [("flat-item".to_string(), None), ("one".to_string(), Some("alpha".to_string()))]);
+    assert_eq!(work.errors.len(), 1, "{:?}", work.errors);
+    assert!(work.errors[0].at.ends_with("/flat-item") && work.errors[0].reason.contains("top of the work root"));
 }
 
 #[test]

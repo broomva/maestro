@@ -53,6 +53,12 @@ impl Paths {
     /// Paths from the environment by the registry's rules. A root the registry refuses
     /// (a relative `BROOMVA_HOME`, the workspace at `$HOME`) is an error, not a guess.
     pub fn from_env() -> Result<Self, registry::Error> {
+        Self::from_env_with(None)
+    }
+
+    /// As [`Paths::from_env`], with the workspace named explicitly (`--workspace`): the
+    /// workspace variables are then not read, so a bad one cannot fail an explicit choice.
+    pub fn from_env_with(workspace: Option<PathBuf>) -> Result<Self, registry::Error> {
         let broomva_home = registry::machine_root()?;
         let config = broomva_home.join(machine_rel("config")).join("maestro");
         let work_root = match env_path("MAESTRO_WORK_ROOT")
@@ -66,7 +72,11 @@ impl Paths {
             Some(p) => p,
             None => home().unwrap_or_else(|| PathBuf::from(".")).join(".local/state/fleet-reconcile"),
         };
-        Ok(Self { workspace: registry::workspace_root()?, work_root, broomva_home, fleet_state })
+        let workspace = match workspace {
+            Some(w) => w,
+            None => registry::workspace_root()?,
+        };
+        Ok(Self { workspace, work_root, broomva_home, fleet_state })
     }
 
     /// All paths under one root, laid out like a real machine. Used by tests and fixtures.
