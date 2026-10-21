@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 fn maestro() -> Command {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_maestro"));
-    cmd.env("MAESTRO_WORKSPACE", root.join("workspace"))
+    // The name that wins (BROOMVA_WORKSPACE), and the older ones cleared: an ambient value must not leak in.
+    cmd.env("BROOMVA_WORKSPACE", root.join("workspace"))
+        .env_remove("MAESTRO_WORKSPACE")
+        .env_remove("BSTACK_WORKSPACE")
         .env("MAESTRO_WORK_ROOT", root.join("work"))
         .env("BROOMVA_HOME", root.join("broomva-home"))
         .env("MAESTRO_FLEET_STATE", root.join("fleet-reconcile"))

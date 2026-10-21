@@ -179,6 +179,10 @@ mutate $paths '.or_else(|| configured_work_root(&config.join("config.json")))' '
 mutate $doctor '            if sha == REGISTRY_SHA256 {' '            if true {'
 mutate $doctor 'Ok(text) if text == VENDORED_READER => {' 'Ok(_) => {'
 mutate $cli 'if checks.iter().any(|c| c.status != Status::Ok) {' 'if checks.iter().any(|c| c.status == Status::Stale) {'
+# git reads the repo at the root alone: no inherited GIT_DIR, the root is a top level, names are UTF-8.
+mutate $tree '        cmd.env_remove(key);' ''
+mutate $tree '                    if same_path(Path::new(top), &tree.root) {' '                    if true {'
+mutate $tree '        let out = String::from_utf8(self.git_bytes(&args).map_err(|e| e.to_string())?)' '        let out = Ok::<_, ()>(String::from_utf8_lossy(&self.git_bytes(&args).map_err(|e| e.to_string())?).into_owned())'
 
 echo "mutation  $killed of $total killed"
 exit $failed

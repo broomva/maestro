@@ -343,3 +343,48 @@ fn doctor_tells_a_stale_reader() {
 
     assert_eq!(statuses(&tmp.path().join("absent"), TreeSource::WorkingTree), [Status::Unread, Status::Unread]);
 }
+
+/// A root below a repository's top level would read the enclosing repo's files at paths
+/// relative to its top: the revision is refused, so every section is unread.
+#[test]
+fn a_git_root_below_the_top_level_is_unresolved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = machine(tmp.path(), &[(".control/asks/a.yaml", LEDGER), ("sub/README.md", "x")]);
+    let store = Store::new(Paths::under(tmp.path()), TreeSource::GitRev("main".into()));
+    assert!(store.tree.commit.is_some());
+    let inner = Paths { workspace: paths.workspace.join("sub"), ..paths.clone() };
+    let store = Store::new(inner, TreeSource::GitRev("main".into()));
+    assert!(store.tree.commit.is_none());
+    let asks = store.asks();
+    assert!(asks.data.is_none(), "{:?}", asks.data);
+    assert!(asks.errors.iter().any(|e| e.reason.contains("not a git top level")), "{:?}", asks.errors);
+}
+
+/// A name git stores that is not UTF-8 makes the registry's reader fail on the listing; the
+/// fast path fails too instead of decoding it lossily (P20 r2 MINOR). APFS refuses such a
+/// name on disk, so the entry goes into the index directly.
+#[test]
+fn a_non_utf8_name_in_the_tree_is_a_read_error_as_in_the_registry() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = machine(tmp.path(), &[(".broomva/asks/a.yaml", LEDGER)]);
+    let ws = &paths.workspace;
+    let blob = Command::new("git").arg("-C").arg(ws).args(["hash-object", "-w", "--stdin"]).output().unwrap();
+    let blob = String::from_utf8(blob.stdout).unwrap();
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(ws)
+        .args(["update-index", "--index-info"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = format!("100644 {} 0\t.broomva/", blob.trim()).into_bytes();
+    line.extend_from_slice(b"\xff\n");
+    child.stdin.take().unwrap().write_all(&line).unwrap();
+    assert!(child.wait().unwrap().success());
+    git(ws, &["commit", "-q", "-m", "non-utf8"]);
+    let store = Store::new(paths.clone(), TreeSource::GitRev("main".into()));
+    let commit = store.tree.commit.clone().unwrap();
+    assert!(registry::shadowed(ws, Some(&commit)).is_err(), "the registry reads this tree");
+    assert!(store.rel("asks").is_err(), "ours: {:?}", store.rel("asks"));
+}

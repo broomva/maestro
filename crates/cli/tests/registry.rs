@@ -134,3 +134,50 @@ fn doctor_exits_non_zero_unless_the_reader_is_known_current() {
     let statuses: Vec<_> = v["checks"].as_array().unwrap().iter().map(|c| c["status"].as_str().unwrap()).collect();
     assert_eq!(statuses, ["unread", "unread"]);
 }
+
+/// A git hook, or a harness running inside one, exports GIT_DIR. doctor must read the folder it
+/// was given, not the repository the variable names (P20 r2 MAJOR).
+#[test]
+fn doctor_reads_the_bstack_it_was_given_not_an_inherited_git_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    workspace(&tmp.path().join("ws"), "a");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let bstack = tmp.path().join("bstack");
+    std::fs::create_dir_all(bstack.join("references")).unwrap();
+    std::fs::create_dir_all(bstack.join("scripts/lib")).unwrap();
+    std::fs::copy(manifest.join("../../fixtures/registry/paths.toml"), bstack.join("references/paths.toml")).unwrap();
+    std::fs::copy(manifest.join("../store/src/broomva_paths.rs"), bstack.join("scripts/lib/broomva_paths.rs")).unwrap();
+    for args in [&["init", "-q", "-b", "main"][..], &["add", "-A"], &["commit", "-q", "-m", "bstack"]] {
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(&bstack)
+            .args(["-c", "user.name=t", "-c", "user.email=t@localhost"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+    }
+    let doctor = |dir: &Path| {
+        let out = maestro(&home)
+            .env("BROOMVA_WORKSPACE", tmp.path().join("ws"))
+            .env("GIT_DIR", bstack.join(".git"))
+            .env("GIT_WORK_TREE", &bstack)
+            .args(["--tree", "main", "doctor", "--json", "--bstack"])
+            .arg(dir)
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let statuses: Vec<String> =
+            v["checks"].as_array().unwrap().iter().map(|c| c["status"].as_str().unwrap().to_string()).collect();
+        (out.status.code(), statuses)
+    };
+    // The real checkout is current, with the variables set.
+    assert_eq!(doctor(&bstack), (Some(0), vec!["ok".to_string(), "ok".to_string()]));
+    // A folder that is no repository, and a folder inside the checkout, are not it.
+    let unread = (Some(1), vec!["unread".to_string(), "unread".to_string()]);
+    let not_a_repo = tmp.path().join("not-a-repo");
+    std::fs::create_dir_all(&not_a_repo).unwrap();
+    assert_eq!(doctor(&not_a_repo), unread);
+    assert_eq!(doctor(&bstack.join("references")), unread);
+}

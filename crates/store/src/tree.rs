@@ -97,8 +97,20 @@ impl Tree {
             let spec = format!("{rev}^{{commit}}");
             // No `--end-of-options` (git >= 2.30): the leading-dash check above already keeps
             // the revision from reading as an option, and older git would refuse the flag.
-            match tree.git(&["rev-parse", "--verify", "--quiet", &spec]) {
-                Ok(out) if !out.trim().is_empty() => tree.commit = Some(out.trim().to_string()),
+            // One call: the repo's top level, then the commit. A root below the top level would read
+            // the enclosing repo's files at paths relative to its top, so it is refused.
+            match tree.git(&["rev-parse", "--show-toplevel", "--verify", "--quiet", &spec]) {
+                Ok(out) if out.lines().count() == 2 => {
+                    let mut lines = out.lines();
+                    let top = lines.next().unwrap_or_default();
+                    let commit = lines.next().unwrap_or_default().trim();
+                    if same_path(Path::new(top), &tree.root) {
+                        tree.commit = Some(commit.to_string());
+                    } else {
+                        tree.unresolved =
+                            Some(format!("{} is not a git top level (its repo is {top})", tree.root.display()));
+                    }
+                }
                 // `--quiet` fails with no message when the revision names nothing.
                 Ok(_) | Err(TreeError::Git { .. }) => {
                     tree.unresolved = Some(format!("no commit is named `{rev}` in {}", tree.root.display()))
@@ -133,7 +145,9 @@ impl Tree {
     pub fn ls_full(&self, commit: &str, specs: &[&str]) -> Result<Vec<(String, String)>, String> {
         let mut args = vec!["ls-tree", "-z", "--full-tree", commit, "--"];
         args.extend_from_slice(specs);
-        let out = self.git(&args).map_err(|e| e.to_string())?;
+        // Strict UTF-8, as the registry reads git's output: a name it cannot decode is an error.
+        let out = String::from_utf8(self.git_bytes(&args).map_err(|e| e.to_string())?)
+            .map_err(|_| format!("git ls-tree output in {} is not UTF-8", self.root.display()))?;
         Ok(out
             .split('\0')
             .filter_map(|record| {
@@ -240,9 +254,7 @@ impl Tree {
     }
 
     fn cat_file_batch(&self, rev: &str, rels: &[String]) -> Result<Vec<FileRead>, TreeError> {
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
+        let mut child = git_command(&self.root)
             .args(["--no-pager", "cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -258,19 +270,48 @@ impl Tree {
     }
 
     fn git(&self, args: &[&str]) -> Result<String, TreeError> {
-        let output = Command::new("git").arg("-C").arg(&self.root).arg("--no-pager").args(args).output()?;
+        self.git_bytes(args).map(|out| String::from_utf8_lossy(&out).into_owned())
+    }
+
+    fn git_bytes(&self, args: &[&str]) -> Result<Vec<u8>, TreeError> {
+        let output = git_command(&self.root).arg("--no-pager").args(args).output()?;
         if !output.status.success() {
             return Err(TreeError::Git {
                 args: args.join(" "),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             });
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(output.stdout)
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// The variables that make git read another repository than the one at `-C`. A git hook,
+/// or a harness running inside one, sets them; the registry's reader clears the first two.
+const REPO_ENV: [&str; 6] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+/// `git -C <root>` with the repository chosen by `root` alone.
+fn git_command(root: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root);
+    for key in REPO_ENV {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
 fn utf8(rel: &str, bytes: Vec<u8>) -> Result<String, TreeError> {
