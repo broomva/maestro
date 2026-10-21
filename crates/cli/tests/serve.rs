@@ -1,4 +1,6 @@
 //! End to end: `maestro serve --http` binds where it may, answers MCP, and stops on SIGTERM.
+//! Unix only: the stops are signals sent with `kill`.
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -114,6 +116,7 @@ fn a_client_stalled_mid_body_does_not_hold_the_daemon_past_its_grace() {
 fn sigterm_right_after_the_readiness_line_is_a_clean_stop() {
     // A service manager may stop the daemon the moment it reports ready: the handler must exist by then.
     // bash's builtin `kill` lands within microseconds of the line; spawning `kill` is too slow to see the race.
+    // Probabilistic: the old order failed 12-19 of 20 here on an idle machine, but none under heavy load.
     let script = r#"bad=0
 for i in $(seq 1 20); do
   coproc M { exec "$BIN" serve --http --bind 127.0.0.1:0 2>&1; }

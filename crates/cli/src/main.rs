@@ -258,10 +258,11 @@ fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn shutdown_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
-    Ok(async {
-        let _ = tokio::signal::ctrl_c().await;
+    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+    Ok(async move {
+        ctrl_c.recv().await;
     })
 }
 
