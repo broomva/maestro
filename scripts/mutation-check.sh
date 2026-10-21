@@ -139,5 +139,18 @@ mutate $store '.nth(breaks - 1)' '.nth(breaks)'
 mutate $store '.take_while(|b| (**b & 0xC0) == 0x80).count().min(3)' '.take_while(|b| (**b & 0xC0) == 0x80).count()'
 mutate $views 'if active && ticks.is_some_and(TickTail::whole) && names_receipts' 'if active && ticks.is_some() && names_receipts'
 
+# HTTP (BRO-3264): where the daemon may listen, which requests it takes, and a store per request.
+http=crates/mcp/src/http.rs
+mcp=crates/mcp/src/lib.rs
+mutate $http 'if addr.ip().is_loopback() || is_tailnet(addr.ip()) {' 'if !addr.ip().is_unspecified() {'
+mutate $http 'a == 100 && (b & 0xc0) == 64' 'a == 100'
+mutate $http "v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]" "v6.segments()[..2] == [0xfd7a, 0x115c]"
+mutate $http 'v6.to_ipv4_mapped().is_some_and(|v4| is_tailnet(IpAddr::V4(v4)))' 'v6.to_ipv4_mapped().is_some()'
+mutate $http '        .with_allowed_hosts(hosts)' '        .disable_allowed_hosts()'
+mutate $http '        .enforce_origin_validation()' '        .disable_allowed_origins()'
+mutate $mcp 'Self { paths: Arc::new(store.paths), source: store.tree.source }' 'Self { paths: Arc::new(store.paths), source: store.tree.commit.clone().map_or(store.tree.source, maestro_store::TreeSource::GitRev) }'
+mutate $http 'None => Ok(Self::loopback()),' 'None => Self::named("100.64.0.1:7171".parse().unwrap()),'
+mutate $http 'SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)' 'SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT)'
+
 echo "mutation  $killed of $total killed"
 exit $failed

@@ -96,6 +96,15 @@ enum Command {
     },
     /// Serve the MCP server on stdio.
     Mcp,
+    /// Serve the MCP server over Streamable HTTP: one daemon per machine.
+    Serve {
+        /// Streamable HTTP at /mcp (the only transport `serve` offers; stdio is `maestro mcp`).
+        #[arg(long)]
+        http: bool,
+        /// Listen here instead of 127.0.0.1:7171. Only a loopback or tailnet address is accepted.
+        #[arg(long)]
+        bind: Option<std::net::SocketAddr>,
+    },
     /// What each surface may do, and the standing invariants.
     Authority,
     /// This node, and the known surfaces and harnesses with their capabilities.
@@ -201,6 +210,7 @@ fn run(cli: &Cli) -> Result<()> {
             let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
             runtime.block_on(maestro_mcp::serve_stdio(store)).map_err(|e| anyhow::anyhow!("{e}"))?;
         }
+        Command::Serve { http, bind } => serve(store, *http, *bind)?,
         Command::Context { .. } => println!("{}", context(cli, &store)?),
         Command::Authority => authority(cli.json),
         Command::Hosts => hosts(cli.json),
@@ -208,6 +218,47 @@ fn run(cli: &Cli) -> Result<()> {
         _ => read(cli, &store)?,
     }
     Ok(())
+}
+
+fn serve(store: Store, http: bool, bind: Option<std::net::SocketAddr>) -> Result<()> {
+    use maestro_mcp::http::{self, Bind};
+    if !http {
+        bail!("`serve` needs --http (stdio is `maestro mcp`)");
+    }
+    let bind = Bind::from_arg(bind)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async move {
+        let listener = http::listen(bind).await.with_context(|| format!("listening on {}", bind.addr()))?;
+        let local = listener.local_addr()?;
+        eprintln!("maestro: serving MCP on http://{local}{}", http::PATH);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            stop.cancel();
+        });
+        http::serve(store, listener, cancel).await?;
+        Ok(())
+    })
+}
+
+/// Ctrl-C, or SIGTERM from a service manager.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(_) => return std::future::pending().await,
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn read(cli: &Cli, store: &Store) -> Result<()> {

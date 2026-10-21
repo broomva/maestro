@@ -1,4 +1,6 @@
 //! Maestro over MCP: the same reads as the CLI, plus context as prompts and resources.
+//! Served on stdio ([`serve_stdio`]) and over Streamable HTTP ([`http`]), both through
+//! [`MaestroServer`], which dispatches through [`call`] as the CLI does.
 //!
 //! Every tool here has [`Authority::Read`]. Owner actions are not exposed: a
 //! model-visible tool is not proof of the owner, and the BRO-3186 contract
@@ -13,10 +15,10 @@ use maestro_store::{Store, views};
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    AnnotateAble, CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams, GetPromptResult,
-    Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt,
-    PromptArgument, PromptMessage, PromptMessageRole, RawResource, ReadResourceRequestParams, ReadResourceResult,
-    ResourceContents, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResponse,
+    GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
+    Resource, ResourceContents, Role, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use schemars::JsonSchema;
@@ -24,6 +26,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::future::Future;
 use std::sync::Arc;
+
+pub mod http;
 
 /// One tool: its name, what it may do, and its argument type.
 pub struct ToolSpec {
@@ -395,11 +399,11 @@ fn prompt_arg(name: &str, description: &str) -> PromptArgument {
 }
 
 impl ServerHandler for MaestroServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut implementation = Implementation::new("maestro", env!("CARGO_PKG_VERSION"));
         implementation.title = Some("Maestro".to_string());
         implementation.description = Some("Governance and orchestration metalayer for agent fleets".to_string());
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().enable_prompts().enable_resources().build();
         info.server_info = implementation;
         info.instructions = Some(
@@ -424,7 +428,7 @@ impl ServerHandler for MaestroServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+    ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let this = self.clone();
         async move {
             let name = request.name.to_string();
@@ -437,14 +441,14 @@ impl ServerHandler for MaestroServer {
                 Ok(value) => {
                     if let Some(md) = value.get("markdown").and_then(|m| m.as_str()) {
                         let mut result = CallToolResult::structured(value.clone());
-                        result.content = vec![Content::text(md.to_string())];
-                        Ok(result)
+                        result.content = vec![ContentBlock::text(md.to_string())];
+                        Ok(result.into())
                     } else {
-                        Ok(CallToolResult::structured(value))
+                        Ok(CallToolResult::structured(value).into())
                     }
                 }
                 Err(e) if e.code == rmcp::model::ErrorCode::INVALID_PARAMS => {
-                    Ok(CallToolResult::error(vec![Content::text(e.message.to_string())]))
+                    Ok(CallToolResult::error(vec![ContentBlock::text(e.message.to_string())]).into())
                 }
                 Err(e) => Err(e),
             }
@@ -472,7 +476,7 @@ impl ServerHandler for MaestroServer {
         &self,
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<GetPromptResult, McpError>> + Send + '_ {
+    ) -> impl Future<Output = Result<GetPromptResponse, McpError>> + Send + '_ {
         let this = self.clone();
         async move {
             if request.name != "maestro_context" {
@@ -484,10 +488,9 @@ impl ServerHandler for MaestroServer {
             let packet = tokio::task::spawn_blocking(move || views::context(&this.store(), scope))
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            let mut result =
-                GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, packet.render_markdown(8))]);
+            let mut result = GetPromptResult::new(vec![PromptMessage::new_text(Role::User, packet.render_markdown(8))]);
             result.description = Some("Maestro governance context".to_string());
-            Ok(result)
+            Ok(result.into())
         }
     }
 
@@ -499,9 +502,9 @@ impl ServerHandler for MaestroServer {
         let resources = RESOURCES
             .iter()
             .map(|(uri, name, description)| {
-                let mut raw = RawResource::new(*uri, *name);
-                raw.description = Some(description.to_string());
-                raw.no_annotation()
+                let mut resource = Resource::new(*uri, *name);
+                resource.description = Some(description.to_string());
+                resource
             })
             .collect();
         std::future::ready(Ok(ListResourcesResult::with_all_items(resources)))
@@ -511,7 +514,7 @@ impl ServerHandler for MaestroServer {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ReadResourceResponse, McpError>> + Send + '_ {
         let this = self.clone();
         async move {
             let uri = request.uri.clone();
@@ -522,15 +525,24 @@ impl ServerHandler for MaestroServer {
             if let ResourceContents::TextResourceContents { mime_type, .. } = &mut contents {
                 *mime_type = Some(mime.to_string());
             }
-            Ok(ReadResourceResult::new(vec![contents]))
+            Ok(ReadResourceResult::new(vec![contents]).into())
         }
     }
 }
 
 /// Serve over stdio until the client disconnects.
 pub async fn serve_stdio(store: Store) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_io(store, rmcp::transport::io::stdio()).await
+}
+
+/// Serve over any byte stream pair until the peer disconnects; stdio is one such pair.
+pub async fn serve_io<R, W>(store: Store, io: (R, W)) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
     use rmcp::ServiceExt;
-    let service = MaestroServer::new(store).serve(rmcp::transport::io::stdio()).await?;
+    let service = MaestroServer::new(store).serve(io).await?;
     service.waiting().await?;
     Ok(())
 }
