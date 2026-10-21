@@ -136,7 +136,7 @@ def main():
     for row in retirement:
         named = [needle for needle in INVENTORY if needle in row]
         if len(named) != 1:
-            failures.append(f"retirement row {row.split()[0]}: names {len(named)} inventory ledgers {named}, want 1")
+            failures.append(f"retirement row {(row.split() or ['(empty)'])[0]}: names {len(named)} inventory ledgers {named}, want 1")
 
     for line in failures:
         print(line)
