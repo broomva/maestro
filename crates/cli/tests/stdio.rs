@@ -247,11 +247,12 @@ fn a_hung_tailscale_is_killed() {
     assert!(!alive, "the timed-out tailscale {pid} is still running");
 }
 
-/// The hook stays inside its budget however long the ticks ledger grows: a 100 MB ledger whose
-/// last lines are the fixture's reads the same context, in under 200 ms. The fixture workspace is
-/// a working tree; on a real checkout the git reads add their own cost, measured in the PR.
+/// However long the ticks ledger grows, the hook reads only its tail: a 100 MB ledger whose last
+/// lines are the fixture's reads the same context. This debug build parses the 2 MiB tail in about
+/// 0.2 s and a full read in about 10 s, so 1 s tells them apart; the 200 ms budget is held by
+/// `scripts/tail-bench.sh` on the release binary.
 #[test]
-fn a_100_mb_ticks_ledger_keeps_the_hook_under_200_ms() {
+fn a_100_mb_ticks_ledger_is_read_by_its_tail() {
     let home = tempfile::tempdir().unwrap();
     let ledger = home.path().join("ledger/loops/ticks.jsonl");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
@@ -292,5 +293,5 @@ fn a_100_mb_ticks_ledger_keeps_the_hook_under_200_ms() {
     let receipts = receipts.trim_matches('"');
     assert!(small.contains(receipts), "{small}");
     assert_eq!(big, small.replacen(receipts, "", 1));
-    assert!(took < std::time::Duration::from_millis(200), "took {took:?}");
+    assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
 }

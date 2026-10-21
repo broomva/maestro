@@ -34,8 +34,8 @@ pub const LEDGER_LIMIT: usize = 1024 * 1024;
 /// this many UTF-16 units, so a ledger that only grows costs the same to read every call.
 pub const STREAM_TAIL: usize = 2 * 1024 * 1024;
 
-/// Ticks read from the ledger's tail. `from` is the byte the read began at: 0 when the whole
-/// ledger was read, so only then does an absent tick mean the ledger holds none.
+/// Ticks read from the ledger's tail. `from` is the byte offset of the tail's first line: 0 when
+/// the tail is the whole ledger, so only then does an absent tick mean the ledger holds none.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TickTail {
     pub ticks: Vec<Tick>,
@@ -187,7 +187,7 @@ impl Store {
             Ok(t) => t,
             Err(e) => return Section::unavailable(label, e.to_string()),
         };
-        // Line numbers count from where the read began, which the label says.
+        // Line numbers count from the tail's first line, whose byte offset the label says.
         let label = if from == 0 { label } else { format!("{label} from byte {from}") };
         let mut events = Vec::new();
         let mut errors = Vec::new();
@@ -254,8 +254,8 @@ impl Store {
 }
 
 /// The plugin's `readTail`: `text.slice(text.indexOf("\n", text.length - limit) + 1)` when the
-/// file is over `limit` UTF-16 units, else the whole file, with the byte offset the text starts
-/// at. The bytes decode as the plugin's `readFile(path, "utf8")` decodes them: an invalid sequence
+/// file is over `limit` UTF-16 units, else the whole file, with the byte offset in the file of the
+/// returned text's first byte. The bytes decode as the plugin's `readFile(path, "utf8")` decodes them: an invalid sequence
 /// is U+FFFD. JavaScript measures in UTF-16 units and a unit is at most 3 bytes of UTF-8, so the cut
 /// lies in the last `3 * limit + 3` bytes and only those are read, except when no line break
 /// follows the cut: then the tail is the whole file, as `indexOf` giving -1 makes it there.

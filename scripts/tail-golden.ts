@@ -34,6 +34,11 @@ const cases: { bytes: Buffer; limit: number }[] = [
 ].map(([s, limit]) => ({ bytes: utf8(s as string), limit: limit as number }));
 cases.push({ bytes: Buffer.from("aaaa\n\xff\nb\n", "latin1"), limit: 4 });
 cases.push({ bytes: Buffer.from("aa\n\xffb\n", "latin1"), limit: 4 });
+// A window that starts inside a run of more than 3 continuation bytes skips 3 of them, no more.
+for (let pad = 0; pad < 12; pad++) {
+  const run = Buffer.concat([utf8("a".repeat(pad)), Buffer.from([0xed, 0xa0]), Buffer.alloc(10, 0x80), Buffer.from([0xe2, 0x0a])]);
+  for (const limit of [1, 2, 3, 4]) cases.push({ bytes: run, limit });
+}
 for (let i = 0; i < 600; i++) {
   const length = next() % 120;
   const parts: Buffer[] = [];

@@ -31,6 +31,9 @@ for want in "$tail_line" 'const STREAM_TAIL = 2 * 1024 * 1024;'; do
   grep -qF -- "$want" "$work/plugin/server/loops.ts" \
     || { echo "parity    server/loops.ts no longer has: $want (port the change to read_tail)"; exit 1; }
 done
+# The golden's generator runs the same expression, so the golden is the plugin's cut, not a copy's.
+grep -qF -- "${tail_line#return }" "$repo/scripts/tail-golden.ts" \
+  || { echo "parity    scripts/tail-golden.ts no longer runs the plugin's readTail expression"; exit 1; }
 bun "$repo/scripts/tail-golden.ts" >"$work/tail-golden.json"
 
 if [ "${1:-}" = "--write" ]; then

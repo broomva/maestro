@@ -61,7 +61,8 @@ PY
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; failed=1
   elif [ "$code" != 124 ] && [ -n "$caught" ] && grep -q '^test result: FAILED' log; then
     echo "killed    $file: $old  [$caught]"; killed=$((killed + 1))
-  elif [ "$code" != 124 ] && [ -n "$crash" ] && grep -qxF "fatal runtime error: $crash, aborting" log \
+  # The runtime's line may follow `cargo test -q` progress dots another test thread printed first.
+  elif [ "$code" != 124 ] && [ -n "$crash" ] && grep -qE "^[.i]*fatal runtime error: $crash, aborting$" log \
     && grep -qE '^  process didn.t exit successfully: .*\(signal: 6, SIGABRT: process abort signal\)$' log; then
     echo "killed    $file: $old  [crash: $crash, as declared]"; killed=$((killed + 1))
   else
@@ -135,6 +136,7 @@ mutate $store 'if start == 0 && units <= limit {' 'if units <= limit {'
 mutate $store 'None => Ok((String::from_utf8_lossy(&std::fs::read(path)?).into_owned(), 0)),' 'None => Ok((text.into_owned(), start + skip as u64)),'
 mutate $store 'let text = String::from_utf8_lossy(raw);' 'let text = std::borrow::Cow::Borrowed(std::str::from_utf8(raw).unwrap_or_default());'
 mutate $store '.nth(breaks - 1)' '.nth(breaks)'
+mutate $store '.take_while(|b| (**b & 0xC0) == 0x80).count().min(3)' '.take_while(|b| (**b & 0xC0) == 0x80).count()'
 mutate $views 'if active && ticks.is_some_and(TickTail::whole) && names_receipts' 'if active && ticks.is_some() && names_receipts'
 
 echo "mutation  $killed of $total killed"

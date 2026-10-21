@@ -100,9 +100,10 @@ read, that count becomes a lower bound and the error is reported under `worktree
   - The ticks ledger is read by its tail, cut where the plugin's `readTail` cuts it: the last
     `STREAM_TAIL` (2,097,152) UTF-16 units, from the first whole line. A tick that started before
     the tail is not read, by either, so `no_tick_receipts` is raised only when the tail is the
-    whole ledger. `fixtures/parity/tail-golden.json` is the plugin's own cut on
-    seeded cases (`scripts/tail-golden.ts`), and `scripts/parity-check.sh` fails if the pinned
-    plugin's line changes. A 100 MB ledger keeps the hook under 200 ms.
+    whole ledger. `fixtures/parity/tail-golden.json` is the plugin's cut expression run under bun on
+    seeded byte cases (`scripts/tail-golden.ts`); `scripts/parity-check.sh` fails if the pinned
+    plugin's line, or the generator's copy of it, changes. `scripts/tail-bench.sh` holds the hook
+    under 200 ms on a 100 MB ledger with the release binary.
   - Work flags come from the plugin's `parseEvents`, and lines are read as `JSON.parse` reads them.
     So a torn last line, a huge number or a lone surrogate never hides or resurrects a flag.
   - **Proof:**
