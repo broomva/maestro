@@ -25,11 +25,27 @@ cp "$repo/scripts/plugin-golden.ts" "$work/plugin/.golden.ts"
 (cd "$work/plugin" && bun .golden.ts "$repo/fixtures/parity/workspace/.control/asks") >"$work/golden.json" 2>"$work/stderr.log" \
   || { cat "$work/stderr.log"; exit 1; }
 
+# The ticks tail: the plugin's readTail line and STREAM_TAIL, verbatim, and its cut on the seeded cases.
+tail_line='return limit !== null && text.length > limit ? text.slice(text.indexOf("\n", text.length - limit) + 1) : text;'
+for want in "$tail_line" 'const STREAM_TAIL = 2 * 1024 * 1024;'; do
+  grep -qF -- "$want" "$work/plugin/server/loops.ts" \
+    || { echo "parity    server/loops.ts no longer has: $want (port the change to read_tail)"; exit 1; }
+done
+# The golden's generator runs the same expression, so the golden is the plugin's cut, not a copy's.
+grep -qF -- "${tail_line#return }" "$repo/scripts/tail-golden.ts" \
+  || { echo "parity    scripts/tail-golden.ts no longer runs the plugin's readTail expression"; exit 1; }
+bun "$repo/scripts/tail-golden.ts" >"$work/tail-golden.json"
+
 if [ "${1:-}" = "--write" ]; then
+  mv "$work/tail-golden.json" "$repo/fixtures/parity/tail-golden.json"
   mv "$work/golden.json" "$repo/fixtures/parity/plugin-golden.json"
   echo "parity    golden rewritten from plugin ${rev:0:12}"
+elif ! cmp -s "$work/tail-golden.json" "$repo/fixtures/parity/tail-golden.json"; then
+  echo "parity    tail golden DIFFERS from scripts/tail-golden.ts:"
+  diff -u "$repo/fixtures/parity/tail-golden.json" "$work/tail-golden.json" | head -20
+  exit 1
 elif cmp -s "$work/golden.json" "$repo/fixtures/parity/plugin-golden.json"; then
-  echo "parity    golden matches plugin ${rev:0:12}"
+  echo "parity    golden matches plugin ${rev:0:12}, tail golden matches its readTail"
 else
   echo "parity    golden DIFFERS from plugin ${rev:0:12}:"
   diff -u "$repo/fixtures/parity/plugin-golden.json" "$work/golden.json" | head -60

@@ -30,6 +30,23 @@ pub const PREAUTH_FILE: &str = ".control/preauth.yaml";
 pub const LOOPS_DIR: &str = ".broomva/loops";
 /// The plugin's `LEDGER_LIMIT`: a ledger over this size is refused, not cut.
 pub const LEDGER_LIMIT: usize = 1024 * 1024;
+/// The plugin's `STREAM_TAIL` (`server/loops.ts`): an envelope stream is judged on its last
+/// this many UTF-16 units, so a ledger that only grows costs the same to read every call.
+pub const STREAM_TAIL: usize = 2 * 1024 * 1024;
+
+/// Ticks read from the ledger's tail. `from` is the byte offset of the tail's first line: 0 when
+/// the tail is the whole ledger, so only then does an absent tick mean the ledger holds none.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TickTail {
+    pub ticks: Vec<Tick>,
+    pub from: u64,
+}
+
+impl TickTail {
+    pub fn whole(&self) -> bool {
+        self.from == 0
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LedgerFile {
@@ -161,14 +178,17 @@ impl Store {
         }
     }
 
-    /// Paired ticks from the loops ledger, oldest first.
-    pub fn ticks(&self) -> Section<Vec<Tick>> {
+    /// Paired ticks from the loops ledger's tail ([`STREAM_TAIL`]), oldest first. A tick that
+    /// started before the tail is not read, as the plugin does not read it.
+    pub fn ticks(&self) -> Section<TickTail> {
         let path = self.paths.ticks_ledger();
         let label = format!("fs:{}", path.display());
-        let text = match std::fs::read_to_string(&path) {
+        let (text, from) = match read_tail(&path, STREAM_TAIL) {
             Ok(t) => t,
             Err(e) => return Section::unavailable(label, e.to_string()),
         };
+        // Line numbers count from the tail's first line, whose byte offset the label says.
+        let label = if from == 0 { label } else { format!("{label} from byte {from}") };
         let mut events = Vec::new();
         let mut errors = Vec::new();
         for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
@@ -177,7 +197,7 @@ impl Store {
                 Err(e) => errors.push(SourceError { at: format!("{label}:{}", n + 1), reason: e.to_string() }),
             }
         }
-        Section::partial(label, pair_ticks(&events), errors)
+        Section::partial(label, TickTail { ticks: pair_ticks(&events), from }, errors)
     }
 
     /// The latest fleet-reconcile report per scope.
@@ -230,6 +250,56 @@ impl Store {
         }
         items.sort_by(|a, b| b.front.updated.cmp(&a.front.updated).then(a.slug.cmp(&b.slug)));
         Section::partial(label, items, errors)
+    }
+}
+
+/// The plugin's `readTail`: `text.slice(text.indexOf("\n", text.length - limit) + 1)` when the
+/// file is over `limit` UTF-16 units, else the whole file, with the byte offset in the file of the
+/// returned text's first byte. The bytes decode as the plugin's `readFile(path, "utf8")` decodes them: an invalid sequence
+/// is U+FFFD. JavaScript measures in UTF-16 units and a unit is at most 3 bytes of UTF-8, so the cut
+/// lies in the last `3 * limit + 3` bytes and only those are read, except when no line break
+/// follows the cut: then the tail is the whole file, as `indexOf` giving -1 makes it there.
+pub fn read_tail(path: &Path, limit: usize) -> std::io::Result<(String, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    // Plus 3: the character the window starts inside is skipped, and the rest still holds `limit` units.
+    let window = (limit as u64).saturating_mul(3).saturating_add(3).min(size);
+    let start = size - window;
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity(window as usize);
+    file.take(window).read_to_end(&mut bytes)?;
+    // A window that starts mid-file may start inside a character: skip its continuation bytes.
+    let skip = if start == 0 { 0 } else { bytes.iter().take_while(|b| (**b & 0xC0) == 0x80).count().min(3) };
+    let raw = &bytes[skip..];
+    let text = String::from_utf8_lossy(raw);
+    let units: usize = text.chars().map(char::len_utf16).sum();
+    if start == 0 && units <= limit {
+        return Ok((text.into_owned(), 0));
+    }
+    // `units` counts the window only; the cut is `limit` units before the end either way.
+    let target = units - limit;
+    let mut seen = 0;
+    let at = text
+        .char_indices()
+        .find(|(_, c)| {
+            let here = seen;
+            seen += c.len_utf16();
+            here >= target
+        })
+        .map_or(text.len(), |(i, _)| i);
+    match text[at..].find('\n') {
+        Some(nl) => {
+            let cut = at + nl + 1;
+            // A line break decodes from one 0x0A byte and nothing else does: the cut in the raw
+            // bytes is after as many of them.
+            let breaks = text[..cut].bytes().filter(|b| *b == b'\n').count();
+            let raw_cut =
+                raw.iter().enumerate().filter(|(_, b)| **b == b'\n').nth(breaks - 1).map_or(0, |(i, _)| i + 1);
+            Ok((text[cut..].to_string(), start + (skip + raw_cut) as u64))
+        }
+        None if start == 0 => Ok((text.into_owned(), 0)),
+        None => Ok((String::from_utf8_lossy(&std::fs::read(path)?).into_owned(), 0)),
     }
 }
 

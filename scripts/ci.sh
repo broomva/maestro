@@ -9,4 +9,5 @@ step cargo clippy --workspace --all-targets --locked -- -D warnings
 step cargo test --workspace --locked
 step scripts/mutation-check.sh
 step scripts/parity-check.sh
+step scripts/tail-bench.sh
 echo "== ci green"

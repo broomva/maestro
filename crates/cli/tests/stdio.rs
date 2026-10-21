@@ -246,3 +246,52 @@ fn a_hung_tailscale_is_killed() {
     let alive = Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
     assert!(!alive, "the timed-out tailscale {pid} is still running");
 }
+
+/// However long the ticks ledger grows, the hook reads only its tail: a 100 MB ledger whose last
+/// lines are the fixture's reads the same context. This debug build parses the 2 MiB tail in about
+/// 0.2 s and a full read in about 10 s, so 1 s tells them apart; the 200 ms budget is held by
+/// `scripts/tail-bench.sh` on the release binary.
+#[test]
+fn a_100_mb_ticks_ledger_is_read_by_its_tail() {
+    let home = tempfile::tempdir().unwrap();
+    let ledger = home.path().join("ledger/loops/ticks.jsonl");
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let fixture_ticks = std::fs::read_to_string(fixture().join("broomva-home/ledger/loops/ticks.jsonl")).unwrap();
+    let filler = json!({
+        "v": 1, "id": "F", "ts": "2026-09-01T00:00:00Z", "stream": "loops/ticks", "type": "loop.tick.started",
+        "actor": "agent:aaaa1111", "subject": "loop:filler", "refs": {}, "cause": null, "data": {}, "prev": "sha256:0",
+    })
+    .to_string()
+        + "\n";
+    let mut text = String::with_capacity(101 * 1024 * 1024);
+    while text.len() < 100 * 1024 * 1024 {
+        text.push_str(&filler);
+    }
+    text.push_str(&fixture_ticks);
+    std::fs::write(&ledger, &text).unwrap();
+    drop(text);
+
+    let hook = |home: &Path| {
+        let started = std::time::Instant::now();
+        let out = maestro()
+            .env("BROOMVA_HOME", home)
+            .args(["context", "--format", "hook", "--cwd"])
+            .arg(fixture().join("workspace/apps/demo"))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        (started.elapsed(), String::from_utf8(out.stdout).unwrap())
+    };
+    let (_, small) = hook(&fixture().join("broomva-home"));
+    hook(home.path()); // warm the page cache, as a hook run after the ledger's last write finds it
+    let (took, big) = hook(home.path());
+    assert!(small.contains("demo-tick"), "{small}");
+    // The tail holds every fixture tick, so the context is the same, except that a cut tail
+    // claims no missing receipts: the ticks before it are unread.
+    let receipts = "\n- `silent`: the contract names tick receipts and the ledger holds none for this loop";
+    let receipts = serde_json::to_string(receipts).unwrap();
+    let receipts = receipts.trim_matches('"');
+    assert!(small.contains(receipts), "{small}");
+    assert_eq!(big, small.replacen(receipts, "", 1));
+    assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+}

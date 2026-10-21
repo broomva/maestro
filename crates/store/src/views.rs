@@ -3,7 +3,7 @@
 //! Pure functions over what the readers returned, so every surface (CLI, MCP,
 //! hooks) computes the same counts from the same inputs.
 
-use crate::{LedgerFile, Store};
+use crate::{LedgerFile, Store, TickTail};
 use maestro_core::ask::{AskRef, AskState};
 use maestro_core::context::{AskBrief, ContextPacket, ContextScope, InitiativeBrief, LoopBrief};
 use maestro_core::fleet::FleetSummary;
@@ -69,6 +69,7 @@ pub struct LoopRow {
     pub owner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_tick: Option<Tick>,
+    /// Ticks started inside the ledger's tail ([`crate::STREAM_TAIL`]), not the whole history.
     pub ticks_recorded: usize,
     /// Plugin drift classes, with the plugin's meaning. Only those the ticks ledger proves.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -110,10 +111,10 @@ pub fn unclosed_limit(ticks: &[&Tick]) -> i64 {
 }
 
 /// Join the registry with the ticks ledger. `ticks` is `None` when the ledger is unread:
-/// then nothing about ticks is claimed.
-pub fn loop_rows(specs: &[LoopSpec], ticks: Option<&[Tick]>, now: jiff::Timestamp) -> Vec<LoopRow> {
+/// then nothing about ticks is claimed. A tail that is not the whole ledger claims no absence.
+pub fn loop_rows(specs: &[LoopSpec], ticks: Option<&TickTail>, now: jiff::Timestamp) -> Vec<LoopRow> {
     let mut by_loop: BTreeMap<&str, Vec<&Tick>> = BTreeMap::new();
-    for t in ticks.unwrap_or_default() {
+    for t in ticks.map(|t| t.ticks.as_slice()).unwrap_or_default() {
         by_loop.entry(t.loop_id.as_str()).or_default().push(t);
     }
     let today = now.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
@@ -153,7 +154,7 @@ pub fn loop_rows(specs: &[LoopSpec], ticks: Option<&[Tick]>, now: jiff::Timestam
                 .as_ref()
                 .and_then(|c| c.produces.as_deref())
                 .is_some_and(|p| p.contains("loop.tick.started") || p.contains("loop.tick.ended"));
-            if active && ticks.is_some() && names_receipts && mine.is_empty() {
+            if active && ticks.is_some_and(TickTail::whole) && names_receipts && mine.is_empty() {
                 notices.push(Notice {
                     kind: NoticeKind::NoTickReceipts,
                     loop_id: spec.id.clone(),
@@ -258,7 +259,7 @@ pub fn work_counts(work: &[WorkItem]) -> BTreeMap<&'static str, usize> {
 pub struct Reads {
     pub asks: Section<Vec<LedgerFile>>,
     pub work: Section<Vec<WorkItem>>,
-    pub ticks: Section<Vec<Tick>>,
+    pub ticks: Section<TickTail>,
     pub loops: Section<Vec<LoopSpec>>,
     pub initiatives: Section<Vec<Initiative>>,
     pub fleet: Section<Vec<FleetSummary>>,
@@ -295,7 +296,7 @@ impl Reads {
     pub fn loop_rows(&self, now: jiff::Timestamp) -> Section<Vec<LoopRow>> {
         let mut errors = self.loops.errors.clone();
         errors.extend(self.ticks.errors.clone());
-        let rows = self.loops.data.as_deref().map(|specs| loop_rows(specs, self.ticks.data.as_deref(), now));
+        let rows = self.loops.data.as_deref().map(|specs| loop_rows(specs, self.ticks.data.as_ref(), now));
         Section { source: format!("{} + {}", self.loops.source, self.ticks.source), data: rows, errors }
     }
 }
@@ -540,11 +541,11 @@ mod tests {
         .unwrap();
         // 09:00-05:00 is 14:00Z, the latest instant, though it is the smallest text.
         let ticks = [tick("2026-10-19T13:30:00Z"), tick("2026-10-19T09:00:00-05:00"), tick("2026-10-19T12:00:00Z")];
-        let rows = loop_rows(std::slice::from_ref(&spec), Some(&ticks), now());
+        let rows = loop_rows(std::slice::from_ref(&spec), Some(&whole(&ticks)), now());
         assert_eq!(rows[0].last_tick.as_ref().unwrap().started_at, "2026-10-19T09:00:00-05:00");
         // 16:00+02:00 is 14:00Z: the largest text, and the earlier instant.
         let ticks = [tick("2026-10-19T16:00:00+02:00"), tick("2026-10-19T14:30:00Z")];
-        let rows = loop_rows(std::slice::from_ref(&spec), Some(&ticks), now());
+        let rows = loop_rows(std::slice::from_ref(&spec), Some(&whole(&ticks)), now());
         assert_eq!(rows[0].last_tick.as_ref().unwrap().started_at, "2026-10-19T14:30:00Z");
     }
 
@@ -560,7 +561,7 @@ mod tests {
         let closed = |start: i64| Tick { ended_at: Some(at(start - 50)), ..tick(&at(start)) };
         let open = |start: i64| Tick { ended_at: None, ..tick(&at(start)) };
         let unclosed = |ticks: &[Tick]| {
-            loop_rows(std::slice::from_ref(&spec), Some(ticks), now)[0]
+            loop_rows(std::slice::from_ref(&spec), Some(&whole(ticks)), now)[0]
                 .drift
                 .iter()
                 .any(|d| d.class == DriftClass::TickUnclosed)
@@ -570,5 +571,21 @@ mod tests {
         assert!(unclosed(&[closed(600), closed(480), open(101)]));
         // With no closed tick the floor holds.
         assert!(unclosed(&[open(61)]));
+    }
+
+    fn whole(ticks: &[Tick]) -> TickTail {
+        TickTail { ticks: ticks.to_vec(), from: 0 }
+    }
+
+    /// No receipts in a cut tail is not "none in the ledger": the ticks before it are unread.
+    #[test]
+    fn a_cut_tail_claims_no_missing_receipts() {
+        let spec: LoopSpec = serde_yaml::from_str(
+            "id: l\ntitle: L\npurpose: p\nowner: o\nscope: broomva\nsubstrate: {kind: t3-schedule}\ncadence: x\nreview_by: '2099-01-01'\ncontract: {produces: a loop.tick.started per fire}\n",
+        )
+        .unwrap();
+        let notices = |ticks: TickTail| loop_rows(std::slice::from_ref(&spec), Some(&ticks), now())[0].notices.clone();
+        assert_eq!(notices(TickTail::default())[0].kind, NoticeKind::NoTickReceipts);
+        assert!(notices(TickTail { ticks: vec![], from: 1 }).is_empty());
     }
 }

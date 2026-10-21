@@ -61,7 +61,8 @@ PY
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; failed=1
   elif [ "$code" != 124 ] && [ -n "$caught" ] && grep -q '^test result: FAILED' log; then
     echo "killed    $file: $old  [$caught]"; killed=$((killed + 1))
-  elif [ "$code" != 124 ] && [ -n "$crash" ] && grep -qxF "fatal runtime error: $crash, aborting" log \
+  # The runtime's line may follow `cargo test -q` progress dots another test thread printed first.
+  elif [ "$code" != 124 ] && [ -n "$crash" ] && grep -qE "^[.i]*fatal runtime error: $crash, aborting$" log \
     && grep -qE '^  process didn.t exit successfully: .*\(signal: 6, SIGABRT: process abort signal\)$' log; then
     echo "killed    $file: $old  [crash: $crash, as declared]"; killed=$((killed + 1))
   else
@@ -124,6 +125,19 @@ mutate $yaml 'if data.count.saturating_mul(data.alias_count) > MAX_ALIAS_COUNT {
 mutate $yaml '&& self.stack.len() >= MAX_DEPTH {' '&& false {'
 mutate $yaml 'if depth > MAX_DEPTH {' 'if false {' 'stack overflow'
 mutate $yaml '.checked_sub(n)' '.checked_sub(0)'
+mutate $yaml 'Event::SequenceStart(..) | Event::MappingStart(..) => self.check_key(at, None, true),' 'Event::SequenceStart(..) | Event::MappingStart(..) => self.check_key(at, None, false),'
+mutate $yaml 'if e.info() == "recursion limit exceeded" {' 'if false {'
+# The ticks ledger is read by its tail, cut where the plugin's readTail cuts it.
+mutate $store 'let (text, from) = match read_tail(&path, STREAM_TAIL) {' 'let (text, from) = match read_tail(&path, usize::MAX / 4) {'
+mutate $store 'here >= target' 'here > target'
+mutate $store 'let cut = at + nl + 1;' 'let cut = at + nl;'
+mutate $store '.saturating_mul(3).saturating_add(3)' '.saturating_mul(3)'
+mutate $store 'if start == 0 && units <= limit {' 'if units <= limit {'
+mutate $store 'None => Ok((String::from_utf8_lossy(&std::fs::read(path)?).into_owned(), 0)),' 'None => Ok((text.into_owned(), start + skip as u64)),'
+mutate $store 'let text = String::from_utf8_lossy(raw);' 'let text = std::borrow::Cow::Borrowed(std::str::from_utf8(raw).unwrap_or_default());'
+mutate $store '.nth(breaks - 1)' '.nth(breaks)'
+mutate $store '.take_while(|b| (**b & 0xC0) == 0x80).count().min(3)' '.take_while(|b| (**b & 0xC0) == 0x80).count()'
+mutate $views 'if active && ticks.is_some_and(TickTail::whole) && names_receipts' 'if active && ticks.is_some() && names_receipts'
 
 echo "mutation  $killed of $total killed"
 exit $failed
