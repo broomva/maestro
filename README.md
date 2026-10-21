@@ -159,12 +159,12 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 | `MAESTRO_TREE` | `origin/main` |
 | `MAESTRO_WORK_ROOT` | `workRoot` from `$BROOMVA_HOME/config/maestro/config.json`, then from `~/.config/maestro-paseo/config.json`, else the registry's `machine.work` (`~/.broomva/work`, or the legacy `~/maestro` while only it exists) |
 | `BROOMVA_HOME` | `~/.broomva` |
+| `MAESTRO_FLEET_STATE` | `~/.local/state/fleet-reconcile` |
 
 Inside the workspace, each name is read from `.broomva/<name>` when the tree has it and from
 `.control/<name>` otherwise, on disk and at a git revision alike; a tree holding both is a read
 error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
 `<initiative>/<slug>/_work.md` (`_unfiled` for none); any other work root is flat, `<slug>/_work.md`.
-| `MAESTRO_FLEET_STATE` | `~/.local/state/fleet-reconcile` |
 
 ## Layout
 
