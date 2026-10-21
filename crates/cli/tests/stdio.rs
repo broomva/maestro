@@ -225,8 +225,12 @@ fn a_blank_maestro_node_falls_through_to_tailscale() {
 
 #[test]
 fn a_grandchild_holding_the_pipe_does_not_hang_hosts() {
-    let dir = fake_tailscale(&format!("sleep 30 &\necho '{STATUS}'"));
+    let pids = tempfile::tempdir().unwrap();
+    let pidfile = pids.path().join("pid");
+    let dir = fake_tailscale(&format!("sleep 30 &\necho $! > {}\necho '{STATUS}'", pidfile.display()));
     let (node, took) = node_with(&dir, None);
+    let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+    let _ = Command::new("kill").arg(&pid).status();
     assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
     assert_eq!(node, Value::Null, "output that never closes is not trusted");
 }
