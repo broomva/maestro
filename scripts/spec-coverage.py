@@ -133,6 +133,10 @@ def main():
         hits = sum(needle in row for row in retirement)
         if hits != 1:
             failures.append(f"ledger {needle}: named by {hits} retirement rows, want 1")
+    for row in retirement:
+        named = [needle for needle in INVENTORY if needle in row]
+        if len(named) != 1:
+            failures.append(f"retirement row {row.split()[0]}: names {len(named)} inventory ledgers {named}, want 1")
 
     for line in failures:
         print(line)
