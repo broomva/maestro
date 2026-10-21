@@ -182,7 +182,8 @@ fn doctor_reads_the_bstack_it_was_given_not_an_inherited_git_dir() {
     assert_eq!(doctor(&bstack.join("references")), unread);
 }
 
-/// Each variable that points git at another repository, set alone, as a hook or a harness inside
+/// Each variable that changes a revision read when set alone (GIT_INDEX_FILE and the alternates
+/// list are dropped too, but a revision read never consults them), as a hook or a harness inside
 /// one leaves it: the workspace's revision is still the one read (P20 arc 2 r1, both strata).
 #[test]
 fn an_inherited_git_repo_variable_does_not_redirect_a_revision_read() {
@@ -212,7 +213,8 @@ fn an_inherited_git_repo_variable_does_not_redirect_a_revision_read() {
         ("GIT_DIR", git.clone()),
         ("GIT_COMMON_DIR", git.clone()),
         ("GIT_OBJECT_DIRECTORY", git.join("objects")),
-        ("GIT_INDEX_FILE", git.join("index")),
+        // Alone, it points the repo found from `-C` at another work tree: the root is then no top level.
+        ("GIT_WORK_TREE", other.clone()),
     ] {
         let v = json(
             maestro(&home).env("BROOMVA_WORKSPACE", &ws).env(key, &value).args(["--tree", "main", "asks", "--json"]),
