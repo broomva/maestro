@@ -162,12 +162,9 @@ mutate $http 'SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)' 'S
 # registry's, $BROOMVA_HOME by kind, and the stale-reader check.
 paths=crates/store/src/paths.rs
 doctor=crates/store/src/doctor.rs
-mutate $store '        if both {' '        if false && both {'
-mutate $store 'if !["040000", "100644", "100755"].contains(&mode.as_str()) {' 'if false {'
-mutate $store '            if path == new || path == old {' '            if false {'
-mutate $store 'Ok(if rels.len() > 1 && control && !moved {' 'Ok(if false {'
-mutate $store 'Ok(if rels.len() > 1 && control && !moved {' 'Ok(if rels.len() > 1 && control {'
 mutate $store 'if std::fs::symlink_metadata(bucket.join("_work.md")).is_ok() {' 'if false {'
+mutate $store '        if layout.shadowed.iter().any(|n| n == name) {' '        if false {'
+mutate $store '                .unwrap_or_else(|| rels[0].clone())),' '                .unwrap_or_else(|| rels[rels.len() - 1].clone())),'
 mutate $paths '            Some(w) => w,' '            Some(_) => registry::workspace_root()?,'
 mutate $store '            paths.workspace = views::lexical(&abs);' '            paths.workspace = abs;'
 mutate $store 'let initiative = (name != UNFILED).then_some(name);' 'let initiative = Some(name);'
@@ -179,10 +176,9 @@ mutate $paths '.or_else(|| configured_work_root(&config.join("config.json")))' '
 mutate $doctor '            if sha == REGISTRY_SHA256 {' '            if true {'
 mutate $doctor 'Ok(text) if text == VENDORED_READER => {' 'Ok(_) => {'
 mutate $cli 'if checks.iter().any(|c| c.status != Status::Ok) {' 'if checks.iter().any(|c| c.status == Status::Stale) {'
-# git reads the repo at the root alone: no inherited GIT_DIR, the root is a top level, names are UTF-8.
+# git reads the repo at the root alone: no inherited GIT_DIR, and the root is a top level.
 mutate $tree '        cmd.env_remove(key);' ''
 mutate $tree '                    if same_path(Path::new(top), &tree.root) {' '                    if true {'
-mutate $tree '        let out = String::from_utf8(self.git_bytes(&args).map_err(|e| e.to_string())?)' '        let out = Ok::<_, ()>(String::from_utf8_lossy(&self.git_bytes(&args).map_err(|e| e.to_string())?).into_owned())'
 
 echo "mutation  $killed of $total killed"
 exit $failed

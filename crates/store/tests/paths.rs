@@ -124,10 +124,9 @@ fn a_moved_file_in_git_is_read_from_the_new_place() {
     assert!(at_main.preauth().data.is_some() && at_before.preauth().data.is_some());
 }
 
-/// Maestro reads a git revision with one `ls-tree` instead of the registry's three to four git
-/// processes per name. On every tree shape below, each name's answer at the commit is the
-/// registry's `tree_path` + `shadowed` answer, and the on-disk answer for the same checkout
-/// (the registry's `repo_path` + `shadowed`, which Maestro calls directly).
+/// Maestro reads a git revision through the registry's `shadowed` and `tree_path`. On every tree
+/// shape below, each name's answer at the commit is theirs, and a name the tree holds is the
+/// same place on disk (the registry's `repo_path` + `shadowed`).
 #[test]
 fn the_git_rule_is_the_registrys_on_every_tree_shape() {
     use std::os::unix::fs::symlink;
@@ -186,8 +185,8 @@ fn the_git_rule_is_the_registrys_on_every_tree_shape() {
                 Ok(both) if both.iter().any(|n| n == name) => Err(()),
                 Ok(_) => match registry::tree_path(name, &ws, &commit) {
                     Ok(Some(rel)) => Ok(rel),
-                    // In neither: the git reader has no rule of its own; the disk one decides.
-                    Ok(None) => on_disk.clone(),
+                    // In neither the registry has no answer; the name is unread at its new place.
+                    Ok(None) => Ok(registry::repo_rels(name).unwrap()[0].clone()),
                     Err(_) => Err(()),
                 },
             };
@@ -196,11 +195,15 @@ fn the_git_rule_is_the_registrys_on_every_tree_shape() {
                 theirs.as_ref().map_err(|_| ()),
                 "{shape}: {name}: ours {ours:?}"
             );
-            assert_eq!(
-                ours.as_ref().map_err(|_| ()),
-                on_disk.as_ref().map_err(|_| ()),
-                "{shape}: {name}: disk and git disagree"
-            );
+            // A name the tree holds is the same place on disk and at the commit.
+            let present = matches!(&shadowed, Ok(_)) && matches!(registry::tree_path(name, &ws, &commit), Ok(Some(_)));
+            if present {
+                assert_eq!(
+                    ours.as_ref().map_err(|_| ()),
+                    on_disk.as_ref().map_err(|_| ()),
+                    "{shape}: {name}: disk and git disagree"
+                );
+            }
         }
     }
 }

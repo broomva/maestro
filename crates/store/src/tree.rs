@@ -141,22 +141,6 @@ impl Tree {
         }
     }
 
-    /// `git ls-tree --full-tree <commit> -- <specs>`: (mode, path) of each entry listed.
-    pub fn ls_full(&self, commit: &str, specs: &[&str]) -> Result<Vec<(String, String)>, String> {
-        let mut args = vec!["ls-tree", "-z", "--full-tree", commit, "--"];
-        args.extend_from_slice(specs);
-        // Strict UTF-8, as the registry reads git's output: a name it cannot decode is an error.
-        let out = String::from_utf8(self.git_bytes(&args).map_err(|e| e.to_string())?)
-            .map_err(|_| format!("git ls-tree output in {} is not UTF-8", self.root.display()))?;
-        Ok(out
-            .split('\0')
-            .filter_map(|record| {
-                let (meta, path) = record.split_once('\t')?;
-                Some((meta.split(' ').next().unwrap_or("").to_string(), path.to_string()))
-            })
-            .collect())
-    }
-
     /// Where this tree is read from: `worktree` or `git:<rev>@<commit>`.
     pub fn place(&self) -> String {
         self.label("").trim_end_matches(':').to_string()
@@ -270,10 +254,6 @@ impl Tree {
     }
 
     fn git(&self, args: &[&str]) -> Result<String, TreeError> {
-        self.git_bytes(args).map(|out| String::from_utf8_lossy(&out).into_owned())
-    }
-
-    fn git_bytes(&self, args: &[&str]) -> Result<Vec<u8>, TreeError> {
         let output = git_command(&self.root).arg("--no-pager").args(args).output()?;
         if !output.status.success() {
             return Err(TreeError::Git {
@@ -281,7 +261,7 @@ impl Tree {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             });
         }
-        Ok(output.stdout)
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     pub fn root(&self) -> &Path {

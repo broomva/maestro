@@ -24,17 +24,15 @@ use maestro_core::work::{Flag, FlagKind, OrchState, WorkFrontmatter, WorkItem, W
 use maestro_core::{Section, SourceError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The tree facts the registry's rule reads.
+/// The names present under both `.broomva/` and `.control/`, as the registry's `shadowed` reads
+/// them, and the commit when the store reads a git revision.
 #[derive(Debug, Clone)]
-enum Layout {
-    /// Working tree: the names present under both `.broomva/` and `.control/`.
-    Disk { shadowed: Vec<String> },
-    /// Git revision: every entry directly under the two folders, with its mode.
-    Git { commit: String, children: HashMap<String, String> },
+struct Layout {
+    commit: Option<String>,
+    shadowed: Vec<String>,
 }
 
 pub use paths::{Paths, UNFILED, WorkLayout};
@@ -99,11 +97,7 @@ impl Store {
         let rels = broomva_paths::repo_rels(name).map_err(|e| e.to_string())?;
         let root = self.tree.root();
         let layout = self.layout.get_or_init(|| self.read_layout()).as_ref().map_err(Clone::clone)?;
-        let both = match layout {
-            Layout::Disk { shadowed } => shadowed.iter().any(|n| n == name),
-            Layout::Git { children, .. } => rels.len() > 1 && rels.iter().all(|r| children.contains_key(r)),
-        };
-        if both {
+        if layout.shadowed.iter().any(|n| n == name) {
             return Err(format!(
                 "both {} and {} exist in {}: the record is one of them, so neither is read until one is removed",
                 rels[0],
@@ -111,53 +105,25 @@ impl Store {
                 self.tree.place()
             ));
         }
-        match layout {
-            Layout::Disk { .. } => {
+        match &layout.commit {
+            None => {
                 let path = broomva_paths::repo_path(name, root).map_err(|e| e.to_string())?;
                 rels.into_iter()
                     .find(|rel| path.ends_with(rel))
                     .ok_or_else(|| format!("the registry put {name} at {}, outside {}", path.display(), root.display()))
             }
-            // The registry's `tree_path`, on the one listing (a differential test holds them equal).
-            Layout::Git { commit, children } => {
-                for rel in &rels {
-                    if let Some(mode) = children.get(rel) {
-                        if !["040000", "100644", "100755"].contains(&mode.as_str()) {
-                            return Err(format!("{rel} is not a folder or a file in {commit} (mode {mode})"));
-                        }
-                        return Ok(rel.clone());
-                    }
-                }
-                // In neither: where the registry puts a new file on disk, `.control/` while the tree
-                // has it and no name has moved to `.broomva/`, so both reads name one place.
-                let (new, old) = (broomva_paths::REPO_DIR, broomva_paths::REPO_LEGACY_DIR);
-                let control = children.keys().any(|k| k.starts_with(&format!("{old}/")));
-                let moved = broomva_paths::REPO
-                    .iter()
-                    .any(|&(_, path, legacy, _)| legacy && children.contains_key(&format!("{new}/{path}")));
-                Ok(if rels.len() > 1 && control && !moved { rels[1].clone() } else { rels[0].clone() })
-            }
+            // In neither, the registry's git reader has no answer: the name is unread at its new place.
+            Some(commit) => Ok(broomva_paths::tree_path(name, root, commit)
+                .map_err(|e| e.to_string())?
+                .unwrap_or_else(|| rels[0].clone())),
         }
     }
 
-    /// On disk, the registry's `shadowed` (lstats). In a git revision, one `ls-tree` of both
-    /// folders: the registry's tree readers run three to four git processes per name, which put
-    /// the session hook over its budget.
+    /// The registry's `shadowed`, on disk or at the commit read.
     fn read_layout(&self) -> Result<Layout, String> {
-        let Some(commit) = self.tree.commit_to_read().map_err(|e| e.to_string())? else {
-            let shadowed = broomva_paths::shadowed(self.tree.root(), None).map_err(|e| e.to_string())?;
-            return Ok(Layout::Disk { shadowed });
-        };
-        let (new, old) = (broomva_paths::REPO_DIR, broomva_paths::REPO_LEGACY_DIR);
-        let mut children = HashMap::new();
-        for (mode, path) in self.tree.ls_full(commit, &[new, old, &format!("{new}/"), &format!("{old}/")])? {
-            // A folder that is a tree is listed by its children; listed itself, it is not a folder.
-            if path == new || path == old {
-                return Err(format!("{path} is not a folder in {commit} ({mode})"));
-            }
-            children.insert(path, mode);
-        }
-        Ok(Layout::Git { commit: commit.to_string(), children })
+        let commit = self.tree.commit_to_read().map_err(|e| e.to_string())?.map(str::to_string);
+        let shadowed = broomva_paths::shadowed(self.tree.root(), commit.as_deref()).map_err(|e| e.to_string())?;
+        Ok(Layout { commit, shadowed })
     }
 
     /// Read every YAML file in a workspace directory as a document, with `parse`.
