@@ -14,12 +14,16 @@ permissions:
 jobs:
   ci:
     name: ci
-    runs-on: ${{ vars.CI_RUNNER_LABELS && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
+    # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
+    runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
     timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
     steps:
+      # The job runs build scripts and the plugin's code (parity): keep the token out of .git/config.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

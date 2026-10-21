@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Plugin parity: regenerate fixtures/parity/plugin-golden.json with the Paseo plugin's own
 # code, at the revision pinned in fixtures/parity/plugin-rev, and fail if it differs from the
-# committed golden. The Rust side is held to that golden by `every_ledger_reads_as_the_plugin_reads_it`,
-# so together they prove Maestro reads every parity ledger as the plugin does.
+# committed golden. The Rust side is held to that golden by `every_ledger_reads_as_the_plugin_reads_it`:
+# a ledger both read must read to the byte, and one the plugin refuses Maestro must refuse; a ledger
+# outside Maestro's subset is only proven refused, its plugin reading is not compared.
 # Moving the pin is deliberate: bump plugin-rev, rerun with --write, review the diff.
 # Needs git, bun and network. Usage: scripts/parity-check.sh [--write]
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 rev=$(tr -d '[:space:]' <"$repo/fixtures/parity/plugin-rev")
+# A commit, never a ref: a branch name would move under the pin and still pass.
+[[ $rev =~ ^[0-9a-f]{40}$ ]] || { echo "parity    plugin-rev must be a 40-hex commit, got '$rev'"; exit 1; }
 url=${MAESTRO_PASEO_URL:-https://github.com/broomva/maestro-paseo}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

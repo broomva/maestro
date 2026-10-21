@@ -329,6 +329,16 @@ mod tests {
         }
     }
 
+    /// A source built directly, not parsed, is held to the same rule: git never sees the dash.
+    #[test]
+    fn a_dash_revision_is_refused_before_git_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        for rev in ["-x", "--output=/tmp/maestro-must-not-exist"] {
+            let tree = Tree::resolved(tmp.path(), TreeSource::GitRev(rev.into()));
+            assert_eq!(tree.unresolved.as_deref(), Some("a revision may not start with `-`"), "{rev}");
+        }
+    }
+
     #[test]
     fn an_out_of_step_batch_stream_is_an_error() {
         let rels = vec!["a.yaml".to_string()];
