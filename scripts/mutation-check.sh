@@ -5,21 +5,25 @@
 # survives, does not build, ends without a failing test (timeout, crash, infra), or its anchor
 # is missing. The list is the guards proven so far, not every guard in the crates.
 # Mutants are applied to a throwaway copy of the tree (tracked and untracked files, as they
-# are now), never to this checkout, so nothing here has to be restored.
+# are now), built into a target dir inside that copy: nothing in this checkout is written,
+# nothing is shared between runs, and nothing has to be restored.
 # Pattern: core/life crates/cuenca/cuenca-tree/scripts/mutation-check.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 command -v timeout >/dev/null || { echo "mutation-check needs \`timeout\` (GNU coreutils)"; exit 3; }
 limit=${MUTANT_TIMEOUT_SECS:-900}
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target/mutants} CARGO_TERM_COLOR=never
+[[ $limit =~ ^[1-9][0-9]*$ ]] || { echo "MUTANT_TIMEOUT_SECS must be a positive whole number of seconds"; exit 3; }
 
 copy=$(mktemp -d)
 trap 'rm -rf "$copy"' EXIT
 trap 'exit 130' INT TERM
-# Extract with fresh mtimes (-m): the target dir is shared across runs, and a copy whose files
-# kept their old mtimes would reuse test binaries built for a previous, deleted copy.
-git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf - | tar -xmf - -C "$copy"
+# A tracked file deleted in the working tree is deleted in the copy too.
+git ls-files -z --cached --others --exclude-standard \
+  | while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done \
+  | tar --null -T - -cf - | tar -xf - -C "$copy"
+export CARGO_TARGET_DIR=$copy/.target CARGO_TERM_COLOR=never
 git -C "$copy" init -q
+echo /.target >"$copy/.git/info/exclude"
 git -C "$copy" add -A
 git -C "$copy" -c core.hooksPath=/dev/null -c user.name=mutation -c user.email=mutation@localhost commit -qm base
 cd "$copy"
@@ -35,10 +39,10 @@ set +e
 failed=0 killed=0 total=0
 mutate() { # file, old, new[, crash]: the anchor must occur exactly once. `crash` names the one
   # abort that counts as a kill, for a guard whose whole purpose is to prevent it (`stack
-  # overflow`); it must be the test binary's own fatal error, never a timeout.
+  # overflow`): the runtime's own whole line plus the test process's SIGABRT, never a timeout.
   local file=$1 old=$2 new=$3 crash=${4:-} code caught
   total=$((total + 1))
-  git checkout -q -- . && git clean -qfd -e log || { echo "cannot reset the copy"; exit 3; }
+  git checkout -q -- . && git clean -qfdx -e log -e .target || { echo "cannot reset the copy"; exit 3; }
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
@@ -58,8 +62,8 @@ PY
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; failed=1
   elif [ "$code" != 124 ] && [ -n "$caught" ] && grep -q '^test result: FAILED' log; then
     echo "killed    $file: $old  [$caught]"; killed=$((killed + 1))
-  elif [ "$code" != 124 ] && [ -n "$crash" ] && grep -q "^fatal runtime error: $crash" log \
-    && grep -q 'SIGABRT' log; then
+  elif [ "$code" != 124 ] && [ -n "$crash" ] && grep -qxF "fatal runtime error: $crash, aborting" log \
+    && grep -qE '^  process didn.t exit successfully: .*\(signal: 6, SIGABRT: process abort signal\)$' log; then
     echo "killed    $file: $old  [crash: $crash, as declared]"; killed=$((killed + 1))
   else
     echo "UNCLEAR   $file: $old (exit $code, no failing test: timeout, crash or infra)"; tail -5 log; failed=1
