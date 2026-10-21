@@ -8,7 +8,7 @@
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use maestro_core::authority::{Authority, INVARIANTS, OwnerVerb, UNDO_MS};
-use maestro_core::session::{Host, known_capabilities};
+use maestro_core::session::{Harness, Node, NodeId, Surface, harness_capabilities, surface_capabilities};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Value, json};
 use std::io::Read as _;
@@ -98,7 +98,7 @@ enum Command {
     Mcp,
     /// What each surface may do, and the standing invariants.
     Authority,
-    /// Known harness capabilities.
+    /// This node, and the known surfaces and harnesses with their capabilities.
     Hosts,
 }
 
@@ -418,25 +418,74 @@ fn authority(as_json: bool) {
 }
 
 fn hosts(as_json: bool) {
-    let hosts = [Host::T3, Host::Paseo, Host::ClaudeCode, Host::Codex, Host::Gemini];
-    let rows: Vec<Value> = hosts.iter().map(|h| json!({ "host": h, "capabilities": known_capabilities(h) })).collect();
+    let surfaces: Vec<Value> =
+        Surface::KNOWN.iter().map(|s| json!({ "surface": s, "capabilities": surface_capabilities(s) })).collect();
+    let harnesses: Vec<Value> =
+        Harness::KNOWN.iter().map(|h| json!({ "harness": h, "capabilities": harness_capabilities(h) })).collect();
+    let node = local_node();
     if as_json {
-        println!("{}", json!(rows));
+        println!("{}", json!({ "node": node, "surfaces": surfaces, "harnesses": harnesses }));
         return;
     }
-    for r in rows {
-        let caps = r["capabilities"]
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .filter(|(_, v)| v.as_bool() == Some(true))
-                    .map(|(k, _)| k.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
-        println!("  {:<12} {caps}", s(&r["host"]));
+    match &node {
+        Some(n) => println!("Node: {} ({})", n.name.as_deref().unwrap_or("unnamed"), n.id),
+        None => println!("Node: unknown (no tailscale; set MAESTRO_NODE to its stable node ID)"),
     }
+    for (title, rows, key) in [("Surfaces", &surfaces, "surface"), ("Harnesses", &harnesses, "harness")] {
+        println!("{title}:");
+        for r in rows {
+            println!("  {:<12} {}", s(&r[key]), true_keys(&r["capabilities"]));
+        }
+    }
+}
+
+/// This machine: `MAESTRO_NODE` (a stable node ID), else `tailscale status`, else unknown.
+fn local_node() -> Option<Node> {
+    if let Some(id) = std::env::var("MAESTRO_NODE").ok().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) {
+        return Some(Node { id: NodeId(id), name: None });
+    }
+    let out = run_bounded(
+        std::process::Command::new("tailscale").args(["status", "--json", "--peers=false"]),
+        std::time::Duration::from_secs(3),
+    )?;
+    Node::from_tailscale_status(&serde_json::from_slice(&out).ok()?)
+}
+
+/// A child's stdout if it exits 0 and its output closes within `limit`; otherwise nothing,
+/// and a child still running is killed.
+fn run_bounded(cmd: &mut std::process::Command, limit: std::time::Duration) -> Option<Vec<u8>> {
+    use std::process::Stdio;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = tx.send(stdout.read_to_end(&mut buf).map(|_| buf));
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait().ok()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // A grandchild can hold the pipe open after the child exits: the deadline covers the read too.
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    let buf = rx.recv_timeout(left).ok()?.ok()?;
+    status.success().then_some(buf)
+}
+
+fn true_keys(caps: &Value) -> String {
+    caps.as_object()
+        .map(|m| {
+            m.iter().filter(|(_, v)| v.as_bool() == Some(true)).map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
+        })
+        .unwrap_or_default()
 }
 
 fn validate(store: &Store, file: &PathBuf) -> Result<()> {

@@ -47,7 +47,23 @@ fn mcp_handshake_lists_and_calls_tools() {
     let tools = recv();
     let names: Vec<_> =
         tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-    assert!(names.contains(&"maestro_needs_list".to_string()));
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        [
+            "maestro_ask_get",
+            "maestro_asks_list",
+            "maestro_context",
+            "maestro_fleet_get",
+            "maestro_initiatives_list",
+            "maestro_loops_get",
+            "maestro_needs_list",
+            "maestro_snapshot",
+            "maestro_work_list",
+        ],
+        "every harness registration answers these nine tools"
+    );
     assert!(!names.iter().any(|n| n.contains("answer")), "no owner verb is listed");
 
     send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"maestro_needs_list","arguments":{}}}));
@@ -129,4 +145,104 @@ fn the_hook_gives_up_silently_when_over_budget() {
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn hosts_reports_surfaces_and_harnesses_apart() {
+    let out = maestro().args(["hosts", "--json"]).env("MAESTRO_NODE", "Test-Node").output().unwrap();
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["node"], json!({ "id": "Test-Node" }));
+    let names = |key: &str, field: &str| -> Vec<String> {
+        v[key].as_array().unwrap().iter().map(|r| r[field].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(names("surfaces", "surface"), ["paseo", "t3", "direct"]);
+    assert_eq!(names("harnesses", "harness"), ["claude-code", "codex", "gemini", "agy"]);
+    for r in v["surfaces"].as_array().unwrap() {
+        assert!(r["capabilities"].get("mcp").is_none(), "a surface does not serve MCP: {r}");
+    }
+    for r in v["harnesses"].as_array().unwrap() {
+        assert!(r["capabilities"].get("launch").is_none(), "a harness does not launch sessions: {r}");
+    }
+}
+
+#[test]
+fn a_hung_tailscale_does_not_hang_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("tailscale");
+    std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    let out = maestro()
+        .args(["hosts", "--json"])
+        .env_remove("MAESTRO_NODE")
+        .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(started.elapsed() < std::time::Duration::from_secs(10), "took {:?}", started.elapsed());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["node"], Value::Null);
+}
+
+fn fake_tailscale(script: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("tailscale");
+    std::fs::write(&fake, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    dir
+}
+
+fn node_with(dir: &tempfile::TempDir, maestro_node: Option<&str>) -> (Value, std::time::Duration) {
+    let mut cmd = maestro();
+    cmd.args(["hosts", "--json"]).env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()));
+    match maestro_node {
+        Some(n) => cmd.env("MAESTRO_NODE", n),
+        None => cmd.env_remove("MAESTRO_NODE"),
+    };
+    let started = std::time::Instant::now();
+    let out = cmd.output().unwrap();
+    assert!(out.status.success());
+    (serde_json::from_slice::<Value>(&out.stdout).unwrap()["node"].clone(), started.elapsed())
+}
+
+const STATUS: &str = r#"{"Self":{"ID":"nTest","DNSName":"box.example.ts.net."}}"#;
+
+#[test]
+fn a_failed_tailscale_names_no_node_even_with_json() {
+    let ok = fake_tailscale(&format!("echo '{STATUS}'"));
+    assert_eq!(node_with(&ok, None).0, json!({ "id": "nTest", "name": "box" }));
+    let failed = fake_tailscale(&format!("echo '{STATUS}'; exit 1"));
+    assert_eq!(node_with(&failed, None).0, Value::Null);
+}
+
+#[test]
+fn a_blank_maestro_node_falls_through_to_tailscale() {
+    let ok = fake_tailscale(&format!("echo '{STATUS}'"));
+    assert_eq!(node_with(&ok, Some("  ")).0, json!({ "id": "nTest", "name": "box" }));
+    assert_eq!(node_with(&ok, Some(" nPinned ")).0, json!({ "id": "nPinned" }));
+}
+
+#[test]
+fn a_grandchild_holding_the_pipe_does_not_hang_hosts() {
+    let pids = tempfile::tempdir().unwrap();
+    let pidfile = pids.path().join("pid");
+    let dir = fake_tailscale(&format!("sleep 30 &\necho $! > {}\necho '{STATUS}'", pidfile.display()));
+    let (node, took) = node_with(&dir, None);
+    let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+    let _ = Command::new("kill").arg(&pid).status();
+    assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+    assert_eq!(node, Value::Null, "output that never closes is not trusted");
+}
+
+#[test]
+fn a_hung_tailscale_is_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let bin = fake_tailscale(&format!("echo $$ > {}\nexec sleep 30", pidfile.display()));
+    let (node, _) = node_with(&bin, None);
+    assert_eq!(node, Value::Null);
+    let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+    let alive = Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
+    assert!(!alive, "the timed-out tailscale {pid} is still running");
 }

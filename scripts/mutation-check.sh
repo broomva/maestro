@@ -69,12 +69,14 @@ PY
   fi
 }
 
-ask=crates/maestro-core/src/ask.rs
-auth=crates/maestro-core/src/authority.rs
-views=crates/maestro-store/src/views.rs
-store=crates/maestro-store/src/lib.rs
-tree=crates/maestro-store/src/tree.rs
-yaml=crates/maestro-store/src/yaml.rs
+ask=crates/core/src/ask.rs
+auth=crates/core/src/authority.rs
+views=crates/store/src/views.rs
+store=crates/store/src/lib.rs
+tree=crates/store/src/tree.rs
+yaml=crates/store/src/yaml.rs
+session=crates/core/src/session.rs
+cli=crates/cli/src/main.rs
 
 # Ask state and entry hash: the plugin's stateOf and entryHash.
 mutate $ask 'if text(row.get("archived_at")).is_some() || status.starts_with("archived") {' 'if status.starts_with("archived") {'
@@ -102,6 +104,20 @@ mutate $tree "if rev.is_empty() || rev.starts_with('-') {" 'if rev.is_empty() {'
 mutate $tree "if rev.starts_with('-') {
                 tree.unresolved" "if false {
                 tree.unresolved"
+# Sessions: a surface drives, a harness runs, a node is its stable ID; nothing unknown is promised.
+mutate $session '"direct" => Self::Direct,' ''
+mutate $session 'Surface::Direct => SurfaceCapabilities { launch: true, schedule: true, ..Default::default() },' 'Surface::Direct => SurfaceCapabilities { launch: true, send: true, schedule: true, ..Default::default() },'
+mutate $session 'Surface::Other(_) => SurfaceCapabilities::default(),' 'Surface::Other(_) => SurfaceCapabilities { launch: true, ..Default::default() },'
+mutate $session 'Harness::Other(_) => HarnessCapabilities::default(),' 'Harness::Other(_) => HarnessCapabilities { mcp: true, ..Default::default() },'
+mutate $session 'let id = me.get("ID")?.as_str()?.trim();' 'let id = me.get("DNSName")?.as_str()?.trim();'
+mutate $session 'if id.is_empty() {
+            // A blank ID' 'if false {
+            // A blank ID'
+mutate $cli 'if std::time::Instant::now() >= deadline {' 'if false {'
+mutate $cli 'status.success().then_some(buf)' 'Some(buf)'
+mutate $cli 'let _ = child.kill();' ''
+mutate $cli 'let buf = rx.recv_timeout(left).ok()?.ok()?;' 'let buf = rx.recv().ok()?.ok()?;'
+mutate $cli '.map(|n| n.trim().to_string()).filter(|n| !n.is_empty())' '.map(|n| n.trim().to_string())'
 # YAML: the subset admission, the package's alias limit, and the nesting and size bounds.
 mutate $yaml 'if let Some(reason) = outside_subset(source) {' 'if let Some(reason) = outside_subset(source).filter(|_| false) {'
 mutate $yaml 'if data.count.saturating_mul(data.alias_count) > MAX_ALIAS_COUNT {' 'if false {'

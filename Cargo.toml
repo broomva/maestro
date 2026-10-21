@@ -10,9 +10,9 @@ license = "MIT"
 repository = "https://github.com/broomva/maestro"
 
 [workspace.dependencies]
-maestro-core = { path = "crates/maestro-core" }
-maestro-store = { path = "crates/maestro-store" }
-maestro-mcp = { path = "crates/maestro-mcp" }
+maestro-core = { path = "crates/core" }
+maestro-store = { path = "crates/store" }
+maestro-mcp = { path = "crates/mcp" }
 anyhow = "1"
 jiff = "0.2"
 clap = { version = "4.6", features = ["derive", "env"] }

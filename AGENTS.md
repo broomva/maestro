@@ -12,7 +12,7 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
   without the phase that transfers ownership. A second writer is the defect the BRO-3186 contract
   forbids.
 - **No owner verb on a model-visible surface** until an authenticated owner path exists.
-  `maestro-mcp/tests/dispatch.rs` enforces this, so keep it green and do not weaken it.
+  `crates/mcp/tests/dispatch.rs` enforces this, so keep it green and do not weaken it.
 - **Unread is not empty.** Every reader returns a `Section` with its source and errors. Never collapse
   a failed read into an empty list.
 - **Validator of record.** `scripts/ask_ledger.py` in the workspace validates asks. Do not

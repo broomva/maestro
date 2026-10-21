@@ -10,7 +10,7 @@ use crate::need::Need;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
-/// How a packet reaches a session. Adapters pick the strongest one their host supports.
+/// How a packet reaches a session. Adapters pick the strongest one their harness or surface supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InjectionStrategy {
