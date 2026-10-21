@@ -547,4 +547,28 @@ mod tests {
         let rows = loop_rows(std::slice::from_ref(&spec), Some(&ticks), now());
         assert_eq!(rows[0].last_tick.as_ref().unwrap().started_at, "2026-10-19T14:30:00Z");
     }
+
+    /// The plugin's `TICK_UNCLOSED` "waits 2x the median tick when that is longer" (loops-model.test.ts).
+    #[test]
+    fn an_unclosed_tick_waits_twice_the_median_tick_when_that_is_longer() {
+        let spec: LoopSpec = serde_yaml::from_str(
+            "id: l\ntitle: L\npurpose: p\nowner: o\nscope: broomva\nsubstrate: {kind: t3-schedule}\ncadence: x\nreview_by: '2099-01-01'\n",
+        )
+        .unwrap();
+        let now: jiff::Timestamp = "2026-10-19T20:00:00Z".parse().unwrap();
+        let at = |mins: i64| (now - jiff::SignedDuration::from_mins(mins)).to_string();
+        let closed = |start: i64| Tick { ended_at: Some(at(start - 50)), ..tick(&at(start)) };
+        let open = |start: i64| Tick { ended_at: None, ..tick(&at(start)) };
+        let unclosed = |ticks: &[Tick]| {
+            loop_rows(std::slice::from_ref(&spec), Some(ticks), now)[0]
+                .drift
+                .iter()
+                .any(|d| d.class == DriftClass::TickUnclosed)
+        };
+        // Two 50-minute ticks: the limit is 100 minutes, past the 60-minute floor.
+        assert!(!unclosed(&[closed(600), closed(480), open(61)]));
+        assert!(unclosed(&[closed(600), closed(480), open(101)]));
+        // With no closed tick the floor holds.
+        assert!(unclosed(&[open(61)]));
+    }
 }

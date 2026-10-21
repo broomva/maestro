@@ -103,7 +103,9 @@ read, that count becomes a lower bound and the error is reported under `worktree
     - `scripts/parity-fuzz.py` is a differential fuzz against the plugin. Anything Maestro reads must
       match, and anything the plugin refuses Maestro must refuse. A ledger drawn from the subset
       grammar that the plugin reads must be read, so a reader refusing everything cannot pass.
-    - Regenerate the golden file whenever the plugin's readers change.
+    - `scripts/parity-check.sh` regenerates the golden from the plugin at the revision pinned in
+      `fixtures/parity/plugin-rev` and fails on any difference; CI runs it. To move the pin, edit
+      `plugin-rev`, run `scripts/parity-check.sh --write`, and review the diff.
 - **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
   50).
 
@@ -148,9 +150,9 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 ## Develop
 
 ```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+bash scripts/ci.sh             # the whole gate, as CI runs it (needs bun and network for parity)
+cargo test                     # the suite alone
+scripts/mutation-check.sh      # each guarded predicate's mutant must fail the suite
 ```
 
 Tests run against `fixtures/machine/`, a miniature machine layout, so they never touch real ledgers.

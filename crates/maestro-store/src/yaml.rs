@@ -1394,7 +1394,9 @@ mod tests {
     fn deep_nesting_is_refused_not_a_stack_overflow() {
         let block = |n: usize| format!("x:\n  {}v\n", "- ".repeat(n));
         assert!(parse(&block(MAX_DEPTH - 1)).is_ok(), "at the cap it reads");
-        assert!(refused(&block(50_000)).contains("deeper than"));
+        // Refused while parsing, before a 50 000-level tree is built, not only once it is resolved.
+        let deep = refused(&block(50_000));
+        assert!(deep.contains("deeper than") && !deep.contains("once aliases are resolved"), "{deep}");
         assert!(parse(&format!("x: {}{}\n", "[".repeat(300), "]".repeat(300))).is_err());
         // An alias returns its anchor's value, as the package does, so nesting it deeper reads.
         let deep_alias =

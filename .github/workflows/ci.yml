@@ -1,0 +1,32 @@
+# The required check on main (ruleset `main: required checks`). It runs the same gate an
+# agent runs before a PR: scripts/ci.sh (fmt, clippy, tests, mutation, plugin parity).
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  ci:
+    name: ci
+    # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
+    runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      # The job runs build scripts and the plugin's code (parity): keep the token out of .git/config.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+      - run: bash scripts/ci.sh
