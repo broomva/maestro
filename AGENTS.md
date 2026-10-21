@@ -25,11 +25,12 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
 ## Gates
 
 ```bash
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+bash scripts/ci.sh   # fmt, clippy, tests, mutation check, plugin parity; the required `ci` check runs it
 ```
 
 A behaviour change ships with a test. A guard, such as an authority check, a drift rule or a
-degraded-source rule, ships with a test that fails when the guard is removed.
+degraded-source rule, ships with a test that fails when the guard is removed, and a line in
+`scripts/mutation-check.sh` that proves it.
 
 ## Copy
 
