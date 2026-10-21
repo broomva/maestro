@@ -46,7 +46,10 @@
 //!   block keys and flow sequence pairs (refused in flow mappings too, which the
 //!   package reads); a flow sequence pair whose `:` is not on its key's line; and
 //!   a plain scalar opening with `|`, `>`, `@`, `` ` `` or `%`;
-//! - nesting deeper than [`MAX_DEPTH`], and more than [`MAX_NODES`] values;
+//! - nesting deeper than [`MAX_DEPTH`] ([`MAX_FLOW_DEPTH`] for flow collections,
+//!   yaml-rust2's own limit), and more than [`MAX_NODES`] values, an aliased
+//!   anchor's value counted once for itself, once for its cached copy and once
+//!   per alias;
 //! - anything yaml-rust2 itself cannot parse.
 
 use maestro_core::js::JsValue;
@@ -62,6 +65,8 @@ pub const MAX_NODES: usize = 500_000;
 /// Collections nested deeper than this are refused. Conversion recurses per level, and the
 /// plugin's own limit is its engine's stack (node near 1 000 levels, bun near 8 000).
 pub const MAX_DEPTH: usize = 256;
+/// yaml-rust2's own flow nesting limit, which it applies before [`MAX_DEPTH`] can.
+pub const MAX_FLOW_DEPTH: usize = 255;
 /// The YAML spec's limit on an implicit key, which the package enforces.
 const MAX_IMPLICIT_KEY: usize = 1024;
 /// The stack the parser runs on, so [`MAX_DEPTH`] holds whatever thread calls (a 2 MiB tokio
@@ -227,8 +232,14 @@ fn build(source: &str, marks: HashMap<char, Carried>) -> Result<Builder, String>
     // Drive the parser one event at a time: its own `load` recurses once per nesting level,
     // and this loop stops at the first refusal instead of parsing the rest.
     loop {
-        let (event, mark) =
-            parser.next_token().map_err(|e| format!("{OUTSIDE}: what this reader's YAML parser refuses ({e})"))?;
+        let (event, mark) = parser.next_token().map_err(|e| {
+            // yaml-rust2 stops flow nesting itself, before the depth rule sees it: name the rule.
+            if e.info() == "recursion limit exceeded" {
+                format!("{OUTSIDE}: flow collections nested deeper than {MAX_FLOW_DEPTH} levels ({e})")
+            } else {
+                format!("{OUTSIDE}: what this reader's YAML parser refuses ({e})")
+            }
+        })?;
         let end = event == Event::StreamEnd;
         builder.on_event(event, mark);
         if end || builder.error.is_some() {
@@ -469,7 +480,7 @@ impl Builder {
     }
 
     /// Checks on a node about to be read as a mapping key at char `at`.
-    fn check_key(&mut self, at: usize, value: Option<(&str, TScalarStyle)>) {
+    fn check_key(&mut self, at: usize, value: Option<(&str, TScalarStyle)>, collection: bool) {
         let n = self.line_of(at);
         // Look back from the key over spaces only: copying the line up to every key is quadratic
         // when many keys share one line.
@@ -490,6 +501,10 @@ impl Builder {
             if style == TScalarStyle::Plain && self.src.get(at) == Some(&':') {
                 return self.refuse(format!("an empty key (line {})", n + 1));
             }
+        }
+        // Named before the pair rule below, which a collection key would otherwise meet first.
+        if collection {
+            return self.refuse(format!("a collection used as a map key (line {})", n + 1));
         }
         let span = self.key_span(at, value);
         // A flow sequence pair's key is on one line with its `:`: a quoted key's closing quote
@@ -614,8 +629,9 @@ impl MarkedEventReceiver for Builder {
         }
         if self.awaits_key() {
             match &ev {
-                Event::Scalar(value, style, ..) => self.check_key(at, Some((value, *style))),
-                Event::Alias(_) | Event::SequenceStart(..) | Event::MappingStart(..) => self.check_key(at, None),
+                Event::Scalar(value, style, ..) => self.check_key(at, Some((value, *style)), false),
+                Event::Alias(_) => self.check_key(at, None, false),
+                Event::SequenceStart(..) | Event::MappingStart(..) => self.check_key(at, None, true),
                 _ => {}
             }
             // A block mapping's entries begin where its first key does.
@@ -1208,6 +1224,9 @@ mod tests {
         let n = MAX_NODES * 3 / 5;
         let anchored = format!("big: &a [{}]\n", vec!["0"; n].join(","));
         assert!(parse(&anchored).is_ok(), "{:?}", parse(&anchored).err());
+        // The README's gap: with one alias it is charged three times, so it is refused (the plugin reads it).
+        let aliased = format!("big: &a [{}]\nuse: *a\n", vec!["0"; 300_000].join(","));
+        assert!(refused(&aliased).contains("expands past"));
     }
 
     #[test]
@@ -1239,6 +1258,8 @@ mod tests {
             ("k:\n  - id: \"x\n    y\"\n", "quoted scalar"),
             ("    x: [a, b\naken]\n", "flow collection continuation"),
             ("o: [a: [x]]\n", "parser refuses"),
+            ("k0: [[ ] : [x] ]\n", "a collection used as a map key (line 1)"),
+            ("k0: [{a: b} : [x] ]\n", "a collection used as a map key (line 1)"),
         ] {
             let e = refused(doc);
             assert!(e.contains(OUTSIDE) && e.contains(why), "{doc:?}: {e}");
@@ -1394,6 +1415,12 @@ mod tests {
     fn deep_nesting_is_refused_not_a_stack_overflow() {
         let block = |n: usize| format!("x:\n  {}v\n", "- ".repeat(n));
         assert!(parse(&block(MAX_DEPTH - 1)).is_ok(), "at the cap it reads");
+        // yaml-rust2 stops flow nesting at its own limit: the refusal names the depth rule.
+        let flow = |n: usize| format!("k: {}{}\n", "[".repeat(n), "]".repeat(n));
+        assert!(parse(&flow(MAX_FLOW_DEPTH)).is_ok(), "at the flow cap it reads");
+        let e = refused(&flow(MAX_FLOW_DEPTH + 1));
+        assert!(e.contains(&format!("flow collections nested deeper than {MAX_FLOW_DEPTH} levels")), "{e}");
+        assert!(!e.contains("parser refuses"), "{e}");
         // Refused while parsing, before a 50 000-level tree is built, not only once it is resolved.
         let deep = refused(&block(50_000));
         assert!(deep.contains("deeper than") && !deep.contains("once aliases are resolved"), "{deep}");

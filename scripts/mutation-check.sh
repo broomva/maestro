@@ -124,6 +124,15 @@ mutate $yaml 'if data.count.saturating_mul(data.alias_count) > MAX_ALIAS_COUNT {
 mutate $yaml '&& self.stack.len() >= MAX_DEPTH {' '&& false {'
 mutate $yaml 'if depth > MAX_DEPTH {' 'if false {' 'stack overflow'
 mutate $yaml '.checked_sub(n)' '.checked_sub(0)'
+mutate $yaml 'Event::SequenceStart(..) | Event::MappingStart(..) => self.check_key(at, None, true),' 'Event::SequenceStart(..) | Event::MappingStart(..) => self.check_key(at, None, false),'
+mutate $yaml 'if e.info() == "recursion limit exceeded" {' 'if false {'
+# The ticks ledger is read by its tail, cut where the plugin's readTail cuts it.
+mutate $store 'let (text, from) = match read_tail(&path, STREAM_TAIL) {' 'let (text, from) = match read_tail(&path, usize::MAX / 4) {'
+mutate $store 'here >= target' 'here > target'
+mutate $store 'let cut = at + nl + 1;' 'let cut = at + nl;'
+mutate $store '.saturating_mul(3).saturating_add(3)' '.saturating_mul(3)'
+mutate $store 'if start == 0 && units <= limit {' 'if units <= limit {'
+mutate $store 'None => Ok((std::fs::read_to_string(path)?, 0)),' 'None => Ok((text.to_string(), start + skip as u64)),'
 
 echo "mutation  $killed of $total killed"
 exit $failed

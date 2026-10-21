@@ -30,6 +30,9 @@ pub const PREAUTH_FILE: &str = ".control/preauth.yaml";
 pub const LOOPS_DIR: &str = ".broomva/loops";
 /// The plugin's `LEDGER_LIMIT`: a ledger over this size is refused, not cut.
 pub const LEDGER_LIMIT: usize = 1024 * 1024;
+/// The plugin's `STREAM_TAIL` (`server/loops.ts`): an envelope stream is judged on its last
+/// this many UTF-16 units, so a ledger that only grows costs the same to read every call.
+pub const STREAM_TAIL: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LedgerFile {
@@ -161,14 +164,17 @@ impl Store {
         }
     }
 
-    /// Paired ticks from the loops ledger, oldest first.
+    /// Paired ticks from the loops ledger's tail ([`STREAM_TAIL`]), oldest first. A tick that
+    /// started before the tail is not read, as the plugin does not read it.
     pub fn ticks(&self) -> Section<Vec<Tick>> {
         let path = self.paths.ticks_ledger();
         let label = format!("fs:{}", path.display());
-        let text = match std::fs::read_to_string(&path) {
+        let (text, from) = match read_tail(&path, STREAM_TAIL) {
             Ok(t) => t,
             Err(e) => return Section::unavailable(label, e.to_string()),
         };
+        // Line numbers count from where the read began, which the label says.
+        let label = if from == 0 { label } else { format!("{label} from byte {from}") };
         let mut events = Vec::new();
         let mut errors = Vec::new();
         for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
@@ -230,6 +236,50 @@ impl Store {
         }
         items.sort_by(|a, b| b.front.updated.cmp(&a.front.updated).then(a.slug.cmp(&b.slug)));
         Section::partial(label, items, errors)
+    }
+}
+
+/// The plugin's `readTail`: `text.slice(text.indexOf("\n", text.length - limit) + 1)` when the
+/// file is over `limit` UTF-16 units, else the whole file, with the byte offset the text starts
+/// at. JavaScript measures in UTF-16 units and a unit is at most 3 bytes of UTF-8, so the cut
+/// always lies in the last `3 * limit + 3` bytes and nothing before them is read. A tail with no
+/// line break after the cut is the whole file, as `indexOf` giving -1 makes it there.
+pub fn read_tail(path: &Path, limit: usize) -> std::io::Result<(String, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    // Plus 3: the character the window starts inside is skipped, and the rest still holds `limit` units.
+    let window = (limit as u64).saturating_mul(3).saturating_add(3).min(size);
+    let start = size - window;
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity(window as usize);
+    file.take(window).read_to_end(&mut bytes)?;
+    // A window that starts mid-file may start inside a character: skip its continuation bytes.
+    let skip = if start == 0 { 0 } else { bytes.iter().take_while(|b| (**b & 0xC0) == 0x80).count().min(3) };
+    let invalid = |e: std::str::Utf8Error| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+    let text = std::str::from_utf8(&bytes[skip..]).map_err(invalid)?;
+    let units: usize = text.chars().map(char::len_utf16).sum();
+    if start == 0 && units <= limit {
+        return Ok((text.to_string(), 0));
+    }
+    // `units` counts the window only; the cut is `limit` units before the end either way.
+    let target = units - limit;
+    let mut seen = 0;
+    let at = text
+        .char_indices()
+        .find(|(_, c)| {
+            let here = seen;
+            seen += c.len_utf16();
+            here >= target
+        })
+        .map_or(text.len(), |(i, _)| i);
+    match text[at..].find('\n') {
+        Some(nl) => {
+            let cut = at + nl + 1;
+            Ok((text[cut..].to_string(), start + (skip + cut) as u64))
+        }
+        None if start == 0 => Ok((text.to_string(), 0)),
+        None => Ok((std::fs::read_to_string(path)?, 0)),
     }
 }
 

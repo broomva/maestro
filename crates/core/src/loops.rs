@@ -116,7 +116,7 @@ pub enum DriftClass {
 pub enum NoticeKind {
     /// An active row's `review_by` date has passed.
     ReviewOverdue,
-    /// The contract names tick receipts and the ledger holds none for this loop.
+    /// The contract names tick receipts and the ledger's tail holds none for this loop.
     NoTickReceipts,
 }
 

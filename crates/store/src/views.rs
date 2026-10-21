@@ -69,6 +69,7 @@ pub struct LoopRow {
     pub owner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_tick: Option<Tick>,
+    /// Ticks started inside the ledger's tail ([`crate::STREAM_TAIL`]), not the whole history.
     pub ticks_recorded: usize,
     /// Plugin drift classes, with the plugin's meaning. Only those the ticks ledger proves.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -157,7 +158,8 @@ pub fn loop_rows(specs: &[LoopSpec], ticks: Option<&[Tick]>, now: jiff::Timestam
                 notices.push(Notice {
                     kind: NoticeKind::NoTickReceipts,
                     loop_id: spec.id.clone(),
-                    detail: "the contract names tick receipts and the ledger holds none for this loop".into(),
+                    detail: "the contract names tick receipts and the ticks ledger's tail holds none for this loop"
+                        .into(),
                 });
             }
             LoopRow {
