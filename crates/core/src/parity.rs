@@ -111,6 +111,7 @@ pub fn eval(case: &Value) -> Value {
             Ok(v) => json!({"ok": v}),
             Err(m) => json!({"refused": m}),
         },
+        "repr" => json!({"ok": crate::py::repr_str(s(&args, "text"))}),
         "rule_matches" => json!({"ok": d::rule_matches(s(&args, "rule"), s(&args, "path"))}),
         "is_governance" => json!({"ok": d::is_governance(s(&args, "path"), &strings(args.get("human_paths")))}),
         "is_test_path" => json!({"ok": d::is_test_path(s(&args, "path"))}),

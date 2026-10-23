@@ -74,29 +74,12 @@ pub fn repr_str(s: &str) -> String {
     out
 }
 
-/// `str.isprintable` for the characters a message can carry: controls, format characters,
-/// separators other than the space, and private use are escaped by `repr`. (Unassigned code points,
-/// which Python also escapes, need the Unicode tables and are printed as they are.)
+/// `str.isprintable` as the reference Python reads it: its Unicode tables, generated into
+/// `py_printable.rs` and checked by `scripts/parity-delegation.py`.
 fn printable(c: char) -> bool {
     let n = c as u32;
-    !(n < 0x20
-        || (0x7f..0xa1).contains(&n)
-        || n == 0xad
-        || (0x600..=0x605).contains(&n)
-        || n == 0x61c
-        || n == 0x6dd
-        || n == 0x70f
-        || n == 0x1680
-        || n == 0x180e
-        || (0x2000..=0x200f).contains(&n)
-        || (0x2028..=0x202f).contains(&n)
-        || (0x205f..=0x2064).contains(&n)
-        || (0x2066..=0x206f).contains(&n)
-        || n == 0x3000
-        || (0xd800..=0xf8ff).contains(&n)
-        || n == 0xfeff
-        || (0xfff9..=0xfffb).contains(&n)
-        || (0xf0000..=0x10ffff).contains(&n))
+    let i = crate::py_printable::NONPRINTABLE.partition_point(|&(_, end)| end < n);
+    crate::py_printable::NONPRINTABLE.get(i).is_none_or(|&(start, _)| n < start)
 }
 
 /// `repr(x)` for a float.
@@ -234,6 +217,16 @@ pub fn join(a: &str, b: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repr_escapes_what_python_escapes() {
+        assert_eq!(repr_str("a\u{e9}\u{2192}"), "'a\u{e9}\u{2192}'");
+        assert_eq!(repr_str("\u{378}"), "'\\u0378'"); // unassigned
+        assert_eq!(repr_str("\u{e0041}"), "'\\U000e0041'"); // a tag character (Cf)
+        assert_eq!(repr_str("\u{ad}\u{a0}"), "'\\xad\\xa0'");
+        assert_eq!(repr_str("\u{10ffff}"), "'\\U0010ffff'");
+        assert_eq!(repr_str(" "), "' '");
+    }
     use serde_json::json;
 
     #[test]
