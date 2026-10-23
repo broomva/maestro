@@ -896,13 +896,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jiff",
  "maestro-core",
  "maestro-mcp",
  "maestro-store",
+ "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-util",
+ "yaml-rust2",
 ]
 
 [[package]]

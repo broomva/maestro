@@ -16,7 +16,8 @@ jobs:
     name: ci
     # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
     runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    # ci.sh runs every mutant against the whole suite (159 at BRO-3204: about 45 min hosted).
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
     steps:

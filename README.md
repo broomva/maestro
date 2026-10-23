@@ -42,9 +42,12 @@ maestro hosts                        # this node, surfaces and harnesses, each w
 maestro mcp                          # MCP server on stdio
 maestro serve --http [--bind ADDR]   # MCP server over Streamable HTTP at /mcp, 127.0.0.1:7171 by default
 maestro doctor [--bstack DIR]        # is the vendored path reader the one bstack generates (as of that checkout's last fetch)? exit 1 if stale or unread
+maestro delegation assess|plan|brief|ladder   # tiers, assessments and agent-graph rules (the workspace's delegation.py, ported)
+maestro economy capacity --usage F [--samples F] [--now T] [--state F]   # capacity forecast, cadence mode and launch gates; --state = provider_manager --json state (failover)
+maestro economy tiers [--path F]     # Maestro's economy by tier, and what to re-plan
 ```
 
-Every command takes `--json`. Agents should use `--json`: it is the same data the MCP tools return,
+Every command takes `--json` (`delegation brief` prints its markdown block either way). Agents should use `--json`: it is the same data the MCP tools return,
 because the CLI and the MCP server share one dispatch.
 
 By default Maestro reads the workspace at `origin/main`, because main's copy wins under the home rule.
@@ -131,6 +134,66 @@ read, that count becomes a lower bound and the error is reported under `worktree
       `plugin-rev`, run `scripts/parity-check.sh --write`, and review the diff.
 - **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
   50).
+- **Delegation and economy.** `maestro_core::delegation` and `maestro_core::economy` port the
+  workspace's `scripts/delegation.py` (assessment, tier ladder, plan-graph rules, briefs) and the pure
+  part of `scripts/fleet_economy.py` (capacity forecast, cadence modes, launch and resume gates, the
+  economy by tier, and BRO-3223's spendable-account readiness, balancer bounds and resume gate), as of
+  workspace `3395842d0` (ws#1112). The Python is the reference until the tick moves here (node `loops-port`).
+  **Parity is claimed inside a typed schema** (`maestro_core::schema`), the shapes the real inputs hold:
+  graph ids, kinds, repos, `done`, tiers and every list item are strings; signal counts are JSON integers
+  within 64 bits (not bools, not floats, not digit strings), and so are tier counts; flags are bools;
+  usage, sample and balancer numbers are numbers; timestamps are UTC strings
+  `YYYY-MM-DDTHH:MM:SS[.ffffff]` ending `Z` or `+00:00` (the form the usage endpoint and the samples
+  write), or epoch numbers, inside `datetime`'s years 1..9999. Inside it, messages, rounding, exit
+  codes and uncaught-error kinds are the Python's for the same arguments (a runway past `datetime`'s
+  years raises the same kind and decides nothing). **Outside it Maestro refuses** before any
+  rule runs, naming the field (`graph.nodes[1].signals.est_loc: an integer within 64 bits, not a string
+  (outside the schema Maestro reads exactly)`), where the Python would go on with Python's semantics on
+  arbitrary input (`1` and `True` one dict key, `str.strip`'s separators, `int()` of any digit string):
+  `plan` and `brief` exit 1, `economy` exits 1, a policy outside it is unreadable (classification fails
+  closed). **The readers are held to Python's by measurement.** A JSON input (a `.json` graph, usage,
+  state, samples, the tier file) is refused where serde_json and `json.loads` build different values: an
+  integer no 64-bit integer holds, a float past f64's range, `NaN`/`Infinity`/`-Infinity`, and the
+  integer `-0` (serde_json reads -0.0). A graph or policy is read within a YAML subset, the rule
+  `maestro_store::yaml` follows for asks. These are refused with the reason and line named: a document
+  the subset check cannot scan; a tab; a CR outside CRLF; a control character; U+0085, U+2028 and U+2029;
+  a byte-order mark; anchors and aliases, tags and merge keys; a plain scalar holding `?`;
+  a plain scalar PyYAML (YAML 1.1) and serde_yaml (YAML 1.2) read differently (`yes`, `off`, `0250`,
+  `0o17`, `1e3`, `1:20`, `2026-10-23`, `.inf`); and a mapping key that is not a string. Quote the value
+  to keep it. Each rule is there because a differential fuzz (`yaml_differential`, `json_differential` in
+  `scripts/parity-delegation.py`) found documents the readers misread without it. The claim is that every
+  document the CLI reads, PyYAML or `json.loads` reads to the same value, types strict. It is measured on
+  each run (about 75,000 fuzzed YAML and 53,000 fuzzed JSON documents near the real inputs) and held by
+  `cargo test` on goldens of PyYAML's and Python's readings. A refusal is always allowed: the CLI also
+  refuses some documents Python reads. Known differences inside both: the CLI flags follow the
+  subcommand (`maestro delegation plan G --repo N=P`, not `--repo N=P plan G`); JSON is printed with sorted
+  keys and two-space indent; a duplicate YAML key is refused where PyYAML keeps the last value; `repr`
+  escapes what the reference Python's `str.isprintable` refuses, from its Unicode tables (16.0, Python
+  3.14; `crates/core/src/py_printable.rs`, generated and checked by the harness); a document serde_yaml cannot parse
+  (a `%` directive among them) stops with its `YAMLError`; `maestro economy capacity` refuses a `--usage` that is not a list; a flag value outside its choices, or one `int()` refuses, prints argparse's error line, not its usage block (a repeated flag takes its last value, every occurrence checked against its choices, and `int()`'s Unicode digits are read, as in argparse). Argv argparse accepts that clap does not is refused with clap's error (exit 2), never read differently: an abbreviated flag (`--est` for `--est-loc`), a value starting with `-` (`--ticket -1`, `--files -1_000`) except an ASCII negative integer given to an int flag, a global flag given to a subcommand that does not take it (`plan --no-policy`), and an integer past 64 bits. A graph repo path in `~user/` form is refused by name (exit 1); only `~` and `~/` expand. The sample cache, transcript reading
+  and the economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
+  (maestro-paseo `shared/tiers.ts`).
+  - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation
+    with files on disk among them; the test `crates/core/tests/parity_delegation.rs` holds the Rust to
+    it, and `scripts/mutation-check.sh` breaks the guards listed under "Ports of delegation.py". Its
+    type cases give every graph, usage-row, sample, balancer-state and tier field a value of each type;
+    a case outside the schema holds the field the harness's own reading of the schema refuses
+    (`refusal` in `scripts/parity-delegation.py`), and the Rust must refuse that same field.
+  - `fixtures/delegation/yaml11-golden.json` is PyYAML's implicit resolver on 6,733 plain scalars; the
+    CLI's YAML 1.1 reading (`yaml11` in `crates/cli/src/port.rs`) is held to it by its unit test.
+  - `fixtures/delegation/yaml-golden.json` (6,000 fuzzed documents with PyYAML's reading) and
+    `json-golden.json` (about 4,000 with `json.loads`'s) are replayed by `cargo test`
+    (`the_cli_reads_yaml_as_pyyaml_or_refuses`, `the_cli_reads_json_as_python_or_refuses`): every
+    document the CLI reads must read to Python's value.
+  - `fixtures/delegation/cli-golden.json` is the Python CLIs' output on scratch repos (bindings, nested,
+    absent and same-directory repos, policies); `crates/cli/tests/delegation.rs` rebuilds the
+    layout and replays every case through the binary.
+  - `python3 scripts/parity-delegation.py --workspace ~/broomva` fails unless both goldens are the
+    Python's output at the workspace's `origin/main`, the same cases agree through `maestro
+    parity-eval`, both CLIs agree on every real `docs/plans/*.graph.yaml` and on the scratch-repo
+    scenarios, both forecasts agree on the live usage snapshot, 100,000 random runways agree to the
+    microsecond, and the plugin's `tiers.ts` at `fixtures/delegation/tiers-rev` agrees. `--write`
+    regenerates both goldens: review their diff.
 
 ## Harness registration
 
@@ -170,7 +233,7 @@ error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
 
 | Directory | Package | Role |
 |---|---|---|
-| `crates/core` | `maestro-core` | Typed domain, no I/O: work states and transitions, asks, needs, loops and drift, ticks and due tiers, initiatives, grants, fleet, sessions namespaced by surface, surfaces, harnesses and nodes, authority, context packets |
+| `crates/core` | `maestro-core` | Typed domain, no I/O: work states and transitions, asks, needs, loops and drift, ticks and due tiers, initiatives, grants, fleet, sessions namespaced by surface, surfaces, harnesses and nodes, authority, context packets, delegation tiers and plan graphs, the capacity economy |
 | `crates/store` | `maestro-store` | Readers for the on-disk control plane (working tree or a git revision) and the shared views |
 | `crates/mcp` | `maestro-mcp` | MCP server: read tools, the `maestro_context` prompt, and `maestro://` resources |
 | `crates/cli` | `maestro` | The `maestro` binary |
@@ -181,6 +244,7 @@ error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
 bash scripts/ci.sh             # the whole gate, as CI runs it (needs bun and network for parity)
 cargo test                     # the suite alone
 scripts/mutation-check.sh      # each guarded predicate's mutant must fail the suite
+python3 scripts/parity-delegation.py --workspace ~/broomva   # the delegation and economy ports against the workspace's Python
 ```
 
 Tests run against `fixtures/machine/`, a miniature machine layout, so they never touch real ledgers.
