@@ -251,7 +251,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "maestro_ask_file",
         title: "File an ask",
-        description: "File one ask into a ledger in the asks folder, through the workspace's validator of record (ask_ledger.py validate) under the ledger's lock. Read maestro_asks_list first so you never duplicate one. Nothing is written unless the validator accepts the ask. Until sessions are verified your origin is recorded as unverified, and answers are not routed back into your session.",
+        description: "File one ask into a ledger in the asks folder, through the workspace's writer of record (ask_ledger.py file), which holds the ledger's lock. Read maestro_asks_list first so you never duplicate one. Nothing is written unless the ledger reads back as its asks plus exactly this one with no new validator error. Until sessions are verified your origin is recorded as unverified, and answers are not routed back into your session.",
         authority: Authority::AgentRequest,
         request: Some(RequestKind::AskFile),
         scope: "asks: appends one ask to one ledger",

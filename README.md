@@ -56,15 +56,18 @@ maestro handback --summary S [--next N]
 maestro escalate --reason R
 ```
 
-- **Filing.** `ask file` takes the ledger's §5.5 lock (the Paseo plugin's `server/locks.ts`, ported in
-  `crates/store/src/locks.rs`; root `MAESTRO_PASEO_ASK_LOCKS`, else `~/.local/state/control-asks/locks`),
-  appends the ask, and renames the result over the ledger only when the workspace's `ask_ledger.py`
-  (or `MAESTRO_ASK_LEDGER`), through its own `load`/`validate`/`asks_of` judging the ledger's real path,
-  raises no error the ledger did not already have and reads the ledger's asks plus exactly that ask,
-  and Maestro's reader agrees with the new ask open. It writes to the working tree. It refuses an answer,
-  a status or an origin in the ask, an id or uid any existing ask is addressed by (as the plugin's
-  `text()` reads them), a result over the readers' 1 MiB limit, and a ledger that does not exist (a
-  ledger opens with its arc, lanes and tz in a workspace change).
+- **Filing.** `ask file` files through the workspace's writer of record, `ask_ledger.py file` (or
+  `MAESTRO_ASK_LEDGER`; BRO-3406), and writes no YAML itself. The writer holds the ledger's §5.5 lock
+  (the Paseo plugin's `server/locks.ts`; root `MAESTRO_PASEO_ASK_LOCKS`, else
+  `~/.local/state/control-asks/locks`, which Maestro passes on) and the flock, appends the ask in the
+  line shape its own `stamp` and `archive` edit, records the origin `{via: maestro, session, verified:
+  false}`, and replaces the ledger only when it reads back as the ledger's asks plus exactly that ask with
+  no new validator error. It writes to the working tree. It refuses an answer, a status or an origin in
+  the ask, an id or uid outside `^[A-Za-z0-9][A-Za-z0-9._-]*$` or one any existing ask is addressed by,
+  values Maestro's reader would read back otherwise (integers beyond ±(2^53 − 1), `-0.0`), a result over
+  the readers' 1 MiB limit, and a ledger that does not exist or is a symlink. Exit 75 (the lock was busy)
+  is reported as busy, to retry. `crates/store/src/locks.rs` (the same lock, ported) guards the
+  requests journal.
 - **Unverified callers.** Until sessions are verified against their surface (BRO-3268), every caller is
   unverified: an ask is filed with `origin: {via: maestro, session, verified: false}` and no `agent_id`,
   so no answer is routed into a session on a caller's word; every other request is held.
@@ -192,7 +195,7 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 | `BROOMVA_HOME` | `~/.broomva` |
 | `MAESTRO_FLEET_STATE` | `~/.local/state/fleet-reconcile` |
 | `MAESTRO_PASEO_ASK_LOCKS` | `~/.local/state/control-asks/locks` (the plugin's ask-ledger lock root) |
-| `MAESTRO_ASK_LEDGER` | `<workspace>/scripts/ask_ledger.py` (the validator `ask file` runs) |
+| `MAESTRO_ASK_LEDGER` | `<workspace>/scripts/ask_ledger.py` (the writer `ask file` runs: `ask_ledger.py file`) |
 | `MAESTRO_SESSION` | none: the session agent requests name |
 
 Inside the workspace, each name is read from `.broomva/<name>` when the tree has it and from
