@@ -951,7 +951,7 @@ def cli_cases():
             variants += [["--root", W], ["--root", BARE], ["--root", ""],
                          ["--root", BARE, "--root", W], ["--skip-absent-repos", "--skip-absent-repos"]]
         if name == "ok":
-            variants += [["--repo", f"bare={BARE}"], ["--repo", "nope=x"], ["--repo", "bad"], ["--root", W],
+            variants += [["--repo", f"bare={BARE}"], ["--repo", "nope=x"], ["--repo", "bad"], ["--root", W], ["--root", ""],
                          ["--repo", f"bare={R}/gone", "--repo", f"bare={BARE}"],
                          ["--repo", f"bare={BARE}", "--repo", f"bare={R}/gone"]]
         for flags in variants:
@@ -978,6 +978,9 @@ def cli_cases():
               # P20 port r5, Stratum B: an empty string is falsy in the Python.
               ["--kind", "", "--paths", "a.rs"],
               ["--kind", "bogus"], ["--observed-tier", "x"], ["--mode", "x"],
+              # P20 port arc 2 r1 (A MAJOR): argparse checks choices at every occurrence, in argv order.
+              ["--kind", "bogus", "--kind", "implement"], ["--mode", "x", "--mode", "normal"],
+              ["--observed-tier", "x", "--observed-tier", "apex"], ["--mode", "bogus", "--kind", "bogus2"],
               ["--kind", "implement", "--paths", "a.rs", "--spec", ""],
               ["--kind", "rerun", "--done", "gh run rerun 1 --failed", "--brief", "--ticket", ""],
               # Port continuation (Codex): a repeated nargs="*" flag replaces; int() reads Unicode digits.

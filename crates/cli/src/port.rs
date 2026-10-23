@@ -60,7 +60,8 @@ pub struct AssessArgs {
     /// Classify with the built-in governance paths only (a repo with no policy file).
     #[arg(long)]
     no_policy: bool,
-    #[arg(long, default_value = "implement")]
+    /// argparse checks `choices` at each occurrence, in argv order: a repeated flag is checked every time.
+    #[arg(long, default_value = "implement", value_parser = kind_choice)]
     kind: String,
     /// argparse's `nargs="*"` stores: a repeated `--paths` replaces the earlier list.
     #[arg(long, num_args = 0.., action = clap::ArgAction::Set)]
@@ -80,10 +81,10 @@ pub struct AssessArgs {
     spec: Option<String>,
     #[arg(long, default_value_t = 0, allow_negative_numbers = true, value_parser = py_int)]
     failed_attempts: i64,
-    #[arg(long)]
+    #[arg(long, value_parser = tier_choice)]
     observed_tier: Option<String>,
-    /// capacity.cadence.mode from the snapshot (read_only or read-only).
-    #[arg(long)]
+    /// capacity.cadence.mode from the snapshot (read_only or read-only), normalised as `type=norm_mode`.
+    #[arg(long, value_parser = mode_choice)]
     mode: Option<String>,
     #[arg(long)]
     allow_apex: bool,
@@ -779,7 +780,7 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
         Err(f @ Fault::Refused { .. }) => return fail(format!("  [error] {graph_path}: {f}"), 1),
         Err(f) => return crash(&f),
     };
-    if py::truthy(graph.get("repos")) && bind.root.is_some() {
+    if py::truthy(graph.get("repos")) && bind.root.as_deref().is_some_and(|r| !r.is_empty()) {
         return fail("this graph names its repos: bind them with --repo NAME=PATH, not --root", 2);
     }
     let root = bind.root.clone().filter(|r| !r.is_empty()).unwrap_or_else(cwd); // `o.root or os.getcwd()`
@@ -929,30 +930,32 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
     ExitCode::SUCCESS
 }
 
-/// argparse's error line for a value outside `choices` (its usage block is not reproduced).
-fn invalid_choice(flag: &str, v: &str, choices: &[&str]) -> ExitCode {
-    fail(format!("error: argument {flag}: invalid choice: {} (choose from {})", py::repr_str(v), choices.join(", ")), 2)
+/// argparse's `choices` check, as a value parser so clap runs it at each occurrence in argv order;
+/// `usage_error` prints its message as argparse's error line (its usage block is not reproduced).
+fn choice(v: String, choices: &[&str]) -> Result<String, String> {
+    if choices.contains(&v.as_str()) {
+        return Ok(v);
+    }
+    Err(format!("invalid choice: {} (choose from {})", py::repr_str(&v), choices.join(", ")))
 }
 
-fn assess(a: &AssessArgs) -> ExitCode {
+fn kind_choice(s: &str) -> Result<String, String> {
     let mut kinds: Vec<&str> =
         d::MECHANICAL_KINDS.iter().chain(&d::WORK_KINDS).chain(&d::FRONTIER_KINDS).copied().collect();
     kinds.sort_unstable();
-    if !kinds.contains(&a.kind.as_str()) {
-        return invalid_choice("--kind", &a.kind, &kinds);
-    }
-    if let Some(t) = &a.observed_tier
-        && Tier::parse(t).is_none()
-    {
-        return invalid_choice("--observed-tier", t, &Tier::ALL.map(Tier::as_str));
-    }
-    let mode = a.mode.as_deref().map(d::norm_mode);
-    if let Some(m) = &mode
-        && m != "normal"
-        && !d::SAVING_MODES.contains(&m.as_str())
-    {
-        return invalid_choice("--mode", m, &["normal", "conserve", "critical", "read_only"]);
-    }
+    choice(s.to_string(), &kinds)
+}
+
+fn tier_choice(s: &str) -> Result<String, String> {
+    choice(s.to_string(), &Tier::ALL.map(Tier::as_str))
+}
+
+fn mode_choice(s: &str) -> Result<String, String> {
+    choice(d::norm_mode(s), &["normal", "conserve", "critical", "read_only"])
+}
+
+fn assess(a: &AssessArgs) -> ExitCode {
+    let mode = a.mode.clone();
     let root = a.root.clone().filter(|r| !r.is_empty()).unwrap_or_else(cwd); // `o.root or os.getcwd()`
     let human = if a.no_policy {
         vec![]

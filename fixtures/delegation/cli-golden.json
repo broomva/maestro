@@ -459,6 +459,85 @@
   {
    "cwd": "w",
    "json": false,
+   "name": "ok plan --root ",
+   "py": [
+    "--root",
+    "",
+    "plan",
+    "{ROOT}/ok.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/ok.json",
+    "--root",
+    ""
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "a                implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\nb                implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=a\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "ok plan --json --root ",
+   "py": [
+    "--root",
+    "",
+    "plan",
+    "{ROOT}/ok.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/ok.json",
+    "--root",
+    ""
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "[\n {\n  \"id\": \"a\",\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [\n   \"docs/specs/a.html\",\n   \"bare:docs/adrs/b.html\",\n   \"docs/specs/missing.html\"\n  ],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n },\n {\n  \"id\": \"b\",\n  \"repo\": \"bare\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [\n   \"w:docs/specs/a.html\"\n  ],\n  \"depends_on\": [\n   \"a\"\n  ],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "ok brief a --root ",
+   "py": [
+    "--root",
+    "",
+    "brief",
+    "{ROOT}/ok.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/ok.json",
+    "a",
+    "--root",
+    ""
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Read first, and work from it: `docs/specs/a.html`, `bare:docs/adrs/b.html` (repo `bare` at `{ROOT}/bare`), `docs/specs/missing.html`.\n- Done means: `make test`. Verification: **check**, the check's exit code.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
    "name": "ok plan --repo bare={ROOT}/gone --repo bare={ROOT}/bare",
    "py": [
     "--repo",
@@ -6237,6 +6316,510 @@
     "code": 2,
     "crash": false,
     "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'x' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind bogus --kind implement",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "bogus",
+    "--kind",
+    "implement"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "bogus",
+    "--kind",
+    "implement"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --kind: invalid choice: 'bogus' (choose from archive, cleanup, closeout, decompose, design, docs, implement, merge-on-green, relay, rerun, research, resume, review, update-branch)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind bogus --kind implement",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "bogus",
+    "--kind",
+    "implement"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "bogus",
+    "--kind",
+    "implement"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --kind: invalid choice: 'bogus' (choose from archive, cleanup, closeout, decompose, design, docs, implement, merge-on-green, relay, rerun, research, resume, review, update-branch)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind bogus --kind implement",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "bogus",
+    "--kind",
+    "implement"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "bogus",
+    "--kind",
+    "implement"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --kind: invalid choice: 'bogus' (choose from archive, cleanup, closeout, decompose, design, docs, implement, merge-on-green, relay, rerun, research, resume, review, update-branch)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind bogus --kind implement",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "bogus",
+    "--kind",
+    "implement"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "bogus",
+    "--kind",
+    "implement"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --kind: invalid choice: 'bogus' (choose from archive, cleanup, closeout, decompose, design, docs, implement, merge-on-green, relay, rerun, research, resume, review, update-branch)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --mode x --mode normal",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--mode",
+    "x",
+    "--mode",
+    "normal"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--mode",
+    "x",
+    "--mode",
+    "normal"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'x' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --mode x --mode normal",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--mode",
+    "x",
+    "--mode",
+    "normal"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--mode",
+    "x",
+    "--mode",
+    "normal"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'x' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --mode x --mode normal",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--mode",
+    "x",
+    "--mode",
+    "normal"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--mode",
+    "x",
+    "--mode",
+    "normal"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'x' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --mode x --mode normal",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--mode",
+    "x",
+    "--mode",
+    "normal"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--mode",
+    "x",
+    "--mode",
+    "normal"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'x' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --observed-tier x --observed-tier apex",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--observed-tier",
+    "x",
+    "--observed-tier",
+    "apex"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--observed-tier",
+    "x",
+    "--observed-tier",
+    "apex"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --observed-tier: invalid choice: 'x' (choose from mechanical, standard, frontier, apex)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --observed-tier x --observed-tier apex",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--observed-tier",
+    "x",
+    "--observed-tier",
+    "apex"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--observed-tier",
+    "x",
+    "--observed-tier",
+    "apex"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --observed-tier: invalid choice: 'x' (choose from mechanical, standard, frontier, apex)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --observed-tier x --observed-tier apex",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--observed-tier",
+    "x",
+    "--observed-tier",
+    "apex"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--observed-tier",
+    "x",
+    "--observed-tier",
+    "apex"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --observed-tier: invalid choice: 'x' (choose from mechanical, standard, frontier, apex)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --observed-tier x --observed-tier apex",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--observed-tier",
+    "x",
+    "--observed-tier",
+    "apex"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--observed-tier",
+    "x",
+    "--observed-tier",
+    "apex"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --observed-tier: invalid choice: 'x' (choose from mechanical, standard, frontier, apex)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --mode bogus --kind bogus2",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--mode",
+    "bogus",
+    "--kind",
+    "bogus2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--mode",
+    "bogus",
+    "--kind",
+    "bogus2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'bogus' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --mode bogus --kind bogus2",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--mode",
+    "bogus",
+    "--kind",
+    "bogus2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--mode",
+    "bogus",
+    "--kind",
+    "bogus2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'bogus' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --mode bogus --kind bogus2",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--mode",
+    "bogus",
+    "--kind",
+    "bogus2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--mode",
+    "bogus",
+    "--kind",
+    "bogus2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'bogus' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --mode bogus --kind bogus2",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--mode",
+    "bogus",
+    "--kind",
+    "bogus2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--mode",
+    "bogus",
+    "--kind",
+    "bogus2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'bogus' (choose from normal, conserve, critical, read_only)\n",
     "stdout": ""
    }
   },

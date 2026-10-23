@@ -357,7 +357,10 @@ mutate $schema 'if PYTHON_READS.iter().any(|p| msg.starts_with(p))' 'if false'
 mutate $econ '.as_str().filter(|c| !c.is_empty()) {' '.as_str() {'
 mutate $port 'let spec = a.spec.as_deref().filter(|s| !s.is_empty()).map(py::normpath);' 'let spec = a.spec.as_deref().map(py::normpath);'
 mutate $port 'a.ticket.as_deref().filter(|t| !t.is_empty())' 'a.ticket.as_deref()'
-mutate $port '    if !kinds.contains(&a.kind.as_str()) {' '    if false {'
+mutate $port '    if choices.contains(&v.as_str()) {' '    if true {'
+mutate $port '    choice(d::norm_mode(s), &["normal", "conserve", "critical", "read_only"])' '    choice(s.to_string(), &["normal", "conserve", "critical", "read_only"])'
+mutate $port '    #[arg(long, value_parser = tier_choice)]' '    #[arg(long)]'
+mutate $port '    if py::truthy(graph.get("repos")) && bind.root.as_deref().is_some_and(|r| !r.is_empty()) {' '    if py::truthy(graph.get("repos")) && bind.root.is_some() {'
 mutate $port '                            repos = m.next_value::<Option<Keys>>()?;' '                            repos = repos.or(m.next_value::<Option<Keys>>()?);'
 
 echo "mutation  $killed of $total killed"
