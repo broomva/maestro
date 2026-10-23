@@ -343,6 +343,15 @@ mutate $schema '        (Ty::Time, Value::String(s)) => s.is_empty() || crate::e
 mutate $schema '        (Ty::Time, Value::Number(n)) => crate::economy::epoch_us(n.as_f64().unwrap_or(f64::NAN)).is_some(),' '        (Ty::Time, Value::Number(_)) => true,'
 mutate $econ '    if (DT_MIN_US..=DT_MAX_US).contains(&sum) { Ok(sum) } else { Err(overflow()) }' '    Ok(sum)'
 mutate $econ '    if opened < DT_MIN_US {' '    if false {'
+# P20 port r5: documents Python reads that serde_json refuses are refused, never skipped as not
+# JSON; an empty string is falsy where the Python tests it; a duplicate `repos` key is the last
+# one; a flag outside its choices exits 2 (held by the CLI goldens and crates/cli/tests/delegation.rs).
+mutate $schema 'if PYTHON_READS.iter().any(|p| msg.starts_with(p))' 'if false'
+mutate $econ '.as_str().filter(|c| !c.is_empty()) {' '.as_str() {'
+mutate $port 'let spec = a.spec.as_deref().filter(|s| !s.is_empty()).map(py::normpath);' 'let spec = a.spec.as_deref().map(py::normpath);'
+mutate $port 'a.ticket.as_deref().filter(|t| !t.is_empty())' 'a.ticket.as_deref()'
+mutate $port '    if !kinds.contains(&a.kind.as_str()) {' '    if false {'
+mutate $port '                            repos = m.next_value::<Option<Keys>>()?;' '                            repos = repos.or(m.next_value::<Option<Keys>>()?);'
 
 echo "mutation  $killed of $total killed"
 exit $failed

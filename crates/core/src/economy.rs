@@ -499,7 +499,7 @@ pub fn resume_gate(accounts: &Accounts, now: i64, gate: &Gate) -> Result<Value, 
     } else {
         let mut why =
             format!("5h under {}% on {}", RESUME_5H as i64, five.keys().cloned().collect::<Vec<_>>().join(", "));
-        if let Some(c) = r["covered_by"].as_str() {
+        if let Some(c) = r["covered_by"].as_str().filter(|c| !c.is_empty()) {
             why += &format!("; {} stale, covered by failover to {c}", joined("unknown"));
         }
         (true, why)

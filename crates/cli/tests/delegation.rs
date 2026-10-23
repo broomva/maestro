@@ -108,7 +108,7 @@ fn the_cli_matches_the_python_clis() {
             } else {
                 stdout == want["stdout"].as_str().unwrap()
             };
-            code == want_code && stderr == want["stderr"].as_str().unwrap() && out_ok
+            code == want_code && stderr == argparse_error_line(want_code, want["stderr"].as_str().unwrap()) && out_ok
         };
         if !ok {
             bad.push(format!(
@@ -176,6 +176,18 @@ fn yaml_outside_the_subset_is_refused() {
     }
 }
 
+/// An argparse usage error (exit 2) is held to its error line; its usage block is not reproduced
+/// (the harness's rule, `compare_cli` in scripts/parity-delegation.py).
+fn argparse_error_line(code: Option<i32>, stderr: &str) -> String {
+    match (code, stderr.strip_prefix("usage: ")) {
+        (Some(2), Some(rest)) => {
+            let last = rest.trim_end_matches('\n').rsplit('\n').next().unwrap_or("");
+            format!("error: {}\n", last.split_once(": error: ").map_or(last, |(_, e)| e))
+        }
+        _ => stderr.to_string(),
+    }
+}
+
 fn capacity(dir: &std::path::Path, usage: &str) -> std::process::Output {
     let path = dir.join("usage.json");
     std::fs::write(&path, usage).unwrap();
@@ -212,4 +224,34 @@ fn malformed_usage_is_refused_not_read_as_capacity() {
     let out = capacity(dir.path(), &format!("[{ACTIVE}]"));
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("\"mode\""));
+}
+
+/// A samples line Python's `json.loads` reads but serde_json does not (a lone surrogate escape,
+/// nesting past 128) is refused, never skipped as not JSON; a line neither reads is skipped, as the
+/// tick skips it (P20 port r5, Stratum B BLOCKER).
+#[test]
+fn samples_python_reads_are_refused_not_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let usage = dir.path().join("usage.json");
+    std::fs::write(&usage, format!("[{ACTIVE}]")).unwrap();
+    let run = |samples: &str| {
+        let path = dir.path().join("samples.jsonl");
+        std::fs::write(&path, samples).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_maestro"))
+            .args(["economy", "capacity", "--now", "2026-10-23T00:00:00Z", "--usage"])
+            .arg(&usage)
+            .arg("--samples")
+            .arg(&path)
+            .output()
+            .unwrap()
+    };
+    let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    for line in [r#"{"at": "\ud800"}"#, deep.as_str()] {
+        let out = run(&format!("{line}\n"));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(0), "{line}: read");
+        assert!(err.contains("outside the schema"), "{line}: {err}");
+    }
+    let out = run("not json\n");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
 }

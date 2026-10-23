@@ -913,7 +913,6 @@ dependencies = [
 name = "maestro-core"
 version = "0.1.0"
 dependencies = [
- "jiff",
  "schemars",
  "serde",
  "serde_json",

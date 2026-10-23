@@ -584,7 +584,7 @@ fn keys_in_order(y: &serde_yaml::Value) -> Vec<String> {
 }
 
 /// The keys of a JSON graph's `repos` object in file order, a repeated key at its first position
-/// (as `json.loads` builds the dict).
+/// (as `json.loads` builds the dict). A repeated `repos` key is the last one, as `json.loads` keeps it.
 fn json_repos_order(text: &str) -> Vec<String> {
     use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
     struct Keys(Vec<String>);
@@ -609,11 +609,31 @@ fn json_repos_order(text: &str) -> Vec<String> {
             d.deserialize_map(V)
         }
     }
-    #[derive(serde::Deserialize)]
-    struct Graph {
-        repos: Option<Keys>,
+    struct Graph(Option<Keys>);
+    impl<'de> serde::Deserialize<'de> for Graph {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Graph;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a mapping")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Graph, A::Error> {
+                    let mut repos = None;
+                    while let Some(k) = m.next_key::<String>()? {
+                        if k == "repos" {
+                            repos = m.next_value::<Option<Keys>>()?;
+                        } else {
+                            m.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                    Ok(Graph(repos))
+                }
+            }
+            d.deserialize_map(V)
+        }
     }
-    serde_json::from_str::<Graph>(text).ok().and_then(|g| g.repos).map(|k| k.0).unwrap_or_default()
+    serde_json::from_str::<Graph>(text).ok().and_then(|g| g.0).map(|k| k.0).unwrap_or_default()
 }
 
 /// The graph (`json.loads` for `.json`, else `yaml.safe_load(...) or {}`), and its `repos` names in
@@ -677,7 +697,10 @@ fn bind_repos(
     let home = py::or(graph.get("repo"), None).map_or_else(String::new, py::str_of);
     // `(graph.get("repos") or {}).items()`: the schema holds repos to a mapping or null.
     let declared: Vec<(String, Value)> = match graph.get("repos").and_then(Value::as_object).filter(|o| !o.is_empty()) {
-        Some(o) => order.iter().filter_map(|k| o.get(k).map(|v| (k.clone(), v.clone()))).collect(),
+        Some(o) if order.len() == o.len() && order.iter().all(|k| o.contains_key(k)) => {
+            order.iter().map(|k| (k.clone(), o[k].clone())).collect()
+        }
+        Some(_) => return Err(Fault::Value("the order of the graph's repos is unreadable".into())),
         None => vec![(home, json!(root))],
     };
     let mut out: Vec<(String, Repo)> = Vec::new();
@@ -778,7 +801,9 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
         if let Some(p) = policies.borrow().get(name) {
             return Ok(p.clone());
         }
-        let r = &repos.iter().find(|(n, _)| n == name).expect("a named repo").1;
+        let Some((_, r)) = repos.iter().find(|(n, _)| n == name) else {
+            return Err(Fault::Value(format!("repo {} is not declared", py::repr_str(name))));
+        };
         let file = py::join(&py::join(&r.dir, ".control"), "policy.yaml");
         let has_file = Path::new(&file).is_file();
         let got = if r.policy == json!("none") {
@@ -877,18 +902,29 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
     ExitCode::SUCCESS
 }
 
+/// argparse's error line for a value outside `choices` (its usage block is not reproduced).
+fn invalid_choice(flag: &str, v: &str, choices: &[&str]) -> ExitCode {
+    fail(format!("error: argument {flag}: invalid choice: {} (choose from {})", py::repr_str(v), choices.join(", ")), 2)
+}
+
 fn assess(a: &AssessArgs) -> ExitCode {
+    let mut kinds: Vec<&str> =
+        d::MECHANICAL_KINDS.iter().chain(&d::WORK_KINDS).chain(&d::FRONTIER_KINDS).copied().collect();
+    kinds.sort_unstable();
+    if !kinds.contains(&a.kind.as_str()) {
+        return invalid_choice("--kind", &a.kind, &kinds);
+    }
     if let Some(t) = &a.observed_tier
         && Tier::parse(t).is_none()
     {
-        return fail(format!("argument --observed-tier: invalid choice: {}", py::repr_str(t)), 2);
+        return invalid_choice("--observed-tier", t, &Tier::ALL.map(Tier::as_str));
     }
     let mode = a.mode.as_deref().map(d::norm_mode);
     if let Some(m) = &mode
         && m != "normal"
         && !d::SAVING_MODES.contains(&m.as_str())
     {
-        return fail(format!("argument --mode: invalid choice: {}", py::repr_str(m)), 2);
+        return invalid_choice("--mode", m, &["normal", "conserve", "critical", "read_only"]);
     }
     let root = a.root.clone().unwrap_or_else(cwd);
     let human = if a.no_policy {
@@ -905,7 +941,7 @@ fn assess(a: &AssessArgs) -> ExitCode {
             }
         }
     };
-    let spec = a.spec.as_deref().map(py::normpath);
+    let spec = a.spec.as_deref().filter(|s| !s.is_empty()).map(py::normpath);
     if let Some(s) = &spec
         && !(d::is_spec_path(s) && Path::new(&py::join(&root, s)).is_file())
     {
@@ -949,7 +985,7 @@ fn assess(a: &AssessArgs) -> ExitCode {
             repo: None,
             repo_dirs: &[],
         };
-        println!("{}", d::brief_block(&brief, a.ticket.as_deref()));
+        println!("{}", d::brief_block(&brief, a.ticket.as_deref().filter(|t| !t.is_empty())));
         return ExitCode::SUCCESS;
     }
     let mut out = serde_json::to_value(&r).expect("JSON");

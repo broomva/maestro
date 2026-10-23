@@ -321,8 +321,22 @@ pub fn parse_json(text: &str) -> Result<Value, String> {
     if let Some((lit, what)) = outside_number(text) {
         return Err(format!("the number {lit} is {what} ({OUTSIDE})"));
     }
-    serde_json::from_str(text).map_err(|e| e.to_string())
+    serde_json::from_str(text).map_err(|e| {
+        let msg = e.to_string();
+        // Errors where `json.loads` reads a value: a lone surrogate escape, nesting past serde_json's
+        // 128 levels, a number past f64. Refused, never skipped as not JSON.
+        if PYTHON_READS.iter().any(|p| msg.starts_with(p)) { format!("{msg} ({OUTSIDE})") } else { msg }
+    })
 }
+
+/// serde_json's messages for documents Python's `json.loads` accepts.
+const PYTHON_READS: [&str; 5] = [
+    "lone leading surrogate in hex escape",
+    "unexpected end of hex escape",
+    "invalid unicode code point",
+    "recursion limit exceeded",
+    "number out of range",
+];
 
 /// The first number token outside strings the two readers build differently, and why.
 fn outside_number(text: &str) -> Option<(&str, &'static str)> {
@@ -445,5 +459,24 @@ mod tests {
         assert!(parse_json("[-9223372036854775809]").is_err());
         assert!(parse_json("[18446744073709551615, -9223372036854775808, 1e300, \"100000000000000000000\"]").is_ok());
         assert!(parse_json(r#"{"a\"1": 100000000000000000000.0}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod python_reads {
+    use super::{OUTSIDE, parse_json};
+
+    #[test]
+    fn documents_python_reads_are_refused_not_unparsed() {
+        let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+        for doc in [r#""\ud800""#, r#""\udc00""#, r#""\ud800x""#, r#""\ud800A""#, deep.as_str()] {
+            let e = parse_json(doc).expect_err(doc);
+            assert!(e.ends_with(&format!("({OUTSIDE})")), "{doc}: {e}");
+        }
+        for doc in ["{", "[1,]", "nope"] {
+            let e = parse_json(doc).expect_err(doc);
+            assert!(!e.contains(OUTSIDE), "{doc}: {e}");
+        }
+        assert!(parse_json(r#""😀""#).is_ok());
     }
 }

@@ -680,6 +680,10 @@ def gate_cases(rng):
          {**on, "probes": {"x": {"result": "limited", "at": t}}}),
         ([acct("a", isActive=True, stale=True, numbersAgeSeconds=90)],
          {**on, "config": {"autoBalance": True, "staleNumbersMinutes": True}}),
+        # P20 port r5, Stratum B: a standby named "" covers, and the reason names no one (`if r["covered_by"]`).
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "id": "", "email": ""}], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "email": ""}], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "id": ""}], on),
     ]
     for rows, st in edge:
         args = {"usage": rows, "now": at_now, "state": st}
@@ -806,6 +810,8 @@ def compare_cli(name, py_cmd, rs_cmd, cwd, parse_json=False):
         return check(name, rc == 1 and "Traceback" in re_ and f"\n  {kind}: " in re_ and po == ro,
                      f"python raised {kind}; rust exit {rc}: {re_[:200]}")
     ok = check(name, pc == rc, f"exit python {pc} rust {rc}\n  py: {pe[:300]}\n  rs: {re_[:300]}")
+    if pc == 2 and pe.startswith("usage: "):  # argparse: the same error line; its usage block is not reproduced
+        pe = "error: " + pe.rstrip("\n").rsplit("\n", 1)[-1].split(": error: ", 1)[-1] + "\n"
     ok &= check(name, pe == re_, f"stderr differs\n  py: {pe[:600]}\n  rs: {re_[:600]}")
     if parse_json and pc == 0:
         ok &= check(name, same(json.loads(po), json.loads(ro)), "JSON stdout differs")
@@ -884,6 +890,12 @@ def cli_layout():
     files = {f"{name}.json": json.dumps(g) for name, g in graphs.items()}
     files["astral.json"] = json.dumps({"repo": "w", "repos": {"w": W, "n": NESTED},
                                        "nodes": [node("a", done="ship it \U0001F680", signals={"paths": ["nested/x.rs"]})]})
+    # P20 port r5, Stratum B: `json.loads` keeps the last `repos` and a repeated name at its first position.
+    nodes = json.dumps([node("a"), node("b", repo="bare", depends_on=["a"])])
+    files["dup-repos.json"] = (f'{{"repo": "w", "repos": {{"zz": "{R}/gone"}}, "repos": {{"w": "{W}", "bare": '
+                               f'{{"path": "{BARE}", "policy": "none"}}}}, "nodes": {nodes}}}')
+    files["dup-repo-key.json"] = (f'{{"repo": "w", "repos": {{"bare": "{R}/gone", "w": "{W}", "bare": '
+                                  f'{{"path": "{BARE}", "policy": "none"}}}}, "nodes": {nodes}}}')
     files["list.graph.yaml"] = "- a\n- b\n"
     files["empty.graph.yaml"] = ""
     files["w/.control/policy.yaml"] = "auto_merge:\n  rules:\n    - {action: require_human, path_touched: deploy/}\n"
@@ -906,7 +918,7 @@ def cli_cases():
 
     names = ["ok", "nested", "same-dir", "absent", "absent-spec", "no-policy", "policy-none-but-file", "governed",
              "bad-name", "no-path", "single", "repos-list", "int-id", "int-id-only", "list-id", "list-mode",
-             "list-dep", "list-repo-absent", "list-repo-unnamed-home", "list-id-unnamed-home"]
+             "list-dep", "list-repo-absent", "list-repo-unnamed-home", "list-id-unnamed-home", "dup-repos", "dup-repo-key"]
     for name in names:
         path = f"{R}/{name}.json"
         variants = [[], ["--skip-absent-repos"]]
@@ -936,7 +948,12 @@ def cli_cases():
               ["--kind", "review", "--mode", "read-only", "--observed-tier", "apex"],
               ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "3", "--allow-apex", "--mode", "conserve"],
               ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "-1", "--est-loc", "-5", "--files", "-2"],
-              ["--kind", "implement", "--paths", "a.rs", "--est-loc", " 1_000 ", "--mode", "critical", "--mode", "normal"]]
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", " 1_000 ", "--mode", "critical", "--mode", "normal"],
+              # P20 port r5, Stratum B: an empty string is falsy in the Python.
+              ["--kind", "", "--paths", "a.rs"],
+              ["--kind", "bogus"], ["--observed-tier", "x"], ["--mode", "x"],
+              ["--kind", "implement", "--paths", "a.rs", "--spec", ""],
+              ["--kind", "rerun", "--done", "gh run rerun 1 --failed", "--brief", "--ticket", ""]]
     for args in assess:
         for root_args in (["--root", W], ["--root", BARE], ["--root", BARE, "--no-policy"],
                           ):
