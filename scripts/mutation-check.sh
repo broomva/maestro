@@ -287,6 +287,12 @@ mutate $port '            Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart
                 continue
             }'
 mutate $port '                if *anchor > 0 =>' '                if false =>'
+# Port continuation (Codex): argparse's repeat, Unicode-digit and type-error readings of assess flags.
+mutate $port '    #[arg(long, num_args = 0.., action = clap::ArgAction::Set)]' '    #[arg(long, num_args = 0..)]'
+mutate $port "    let ascii: Option<String> = digits.chars().map(|c| if c == '_' { Some('_') } else { py::decimal(c) }).collect();" "    let ascii: Option<String> = digits.chars().map(|c| if c == '_' || c.is_ascii_digit() { Some(c) } else { None }).collect();"
+mutate $port '    if !args.iter().any(|a| a == "delegation") {' '    if true {'
+mutate $port '    Some(fail(format!("error: argument {flag}: {why}"), 2))' '    None'
+mutate crates/core/src/py.rs '    (z <= n).then(|| char::from(b'"'"'0'"'"' + (n - z) as u8))' '    (z < n).then(|| char::from(b'"'"'0'"'"' + (n - z) as u8))'
 
 # The schema (crates/core/src/schema.rs): every input is checked before any rule runs, and each
 # field type holds. Held by the golden's refusals (the harness's own reading of the schema) and

@@ -170,7 +170,7 @@ read, that count becomes a lower bound and the error is reported under `worktree
   keys and two-space indent; a duplicate YAML key is refused where PyYAML keeps the last value; `repr`
   escapes what the reference Python's `str.isprintable` refuses, from its Unicode tables (16.0, Python
   3.14; `crates/core/src/py_printable.rs`, generated and checked by the harness); a document serde_yaml cannot parse
-  (a `%` directive among them) stops with its `YAMLError`; `maestro economy capacity` refuses a `--usage` that is not a list; a flag value outside its choices prints argparse's error line, not its usage block. The sample cache, transcript reading
+  (a `%` directive among them) stops with its `YAMLError`; `maestro economy capacity` refuses a `--usage` that is not a list; a flag value outside its choices, or one `int()` refuses, prints argparse's error line, not its usage block (a repeated `--paths` replaces the earlier list, and `int()`'s Unicode digits are read, as in argparse). The sample cache, transcript reading
   and the economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
   (maestro-paseo `shared/tiers.ts`).
   - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation

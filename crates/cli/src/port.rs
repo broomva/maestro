@@ -60,7 +60,8 @@ pub struct AssessArgs {
     no_policy: bool,
     #[arg(long, default_value = "implement")]
     kind: String,
-    #[arg(long, num_args = 0..)]
+    /// argparse's `nargs="*"` stores: a repeated `--paths` replaces the earlier list.
+    #[arg(long, num_args = 0.., action = clap::ArgAction::Set)]
     paths: Vec<String>,
     /// Omit when unknown; unknown counts as 0 for the LOC rules.
     #[arg(long, allow_negative_numbers = true, value_parser = py_int)]
@@ -118,18 +119,62 @@ pub enum EconomyCommand {
     },
 }
 
-/// argparse's `type=int`: Python's `int()` on the argument (`" 1_000 "` is 1000).
-fn py_int(s: &str) -> Result<i64, String> {
-    let t = s.trim();
-    let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
-    let ok = digits.starts_with(|c: char| c.is_ascii_digit())
-        && digits.ends_with(|c: char| c.is_ascii_digit())
-        && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
-        && !digits.contains("__");
-    if !ok {
-        return Err(format!("invalid int value: {}", py::repr_str(s)));
+/// The `type=int` flags of `delegation assess`.
+const INT_FLAGS: [&str; 4] = ["--est-loc", "--files", "--repos", "--failed-attempts"];
+
+/// argparse reads `-３００` after an int flag as a negative number (its matcher's `\d` is Unicode);
+/// clap's only reads ASCII, so such a value is joined to its flag (`--files=-３００`) before parsing.
+pub fn argv(args: Vec<String>) -> Vec<String> {
+    if !args.iter().any(|a| a == "delegation") {
+        return args;
     }
-    t.replace('_', "").parse().map_err(|_| format!("invalid int value: {}", py::repr_str(s)))
+    let negative =
+        |v: &str| v.strip_prefix('-').is_some_and(|d| !d.is_empty() && d.chars().all(|c| py::decimal(c).is_some()));
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.into_iter().peekable();
+    while let Some(a) = it.next() {
+        match it.peek() {
+            Some(v) if INT_FLAGS.contains(&a.as_str()) && negative(v) => {
+                let v = it.next().unwrap_or_default();
+                out.push(format!("{a}={v}"));
+            }
+            _ => out.push(a),
+        }
+    }
+    out
+}
+
+/// argparse's error line for a flag value its `type` refuses (`py_int`), as the port's usage errors
+/// print it; any other clap error is clap's.
+pub fn usage_error(e: &clap::Error) -> Option<ExitCode> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    if e.kind() != ErrorKind::ValueValidation {
+        return None;
+    }
+    let Some(ContextValue::String(arg)) = e.get(ContextKind::InvalidArg) else { return None };
+    let flag = arg.split_whitespace().next()?;
+    let why = std::error::Error::source(e)?.to_string();
+    Some(fail(format!("error: argument {flag}: {why}"), 2))
+}
+
+/// argparse's `type=int`: Python's `int()` on the argument (`" 1_000 "` is 1000, `"１２"` is 12).
+fn py_int(s: &str) -> Result<i64, String> {
+    let bad = || format!("invalid int value: {}", py::repr_str(s));
+    let t = py::strip(s);
+    let (neg, digits) = match t.strip_prefix('-') {
+        Some(d) => (true, d),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let ascii: Option<String> = digits.chars().map(|c| if c == '_' { Some('_') } else { py::decimal(c) }).collect();
+    let ascii = ascii.ok_or_else(bad)?;
+    let ok = ascii.starts_with(|c: char| c.is_ascii_digit())
+        && ascii.ends_with(|c: char| c.is_ascii_digit())
+        && !ascii.contains("__");
+    if !ok {
+        return Err(bad());
+    }
+    let sign = if neg { "-" } else { "" };
+    format!("{sign}{}", ascii.replace('_', "")).parse().map_err(|_| bad())
 }
 
 /// fleet_economy's `_fmt`: a count as `1.2M`, `3.4k`, or `%g`; `-` for none.

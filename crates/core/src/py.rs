@@ -82,6 +82,15 @@ fn printable(c: char) -> bool {
     crate::py_printable::NONPRINTABLE.get(i).is_none_or(|&(start, _)| n < start)
 }
 
+/// `unicodedata.decimal(c)` as an ASCII digit, as `int()` reads it: every Unicode decimal digit,
+/// from the reference Python's tables generated into `py_printable.rs`.
+pub fn decimal(c: char) -> Option<char> {
+    let n = c as u32;
+    let i = crate::py_printable::DECIMAL_ZEROS.partition_point(|&z| z + 9 < n);
+    let z = *crate::py_printable::DECIMAL_ZEROS.get(i)?;
+    (z <= n).then(|| char::from(b'0' + (n - z) as u8))
+}
+
 /// `repr(x)` for a float.
 pub fn float_repr(f: f64) -> String {
     if f.is_nan() {
@@ -223,6 +232,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn decimal_is_unicodedatas() {
+        // unicodedata.decimal: the full-width, Arabic-Indic and Ol Chiki digits; not '²' (a digit, not decimal).
+        let read: String = "０９٠٩᱒1".chars().filter_map(decimal).collect();
+        assert_eq!(read, "090921");
+        assert_eq!(decimal('\u{b2}'), None);
+        assert_eq!(decimal('/'), None);
+        assert_eq!(decimal('\u{1fbf9}'), Some('9'));
+        assert_eq!(decimal('\u{1fbfa}'), None);
+    }
 
     #[test]
     fn repr_escapes_what_python_escapes() {

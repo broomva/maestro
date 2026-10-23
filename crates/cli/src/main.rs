@@ -229,12 +229,16 @@ fn drop_inherited_git_repo() {}
 
 fn main() -> std::process::ExitCode {
     drop_inherited_git_repo();
-    let args: Vec<String> = std::env::args().collect();
+    let args = port::argv(std::env::args().collect());
     let hook = is_hook(&args);
+    let port_cmd = args.iter().any(|a| a == "delegation" || a == "economy");
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(_) if hook => return std::process::ExitCode::SUCCESS,
-        Err(e) => e.exit(),
+        Err(e) => match port_cmd.then(|| port::usage_error(&e)).flatten() {
+            Some(code) => return code,
+            None => e.exit(),
+        },
     };
 
     // The hook path never blocks a session: any failure or overrun prints nothing and exits 0.

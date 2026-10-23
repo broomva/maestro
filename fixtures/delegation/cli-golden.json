@@ -5687,6 +5687,779 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths src/a.rs --paths deploy/prod.yaml",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "--paths",
+    "deploy/prod.yaml"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "--paths",
+    "deploy/prod.yaml"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"governance\",\n \"author\": null,\n \"executor\": \"frontier\",\n \"thinking\": \"xhigh\",\n \"verify\": \"p20-full\",\n \"needs\": [],\n \"reasons\": [\n  \"governance-class paths: deploy/prod.yaml\"\n ],\n \"contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"xhigh\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths src/a.rs --paths deploy/prod.yaml",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "--paths",
+    "deploy/prod.yaml"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "--paths",
+    "deploy/prod.yaml"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 3,
+    "crash": false,
+    "stderr": "policy unreadable, refusing to classify (pass --no-policy for a repo without one): {ROOT}/bare/.control/policy.yaml: [Errno 2] No such file or directory: '{ROOT}/bare/.control/policy.yaml'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths src/a.rs --paths deploy/prod.yaml",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "--paths",
+    "deploy/prod.yaml"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "--paths",
+    "deploy/prod.yaml"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths deploy/prod.yaml --paths src/a.rs",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "deploy/prod.yaml",
+    "--paths",
+    "src/a.rs"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "deploy/prod.yaml",
+    "--paths",
+    "src/a.rs"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths deploy/prod.yaml --paths src/a.rs",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "deploy/prod.yaml",
+    "--paths",
+    "src/a.rs"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "deploy/prod.yaml",
+    "--paths",
+    "src/a.rs"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 3,
+    "crash": false,
+    "stderr": "policy unreadable, refusing to classify (pass --no-policy for a repo without one): {ROOT}/bare/.control/policy.yaml: [Errno 2] No such file or directory: '{ROOT}/bare/.control/policy.yaml'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths deploy/prod.yaml --paths src/a.rs",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "deploy/prod.yaml",
+    "--paths",
+    "src/a.rs"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "deploy/prod.yaml",
+    "--paths",
+    "src/a.rs"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths a.rs b.rs --paths",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--paths"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--paths"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs b.rs --paths",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--paths"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--paths"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 3,
+    "crash": false,
+    "stderr": "policy unreadable, refusing to classify (pass --no-policy for a repo without one): {ROOT}/bare/.control/policy.yaml: [Errno 2] No such file or directory: '{ROOT}/bare/.control/policy.yaml'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs b.rs --paths",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--paths"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--paths"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths a.rs --files \uff11\uff12 --est-loc \u0663_\u0660\u0660",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "\uff11\uff12",
+    "--est-loc",
+    "\u0663_\u0660\u0660"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "\uff11\uff12",
+    "--est-loc",
+    "\u0663_\u0660\u0660"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs --files \uff11\uff12 --est-loc \u0663_\u0660\u0660",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "\uff11\uff12",
+    "--est-loc",
+    "\u0663_\u0660\u0660"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "\uff11\uff12",
+    "--est-loc",
+    "\u0663_\u0660\u0660"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 3,
+    "crash": false,
+    "stderr": "policy unreadable, refusing to classify (pass --no-policy for a repo without one): {ROOT}/bare/.control/policy.yaml: [Errno 2] No such file or directory: '{ROOT}/bare/.control/policy.yaml'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs --files \uff11\uff12 --est-loc \u0663_\u0660\u0660",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "\uff11\uff12",
+    "--est-loc",
+    "\u0663_\u0660\u0660"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "\uff11\uff12",
+    "--est-loc",
+    "\u0663_\u0660\u0660"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths a.rs --est-loc -\uff13\uff10\uff10 --repos \u1c52",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "-\uff13\uff10\uff10",
+    "--repos",
+    "\u1c52"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "-\uff13\uff10\uff10",
+    "--repos",
+    "\u1c52"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [\n  \"decompose\"\n ],\n \"reasons\": [\n  \"bounded change: its done check verifies it\",\n  \"2 repos: a frontier plan splits it into one node per repo\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs --est-loc -\uff13\uff10\uff10 --repos \u1c52",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "-\uff13\uff10\uff10",
+    "--repos",
+    "\u1c52"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "-\uff13\uff10\uff10",
+    "--repos",
+    "\u1c52"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 3,
+    "crash": false,
+    "stderr": "policy unreadable, refusing to classify (pass --no-policy for a repo without one): {ROOT}/bare/.control/policy.yaml: [Errno 2] No such file or directory: '{ROOT}/bare/.control/policy.yaml'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs --est-loc -\uff13\uff10\uff10 --repos \u1c52",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "-\uff13\uff10\uff10",
+    "--repos",
+    "\u1c52"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "-\uff13\uff10\uff10",
+    "--repos",
+    "\u1c52"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [\n  \"decompose\"\n ],\n \"reasons\": [\n  \"bounded change: its done check verifies it\",\n  \"2 repos: a frontier plan splits it into one node per repo\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths a.rs --est-loc \u00b2",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u00b2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u00b2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --est-loc: invalid int value: '\u00b2'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs --est-loc \u00b2",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u00b2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u00b2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --est-loc: invalid int value: '\u00b2'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs --est-loc \u00b2",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u00b2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u00b2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --est-loc: invalid int value: '\u00b2'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths a.rs --files x",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "x"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "x"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --files: invalid int value: 'x'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs --files x",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "x"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "x"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --files: invalid int value: 'x'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs --files x",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "x"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "x"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --files: invalid int value: 'x'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "ladder",
    "py": [
     "ladder"
