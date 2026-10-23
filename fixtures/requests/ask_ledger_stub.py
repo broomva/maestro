@@ -50,6 +50,7 @@ def validate(ledger: dict, preauth=None, require_decisions=False, require_decisi
 
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+NUMBER = re.compile(r"[0-9]+|0o[0-7]+|0x[0-9a-fA-F]+|([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][-+]?[0-9]+)?")
 REFUSED = ("answer", "answered", "resolution", "outcome", "answered_at", "defaulted_at", "answered_by",
            "status", "archived_at", "archived_reason", "origin")
 LIMIT = 1 << 20
@@ -118,6 +119,8 @@ def file(ledger: Path, ask: dict, session, wait: float) -> str:
     for name in ("id", "uid"):
         if name in ask and not (isinstance(ask[name], str) and ID_RE.match(ask[name])):
             raise Refused(f"the ask's {name} must be a string matching {ID_RE.pattern}")
+        if name in ask and (yaml.safe_load(ask[name]) != ask[name] or NUMBER.fullmatch(ask[name])):
+            raise Refused(f"the ask's {name} {ask[name]!r} reads as a number, a bool or null to a YAML reader")
     bad = sorted(k for k in ask if k in REFUSED or k.startswith("answer_"))
     if bad:
         raise Refused(f"an agent never files {', '.join(bad)}")
@@ -153,7 +156,7 @@ def file(ledger: Path, ask: dict, session, wait: float) -> str:
         was = asks_of(before)
         if "asks" not in before or was is None:
             raise Refused("the ledger has no `asks` list to append to")
-        taken = {str(v) for a in was for v in (a.get("id"), a.get("uid")) if v is not None}
+        taken = {str(v).strip() for a in was for v in (a.get("id"), a.get("uid")) if v is not None}
         for name in (entry["id"], entry.get("uid")):
             if name is not None and name in taken:
                 raise Refused(f"the ledger already has an ask {name!r}; nothing was written")

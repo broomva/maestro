@@ -242,7 +242,9 @@ fn no_spelling_of_a_taken_uid_is_filed() {
             .unwrap();
         let said = String::from_utf8_lossy(&out.stderr);
         assert!(
-            said.contains("already has an ask") || said.contains("must be a string matching"),
+            said.contains("already has an ask")
+                || said.contains("must be a string matching")
+                || said.contains("reads as a number"),
             "{uid}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
