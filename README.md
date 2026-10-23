@@ -47,7 +47,7 @@ maestro economy capacity --usage F [--samples F] [--now T] [--state F]   # capac
 maestro economy tiers [--path F]     # Maestro's economy by tier, and what to re-plan
 ```
 
-Every command takes `--json`. Agents should use `--json`: it is the same data the MCP tools return,
+Every command takes `--json` (`delegation brief` prints its markdown block either way). Agents should use `--json`: it is the same data the MCP tools return,
 because the CLI and the MCP server share one dispatch.
 
 By default Maestro reads the workspace at `origin/main`, because main's copy wins under the home rule.
@@ -170,7 +170,7 @@ read, that count becomes a lower bound and the error is reported under `worktree
   keys and two-space indent; a duplicate YAML key is refused where PyYAML keeps the last value; `repr`
   escapes what the reference Python's `str.isprintable` refuses, from its Unicode tables (16.0, Python
   3.14; `crates/core/src/py_printable.rs`, generated and checked by the harness); a document serde_yaml cannot parse
-  (a `%` directive among them) stops with its `YAMLError`; `maestro economy capacity` refuses a `--usage` that is not a list; a flag value outside its choices, or one `int()` refuses, prints argparse's error line, not its usage block (a repeated flag takes its last value, every occurrence checked against its choices, and `int()`'s Unicode digits are read, as in argparse). Argv argparse accepts that clap does not is refused with clap's error (exit 2), never read differently: an abbreviated flag (`--est` for `--est-loc`), a value starting with `-` (`--ticket -1`, `--files -1_000`) except an ASCII negative integer given to an int flag, a global flag given to a subcommand that does not take it (`plan --no-policy`), and an integer past 64 bits. The sample cache, transcript reading
+  (a `%` directive among them) stops with its `YAMLError`; `maestro economy capacity` refuses a `--usage` that is not a list; a flag value outside its choices, or one `int()` refuses, prints argparse's error line, not its usage block (a repeated flag takes its last value, every occurrence checked against its choices, and `int()`'s Unicode digits are read, as in argparse). Argv argparse accepts that clap does not is refused with clap's error (exit 2), never read differently: an abbreviated flag (`--est` for `--est-loc`), a value starting with `-` (`--ticket -1`, `--files -1_000`) except an ASCII negative integer given to an int flag, a global flag given to a subcommand that does not take it (`plan --no-policy`), and an integer past 64 bits. A graph repo path in `~user/` form is refused by name (exit 1); only `~` and `~/` expand. The sample cache, transcript reading
   and the economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
   (maestro-paseo `shared/tiers.ts`).
   - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation

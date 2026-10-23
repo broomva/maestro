@@ -27,6 +27,23 @@ fn a_repos_list_is_refused_not_planned() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("graph.repos: a mapping, not a list"));
 }
 
+/// Python expands `~user/` through the password database; Maestro refuses it by name instead of
+/// reading it relative to the cwd and skipping the node as absent (P20 port arc 2 r2, Stratum A).
+/// `~/` still expands: the same graph with `~/` plans.
+#[test]
+fn a_tilde_user_repo_path_is_refused_not_read_relative() {
+    let dir = tempfile::tempdir().unwrap();
+    for path in ["~root/x", "~nobody-here/x", "~x"] {
+        let out = plan(dir.path(), &format!("repo: w\nrepos:\n  w: {path}\n{NODES}"));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{path}: {err}");
+        assert!(out.stdout.is_empty(), "{path}");
+        assert!(err.contains("repos.w:") && err.contains("only ~ and ~/ expand"), "{path}: {err}");
+    }
+    let out = plan(dir.path(), &format!("repo: w\nrepos:\n  w: {{path: ~/, policy: none}}\n{NODES}"));
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 #[test]
 fn a_single_repo_graph_plans() {
     let dir = tempfile::tempdir().unwrap();

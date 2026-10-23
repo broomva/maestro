@@ -746,7 +746,15 @@ fn bind_repos(
         let Some(path) = path.filter(|p| py::truthy(Some(p))) else {
             return Err(Fault::Value(format!("repo {} has no path", py::repr_str(&name))));
         };
-        out.push((name, Repo { dir: realpath(&expanduser(&py::str_of(&path))), policy }));
+        let path = py::str_of(&path);
+        // `~user/` is expanded by Python through the password database; refused, never read as relative.
+        if path.starts_with('~') && !(path == "~" || path.starts_with("~/")) {
+            return Err(Fault::Refused {
+                field: format!("repos.{name}"),
+                why: format!("{}: only ~ and ~/ expand", py::repr_str(&path)),
+            });
+        }
+        out.push((name, Repo { dir: realpath(&expanduser(&path)), policy }));
     }
     let mut unknown: Vec<&str> =
         bindings.iter().map(|(n, _)| n.as_str()).filter(|n| !out.iter().any(|(o, _)| o == n)).collect();
@@ -792,6 +800,7 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
     let repos = match bind_repos(&graph, &order, &root, &bindings) {
         Ok(r) => r,
         Err(Fault::Value(e)) => return fail(format!("  [error] {e}"), 2),
+        Err(f @ Fault::Refused { .. }) => return fail(format!("maestro: {f}"), 1),
         Err(f) => return crash(&f),
     };
     let absent: HashSet<String> =
