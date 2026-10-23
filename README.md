@@ -137,13 +137,16 @@ read, that count becomes a lower bound and the error is reported under `worktree
 - **Delegation and economy.** `maestro_core::delegation` and `maestro_core::economy` port the
   workspace's `scripts/delegation.py` (assessment, tier ladder, plan-graph rules, briefs) and the pure
   part of `scripts/fleet_economy.py` (capacity forecast, cadence modes, launch and resume gates, the
-  economy by tier). The Python is the reference until the tick moves here (node `loops-port`); its
-  messages, rounding and exit codes are kept, so `maestro delegation` and `maestro economy` can stand in
-  for its CLIs. The sample cache, transcript reading and the economy ledger stay in the Python.
-  The tier ladder equals the plugin's `DEFAULT_TIER_LADDER` (maestro-paseo `shared/tiers.ts`).
-  - `fixtures/delegation/golden.json` is the Python's output on deterministic cases; the test
-    `crates/core/tests/parity_delegation.rs` holds the Rust to it, and `scripts/mutation-check.sh`
-    breaks each guarded predicate once.
+  economy by tier). The Python is the reference until the tick moves here (node `loops-port`). Its
+  messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments, with three
+  known differences: the CLI flags follow the subcommand (`maestro delegation plan G --repo N=P`, not
+  `--repo N=P plan G`), JSON is printed with sorted keys and two-space indent, and a YAML graph with a
+  duplicate key is refused where PyYAML keeps the last value. The sample cache, transcript reading and the
+  economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
+  (maestro-paseo `shared/tiers.ts`).
+  - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation
+    with files on disk among them; the test `crates/core/tests/parity_delegation.rs` holds the Rust to
+    it, and `scripts/mutation-check.sh` breaks the guards listed under "Ports of delegation.py".
   - `python3 scripts/parity-delegation.py --workspace ~/broomva` fails unless the golden is the
     Python's output at the workspace's `origin/main`, the same cases agree through `maestro
     parity-eval`, both CLIs agree on every real `docs/plans/*.graph.yaml` and on scratch-repo

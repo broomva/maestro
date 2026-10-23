@@ -68,6 +68,16 @@ def py_eval(D, E, case, tmp):
         if fn == "validate":
             errors, nodes = D.validate(json.loads(json.dumps(a["graph"])), a.get("human_paths") or [])
             return {"ok": {"errors": errors, "nodes": [plan_json(D, n) for n in nodes]}}
+        if fn == "validate_disk":
+            files = set(a.get("files") or [])
+            human = a.get("human_paths") or []
+            errors, nodes = D.validate(json.loads(json.dumps(a["graph"])),
+                                       exists=lambda r: f"{r.repo}:{r.path}" in files,
+                                       policy_for=lambda name: human, dirs=dict(a.get("dirs") or []))
+            return {"ok": {"errors": errors, "nodes": [plan_json(D, n) for n in nodes]}}
+        if fn == "add_hours":  # the timedelta the forecast adds, to the microsecond
+            now = E.parse_ts(a["now"])
+            return {"ok": (now + dt.timedelta(hours=a["hours"]) - now) // dt.timedelta(microseconds=1)}
         if fn == "brief":
             errors, nodes = D.validate(json.loads(json.dumps(a["graph"])))
             if errors:
@@ -110,7 +120,7 @@ def py_eval(D, E, case, tmp):
         raise KeyError(fn)
     except ValueError as e:
         return {"err": str(e)}
-    except Exception as e:  # what the Python does not catch: a traceback, compared by kind only
+    except Exception as e:  # what the Python does not catch: a traceback, compared by its kind
         return {"crash": type(e).__name__}
 
 
@@ -130,8 +140,7 @@ def same(a, b):
 
 
 def same_result(want, got):
-    if "crash" in want or "crash" in got:
-        return "crash" in want and "crash" in got
+    """A crash is compared by the Python exception's type name, like every other value."""
     return same(want, got)
 
 
@@ -219,6 +228,11 @@ GRAPHS = [
     {"nodes": [node("a", signals={"paths": ["a.rs", "x/test_b.py"]}, spawn_default="mechanical")]},
     {"nodes": [node(1), node("b", depends_on=[1, 2])]},
     {"nodes": [node("a", done=3)]},
+    {"repo": "w", "repos": ["w"], "nodes": [node("a")]},
+    {"nodes": [node("a", tier="bad\u00a0tier\u200b\u2028\ue000\xad")]},
+    {"repo": "w", "repos": "w", "nodes": [node("a")]},
+    {"nodes": [node("a", signals={"paths": ["a.rs"], "est_loc": [1]})]},
+    {"nodes": [node("a", signals={"paths": 7})]},
     {"nodes": [node("a", signals={"paths": ["scripts/x-hook.sh"]})], "_human": ["scripts/*-hook.sh"]},
     {"ticket": "BRO-1", "repo": "w", "repos": {"w": ".", "m": "m"},
      "nodes": [node("a", inputs=["docs/specs/a.html", "m:docs/adrs/b.html"], signals={"paths": ["a.rs"]}),
@@ -235,6 +249,42 @@ def graph_cases():
         for n in g.get("nodes") or []:
             if isinstance(n, dict) and isinstance(n.get("id"), str):
                 cases.append({"fn": "brief", "args": {"graph": g, "node": n["id"], "ticket": g.get("ticket")}})
+    return cases
+
+
+def disk_cases(rng):
+    """validate with files on disk and bound repo directories."""
+    w, n = "/r/w", "/r/w/nested"
+    graphs = [
+        ({"nodes": [node("a", signals={"paths": ["a.rs"], "spec": "docs/specs/x.html", "est_loc": 400})]}, []),
+        ({"nodes": [node("a", signals={"paths": ["a.rs"], "spec": "docs/specs/x.html", "est_loc": 400})]},
+         [":docs/specs/x.html"]),
+        ({"nodes": [node("a", inputs=["docs/specs/x.html"], signals={"paths": ["a.rs", "b.rs"], "est_loc": 400})]},
+         [":docs/specs/x.html"]),
+        ({"nodes": [node("a", inputs=["docs/specs/x.html"], signals={"paths": ["a.rs", "b.rs"], "est_loc": 400})]}, []),
+        ({"nodes": [node("a", inputs=["notes/x.html", "docs/adrs/y.html"],
+                         signals={"paths": ["a.rs"], "public_api": True})]}, [":notes/x.html", ":docs/adrs/y.html"]),
+        ({"nodes": [DESIGN, node("a", inputs=["docs/specs/a.html"], depends_on=["spec"],
+                                 signals={"paths": ["a.rs"], "est_loc": 400})]}, []),
+    ]
+    cases = [{"fn": "validate_disk", "args": {"graph": g, "files": f, "dirs": []}} for g, f in graphs]
+    nested = [
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", signals={"paths": ["nested/x.rs"]})]},
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", signals={"paths": ["nested"]})]},
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", inputs=["nested/docs/specs/a.html"])]},
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", signals={"paths": ["nestedx/a.rs"]})]},
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", repo="n", signals={"paths": ["x.rs"]})]},
+    ]
+    for g in nested:
+        for dirs in ([["w", w], ["n", n]], [["n", n], ["w", w]]):
+            cases.append({"fn": "validate_disk", "args": {"graph": g, "files": [], "dirs": dirs}})
+    for _ in range(300):
+        h = rng.choice([rng.uniform(0, 400), rng.uniform(0, 1), rng.randrange(1, 10**6) / 8, rng.random() * 1e4])
+        cases.append({"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z", "hours": h}})
+    cases += [{"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z", "hours": h}}
+              for h in [0.0, 1.5, 1 / 3, 2.5e-10, 1.25e-10, 3.75e-10, 1e-12, 123.456789,
+                        # where hours * 3600 then rounding (not CPython's timedelta) is 1 µs off
+                        6687.660218274861, 9987.080269162361, 7009.91369442625, 9937.848669440416]]
     return cases
 
 
@@ -314,7 +364,7 @@ def capacity_cases(rng):
 
 def all_cases():
     rng = random.Random(3204)
-    return assess_cases(rng) + graph_cases() + small_cases() + capacity_cases(rng)
+    return assess_cases(rng) + graph_cases() + disk_cases(rng) + small_cases() + capacity_cases(rng)
 
 
 # --- runners -------------------------------------------------------------------------------------
@@ -334,8 +384,10 @@ def compare_cli(name, py_cmd, rs_cmd, cwd, parse_json=False):
     pc, po, pe = run(py_cmd, cwd)
     rc, ro, re_ = run(rs_cmd, cwd)
     cli_runs.append(pc)
-    if pc == 1 and "Traceback" in pe:  # an uncaught Python error: the Rust must also exit 1 with a traceback
-        return check(name, rc == 1 and "Traceback" in re_, f"python crashed; rust exit {rc}: {re_[:200]}")
+    if pc == 1 and "Traceback" in pe:  # an uncaught Python error: the Rust exits 1 with the same exception kind
+        kind = pe.strip().splitlines()[-1].split(":", 1)[0]
+        return check(name, rc == 1 and "Traceback" in re_ and f"\n  {kind}: " in re_ and po == ro,
+                     f"python raised {kind}; rust exit {rc}: {re_[:200]}")
     ok = check(name, pc == rc, f"exit python {pc} rust {rc}\n  py: {pe[:300]}\n  rs: {re_[:300]}")
     ok &= check(name, pe == re_, f"stderr differs\n  py: {pe[:600]}\n  rs: {re_[:600]}")
     if parse_json and pc == 0:
@@ -393,6 +445,9 @@ def cli_scenarios(dpy, maestro, ws, tmp):
         "bad-name": {"repo": "w", "repos": {"w": w, "a:b": bare}, "nodes": [node("a")]},
         "no-path": {"repo": "w", "repos": {"w": w, "x": {"policy": "none"}}, "nodes": [node("a")]},
         "single": {"nodes": [node("a", inputs=["docs/specs/a.html"])]},
+        "repos-list": {"repo": "w", "repos": ["w"], "nodes": [node("a")]},
+        "int-id": {"repo": "w", "repos": {"w": w}, "nodes": [node(1), node("a", depends_on=[1])]},
+        "int-id-only": {"repo": "w", "repos": {"w": w}, "nodes": [node(1)]},
     }
     for name, g in graphs.items():
         path = os.path.join(tmp, f"{name}.json")
@@ -418,13 +473,22 @@ def cli_scenarios(dpy, maestro, ws, tmp):
               ["--kind", "rerun", "--brief"],
               ["--kind", "implement", "--paths", "a.rs", "b.rs", "--est-loc", "300", "--done", "x", "--brief"],
               ["--kind", "review", "--mode", "read-only", "--observed-tier", "apex"],
-              ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "3", "--allow-apex", "--mode", "conserve"]]
+              ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "3", "--allow-apex", "--mode", "conserve"],
+              ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "-1", "--est-loc", "-5", "--files", "-2"]]
     for args in assess:
         for root_args in (["--root", w], ["--root", bare], ["--root", bare, "--no-policy"]):
             compare_cli(f"assess {' '.join(root_args + args)}", ["python3", dpy, *root_args, "assess", *args],
                         [maestro, "delegation", "assess", *root_args, *args], w,
                         parse_json="--brief" not in args)
     compare_cli("ladder", ["python3", dpy, "ladder"], [maestro, "delegation", "ladder"], w, parse_json=True)
+    # YAML merge keys, as PyYAML applies them: a reviewer merged in from an anchor stays a reviewer.
+    merged = os.path.join(tmp, "merged.graph.yaml")
+    with open(merged, "w") as f:
+        f.write(f"repo: w\nrepos: {{w: {w}}}\nreviewer: &reviewer\n  kind: review\n  done: check\n"
+                "nodes:\n  - <<: *reviewer\n    id: r\n    tier: standard\n  - <<: *reviewer\n    id: s\n")
+    for sub, extra in (("plan", []), ("brief", ["s"])):
+        compare_cli(f"cli merge-keys {sub}", ["python3", dpy, sub, merged, *extra],
+                    [maestro, "delegation", sub, merged, *extra], w)
 
 
 def live_capacity(E, maestro):
@@ -544,6 +608,15 @@ def main(argv=None):
         print(f"cli       {len(cli_runs)} invocations of both CLIs (by exit code {codes}) "
               + ("agree" if len(failures) == before else "DIFFER"))
         live_capacity(E, maestro)
+        # The forecast's timedelta, densely: 100,000 random runways to the microsecond.
+        rng = random.Random()
+        sweep = [{"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z",
+                                              "hours": rng.choice([rng.uniform(0, 400), rng.random() * 1e4])}}
+                 for _ in range(100_000)]
+        got = rust_eval(maestro, sweep)
+        off = sum(1 for c, g in zip(sweep, got) if not same(py_eval(D, E, c, tmp), g))
+        print(f"timedelta {len(sweep) - off} of {len(sweep)} random runways agree to the microsecond")
+        check("timedelta sweep", off == 0, f"{off} runways differ")
         if not a.offline:
             before = len(failures)
             plugin_tiers(maestro, D, tmp)

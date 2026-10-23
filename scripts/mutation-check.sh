@@ -211,6 +211,37 @@ mutate $econ '(None, _) => true,' '(None, _) => false,'
 mutate $econ '(ctx > HANDOFF_K, driven && ctx > SUCCESSOR_K)' '(ctx > HANDOFF_K, ctx > SUCCESSOR_K)'
 mutate $econ '(MIN_SPAN_H..=(7 * 24) as f64).contains(&open_h)' '(0.0..=f64::MAX).contains(&open_h)'
 mutate $econ '&& rd / rn >= REPLAN_RAISED' '&& rd / rn > REPLAN_RAISED'
+# A repos that is not a mapping stops the run; it never plans as a single-repo graph.
+mutate $deleg 'return Err(Fault::attribute_error(format!("'"'"'{}'"'"' object has no attribute '"'"'keys'"'"'", type_name(other))));' 'let _ = other;
+            vec![]'
+mutate crates/cli/src/port.rs '            return Err(Fault::Crash {
+                kind: "AttributeError",
+                msg: format!("'"'"'{}'"'"' object has no attribute '"'"'items'"'"'", d::type_name(other)),
+            });' '            let _ = other;
+            vec![(home, json!(root))]'
+
+# The disk-aware guards: a stated spec must exist; a spec input is found on disk; a path inside
+# another bound repo is refused.
+mutate $deleg '} else if disk.is_some_and(|d| !(d.exists)(s)) {' '} else if false {'
+mutate $deleg 'None => disk.is_some_and(|d| (d.exists)(x)),' 'None => false,'
+mutate $deleg '&& d.starts_with(&format!("{mine}/"))' '&& false'
+# Tier floors, reasons, decomposition, the thinking floor, the mechanical rung and the review exemption.
+mutate $deleg '} else if tier < a.executor {' '} else if false {'
+mutate $deleg 'if tier > a.executor && !has_reason {' 'if false {'
+mutate $deleg 'if tier == Tier::Apex && !has_reason {' 'if false {'
+mutate $deleg 'if a.needs.contains(&"decompose") {' 'if false {'
+mutate $deleg 'Some(t) if (a.complexity == "governance" || kind_s == "review") && t < a.thinking =>' 'Some(t) if false && t < a.thinking =>'
+mutate $deleg 'if MECHANICAL_KINDS.contains(&kind) && paths.is_empty() && loc == 0 && gov.is_empty() {' 'if MECHANICAL_KINDS.contains(&kind) && loc == 0 && gov.is_empty() {'
+mutate $deleg '        && kind != "review"
+' '
+'
+# Samples from the future, too short a span, unusable accounts, past resets, too few approvals.
+mutate $econ '|| at > now {' '{'
+mutate $econ 'if span < MIN_SPAN_H {' 'if false {'
+mutate $econ 'py::num(v.get("7d")).filter(|s| !py::truthy(v.get("limited")) && *s < 100.0)' 'py::num(v.get("7d")).filter(|s| *s < 100.0)'
+mutate $econ '.filter(|r| *r > now)' '.filter(|_| true)'
+mutate $econ '&& approved >= 3.0' '&& approved >= 0.0'
+mutate $econ 'Some(at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64))' 'Some(at + (hours * 3600.0).trunc() as i64 * US + round_half_even((hours * 3600.0).fract() * 1e6))'
 
 echo "mutation  $killed of $total killed"
 exit $failed

@@ -62,11 +62,11 @@ pub struct AssessArgs {
     #[arg(long, num_args = 0..)]
     paths: Vec<String>,
     /// Omit when unknown; unknown counts as 0 for the LOC rules.
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     est_loc: Option<i64>,
-    #[arg(long)]
+    #[arg(long, allow_negative_numbers = true)]
     files: Option<i64>,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, allow_negative_numbers = true)]
     repos: i64,
     #[arg(long)]
     public_api: bool,
@@ -74,7 +74,7 @@ pub struct AssessArgs {
     one_way_door: bool,
     #[arg(long)]
     spec: Option<String>,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
     failed_attempts: i64,
     #[arg(long)]
     observed_tier: Option<String>,
@@ -202,7 +202,10 @@ fn load_graph(path: &str) -> Result<(Value, Vec<String>), String> {
     let v: Value = if path.ends_with(".json") {
         serde_json::from_str(&text).map_err(|e| e.to_string())?
     } else {
-        serde_yaml::from_str(&text).map_err(|e| e.to_string())?
+        // PyYAML applies merge keys (`<<: *anchor`); serde_yaml only on request.
+        let mut y: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| e.to_string())?;
+        y.apply_merge().map_err(|e| e.to_string())?;
+        serde_json::to_value(y).map_err(|e| e.to_string())?
     };
     let ordered: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| e.to_string())?;
     let order = match ordered.get("repos") {
@@ -239,24 +242,30 @@ struct Repo {
 }
 
 /// name -> {dir, policy} for every repo a graph names, in the graph's order.
+/// `Fault::Value` is the Python's `ValueError` (exit 2); `Fault::Crash` its traceback (exit 1).
 fn bind_repos(
     graph: &Value,
     order: &[String],
     root: &str,
     bindings: &[(String, String)],
-) -> Result<Vec<(String, Repo)>, String> {
+) -> Result<Vec<(String, Repo)>, Fault> {
     let named = py::truthy(graph.get("repos"));
     let home = py::or(graph.get("repo"), None).map_or_else(String::new, py::str_of);
-    let declared: Vec<(String, Value)> = match graph.get("repos") {
-        Some(Value::Object(o)) if !o.is_empty() => {
-            order.iter().filter_map(|k| o.get(k).map(|v| (k.clone(), v.clone()))).collect()
+    // `graph.get("repos") or {}`, then `.items()`: a truthy non-mapping is the Python's AttributeError.
+    let declared: Vec<(String, Value)> = match py::or(graph.get("repos"), None) {
+        Some(Value::Object(o)) => order.iter().filter_map(|k| o.get(k).map(|v| (k.clone(), v.clone()))).collect(),
+        Some(other) => {
+            return Err(Fault::Crash {
+                kind: "AttributeError",
+                msg: format!("'{}' object has no attribute 'items'", d::type_name(other)),
+            });
         }
-        _ => vec![(home, json!(root))],
+        None => vec![(home, json!(root))],
     };
     let mut out: Vec<(String, Repo)> = Vec::new();
     for (name, v) in declared {
         if named && (name.is_empty() || name.contains(':')) {
-            return Err(format!("repo name {}: a name is non-empty and has no ':'", py::repr_str(&name)));
+            return Err(Fault::Value(format!("repo name {}: a name is non-empty and has no ':'", py::repr_str(&name))));
         }
         let (mut path, policy) = match &v {
             Value::Object(o) => (o.get("path").cloned(), o.get("policy").cloned().unwrap_or(Value::Null)),
@@ -266,7 +275,7 @@ fn bind_repos(
             path = Some(json!(p));
         }
         let Some(path) = path.filter(|p| py::truthy(Some(p))) else {
-            return Err(format!("repo {} has no path", py::repr_str(&name)));
+            return Err(Fault::Value(format!("repo {} has no path", py::repr_str(&name))));
         };
         out.push((name, Repo { dir: realpath(&expanduser(&py::str_of(&path))), policy }));
     }
@@ -275,12 +284,15 @@ fn bind_repos(
     if !unknown.is_empty() {
         unknown.sort_unstable();
         unknown.dedup();
-        return Err(format!("--repo names {}, which the graph does not", unknown.join(", ")));
+        return Err(Fault::Value(format!("--repo names {}, which the graph does not", unknown.join(", "))));
     }
     let mut seen: HashMap<&str, &str> = HashMap::new();
     for (name, r) in &out {
         if let Some(first) = seen.get(r.dir.as_str()) {
-            return Err(format!("repos {first} and {name} are one directory ({}): a place has one name", r.dir));
+            return Err(Fault::Value(format!(
+                "repos {first} and {name} are one directory ({}): a place has one name",
+                r.dir
+            )));
         }
         seen.insert(&r.dir, name);
     }
@@ -308,7 +320,8 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
         bind.repos.iter().filter_map(|x| x.split_once('=').map(|(n, p)| (n.to_string(), p.to_string()))).collect();
     let repos = match bind_repos(&graph, &order, &root, &bindings) {
         Ok(r) => r,
-        Err(e) => return fail(format!("  [error] {e}"), 2),
+        Err(Fault::Value(e)) => return fail(format!("  [error] {e}"), 2),
+        Err(f) => return crash(&f),
     };
     let absent: HashSet<String> =
         repos.iter().filter(|(_, r)| !Path::new(&r.dir).is_dir()).map(|(n, _)| n.clone()).collect();
@@ -394,7 +407,8 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
         return ExitCode::from(1);
     }
     if let Some(want) = node {
-        let Some(n) = nodes.iter().find(|n| py::str_of(&n.id) == want) else {
+        // `n["id"] == o.node`: only a string id names a node from the command line.
+        let Some(n) = nodes.iter().find(|n| n.id.as_str() == Some(want)) else {
             return fail(format!("no node {}", py::repr_str(want)), 2);
         };
         let ticket = graph.get("ticket").filter(|t| py::truthy(Some(t))).map(py::str_of);
@@ -419,11 +433,22 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
     }
     for n in &nodes {
         let thinking = n.thinking.as_str().and_then(Thinking::parse).unwrap_or(n.tier.rung().thinking);
+        // `','.join(depends_on)` takes strings only.
+        if let Some(bad) = n.depends_on.iter().find(|d| !d.is_string()) {
+            return crash(&Fault::Crash {
+                kind: "TypeError",
+                msg: format!("sequence item 0: expected str instance, {} found", d::type_name(bad)),
+            });
+        }
         let after: Vec<String> = n.depends_on.iter().map(py::str_of).collect();
         let after = after.join(",");
+        // A number right-aligns in a format width, a string left-aligns.
+        let id = match &n.id {
+            Value::String(s) => format!("{s:16}"),
+            other => format!("{:>16}", py::str_of(other)),
+        };
         println!(
-            "{:16} {:12} {:10} {:28} thinking={:6} verify={:8} after={}",
-            py::str_of(&n.id),
+            "{id} {:12} {:10} {:28} thinking={:6} verify={:8} after={}",
             n.kind,
             n.tier.as_str(),
             n.tier.rung().provider,
@@ -454,7 +479,7 @@ fn assess(a: &AssessArgs) -> ExitCode {
     } else {
         match policy_of(&root) {
             Ok(h) => h,
-            Err(crash @ Fault::Crash(_)) => return self::crash(&crash),
+            Err(crash @ Fault::Crash { .. }) => return self::crash(&crash),
             Err(e) => {
                 return fail(
                     format!("policy unreadable, refusing to classify (pass --no-policy for a repo without one): {e}"),

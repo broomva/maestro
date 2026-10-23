@@ -94,14 +94,14 @@ fn round_half_even(f: f64) -> i64 {
     r as i64
 }
 
-/// `datetime + timedelta(hours=h)`: the float seconds split by modf, the fraction rounded to µs.
-fn add_hours(at: i64, hours: f64) -> Option<i64> {
-    let secs = hours * 3600.0;
-    if !secs.is_finite() || secs.abs() > 1e12 {
+/// `datetime + timedelta(hours=h)` as CPython's `timedelta_new` builds it: the whole hours exactly,
+/// the fraction times 3.6e9 µs in double precision, rounded half to even.
+pub fn add_hours(at: i64, hours: f64) -> Option<i64> {
+    if !hours.is_finite() || hours.abs() > 1e8 {
         return None;
     }
-    let whole = secs.trunc();
-    Some(at + whole as i64 * US + round_half_even((secs - whole) * 1e6))
+    let whole = hours.trunc();
+    Some(at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64))
 }
 
 fn digits(s: &str) -> Option<i64> {

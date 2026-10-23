@@ -4,7 +4,8 @@
 //! `scripts/fleet_economy.py` return on each case, written by `scripts/parity-delegation.py
 //! --write` (which also fails when the golden is not the Python's output). This test evaluates
 //! every case with the Rust port and requires the same result: equal JSON of equal types, the
-//! same message for an error the Python raises as `ValueError`, and a crash where it crashes.
+//! same message for an error the Python raises as `ValueError`, and a crash of the same exception
+//! kind where it crashes.
 
 use maestro_core::parity::eval;
 use serde_json::Value;
@@ -23,10 +24,8 @@ fn same(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// A crash is `{"crash": <Python exception type>}` on both sides, so it is compared like any value.
 fn agrees(want: &Value, got: &Value) -> bool {
-    if want.get("crash").is_some() || got.get("crash").is_some() {
-        return want.get("crash").is_some() && got.get("crash").is_some();
-    }
     same(want, got)
 }
 
@@ -67,6 +66,11 @@ fn graph_validation_matches_the_python() {
 }
 
 #[test]
+fn graph_validation_on_disk_matches_the_python() {
+    check("validate_disk");
+}
+
+#[test]
 fn briefs_match_the_python() {
     check("brief");
 }
@@ -86,6 +90,7 @@ fn capacity_matches_the_python() {
 #[test]
 fn timestamps_match_the_python() {
     check("parse_ts");
+    check("add_hours");
 }
 
 #[test]

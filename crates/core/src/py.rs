@@ -49,14 +49,44 @@ pub fn repr_str(s: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            c if (c as u32) < 0x20 || (0x7f..0xa0).contains(&(c as u32)) => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
+            c if !printable(c) => {
+                let n = c as u32;
+                out.push_str(&match n {
+                    0..=0xff => format!("\\x{n:02x}"),
+                    0x100..=0xffff => format!("\\u{n:04x}"),
+                    _ => format!("\\U{n:08x}"),
+                });
             }
             c => out.push(c),
         }
     }
     out.push(quote);
     out
+}
+
+/// `str.isprintable` for the characters a message can carry: controls, format characters,
+/// separators other than the space, and private use are escaped by `repr`. (Unassigned code points,
+/// which Python also escapes, need the Unicode tables and are printed as they are.)
+fn printable(c: char) -> bool {
+    let n = c as u32;
+    !(n < 0x20
+        || (0x7f..0xa1).contains(&n)
+        || n == 0xad
+        || (0x600..=0x605).contains(&n)
+        || n == 0x61c
+        || n == 0x6dd
+        || n == 0x70f
+        || n == 0x1680
+        || n == 0x180e
+        || (0x2000..=0x200f).contains(&n)
+        || (0x2028..=0x202f).contains(&n)
+        || (0x205f..=0x2064).contains(&n)
+        || (0x2066..=0x206f).contains(&n)
+        || n == 0x3000
+        || (0xd800..=0xf8ff).contains(&n)
+        || n == 0xfeff
+        || (0xfff9..=0xfffb).contains(&n)
+        || (0xf0000..=0x10ffff).contains(&n))
 }
 
 /// `repr(x)` for a float.

@@ -2,12 +2,12 @@
 //!
 //! A case is `{"fn": name, "args": {...}}`; the result is `{"ok": value}`, `{"err": message}` for
 //! an error the Python raises as `ValueError` (its message compared to the byte), or
-//! `{"crash": message}` for one it does not catch (only the kind is compared).
+//! `{"crash": kind}` for one it does not catch (the exception's type name, compared exactly).
 //! `scripts/parity-delegation.py` runs the Python's functions on the same cases, writes
 //! `fixtures/delegation/golden.json`, and runs this evaluator through `maestro parity-eval`;
 //! `crates/core/tests/parity_delegation.rs` holds this evaluator to that golden.
 
-use crate::delegation::{self as d, BriefNode, Fault, Tier};
+use crate::delegation::{self as d, BriefNode, Disk, Fault, Ref, Tier};
 use crate::economy as e;
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
@@ -23,7 +23,7 @@ fn s<'a>(args: &'a Value, k: &str) -> &'a str {
 fn fault(f: Fault) -> Value {
     match f {
         Fault::Value(m) => json!({"err": m}),
-        Fault::Crash(m) => json!({"crash": m}),
+        Fault::Crash { kind, .. } => json!({"crash": kind}),
     }
 }
 
@@ -52,6 +52,31 @@ pub fn eval(case: &Value) -> Value {
             }
             Err(f) => fault(f),
         },
+        // `validate` with files on disk (`exists`) and bound repo directories (`dirs`): the spec-exists
+        // check, spec discovery on disk and the nested-repo refusal.
+        "validate_disk" => {
+            let files = strings(args.get("files"));
+            let dirs: Vec<(String, String)> = args
+                .get("dirs")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(|p| (crate::py::str_of(&p[0]), crate::py::str_of(&p[1]))).collect())
+                .unwrap_or_default();
+            let human = strings(args.get("human_paths"));
+            let exists = |r: &Ref| files.iter().any(|f| *f == format!("{}:{}", r.repo, r.path));
+            let policy_for = |_: &str| Ok(human.clone());
+            let disk = Disk { exists: &exists, policy_for: &policy_for };
+            match d::validate(&args["graph"], &[], Some(&disk), Some(&dirs), &HashSet::new()) {
+                Ok((errors, nodes)) => json!({"ok": {
+                    "errors": errors, "nodes": nodes.iter().map(d::PlanNode::to_json).collect::<Vec<_>>()
+                }}),
+                Err(f) => fault(f),
+            }
+        }
+        "add_hours" => {
+            let now = e::parse_ts(args.get("now")).ok().flatten().unwrap_or(0);
+            let hours = args.get("hours").and_then(Value::as_f64).unwrap_or(f64::NAN);
+            json!({"ok": e::add_hours(now, hours).map(|t| t - now)})
+        }
         "brief" => match d::validate(&args["graph"], &[], None, None, &HashSet::new()) {
             Ok((errors, _)) if !errors.is_empty() => json!({"err": errors.join("\n")}),
             Ok((_, nodes)) => {

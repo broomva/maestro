@@ -214,17 +214,28 @@ pub fn is_spec_path(path: &str) -> bool {
 }
 
 /// Why the Python would stop. `Value` is a `ValueError` the graph validator reports as a node
-/// error; `Crash` is one it lets through (a traceback, exit 1).
+/// error; `Crash` is one it lets through (a traceback, exit 1), with the Python exception's kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
     Value(String),
-    Crash(String),
+    Crash { kind: &'static str, msg: String },
+}
+
+impl Fault {
+    fn type_error(msg: String) -> Fault {
+        Fault::Crash { kind: "TypeError", msg }
+    }
+
+    fn attribute_error(msg: String) -> Fault {
+        Fault::Crash { kind: "AttributeError", msg }
+    }
 }
 
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Fault::Value(m) | Fault::Crash(m) => f.write_str(m),
+            Fault::Value(m) => f.write_str(m),
+            Fault::Crash { kind, msg } => write!(f, "{kind}: {msg}"),
         }
     }
 }
@@ -233,10 +244,11 @@ impl std::fmt::Display for Fault {
 fn int_of(v: &Value) -> Result<i64, Fault> {
     match v {
         Value::Bool(b) => Ok(*b as i64),
-        Value::Number(n) => n
-            .as_i64()
-            .or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f.trunc() as i64))
-            .ok_or_else(|| Fault::Crash(format!("cannot convert float {} to integer", py::repr(v)))),
+        Value::Number(n) => {
+            n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f.trunc() as i64)).ok_or_else(|| {
+                Fault::Crash { kind: "OverflowError", msg: format!("cannot convert float {} to integer", py::repr(v)) }
+            })
+        }
         Value::String(s) => {
             // Python's int(): optional sign, ASCII digits, single underscores between digits.
             let t = s.trim();
@@ -246,12 +258,15 @@ fn int_of(v: &Value) -> Result<i64, Fault> {
                 && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
                 && !digits.contains("__");
             if ok {
-                t.replace('_', "").parse().map_err(|_| Fault::Crash(format!("integer {s} out of range")))
+                // Python's int is unbounded; an i64 is not, so a longer literal stops here.
+                t.replace('_', "")
+                    .parse()
+                    .map_err(|_| Fault::Crash { kind: "OverflowError", msg: format!("integer {s} out of range") })
             } else {
                 Err(Fault::Value(format!("invalid literal for int() with base 10: {}", py::repr_str(s))))
             }
         }
-        other => Err(Fault::Crash(format!(
+        other => Err(Fault::type_error(format!(
             "int() argument must be a string, a bytes-like object or a real number, not '{}'",
             type_name(other)
         ))),
@@ -286,7 +301,7 @@ pub fn iter_of(v: &Value) -> Result<Vec<Value>, Fault> {
         Value::Array(a) => Ok(a.clone()),
         Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
         Value::Object(o) => Ok(o.keys().map(|k| Value::String(k.clone())).collect()),
-        other => Err(Fault::Crash(format!("'{}' object is not iterable", type_name(other)))),
+        other => Err(Fault::type_error(format!("'{}' object is not iterable", type_name(other)))),
     }
 }
 
@@ -566,8 +581,12 @@ pub fn validate(
         return Ok((vec!["graph has no nodes".into()], vec![]));
     }
     let home = py::or(get("repo"), None).map_or_else(String::new, py::str_of);
+    // `set((graph.get("repos") or {}).keys())`: repos is a mapping or nothing.
     let mut names: Vec<String> = match py::or(get("repos"), None) {
-        Some(v) => iter_of(v)?.iter().map(py::str_of).collect(),
+        Some(Value::Object(o)) => o.keys().cloned().collect(),
+        Some(other) => {
+            return Err(Fault::attribute_error(format!("'{}' object has no attribute 'keys'", type_name(other))));
+        }
         None => vec![],
     };
     if names.is_empty() {
@@ -721,7 +740,9 @@ pub fn validate(
             match py::or(n.get("done"), None) {
                 None => Ok(true),
                 Some(Value::String(s)) => Ok(s.trim().is_empty()),
-                Some(other) => Err(Fault::Crash(format!("'{}' object has no attribute 'strip'", type_name(other)))),
+                Some(other) => {
+                    Err(Fault::attribute_error(format!("'{}' object has no attribute 'strip'", type_name(other))))
+                }
             }
         };
         if skip.contains(nid) {
