@@ -113,7 +113,11 @@ fn started() -> i64 {
     }
     match ps(std::process::id()) {
         Ps::Running(Some(s)) => *OWN.get_or_init(|| s),
-        _ => now_secs().round() as i64,
+        // Fixed at the first ask, as the plugin's uptime-based stand-in is.
+        _ => {
+            static FIRST: OnceLock<i64> = OnceLock::new();
+            *FIRST.get_or_init(|| now_secs().round() as i64)
+        }
     }
 }
 

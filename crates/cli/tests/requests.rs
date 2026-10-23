@@ -22,10 +22,18 @@ fn machine() -> tempfile::TempDir {
     tmp
 }
 
+/// Where this machine's Python finds user-installed packages (PyYAML), read with the real HOME:
+/// the scratch HOME below would hide them from the validator.
+fn python_user_base() -> String {
+    let out = Command::new("python3").args(["-m", "site", "--user-base"]).output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
 fn maestro(root: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_maestro"));
     cmd.env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PYTHONUSERBASE", python_user_base())
         .env("HOME", root.join("home"))
         .env("BROOMVA_WORKSPACE", root.join("ws"))
         .env("BROOMVA_HOME", root.join("broomva-home"))
@@ -69,14 +77,16 @@ fn a_filed_ask_is_appended_validated_and_listed() {
     assert_eq!(v["request"]["request"], "ask.file");
     assert_eq!(v["request"]["disposition"], "applied");
     assert_eq!(v["request"]["verified"], false);
-    assert_eq!(v["validator"], "ask-ledger: 6 ask(s), 0 decision(s), 0 error(s)");
+    assert_eq!(v["validator"], "ask_ledger.py: 6 ask(s), no new error");
     let ids = listed(m.path());
     assert_eq!(ids.len(), 6);
     assert_eq!(ids.last().map(String::as_str), Some("filed-1"));
     let text = ledger(m.path());
     // Appended to the list, before the key that follows it; the origin is Maestro's and routes nowhere.
-    assert!(text.find("id: filed-1").unwrap() < text.find("decisions: []").unwrap());
-    assert!(text.contains("verified: false") && text.contains("session: t3:local/test") && !text.contains("agent_id"));
+    assert!(text.find("id: \"filed-1\"").unwrap() < text.find("decisions: []").unwrap());
+    assert!(
+        text.contains("verified: false") && text.contains("session: \"t3:local/test\"") && !text.contains("agent_id")
+    );
     let journal = std::fs::read_to_string(m.path().join("broomva-home/ledger/requests/requests.jsonl")).unwrap();
     assert_eq!(journal.lines().count(), 1);
     assert!(std::fs::read_dir(m.path().join("locks")).unwrap().next().is_none(), "no lock left behind");
@@ -91,7 +101,17 @@ fn a_refused_ask_writes_nothing() {
     let cases: Vec<(String, &str)> = vec![
         (bad.to_string(), "refused the ask"),
         (ask("seed-1"), "already has an ask `seed-1`"),
+        (
+            {
+                let mut v: Value = serde_json::from_str(&ask("shadow")).unwrap();
+                v["uid"] = Value::String("seed-1".into());
+                v.to_string()
+            },
+            "already has an ask `seed-1`",
+        ),
         (r#"{"id":"x","answer":"yes"}"#.to_string(), "`answer` is not the filer's"),
+        (r#"{"id":"x","defaulted_at":"2026-10-23T00:00:00Z"}"#.to_string(), "`defaulted_at` is not the filer's"),
+        (r#"{"id":"x","answered_by":"owner"}"#.to_string(), "`answered_by` is not the filer's"),
         (r#"{"id":"x","status":"resolved"}"#.to_string(), "`status` is not the filer's"),
         (r#"{"id":"x","origin":{"agent_id":"someone"}}"#.to_string(), "`origin` is not the filer's"),
         (r#"{"ask":"no id"}"#.to_string(), "needs an `id`"),
@@ -127,7 +147,63 @@ fn an_error_the_ledger_already_had_does_not_refuse_a_new_ask() {
     std::fs::write(&path, ledger(m.path()).replace("ask: \"Seeded ask 2", "ask: \"STUB-INVALID Seeded ask 2")).unwrap();
     let out = file(m.path(), "after-legacy");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(ledger(m.path()).contains("id: after-legacy"));
+    assert!(ledger(m.path()).contains("id: \"after-legacy\""));
+}
+
+/// A ledger whose asks sit under `open_asks`: appending an `asks` list would hide them all.
+#[test]
+fn an_open_asks_ledger_is_refused() {
+    let m = machine();
+    let path = m.path().join("ws/.control/asks/ledger.yaml");
+    std::fs::write(&path, ledger(m.path()).replace("\nasks:\n", "\nopen_asks:\n")).unwrap();
+    let before = ledger(m.path());
+    let out = file(m.path(), "hidden");
+    assert!(!out.status.success());
+    assert_eq!(ledger(m.path()), before);
+    assert_eq!(listed(m.path()).len(), 5);
+}
+
+/// The validator judges the result as the ledger itself (its name rules), never as the temp.
+#[test]
+fn the_validator_judges_the_ledgers_own_name() {
+    let m = machine();
+    let asks = m.path().join("ws/.control/asks");
+    std::fs::rename(asks.join("ledger.yaml"), asks.join("ideas-foo.yaml")).unwrap();
+    let file_into = |body: String| {
+        maestro(m.path())
+            .args(["ask", "file", "--session", "t3:-/x", "--ledger", "ideas-foo.yaml", "--ask", &body])
+            .output()
+            .unwrap()
+    };
+    let out = file_into(ask("not-an-idea"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("holds ideas only"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut idea: Value = serde_json::from_str(&ask("an-idea")).unwrap();
+    idea["class"] = Value::String("idea".into());
+    let out = file_into(idea.to_string());
+    assert!(out.status.success(), "the seeded asks' errors are old ones: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// Strings YAML 1.1 reads as booleans or timestamps are written so every reader reads strings.
+#[test]
+fn every_reader_reads_the_same_strings() {
+    let m = machine();
+    let mut v: Value = serde_json::from_str(&ask("words")).unwrap();
+    v["default"] = Value::String("no".into());
+    v["options"][0]["id"] = Value::String("yes".into());
+    v["stakes"] = Value::String("2026-10-23 on: \"quoted\" # not a comment\nsecond line".into());
+    let out = maestro(m.path())
+        .args(["ask", "file", "--session", "t3:-/x", "--ledger", "ledger.yaml", "--ask", &v.to_string()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let shown = maestro(m.path()).args(["--json", "asks", "show", "ledger.yaml", "words"]).output().unwrap();
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(shown["ask"]["default"], "no");
+    assert_eq!(shown["ask"]["stakes"], v["stakes"]);
 }
 
 #[test]
@@ -222,8 +298,22 @@ fn the_agent_cli_has_no_owner_verb() {
         }
     }
     assert!(seen.iter().any(|c| c == "ask file"), "{seen:?}");
-    let owner_words =
-        ["answer", "approve", "allow", "deny", "dispatch", "verdict", "undo", "review", "decide", "send-back"];
+    let owner_words = [
+        "answer",
+        "approve",
+        "allow",
+        "deny",
+        "dispatch",
+        "verdict",
+        "undo",
+        "review",
+        "decide",
+        "send-back",
+        "resolve",
+        "withdraw",
+        "archive",
+        "default",
+    ];
     for command in &seen {
         for word in owner_words {
             assert!(!command.split([' ', '-']).any(|w| w == word), "`maestro {command}` reads as an owner verb");

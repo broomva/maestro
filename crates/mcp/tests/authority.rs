@@ -42,7 +42,10 @@ fn no_tool_maps_to_an_owner_verb() {
                 kind.as_str()
             );
         }
-        for word in ["answer", "approve", "allow", "deny", "dispatch", "verdict", "undo", "review", "decide"] {
+        for word in [
+            "answer", "approve", "allow", "deny", "dispatch", "verdict", "undo", "review", "decide", "resolve",
+            "withdraw", "archive", "default",
+        ] {
             assert!(!spec.name.split('_').any(|w| w == word), "{} reads as an owner verb", spec.name);
         }
     }
@@ -71,4 +74,52 @@ fn owner_verbs_are_unknown_tools() {
     )
     .unwrap_err();
     assert!(err.message.contains("not the filer's"), "{}", err.message);
+}
+
+fn tree(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.insert(path.strip_prefix(root).unwrap().to_path_buf(), Vec::new());
+                stack.push(path);
+            } else {
+                out.insert(path.strip_prefix(root).unwrap().to_path_buf(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+fn copy(from: &std::path::Path, to: &std::path::Path) {
+    for (rel, bytes) in tree(from) {
+        if from.join(&rel).is_dir() {
+            std::fs::create_dir_all(to.join(&rel)).unwrap();
+        } else {
+            std::fs::create_dir_all(to.join(&rel).parent().unwrap()).unwrap();
+            std::fs::write(to.join(&rel), bytes).unwrap();
+        }
+    }
+}
+
+/// What a read does, not what it declares: every tool declared a read leaves a whole machine
+/// (ledgers, work, home, fleet state) byte for byte as it was.
+#[test]
+fn a_read_tool_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine"), tmp.path());
+    let mut paths = Paths::under(tmp.path());
+    paths.ask_locks = tmp.path().join("locks");
+    let store = Store::new(paths, TreeSource::WorkingTree);
+    let before = tree(tmp.path());
+    for spec in TOOLS.iter().filter(|t| t.authority == Authority::Read) {
+        let args = match spec.name {
+            "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
+            _ => json!({}),
+        };
+        call(&store, spec.name, args).unwrap_or_else(|e| panic!("{}: {}", spec.name, e.message));
+        assert!(tree(tmp.path()) == before, "{} changed the machine", spec.name);
+    }
 }

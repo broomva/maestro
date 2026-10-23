@@ -27,6 +27,8 @@ else
 fi
 
 (cd "$repo" && cargo build --locked -q -p maestro)
+# The scratch HOME each filer runs under would hide user-installed PyYAML from the validator.
+PYTHONUSERBASE=$(python3 -m site --user-base); export PYTHONUSERBASE
 target=$(cd "$repo" && cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 cp "$repo/scripts/lock-parity.ts" "$driver"
 mkdir -p "$work/scratch"

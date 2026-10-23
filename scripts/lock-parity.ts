@@ -39,6 +39,7 @@ async function file(root: string, id: string, env: Record<string, string> = {}) 
     {
       env: {
         PATH: process.env.PATH ?? "",
+        PYTHONUSERBASE: process.env.PYTHONUSERBASE ?? "",
         HOME: join(root, "home"),
         BROOMVA_WORKSPACE: join(root, "ws"),
         BROOMVA_HOME: join(root, "broomva-home"),

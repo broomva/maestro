@@ -2,11 +2,13 @@
 //!
 //! Until phase 2 Maestro is not the asks writer of record: it files *through* the workspace's
 //! `scripts/ask_ledger.py`. Under the ledger's §5.5 lock ([`crate::locks`], the lock the Paseo
-//! plugin answers under) it reads the ledger, appends the ask as one list entry, writes the result
-//! to the plugin's temp name beside it, runs `ask_ledger.py validate` on that temp, and renames it
-//! over the ledger only when the validator raised no error the ledger did not already have, the
-//! YAML reads back as the old ledger plus exactly this ask, and the lock is still ours. Anything
-//! else writes nothing.
+//! plugin answers under) it reads the ledger, appends the ask as one list entry, and writes the
+//! result to the plugin's temp name beside it. The validator of record's own `load`, `validate`
+//! and `asks_of` then read the ledger and the temp, each judged as the ledger's real path (its
+//! name rules and repo are the ledger's). The temp is renamed over the ledger only when:
+//! the validator raised no error the ledger did not already have; its `asks_of` reads the temp as
+//! the ledger's asks plus exactly this ask, value for value; Maestro's reader agrees and reads the
+//! new ask as open; and the lock is still ours. Anything else writes nothing.
 
 use crate::locks::{self, AcquireOptions, LockError};
 use crate::paths::Paths;
@@ -22,21 +24,15 @@ use std::time::Duration;
 /// answer: an agent can wait, and each holder runs the validator (~0.1 s) under it.
 pub const FILE_WAIT: Duration = Duration::from_secs(30);
 
-/// Keys that answer or close an ask. An agent never files one: that would be answering for the owner.
-pub const OWNER_KEYS: &[&str] = &[
-    "answer",
-    "answered",
-    "answered_at",
-    "answered_by",
-    "answer_option",
-    "answer_note",
-    "answer_other",
-    "resolution",
-    "outcome",
-    "status",
-    "archived_at",
-    "origin",
-];
+/// Keys an agent never files, beside the plugin's `OUTCOME_KEYS` ([`maestro_core::ask::OUTCOME_KEYS`]):
+/// the rest of an answer, a status, an archive mark, and the origin, which is Maestro's.
+pub const FILER_REFUSED: &[&str] =
+    &["answered_by", "answer_option", "answer_note", "answer_other", "status", "archived_at", "origin"];
+
+/// Whether `key` answers, closes or routes an ask, and so is never the filer's.
+pub fn refused_key(key: &str) -> bool {
+    maestro_core::ask::OUTCOME_KEYS.contains(&key) || FILER_REFUSED.contains(&key)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileError {
@@ -74,7 +70,7 @@ pub fn ledger_name_ok(name: &str) -> bool {
 pub struct Filed {
     pub ledger: PathBuf,
     pub id: String,
-    /// The validator's summary line for the written ledger.
+    /// What the validator of record said of the written ledger.
     pub validator: String,
 }
 
@@ -93,7 +89,7 @@ pub fn compose_ask(
     if id.is_empty() {
         return Err(refused("the ask needs an `id`"));
     }
-    if let Some(key) = OWNER_KEYS.iter().find(|k| ask.contains_key(**k)) {
+    if let Some(key) = ask.keys().find(|k| refused_key(k)) {
         return Err(refused(format!(
             "`{key}` is not the filer's: answers, status and origin are written by the owner's verbs and by Maestro"
         )));
@@ -114,19 +110,68 @@ pub fn compose_ask(
     Ok(out)
 }
 
-/// The ask rendered as one block-sequence entry at `indent` spaces.
-fn render_entry(ask: &Map<String, Value>, indent: usize) -> Result<String, FileError> {
-    // serde_json's map is sorted; YAML keeps the order given, so `id` goes first by hand.
-    let mut doc = serde_yaml::Mapping::new();
-    let to_yaml = |v: &Value| serde_yaml::to_value(v).map_err(|e| refused(e.to_string()));
-    doc.insert("id".into(), to_yaml(&ask["id"])?);
-    for (k, v) in ask.iter().filter(|(k, _)| *k != "id") {
-        doc.insert(k.as_str().into(), to_yaml(v)?);
+/// A key written plain when it is an identifier, else as a JSON (YAML double-quoted) string.
+fn yaml_key(k: &str) -> String {
+    let plain = k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if plain { k.to_string() } else { Value::String(k.into()).to_string() }
+}
+
+/// A scalar or an empty collection on one line. Every string is double-quoted (JSON's escapes are
+/// YAML's), so YAML 1.1 (PyYAML: `no`, `on`, timestamps) and 1.2 readers read the same value.
+fn yaml_inline(v: &Value) -> Option<String> {
+    match v {
+        Value::Array(a) if a.is_empty() => Some("[]".into()),
+        Value::Object(m) if m.is_empty() => Some("{}".into()),
+        Value::Array(_) | Value::Object(_) => None,
+        scalar => Some(scalar.to_string()),
     }
-    let text = serde_yaml::to_string(&serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(doc)]))
-        .map_err(|e| refused(e.to_string()))?;
+}
+
+/// `v` as block YAML lines under a parent at `indent`.
+fn yaml_block(v: &Value, indent: usize, out: &mut String) {
     let pad = " ".repeat(indent);
-    Ok(text.lines().map(|l| format!("{pad}{l}\n")).collect())
+    match v {
+        Value::Object(m) => {
+            for (k, item) in m {
+                match yaml_inline(item) {
+                    Some(line) => out.push_str(&format!("{pad}{}: {line}\n", yaml_key(k))),
+                    None => {
+                        out.push_str(&format!("{pad}{}:\n", yaml_key(k)));
+                        yaml_block(item, indent + 2, out);
+                    }
+                }
+            }
+        }
+        Value::Array(a) => {
+            for item in a {
+                match yaml_inline(item) {
+                    Some(line) => out.push_str(&format!("{pad}- {line}\n")),
+                    None => {
+                        // The item's first line takes the dash; the rest line up under it.
+                        let mut inner = String::new();
+                        yaml_block(item, indent + 2, &mut inner);
+                        out.push_str(&format!("{pad}- {}", &inner[indent + 2..]));
+                    }
+                }
+            }
+        }
+        scalar => out.push_str(&format!("{pad}{scalar}\n")),
+    }
+}
+
+/// The ask rendered as one block-sequence entry at `indent` spaces, `id` first.
+fn render_entry(ask: &Map<String, Value>, indent: usize) -> Result<String, FileError> {
+    let mut ordered = Map::new();
+    let mut body = String::new();
+    // serde_json's map is sorted, so `id` is written first by hand.
+    ordered.insert("id".into(), ask["id"].clone());
+    let mut first = String::new();
+    yaml_block(&Value::Object(ordered), indent + 2, &mut first);
+    let rest: Map<String, Value> =
+        ask.iter().filter(|(k, _)| *k != "id").map(|(k, v)| (k.clone(), v.clone())).collect();
+    yaml_block(&Value::Object(rest), indent + 2, &mut body);
+    Ok(format!("{}- {}{body}", " ".repeat(indent), &first[indent + 2..]))
 }
 
 fn is_top_key(line: &str, key: &str) -> bool {
@@ -177,7 +222,7 @@ pub fn append_entry(text: &str, ask: &Map<String, Value>) -> Result<String, File
             break;
         }
     }
-    // Trailing blank and comment lines stay with what follows the block.
+    // Trailing blank lines stay with what follows the block.
     let mut cut = end;
     while cut > at + 1 && lines[cut - 1].trim().is_empty() {
         cut -= 1;
@@ -218,18 +263,48 @@ fn check_appended(old: &str, new: &str, ask: &Map<String, Value>) -> Result<(), 
     if *b != *a || asks_before != asks_after {
         return Err(refused("the appended ledger does not read as the old one plus this ask; nothing was written"));
     }
-    // Maestro's own reader, the plugin's subset, must read the new entry too.
-    let read = crate::yaml::parse(new).map_err(|e| refused(format!("Maestro's reader refuses the result: {e}")))?;
-    let (ledger, bad) = maestro_core::ask::AskLedger::from_value(read.value).map_err(refused)?;
+    // Maestro's own reader (the plugin's subset and its `asksKey`) reads the old asks, then this
+    // one, open: an `asks` list beside an `open_asks` one, or an entry that reads as answered, fails.
+    let asks_of = |t: &str| -> Result<Vec<maestro_core::ask::Ask>, FileError> {
+        let read = crate::yaml::parse(t).map_err(|e| refused(format!("Maestro's reader refuses the ledger: {e}")))?;
+        let (ledger, bad) = maestro_core::ask::AskLedger::from_value(read.value).map_err(refused)?;
+        if bad.is_empty() { Ok(ledger.asks) } else { Err(refused("Maestro's reader skips an entry of the ledger")) }
+    };
+    let (was, now) = (asks_of(old)?, asks_of(new)?);
     let id = ask["id"].as_str().unwrap_or_default();
-    if !bad.is_empty() || ledger.asks.last().map(|a| a.id.as_str()) != Some(id) {
-        return Err(refused("Maestro's reader does not read the appended ask; nothing was written"));
+    let same = now.len() == was.len() + 1 && now.iter().zip(&was).all(|(n, w)| n.row == w.row);
+    match now.last() {
+        Some(last) if same && last.id == id && last.state() == maestro_core::ask::AskState::Open => Ok(()),
+        _ => Err(refused("Maestro's reader does not read the old asks plus this one, open; nothing was written")),
     }
-    Ok(())
 }
 
-/// `ask_ledger.py validate <file>`: its error lines (path-free) and its summary.
-fn validate(script: &Path, workspace: &Path, file: &Path) -> Result<(Vec<String>, String), FileError> {
+/// Runs the validator of record's own functions on `file`, judged as the ledger at `real`:
+/// `load(file)`, `validate(ledger, preauth, path=real)` and `asks_of(ledger)`.
+const DRIVER: &str = r#"
+import importlib.util, json, sys
+from pathlib import Path
+script, file, real, preauth = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("ask_ledger_of_record", script)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+try:
+    ledger = m.load(Path(file))
+    pre = m.load(Path(preauth)) if preauth and Path(preauth).is_file() else {}
+except Exception as e:
+    print(json.dumps({"refused": "%s: %s" % (type(e).__name__, e)}))
+    sys.exit(0)
+errors = m.validate(ledger, pre, path=Path(real))
+print(json.dumps({"errors": [str(e) for e in errors], "asks": m.asks_of(ledger)}, default=str))
+"#;
+
+/// What the validator of record read: its errors and its `asks_of`.
+struct Verdict {
+    errors: Vec<String>,
+    asks: Value,
+}
+
+fn validate(script: &Path, workspace: &Path, file: &Path, real: &Path) -> Result<Verdict, FileError> {
     if !script.is_file() {
         return Err(refused(format!(
             "the validator of record is not at {}; nothing was written (set MAESTRO_ASK_LEDGER)",
@@ -238,26 +313,35 @@ fn validate(script: &Path, workspace: &Path, file: &Path) -> Result<(Vec<String>
     }
     let preauth =
         [".broomva/preauth.yaml", ".control/preauth.yaml"].iter().map(|r| workspace.join(r)).find(|p| p.is_file());
-    let mut cmd = Command::new("python3");
-    cmd.arg(script).arg("validate").arg(file).current_dir(workspace).stdin(Stdio::null());
-    match preauth {
-        Some(p) => cmd.arg("--preauth").arg(p),
-        None => cmd.arg("--preauth").arg("/nonexistent/preauth.yaml"),
+    let out = Command::new("python3")
+        .arg("-c")
+        .arg(DRIVER)
+        .arg(script)
+        .arg(file)
+        .arg(real)
+        .arg(preauth.unwrap_or_default())
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| refused(format!("the validator did not run: {e}")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let verdict: Value = match stdout.lines().last().map(serde_json::from_str::<Value>) {
+        Some(Ok(v)) if out.status.success() => v,
+        _ => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(refused(format!(
+                "the validator gave no verdict (exit {:?}): {}",
+                out.status.code(),
+                stderr.lines().last().unwrap_or_default()
+            )));
+        }
     };
-    let out = cmd.output().map_err(|e| refused(format!("the validator did not run: {e}")))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).replace(&file.display().to_string(), "<ledger>");
-    let errors: Vec<String> =
-        stdout.lines().filter(|l| l.trim_start().starts_with("ERROR")).map(|l| l.trim().to_string()).collect();
-    let summary = stdout.lines().rev().find(|l| l.starts_with("ask-ledger:")).unwrap_or_default().to_string();
-    if summary.is_empty() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(refused(format!(
-            "the validator gave no verdict (exit {:?}): {}",
-            out.status.code(),
-            stderr.lines().last().unwrap_or_default()
-        )));
+    if let Some(why) = verdict["refused"].as_str() {
+        return Err(refused(format!("the validator of record does not read the ledger: {why}")));
     }
-    Ok((errors, summary))
+    let errors =
+        verdict["errors"].as_array().map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect());
+    Ok(Verdict { errors: errors.unwrap_or_default(), asks: verdict["asks"].clone() })
 }
 
 /// Files `ask` into `<asks dir>/<ledger>` through the validator of record, under the ledger's lock.
@@ -296,11 +380,15 @@ pub fn file_ask(
             Err(e) => return Err(e.into()),
         };
         let old = std::fs::read_to_string(&path)?;
+        // An ask is addressed by its uid, else its id: the new one's id and uid name no other ask.
+        let uid = entry.get("uid").and_then(Value::as_str).map(str::to_string);
+        let names: Vec<&str> = std::iter::once(id.as_str()).chain(uid.as_deref()).collect();
         if let Ok(read) = crate::yaml::parse(&old)
             && let Ok((existing, _)) = maestro_core::ask::AskLedger::from_value(read.value)
-            && existing.asks.iter().any(|a| a.id == id || a.uid.as_deref() == Some(id.as_str()))
+            && let Some(taken) =
+                names.iter().find(|n| existing.asks.iter().any(|a| a.id == **n || a.uid.as_deref() == Some(**n)))
         {
-            return Err(refused(format!("{ledger} already has an ask `{id}`; nothing was written")));
+            return Err(refused(format!("{ledger} already has an ask `{taken}`; nothing was written")));
         }
         let new = append_entry(&old, &entry)?;
         check_appended(&old, &new, &entry)?;
@@ -312,9 +400,20 @@ pub fn file_ask(
                 use std::os::unix::fs::PermissionsExt as _;
                 std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(meta.permissions().mode() & 0o777))?;
             }
-            let (after, summary) = validate(&script, &paths.workspace, &temp)?;
-            let mut known = validate(&script, &paths.workspace, &path)?.0;
+            let before = validate(&script, &paths.workspace, &path, &path)?;
+            let after = validate(&script, &paths.workspace, &temp, &path)?;
+            // The validator of record's reading: the ledger's asks, then exactly this one.
+            let mut want = before.asks.as_array().cloned().unwrap_or_default();
+            want.push(Value::Object(entry.clone()));
+            if after.asks != Value::Array(want) {
+                return Err(refused(
+                    "ask_ledger.py does not read the result as the ledger's asks plus this ask; nothing was written",
+                ));
+            }
+            let summary = format!("ask_ledger.py: {} ask(s), no new error", after.asks.as_array().map_or(0, Vec::len));
+            let mut known = before.errors;
             let fresh: Vec<String> = after
+                .errors
                 .into_iter()
                 .filter(|e| match known.iter().position(|k| k == e) {
                     Some(i) => {
@@ -416,7 +515,10 @@ mod tests {
         assert_eq!(ids(&appended(column0)), ["one", "two", "new"]);
         assert_eq!(ids(&appended("arc: a\nasks: []\nlanes: [a]\n")), ["new"]);
         assert_eq!(ids(&appended("arc: a\nasks: [] # none yet\n")), ["new"]);
-        assert_eq!(ids(&appended("arc: a\nlanes: [a]")), ["new"]);
+        assert_eq!(ids(&appended("arc: a\nlanes: [a]\n")), ["new"]);
+        let unread = "arc: a\nlanes: [a]";
+        let new = append_entry(unread, &ask("new")).unwrap();
+        assert!(check_appended(unread, &new, &ask("new")).is_err(), "a ledger Maestro cannot read is not filed into");
         assert_eq!(ids(&appended("asks:\n  - id: one\n    ask: |\n      x\n\n      y\n")), ["one", "new"]);
         assert!(append_entry("asks: [{id: one}]\n", &ask("new")).is_err(), "a flow list is refused");
     }
@@ -435,7 +537,7 @@ mod tests {
     #[test]
     fn the_filer_writes_no_owner_key_and_no_routable_origin() {
         let session: SessionRef = "paseo:-/a1".parse().unwrap();
-        for key in OWNER_KEYS {
+        for key in maestro_core::ask::OUTCOME_KEYS.iter().chain(FILER_REFUSED) {
             let mut a = ask("x");
             a.insert((*key).to_string(), json!("v"));
             assert!(compose_ask(&a, &session, &Principal::Unverified).is_err(), "{key}");
