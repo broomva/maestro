@@ -36,6 +36,8 @@ fn every_tool_answers_on_the_fixture() {
     let s = store();
     let args = |name: &str| match name {
         "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
+        "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
+        "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
         _ => json!({}),
     };
     for spec in TOOLS {

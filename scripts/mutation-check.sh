@@ -364,5 +364,27 @@ mutate $port '    #[arg(long, value_parser = tier_choice)]' '    #[arg(long)]'
 mutate $port '    if py::truthy(graph.get("repos")) && bind.root.as_deref().is_some_and(|r| !r.is_empty()) {' '    if py::truthy(graph.get("repos")) && bind.root.is_some() {'
 mutate $port '                            repos = m.next_value::<Option<Keys>>()?;' '                            repos = repos.or(m.next_value::<Option<Keys>>()?);'
 
+# View (BRO-3203): the catalog validator drops what it cannot place and records each drop; an
+# unread source renders unavailable, never 0; an ask card carries only its own ledger's errors;
+# the page fetches nothing; an unchanged poll sends no html; the poll is offered to the App only.
+cat=crates/view/src/catalog.rs
+render=crates/view/src/render.rs
+page=crates/view/src/page.rs
+mutate $cat 'if let Some(extra) = raw.keys().find(|k| !matches!(k.as_str(), "type" | "props" | "children")) {' 'if let Some(extra) = None::<&String> {'
+mutate $cat '        if self.placed.contains(id) {' '        if false {'
+mutate $cat '        if depth > MAX_DEPTH {' '        if false {'
+mutate $cat '        if self.placed.len() >= MAX_BLOCKS {' '        if false {'
+mutate $cat '            if !kind.children {' '            if false {'
+mutate $cat 'if !walk.placed.contains(id.as_str()) && !walk.dropped.contains(id.as_str()) {' 'if false {'
+mutate $cat '    if value.chars().count() > MAX_HANDLE {' '    if false {'
+mutate $cat '    if value.chars().any(char::is_control) {' '    if false {'
+mutate $cat '        Some(n) if n == 0 || n > MAX_LIMIT =>' '        Some(n) if n > MAX_LIMIT =>'
+mutate $render '        (None, _) => "unavailable",' '        (None, _) => "ok",'
+mutate $render '                None => span class="mv-tile-value mv-unavailable" { "unavailable" },' '                None => span class="mv-tile-value" { "0" },'
+mutate $render '            || file_at.is_err()' '            || true'
+mutate $page '    while let Some(at) = rest.find("@font-face") {' '    while let Some(at) = None::<usize> {'
+mutate $mcp '            if a.revision.as_deref() == Some(r.revision.as_str()) {' '            if false {'
+mutate $mcp '        Ui::AppOnly => json!(["app"]),' '        Ui::AppOnly => json!(["model", "app"]),'
+
 echo "mutation  $killed of $total killed"
 exit $failed

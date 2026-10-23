@@ -13,4 +13,5 @@ step cargo test --workspace --locked
 step scripts/mutation-check.sh
 step scripts/parity-check.sh
 step scripts/tail-bench.sh
+step scripts/bridge-check.sh
 echo "== ci green"

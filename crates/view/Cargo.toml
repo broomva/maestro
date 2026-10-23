@@ -1,0 +1,26 @@
+[package]
+name = "maestro-view"
+description = "Maestro's owner surface: the generative-UI catalog, maud-rendered views from a fresh Store, and the MCP App page."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+maestro-core.workspace = true
+maestro-store.workspace = true
+jiff.workspace = true
+maud = "0.27"
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+insta = "1.49"
+sha2.workspace = true
+jiff.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

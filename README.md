@@ -195,6 +195,35 @@ read, that count becomes a lower bound and the error is reported under `worktree
     microsecond, and the plugin's `tiers.ts` at `fixtures/delegation/tiers-rev` agrees. `--write`
     regenerates both goldens: review their diff.
 
+## The owner surface (MCP App)
+
+`crates/view` renders Maestro for people. An agent composes a screen from catalog blocks, and
+Maestro decides every value on it:
+
+- `maestro_ui_catalog` lists the block types (`stack`, `snapshot`, `needs`, `asks`, `ask`, `work`,
+  `loops`, `initiatives`, `fleet`) and their props. Props are handles and filters only (a ledger
+  name, an ask id, a project, a state, a limit); no block carries text, numbers or markup.
+- `maestro_ui_render { root, blocks }` validates the spec, places what it can and reports every drop
+  with its reason (an unknown type, a prop the type does not take, a cycle, a missing or unreachable
+  block, more than 64 blocks or 6 levels). It reads every value from a Store built for that call and
+  renders HTML with maud. A source that could not be read renders as unavailable, never as 0. In an MCP
+  Apps host the result opens `ui://maestro/view.html`, which shows it and polls the app-only
+  `maestro_ui_poll` with its revision every 15 s while visible; a poll returns html only when the
+  revision (sha256 of the html) changed. `format: "snapshot"` returns a standalone HTML document with
+  no script as the text result, for a host without MCP Apps (T3's `html_render` in Claude threads).
+- The App page is the foundation CSS (`design-system/broomva`), `crates/view/assets/view.css` and one
+  script, `assets/bridge.js`: the official MCP Apps client (`@modelcontextprotocol/ext-apps` 2.0.3),
+  built with bun from `crates/view/bridge/src`. The build is checked in; `scripts/bridge-check.sh`
+  (in `ci.sh`) fails unless it is what bun 1.4.3 builds from the source, and the crate's test pins its
+  sha256. There is no WebAssembly: T3's CSP blocks it.
+- `scripts/view-e2e.sh [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
+  (the ext-apps `AppBridge`) against `maestro serve --http`: on the real ledgers at `origin/main`,
+  and on a scratch copy of the fixture that it edits to prove the poll. It writes screenshots at 390
+  and 1440 px, light and dark. It is not in `ci.sh` (it needs WebKit: `cd crates/view/bridge && bun
+  install && bunx playwright install webkit`).
+
+The catalog is a draft (`0-draft`) until node `catalog-freeze` publishes it as a versioned schema.
+
 ## Harness registration
 
 | Harness | Registration |

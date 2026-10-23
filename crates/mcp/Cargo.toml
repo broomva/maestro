@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 maestro-core.workspace = true
 maestro-store.workspace = true
+maestro-view.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -22,4 +23,5 @@ workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+maestro-view.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
