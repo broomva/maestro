@@ -453,8 +453,6 @@ def cli_layout():
         "no-policy": {"repo": "b", "repos": {"b": BARE}, "nodes": [node("a")]},
         "policy-none-but-file": {"repo": "w", "repos": {"w": {"path": W, "policy": "none"}}, "nodes": [node("a")]},
         "governed": {"repo": "w", "repos": {"w": W}, "nodes": [node("a", signals={"paths": ["deploy/x.yaml"]})]},
-        "governed-merged-policy": {"repo": "m", "repos": {"m": f"{R}/merged-policy"},
-                                   "nodes": [node("a", signals={"paths": ["deploy/x.yaml"]})]},
         "bad-name": {"repo": "w", "repos": {"w": W, "a:b": BARE}, "nodes": [node("a")]},
         "no-path": {"repo": "w", "repos": {"w": W, "x": {"policy": "none"}}, "nodes": [node("a")]},
         "single": {"nodes": [node("a", inputs=["docs/specs/a.html"])]},
@@ -463,32 +461,11 @@ def cli_layout():
         "int-id-only": {"repo": "w", "repos": {"w": W}, "nodes": [node(1)]},
     }
     files = {f"{name}.json": json.dumps(g) for name, g in graphs.items()}
-    # YAML merge keys, as PyYAML applies them, in nodes and in repos (merged repos come first).
-    files["merged.graph.yaml"] = (f"repo: w\nrepos: {{w: {W}}}\nreviewer: &reviewer\n  kind: review\n  done: check\n"
-                                  "nodes:\n  - <<: *reviewer\n    id: r\n    tier: standard\n  - <<: *reviewer\n    id: s\n")
-    files["merged-repos.graph.yaml"] = (f"extra: &extra {{n: {{path: {NESTED}, policy: none}}, v: {R}/w-link}}\n"
-                                        f"repo: w\nrepos: {{<<: *extra, w: {W}}}\n"
-                                        "nodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n")
-    files["merged-repos-nested.graph.yaml"] = (f"extra: &extra {{n: {{path: {NESTED}, policy: none}}}}\n"
-                                               f"repo: w\nrepos: {{<<: *extra, w: {W}}}\n"
-                                               "nodes:\n  - {id: a, done: t, signals: {paths: [nested/x.rs]}}\n")
-    files["merged-repos-absent.graph.yaml"] = (f"extra: &extra {{x: {R}/gone}}\nrepo: w\nrepos: {{<<: *extra, w: {W}}}\n"
-                                               "nodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n")
-    files["multi-merge.graph.yaml"] = (f"a: &a {{v: {R}/w-link}}\nb: &b {{v: {BARE}}}\n"
-                                       f"repo: w\nrepos: {{<<: [*a, *b], w: {W}}}\n"
-                                       "nodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n")
-    files["multi-merge-policy/.control/policy.yaml"] = (
-        "h: &h {action: require_human, path_touched: deploy/}\na: &a {action: auto, path_touched: deploy/}\n"
-        "auto_merge: {rules: [{<<: [*h, *a]}]}\n")
-    files["multi-merge-policy.graph.yaml"] = (f"repo: m\nrepos: {{m: {R}/multi-merge-policy}}\n"
-                                              "nodes:\n  - {id: a, done: t, signals: {paths: [deploy/x.yaml]}}\n")
     files["astral.json"] = json.dumps({"repo": "w", "repos": {"w": W, "n": NESTED},
                                        "nodes": [node("a", done="ship it \U0001F680", signals={"paths": ["nested/x.rs"]})]})
     files["list.graph.yaml"] = "- a\n- b\n"
     files["empty.graph.yaml"] = ""
     files["w/.control/policy.yaml"] = "auto_merge:\n  rules:\n    - {action: require_human, path_touched: deploy/}\n"
-    files["merged-policy/.control/policy.yaml"] = ("r: &r {action: require_human}\n"
-                                                   "auto_merge: {rules: [{<<: *r, path_touched: deploy/}]}\n")
     files["w/docs/specs/a.html"] = ""
     files["bare/docs/adrs/b.html"] = ""
     files["economy.json"] = json.dumps({"generatedAt": "2026-10-22T00:00:00Z", "tiers": {
@@ -504,7 +481,7 @@ def cli_cases():
         cases.append({"name": name, "tool": tool, "py": py, "rs": rs, "cwd": cwd, "json": parse_json})
 
     names = ["ok", "nested", "same-dir", "absent", "absent-spec", "no-policy", "policy-none-but-file", "governed",
-             "governed-merged-policy", "bad-name", "no-path", "single", "repos-list", "int-id", "int-id-only"]
+             "bad-name", "no-path", "single", "repos-list", "int-id", "int-id-only"]
     for name in names:
         path = f"{R}/{name}.json"
         variants = [[], ["--skip-absent-repos"]]
@@ -519,10 +496,7 @@ def cli_cases():
             add(f"{name} plan --json {' '.join(flags)}", [*flags, "plan", path, "--json"],
                 ["--json", "delegation", "plan", path, *flags], parse_json=True)
             add(f"{name} brief a {' '.join(flags)}", [*flags, "brief", path, "a"], ["delegation", "brief", path, "a", *flags])
-    for g, extra in (("merged.graph.yaml", ["plan"]), ("merged.graph.yaml", ["brief", "s"]),
-                     ("merged-repos.graph.yaml", ["plan"]), ("merged-repos-nested.graph.yaml", ["plan"]),
-                     ("merged-repos-absent.graph.yaml", ["plan"]), ("list.graph.yaml", ["plan"]),
-                     ("multi-merge.graph.yaml", ["plan"]), ("multi-merge-policy.graph.yaml", ["plan"]),
+    for g, extra in (("list.graph.yaml", ["plan"]),
                      ("astral.json", ["plan"]),
                      ("empty.graph.yaml", ["plan"])):
         sub, rest = extra[0], extra[1:]
@@ -540,7 +514,7 @@ def cli_cases():
               ["--kind", "implement", "--paths", "a.rs", "--est-loc", " 1_000 ", "--mode", "critical", "--mode", "normal"]]
     for args in assess:
         for root_args in (["--root", W], ["--root", BARE], ["--root", BARE, "--no-policy"],
-                          ["--root", f"{R}/merged-policy"]):
+                          ):
             add(f"assess {' '.join(root_args + args)}", [*root_args, "assess", *args],
                 ["delegation", "assess", *root_args, *args], parse_json="--brief" not in args)
     add("ladder", ["ladder"], ["delegation", "ladder"], parse_json=True)

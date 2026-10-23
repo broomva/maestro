@@ -137,24 +137,26 @@ read, that count becomes a lower bound and the error is reported under `worktree
 - **Delegation and economy.** `maestro_core::delegation` and `maestro_core::economy` port the
   workspace's `scripts/delegation.py` (assessment, tier ladder, plan-graph rules, briefs) and the pure
   part of `scripts/fleet_economy.py` (capacity forecast, cadence modes, launch and resume gates, the
-  economy by tier). The Python is the reference until the tick moves here (node `loops-port`). Its
+  economy by tier), as of workspace `49069e398`; BRO-3223's spendable-account readiness and resume gate
+  (ws#1112) are not ported yet. The Python is the reference until the tick moves here (node `loops-port`). Its
   messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments. Known
   differences: the CLI flags follow the subcommand (`maestro delegation plan G --repo N=P`, not
-  `--repo N=P plan G`); JSON is printed with sorted keys and two-space indent; YAML is read as YAML 1.2
-  (merge keys applied in PyYAML's order, custom tags refused as `safe_load` refuses them, but a YAML error
-  worded without PyYAML's line and column, and a quoted `'<<'` key read as a merge), so a duplicate key is refused
-  where PyYAML keeps the last value
-  and an unquoted `1e3` or `0o17` is a number where PyYAML keeps a string; timestamps are read in the
-  extended ISO form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes), not the basic or
-  week forms Python 3.14 also accepts; a `depends_on` written as a mapping is iterated in sorted key order; a message prints unassigned code points
-  that Python's `repr` escapes. The sample cache, transcript reading and the
+  `--repo N=P plan G`); JSON is printed with sorted keys and two-space indent; a graph or policy is read
+  within a YAML subset, the rule `maestro_store::yaml` follows for asks: anchors and aliases, tags and merge
+  keys are refused with the reason named (a policy using one is unreadable, so classification fails closed),
+  never misread, since no graph or policy uses them and serde_yaml (YAML 1.2) and PyYAML build them
+  differently. Inside the subset, a duplicate key is refused where PyYAML keeps the last value and an
+  unquoted `1e3` or `0o17` is a number where PyYAML keeps a string; timestamps are read in the extended ISO
+  form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes); a `depends_on` written as a
+  mapping is iterated in sorted key order; a message prints unassigned code points that Python's `repr`
+  escapes. The sample cache, transcript reading and the
   economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
   (maestro-paseo `shared/tiers.ts`).
   - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation
     with files on disk among them; the test `crates/core/tests/parity_delegation.rs` holds the Rust to
     it, and `scripts/mutation-check.sh` breaks the guards listed under "Ports of delegation.py".
   - `fixtures/delegation/cli-golden.json` is the Python CLIs' output on scratch repos (bindings, nested,
-    absent and same-directory repos, policies, merge keys); `crates/cli/tests/delegation.rs` rebuilds the
+    absent and same-directory repos, policies); `crates/cli/tests/delegation.rs` rebuilds the
     layout and replays every case through the binary.
   - `python3 scripts/parity-delegation.py --workspace ~/broomva` fails unless both goldens are the
     Python's output at the workspace's `origin/main`, the same cases agree through `maestro

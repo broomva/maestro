@@ -77,7 +77,7 @@ fn the_cli_matches_the_python_clis() {
         std::os::unix::fs::symlink(root.join(target.as_str().unwrap()), root.join(link)).unwrap();
     }
     let cases = golden["cases"].as_array().unwrap();
-    assert!(cases.len() > 150, "the CLI golden lost cases: {}", cases.len());
+    assert!(cases.len() > 140, "the CLI golden lost cases: {}", cases.len());
     let mut bad = Vec::new();
     for c in cases {
         let args: Vec<String> =
@@ -120,27 +120,42 @@ fn the_cli_matches_the_python_clis() {
     );
 }
 
-/// PyYAML's safe_load constructs only the standard tags, so a custom tag makes the policy unreadable
-/// (assess refuses, exit 3) and the graph a traceback (exit 1). The wording of a YAML error is not
-/// the Python's (it has no line and column), so these are held here rather than in the CLI golden.
+/// Anchors, aliases, tags and merge keys are outside the YAML subset the CLI reads as PyYAML does:
+/// a policy using one is unreadable (assess refuses, exit 3; plan reports it against the node) and a
+/// graph using one is refused with the reason named (exit 1). Never misread, never planned.
 #[test]
-fn a_custom_yaml_tag_is_refused() {
+fn yaml_outside_the_subset_is_refused() {
+    let assess = |policy: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".control")).unwrap();
+        std::fs::write(dir.path().join(".control/policy.yaml"), policy).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_maestro"))
+            .current_dir(dir.path())
+            .args(["delegation", "assess", "--root", ".", "--kind", "implement", "--paths", "deploy/x"])
+            .output()
+            .unwrap()
+    };
+    for (policy, why) in [
+        ("auto_merge: {rules: [!rule {action: require_human, path_touched: deploy/}]}\n", "a tag"),
+        ("r: &r {action: require_human}\nauto_merge: {rules: [*r]}\n", "an anchor"),
+        ("auto_merge: {rules: [{<<: {action: require_human}, path_touched: deploy/}]}\n", "a merge key"),
+    ] {
+        let out = assess(policy);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{policy}: {err}");
+        assert!(err.contains("outside the YAML subset") && err.contains(why), "{policy}: {err}");
+    }
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join(".control")).unwrap();
-    std::fs::write(
-        dir.path().join(".control/policy.yaml"),
-        "auto_merge: {rules: [!rule {action: require_human, path_touched: deploy/}]}\n",
-    )
-    .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_maestro"))
-        .current_dir(dir.path())
-        .args(["delegation", "assess", "--root", ".", "--kind", "implement", "--paths", "deploy/x"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stdout));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("could not determine a constructor for the tag '!rule'"));
-    let out = plan(dir.path(), "nodes:\n  - !node {id: a, done: t}\n");
-    assert_eq!(out.status.code(), Some(1));
-    assert!(out.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("ConstructorError: could not determine a constructor"));
+    for (graph, why) in [
+        ("nodes:\n  - !node {id: a, done: t}\n", "a tag"),
+        ("x: &x {done: t}\nnodes:\n  - {id: a, signals: {paths: [a.rs]}}\n", "an anchor"),
+        ("x: &a {id: a, done: t}\nnodes:\n  - *a\n", "an anchor"),
+        ("nodes:\n  - {<<: {kind: review}, id: r, done: t, tier: standard}\n", "a merge key"),
+    ] {
+        let out = plan(dir.path(), graph);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{graph}: {err}");
+        assert!(out.stdout.is_empty(), "{graph} was planned");
+        assert!(err.contains(why), "{graph}: {err}");
+    }
 }

@@ -226,54 +226,53 @@ pub fn realpath(filename: &str) -> String {
     path
 }
 
-/// YAML as PyYAML's `safe_load` builds it: merge keys (`<<: *anchor`) applied with PyYAML's order,
-/// merged keys first, each key at its first position, an explicit key's value winning, and of several
-/// merged mappings the first winning. serde_yaml's own `apply_merge` orders keys otherwise.
+/// The first YAML feature outside the subset this CLI reads as PyYAML's `safe_load` does: an
+/// anchor (so any alias, which must follow its anchor), a tag or a merge key. No graph or policy uses them, and each is a place where
+/// serde_yaml (YAML 1.2) and PyYAML build different values, so they are refused, with the reason and
+/// line named, never misread (the rule `maestro_store::yaml` follows for ask ledgers).
+fn outside_subset(text: &str) -> Option<String> {
+    use yaml_rust2::parser::{Event, Parser};
+    let mut parser = Parser::new_from_str(text);
+    loop {
+        // A syntax error is serde_yaml's to report, with its own message.
+        let Ok((event, mark)) = parser.next_token() else { return None };
+        let why = match &event {
+            Event::StreamEnd => return None,
+            Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart(_, Some(_)) | Event::MappingStart(_, Some(_)) => {
+                "a tag"
+            }
+            Event::Scalar(_, _, anchor, _) | Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _)
+                if *anchor > 0 =>
+            {
+                "an anchor"
+            }
+            _ => continue,
+        };
+        return Some(format!("{why} (line {})", mark.line()));
+    }
+}
+
+/// Whether a loaded document holds a `<<` key anywhere (PyYAML would merge it).
+fn has_merge_key(y: &serde_yaml::Value) -> bool {
+    match y {
+        serde_yaml::Value::Mapping(m) => m.iter().any(|(k, v)| k.as_str() == Some("<<") || has_merge_key(v)),
+        serde_yaml::Value::Sequence(s) => s.iter().any(has_merge_key),
+        _ => false,
+    }
+}
+
+/// YAML within the subset (see [`outside_subset`]); anything outside it is `Fault::Value` naming why.
 fn load_yaml(text: &str) -> Result<serde_yaml::Value, Fault> {
-    fn merge(v: serde_yaml::Value) -> Result<serde_yaml::Value, Fault> {
-        use serde_yaml::Value as Y;
-        Ok(match v {
-            Y::Mapping(m) => {
-                let (mut merged, mut explicit) = (Vec::new(), Vec::new());
-                for (k, val) in m {
-                    if k.as_str() != Some("<<") {
-                        explicit.push((k, merge(val)?));
-                        continue;
-                    }
-                    let sources = match merge(val)? {
-                        Y::Sequence(seq) => seq.into_iter().rev().collect(),
-                        one => vec![one],
-                    };
-                    for src in sources {
-                        let Y::Mapping(src) = src else {
-                            return Err(Fault::Crash {
-                                kind: "ConstructorError",
-                                msg: "expected a mapping or list of mappings for merging".into(),
-                            });
-                        };
-                        merged.extend(src);
-                    }
-                }
-                let mut out = serde_yaml::Mapping::new();
-                for (k, val) in merged.into_iter().chain(explicit) {
-                    out.insert(k, val); // an existing key keeps its position
-                }
-                Y::Mapping(out)
-            }
-            Y::Sequence(s) => Y::Sequence(s.into_iter().map(merge).collect::<Result<_, _>>()?),
-            // safe_load constructs only the standard tags; serde_yaml has resolved those already.
-            Y::Tagged(t) => {
-                return Err(Fault::Crash {
-                    kind: "ConstructorError",
-                    msg: format!("could not determine a constructor for the tag '{}'", t.tag),
-                });
-            }
-            other => other,
-        })
+    let outside = |why: String| Fault::Value(format!("{}: {why}", maestro_store::yaml::OUTSIDE));
+    if let Some(why) = outside_subset(text) {
+        return Err(outside(why));
     }
     let y: serde_yaml::Value =
         serde_yaml::from_str(text).map_err(|e| Fault::Crash { kind: "YAMLError", msg: e.to_string() })?;
-    merge(y)
+    if has_merge_key(&y) {
+        return Err(outside("a merge key `<<`".into()));
+    }
+    Ok(y)
 }
 
 /// The keys of a loaded mapping in file order (a JSON value sorts its keys; the Python's dict keeps
@@ -437,6 +436,7 @@ fn crash(f: &Fault) -> ExitCode {
 fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out: bool) -> ExitCode {
     let (graph, order) = match load_graph(graph_path) {
         Ok(g) => g,
+        Err(Fault::Value(why)) => return fail(format!("  [error] {graph_path}: {why}"), 1),
         Err(f) => return crash(&f),
     };
     if py::truthy(graph.get("repos")) && bind.root.is_some() {

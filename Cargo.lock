@@ -906,6 +906,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "yaml-rust2",
 ]
 
 [[package]]

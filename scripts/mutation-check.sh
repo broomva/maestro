@@ -244,7 +244,7 @@ mutate $econ '&& approved >= 3.0' '&& approved >= 0.0'
 mutate $econ 'Some(at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64))' 'Some(at + (hours * 3600.0).trunc() as i64 * US + round_half_even((hours * 3600.0).fract() * 1e6))'
 
 # Skipped nodes are checked for structure only; the plan CLI's binding guards (held by the CLI
-# golden in crates/cli/tests/delegation.rs); YAML merge keys in PyYAML's order.
+# golden in crates/cli/tests/delegation.rs).
 port=crates/cli/src/port.rs
 mutate $deleg 'if skip.contains(nid) {' 'if false {'
 mutate $port 'if !absent.is_empty() && !bind.skip_absent_repos {' 'if false {'
@@ -253,21 +253,16 @@ mutate $port 'if let Some(first) = seen.get(r.dir.as_str()) {' 'if let Some(firs
 mutate $port '            if has_file {
                 return Err(Fault::Value(format!(' '            if false {
                 return Err(Fault::Value(format!('
-mutate $port '                        explicit.push((k, merge(val)?));
-                        continue;' '                        explicit.push((k, merge(val)?));
-                        continue;
-                    }
-                    if true {
-                        continue;'
-mutate $port 'for (k, val) in merged.into_iter().chain(explicit) {' 'for (k, val) in explicit.into_iter().chain(merged) {'
 mutate $port '    if !v.is_object() {' '    if false {'
-
-mutate $port 'Y::Sequence(seq) => seq.into_iter().rev().collect(),' 'Y::Sequence(seq) => seq.into_iter().collect(),'
 mutate $port 'bindings.iter().rev().find(|(n, _)| *n == name)' 'bindings.iter().find(|(n, _)| *n == name)'
-mutate $port '            Y::Tagged(t) => {
-                return Err(Fault::Crash {' '            Y::Tagged(t) => {
-                return merge(t.value);
-                return Err(Fault::Crash {'
+# YAML outside the subset (anchors, tags, merge keys) is refused, never misread.
+mutate $port '            Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart(_, Some(_)) | Event::MappingStart(_, Some(_)) => {
+                "a tag"
+            }' '            Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart(_, Some(_)) | Event::MappingStart(_, Some(_)) => {
+                continue
+            }'
+mutate $port '                if *anchor > 0 =>' '                if false =>'
+mutate $port '    if has_merge_key(&y) {' '    if false {'
 
 echo "mutation  $killed of $total killed"
 exit $failed

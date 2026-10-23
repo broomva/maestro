@@ -1621,146 +1621,6 @@
   {
    "cwd": "w",
    "json": false,
-   "name": "governed-merged-policy plan ",
-   "py": [
-    "plan",
-    "{ROOT}/governed-merged-policy.json"
-   ],
-   "rs": [
-    "delegation",
-    "plan",
-    "{ROOT}/governed-merged-policy.json"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "a                implement    frontier   claude/claude-opus-5-5       thinking=xhigh  verify=p20-full after=-\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
-   "name": "governed-merged-policy plan --json ",
-   "py": [
-    "plan",
-    "{ROOT}/governed-merged-policy.json",
-    "--json"
-   ],
-   "rs": [
-    "--json",
-    "delegation",
-    "plan",
-    "{ROOT}/governed-merged-policy.json"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "[\n {\n  \"id\": \"a\",\n  \"repo\": \"m\",\n  \"kind\": \"implement\",\n  \"tier\": \"frontier\",\n  \"spawn_default\": \"frontier\",\n  \"verify\": \"p20-full\",\n  \"thinking\": \"xhigh\",\n  \"inputs\": [],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"governance\",\n   \"author\": null,\n   \"executor\": \"frontier\",\n   \"thinking\": \"xhigh\",\n   \"verify\": \"p20-full\",\n   \"needs\": [],\n   \"reasons\": [\n    \"governance-class paths: deploy/x.yaml\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"frontier\",\n   \"provider\": \"claude/claude-opus-5-5\",\n   \"thinking\": \"xhigh\",\n   \"agent\": \"opus\"\n  }\n }\n]\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "governed-merged-policy brief a ",
-   "py": [
-    "brief",
-    "{ROOT}/governed-merged-policy.json",
-    "a"
-   ],
-   "rs": [
-    "delegation",
-    "brief",
-    "{ROOT}/governed-merged-policy.json",
-    "a"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "## Delegation contract\n- Your tier: **frontier** (claude-opus-5-5, thinking xhigh). It is fixed for this run.\n- Done means: `make test`. Verification: **p20-full**, by a different model than you.\n- Agents you start default to **frontier**, with the model passed explicitly (Agent tool `model: opus`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "governed-merged-policy plan --skip-absent-repos",
-   "py": [
-    "--skip-absent-repos",
-    "plan",
-    "{ROOT}/governed-merged-policy.json"
-   ],
-   "rs": [
-    "delegation",
-    "plan",
-    "{ROOT}/governed-merged-policy.json",
-    "--skip-absent-repos"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "a                implement    frontier   claude/claude-opus-5-5       thinking=xhigh  verify=p20-full after=-\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
-   "name": "governed-merged-policy plan --json --skip-absent-repos",
-   "py": [
-    "--skip-absent-repos",
-    "plan",
-    "{ROOT}/governed-merged-policy.json",
-    "--json"
-   ],
-   "rs": [
-    "--json",
-    "delegation",
-    "plan",
-    "{ROOT}/governed-merged-policy.json",
-    "--skip-absent-repos"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "[\n {\n  \"id\": \"a\",\n  \"repo\": \"m\",\n  \"kind\": \"implement\",\n  \"tier\": \"frontier\",\n  \"spawn_default\": \"frontier\",\n  \"verify\": \"p20-full\",\n  \"thinking\": \"xhigh\",\n  \"inputs\": [],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"governance\",\n   \"author\": null,\n   \"executor\": \"frontier\",\n   \"thinking\": \"xhigh\",\n   \"verify\": \"p20-full\",\n   \"needs\": [],\n   \"reasons\": [\n    \"governance-class paths: deploy/x.yaml\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"frontier\",\n   \"provider\": \"claude/claude-opus-5-5\",\n   \"thinking\": \"xhigh\",\n   \"agent\": \"opus\"\n  }\n }\n]\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "governed-merged-policy brief a --skip-absent-repos",
-   "py": [
-    "--skip-absent-repos",
-    "brief",
-    "{ROOT}/governed-merged-policy.json",
-    "a"
-   ],
-   "rs": [
-    "delegation",
-    "brief",
-    "{ROOT}/governed-merged-policy.json",
-    "a",
-    "--skip-absent-repos"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "## Delegation contract\n- Your tier: **frontier** (claude-opus-5-5, thinking xhigh). It is fixed for this run.\n- Done means: `make test`. Verification: **p20-full**, by a different model than you.\n- Agents you start default to **frontier**, with the model passed explicitly (Agent tool `model: opus`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
    "name": "bad-name plan ",
    "py": [
     "plan",
@@ -2759,113 +2619,6 @@
   {
    "cwd": "w",
    "json": false,
-   "name": "merged.graph.yaml plan",
-   "py": [
-    "plan",
-    "{ROOT}/merged.graph.yaml"
-   ],
-   "rs": [
-    "delegation",
-    "plan",
-    "{ROOT}/merged.graph.yaml"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 1,
-    "crash": false,
-    "stderr": "  [error] r: a reviewer runs at frontier or above, never standard\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "merged.graph.yaml brief s",
-   "py": [
-    "brief",
-    "{ROOT}/merged.graph.yaml",
-    "s"
-   ],
-   "rs": [
-    "delegation",
-    "brief",
-    "{ROOT}/merged.graph.yaml",
-    "s"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 1,
-    "crash": false,
-    "stderr": "  [error] r: a reviewer runs at frontier or above, never standard\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "merged-repos.graph.yaml plan",
-   "py": [
-    "plan",
-    "{ROOT}/merged-repos.graph.yaml"
-   ],
-   "rs": [
-    "delegation",
-    "plan",
-    "{ROOT}/merged-repos.graph.yaml"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 2,
-    "crash": false,
-    "stderr": "  [error] repos v and w are one directory ({ROOT}/w): a place has one name\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "merged-repos-nested.graph.yaml plan",
-   "py": [
-    "plan",
-    "{ROOT}/merged-repos-nested.graph.yaml"
-   ],
-   "rs": [
-    "delegation",
-    "plan",
-    "{ROOT}/merged-repos-nested.graph.yaml"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 1,
-    "crash": false,
-    "stderr": "  [error] a: 'nested/x.rs' is inside repo n: write it as n:x.rs\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "merged-repos-absent.graph.yaml plan",
-   "py": [
-    "plan",
-    "{ROOT}/merged-repos-absent.graph.yaml"
-   ],
-   "rs": [
-    "delegation",
-    "plan",
-    "{ROOT}/merged-repos-absent.graph.yaml"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 1,
-    "crash": false,
-    "stderr": "  [error] repo x ({ROOT}/gone) is not here: bind it with --repo x=PATH, or pass --skip-absent-repos\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
    "name": "list.graph.yaml plan",
    "py": [
     "plan",
@@ -2882,48 +2635,6 @@
     "crash": true,
     "stderr": "AttributeError",
     "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "multi-merge.graph.yaml plan",
-   "py": [
-    "plan",
-    "{ROOT}/multi-merge.graph.yaml"
-   ],
-   "rs": [
-    "delegation",
-    "plan",
-    "{ROOT}/multi-merge.graph.yaml"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 2,
-    "crash": false,
-    "stderr": "  [error] repos v and w are one directory ({ROOT}/w): a place has one name\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "multi-merge-policy.graph.yaml plan",
-   "py": [
-    "plan",
-    "{ROOT}/multi-merge-policy.graph.yaml"
-   ],
-   "rs": [
-    "delegation",
-    "plan",
-    "{ROOT}/multi-merge-policy.graph.yaml"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "a                implement    frontier   claude/claude-opus-5-5       thinking=xhigh  verify=p20-full after=-\n"
    }
   },
   {
@@ -3072,39 +2783,6 @@
   {
    "cwd": "w",
    "json": true,
-   "name": "assess --root {ROOT}/merged-policy --kind implement --paths src/a.rs deploy/x",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "implement",
-    "--paths",
-    "src/a.rs",
-    "deploy/x"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
-    "--kind",
-    "implement",
-    "--paths",
-    "src/a.rs",
-    "deploy/x"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "{\n \"complexity\": \"governance\",\n \"author\": null,\n \"executor\": \"frontier\",\n \"thinking\": \"xhigh\",\n \"verify\": \"p20-full\",\n \"needs\": [],\n \"reasons\": [\n  \"governance-class paths: deploy/x\"\n ],\n \"contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"xhigh\",\n  \"agent\": \"opus\"\n }\n}\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths a.rs b.rs --est-loc 300",
    "py": [
     "--root",
@@ -3199,43 +2877,6 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "b.rs",
-    "--est-loc",
-    "300"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
-   "name": "assess --root {ROOT}/merged-policy --kind implement --paths a.rs b.rs --est-loc 300",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "b.rs",
-    "--est-loc",
-    "300"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
     "--kind",
     "implement",
     "--paths",
@@ -3374,45 +3015,6 @@
   {
    "cwd": "w",
    "json": true,
-   "name": "assess --root {ROOT}/merged-policy --kind implement --paths a.rs --est-loc 300 --spec docs/specs/a.html",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--est-loc",
-    "300",
-    "--spec",
-    "docs/specs/a.html"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--est-loc",
-    "300",
-    "--spec",
-    "docs/specs/a.html"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 2,
-    "crash": false,
-    "stderr": "--spec docs/specs/a.html must be an existing file under docs/specs/, docs/adrs/, docs/plans/ of {ROOT}/merged-policy\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths a.rs --spec docs/specs/none.html",
    "py": [
     "--root",
@@ -3514,41 +3116,6 @@
     "code": 2,
     "crash": false,
     "stderr": "--spec docs/specs/none.html must be an existing file under docs/specs/, docs/adrs/, docs/plans/ of {ROOT}/bare\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
-   "name": "assess --root {ROOT}/merged-policy --kind implement --paths a.rs --spec docs/specs/none.html",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--spec",
-    "docs/specs/none.html"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--spec",
-    "docs/specs/none.html"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 2,
-    "crash": false,
-    "stderr": "--spec docs/specs/none.html must be an existing file under docs/specs/, docs/adrs/, docs/plans/ of {ROOT}/merged-policy\n",
     "stdout": ""
    }
   },
@@ -3668,43 +3235,6 @@
   {
    "cwd": "w",
    "json": false,
-   "name": "assess --root {ROOT}/merged-policy --kind rerun --done gh run rerun 1 --failed --brief --ticket BRO-1",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "rerun",
-    "--done",
-    "gh run rerun 1 --failed",
-    "--brief",
-    "--ticket",
-    "BRO-1"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
-    "--kind",
-    "rerun",
-    "--done",
-    "gh run rerun 1 --failed",
-    "--brief",
-    "--ticket",
-    "BRO-1"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "## Delegation contract (BRO-1)\n- Your tier: **mechanical** (claude-haiku-5-5, thinking low). It is fixed for this run.\n- Done means: `gh run rerun 1 --failed`. Verification: **check**, the check's exit code.\n- Agents you start default to **mechanical**, with the model passed explicitly (Agent tool `model: haiku`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
    "name": "assess --root {ROOT}/w --kind rerun --brief",
    "py": [
     "--root",
@@ -3779,35 +3309,6 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
-    "--kind",
-    "rerun",
-    "--brief"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 2,
-    "crash": false,
-    "stderr": "--brief needs --done: a brief without a done check is not delegable\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
-   "json": false,
-   "name": "assess --root {ROOT}/merged-policy --kind rerun --brief",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "rerun",
-    "--brief"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
     "--kind",
     "rerun",
     "--brief"
@@ -3953,49 +3454,6 @@
   },
   {
    "cwd": "w",
-   "json": false,
-   "name": "assess --root {ROOT}/merged-policy --kind implement --paths a.rs b.rs --est-loc 300 --done x --brief",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "b.rs",
-    "--est-loc",
-    "300",
-    "--done",
-    "x",
-    "--brief"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "b.rs",
-    "--est-loc",
-    "300",
-    "--done",
-    "x",
-    "--brief"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 1,
-    "crash": false,
-    "stderr": "not delegable as one node: needs spec first (substantive (>200 LOC, multi-file or public API): P20 verifies; no spec for work this size: a frontier node writes it first, the executor works from it)\n",
-    "stdout": ""
-   }
-  },
-  {
-   "cwd": "w",
    "json": true,
    "name": "assess --root {ROOT}/w --kind review --mode read-only --observed-tier apex",
    "py": [
@@ -4086,41 +3544,6 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
-    "--kind",
-    "review",
-    "--mode",
-    "read-only",
-    "--observed-tier",
-    "apex"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": null,\n \"executor\": \"apex\",\n \"thinking\": \"high\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"review is frontier work: a reviewer is pinned, never downgraded\",\n  \"an earlier run raised to apex: that is the floor now\"\n ],\n \"contract\": {\n  \"tier\": \"apex\",\n  \"provider\": \"claude/claude-fable-5-1\",\n  \"thinking\": \"high\",\n  \"agent\": \"fable\"\n }\n}\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
-   "name": "assess --root {ROOT}/merged-policy --kind review --mode read-only --observed-tier apex",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "review",
-    "--mode",
-    "read-only",
-    "--observed-tier",
-    "apex"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
     "--kind",
     "review",
     "--mode",
@@ -4264,47 +3687,6 @@
   {
    "cwd": "w",
    "json": true,
-   "name": "assess --root {ROOT}/merged-policy --kind implement --paths a.rs --failed-attempts 3 --allow-apex --mode conserve",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--failed-attempts",
-    "3",
-    "--allow-apex",
-    "--mode",
-    "conserve"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--failed-attempts",
-    "3",
-    "--allow-apex",
-    "--mode",
-    "conserve"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"apex\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\",\n  \"failed verification 3x, one rung each: standard -> apex\",\n  \"capacity conserve: thinking high -> medium; the tier stays\"\n ],\n \"contract\": {\n  \"tier\": \"apex\",\n  \"provider\": \"claude/claude-fable-5-1\",\n  \"thinking\": \"medium\",\n  \"agent\": \"fable\"\n }\n}\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths a.rs --failed-attempts -1 --est-loc -5 --files -2",
    "py": [
     "--root",
@@ -4414,49 +3796,6 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--failed-attempts",
-    "-1",
-    "--est-loc",
-    "-5",
-    "--files",
-    "-2"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\",\n  \"failed verification -1x, one rung each: standard -> standard\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
-   "name": "assess --root {ROOT}/merged-policy --kind implement --paths a.rs --failed-attempts -1 --est-loc -5 --files -2",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--failed-attempts",
-    "-1",
-    "--est-loc",
-    "-5",
-    "--files",
-    "-2"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
     "--kind",
     "implement",
     "--paths",
@@ -4610,49 +3949,6 @@
   {
    "cwd": "w",
    "json": true,
-   "name": "assess --root {ROOT}/merged-policy --kind implement --paths a.rs --est-loc  1_000  --mode critical --mode normal",
-   "py": [
-    "--root",
-    "{ROOT}/merged-policy",
-    "assess",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--est-loc",
-    " 1_000 ",
-    "--mode",
-    "critical",
-    "--mode",
-    "normal"
-   ],
-   "rs": [
-    "delegation",
-    "assess",
-    "--root",
-    "{ROOT}/merged-policy",
-    "--kind",
-    "implement",
-    "--paths",
-    "a.rs",
-    "--est-loc",
-    " 1_000 ",
-    "--mode",
-    "critical",
-    "--mode",
-    "normal"
-   ],
-   "tool": "delegation",
-   "want": {
-    "code": 0,
-    "crash": false,
-    "stderr": "",
-    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
-   }
-  },
-  {
-   "cwd": "w",
-   "json": true,
    "name": "ladder",
    "py": [
     "ladder"
@@ -4754,19 +4050,10 @@
    "bare/docs/adrs/b.html": "",
    "economy.json": "{\"generatedAt\": \"2026-10-22T00:00:00Z\", \"tiers\": {\"standard\": {\"runs\": 10, \"raisedRuns\": 3, \"approved\": 4, \"firstPass\": 0.25, \"tokensPerApproved\": 1234567}, \"frontier\": {\"runs\": 2, \"approved\": 0, \"firstPass\": null, \"tokensPerApproved\": 980}}}",
    "empty.graph.yaml": "",
-   "governed-merged-policy.json": "{\"repo\": \"m\", \"repos\": {\"m\": \"{ROOT}/merged-policy\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"deploy/x.yaml\"]}, \"done\": \"make test\"}]}",
    "governed.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"deploy/x.yaml\"]}, \"done\": \"make test\"}]}",
    "int-id-only.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": 1, \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",
    "int-id.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": 1, \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}, {\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\", \"depends_on\": [1]}]}",
    "list.graph.yaml": "- a\n- b\n",
-   "merged-policy/.control/policy.yaml": "r: &r {action: require_human}\nauto_merge: {rules: [{<<: *r, path_touched: deploy/}]}\n",
-   "merged-repos-absent.graph.yaml": "extra: &extra {x: {ROOT}/gone}\nrepo: w\nrepos: {<<: *extra, w: {ROOT}/w}\nnodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n",
-   "merged-repos-nested.graph.yaml": "extra: &extra {n: {path: {ROOT}/w/nested, policy: none}}\nrepo: w\nrepos: {<<: *extra, w: {ROOT}/w}\nnodes:\n  - {id: a, done: t, signals: {paths: [nested/x.rs]}}\n",
-   "merged-repos.graph.yaml": "extra: &extra {n: {path: {ROOT}/w/nested, policy: none}, v: {ROOT}/w-link}\nrepo: w\nrepos: {<<: *extra, w: {ROOT}/w}\nnodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n",
-   "merged.graph.yaml": "repo: w\nrepos: {w: {ROOT}/w}\nreviewer: &reviewer\n  kind: review\n  done: check\nnodes:\n  - <<: *reviewer\n    id: r\n    tier: standard\n  - <<: *reviewer\n    id: s\n",
-   "multi-merge-policy.graph.yaml": "repo: m\nrepos: {m: {ROOT}/multi-merge-policy}\nnodes:\n  - {id: a, done: t, signals: {paths: [deploy/x.yaml]}}\n",
-   "multi-merge-policy/.control/policy.yaml": "h: &h {action: require_human, path_touched: deploy/}\na: &a {action: auto, path_touched: deploy/}\nauto_merge: {rules: [{<<: [*h, *a]}]}\n",
-   "multi-merge.graph.yaml": "a: &a {v: {ROOT}/w-link}\nb: &b {v: {ROOT}/bare}\nrepo: w\nrepos: {<<: [*a, *b], w: {ROOT}/w}\nnodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n",
    "nested.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"n\": \"{ROOT}/w/nested\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"nested/x.rs\"]}, \"done\": \"make test\"}]}",
    "no-path.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"x\": {\"policy\": \"none\"}}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",
    "no-policy.json": "{\"repo\": \"b\", \"repos\": {\"b\": \"{ROOT}/bare\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",
