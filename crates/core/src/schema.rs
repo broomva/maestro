@@ -303,17 +303,19 @@ pub fn tiers(data: &Value) -> Result<(), Fault> {
     Ok(())
 }
 
-/// `json.loads`, refusing an integer literal no 64-bit integer holds: serde_json reads one as a
-/// float where Python keeps an int, so its type and every message naming it would differ.
+/// `json.loads`, refusing a number the two readers build differently: an integer no 64-bit
+/// integer holds (serde_json reads it as a float, Python keeps an int), a float past f64's range
+/// (serde_json refuses it, Python reads `inf`) and Python's `NaN`, `Infinity` and `-Infinity`
+/// (not JSON; Python reads them as floats).
 pub fn parse_json(text: &str) -> Result<Value, String> {
-    if let Some(lit) = wide_integer(text) {
-        return Err(format!("the integer {lit} does not fit 64 bits ({OUTSIDE})"));
+    if let Some((lit, what)) = outside_number(text) {
+        return Err(format!("the number {lit} is {what} ({OUTSIDE})"));
     }
     serde_json::from_str(text).map_err(|e| e.to_string())
 }
 
-/// The first integer literal (no fraction, no exponent) outside i64 and u64, outside strings.
-fn wide_integer(text: &str) -> Option<&str> {
+/// The first number token outside strings the two readers build differently, and why.
+fn outside_number(text: &str) -> Option<(&str, &'static str)> {
     let b = text.as_bytes();
     let (mut i, mut in_str) = (0, false);
     while i < b.len() {
@@ -332,19 +334,32 @@ fn wide_integer(text: &str) -> Option<&str> {
             i += 1;
             continue;
         }
-        if c == b'-' || c.is_ascii_digit() {
+        if c == b'-' || c.is_ascii_alphanumeric() {
             let start = i;
             i += 1;
-            while i < b.len() && b[i].is_ascii_digit() {
-                i += 1;
-            }
-            let float = i < b.len() && matches!(b[i], b'.' | b'e' | b'E');
             while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'.' | b'+' | b'-')) {
                 i += 1;
             }
             let lit = &text[start..i];
-            if !float && lit.parse::<i64>().is_err() && lit.parse::<u64>().is_err() && lit != "-" {
-                return Some(lit);
+            let digits = lit.strip_prefix('-').unwrap_or(lit);
+            if matches!(digits, "NaN" | "Infinity") {
+                return Some((lit, "not finite"));
+            }
+            if !digits.starts_with(|c: char| c.is_ascii_digit()) {
+                continue; // true, false, null, or a syntax error serde_json reports
+            }
+            if digits.contains(['.', 'e', 'E']) {
+                if lit.parse::<f64>().is_ok_and(|f| !f.is_finite()) {
+                    return Some((lit, "a float past f64's range"));
+                }
+            } else if digits.bytes().all(|d| d.is_ascii_digit()) {
+                if lit.parse::<i64>().is_err() && lit.parse::<u64>().is_err() {
+                    return Some((lit, "an integer that does not fit 64 bits"));
+                }
+                // serde_json reads `-0` as the float -0.0, Python as the integer 0.
+                if lit.starts_with('-') && digits.bytes().all(|d| d == b'0') {
+                    return Some((lit, "a negative integer zero"));
+                }
             }
             continue;
         }
@@ -407,6 +422,15 @@ mod tests {
 
     #[test]
     fn a_wide_integer_literal_is_refused() {
+        assert!(parse_json("[1e400]").is_err_and(|e| e.contains("past f64's range")));
+        for t in ["[NaN]", "[Infinity]", "[-Infinity]", r#"{"a": [1, -Infinity]}"#] {
+            assert!(parse_json(t).is_err_and(|e| e.contains("not finite")), "{t}");
+        }
+        assert!(parse_json(r#"["NaN", "-Infinity", true, null]"#).is_ok());
+        assert!(parse_json("[-0]").is_err_and(|e| e.contains("negative integer zero")));
+        assert!(parse_json("[-0.0, 0, -1]").is_ok());
+        assert!(parse_json("[-1.5E+309]").is_err());
+        assert!(parse_json("[1.7976931348623157e308, 1e-400]").is_ok());
         assert!(parse_json("[100000000000000000000]").is_err());
         assert!(parse_json("[-9223372036854775809]").is_err());
         assert!(parse_json("[18446744073709551615, -9223372036854775808, 1e300, \"100000000000000000000\"]").is_ok());

@@ -198,6 +198,7 @@ fn malformed_usage_is_refused_not_read_as_capacity() {
     for (usage, why) in [
         (format!("[{ACTIVE},null]"), "usage[1]: a mapping, not null (outside the schema"),
         (format!("[{}]", ACTIVE.replace("10,", "100000000000000000000,")), "does not fit 64 bits"),
+        (format!("[{}]", ACTIVE.replace("10,", "1e400,")), "past f64's range"),
         (format!("[{tiny}]"), "OverflowError: date value out of range"),
         (format!("{{\"a\": {ACTIVE}}}"), "--usage is a dict, not a list of rows"),
     ] {

@@ -308,10 +308,22 @@ mutate $schema '        (Ty::Str, Value::String(_)) => true,' '        (Ty::Str,
 mutate $schema '        let Value::Object(n) = n else { return Err(refuse(&at, "a mapping", n)) };' '        let Value::Object(n) = n else { continue };'
 mutate $schema '        Some(other) => Err(refuse(field, "a mapping", other)),' '        Some(_) => Ok(None),'
 mutate $schema '        Some(other) => Err(refuse(field, "a list", other)),' '        Some(_) => Ok(&[]),'
-mutate $schema '            if !float && lit.parse::<i64>().is_err() && lit.parse::<u64>().is_err() && lit != "-" {' '            if false {'
+mutate $schema '                if lit.parse::<i64>().is_err() && lit.parse::<u64>().is_err() {' '                if false {'
+mutate $schema '                if lit.parse::<f64>().is_ok_and(|f| !f.is_finite()) {' '                if false {'
+mutate $schema '            if matches!(digits, "NaN" | "Infinity") {' '            if false {'
+mutate $schema "                if lit.starts_with('-') && digits.bytes().all(|d| d == b'0') {" '                if false {'
 # YAML 1.1 and 1.2 read these plain scalars differently; a key that is not a string.
 mutate $port '                    TScalarStyle::Plain => plain_scalar_outside(v, is_key),' '                    TScalarStyle::Plain => None,'
 mutate $port '    if is_key && py != Yaml11::Str {' '    if false {'
+# What the two readers scan differently; what the check cannot scan (held by the YAML golden:
+# PyYAML's reading of 6,000 fuzzed documents, replayed by port.rs's unit test).
+mutate $port '            Err(e) => return Some(format!("YAML the subset check cannot scan: {e}")),' '            Err(_) => return None,'
+mutate $port "    if v.contains('?') {" '    if false {'
+mutate $port "            '\\t' => \"a tab\"," "            '\\t' => continue,"
+mutate $port "            '\\r' => \"a carriage return outside a CRLF line ending\"," "            '\\r' => continue,"
+mutate $port "            '\\u{85}' | '\\u{2028}' | '\\u{2029}' => \"a Unicode line or paragraph separator\"," "            '\\u{85}' | '\\u{2028}' | '\\u{2029}' => continue,"
+mutate $port "            '\\u{feff}' if i > 0 => \"a byte-order mark past the start\"," "            '\\u{feff}' if false => \"a byte-order mark past the start\","
+mutate $port '            c if c.is_control() => "a control character",' '            c if false && c.is_control() => "a control character",'
 mutate $port '        Yaml11::Bool if matches!(v, "true" | "True" | "TRUE" | "false" | "False" | "FALSE") => None,' '        Yaml11::Bool => None,'
 mutate $port '            if decimal && same { None } else { differ() }' '            if same { None } else { differ() }'
 mutate $port '            if plain && same { None } else { differ() }' '            if same { None } else { differ() }'

@@ -38,6 +38,8 @@ GOLDEN = os.path.join(REPO, "fixtures", "delegation", "golden.json")
 CLI_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "cli-golden.json")
 TIERS_REV = os.path.join(REPO, "fixtures", "delegation", "tiers-rev")
 YAML11_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "yaml11-golden.json")
+YAML_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "yaml-golden.json")
+JSON_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "json-golden.json")
 PROVIDER_MANAGER = os.path.expanduser("~/.claude/skills/provider-manager/scripts/provider_manager.py")
 
 failures: list[str] = []
@@ -213,7 +215,9 @@ def refusal(case):
         elif fn in ("validate", "validate_disk", "brief"):
             _graph(a["graph"])
         elif fn in ("capacity", "resume_gate", "gate_bounds"):
-            if type(a.get("state")) is dict:
+            if "state" in a:
+                if type(a["state"]) is not dict:
+                    raise Refused("state")
                 _state(a["state"])
                 _usage(a["usage"])
             if fn != "gate_bounds":
@@ -982,6 +986,169 @@ def yaml11_golden(write):
     return len(cases)
 
 
+# --- YAML: PyYAML's safe_load against the CLI's reader, differentially --------------------------
+YAML_TRICKY = ["\t", "\r", "\r\n", "\x85", "\u2028", "\u2029", "\ufeff", "\x00", "\x1c", "\x7f", "\xa0", "\u3000", "?",
+               "&", "*", "!", "|", ">", "#", ":", ",", "[", "]", "{", "}", "-", '"', "'", "%", "@", "`", " ", "\n", ".",
+               "~", "=", "<", "\\", "\\n", "0", "1", "yes", "x", "é", "→", ": ", "- ", "? ", "  ", "\n  ", "\n- ", "---",
+               "...", "|-", ">-", "|+", "#c", "&a", "*a", "!t", "'q'", '"q"', "{a: 1}", "[1, 2]", "1.5", "0x1", "null",
+               "~", "\x01", "1: ", "[?1]"]
+YAML_SMALL = ["a: b\n", "a: [b, c]\n", "a: {b: c, d: [e]}\n", "- a\n- b: c\n", "a:\n  b: c\n  d:\n    - e\n",
+              "a: |\n  x\n  y\n", "a: >\n  x\n  y\n", "a: 'x y'\n", 'a: "x\\ty"\n', "a: x\n  y\n", "{a: b}\n",
+              "[a, {b: c}]\n", "1: a\n", "a: [?1]\n",
+              "nodes:\n  - id: a\n    done: make test\n    signals: {paths: [a.rs], est_loc: 10}\n"]
+
+
+def yaml_docs(ws, rev, n, seed):
+    """Documents near the real graphs and near small YAML, each with a few random edits."""
+    rng = random.Random(seed)
+    names = subprocess.run(["git", "-C", ws, "ls-tree", "--name-only", rev, "docs/plans/"], capture_output=True,
+                           text=True, check=True).stdout.split()
+    bases = [subprocess.run(["git", "-C", ws, "show", f"{rev}:{p}"], capture_output=True, text=True, check=True).stdout
+             for p in names if p.endswith(".graph.yaml")]
+    out = []
+    for _ in range(n):
+        if rng.random() < 0.15 and bases:
+            lines = rng.choice(bases).split("\n")
+            k = rng.randint(0, max(0, len(lines) - 6))
+            t = "\n".join(lines[k:k + rng.randint(3, 12)]) + "\n"
+        else:
+            t = rng.choice(YAML_SMALL)
+        for _ in range(rng.randint(1, 4)):
+            i, op = rng.randint(0, len(t)), rng.random()
+            if op < 0.7:
+                t = t[:i] + rng.choice(YAML_TRICKY) + t[i:]
+            elif op < 0.9 and t:
+                t = t[:i] + t[i + 1:]
+            else:
+                j = rng.randint(0, len(t))
+                t = t[:i] + t[j:j + rng.randint(1, 8)] + t[i:]
+        out.append(t)
+    return list(dict.fromkeys(out))
+
+
+def pyyaml_reading(t):
+    """PyYAML's value as JSON, or None where it raises or builds what JSON cannot hold (a date, a
+    non-string key, a set): the CLI must then refuse the document."""
+    import yaml
+
+    def plain(v):
+        if isinstance(v, dict):
+            return all(type(k) is str and plain(x) for k, x in v.items())
+        if isinstance(v, list):
+            return all(plain(x) for x in v)
+        return v is None or type(v) in (str, int, float, bool)
+    try:
+        v = yaml.safe_load(t)
+        return {"value": json.loads(json.dumps(v, allow_nan=False))} if plain(v) else None
+    except Exception:
+        return None
+
+
+def yaml_differential(ws, rev, maestro, write):
+    """Every document the CLI reads, PyYAML reads to the same value (types strict). A refusal is
+    allowed. Live on 4 x 20,000 fresh documents; a 6,000-document golden for `cargo test`."""
+    bad, read, total = [], 0, 0
+    for seed in (1, 2, 3, 4):
+        ds = yaml_docs(ws, rev, 20000, seed)
+        got = rust_eval(maestro, [{"fn": "load_yaml", "args": {"text": t}} for t in ds])
+        for t, g in zip(ds, got):
+            total += 1
+            if "ok" in g:
+                read += 1
+                want = pyyaml_reading(t)
+                if want is None or not same(want["value"], g["ok"]):
+                    bad.append((t, want, g))
+    for t, w, g in bad[:10]:
+        failures.append(f"yaml misread: {t!r}\n  pyyaml: {json.dumps(w)[:300]}\n  rust: {json.dumps(g)[:300]}")
+    check("yaml differential", not bad, f"{len(bad)} documents read differently")
+    golden = [{"text": t, "pyyaml": pyyaml_reading(t)} for t in yaml_docs(ws, rev, 6000, 7)]
+    text = "[\n" + ",\n".join(json.dumps(g, sort_keys=True) for g in golden) + "\n]\n"
+    if write:
+        with open(YAML_GOLDEN, "w") as f:
+            f.write(text)
+    else:
+        check("yaml golden", os.path.isfile(YAML_GOLDEN) and open(YAML_GOLDEN).read() == text,
+              f"{YAML_GOLDEN} is not PyYAML's reading: rerun with --write and review the diff")
+    return total, read, len(bad)
+
+
+# --- JSON: Python's json.loads against the CLI's reader (schema::parse_json), differentially ----
+JSON_TRICKY = ["NaN", "-NaN", "Infinity", "-Infinity", "1e400", "-1e400", "1E309", "1e-400", "100000000000000000000",
+               "-9223372036854775809", "18446744073709551615", "-0", "-0.0", "1E2", "0.1", "1.7976931348623157e308",
+               "true", "null", '"x"', '"\\ud800"', '"\\u00e9"', "\ufeff", " ", ",", ":", "[", "]", "{", "}", '"',
+               "\\", "\t", "\n", "-", ".", "e", "+", "0", "9", '"a": 1', '"a": 2']
+JSON_BASES = [json.dumps({"email": "a@x.io", "fiveHourUtil": 10.5, "sevenDayUtil": 10, "isActive": True,
+                          "sevenDayResetsAt": "2026-10-28T00:00:00Z", "numbersAgeSeconds": 3, "id": "u1"}),
+              json.dumps([{"fiveHourUtil": 1, "stale": False}, {"sevenDayUtil": None}]),
+              json.dumps({"config": {"standbyMax": 70.0, "autoBalance": True}, "holdUntil": 1761177600.5,
+                          "pendingSignals": [], "probes": {"x": {"at": 1.0, "result": "ok"}}}),
+              json.dumps({"tiers": {"standard": {"runs": 10, "firstPass": 0.25}}}), "[1, 2.5, -3]", '{"a": [1, {"b": null}]}']
+
+
+def json_docs(n, seed):
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        t = rng.choice(JSON_BASES)
+        for _ in range(rng.randint(1, 3)):
+            i, op = rng.randint(0, len(t)), rng.random()
+            if op < 0.4:  # replace a number or a word with a tricky token
+                spots = [k for k in range(len(t)) if t[k].isdigit() or t[k] in "tfn"]
+                if spots:
+                    k = rng.choice(spots)
+                    j = k
+                    while j < len(t) and (t[j].isalnum() or t[j] in ".-+"):
+                        j += 1
+                    t = t[:k] + rng.choice(JSON_TRICKY) + t[j:]
+            elif op < 0.85:
+                t = t[:i] + rng.choice(JSON_TRICKY) + t[i:]
+            elif t:
+                t = t[:i] + t[i + 1:]
+        out.append(t)
+    return list(dict.fromkeys(out))
+
+
+def python_json(t):
+    """Python's value, or None where it raises or reads a value JSON cannot print (NaN, inf)."""
+    try:
+        return {"value": json.loads(json.dumps(json.loads(t), allow_nan=False))}
+    except (ValueError, RecursionError):
+        return None
+
+
+def json_differential(maestro, write):
+    """Every JSON input the CLI reads, Python reads to the same value (types strict); a refusal is allowed."""
+    bad, read, total = [], 0, 0
+    for seed in (1, 2, 3):
+        ds = json_docs(20000, seed)
+        got = rust_eval(maestro, [{"fn": "load_json", "args": {"text": t}} for t in ds])
+        for t, g in zip(ds, got):
+            total += 1
+            if "ok" in g:
+                read += 1
+                want = python_json(t)
+                if want is None or not same(want["value"], g["ok"]):
+                    bad.append((t, want, g))
+    for t, w, g in bad[:10]:
+        failures.append(f"json misread: {t!r}\n  python: {json.dumps(w)[:300]}\n  rust: {json.dumps(g)[:300]}")
+    check("json differential", not bad, f"{len(bad)} documents read differently")
+    def utf8(g):  # a lone surrogate (Python reads `"\\ud800"`) cannot be written for serde_json to read back
+        try:
+            json.dumps(g, ensure_ascii=False).encode("utf-8")
+            return True
+        except UnicodeEncodeError:
+            return False
+    golden = [g for g in ({"text": t, "python": python_json(t)} for t in json_docs(4000, 7)) if utf8(g)]
+    text = "[\n" + ",\n".join(json.dumps(g, sort_keys=True) for g in golden) + "\n]\n"
+    if write:
+        with open(JSON_GOLDEN, "w") as f:
+            f.write(text)
+    else:
+        check("json golden", os.path.isfile(JSON_GOLDEN) and open(JSON_GOLDEN).read() == text,
+              f"{JSON_GOLDEN} is not Python's reading: rerun with --write and review the diff")
+    return total, read, len(bad)
+
+
 def cli_scenarios(dpy, fpy, maestro, tmp, write):
     root = os.path.join(tmp, "repos")
     layout, cases = cli_layout(), cli_cases()
@@ -1144,6 +1311,12 @@ def main(argv=None):
               + ("agree" if len(failures) == before else "DIFFER"))
         print(f"yaml11    {yaml11_golden(a.write)} plain scalars: PyYAML's resolver golden "
               + ("written" if a.write else "checked"))
+        total, read, misread = yaml_differential(ws, a.rev, maestro, a.write)
+        print(f"yaml      {total} fuzzed documents: {read} read by the CLI, {misread} read differently by PyYAML; "
+              f"the rest refused")
+        total, read, misread = json_differential(maestro, a.write)
+        print(f"json      {total} fuzzed documents: {read} read by the CLI, {misread} read differently by Python; "
+              f"the rest refused")
         live_capacity(E, maestro)
         # The forecast's timedelta, densely: 100,000 random runways to the microsecond.
         rng = random.Random()

@@ -106,6 +106,11 @@ pub fn eval(case: &Value) -> Value {
             }
             Err(f) => fault(f),
         },
+        // `json.loads` as the CLI reads its JSON inputs: the value, or the refusal.
+        "load_json" => match crate::schema::parse_json(s(&args, "text")) {
+            Ok(v) => json!({"ok": v}),
+            Err(m) => json!({"refused": m}),
+        },
         "rule_matches" => json!({"ok": d::rule_matches(s(&args, "rule"), s(&args, "path"))}),
         "is_governance" => json!({"ok": d::is_governance(s(&args, "path"), &strings(args.get("human_paths")))}),
         "is_test_path" => json!({"ok": d::is_test_path(s(&args, "path"))}),
@@ -127,7 +132,7 @@ pub fn eval(case: &Value) -> Value {
                     Ok(g) => g,
                     Err(f) => return fault(f),
                 },
-                Some(_) => return json!({"crash": "AttributeError"}),
+                Some(_) => return json!({"refused": "state"}),
             };
             match case["fn"].as_str() {
                 Some("gate_bounds") => json!({"ok": gate_json(&gate)}),

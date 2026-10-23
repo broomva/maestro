@@ -149,11 +149,21 @@ read, that count becomes a lower bound and the error is reported under `worktree
   (outside the schema Maestro reads exactly)`), where the Python would go on with Python's semantics on
   arbitrary input (`1` and `True` one dict key, `str.strip`'s separators, `int()` of any digit string):
   `plan` and `brief` exit 1, `economy` exits 1, a policy outside it is unreadable (classification fails
-  closed), and a JSON integer no 64-bit integer holds is refused. A graph or policy is also read within a
-  YAML subset, the rule `maestro_store::yaml` follows for asks: anchors and aliases, tags, merge keys, a
-  plain scalar PyYAML (YAML 1.1) and serde_yaml (YAML 1.2) read differently (`yes`, `off`, `0250`, `0o17`,
-  `1e3`, `1:20`, `2026-10-23`, `.inf`), and a mapping key that is not a string are refused with the reason
-  and line named; quote the value to keep it. Known differences inside both: the CLI flags follow the
+  closed). **The readers are held to Python's by measurement.** A JSON input (a `.json` graph, usage,
+  state, samples, the tier file) is refused where serde_json and `json.loads` build different values: an
+  integer no 64-bit integer holds, a float past f64's range, `NaN`/`Infinity`/`-Infinity`, and the
+  integer `-0` (serde_json reads -0.0). A graph or policy is read within a YAML subset, the rule
+  `maestro_store::yaml` follows for asks. These are refused with the reason and line named: a document
+  the subset check cannot scan; a tab; a CR outside CRLF; a control character; U+0085, U+2028 and U+2029;
+  a byte-order mark past the start; anchors and aliases, tags and merge keys; a plain scalar holding `?`;
+  a plain scalar PyYAML (YAML 1.1) and serde_yaml (YAML 1.2) read differently (`yes`, `off`, `0250`,
+  `0o17`, `1e3`, `1:20`, `2026-10-23`, `.inf`); and a mapping key that is not a string. Quote the value
+  to keep it. Each rule is there because a differential fuzz (`yaml_differential`, `json_differential` in
+  `scripts/parity-delegation.py`) found documents the readers misread without it. The claim is that every
+  document the CLI reads, PyYAML or `json.loads` reads to the same value, types strict. It is measured on
+  each run (about 75,000 fuzzed YAML and 53,000 fuzzed JSON documents near the real inputs) and held by
+  `cargo test` on goldens of PyYAML's and Python's readings. A refusal is always allowed: the CLI also
+  refuses some documents Python reads. Known differences inside both: the CLI flags follow the
   subcommand (`maestro delegation plan G --repo N=P`, not `--repo N=P plan G`); JSON is printed with sorted
   keys and two-space indent; a duplicate YAML key is refused where PyYAML keeps the last value; timestamps
   are read in the extended ISO form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes); a
@@ -170,6 +180,10 @@ read, that count becomes a lower bound and the error is reported under `worktree
     (`refusal` in `scripts/parity-delegation.py`), and the Rust must refuse that same field.
   - `fixtures/delegation/yaml11-golden.json` is PyYAML's implicit resolver on 6,733 plain scalars; the
     CLI's YAML 1.1 reading (`yaml11` in `crates/cli/src/port.rs`) is held to it by its unit test.
+  - `fixtures/delegation/yaml-golden.json` (6,000 fuzzed documents with PyYAML's reading) and
+    `json-golden.json` (about 4,000 with `json.loads`'s) are replayed by `cargo test`
+    (`the_cli_reads_yaml_as_pyyaml_or_refuses`, `the_cli_reads_json_as_python_or_refuses`): every
+    document the CLI reads must read to Python's value.
   - `fixtures/delegation/cli-golden.json` is the Python CLIs' output on scratch repos (bindings, nested,
     absent and same-directory repos, policies); `crates/cli/tests/delegation.rs` rebuilds the
     layout and replays every case through the binary.

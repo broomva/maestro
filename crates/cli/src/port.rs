@@ -239,12 +239,19 @@ pub fn realpath(filename: &str) -> String {
 fn outside_subset(text: &str) -> Option<String> {
     use yaml_rust2::parser::{Event, Parser};
     use yaml_rust2::scanner::TScalarStyle;
+    if let Some(why) = outside_lexically(text) {
+        return Some(why);
+    }
     let mut parser = Parser::new_from_str(text);
     // Open collections: (is a mapping, the next node is a key).
     let mut open: Vec<(bool, bool)> = Vec::new();
     loop {
-        // A syntax error is serde_yaml's to report, with its own message.
-        let Ok((event, mark)) = parser.next_token() else { return None };
+        // What the check cannot scan is refused: serde_yaml (libyaml) reads documents yaml-rust2
+        // refuses, and PyYAML need not read them as libyaml does.
+        let (event, mark) = match parser.next_token() {
+            Ok(e) => e,
+            Err(e) => return Some(format!("YAML the subset check cannot scan: {e}")),
+        };
         let is_key = matches!(open.last(), Some((true, true)));
         let why = match &event {
             Event::StreamEnd => return None,
@@ -289,6 +296,31 @@ fn outside_subset(text: &str) -> Option<String> {
         };
         return Some(format!("{why} (line {})", mark.line()));
     }
+}
+
+/// The first character the two readers scan differently: a tab, a carriage return outside a CRLF
+/// line ending, a control character, a line or paragraph separator (U+0085, U+2028, U+2029), and a
+/// byte-order mark past the start.
+fn outside_lexically(text: &str) -> Option<String> {
+    let mut line = 1;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let why = match c {
+            '\n' => {
+                line += 1;
+                continue;
+            }
+            '\r' if chars.peek().map(|p| p.1) == Some('\n') => continue,
+            '\t' => "a tab",
+            '\r' => "a carriage return outside a CRLF line ending",
+            '\u{85}' | '\u{2028}' | '\u{2029}' => "a Unicode line or paragraph separator",
+            '\u{feff}' if i > 0 => "a byte-order mark past the start",
+            c if c.is_control() => "a control character",
+            _ => continue,
+        };
+        return Some(format!("{why} (line {line})"));
+    }
+    None
 }
 
 /// What PyYAML's `safe_load` resolves a plain scalar to (its implicit resolvers, YAML 1.1).
@@ -469,8 +501,12 @@ fn yaml11(v: &str) -> Yaml11 {
 /// string, the null words, `true`/`false` in their three spellings, decimal integers within 64 bits
 /// and `[-+]digits.digits` floats (with a signed exponent), which both read alike.
 fn plain_scalar_outside(v: &str, is_key: bool) -> Option<String> {
-    let both = serde_yaml::from_str::<serde_yaml::Value>(v).ok();
     let shown = py::repr_str(v);
+    // PyYAML (1.1) ends a plain scalar at a `?` in a flow collection, serde_yaml (1.2) keeps it.
+    if v.contains('?') {
+        return Some(format!("a plain scalar {shown} holding `?` (quote it)"));
+    }
+    let both = serde_yaml::from_str::<serde_yaml::Value>(v).ok();
     let differ = || Some(format!("a plain scalar {shown} that YAML 1.1 and 1.2 read differently (quote it)"));
     let py = yaml11(v);
     if py == Yaml11::Merge {
@@ -1073,9 +1109,27 @@ pub fn eval_stdin() -> ExitCode {
             Ok(c) => c,
             Err(err) => return fail(&err, 2),
         };
-    let out: Vec<Value> = cases.iter().map(maestro_core::parity::eval).collect();
+    let out: Vec<Value> = cases
+        .iter()
+        .map(|c| match c.get("fn").and_then(Value::as_str) {
+            Some("load_yaml") => yaml_case(c["args"]["text"].as_str().unwrap_or("")),
+            _ => maestro_core::parity::eval(c),
+        })
+        .collect();
     println!("{}", serde_json::to_string(&out).expect("JSON"));
     ExitCode::SUCCESS
+}
+
+/// The CLI's YAML reader on one document: its value, or the refusal or crash.
+fn yaml_case(text: &str) -> Value {
+    match load_yaml(text)
+        .and_then(|y| serde_json::to_value(&y).map_err(|e| Fault::Crash { kind: "YAMLError", msg: e.to_string() }))
+    {
+        Ok(v) => json!({"ok": v}),
+        Err(Fault::Value(m)) => json!({"refused": m}),
+        Err(Fault::Crash { kind, msg }) => json!({"crash": kind, "msg": msg}),
+        Err(f) => json!({"refused": f.to_string()}),
+    }
 }
 
 #[cfg(test)]
@@ -1105,6 +1159,39 @@ mod tests {
             }
         }
         assert!(golden.len() > 1000 && bad.is_empty(), "{} of {}:\n{}", bad.len(), golden.len(), bad.join("\n"));
+    }
+
+    /// Every document of the golden the CLI reads, PyYAML reads to the same value, types strict
+    /// (`scripts/parity-delegation.py`, `yaml_differential`); where PyYAML raises or builds what JSON
+    /// cannot hold, the CLI refuses.
+    #[test]
+    fn the_cli_reads_yaml_as_pyyaml_or_refuses() {
+        let golden: Vec<Value> =
+            serde_json::from_str(include_str!("../../../fixtures/delegation/yaml-golden.json")).unwrap();
+        fn same(a: &Value, b: &Value) -> bool {
+            match (a, b) {
+                (Value::Number(x), Value::Number(y)) => x.is_f64() == y.is_f64() && x.as_f64() == y.as_f64(),
+                (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q)),
+                (Value::Object(x), Value::Object(y)) => {
+                    x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+                }
+                _ => a == b,
+            }
+        }
+        let (mut read, mut bad) = (0, Vec::new());
+        for g in &golden {
+            let text = g["text"].as_str().unwrap();
+            let Ok(v) = load_yaml(text).and_then(|y| serde_json::to_value(y).map_err(|e| Fault::Value(e.to_string())))
+            else {
+                continue;
+            };
+            read += 1;
+            if !g["pyyaml"].get("value").is_some_and(|w| same(w, &v)) {
+                bad.push(format!("{text:?}: pyyaml {}, rust {v}", g["pyyaml"]));
+            }
+        }
+        assert!(golden.len() > 5000 && read > 1000, "{read} of {} read", golden.len());
+        assert!(bad.is_empty(), "{} misread:\n{}", bad.len(), bad[..bad.len().min(10)].join("\n"));
     }
 
     #[test]

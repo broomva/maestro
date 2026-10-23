@@ -128,3 +128,33 @@ fn the_golden_covers_every_rung() {
     }
     assert!(ok("validate", &|v| v["errors"].as_array().is_some_and(Vec::is_empty)), "no valid graph");
 }
+
+/// Every JSON input of the golden the CLI reads, Python's `json.loads` reads to the same value,
+/// types strict (`scripts/parity-delegation.py`, `json_differential`); where Python raises or reads
+/// NaN or an infinity, the CLI refuses.
+#[test]
+fn the_cli_reads_json_as_python_or_refuses() {
+    let golden: Vec<Value> =
+        serde_json::from_str(include_str!("../../../fixtures/delegation/json-golden.json")).unwrap();
+    fn same(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => x.is_f64() == y.is_f64() && x.as_f64() == y.as_f64(),
+            (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q)),
+            (Value::Object(x), Value::Object(y)) => {
+                x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+            }
+            _ => a == b,
+        }
+    }
+    let (mut read, mut bad) = (0, Vec::new());
+    for g in &golden {
+        let text = g["text"].as_str().unwrap();
+        let Ok(v) = maestro_core::schema::parse_json(text) else { continue };
+        read += 1;
+        if !g["python"].get("value").is_some_and(|w| same(w, &v)) {
+            bad.push(format!("{text:?}: python {}, rust {v}", g["python"]));
+        }
+    }
+    assert!(golden.len() > 3000 && read > 500, "{read} of {} read", golden.len());
+    assert!(bad.is_empty(), "{} misread:\n{}", bad.len(), bad[..bad.len().min(10)].join("\n"));
+}
