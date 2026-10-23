@@ -10,13 +10,13 @@ fn store() -> Store {
 }
 
 #[test]
-fn every_exposed_tool_is_read_only() {
-    for spec in TOOLS {
-        assert_eq!(spec.authority, Authority::Read, "{}", spec.name);
-    }
+fn reads_say_read_only_and_requests_do_not() {
     for tool in MaestroServer::tools() {
+        let spec = TOOLS.iter().find(|s| s.name == tool.name).unwrap();
         let ann = tool.annotations.as_ref().expect("annotations");
-        assert_eq!(ann.read_only_hint, Some(true), "{}", tool.name);
+        assert_eq!(ann.read_only_hint, Some(spec.authority == Authority::Read), "{}", tool.name);
+        assert_eq!(ann.destructive_hint, Some(false), "{}", tool.name);
+        assert_eq!(spec.request.is_some(), spec.authority == Authority::AgentRequest, "{}", tool.name);
         assert_eq!(tool.input_schema.get("type").and_then(|t| t.as_str()), Some("object"), "{}", tool.name);
     }
 }
@@ -38,7 +38,7 @@ fn every_tool_answers_on_the_fixture() {
         "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
         _ => json!({}),
     };
-    for spec in TOOLS {
+    for spec in TOOLS.iter().filter(|t| t.authority == Authority::Read) {
         let v = call(&s, spec.name, args(spec.name)).unwrap_or_else(|e| panic!("{}: {}", spec.name, e.message));
         assert!(!v.is_null(), "{}", spec.name);
     }

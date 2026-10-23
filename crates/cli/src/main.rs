@@ -110,6 +110,61 @@ enum Command {
     Authority,
     /// This node, and the known surfaces and harnesses with their capabilities.
     Hosts,
+    /// Agent requests: file one ask (`maestro ask file`). Writes go to the working tree.
+    Ask {
+        #[command(subcommand)]
+        command: AskCommand,
+    },
+    /// Queue work for the owner to dispatch; recorded and held (nothing starts).
+    Queue {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        title: String,
+        /// What the work is and how its done is checked.
+        #[arg(long)]
+        brief: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        initiative: Option<String>,
+    },
+    /// Request one exact action the owner must allow; recorded and held (nothing runs).
+    #[command(name = "action-request")]
+    ActionRequest {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Record that this session's work is finished, with its receipt. Closes nothing by itself (A1).
+    Close {
+        #[command(flatten)]
+        session: SessionArg,
+        /// The evidence: PRs, merge SHAs, checks run.
+        #[arg(long)]
+        receipt: String,
+        #[arg(long)]
+        summary: Option<String>,
+    },
+    /// Hand the work back to the owner.
+    Handback {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        next: Option<String>,
+    },
+    /// Escalate to the owner: something needs their attention now.
+    Escalate {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        reason: String,
+    },
     /// Self-checks: is the vendored path reader the one bstack generates from its registry?
     Doctor {
         /// The bstack checkout to compare with, read at --tree. Default: <workspace>/bstack.
@@ -124,6 +179,28 @@ enum AsksCommand {
     Show { ledger: String, id: String },
     /// Validate a ledger with the workspace's ask_ledger.py, the validator of record.
     Validate { file: PathBuf },
+}
+
+#[derive(clap::Args)]
+struct SessionArg {
+    /// This session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`.
+    #[arg(long, env = "MAESTRO_SESSION")]
+    session: String,
+}
+
+#[derive(Subcommand)]
+enum AskCommand {
+    /// File one ask into a ledger through ask_ledger.py, under the ledger's lock.
+    File {
+        #[command(flatten)]
+        session: SessionArg,
+        /// Ledger file name in the asks folder (it must exist).
+        #[arg(long)]
+        ledger: String,
+        /// The ask as a JSON object; `-` (the default) reads it from stdin.
+        #[arg(long, default_value = "-")]
+        ask: String,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -256,7 +333,74 @@ fn run(cli: &Cli) -> Result<()> {
         Command::Hosts => hosts(cli.json),
         Command::Doctor { bstack } => doctor(cli, &store, bstack.as_deref())?,
         Command::Asks { command: Some(AsksCommand::Validate { file }), .. } => validate(&store, file)?,
+        Command::Ask { command: AskCommand::File { session, ledger, ask } } => {
+            let text = if ask == "-" {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                ask.clone()
+            };
+            let ask: Value = serde_json::from_str(&text).context("--ask must be a JSON object")?;
+            request(
+                cli,
+                &store,
+                "maestro_ask_file",
+                json!({ "session": session.session, "ledger": ledger, "ask": ask }),
+            )?
+        }
+        Command::Queue { session, title, brief, project, initiative } => request(
+            cli,
+            &store,
+            "maestro_work_queue",
+            json!({ "session": session.session, "title": title, "brief": brief, "project": project, "initiative": initiative }),
+        )?,
+        Command::ActionRequest { session, action, reason } => request(
+            cli,
+            &store,
+            "maestro_action_request",
+            json!({ "session": session.session, "action": action, "reason": reason }),
+        )?,
+        Command::Close { session, receipt, summary } => request(
+            cli,
+            &store,
+            "maestro_session_close",
+            json!({ "session": session.session, "receipt": receipt, "summary": summary }),
+        )?,
+        Command::Handback { session, summary, next } => request(
+            cli,
+            &store,
+            "maestro_handback",
+            json!({ "session": session.session, "summary": summary, "next": next }),
+        )?,
+        Command::Escalate { session, reason } => {
+            request(cli, &store, "maestro_escalate", json!({ "session": session.session, "reason": reason }))?
+        }
         _ => read(cli, &store)?,
+    }
+    Ok(())
+}
+
+/// One agent request, through the MCP dispatch. The caller is unverified (BRO-3268).
+fn request(cli: &Cli, store: &Store, tool: &str, args: Value) -> Result<()> {
+    let v = call(store, tool, args)?;
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let r = &v["request"];
+    match r["disposition"].as_str() {
+        Some("applied") => println!(
+            "filed {} in {} ({}); origin {} unverified",
+            s(&r["result"]["id"]),
+            s(&r["result"]["ledger"]),
+            s(&v["validator"]),
+            s(&r["session"]["id"])
+        ),
+        d => println!("{} {} {}: recorded, {}", s(&r["request"]), s(&r["id"]), s(&r["at"]), d.unwrap_or("?")),
+    }
+    if let Some(e) = v["journal_error"].as_str() {
+        eprintln!("maestro: the requests journal was not written: {e}");
     }
     Ok(())
 }

@@ -17,6 +17,7 @@ pub mod initiative;
 pub mod js;
 pub mod loops;
 pub mod need;
+pub mod request;
 pub mod section;
 pub mod session;
 pub mod tick;
