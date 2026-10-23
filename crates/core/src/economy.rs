@@ -726,6 +726,14 @@ pub fn tier_signals(data: &Value) -> Result<(Vec<Value>, Vec<String>), Fault> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_window_opened_before_year_one_overflows() {
+        // Python: datetime(1, 1, 3) - timedelta(days=7) raises OverflowError.
+        let v = serde_json::json!({"reset_7d": "0001-01-03T00:00:00+00:00", "7d": 10});
+        let now = super::parse_ts(Some(&serde_json::json!("2026-10-23T00:00:00Z"))).unwrap().unwrap();
+        assert!(super::window_average(v.as_object().unwrap(), now).is_err());
+    }
+
     use super::*;
 
     fn at(s: &str) -> i64 {

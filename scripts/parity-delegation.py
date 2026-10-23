@@ -664,6 +664,20 @@ def gate_cases(rng):
         st.pop("holdUntil", None), st.pop("pendingSignals", None)
         args = {"usage": rows, "now": iso_z(now), "state": st}
         cases += [{"fn": "resume_gate", "args": args}, {"fn": "capacity", "args": {**args, "samples": []}}]
+    # The same, kept only inside the schema: most generated rows or states carry a value the schema
+    # refuses, which left the standby test and its order unkilled (mutation at 6116390).
+    typed = 0
+    while typed < 400:
+        rows = []
+        while len(rows) < 2:
+            rows = gate_rows(rng, now, iso_z)
+        st = gate_state(rng, now, rows)
+        st.update(versionGate={"automaticSwitching": "on"},
+                  config={**(st.get("config") or {}), "autoBalance": rng.random() < 0.85})
+        args = {"usage": rows, "now": iso_z(now), "state": st}
+        if refusal({"fn": "resume_gate", "args": args}) is None:
+            typed += 1
+            cases.append({"fn": "resume_gate", "args": args})
     # Exact boundaries (P20 r1, Stratum B): resets and holds at now, a duplicate id, a bool bound, a rank tie.
     on = {"versionGate": {"automaticSwitching": "on"}, "config": {"autoBalance": True}}
     acct = lambda name, **kw: {"id": name, "email": f"{name}@x.io", "fiveHourUtil": 10, "sevenDayUtil": 10,  # noqa: E731
@@ -684,6 +698,17 @@ def gate_cases(rng):
         ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "id": "", "email": ""}], on),
         ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "email": ""}], on),
         ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "id": ""}], on),
+        # A standby exactly at standbyMax is one the balancer fails over to ("at or under").
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=70)], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=40)],
+         {**on, "config": {"autoBalance": True, "standbyMax": 40}}),
+        # The standby that covers is the least used: 5h, then 7d, then name (`min(standbys)`).
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=60),
+          acct("c", fiveHourUtil=20)], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=20, sevenDayUtil=50),
+          acct("c", fiveHourUtil=20, sevenDayUtil=5)], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("d", fiveHourUtil=20),
+          acct("c", fiveHourUtil=20)], on),
     ]
     for rows, st in edge:
         args = {"usage": rows, "now": at_now, "state": st}

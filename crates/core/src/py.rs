@@ -216,6 +216,12 @@ pub fn join(a: &str, b: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn strip_is_pythons() {
+        // Python: "\x1cx\x1f".strip() == "x"; U+001C..U+001F are whitespace to str.isspace.
+        assert_eq!(super::strip("\u{1c} x\u{1f}\u{3000}"), "x");
+    }
+
     use super::*;
 
     #[test]

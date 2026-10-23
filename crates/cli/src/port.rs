@@ -526,13 +526,13 @@ fn plain_scalar_outside(v: &str, is_key: bool) -> Option<String> {
         Yaml11::Null => None,
         Yaml11::Bool if matches!(v, "true" | "True" | "TRUE" | "false" | "False" | "FALSE") => None,
         Yaml11::Int => {
-            let decimal = digits(s, b.len()) && (b[s] != b'0' || b.len() == s + 1);
             let same = v
                 .parse::<i64>()
                 .ok()
                 .zip(both.as_ref().and_then(serde_yaml::Value::as_i64))
                 .is_some_and(|(a, b)| a == b);
-            if decimal && same { None } else { differ() }
+            // A leading zero is octal to PyYAML; serde_yaml reads it as a string, so `same` fails.
+            if same { None } else { differ() }
         }
         Yaml11::Float => {
             let dot = b.iter().position(|c| *c == b'.').unwrap_or(b.len());
@@ -549,15 +549,6 @@ fn plain_scalar_outside(v: &str, is_key: bool) -> Option<String> {
     }
 }
 
-/// Whether a loaded document holds a `<<` key anywhere (PyYAML would merge it).
-fn has_merge_key(y: &serde_yaml::Value) -> bool {
-    match y {
-        serde_yaml::Value::Mapping(m) => m.iter().any(|(k, v)| k.as_str() == Some("<<") || has_merge_key(v)),
-        serde_yaml::Value::Sequence(s) => s.iter().any(has_merge_key),
-        _ => false,
-    }
-}
-
 /// YAML within the subset (see [`outside_subset`]); anything outside it is `Fault::Value` naming why.
 fn load_yaml(text: &str) -> Result<serde_yaml::Value, Fault> {
     let outside = |why: String| Fault::Value(format!("{}: {why}", maestro_store::yaml::OUTSIDE));
@@ -566,9 +557,6 @@ fn load_yaml(text: &str) -> Result<serde_yaml::Value, Fault> {
     }
     let y: serde_yaml::Value =
         serde_yaml::from_str(text).map_err(|e| Fault::Crash { kind: "YAMLError", msg: e.to_string() })?;
-    if has_merge_key(&y) {
-        return Err(outside("a merge key `<<`".into()));
-    }
     Ok(y)
 }
 
@@ -1173,6 +1161,27 @@ fn yaml_case(text: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// One witness per subset guard, each a document PyYAML reads differently from serde_yaml or
+    /// raises on (checked with PyYAML 6 under Python 3.14): the fuzz golden measures misreads only, so
+    /// a guard whose witness it lacks is held here.
+    #[test]
+    fn each_subset_guard_refuses_its_witness() {
+        for (doc, why) in [
+            ("a: b\rc: d\n", "a carriage return"), // PyYAML: {a: b, c: d}
+            ("a: b\u{2028}c: d\n", "a Unicode line or paragraph separator"), // PyYAML: {a: b, c: d}
+            ("a: b\u{85}c: d\n", "a Unicode line or paragraph separator"), // PyYAML: {a: b, c: d}
+            ("a: x\u{feff}y\n", "a byte-order mark past the start"),
+            ("a: \u{7}\n", "a control character"), // PyYAML: ReaderError
+            ("c:\n  <<: {b: 1}\n", "a merge key"), // PyYAML: {c: {b: 1}}
+            ("a: 010\n", "010"),                   // PyYAML: {a: 8}
+        ] {
+            match load_yaml(doc) {
+                Err(Fault::Value(e)) => assert!(e.contains(why), "{doc:?}: {e}"),
+                other => panic!("{doc:?} read: {other:?}"),
+            }
+        }
+    }
+
     use super::*;
 
     /// The hand-written resolver is PyYAML's on every scalar of its golden (`scripts/parity-delegation.py`).

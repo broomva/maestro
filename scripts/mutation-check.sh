@@ -286,7 +286,6 @@ mutate $port '            Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart
                 continue
             }'
 mutate $port '                if *anchor > 0 =>' '                if false =>'
-mutate $port '    if has_merge_key(&y) {' '    if false {'
 
 # The schema (crates/core/src/schema.rs): every input is checked before any rule runs, and each
 # field type holds. Held by the golden's refusals (the harness's own reading of the schema) and
@@ -325,7 +324,6 @@ mutate $port "            '\\u{85}' | '\\u{2028}' | '\\u{2029}' => \"a Unicode l
 mutate $port "            '\\u{feff}' if i > 0 => \"a byte-order mark past the start\"," "            '\\u{feff}' if false => \"a byte-order mark past the start\","
 mutate $port '            c if c.is_control() => "a control character",' '            c if false && c.is_control() => "a control character",'
 mutate $port '        Yaml11::Bool if matches!(v, "true" | "True" | "TRUE" | "false" | "False" | "FALSE") => None,' '        Yaml11::Bool => None,'
-mutate $port '            if decimal && same { None } else { differ() }' '            if same { None } else { differ() }'
 mutate $port '            if plain && same { None } else { differ() }' '            if same { None } else { differ() }'
 mutate $port '            Some(serde_yaml::Value::String(x)) if x == v => None,' '            _ if true => None,'
 mutate $port '    if date || stamp {' '    if date {'
