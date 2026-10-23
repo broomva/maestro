@@ -130,7 +130,7 @@ pub struct Rung {
 
 /// `tier` moved `steps` rungs up, capped at `top`, never below `tier`.
 pub fn bump(tier: Tier, steps: i64, top: Tier) -> Tier {
-    let up = (tier as i64 + steps.max(0)).min(top as i64);
+    let up = (tier as i64).saturating_add(steps.max(0)).min(top as i64);
     Tier::ALL[(tier as i64).max(up) as usize]
 }
 
@@ -243,15 +243,49 @@ impl std::fmt::Display for Fault {
     }
 }
 
-/// `int(x)` on a loaded value.
-fn int_of(v: &Value) -> Result<i64, Fault> {
-    match v {
-        Value::Bool(b) => Ok(*b as i64),
-        Value::Number(n) => {
-            n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f.trunc() as i64)).ok_or_else(|| {
-                Fault::Crash { kind: "OverflowError", msg: format!("cannot convert float {} to integer", py::repr(v)) }
-            })
+/// Python's unbounded `int`: saturated to i64 for the comparisons (every one is against a small
+/// constant, which saturation keeps), and its exact decimal text for messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PyInt {
+    v: i64,
+    text: String,
+}
+
+impl PyInt {
+    fn small(v: i64) -> PyInt {
+        PyInt { v, text: v.to_string() }
+    }
+
+    /// An optional sign and ASCII digits, as Python prints the value.
+    fn of_digits(signed: &str) -> PyInt {
+        let (neg, digits) = match signed.strip_prefix('-') {
+            Some(d) => (true, d),
+            None => (false, signed.strip_prefix('+').unwrap_or(signed)),
+        };
+        let digits = digits.trim_start_matches('0');
+        if digits.is_empty() {
+            return PyInt::small(0);
         }
+        let text = if neg { format!("-{digits}") } else { digits.to_string() };
+        let v = text.parse().unwrap_or(if neg { i64::MIN } else { i64::MAX });
+        PyInt { v, text }
+    }
+}
+
+/// `int(x)` on a loaded value.
+fn int_of(v: &Value) -> Result<PyInt, Fault> {
+    match v {
+        Value::Bool(b) => Ok(PyInt::small(*b as i64)),
+        Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
+            (Some(i), _, _) => Ok(PyInt::small(i)),
+            (None, Some(u), _) => Ok(PyInt::of_digits(&u.to_string())),
+            // A float's integer part, exactly: `{:.0}` of a whole f64 prints every digit.
+            (_, _, Some(f)) if f.is_finite() => Ok(PyInt::of_digits(&format!("{:.0}", f.trunc()))),
+            _ => Err(Fault::Crash {
+                kind: "OverflowError",
+                msg: format!("cannot convert float {} to integer", py::repr(v)),
+            }),
+        },
         Value::String(s) => {
             // Python's int(): optional sign, ASCII digits, single underscores between digits.
             let t = s.trim();
@@ -261,10 +295,7 @@ fn int_of(v: &Value) -> Result<i64, Fault> {
                 && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
                 && !digits.contains("__");
             if ok {
-                // Python's int is unbounded; an i64 is not, so a longer literal stops here.
-                t.replace('_', "")
-                    .parse()
-                    .map_err(|_| Fault::Crash { kind: "OverflowError", msg: format!("integer {s} out of range") })
+                Ok(PyInt::of_digits(&t.replace('_', "")))
             } else {
                 Err(Fault::Value(format!("invalid literal for int() with base 10: {}", py::repr_str(s))))
             }
@@ -289,11 +320,23 @@ pub fn type_name(v: &Value) -> &'static str {
     }
 }
 
+/// Python hashes `v` here (a dict key or a set member, stored or looked up): a list or a mapping
+/// is unhashable, a `TypeError` the Python does not catch. `as_` is "dict key" or "set element".
+pub fn hashed(v: &Value, as_: &str) -> Result<(), Fault> {
+    match v {
+        Value::Array(_) | Value::Object(_) => {
+            let t = type_name(v);
+            Err(Fault::type_error(format!("cannot use '{t}' as a {as_} (unhashable type: '{t}')")))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// `int(sig.get(k) or default)`.
-fn int_or(sig: &Map<String, Value>, k: &str, default: i64) -> Result<i64, Fault> {
+fn int_or(sig: &Map<String, Value>, k: &str, default: i64) -> Result<PyInt, Fault> {
     match sig.get(k) {
         v if py::truthy(v) => int_of(v.expect("truthy is present")),
-        _ => Ok(default),
+        _ => Ok(PyInt::small(default)),
     }
 }
 
@@ -331,6 +374,9 @@ pub struct Assessment {
 /// one_way_door, spec, failed_attempts, observed_tier, allow_apex, mode.
 pub fn assess(sig: &Map<String, Value>, human_paths: &[String]) -> Result<Assessment, Fault> {
     let kind_v = py::or(sig.get("kind"), None);
+    if let Some(v) = kind_v {
+        hashed(v, "set element")?;
+    }
     let kind = match kind_v {
         None => "implement".to_string(),
         Some(Value::String(s)) => s.clone(),
@@ -346,8 +392,8 @@ pub fn assess(sig: &Map<String, Value>, human_paths: &[String]) -> Result<Assess
     }
     let kind = kind.as_str();
     let paths: Vec<String> = iter_or_empty(sig.get("paths"))?.iter().map(py::str_of).collect();
-    let loc = int_or(sig, "est_loc", 0)?;
-    let files = int_or(sig, "files", 0)?.max(paths.len() as i64);
+    let loc = int_or(sig, "est_loc", 0)?.v;
+    let files = int_or(sig, "files", 0)?.v.max(paths.len() as i64);
     let code_files = paths.iter().filter(|p| !is_test_path(p)).count();
     let repos = int_or(sig, "repos", 1)?;
     let gov: Vec<&String> = paths.iter().filter(|p| is_governance(p, human_paths)).collect();
@@ -417,13 +463,16 @@ pub fn assess(sig: &Map<String, Value>, human_paths: &[String]) -> Result<Assess
             complexity = "bounded";
             reasons.push("bounded change: its done check verifies it".into());
         }
-        if repos > 1 {
+        if repos.v > 1 {
             author = Some(Tier::Frontier);
             needs.push("decompose");
-            reasons.push(format!("{repos} repos: a frontier plan splits it into one node per repo"));
+            reasons.push(format!("{} repos: a frontier plan splits it into one node per repo", repos.text));
         }
     }
 
+    if let Some(v) = sig.get("observed_tier") {
+        hashed(v, "dict key")?;
+    }
     if let Some(seen) = Tier::of(sig.get("observed_tier"))
         && seen > executor
     {
@@ -431,17 +480,21 @@ pub fn assess(sig: &Map<String, Value>, human_paths: &[String]) -> Result<Assess
         executor = seen;
     }
     let failed = int_or(sig, "failed_attempts", 0)?;
-    if failed != 0 {
+    if failed.v != 0 {
         let top = if py::truthy(sig.get("allow_apex")) { Tier::Apex } else { TOP_DEFAULT };
-        let raised = bump(executor, failed, top);
+        let raised = bump(executor, failed.v, top);
         reasons.push(format!(
-            "failed verification {failed}x, one rung each: {} -> {}",
+            "failed verification {}x, one rung each: {} -> {}",
+            failed.text,
             executor.as_str(),
             raised.as_str()
         ));
         executor = raised;
     }
     let mut thinking = thinking.unwrap_or(executor.rung().thinking);
+    if let Some(v) = sig.get("mode") {
+        hashed(v, "set element")?;
+    }
     let mode = match sig.get("mode") {
         Some(Value::String(m)) => Some(norm_mode(m)),
         _ => None,
@@ -592,6 +645,10 @@ pub fn validate(
         }
         None => vec![],
     };
+    // `... or {home}` and `home not in names`: the graph's repo is a set member.
+    if let Some(v) = py::or(get("repo"), None) {
+        hashed(v, "set element")?;
+    }
     if names.is_empty() {
         names.push(home.clone());
     }
@@ -618,6 +675,7 @@ pub fn validate(
                 continue;
             }
         };
+        hashed(&nid, "dict key")?;
         let k = key(&nid);
         if let Some(&i) = index.get(&k) {
             errors.push(format!("{}: duplicate id", py::str_of(&nid)));
@@ -631,6 +689,7 @@ pub fn validate(
     let deps_of = |i: usize| iter_or_empty(node(i).get("depends_on"));
     for (i, (nid, _)) in order.iter().enumerate() {
         for d in deps_of(i)? {
+            hashed(&d, "dict key")?;
             if !index.contains_key(&key(&d)) {
                 errors.push(format!("{nid}: depends on unknown node {}", py::repr(&d)));
             }
@@ -650,9 +709,14 @@ pub fn validate(
     }
     let mut resolved: Vec<Resolved> = Vec::new();
     for (i, (nid, n)) in order.iter().enumerate() {
+        if let Some(v) = py::or(n.get("repo"), None) {
+            hashed(v, "set element")?;
+        }
         let here = py::or(n.get("repo"), None).map_or_else(|| home.clone(), py::str_of);
         if !names.contains(&here) {
-            errors.push(format!("{nid}: repo {} is not one the graph names", py::repr_str(&here)));
+            // `{here!r}`: the node's own value as written (a number reprs without quotes).
+            let shown = py::or(n.get("repo"), None).map_or_else(|| py::repr_str(&here), py::repr);
+            errors.push(format!("{nid}: repo {shown} is not one the graph names"));
             continue;
         }
         let sig_v = py::or(n.get("signals"), None);
@@ -791,6 +855,7 @@ pub fn validate(
             Err(crash) => return Err(crash),
         };
         let tier_v = py::or(n.get("tier"), None).cloned().unwrap_or(json!(a.executor));
+        hashed(&tier_v, "dict key")?;
         let Some(tier) = Tier::of(Some(&tier_v)) else {
             errors.push(format!("{nid}: unknown tier {}", py::repr(&tier_v)));
             continue;
@@ -831,6 +896,7 @@ pub fn validate(
             errors.push(format!("{nid}: no done check"));
         }
         let verify_v = py::or(n.get("verify"), None).cloned().unwrap_or(json!(a.verify));
+        hashed(&verify_v, "dict key")?;
         let strength = |v: &Value| VERIFY.iter().find(|(k, _)| Some(*k) == v.as_str()).map(|(_, s)| *s);
         match strength(&verify_v) {
             None => errors.push(format!("{nid}: unknown verify {}", py::repr(&verify_v))),
@@ -840,6 +906,7 @@ pub fn validate(
             Some(_) => {}
         }
         let spawn = py::or(n.get("spawn_default"), None).cloned().unwrap_or(json!(tier));
+        hashed(&spawn, "dict key")?;
         if Tier::of(Some(&spawn)).is_none() {
             errors.push(format!("{nid}: unknown spawn_default {}", py::repr(&spawn)));
         }

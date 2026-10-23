@@ -45,6 +45,9 @@ pub const SIGNAL_TTL_S: f64 = 900.0;
 
 const US: i64 = 1_000_000;
 const HOUR_US: i64 = 3600 * US;
+/// `datetime.min` and `datetime.max` in UTC, as epoch microseconds: the dates Python can hold.
+const DT_MIN_US: i64 = -62_135_596_800 * US;
+const DT_MAX_US: i64 = 253_402_300_799 * US + 999_999;
 
 /// A cadence mode, most permissive first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -78,28 +81,63 @@ impl Mode {
 
 /// `parse_ts`: none for null or `""`; a number is epoch seconds, or milliseconds above 1e11;
 /// a string is ISO 8601 as `datetime.fromisoformat` reads it, naive meaning UTC.
-pub fn parse_ts(v: Option<&Value>) -> Result<Option<i64>, String> {
+pub fn parse_ts(v: Option<&Value>) -> Result<Option<i64>, Fault> {
     match v {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) if s.is_empty() => Ok(None),
-        Some(Value::Bool(b)) => Ok(Some(from_seconds(*b as i64 as f64))),
+        Some(Value::Bool(b)) => from_seconds(*b as i64 as f64).map(Some),
         Some(Value::Number(n)) => {
             let f = n.as_f64().unwrap_or(f64::NAN);
-            Ok(Some(from_seconds(f / if f > 1e11 { 1000.0 } else { 1.0 })))
+            from_seconds(f / if f > 1e11 { 1000.0 } else { 1.0 }).map(Some)
         }
         Some(other) => {
             let s = py::str_of(other);
             let t = s.trim().replace('Z', "+00:00");
-            from_iso(&t).map(Some)
+            from_iso(&t).map(Some).map_err(Fault::Value)
         }
     }
 }
 
 /// `datetime.fromtimestamp(f, utc)`: whole seconds, then the fraction rounded half-even to µs.
-fn from_seconds(f: f64) -> i64 {
+/// Outside `datetime`'s years it raises as CPython does: a `ValueError` naming the year, an
+/// `OSError` where the year does not fit the C library's `int` (macOS), an `OverflowError`
+/// past `time_t`.
+fn from_seconds(f: f64) -> Result<i64, Fault> {
+    if f.is_nan() {
+        return Err(Fault::Value("Invalid value NaN (not a number)".into()));
+    }
+    if !f.is_finite() || f.abs() >= 9.2e18 {
+        return Err(Fault::Crash { kind: "OverflowError", msg: "timestamp out of range for platform time_t".into() });
+    }
     let whole = f.trunc();
-    let us = round_half_even((f - whole) * 1e6);
-    whole as i64 * US + us
+    // Past ±9e12 s (285,000 years) no year Python holds is near, and the µs would overflow i64.
+    let us = if whole.abs() < 9e12 { Some(whole as i64 * US + round_half_even((f - whole) * 1e6)) } else { None };
+    let year = year_of(us.map_or(whole as i64, |us| us.div_euclid(US)));
+    if !(i64::from(i32::MIN) + 1900..=i64::from(i32::MAX) + 1900).contains(&year) {
+        return Err(Fault::Crash {
+            kind: "OSError",
+            msg: "[Errno 84] Value too large to be stored in data type".into(),
+        });
+    }
+    match us {
+        Some(us) if (DT_MIN_US..=DT_MAX_US).contains(&us) => Ok(us),
+        _ => Err(Fault::Value(format!("year must be in 1..9999, not {year}"))),
+    }
+}
+
+/// The proleptic Gregorian year of an epoch second (Howard Hinnant's `civil_from_days`).
+fn year_of(secs: i64) -> i64 {
+    let z = secs.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    yoe + era * 400 + i64::from(mp >= 10)
+}
+
+fn overflow() -> Fault {
+    Fault::Crash { kind: "OverflowError", msg: "date value out of range".into() }
 }
 
 fn round_half_even(f: f64) -> i64 {
@@ -110,12 +148,18 @@ fn round_half_even(f: f64) -> i64 {
 
 /// `datetime + timedelta(hours=h)` as CPython's `timedelta_new` builds it: the whole hours exactly,
 /// the fraction times 3.6e9 µs in double precision, rounded half to even.
-pub fn add_hours(at: i64, hours: f64) -> Option<i64> {
+/// A sum outside `datetime`'s years raises, as Python's does: never a date that is not there.
+pub fn add_hours(at: i64, hours: f64) -> Result<i64, Fault> {
+    if hours.is_nan() {
+        return Err(Fault::Value("cannot convert float NaN to integer".into()));
+    }
+    // 1e8 hours is over 11,000 years: past it every sum is out of range (and i64 µs overflow).
     if !hours.is_finite() || hours.abs() > 1e8 {
-        return None;
+        return Err(overflow());
     }
     let whole = hours.trunc();
-    Some(at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64))
+    let sum = at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64);
+    if (DT_MIN_US..=DT_MAX_US).contains(&sum) { Ok(sum) } else { Err(overflow()) }
 }
 
 fn digits(s: &str) -> Option<i64> {
@@ -223,9 +267,12 @@ pub type Accounts = Vec<(String, Map<String, Value>)>;
 
 /// `sample_from_usage`: one cache line from the usage rows, per account (email local part).
 /// A repeated name keeps its first position and its last row, as a Python dict does.
-pub fn sample_from_usage(rows: &[Value], now: i64) -> (Value, Accounts) {
+pub fn sample_from_usage(rows: &[Value], now: i64) -> Result<(Value, Accounts), Fault> {
     let mut accounts: Accounts = Vec::new();
     for a in rows {
+        if !a.is_object() {
+            return Err(attribute_error(a));
+        }
         let name = py::str_of(a.get("email").unwrap_or(&json!("?")));
         let name = name.split('@').next().unwrap_or("").to_string();
         let raw = |k: &str| a.get(k).cloned().unwrap_or(Value::Null);
@@ -248,11 +295,11 @@ pub fn sample_from_usage(rows: &[Value], now: i64) -> (Value, Accounts) {
         }
     }
     let map: Map<String, Value> = accounts.iter().map(|(n, v)| (n.clone(), Value::Object(v.clone()))).collect();
-    (json!({"at": iso(Some(now)), "accounts": map}), accounts)
+    Ok((json!({"at": iso(Some(now)), "accounts": map}), accounts))
 }
 
 /// Two 7d reset stamps name the same window (the endpoint jitters by sub-seconds).
-fn same_window(a: Option<&Value>, b: Option<&Value>) -> Result<bool, String> {
+fn same_window(a: Option<&Value>, b: Option<&Value>) -> Result<bool, Fault> {
     Ok(match (parse_ts(a)?, parse_ts(b)?) {
         (Some(x), Some(y)) => ((x - y) as f64 / 1e6).abs() < 3600.0,
         (x, y) => x.is_none() && y.is_none(),
@@ -261,12 +308,24 @@ fn same_window(a: Option<&Value>, b: Option<&Value>) -> Result<bool, String> {
 
 /// 7d percentage points per hour for one account over the last `WINDOW_H`, or none. Only the
 /// current window counts: a different reset stamp, or a utilization drop, starts a new segment.
-pub fn burn_rate(samples: &[Value], account: &str, now: i64) -> Result<Option<f64>, String> {
+pub fn burn_rate(samples: &[Value], account: &str, now: i64) -> Result<Option<f64>, Fault> {
     let mut pts: Vec<(i64, f64, Option<Value>)> = Vec::new();
     for s in samples {
+        if !s.is_object() {
+            return Err(attribute_error(s));
+        }
         let at = parse_ts(s.get("at"))?;
-        let accts = py::or(s.get("accounts"), None);
-        let v = accts.and_then(|a| py::or(a.get(account), None));
+        let v = match py::or(s.get("accounts"), None) {
+            None => None,
+            Some(a @ Value::Object(_)) => py::or(a.get(account), None),
+            Some(other) => return Err(attribute_error(other)),
+        };
+        if let Some(v) = v
+            && at.is_some()
+            && !v.is_object()
+        {
+            return Err(attribute_error(v));
+        }
         let field = |k: &str| v.and_then(|v| v.get(k));
         let (Some(at), Some(seven)) = (at, py::num(field("7d"))) else { continue };
         if py::truthy(field("stale")) {
@@ -299,13 +358,17 @@ pub fn burn_rate(samples: &[Value], account: &str, now: i64) -> Result<Option<f6
 }
 
 /// Fallback rate: the account's 7d use over the hours its window has been open.
-pub fn window_average(v: &Map<String, Value>, now: i64) -> Result<Option<f64>, String> {
+pub fn window_average(v: &Map<String, Value>, now: i64) -> Result<Option<f64>, Fault> {
     let reset = parse_ts(v.get("reset_7d"))?;
     let (Some(reset), Some(seven)) = (reset, py::num(v.get("7d"))) else { return Ok(None) };
     if py::truthy(v.get("stale")) {
         return Ok(None);
     }
-    let open_h = hours_between(now, reset - 7 * 24 * HOUR_US);
+    let opened = reset - 7 * 24 * HOUR_US;
+    if opened < DT_MIN_US {
+        return Err(overflow());
+    }
+    let open_h = hours_between(now, opened);
     Ok((MIN_SPAN_H..=(7 * 24) as f64).contains(&open_h).then(|| seven / open_h))
 }
 
@@ -336,7 +399,7 @@ impl Default for Gate {
 
 /// Can the fleet spend this account? Not when it needs a login, or is limited: rate-limited, or at
 /// `LIMIT_7D` of a 7d window not yet reset.
-pub fn spendable(v: &Map<String, Value>, now: i64) -> Result<bool, String> {
+pub fn spendable(v: &Map<String, Value>, now: i64) -> Result<bool, Fault> {
     if py::truthy(v.get("needs_login")) || py::truthy(v.get("limited")) {
         return Ok(false);
     }
@@ -353,7 +416,7 @@ pub fn spendable(v: &Map<String, Value>, now: i64) -> Result<bool, String> {
 /// the gate, never open it. Stale, unreadable or unspendable, it is unknown and fails closed
 /// unless failover covers it: a fresh standby passing the balancer's own standby test, picked by
 /// the balancer's rank. `pool` is the accounts whose 7d headroom and relief the forecast counts.
-pub fn readiness(accounts: &Accounts, now: i64, gate: &Gate) -> Result<Map<String, Value>, String> {
+pub fn readiness(accounts: &Accounts, now: i64, gate: &Gate) -> Result<Map<String, Value>, Fault> {
     let mut sorted: Vec<&(String, Map<String, Value>)> = accounts.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
     let mut counted = Map::new();
@@ -465,7 +528,7 @@ pub fn gate_bounds(state: &Map<String, Value>, now: i64, rows: &[Value]) -> Resu
     let empty = Map::new();
     let now_s = now as f64 / 1e6;
     let cfg = py::or(state.get("config"), None);
-    let hold = parse_ts(py::or(state.get("holdUntil"), None)).map_err(Fault::Value)?;
+    let hold = parse_ts(py::or(state.get("holdUntil"), None))?;
     // A pending StopFailure report the balancer has not resolved: its switch has not happened.
     let mut pending = false;
     match py::or(state.get("pendingSignals"), None) {
@@ -532,7 +595,7 @@ pub fn gate_bounds(state: &Map<String, Value>, now: i64, rows: &[Value]) -> Resu
 /// `resume_gate()`, the snapshot's `usage.gate.resume`: every account that decides it is under
 /// `RESUME_5H` of 5h, and an unknown active account is covered by failover. No account to decide
 /// it fails closed.
-pub fn resume_gate(accounts: &Accounts, now: i64, gate: &Gate) -> Result<Value, String> {
+pub fn resume_gate(accounts: &Accounts, now: i64, gate: &Gate) -> Result<Value, Fault> {
     let r = readiness(accounts, now, gate)?;
     let five = r["counted"].as_object().cloned().unwrap_or_default();
     let joined =
@@ -576,7 +639,7 @@ fn usable(v: &Map<String, Value>) -> Option<f64> {
 /// The fleet's runway against its next relief, from the latest sample and the history. `known` is
 /// `readiness()`'s: only an account the fleet can spend decides it, and capacity and relief come
 /// only from its pool (BRO-3223).
-pub fn forecast(current: &Accounts, samples: &[Value], now: i64, gate: &Gate) -> Result<Map<String, Value>, String> {
+pub fn forecast(current: &Accounts, samples: &[Value], now: i64, gate: &Gate) -> Result<Map<String, Value>, Fault> {
     let mut rates: Vec<f64> = Vec::new();
     let mut headroom = 0.0;
     let mut per = Map::new();
@@ -613,7 +676,7 @@ pub fn forecast(current: &Accounts, samples: &[Value], now: i64, gate: &Gate) ->
         if let (Some(r), Some(s)) = (r, ok)
             && r != 0.0
         {
-            row["exhausts_at"] = iso(add_hours(now, (100.0 - s) / r));
+            row["exhausts_at"] = iso(Some(add_hours(now, (100.0 - s) / r)?));
         }
         per.insert(name.clone(), row);
     }
@@ -649,15 +712,11 @@ pub fn forecast(current: &Accounts, samples: &[Value], now: i64, gate: &Gate) ->
         }
         Some(f) => {
             let runway = headroom / f;
-            let ex = add_hours(now, runway);
+            let ex = add_hours(now, runway)?;
             set("runway_h", json!(py::round(runway, 1)));
-            set("exhausts_at", iso(ex));
+            set("exhausts_at", iso(Some(ex)));
             // Unknown relief fails closed.
-            let crosses = match (relief, ex) {
-                (None, _) => true,
-                (Some(rl), Some(ex)) => ex < rl,
-                (Some(_), None) => false,
-            };
+            let crosses = relief.is_none_or(|rl| ex < rl);
             set("crosses_relief", json!(crosses));
             set("basis", json!(if measured_basis && !average_basis { "measured" } else { "window_average" }));
         }
@@ -706,12 +765,15 @@ pub fn cadence(current: &Accounts, fc: &Map<String, Value>) -> Value {
 
 /// The snapshot's `capacity` section. `samples` must already include the current one. `gate`:
 /// readiness()'s failover and bounds; the default (no balancer state) fails a stale active closed.
-pub fn capacity(usage_rows: &[Value], samples: &[Value], now: i64, gate: &Gate) -> Result<Value, String> {
-    let (_, current) = sample_from_usage(usage_rows, now);
+pub fn capacity(usage_rows: &[Value], samples: &[Value], now: i64, gate: &Gate) -> Result<Value, Fault> {
+    let (_, current) = sample_from_usage(usage_rows, now)?;
     let mut fc = forecast(&current, samples, now, gate)?;
     let cad = cadence(&current, &fc);
     let mut recent = 0;
     for s in samples {
+        if !s.is_object() {
+            return Err(attribute_error(s));
+        }
         if let Some(at) = parse_ts(s.get("at"))?
             && (now - at) as f64 / 1e6 <= (WINDOW_H * 3600) as f64
         {
@@ -737,12 +799,34 @@ pub const REPLAN_RAISED: f64 = 0.3;
 /// A tier whose approved work passes first time less often than this is too low.
 pub const REPLAN_FIRST_PASS: f64 = 0.5;
 
+/// A number to Python's arithmetic: an int or a float, and a bool as the int it is. Anything else
+/// in `a / b` or `a >= b` is a `TypeError`.
+fn arith(v: &Value, op: &str) -> Result<f64, Fault> {
+    match v {
+        Value::Number(n) => Ok(n.as_f64().unwrap_or(f64::NAN)),
+        Value::Bool(b) => Ok(f64::from(u8::from(*b))),
+        other => Err(Fault::Crash {
+            kind: "TypeError",
+            msg: format!("unsupported operand type(s) for {op}: '{}'", crate::delegation::type_name(other)),
+        }),
+    }
+}
+
 /// Rows per tier from Maestro's economy.json, and the re-plan signals the tick acts on.
-pub fn tier_signals(data: &Value) -> (Vec<Value>, Vec<String>) {
-    let tiers = py::or(data.get("tiers"), None);
+pub fn tier_signals(data: &Value) -> Result<(Vec<Value>, Vec<String>), Fault> {
+    // `(data or {}).get("tiers") or {}`, then `tiers.get(t)`: a non-mapping fails `.get`.
+    let empty = Value::Object(Map::new());
+    let data = py::or(Some(data), None).unwrap_or(&empty);
+    if !data.is_object() {
+        return Err(attribute_error(data));
+    }
+    let tiers = py::or(data.get("tiers"), None).unwrap_or(&empty);
+    if !tiers.is_object() {
+        return Err(attribute_error(tiers));
+    }
     let (mut rows, mut signals) = (Vec::new(), Vec::new());
     for t in TIER_ORDER {
-        let Some(Value::Object(v)) = tiers.and_then(|x| x.get(t)) else { continue };
+        let Some(Value::Object(v)) = tiers.get(t) else { continue };
         if !py::truthy(v.get("runs")) {
             continue;
         }
@@ -753,30 +837,28 @@ pub fn tier_signals(data: &Value) -> (Vec<Value>, Vec<String>) {
             "first_pass": raw("firstPass"), "raises": raw("raises"), "raised_runs": raw("raisedRuns"),
             "escalations": raw("escalations"), "unmeasured": raw("unmeasured"),
         }));
+        // `raised / runs >= REPLAN_RAISED`: runs is truthy here, so never a zero divisor.
         let raised = py::or(v.get("raisedRuns"), None).cloned().unwrap_or(json!(0));
-        if let (Some(rn), Some(rd)) = (py::num(Some(&runs)), py::num(Some(&raised)))
-            && rn != 0.0
-            && rd / rn >= REPLAN_RAISED
-        {
+        if arith(&raised, "/")? / arith(&runs, "/")? >= REPLAN_RAISED {
             signals.push(format!(
                 "{t}: {}/{} runs raised a tier — assess this work one rung higher",
                 py::str_of(&raised),
                 py::str_of(&runs)
             ));
         }
-        let approved = py::or(v.get("approved"), None).and_then(|a| py::num(Some(a))).unwrap_or(0.0);
-        if let Some(fp) = py::num(v.get("firstPass"))
-            && approved >= 3.0
-            && fp < REPLAN_FIRST_PASS
-        {
-            signals.push(format!(
-                "{t}: first-pass {:.0}% over {} approved — briefs or tier too thin",
-                fp * 100.0,
-                py::str_of(&raw("approved"))
-            ));
+        // `_num(fp) and (approved or 0) >= 3 and fp < ...`: approved is compared only for a numeric fp.
+        if let Some(fp) = py::num(v.get("firstPass")) {
+            let approved = py::or(v.get("approved"), None).cloned().unwrap_or(json!(0));
+            if arith(&approved, ">=")? >= 3.0 && fp < REPLAN_FIRST_PASS {
+                signals.push(format!(
+                    "{t}: first-pass {:.0}% over {} approved — briefs or tier too thin",
+                    fp * 100.0,
+                    py::str_of(&raw("approved"))
+                ));
+            }
         }
     }
-    (rows, signals)
+    Ok((rows, signals))
 }
 
 #[cfg(test)]

@@ -185,7 +185,7 @@ mutate $tree '                    if same_path(Path::new(top), &tree.root) {' ' 
 # (crates/core/tests/parity_delegation.rs): each guarded predicate, broken once.
 deleg=crates/core/src/delegation.rs
 econ=crates/core/src/economy.rs
-mutate $deleg 'let up = (tier as i64 + steps.max(0)).min(top as i64);' 'let up = tier as i64 + steps.max(0);'
+mutate $deleg 'let up = (tier as i64).saturating_add(steps.max(0)).min(top as i64);' 'let up = (tier as i64).saturating_add(steps.max(0));'
 mutate $deleg "Some(('?', rest)) => text.first().is_some_and(|c| *c != '/') && glob(rest, &text[1..])," "Some(('?', rest)) => text.first().is_some() && glob(rest, &text[1..]),"
 mutate $deleg "if i == text.len() || text[i] == '/' {" 'if i == text.len() {'
 mutate $deleg 'if GOVERNANCE_ROOT.contains(&p.as_str()) {' 'if false {'
@@ -207,10 +207,10 @@ mutate $econ '} else if crosses && runway < CRITICAL_RUNWAY_H {' '} else if fals
 mutate $econ '} else if !py::truthy(fc.get("known")) {' '} else if false {'
 mutate $econ 'if let (Some(r), Some(_)) = (r, ok) {' 'if let (Some(r), _) = (r, ok) {'
 mutate $econ '&& (p.1 < last.1 || !same_window(p.2.as_ref(), last.2.as_ref())?)' '&& (p.1 < last.1)'
-mutate $econ '(None, _) => true,' '(None, _) => false,'
+mutate $econ 'let crosses = relief.is_none_or(|rl| ex < rl);' 'let crosses = relief.is_some_and(|rl| ex < rl);'
 mutate $econ '(ctx > HANDOFF_K, driven && ctx > SUCCESSOR_K)' '(ctx > HANDOFF_K, ctx > SUCCESSOR_K)'
 mutate $econ '(MIN_SPAN_H..=(7 * 24) as f64).contains(&open_h)' '(0.0..=f64::MAX).contains(&open_h)'
-mutate $econ '&& rd / rn >= REPLAN_RAISED' '&& rd / rn > REPLAN_RAISED'
+mutate $econ 'arith(&raised, "/")? / arith(&runs, "/")? >= REPLAN_RAISED' 'arith(&raised, "/")? / arith(&runs, "/")? > REPLAN_RAISED'
 # A repos that is not a mapping stops the run; it never plans as a single-repo graph.
 mutate $deleg 'return Err(Fault::attribute_error(format!("'"'"'{}'"'"' object has no attribute '"'"'keys'"'"'", type_name(other))));' 'let _ = other;
             vec![]'
@@ -240,8 +240,8 @@ mutate $econ '|| at > now {' '{'
 mutate $econ 'if span < MIN_SPAN_H {' 'if false {'
 mutate $econ 'py::num(v.get("7d")).filter(|s| !py::truthy(v.get("limited")) && *s < 100.0)' 'py::num(v.get("7d")).filter(|s| *s < 100.0)'
 mutate $econ '.filter(|r| *r > now)' '.filter(|_| true)'
-mutate $econ '&& approved >= 3.0' '&& approved >= 0.0'
-mutate $econ 'Some(at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64))' 'Some(at + (hours * 3600.0).trunc() as i64 * US + round_half_even((hours * 3600.0).fract() * 1e6))'
+mutate $econ 'if arith(&approved, ">=")? >= 3.0 && fp < REPLAN_FIRST_PASS {' 'if arith(&approved, ">=")? >= 0.0 && fp < REPLAN_FIRST_PASS {'
+mutate $econ 'let sum = at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64);' 'let sum = at + (hours * 3600.0).trunc() as i64 * US + round_half_even((hours * 3600.0).fract() * 1e6);'
 
 # The capacity gate (BRO-3223): who decides it, when a stale active account counts, who covers it by
 # failover, the pool headroom and relief come from, and the balancer state's bounds.
@@ -298,6 +298,69 @@ mutate $port '            Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart
             }'
 mutate $port '                if *anchor > 0 =>' '                if false =>'
 mutate $port '    if has_merge_key(&y) {' '    if false {'
+
+# Where the Python raises, the port raises the same kind (P20 port arc 2, Stratum A): an unhashable
+# value where the Python hashes one, a non-mapping row or sample, a non-numeric tier count, a date past
+# datetime's years. Each guard is held by the golden's type cases or the CLI goldens.
+mutate $deleg '    if let Some(v) = kind_v {
+        hashed(v, "set element")?;
+    }' ''
+mutate $deleg '    if let Some(v) = sig.get("observed_tier") {
+        hashed(v, "dict key")?;
+    }' ''
+mutate $deleg '    if let Some(v) = sig.get("mode") {
+        hashed(v, "set element")?;
+    }' ''
+mutate $deleg '    if let Some(v) = py::or(get("repo"), None) {
+        hashed(v, "set element")?;
+    }' ''
+mutate $deleg '        hashed(&nid, "dict key")?;' ''
+mutate $deleg '            hashed(&d, "dict key")?;' ''
+mutate $deleg '        if let Some(v) = py::or(n.get("repo"), None) {
+            hashed(v, "set element")?;
+        }' ''
+mutate $deleg '        hashed(&tier_v, "dict key")?;' ''
+mutate $deleg '        hashed(&verify_v, "dict key")?;' ''
+mutate $deleg '        hashed(&spawn, "dict key")?;' ''
+mutate $deleg '        Value::Array(_) | Value::Object(_) => {
+            let t = type_name(v);' '        Value::Null => {
+            let t = type_name(v);'
+mutate $port '            if let Some(v) = here_v
+                && let Err(f) = d::hashed(v, "set element")' '            if let Some(v) = here_v.filter(|_| false)
+                && let Err(f) = d::hashed(v, "set element")'
+mutate $port '                if let Err(f) = d::hashed(id, "set element") {' '                if let Err(f) = Ok::<(), Fault>(()) {'
+mutate $deleg '        let digits = digits.trim_start_matches('"'"'0'"'"');' '        let digits = digits;'
+mutate $deleg '            (_, _, Some(f)) if f.is_finite() => Ok(PyInt::of_digits(&format!("{:.0}", f.trunc()))),' '            (_, _, Some(f)) if f.is_finite() => Ok(PyInt::small(f.trunc() as i64)),'
+mutate $deleg '            let shown = py::or(n.get("repo"), None).map_or_else(|| py::repr_str(&here), py::repr);' '            let shown = py::repr_str(&here);'
+mutate $econ '        if !a.is_object() {
+            return Err(attribute_error(a));
+        }' ''
+mutate $econ '        if !s.is_object() {
+            return Err(attribute_error(s));
+        }
+        let at = parse_ts(s.get("at"))?;' '        let at = parse_ts(s.get("at"))?;'
+mutate $econ '            Some(other) => return Err(attribute_error(other)),
+        };' '            Some(_) => None,
+        };'
+mutate $econ '            && at.is_some()
+            && !v.is_object()' '            && false'
+mutate $econ '    for s in samples {
+        if !s.is_object() {
+            return Err(attribute_error(s));
+        }
+        if let Some(at)' '    for s in samples {
+        if let Some(at)'
+mutate $econ '        Some(us) if (DT_MIN_US..=DT_MAX_US).contains(&us) => Ok(us),' '        Some(us) => Ok(us),'
+mutate $econ '    if !(i64::from(i32::MIN) + 1900..=i64::from(i32::MAX) + 1900).contains(&year) {' '    if false {'
+mutate $econ '    if (DT_MIN_US..=DT_MAX_US).contains(&sum) { Ok(sum) } else { Err(overflow()) }' '    Ok(sum)'
+mutate $econ '    if opened < DT_MIN_US {' '    if false {'
+mutate $econ '        Value::Bool(b) => Ok(f64::from(u8::from(*b))),' '        Value::Bool(_) => Ok(f64::NAN),'
+mutate $econ '    if !tiers.is_object() {
+        return Err(attribute_error(tiers));
+    }' ''
+mutate $econ '    if !data.is_object() {
+        return Err(attribute_error(data));
+    }' ''
 
 echo "mutation  $killed of $total killed"
 exit $failed

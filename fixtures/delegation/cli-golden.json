@@ -2619,6 +2619,846 @@
   {
    "cwd": "w",
    "json": false,
+   "name": "list-id plan ",
+   "py": [
+    "plan",
+    "{ROOT}/list-id.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-id.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-id plan --json ",
+   "py": [
+    "plan",
+    "{ROOT}/list-id.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-id.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-id brief a ",
+   "py": [
+    "brief",
+    "{ROOT}/list-id.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-id.json",
+    "a"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-id plan --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-id.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-id.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-id plan --json --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-id.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-id.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-id brief a --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "brief",
+    "{ROOT}/list-id.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-id.json",
+    "a",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-mode plan ",
+   "py": [
+    "plan",
+    "{ROOT}/list-mode.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-mode.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-mode plan --json ",
+   "py": [
+    "plan",
+    "{ROOT}/list-mode.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-mode.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-mode brief a ",
+   "py": [
+    "brief",
+    "{ROOT}/list-mode.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-mode.json",
+    "a"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-mode plan --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-mode.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-mode.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-mode plan --json --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-mode.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-mode.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-mode brief a --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "brief",
+    "{ROOT}/list-mode.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-mode.json",
+    "a",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-dep plan ",
+   "py": [
+    "plan",
+    "{ROOT}/list-dep.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-dep.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-dep plan --json ",
+   "py": [
+    "plan",
+    "{ROOT}/list-dep.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-dep.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-dep brief a ",
+   "py": [
+    "brief",
+    "{ROOT}/list-dep.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-dep.json",
+    "a"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-dep plan --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-dep.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-dep.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-dep plan --json --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-dep.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-dep.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-dep brief a --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "brief",
+    "{ROOT}/list-dep.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-dep.json",
+    "a",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-repo-absent plan ",
+   "py": [
+    "plan",
+    "{ROOT}/list-repo-absent.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-repo-absent.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-repo-absent plan --json ",
+   "py": [
+    "plan",
+    "{ROOT}/list-repo-absent.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-repo-absent.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-repo-absent brief a ",
+   "py": [
+    "brief",
+    "{ROOT}/list-repo-absent.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-repo-absent.json",
+    "a"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-repo-absent plan --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-repo-absent.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-repo-absent.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-repo-absent plan --json --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-repo-absent.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-repo-absent.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-repo-absent brief a --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "brief",
+    "{ROOT}/list-repo-absent.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-repo-absent.json",
+    "a",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-repo-unnamed-home plan ",
+   "py": [
+    "plan",
+    "{ROOT}/list-repo-unnamed-home.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-repo-unnamed-home.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-repo-unnamed-home plan --json ",
+   "py": [
+    "plan",
+    "{ROOT}/list-repo-unnamed-home.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-repo-unnamed-home.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-repo-unnamed-home brief a ",
+   "py": [
+    "brief",
+    "{ROOT}/list-repo-unnamed-home.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-repo-unnamed-home.json",
+    "a"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-repo-unnamed-home plan --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-repo-unnamed-home.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-repo-unnamed-home.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-repo-unnamed-home plan --json --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-repo-unnamed-home.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-repo-unnamed-home.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-repo-unnamed-home brief a --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "brief",
+    "{ROOT}/list-repo-unnamed-home.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-repo-unnamed-home.json",
+    "a",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-id-unnamed-home plan ",
+   "py": [
+    "plan",
+    "{ROOT}/list-id-unnamed-home.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-id-unnamed-home.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-id-unnamed-home plan --json ",
+   "py": [
+    "plan",
+    "{ROOT}/list-id-unnamed-home.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-id-unnamed-home.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-id-unnamed-home brief a ",
+   "py": [
+    "brief",
+    "{ROOT}/list-id-unnamed-home.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-id-unnamed-home.json",
+    "a"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-id-unnamed-home plan --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-id-unnamed-home.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/list-id-unnamed-home.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "list-id-unnamed-home plan --json --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/list-id-unnamed-home.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/list-id-unnamed-home.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "list-id-unnamed-home brief a --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "brief",
+    "{ROOT}/list-id-unnamed-home.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/list-id-unnamed-home.json",
+    "a",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
    "name": "list.graph.yaml plan",
    "py": [
     "plan",
@@ -4035,6 +4875,52 @@
     "stderr": "no economy by tier yet ([Errno 2] No such file or directory: '{ROOT}/nope.json')\n",
     "stdout": ""
    }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "tiers economy-str-runs.json",
+   "py": [
+    "tiers",
+    "--path",
+    "{ROOT}/economy-str-runs.json"
+   ],
+   "rs": [
+    "economy",
+    "tiers",
+    "--path",
+    "{ROOT}/economy-str-runs.json"
+   ],
+   "tool": "economy",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "TypeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "tiers economy-list.json",
+   "py": [
+    "tiers",
+    "--path",
+    "{ROOT}/economy-list.json"
+   ],
+   "rs": [
+    "economy",
+    "tiers",
+    "--path",
+    "{ROOT}/economy-list.json"
+   ],
+   "tool": "economy",
+   "want": {
+    "code": 1,
+    "crash": true,
+    "stderr": "AttributeError",
+    "stdout": ""
+   }
   }
  ],
  "layout": {
@@ -4048,11 +4934,19 @@
    "astral.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"n\": \"{ROOT}/w/nested\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"nested/x.rs\"]}, \"done\": \"ship it \\ud83d\\ude80\"}]}",
    "bad-name.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"a:b\": \"{ROOT}/bare\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",
    "bare/docs/adrs/b.html": "",
+   "economy-list.json": "{\"tiers\": [\"standard\"]}",
+   "economy-str-runs.json": "{\"tiers\": {\"standard\": {\"runs\": \"10\", \"raisedRuns\": 3, \"approved\": 4, \"firstPass\": 0.25}}}",
    "economy.json": "{\"generatedAt\": \"2026-10-22T00:00:00Z\", \"tiers\": {\"standard\": {\"runs\": 10, \"raisedRuns\": 3, \"approved\": 4, \"firstPass\": 0.25, \"tokensPerApproved\": 1234567}, \"frontier\": {\"runs\": 2, \"approved\": 0, \"firstPass\": null, \"tokensPerApproved\": 980}}}",
    "empty.graph.yaml": "",
    "governed.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"deploy/x.yaml\"]}, \"done\": \"make test\"}]}",
    "int-id-only.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": 1, \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",
    "int-id.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": 1, \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}, {\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\", \"depends_on\": [1]}]}",
+   "list-dep.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}, {\"id\": \"b\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\", \"depends_on\": [[\"a\"]]}]}",
+   "list-id-unnamed-home.json": "{\"repo\": \"zz\", \"repos\": {\"w\": \"{ROOT}/w\", \"gone\": \"{ROOT}/gone\"}, \"nodes\": [{\"id\": [\"x\"], \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\", \"repo\": \"gone\"}]}",
+   "list-id.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": [\"evil\"], \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",
+   "list-mode.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"a.rs\"], \"mode\": [\"conserve\"]}, \"done\": \"make test\"}]}",
+   "list-repo-absent.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"gone\": \"{ROOT}/gone\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\", \"repo\": [\"gone\"]}, {\"id\": \"g\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\", \"repo\": \"gone\"}]}",
+   "list-repo-unnamed-home.json": "{\"repo\": \"zz\", \"repos\": {\"w\": \"{ROOT}/w\", \"gone\": \"{ROOT}/gone\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\", \"repo\": [\"gone\"]}]}",
    "list.graph.yaml": "- a\n- b\n",
    "nested.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"n\": \"{ROOT}/w/nested\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"nested/x.rs\"]}, \"done\": \"make test\"}]}",
    "no-path.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"x\": {\"policy\": \"none\"}}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",

@@ -21,6 +21,7 @@ Exit 0 only on full agreement. Needs git, cargo, bun and network (for step 5).
 """
 from __future__ import annotations
 
+import copy
 import argparse
 import datetime as dt
 import importlib.util
@@ -488,10 +489,91 @@ def gate_cases(rng):
     return cases
 
 
+# Every field, given a value of each type: where the Python raises (P20 Stratum A, port arc 2: an
+# unhashable id or mode, a non-mapping usage row or sample, a non-numeric tier count, a timestamp or
+# runway past datetime's years), Maestro must raise the same kind, never decide. Not swept: numbers
+# between 6.7e16 s and time_t's limit, where the kind is the platform's (OSError on macOS).
+TYPE_VALS = {"list": ["x"], "dict": {"k": 1}, "null": None, "int": 7, "float": 1.5, "bool": True, "str": "zz",
+             "emptylist": [], "emptydict": {}, "huge": 1e300, "tiny": 1e-6, "neg": -5,
+             "year10k": 253402300800, "ts": "2026-10-29T00:00:00Z"}
+
+
+def type_cases():
+    cases = []
+    tv = TYPE_VALS.items
+    base = {"repo": "workspace", "nodes": [
+        {"id": "a", "kind": "implement", "done": "true", "inputs": [], "produces": ["b.rs"], "depends_on": [],
+         "tier": "standard", "verify": "check", "thinking": "medium", "spawn_default": "standard",
+         "signals": {"paths": ["a.rs"], "mode": "conserve", "est_loc": 10, "files": 1, "observed_tier": "standard",
+                     "failed_attempts": 0, "public_api": False, "repos": 1, "kind": "implement"}},
+        {"id": "b", "kind": "implement", "done": "true", "signals": {"paths": ["c.rs"]}, "depends_on": ["a"]}]}
+    for name, v in tv():
+        for k in ("repo", "repos", "nodes"):
+            if k == "repo" and name in ("int", "float", "bool", "huge", "tiny", "neg", "year10k"):
+                continue  # a numeric repo name is printed as a string (README, known differences)
+            g = copy.deepcopy(base); g[k] = v
+            cases.append({"fn": "validate", "args": {"graph": g}})
+        for k in ("id", "kind", "done", "signals", "inputs", "produces", "depends_on", "tier", "verify", "thinking",
+                  "spawn_default", "repo"):
+            g = copy.deepcopy(base); g["nodes"][0][k] = v
+            cases.append({"fn": "validate", "args": {"graph": g}})
+        for k in base["nodes"][0]["signals"]:
+            g = copy.deepcopy(base); g["nodes"][0]["signals"][k] = v
+            cases.append({"fn": "validate", "args": {"graph": g}})
+        for where in ("depends_on", "inputs", "produces"):
+            g = copy.deepcopy(base); g["nodes"][1 if where == "depends_on" else 0][where] = [v]
+            cases.append({"fn": "validate", "args": {"graph": g}})
+    now = "2026-10-23T00:00:00Z"
+    row = {"id": "a", "email": "a@x.io", "fiveHourUtil": 10, "sevenDayUtil": 10,
+           "sevenDayResetsAt": "2026-10-28T00:00:00Z", "fiveHourResetsAt": "2026-10-23T01:00:00Z", "isActive": True,
+           "isRateLimited": False, "stale": False, "numbersAgeSeconds": 10, "needsLogin": False,
+           "hasStoredCredentials": True}
+    row2 = {**row, "id": "b", "email": "b@x.io", "isActive": False}
+    sample = {"at": "2026-10-22T20:00:00Z",
+              "accounts": {"a": {"7d": 8, "reset_7d": "2026-10-28T00:00:00Z", "stale": False}}}
+    state = {"versionGate": {"automaticSwitching": "on"},
+             "config": {"autoBalance": True, "staleNumbersMinutes": 30, "standbyMax": 70, "standbyWeeklyMax": 95},
+             "holdUntil": None, "pendingSignals": [], "probes": {"b": {"result": "ok", "at": 1761177600}}}
+    tiers = {"tiers": {"standard": {"runs": 10, "raisedRuns": 3, "approved": 4, "firstPass": 0.25,
+                                    "tokensPerApproved": 5, "raises": 1, "escalations": 0, "unmeasured": 0}}}
+    for name, v in tv():
+        for k in row:
+            r = {**row, k: v}
+            for fn in ("capacity", "resume_gate"):
+                cases.append({"fn": fn, "args": {"usage": [r, row2], "samples": [sample], "now": now}})
+                cases.append({"fn": fn, "args": {"usage": [r, row2], "samples": [sample], "now": now, "state": state}})
+        cases.append({"fn": "capacity", "args": {"usage": [row, v], "samples": [], "now": now}})
+        cases.append({"fn": "capacity", "args": {"usage": [row], "samples": [v], "now": now}})
+        cases.append({"fn": "capacity", "args": {"usage": [], "samples": [v], "now": now}})
+        for k in ("at", "accounts"):
+            cases.append({"fn": "capacity", "args": {"usage": [row], "samples": [{**sample, k: v}], "now": now}})
+        for k in ("7d", "reset_7d", "stale"):
+            s = copy.deepcopy(sample); s["accounts"]["a"][k] = v
+            cases.append({"fn": "capacity", "args": {"usage": [row], "samples": [s], "now": now}})
+        s = copy.deepcopy(sample); s["accounts"]["a"] = v
+        cases.append({"fn": "capacity", "args": {"usage": [row], "samples": [s], "now": now}})
+        for k in state:
+            st = {**state, k: v}
+            for fn in ("gate_bounds", "resume_gate", "capacity"):
+                cases.append({"fn": fn, "args": {"usage": [row, row2], "samples": [], "now": now, "state": st}})
+        for k in tiers["tiers"]["standard"]:
+            d = copy.deepcopy(tiers); d["tiers"]["standard"][k] = v
+            cases.append({"fn": "tier_signals", "args": {"data": d}})
+        cases.append({"fn": "tier_signals", "args": {"data": {"tiers": {"standard": v}}}})
+        cases.append({"fn": "tier_signals", "args": {"data": {"tiers": v}}})
+        cases.append({"fn": "tier_signals", "args": {"data": v}})
+        cases.append({"fn": "parse_ts", "args": {"value": v}})
+    for h in (6.7e7, 7e7, -1e8, 1e8, 1.1e8, 1e300):
+        cases.append({"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z", "hours": h}})
+    for s in (253402300799, 253402300799.9999999, -62135596800, -62135596801, 1e13, -1e13, 1e15, 1e20, -1e20):
+        cases.append({"fn": "parse_ts", "args": {"value": s}})
+    return cases
+
+
 def all_cases():
     rng = random.Random(3204)
     return (assess_cases(rng) + graph_cases() + disk_cases(rng) + small_cases() + capacity_cases(rng)
-            + gate_cases(random.Random(3223)))
+            + gate_cases(random.Random(3223)) + type_cases())
 
 
 # --- runners -------------------------------------------------------------------------------------
@@ -578,6 +660,18 @@ def cli_layout():
         "repos-list": {"repo": "w", "repos": ["w"], "nodes": [node("a")]},
         "int-id": {"repo": "w", "repos": {"w": W}, "nodes": [node(1), node("a", depends_on=[1])]},
         "int-id-only": {"repo": "w", "repos": {"w": W}, "nodes": [node(1)]},
+        # P20 port arc 2, Stratum A: values the Python hashes, so a list raises before anything is planned.
+        "list-id": {"repo": "w", "repos": {"w": W}, "nodes": [node(["evil"])]},
+        "list-mode": {"repo": "w", "repos": {"w": W}, "nodes": [node("a", signals={"paths": ["a.rs"], "mode": ["conserve"]})]},
+        "list-dep": {"repo": "w", "repos": {"w": W}, "nodes": [node("a"), node("b", depends_on=[["a"]])]},
+        # The CLI's skipped set hashes `(repo or home)` before validate sees the graph.
+        "list-repo-absent": {"repo": "w", "repos": {"w": W, "gone": f"{R}/gone"},
+                             "nodes": [node("a", repo=["gone"]), node("g", repo="gone")]},
+        # ...even where validate would stop first, on a home the graph does not name.
+        "list-repo-unnamed-home": {"repo": "zz", "repos": {"w": W, "gone": f"{R}/gone"},
+                                   "nodes": [node("a", repo=["gone"])]},
+        "list-id-unnamed-home": {"repo": "zz", "repos": {"w": W, "gone": f"{R}/gone"},
+                                 "nodes": [node(["x"], repo="gone")]},
     }
     files = {f"{name}.json": json.dumps(g) for name, g in graphs.items()}
     files["astral.json"] = json.dumps({"repo": "w", "repos": {"w": W, "n": NESTED},
@@ -587,6 +681,9 @@ def cli_layout():
     files["w/.control/policy.yaml"] = "auto_merge:\n  rules:\n    - {action: require_human, path_touched: deploy/}\n"
     files["w/docs/specs/a.html"] = ""
     files["bare/docs/adrs/b.html"] = ""
+    files["economy-str-runs.json"] = json.dumps({"tiers": {"standard": {"runs": "10", "raisedRuns": 3, "approved": 4,
+                                                                         "firstPass": 0.25}}})
+    files["economy-list.json"] = json.dumps({"tiers": ["standard"]})
     files["economy.json"] = json.dumps({"generatedAt": "2026-10-22T00:00:00Z", "tiers": {
         "standard": {"runs": 10, "raisedRuns": 3, "approved": 4, "firstPass": 0.25, "tokensPerApproved": 1234567},
         "frontier": {"runs": 2, "approved": 0, "firstPass": None, "tokensPerApproved": 980}}})
@@ -600,7 +697,8 @@ def cli_cases():
         cases.append({"name": name, "tool": tool, "py": py, "rs": rs, "cwd": cwd, "json": parse_json})
 
     names = ["ok", "nested", "same-dir", "absent", "absent-spec", "no-policy", "policy-none-but-file", "governed",
-             "bad-name", "no-path", "single", "repos-list", "int-id", "int-id-only"]
+             "bad-name", "no-path", "single", "repos-list", "int-id", "int-id-only", "list-id", "list-mode",
+             "list-dep", "list-repo-absent", "list-repo-unnamed-home", "list-id-unnamed-home"]
     for name in names:
         path = f"{R}/{name}.json"
         variants = [[], ["--skip-absent-repos"]]
@@ -643,6 +741,8 @@ def cli_cases():
         ["--json", "economy", "tiers", "--path", f"{R}/economy.json"], tool="economy", parse_json=True)
     add("tiers missing", ["tiers", "--path", f"{R}/nope.json"], ["economy", "tiers", "--path", f"{R}/nope.json"],
         tool="economy")
+    for bad in ("economy-str-runs.json", "economy-list.json"):
+        add(f"tiers {bad}", ["tiers", "--path", f"{R}/{bad}"], ["economy", "tiers", "--path", f"{R}/{bad}"], tool="economy")
     return cases
 
 

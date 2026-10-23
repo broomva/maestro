@@ -470,7 +470,8 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
         }
         return ExitCode::from(1);
     }
-    let home = py::or(graph.get("repo"), None).map_or_else(String::new, py::str_of);
+    let home_v = py::or(graph.get("repo"), None);
+    let home = home_v.map_or_else(String::new, py::str_of);
     let mut skipped: Vec<String> = Vec::new();
     if let Ok(nodes) = d::iter_of(graph.get("nodes").unwrap_or(&json!([]))) {
         for n in &nodes {
@@ -478,8 +479,18 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
             if !n.is_object() {
                 continue;
             }
+            // `{n.get("id") for n in ... if ... (n.get("repo") or home) in absent}`: both are hashed.
+            let here_v = py::or(n.get("repo"), None).or(home_v);
+            if let Some(v) = here_v
+                && let Err(f) = d::hashed(v, "set element")
+            {
+                return crash(&f);
+            }
             let here = py::or(n.get("repo"), None).map_or_else(|| home.clone(), py::str_of);
             if absent.contains(&here) {
+                if let Err(f) = d::hashed(id, "set element") {
+                    return crash(&f);
+                }
                 skipped.push(py::str_of(id));
             }
         }
@@ -710,18 +721,32 @@ fn read_input(path: &str) -> Result<String, String> {
     }
 }
 
+/// A fault as the one line `maestro economy` prints before exiting 1.
+fn fault_text(f: Fault) -> String {
+    match f {
+        Fault::Value(m) => m,
+        Fault::Crash { kind, msg } => format!("{kind}: {msg}"),
+    }
+}
+
 pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
     match cmd {
         EconomyCommand::Capacity { usage, samples, now, state } => {
             let run = || -> Result<Value, String> {
                 let rows: Value = serde_json::from_str(&read_input(usage)?).map_err(|e| e.to_string())?;
-                let rows = rows.as_array().cloned().unwrap_or_default();
+                // `for a in rows or []`: nothing for a falsy value; a mapping or a string would be
+                // iterated and each item fail `.get`, a number is not iterable. Refused.
+                let rows = match rows {
+                    Value::Array(a) => a,
+                    v if !py::truthy(Some(&v)) => vec![],
+                    v => return Err(format!("--usage is a {}, not a list of rows", d::type_name(&v))),
+                };
                 let samples: Vec<Value> = match samples {
                     Some(p) => read_input(p)?.lines().filter_map(|l| serde_json::from_str(l).ok()).collect(),
                     None => vec![],
                 };
                 let now = match now {
-                    Some(n) => e::parse_ts(Some(&json!(n)))?.ok_or("--now is empty")?,
+                    Some(n) => e::parse_ts(Some(&json!(n))).map_err(fault_text)?.ok_or("--now is empty")?,
                     None => jiff::Timestamp::now().as_microsecond(),
                 };
                 let gate = match state {
@@ -729,13 +754,10 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
                     Some(p) => {
                         let st: Value = serde_json::from_str(&read_input(p)?).map_err(|e| e.to_string())?;
                         let st = st.as_object().ok_or("--state is not a JSON object")?;
-                        e::gate_bounds(st, now, &rows).map_err(|f| match f {
-                            Fault::Value(m) => m,
-                            Fault::Crash { kind, msg } => format!("{kind}: {msg}"),
-                        })?
+                        e::gate_bounds(st, now, &rows).map_err(fault_text)?
                     }
                 };
-                e::capacity(&rows, &samples, now, &gate)
+                e::capacity(&rows, &samples, now, &gate).map_err(fault_text)
             };
             match run() {
                 Ok(v) => {
@@ -759,7 +781,10 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
                 Ok(d) => d,
                 Err(err) => return fail(format!("no economy by tier yet ({err})"), 1),
             };
-            let (rows, signals) = e::tier_signals(&data);
+            let (rows, signals) = match e::tier_signals(&data) {
+                Ok(r) => r,
+                Err(f) => return crash(&f),
+            };
             if json_out {
                 let out = json!({"generatedAt": data.get("generatedAt"), "rows": rows, "replan": signals});
                 println!("{}", serde_json::to_string_pretty(&out).expect("JSON"));

@@ -139,7 +139,9 @@ read, that count becomes a lower bound and the error is reported under `worktree
   part of `scripts/fleet_economy.py` (capacity forecast, cadence modes, launch and resume gates, the
   economy by tier, and BRO-3223's spendable-account readiness, balancer bounds and resume gate), as of
   workspace `3395842d0` (ws#1112). The Python is the reference until the tick moves here (node `loops-port`). Its
-  messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments. Known
+  messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments: where the
+  Python raises (an unhashable id or mode, a non-mapping usage row or sample, a non-numeric tier count, a
+  timestamp or runway past `datetime`'s years), Maestro raises the same kind and decides nothing. Known
   differences: the CLI flags follow the subcommand (`maestro delegation plan G --repo N=P`, not
   `--repo N=P plan G`); JSON is printed with sorted keys and two-space indent; a graph or policy is read
   within a YAML subset, the rule `maestro_store::yaml` follows for asks: anchors and aliases, tags and merge
@@ -149,12 +151,16 @@ read, that count becomes a lower bound and the error is reported under `worktree
   unquoted `1e3` or `0o17` is a number where PyYAML keeps a string; timestamps are read in the extended ISO
   form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes); a `depends_on` written as a
   mapping is iterated in sorted key order; a message prints unassigned code points that Python's `repr`
-  escapes. The sample cache, transcript reading and the
+  escapes; a repo named by a number (`repo: 7`) is the string `'7'` in a plan, and in an error about the
+  graph's own repo; a timestamp between 6.7e16 s and `time_t`'s limit raises `OSError`, macOS's kind,
+  where another platform's Python may raise another; `maestro economy capacity` refuses a `--usage` that
+  is not a list. The sample cache, transcript reading and the
   economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
   (maestro-paseo `shared/tiers.ts`).
   - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation
     with files on disk among them; the test `crates/core/tests/parity_delegation.rs` holds the Rust to
-    it, and `scripts/mutation-check.sh` breaks the guards listed under "Ports of delegation.py".
+    it, and `scripts/mutation-check.sh` breaks the guards listed under "Ports of delegation.py". Its
+    type cases give every graph, usage-row, sample, balancer-state and tier field a value of each type.
   - `fixtures/delegation/cli-golden.json` is the Python CLIs' output on scratch repos (bindings, nested,
     absent and same-directory repos, policies); `crates/cli/tests/delegation.rs` rebuilds the
     layout and replays every case through the binary.

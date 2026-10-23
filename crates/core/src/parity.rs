@@ -27,10 +27,10 @@ fn fault(f: Fault) -> Value {
     }
 }
 
-fn ts(r: Result<Value, String>) -> Value {
+fn ts(r: Result<Value, Fault>) -> Value {
     match r {
         Ok(v) => json!({"ok": v}),
-        Err(m) => json!({"err": m}),
+        Err(f) => fault(f),
     }
 }
 
@@ -81,7 +81,7 @@ pub fn eval(case: &Value) -> Value {
         "add_hours" => {
             let now = e::parse_ts(args.get("now")).ok().flatten().unwrap_or(0);
             let hours = args.get("hours").and_then(Value::as_f64).unwrap_or(f64::NAN);
-            json!({"ok": e::add_hours(now, hours).map(|t| t - now)})
+            ts(e::add_hours(now, hours).map(|t| json!(t - now)))
         }
         "brief" => match d::validate(&args["graph"], &[], None, None, &HashSet::new()) {
             Ok((errors, _)) if !errors.is_empty() => json!({"err": errors.join("\n")}),
@@ -130,7 +130,9 @@ pub fn eval(case: &Value) -> Value {
             };
             match case["fn"].as_str() {
                 Some("gate_bounds") => json!({"ok": gate_json(&gate)}),
-                Some("resume_gate") => ts(e::resume_gate(&e::sample_from_usage(&rows, now).1, now, &gate)),
+                Some("resume_gate") => {
+                    ts(e::sample_from_usage(&rows, now).and_then(|(_, a)| e::resume_gate(&a, now, &gate)))
+                }
                 _ => {
                     let samples = args.get("samples").and_then(Value::as_array).cloned().unwrap_or_default();
                     ts(e::capacity(&rows, &samples, now, &gate))
@@ -145,8 +147,7 @@ pub fn eval(case: &Value) -> Value {
             json!({"ok": {"handoff_candidate": handoff, "successor_due": successor}})
         }
         "tier_signals" => {
-            let (rows, replan) = e::tier_signals(&args["data"]);
-            json!({"ok": {"rows": rows, "replan": replan}})
+            ts(e::tier_signals(&args["data"]).map(|(rows, replan)| json!({"rows": rows, "replan": replan})))
         }
         other => json!({"crash": format!("unknown fn {other}")}),
     }

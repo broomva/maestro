@@ -159,3 +159,39 @@ fn yaml_outside_the_subset_is_refused() {
         assert!(err.contains(why), "{graph}: {err}");
     }
 }
+
+fn capacity(dir: &std::path::Path, usage: &str) -> std::process::Output {
+    let path = dir.join("usage.json");
+    std::fs::write(&path, usage).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_maestro"))
+        .args(["economy", "capacity", "--now", "2026-10-23T00:00:00Z", "--usage"])
+        .arg(&path)
+        .output()
+        .unwrap()
+}
+
+const ACTIVE: &str = r#"{"email":"a@x.io","fiveHourUtil":10,"sevenDayUtil":10,"sevenDayResetsAt":"2026-10-28T00:00:00Z","fiveHourResetsAt":"2026-10-23T01:00:00Z","isActive":true,"isRateLimited":false,"stale":false}"#;
+
+/// Where the Python raises, `maestro economy capacity` prints no mode: a malformed usage row, a
+/// runway past datetime's years, or a usage that is not a list never reads as spendable capacity
+/// (P20 port arc 2, Stratum A).
+#[test]
+fn malformed_usage_is_refused_not_read_as_capacity() {
+    let dir = tempfile::tempdir().unwrap();
+    let tiny = ACTIVE.replace(r#""sevenDayUtil":10"#, r#""sevenDayUtil":0.000001"#).replace("2026-10-28", "2026-10-29");
+    for (usage, why) in [
+        (format!("[{ACTIVE},null]"), "AttributeError"),
+        (format!("[{tiny}]"), "OverflowError: date value out of range"),
+        (format!("{{\"a\": {ACTIVE}}}"), "--usage is a dict, not a list of rows"),
+    ] {
+        let out = capacity(dir.path(), &usage);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{usage}: {err}");
+        assert!(out.stdout.is_empty(), "{usage}: {}", String::from_utf8_lossy(&out.stdout));
+        assert!(err.contains(why), "{usage}: {err}");
+    }
+    // The control: the same active row alone is read.
+    let out = capacity(dir.path(), &format!("[{ACTIVE}]"));
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"mode\""));
+}
