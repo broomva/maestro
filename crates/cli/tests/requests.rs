@@ -3,7 +3,7 @@
 //! The validator here is the stub in fixtures/requests (the workspace repository is private); the
 //! live check against the real ask_ledger.py is pasted in the PR.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -204,6 +204,59 @@ fn every_reader_reads_the_same_strings() {
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_eq!(shown["ask"]["default"], "no");
     assert_eq!(shown["ask"]["stakes"], v["stakes"]);
+}
+
+/// The plugin addresses an ask by `text(uid)`: trimmed, a number as text. No spelling of an
+/// existing uid may be filed beside it, or the owner's ask can no longer be answered.
+#[test]
+fn no_spelling_of_a_taken_uid_is_filed() {
+    let m = machine();
+    let path = m.path().join("ws/.control/asks/ledger.yaml");
+    std::fs::write(&path, ledger(m.path()).replacen("  - id: seed-1\n", "  - id: seed-1\n    uid: \"7\"\n", 1))
+        .unwrap();
+    let before = ledger(m.path());
+    for uid in [json!("7"), json!(" 7 "), json!(7), json!("seed-2")] {
+        let mut v: Value = serde_json::from_str(&ask("n1")).unwrap();
+        v["uid"] = uid.clone();
+        let out = maestro(m.path())
+            .args(["ask", "file", "--session", "t3:-/x", "--ledger", "ledger.yaml", "--ask", &v.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("already has an ask"),
+            "{uid}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(ledger(m.path()), before, "{uid}");
+    }
+}
+
+/// Over the readers' 1 MiB limit no reader reads any ask in a ledger: such a filing is refused.
+#[test]
+fn a_filing_never_pushes_a_ledger_past_the_read_limit() {
+    let m = machine();
+    let before = ledger(m.path());
+    let mut v: Value = serde_json::from_str(&ask("huge")).unwrap();
+    v["notes"] = Value::String("x".repeat(1_100_000));
+    let mut child = maestro(m.path())
+        .args(["ask", "file", "--session", "t3:-/x", "--ledger", "ledger.yaml"])
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write as _;
+        child.stdin.take().unwrap().write_all(v.to_string().as_bytes()).unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("would be over 1048576 bytes"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(ledger(m.path()), before);
+    assert_eq!(listed(m.path()).len(), 5);
 }
 
 #[test]

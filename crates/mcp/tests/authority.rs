@@ -123,3 +123,34 @@ fn a_read_tool_writes_nothing() {
         assert!(tree(tmp.path()) == before, "{} changed the machine", spec.name);
     }
 }
+
+/// What a held request does, not what it declares: it adds one journal line and changes nothing else.
+#[test]
+fn a_held_request_changes_nothing_but_the_journal() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine"), tmp.path());
+    let mut paths = Paths::under(tmp.path());
+    paths.ask_locks = tmp.path().join("locks");
+    let store = Store::new(paths, TreeSource::WorkingTree);
+    let journal = std::path::Path::new("broomva-home/ledger/requests/requests.jsonl");
+    let outside = |t: std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>| {
+        t.into_iter()
+            .filter(|(p, _)| !journal.starts_with(p) && !p.starts_with("broomva-home/locks"))
+            .collect::<Vec<_>>()
+    };
+    let before = outside(tree(tmp.path()));
+    let mut lines = 0;
+    for spec in TOOLS.iter().filter(|t| t.request.is_some_and(|k| k != RequestKind::AskFile)) {
+        let args = json!({
+            "session": "paseo:-/a1", "title": "t", "brief": "b", "action": "a", "reason": "r",
+            "receipt": "r", "summary": "s",
+        });
+        let v = call(&store, spec.name, args).unwrap_or_else(|e| panic!("{}: {}", spec.name, e.message));
+        assert_eq!(v["request"]["disposition"], "held", "{}", spec.name);
+        lines += 1;
+        assert!(outside(tree(tmp.path())) == before, "{} changed the machine", spec.name);
+        let written = std::fs::read_to_string(tmp.path().join(journal)).unwrap();
+        assert_eq!(written.lines().count(), lines, "{}", spec.name);
+    }
+    assert_eq!(lines, RequestKind::ALL.len() - 1);
+}

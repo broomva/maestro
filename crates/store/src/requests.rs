@@ -270,7 +270,22 @@ fn check_appended(old: &str, new: &str, ask: &Map<String, Value>) -> Result<(), 
         let (ledger, bad) = maestro_core::ask::AskLedger::from_value(read.value).map_err(refused)?;
         if bad.is_empty() { Ok(ledger.asks) } else { Err(refused("Maestro's reader skips an entry of the ledger")) }
     };
+    if new.len() > crate::LEDGER_LIMIT {
+        return Err(refused(format!(
+            "the ledger would be over {} bytes, and then no reader reads any ask in it; nothing was written",
+            crate::LEDGER_LIMIT
+        )));
+    }
     let (was, now) = (asks_of(old)?, asks_of(new)?);
+    // An ask is addressed by its uid, else its id, as the plugin's `text()` reads them (trimmed, a
+    // number as text): the new ask's names are no other ask's.
+    if let Some(added) = now.last() {
+        let names = std::iter::once(added.id.as_str()).chain(added.uid.as_deref());
+        if let Some(taken) = names.into_iter().find(|n| was.iter().any(|a| a.id == *n || a.uid.as_deref() == Some(*n)))
+        {
+            return Err(refused(format!("the ledger already has an ask `{taken}`; nothing was written")));
+        }
+    }
     let id = ask["id"].as_str().unwrap_or_default();
     let same = now.len() == was.len() + 1 && now.iter().zip(&was).all(|(n, w)| n.row == w.row);
     match now.last() {
@@ -313,7 +328,9 @@ fn validate(script: &Path, workspace: &Path, file: &Path, real: &Path) -> Result
     }
     let preauth =
         [".broomva/preauth.yaml", ".control/preauth.yaml"].iter().map(|r| workspace.join(r)).find(|p| p.is_file());
+    // -P: neither the workspace (the cwd) nor the script's folder shadows a module the driver imports.
     let out = Command::new("python3")
+        .arg("-P")
         .arg("-c")
         .arg(DRIVER)
         .arg(script)
@@ -380,16 +397,6 @@ pub fn file_ask(
             Err(e) => return Err(e.into()),
         };
         let old = std::fs::read_to_string(&path)?;
-        // An ask is addressed by its uid, else its id: the new one's id and uid name no other ask.
-        let uid = entry.get("uid").and_then(Value::as_str).map(str::to_string);
-        let names: Vec<&str> = std::iter::once(id.as_str()).chain(uid.as_deref()).collect();
-        if let Ok(read) = crate::yaml::parse(&old)
-            && let Ok((existing, _)) = maestro_core::ask::AskLedger::from_value(read.value)
-            && let Some(taken) =
-                names.iter().find(|n| existing.asks.iter().any(|a| a.id == **n || a.uid.as_deref() == Some(**n)))
-        {
-            return Err(refused(format!("{ledger} already has an ask `{taken}`; nothing was written")));
-        }
         let new = append_entry(&old, &entry)?;
         check_appended(&old, &new, &entry)?;
         let temp = asks_dir.join(format!(".{ledger}.tmp-{}", lock.token));

@@ -58,14 +58,19 @@ maestro escalate --reason R
 
 - **Filing.** `ask file` takes the ledger's §5.5 lock (the Paseo plugin's `server/locks.ts`, ported in
   `crates/store/src/locks.rs`; root `MAESTRO_PASEO_ASK_LOCKS`, else `~/.local/state/control-asks/locks`),
-  appends the ask, and renames the result over the ledger only when the workspace's `ask_ledger.py
-  validate` (or `MAESTRO_ASK_LEDGER`) raises no error the ledger did not already have and the YAML reads
-  back as the old ledger plus that ask. It writes to the working tree. It refuses an answer, a status or
-  an origin in the ask, a duplicate id, and a ledger that does not exist (a ledger opens with its arc,
-  lanes and tz in a workspace change).
+  appends the ask, and renames the result over the ledger only when the workspace's `ask_ledger.py`
+  (or `MAESTRO_ASK_LEDGER`), through its own `load`/`validate`/`asks_of` judging the ledger's real path,
+  raises no error the ledger did not already have and reads the ledger's asks plus exactly that ask,
+  and Maestro's reader agrees with the new ask open. It writes to the working tree. It refuses an answer,
+  a status or an origin in the ask, an id or uid any existing ask is addressed by (as the plugin's
+  `text()` reads them), a result over the readers' 1 MiB limit, and a ledger that does not exist (a
+  ledger opens with its arc, lanes and tz in a workspace change).
 - **Unverified callers.** Until sessions are verified against their surface (BRO-3268), every caller is
   unverified: an ask is filed with `origin: {via: maestro, session, verified: false}` and no `agent_id`,
   so no answer is routed into a session on a caller's word; every other request is held.
+- **Not a trust boundary.** The CLI takes its workspace, home and validator from the caller's
+  environment (`BROOMVA_WORKSPACE`, `MAESTRO_ASK_LEDGER`): it files for an agent that could write the
+  file itself, and it records that agent as unverified. Verification is the surfaces' (BRO-3268).
 
 Every command takes `--json`. Agents should use `--json`: it is the same data the MCP tools return,
 because the CLI and the MCP server share one dispatch.
