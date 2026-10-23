@@ -106,6 +106,10 @@ pub enum EconomyCommand {
         /// The time to forecast from (ISO 8601). Default: now.
         #[arg(long)]
         now: Option<String>,
+        /// `provider_manager.py --json state` output: whether failover covers a stale active
+        /// account, and the balancer's bounds. Default: none, so a stale active account fails closed.
+        #[arg(long)]
+        state: Option<String>,
     },
     /// Maestro's economy by tier, and what to re-plan.
     Tiers {
@@ -708,7 +712,7 @@ fn read_input(path: &str) -> Result<String, String> {
 
 pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
     match cmd {
-        EconomyCommand::Capacity { usage, samples, now } => {
+        EconomyCommand::Capacity { usage, samples, now, state } => {
             let run = || -> Result<Value, String> {
                 let rows: Value = serde_json::from_str(&read_input(usage)?).map_err(|e| e.to_string())?;
                 let rows = rows.as_array().cloned().unwrap_or_default();
@@ -720,7 +724,18 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
                     Some(n) => e::parse_ts(Some(&json!(n)))?.ok_or("--now is empty")?,
                     None => jiff::Timestamp::now().as_microsecond(),
                 };
-                e::capacity(&rows, &samples, now)
+                let gate = match state {
+                    None => e::Gate::default(),
+                    Some(p) => {
+                        let st: Value = serde_json::from_str(&read_input(p)?).map_err(|e| e.to_string())?;
+                        let st = st.as_object().ok_or("--state is not a JSON object")?;
+                        e::gate_bounds(st, now, &rows).map_err(|f| match f {
+                            Fault::Value(m) => m,
+                            Fault::Crash { kind, msg } => format!("{kind}: {msg}"),
+                        })?
+                    }
+                };
+                e::capacity(&rows, &samples, now, &gate)
             };
             match run() {
                 Ok(v) => {

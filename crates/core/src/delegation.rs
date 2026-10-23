@@ -38,7 +38,7 @@ pub const SUBSTANTIVE_LOC: i64 = 200;
 /// More non-test files than this needs a spec even when LOC is unknown.
 pub const SPEC_FILES: usize = 3;
 /// Governance class beyond the policy's require_human rules: the controller and its contracts.
-pub const GOVERNANCE_EXTRA: [&str; 7] = [
+pub const GOVERNANCE_EXTRA: [&str; 10] = [
     ".control/",
     ".broomva/loops/",
     "metalayer.md",
@@ -46,6 +46,9 @@ pub const GOVERNANCE_EXTRA: [&str; 7] = [
     "references/delegation.md",
     "scripts/delegation.py",
     "scripts/fleet_economy.py",
+    "docs/references/agent-operating-protocols.md",
+    "docs/references/current-work.md",
+    "docs/references/workspace-context.md",
 ];
 pub const GOVERNANCE_ROOT: [&str; 2] = ["claude.md", "agents.md"];
 /// Where a file counts as a spec, stated or found.

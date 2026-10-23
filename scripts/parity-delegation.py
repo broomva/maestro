@@ -106,8 +106,14 @@ def py_eval(D, E, case, tmp):
                 return {"err": str(e).removeprefix(f"{path}: ")}
         if fn == "parse_ts":
             return {"ok": E.iso(E.parse_ts(a["value"]))}
-        if fn == "capacity":
-            return {"ok": E.capacity(a["usage"], a["samples"], E.parse_ts(a["now"]))}
+        if fn in ("capacity", "resume_gate", "gate_bounds"):
+            now = E.parse_ts(a["now"])
+            gate = E.gate_bounds(a["state"], now, a["usage"]) if "state" in a else {}
+            if fn == "gate_bounds":
+                return {"ok": gate}
+            if fn == "resume_gate":
+                return {"ok": E.resume_gate(E.sample_from_usage(a["usage"], now)["accounts"], now, **gate)}
+            return {"ok": E.capacity(a["usage"], a["samples"], now, **gate)}
         if fn == "session_gates":
             real = E.session_tokens
             E.session_tokens = lambda path, now: {"context_k": a["context_k"]}
@@ -302,7 +308,8 @@ def small_cases():
              "axb", "readme.md", "dir/readme.md", "", "a"]
     cases = [{"fn": "rule_matches", "args": {"rule": r, "path": p}} for r in rules for p in paths]
     gov = ["CLAUDE.md", "./agents.md", "x/claude.md", ".control/policy.yaml", "a/.broomva/loops/x", "METALAYER.md",
-           "references/delegation.md", "scripts/fleet_economy.py", "deploy/x", "scripts/a-hook.sh", "src/a.rs"]
+           "references/delegation.md", "scripts/fleet_economy.py", "docs/references/current-work.md",
+           "x/docs/references/workspace-context.md", "docs/references/agent-operating-protocols.md", "deploy/x", "scripts/a-hook.sh", "src/a.rs"]
     cases += [{"fn": "is_governance", "args": {"path": p, "human_paths": h}} for p in gov for h in HUMAN]
     tests = ["tests/a.rs", "src/test/a.rs", "__tests__/a.js", "spec/a.rb", "test_a.py", "a.test.ts", "a_test.go",
              "a_spec.rb", "a.spec.ts", "openapi.spec.yaml", "x.spec.md", "src/a.rs", "Tests/A.RS", "contest.rs",
@@ -370,9 +377,101 @@ def capacity_cases(rng):
     return cases
 
 
+def gate_rows(rng, now, iso):
+    """Usage rows on the gate's boundaries (BRO-3223): 5h at 70 and 90, 7d at 95, stale ages either
+    side of 30 minutes, the 5h window open or reset, needs-login, no stored credentials."""
+    rows = []
+    for i in range(rng.choice([0, 1, 2, 3, 4])):
+        reset7 = rng.choice([now + dt.timedelta(days=2), now - dt.timedelta(minutes=5), None])
+        rows.append({"id": f"id{i}", "email": f"a{i}@x.io" if rng.random() < 0.9 else "a0@y.io",
+                     "fiveHourUtil": rng.choice([None, 0, 10, 69.9, 70, 70.1, 89.9, 90, 92, "x"]),
+                     "sevenDayUtil": rng.choice([None, 5, 50.5, 89, 94.9, 95, 99]),
+                     "sevenDayResetsAt": None if reset7 is None else iso(reset7),
+                     "fiveHourResetsAt": rng.choice([iso(now + dt.timedelta(hours=2)), iso(now - dt.timedelta(minutes=1)),
+                                                     None, int((now + dt.timedelta(hours=1)).timestamp())]),
+                     "isActive": (i == 0 and rng.random() < 0.9) or rng.random() < 0.1,
+                     "isRateLimited": rng.random() < 0.15, "stale": rng.random() < 0.45,
+                     "numbersAgeSeconds": rng.choice([None, 0, 1799, 1800, 1801, 7200, 59.5]),
+                     **rng.choice([{}, {}, {"needsLogin": True}, {"needsLogin": 0}, {"hasStoredCredentials": False},
+                                   {"hasStoredCredentials": True}, {"hasStoredCredentials": None}])})
+    return rows
+
+
+def gate_state(rng, now, rows):
+    """`provider_manager.py --json state` shapes: failover on or off, holds, pending signals at the TTL,
+    probes either side of the hour, bounds as numbers or strings, and a few malformed values."""
+    t = now.timestamp()
+    st = {}
+    if rng.random() < 0.9:
+        st["versionGate"] = rng.choice([{"automaticSwitching": "on"}] * 9 + [{"automaticSwitching": "off"}, {}, None])
+    if rng.random() < 0.9:
+        cfg = {"autoBalance": rng.choice([True] * 8 + [False, 1, "true", None])}
+        for k, vals in (("staleNumbersMinutes", [30, 10, 60.5, "45", " 5 ", "1_0"]),
+                        ("standbyMax", [70, 50, 80.0, "70"]), ("standbyWeeklyMax", [95, 90, 99.5])):
+            if rng.random() < 0.5:
+                cfg[k] = rng.choice(vals)
+        st["config"] = cfg
+    if rng.random() < 0.3:
+        st["holdUntil"] = rng.choice([None, "", iso_z(now + dt.timedelta(minutes=10)),
+                                      iso_z(now - dt.timedelta(minutes=10)), int((t + 600) * 1000)])
+    if rng.random() < 0.4:
+        st["pendingSignals"] = rng.choice([[], [{"at": t - 899}], [{"at": t - 900}], [{"at": t - 3000}, {"at": t - 10}],
+                                           [{"at": str(t - 5)}], [{}], [{"at": None}]])
+    if rng.random() < 0.6 and rows:
+        probes = {}
+        for r in rng.sample(rows, rng.randint(1, len(rows))):
+            probes[r["id"]] = {"result": rng.choice(["limited", "limited", "ok"]),
+                               "at": rng.choice([t - 3599, t - 3600, t - 10, t - 7200, str(t - 60)])}
+        if rng.random() < 0.2:
+            probes["ghost"] = {"result": "limited", "at": t}
+        st["probes"] = dict(sorted(probes.items()))  # Rust's map iterates sorted; so does this dict
+    return st
+
+
+def iso_z(d):
+    return d.isoformat().replace("+00:00", "Z")
+
+
+def gate_cases(rng):
+    now = dt.datetime(2026, 10, 22, 12, 0, tzinfo=dt.timezone.utc)
+    cases = []
+    for _ in range(600):
+        rows = gate_rows(rng, now, iso_z)
+        args = {"usage": rows, "now": iso_z(now)}
+        if rng.random() < 0.85:
+            args["state"] = gate_state(rng, now, rows)
+        cases.append({"fn": "resume_gate", "args": args})
+        if "state" in args:
+            cases.append({"fn": "gate_bounds", "args": args})
+        if rng.random() < 0.3:
+            cases.append({"fn": "capacity", "args": {**args, "samples": []}})
+    # Failover live and at least two accounts: who covers a stale or unspendable active account.
+    for _ in range(200):
+        rows = []
+        while len(rows) < 2:
+            rows = gate_rows(rng, now, iso_z)
+        st = gate_state(rng, now, rows)
+        st.update(versionGate={"automaticSwitching": "on"}, config={**(st.get("config") or {}), "autoBalance": True})
+        st.pop("holdUntil", None), st.pop("pendingSignals", None)
+        args = {"usage": rows, "now": iso_z(now), "state": st}
+        cases += [{"fn": "resume_gate", "args": args}, {"fn": "capacity", "args": {**args, "samples": []}}]
+    # Malformed state the Python crashes or raises on, named by kind.
+    bad = [{"pendingSignals": {"a": 1}}, {"pendingSignals": "x"}, {"pendingSignals": 5}, {"pendingSignals": [1]},
+           {"versionGate": "on"}, {"versionGate": {"automaticSwitching": "on"}, "config": "x"}, {"config": [1]},
+           {"probes": [1]}, {"config": {"staleNumbersMinutes": None}}, {"config": {"standbyMax": "abc"}},
+           {"config": {"standbyMax": "1__0"}}, {"holdUntil": "soon"}, {"pendingSignals": [{"at": "x"}]},
+           {"probes": {"id0": "limited"}}, {"probes": {"id0": {"result": "limited", "at": "x"}}}]
+    rows = [{"id": "id0", "email": "a0@x.io", "fiveHourUtil": 10, "sevenDayUtil": 10, "isActive": True}]
+    cases += [{"fn": "gate_bounds", "args": {"usage": rows, "now": iso_z(now), "state": b}} for b in bad]
+    cases += [{"fn": "gate_bounds", "args": {"usage": [{"id": [1], "email": "a"}], "now": iso_z(now), "state": {}}},
+              {"fn": "gate_bounds", "args": {"usage": rows, "now": iso_z(now), "state": []}}]
+    return cases
+
+
 def all_cases():
     rng = random.Random(3204)
-    return assess_cases(rng) + graph_cases() + disk_cases(rng) + small_cases() + capacity_cases(rng)
+    return (assess_cases(rng) + graph_cases() + disk_cases(rng) + small_cases() + capacity_cases(rng)
+            + gate_cases(random.Random(3223)))
 
 
 # --- runners -------------------------------------------------------------------------------------
@@ -587,9 +686,17 @@ def live_capacity(E, maestro):
                 if at and (now - at).total_seconds() <= E.KEEP_H * 3600:
                     samples.append(s)
     samples.append(E.sample_from_usage(rows, now))
-    case = {"fn": "capacity", "args": {"usage": rows, "samples": samples, "now": E.iso(now)}}
-    want = py_eval(None, E, case, None)
-    got = rust_eval(maestro, [case])[0]
+    code, out, err = run(["python3", PROVIDER_MANAGER, "--json", "state"])
+    if not check("live balancer state", code == 0, f"provider_manager state exit {code}: {err[:200]}"):
+        return False
+    state = json.loads(out)
+    case = {"fn": "capacity", "args": {"usage": rows, "samples": samples, "now": E.iso(now), "state": state}}
+    gate = {"fn": "resume_gate", "args": {"usage": rows, "now": E.iso(now), "state": state}}
+    want, want_gate = py_eval(None, E, case, None), py_eval(None, E, gate, None)
+    got, got_gate = rust_eval(maestro, [case, gate])
+    print(f"live      resume gate {(want_gate.get('ok') or {}).get('resume')}: {(want_gate.get('ok') or {}).get('why')}")
+    check("live resume gate", same_result(want_gate, got_gate),
+          f"\n  py: {json.dumps(want_gate)[:800]}\n  rs: {json.dumps(got_gate)[:800]}")
     print(f"live      {len(rows)} accounts, {len(samples)} samples, mode "
           f"{(want.get('ok') or {}).get('cadence', {}).get('mode')}")
     return check("live capacity", same_result(want, got), f"\n  py: {json.dumps(want)[:800]}\n  rs: {json.dumps(got)[:800]}")

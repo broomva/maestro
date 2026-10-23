@@ -11,6 +11,7 @@
 //! cache (`update_samples`), transcript reading (`session_tokens`) and the economy ledger
 //! (`record`, `report`). Times are microseconds since the epoch, Python's datetime precision.
 
+use crate::delegation::Fault;
 use crate::py;
 use serde_json::{Map, Value, json};
 
@@ -28,6 +29,19 @@ pub const CRITICAL_RUNWAY_H: f64 = 12.0;
 pub const CRITICAL_7D: f64 = 90.0;
 /// The active account's 5h at or over this: read-only.
 pub const READ_ONLY_5H: f64 = 95.0;
+/// Every account that decides the gate under this 5h %: resumes may run.
+pub const RESUME_5H: f64 = 90.0;
+/// 7d at or over this, in a window not yet reset: the account is limited (BRO-3223).
+pub const LIMIT_7D: f64 = 95.0;
+/// The active account's last good numbers still count while this young (minutes). Mirrors
+/// provider-manager's `staleNumbersMinutes`; `gate_bounds` passes the live value.
+pub const STALE_OK_MIN: f64 = 30.0;
+/// A standby at or under this 5h % is one the balancer would fail over to (`standbyMax`).
+pub const STANDBY_MAX_5H: f64 = 70.0;
+/// provider-manager `LIMITED_HOLD_SECONDS`: a probe-limited standby is no target this long.
+pub const PROBE_HOLD_S: f64 = 3600.0;
+/// provider-manager `SIGNAL_TTL_SECONDS`: a StopFailure report stays pending this long.
+pub const SIGNAL_TTL_S: f64 = 900.0;
 
 const US: i64 = 1_000_000;
 const HOUR_US: i64 = 3600 * US;
@@ -224,6 +238,10 @@ pub fn sample_from_usage(rows: &[Value], now: i64) -> (Value, Accounts) {
         v.insert("active".into(), flag("isActive"));
         v.insert("limited".into(), flag("isRateLimited"));
         v.insert("stale".into(), flag("stale"));
+        v.insert("age_s".into(), raw("numbersAgeSeconds"));
+        // No live credential: only the owner's login brings it back.
+        let needs_login = py::truthy(a.get("needsLogin")) || a.get("hasStoredCredentials") == Some(&Value::Bool(false));
+        v.insert("needs_login".into(), Value::Bool(needs_login));
         match accounts.iter_mut().find(|(n, _)| *n == name) {
             Some(slot) => slot.1 = v,
             None => accounts.push((name, v)),
@@ -291,20 +309,284 @@ pub fn window_average(v: &Map<String, Value>, now: i64) -> Result<Option<f64>, S
     Ok((MIN_SPAN_H..=(7 * 24) as f64).contains(&open_h).then(|| seven / open_h))
 }
 
+/// Which accounts decide the capacity gates: readiness()'s bounds, from the balancer's state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gate {
+    /// The balancer switches accounts on its own right now.
+    pub failover: bool,
+    pub stale_ok_min: f64,
+    pub standby_max: f64,
+    pub standby_weekly_max: f64,
+    /// Accounts a probe found limited within the balancer's hour: no failover target.
+    pub held: Vec<String>,
+}
+
+impl Default for Gate {
+    /// No balancer state: failover never covers, so a stale active account fails closed.
+    fn default() -> Gate {
+        Gate {
+            failover: false,
+            stale_ok_min: STALE_OK_MIN,
+            standby_max: STANDBY_MAX_5H,
+            standby_weekly_max: LIMIT_7D,
+            held: vec![],
+        }
+    }
+}
+
+/// Can the fleet spend this account? Not when it needs a login, or is limited: rate-limited, or at
+/// `LIMIT_7D` of a 7d window not yet reset.
+pub fn spendable(v: &Map<String, Value>, now: i64) -> Result<bool, String> {
+    if py::truthy(v.get("needs_login")) || py::truthy(v.get("limited")) {
+        return Ok(false);
+    }
+    let reset = parse_ts(v.get("reset_7d"))?;
+    let limited = py::num(v.get("7d")).is_some_and(|s| s >= LIMIT_7D) && reset.is_none_or(|r| r > now);
+    Ok(!limited)
+}
+
+/// `readiness()`: which accounts decide the capacity gates, from one sample's accounts.
+///
+/// A standby the fleet cannot spend, or without fresh numbers, never decides them. The active
+/// account is never dropped: its fresh numbers count, and so do stale ones under `stale_ok_min`
+/// old or still in the same 5h window (a 5h reading only rises until its reset); they can close
+/// the gate, never open it. Stale, unreadable or unspendable, it is unknown and fails closed
+/// unless failover covers it: a fresh standby passing the balancer's own standby test, picked by
+/// the balancer's rank. `pool` is the accounts whose 7d headroom and relief the forecast counts.
+pub fn readiness(accounts: &Accounts, now: i64, gate: &Gate) -> Result<Map<String, Value>, String> {
+    let mut sorted: Vec<&(String, Map<String, Value>)> = accounts.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut counted = Map::new();
+    let mut unknown: Vec<String> = Vec::new();
+    let mut standbys: Vec<(f64, f64, &str)> = Vec::new();
+    let mut active: Option<&str> = None;
+    for (name, v) in sorted.iter().map(|(n, v)| (n, v)) {
+        let (five, seven) = (py::num(v.get("5h")), py::num(v.get("7d")));
+        let stale = py::truthy(v.get("stale"));
+        if py::truthy(v.get("active")) {
+            active = Some(name);
+            let reset5 = parse_ts(v.get("reset_5h"))?;
+            let young = py::num(v.get("age_s")).is_some_and(|a| a < gate.stale_ok_min * 60.0);
+            if five.is_some() && (!stale || young || reset5.is_some_and(|r| r > now)) {
+                counted.insert(name.clone(), v["5h"].clone());
+            }
+            if stale || five.is_none() || !spendable(v, now)? {
+                unknown.push(name.clone());
+            }
+        } else if spendable(v, now)?
+            && let Some(f) = five
+            && !stale
+        {
+            counted.insert(name.clone(), v["5h"].clone());
+            if f <= gate.standby_max
+                && !seven.is_some_and(|s| s >= gate.standby_weekly_max)
+                && !gate.held.contains(name)
+            {
+                standbys.push((f, seven.unwrap_or(0.0), name));
+            }
+        }
+    }
+    // The balancer's rank: lowest 5h, then lowest 7d, then name.
+    standbys.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(b.2)));
+    let covered_by = (!unknown.is_empty() && gate.failover).then(|| standbys.first().map(|s| s.2)).flatten();
+    // The fleet's 7d headroom and reset: the active account and every fresh standby, never one that
+    // needs a login (no reset brings it back) nor a stale standby (the balancer never moves to it).
+    let mut pool: Vec<&str> = sorted
+        .iter()
+        .filter(|(_, v)| {
+            !py::truthy(v.get("needs_login")) && (py::truthy(v.get("active")) || !py::truthy(v.get("stale")))
+        })
+        .map(|(n, _)| n.as_str())
+        .collect();
+    pool.sort();
+    let known = unknown.is_empty() || covered_by.is_some();
+    let mut out = Map::new();
+    out.insert("active".into(), json!(active));
+    out.insert("pool".into(), json!(pool));
+    out.insert("counted".into(), Value::Object(counted));
+    out.insert("unknown".into(), json!(unknown));
+    out.insert("covered_by".into(), json!(covered_by));
+    out.insert("known".into(), json!(known));
+    Ok(out)
+}
+
+/// `float(x)` on a loaded value: a number, a bool, or a string Python's float reads.
+fn py_float(v: &Value) -> Result<f64, Fault> {
+    match v {
+        Value::Number(n) => Ok(n.as_f64().unwrap_or(f64::NAN)),
+        Value::Bool(b) => Ok(*b as i64 as f64),
+        Value::String(s) => {
+            let t = s.trim();
+            let bytes = t.as_bytes();
+            // An underscore only between two digits, as in a Python literal.
+            let underscores_ok = bytes.iter().enumerate().all(|(i, b)| {
+                *b != b'_'
+                    || (i > 0 && i + 1 < bytes.len() && bytes[i - 1].is_ascii_digit() && bytes[i + 1].is_ascii_digit())
+            });
+            let parsed = underscores_ok.then(|| t.replace('_', "").parse::<f64>().ok()).flatten();
+            parsed.ok_or_else(|| Fault::Value(format!("could not convert string to float: {}", py::repr_str(s))))
+        }
+        other => Err(Fault::Crash {
+            kind: "TypeError",
+            msg: format!(
+                "float() argument must be a string or a real number, not {}",
+                crate::delegation::type_name(other)
+            ),
+        }),
+    }
+}
+
+fn attribute_error(v: &Value) -> Fault {
+    Fault::Crash {
+        kind: "AttributeError",
+        msg: format!("{} object has no attribute 'get'", crate::delegation::type_name(v)),
+    }
+}
+
+/// `x or {}` then `.get`: a falsy value reads as an empty dict; any other non-dict crashes.
+fn as_dict<'a>(v: Option<&'a Value>, empty: &'a Map<String, Value>) -> Result<&'a Map<String, Value>, Fault> {
+    match py::or(v, None) {
+        None => Ok(empty),
+        Some(Value::Object(m)) => Ok(m),
+        Some(other) => Err(attribute_error(other)),
+    }
+}
+
+/// `float(p.get("at") or 0)`.
+fn at_seconds(p: &Map<String, Value>) -> Result<f64, Fault> {
+    py::or(p.get("at"), None).map_or(Ok(0.0), py_float)
+}
+
+/// `gate_bounds()`: readiness()'s bounds from `provider_manager.py --json state` and the usage
+/// rows (to name the accounts a probe holds). Failover counts only while the balancer switches on
+/// its own: the version gate verified, autoBalance on, no hold in force, and no StopFailure report
+/// pending. A standby a probe found limited within the balancer's hour is no failover target.
+pub fn gate_bounds(state: &Map<String, Value>, now: i64, rows: &[Value]) -> Result<Gate, Fault> {
+    let empty = Map::new();
+    let now_s = now as f64 / 1e6;
+    let cfg = py::or(state.get("config"), None);
+    let hold = parse_ts(py::or(state.get("holdUntil"), None)).map_err(Fault::Value)?;
+    // A pending StopFailure report the balancer has not resolved: its switch has not happened.
+    let mut pending = false;
+    match py::or(state.get("pendingSignals"), None) {
+        None => {}
+        Some(Value::Array(signals)) => {
+            for p in signals {
+                let Value::Object(p) = p else { return Err(attribute_error(p)) };
+                if now_s - at_seconds(p)? < SIGNAL_TTL_S {
+                    pending = true;
+                    break;
+                }
+            }
+        }
+        Some(v @ (Value::Object(_) | Value::String(_))) => return Err(attribute_error(v)),
+        Some(v) => {
+            return Err(Fault::Crash {
+                kind: "TypeError",
+                msg: format!("{} object is not iterable", crate::delegation::type_name(v)),
+            });
+        }
+    }
+    let switching = as_dict(state.get("versionGate"), &empty)?.get("automaticSwitching") == Some(&json!("on"));
+    let failover = switching
+        && as_dict(cfg, &empty)?.get("autoBalance") == Some(&Value::Bool(true))
+        && !hold.is_some_and(|h| h > now)
+        && !pending;
+    let mut names: Vec<(Value, String)> = Vec::new();
+    for a in rows {
+        let Value::Object(a) = a else { return Err(attribute_error(a)) };
+        let id = a.get("id").cloned().unwrap_or(Value::Null);
+        if matches!(id, Value::Array(_) | Value::Object(_)) {
+            return Err(Fault::Crash {
+                kind: "TypeError",
+                msg: format!("unhashable type: {}", crate::delegation::type_name(&id)),
+            });
+        }
+        let name = py::str_of(a.get("email").unwrap_or(&json!("?")));
+        let name = name.split('@').next().unwrap_or("").to_string();
+        match names.iter_mut().find(|(i, _)| *i == id) {
+            Some(slot) => slot.1 = name,
+            None => names.push((id, name)),
+        }
+    }
+    let mut held = Vec::new();
+    for (i, p) in as_dict(state.get("probes"), &empty)? {
+        let Some((_, name)) = names.iter().find(|(id, _)| id.as_str() == Some(i)) else { continue };
+        let Value::Object(p) = p else { return Err(attribute_error(p)) };
+        if p.get("result") == Some(&json!("limited")) && now_s - at_seconds(p)? < PROBE_HOLD_S {
+            held.push(name.clone());
+        }
+    }
+    held.sort();
+    let cfg = as_dict(cfg, &empty)?;
+    let bound = |k: &str, default: f64| cfg.get(k).map_or(Ok(default), py_float);
+    Ok(Gate {
+        failover,
+        stale_ok_min: bound("staleNumbersMinutes", STALE_OK_MIN)?,
+        standby_max: bound("standbyMax", STANDBY_MAX_5H)?,
+        standby_weekly_max: bound("standbyWeeklyMax", LIMIT_7D)?,
+        held,
+    })
+}
+
+/// `resume_gate()`, the snapshot's `usage.gate.resume`: every account that decides it is under
+/// `RESUME_5H` of 5h, and an unknown active account is covered by failover. No account to decide
+/// it fails closed.
+pub fn resume_gate(accounts: &Accounts, now: i64, gate: &Gate) -> Result<Value, String> {
+    let r = readiness(accounts, now, gate)?;
+    let five = r["counted"].as_object().cloned().unwrap_or_default();
+    let joined =
+        |k: &str| r[k].as_array().map(|a| a.iter().map(py::str_of).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    // The first account at the maximum, in name order, as Python's max() picks it.
+    let top = five.iter().fold(None::<(&String, &Value, f64)>, |best, (n, v)| {
+        let f = py::num(Some(v)).unwrap_or(f64::NAN);
+        match best {
+            Some((_, _, b)) if f <= b => best,
+            _ => Some((n, v, f)),
+        }
+    });
+    let (ok, why) = if r["active"].is_null() {
+        // An empty store: the balancer never logs back in on its own, so nothing resumes.
+        (false, "no active account".to_string())
+    } else if r["known"] != json!(true) {
+        (false, format!("{} usage stale, unreadable or unspendable, no failover standby", joined("unknown")))
+    } else if let Some((name, _, max)) = top.filter(|t| t.2 >= RESUME_5H) {
+        (false, format!("5h {}% >= {}% on {name}", py::fmt_g(max), RESUME_5H as i64))
+    } else if top.is_none() {
+        (false, "no spendable account with readable usage".to_string())
+    } else {
+        let mut why =
+            format!("5h under {}% on {}", RESUME_5H as i64, five.keys().cloned().collect::<Vec<_>>().join(", "));
+        if let Some(c) = r["covered_by"].as_str() {
+            why += &format!("; {} stale, covered by failover to {c}", joined("unknown"));
+        }
+        (true, why)
+    };
+    let mut out = Map::new();
+    out.insert("resume".into(), json!(ok));
+    out.insert("why".into(), json!(why));
+    out.extend(r);
+    Ok(Value::Object(out))
+}
+
 fn usable(v: &Map<String, Value>) -> Option<f64> {
     py::num(v.get("7d")).filter(|s| !py::truthy(v.get("limited")) && *s < 100.0)
 }
 
-/// The fleet's runway against its next relief, from the latest sample and the history.
-pub fn forecast(current: &Accounts, samples: &[Value], now: i64) -> Result<Map<String, Value>, String> {
+/// The fleet's runway against its next relief, from the latest sample and the history. `known` is
+/// `readiness()`'s: only an account the fleet can spend decides it, and capacity and relief come
+/// only from its pool (BRO-3223).
+pub fn forecast(current: &Accounts, samples: &[Value], now: i64, gate: &Gate) -> Result<Map<String, Value>, String> {
     let mut rates: Vec<f64> = Vec::new();
     let mut headroom = 0.0;
     let mut per = Map::new();
-    let mut known = true;
+    let ready = readiness(current, now, gate)?;
+    let known = ready["known"] == json!(true);
+    let pool: Vec<String> = ready["pool"].as_array().map(|a| a.iter().map(py::str_of).collect()).unwrap_or_default();
     let (mut measured_basis, mut average_basis) = (false, false);
     for (name, v) in current {
         let seven = v.get("7d").cloned().unwrap_or(Value::Null);
-        let ok = usable(v);
+        let ok = usable(v).filter(|_| pool.contains(name));
         let (r, basis) = match burn_rate(samples, name, now)? {
             Some(r) => (Some(r), "measured"),
             None => (window_average(v, now)?, "window_average"),
@@ -321,9 +603,6 @@ pub fn forecast(current: &Accounts, samples: &[Value], now: i64) -> Result<Map<S
         if let Some(s) = ok {
             headroom += 100.0 - s;
         }
-        if py::num(Some(&seven)).is_none() || py::truthy(v.get("stale")) {
-            known = false;
-        }
         let reset = parse_ts(v.get("reset_7d"))?;
         let raw = |k: &str| v.get(k).cloned().unwrap_or(Value::Null);
         let mut row = json!({
@@ -339,7 +618,7 @@ pub fn forecast(current: &Accounts, samples: &[Value], now: i64) -> Result<Map<S
         per.insert(name.clone(), row);
     }
     let mut relief: Option<i64> = None;
-    for (_, v) in current {
+    for (_, v) in current.iter().filter(|(n, _)| pool.contains(n)) {
         if let Some(r) = parse_ts(v.get("reset_7d"))?.filter(|r| *r > now) {
             relief = Some(relief.map_or(r, |m: i64| m.min(r)));
         }
@@ -351,6 +630,7 @@ pub fn forecast(current: &Accounts, samples: &[Value], now: i64) -> Result<Map<S
     out.insert("relief_at".into(), iso(relief));
     out.insert("burn_pct_h".into(), json!(fleet_rate.map(|f| py::round(f, 2))));
     out.insert("known".into(), json!(known));
+    out.insert("pool".into(), json!(pool));
     let mut set = |k: &str, v: Value| {
         out.insert(k.into(), v);
     };
@@ -389,7 +669,9 @@ pub fn forecast(current: &Accounts, samples: &[Value], now: i64) -> Result<Map<S
 pub fn cadence(current: &Accounts, fc: &Map<String, Value>) -> Value {
     let active = current.iter().find(|(_, v)| py::truthy(v.get("active")));
     let a5 = active.and_then(|(_, v)| py::num(v.get("5h")));
-    let usable7: Vec<f64> = current.iter().filter_map(|(_, v)| usable(v)).collect();
+    let pool = fc.get("pool").and_then(Value::as_array);
+    let in_pool = |n: &str| pool.is_some_and(|p| p.iter().any(|x| x.as_str() == Some(n)));
+    let usable7: Vec<f64> = current.iter().filter(|(n, _)| in_pool(n)).filter_map(|(_, v)| usable(v)).collect();
     let crosses = py::truthy(fc.get("crosses_relief"));
     let runway = py::num(py::or(fc.get("runway_h"), None)).unwrap_or(0.0);
     let show = |k: &str| fc.get(k).map_or_else(|| "None".to_string(), py::str_of);
@@ -422,10 +704,11 @@ pub fn cadence(current: &Accounts, fc: &Map<String, Value>) -> Value {
     })
 }
 
-/// The snapshot's `capacity` section. `samples` must already include the current one.
-pub fn capacity(usage_rows: &[Value], samples: &[Value], now: i64) -> Result<Value, String> {
+/// The snapshot's `capacity` section. `samples` must already include the current one. `gate`:
+/// readiness()'s failover and bounds; the default (no balancer state) fails a stale active closed.
+pub fn capacity(usage_rows: &[Value], samples: &[Value], now: i64, gate: &Gate) -> Result<Value, String> {
     let (_, current) = sample_from_usage(usage_rows, now);
-    let mut fc = forecast(&current, samples, now)?;
+    let mut fc = forecast(&current, samples, now, gate)?;
     let cad = cadence(&current, &fc);
     let mut recent = 0;
     for s in samples {

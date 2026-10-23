@@ -34,6 +34,11 @@ fn ts(r: Result<Value, String>) -> Value {
     }
 }
 
+fn gate_json(g: &e::Gate) -> Value {
+    json!({"failover": g.failover, "stale_ok_min": g.stale_ok_min, "standby_max": g.standby_max,
+           "standby_weekly_max": g.standby_weekly_max, "held": g.held})
+}
+
 pub fn eval(case: &Value) -> Value {
     let args = case.get("args").cloned().unwrap_or(Value::Null);
     let empty = Map::new();
@@ -111,12 +116,27 @@ pub fn eval(case: &Value) -> Value {
         "tier_of_model" => json!({"ok": d::tier_of_model(s(&args, "model"))}),
         "model_of_provider" => json!({"ok": d::model_of_provider(s(&args, "provider"))}),
         "parse_ts" => ts(e::parse_ts(args.get("value")).map(e::iso)),
-        "capacity" => ts((|| {
-            let now = e::parse_ts(args.get("now"))?.ok_or("no now")?;
+        // `state` present: the gate comes from `gate_bounds(state, now, usage)`, as the tick passes it.
+        "capacity" | "resume_gate" | "gate_bounds" => {
+            let Ok(Some(now)) = e::parse_ts(args.get("now")) else { return json!({"err": "no now"}) };
             let rows = args.get("usage").and_then(Value::as_array).cloned().unwrap_or_default();
-            let samples = args.get("samples").and_then(Value::as_array).cloned().unwrap_or_default();
-            e::capacity(&rows, &samples, now)
-        })()),
+            let gate = match args.get("state") {
+                None => e::Gate::default(),
+                Some(Value::Object(state)) => match e::gate_bounds(state, now, &rows) {
+                    Ok(g) => g,
+                    Err(f) => return fault(f),
+                },
+                Some(_) => return json!({"crash": "AttributeError"}),
+            };
+            match case["fn"].as_str() {
+                Some("gate_bounds") => json!({"ok": gate_json(&gate)}),
+                Some("resume_gate") => ts(e::resume_gate(&e::sample_from_usage(&rows, now).1, now, &gate)),
+                _ => {
+                    let samples = args.get("samples").and_then(Value::as_array).cloned().unwrap_or_default();
+                    ts(e::capacity(&rows, &samples, now, &gate))
+                }
+            }
+        }
         "session_gates" => {
             let (handoff, successor) = e::session_gates(
                 args.get("context_k").and_then(Value::as_i64),

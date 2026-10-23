@@ -88,6 +88,16 @@ fn capacity_matches_the_python() {
 }
 
 #[test]
+fn resume_gate_matches_the_python() {
+    check("resume_gate");
+}
+
+#[test]
+fn gate_bounds_match_the_python() {
+    check("gate_bounds");
+}
+
+#[test]
 fn timestamps_match_the_python() {
     check("parse_ts");
     check("add_hours");
