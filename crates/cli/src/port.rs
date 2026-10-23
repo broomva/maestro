@@ -1027,7 +1027,10 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
                     None => vec![],
                 };
                 let now = match now {
-                    Some(n) => e::parse_ts(Some(&json!(n))).map_err(fault_text)?.ok_or("--now is empty")?,
+                    Some(n) => {
+                        maestro_core::schema::time("--now", Some(&json!(n))).map_err(fault_text)?;
+                        e::parse_ts(Some(&json!(n))).map_err(fault_text)?.ok_or("--now is empty")?
+                    }
                     None => jiff::Timestamp::now().as_microsecond(),
                 };
                 let gate = match state {

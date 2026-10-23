@@ -121,9 +121,14 @@ pub fn eval(case: &Value) -> Value {
         },
         "tier_of_model" => json!({"ok": d::tier_of_model(s(&args, "model"))}),
         "model_of_provider" => json!({"ok": d::model_of_provider(s(&args, "provider"))}),
-        "parse_ts" => ts(e::parse_ts(args.get("value")).map(e::iso)),
+        "parse_ts" => ts(crate::schema::time("value", args.get("value"))
+            .and_then(|()| e::parse_ts(args.get("value")))
+            .map(e::iso)),
         // `state` present: the gate comes from `gate_bounds(state, now, usage)`, as the tick passes it.
         "capacity" | "resume_gate" | "gate_bounds" => {
+            if let Err(f) = crate::schema::time("now", args.get("now")) {
+                return fault(f);
+            }
             let Ok(Some(now)) = e::parse_ts(args.get("now")) else { return json!({"err": "no now"}) };
             let rows = args.get("usage").and_then(Value::as_array).cloned().unwrap_or_default();
             let gate = match args.get("state") {

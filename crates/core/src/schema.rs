@@ -31,7 +31,8 @@ enum Ty {
     NumOnly,
     /// A bool or null.
     Bool,
-    /// A string, a number (not a bool) or null: what `parse_ts` reads as a timestamp.
+    /// A timestamp: a strict UTC string, `""`, an epoch number or null, inside `datetime`'s years
+    /// (`economy::parse_ts`).
     Time,
     /// A list of strings or null.
     Strs,
@@ -56,9 +57,10 @@ fn check(field: &str, v: &Value, ty: Ty) -> Result<(), Fault> {
         (_, Value::Null) => true,
         (Ty::Str, Value::String(_)) => true,
         (Ty::Int, Value::Number(n)) => n.is_i64(),
-        (Ty::Num | Ty::NumOnly | Ty::Time, Value::Number(_)) => true,
+        (Ty::Num | Ty::NumOnly, Value::Number(_)) => true,
+        (Ty::Time, Value::Number(n)) => crate::economy::epoch_us(n.as_f64().unwrap_or(f64::NAN)).is_some(),
+        (Ty::Time, Value::String(s)) => s.is_empty() || crate::economy::timestamp_us(s).is_some(),
         (Ty::Bool, Value::Bool(_)) => true,
-        (Ty::Time, Value::String(_)) => true,
         (Ty::Strs, Value::Array(a)) => {
             for (i, x) in a.iter().enumerate() {
                 if !x.is_string() {
@@ -77,7 +79,10 @@ fn check(field: &str, v: &Value, ty: Ty) -> Result<(), Fault> {
         Ty::Int => "an integer within 64 bits",
         Ty::Num | Ty::NumOnly => "a number",
         Ty::Bool => "a bool",
-        Ty::Time => "a timestamp string or epoch number",
+        Ty::Time => match v {
+            Value::Number(_) => crate::economy::TIME_RANGE,
+            _ => crate::economy::TIME_FORM,
+        },
         Ty::Strs => "a list of strings",
     };
     Err(refuse(field, want, v))
@@ -91,6 +96,11 @@ fn fields(at: &str, m: &Map<String, Value>, spec: &[(&str, Ty)]) -> Result<(), F
         }
     }
     Ok(())
+}
+
+/// A timestamp argument (`--now`, a parity case's `now` or `value`) checked as a schema field.
+pub fn time(field: &str, v: Option<&Value>) -> Result<(), Fault> {
+    v.map_or(Ok(()), |v| check(field, v, Ty::Time))
 }
 
 /// A mapping or null at `field`; `None` for null or absent.

@@ -142,9 +142,11 @@ read, that count becomes a lower bound and the error is reported under `worktree
   **Parity is claimed inside a typed schema** (`maestro_core::schema`), the shapes the real inputs hold:
   graph ids, kinds, repos, `done`, tiers and every list item are strings; signal counts are JSON integers
   within 64 bits (not bools, not floats, not digit strings), and so are tier counts; flags are bools;
-  usage, sample and balancer numbers are numbers; timestamps are strings or epoch numbers. Inside it, messages, rounding, exit
-  codes and uncaught-error kinds are the Python's for the same arguments (a timestamp or runway past
-  `datetime`'s years raises the same kind and decides nothing). **Outside it Maestro refuses** before any
+  usage, sample and balancer numbers are numbers; timestamps are UTC strings
+  `YYYY-MM-DDTHH:MM:SS[.ffffff]` ending `Z` or `+00:00` (the form the usage endpoint and the samples
+  write), or epoch numbers, inside `datetime`'s years 1..9999. Inside it, messages, rounding, exit
+  codes and uncaught-error kinds are the Python's for the same arguments (a runway past `datetime`'s
+  years raises the same kind and decides nothing). **Outside it Maestro refuses** before any
   rule runs, naming the field (`graph.nodes[1].signals.est_loc: an integer within 64 bits, not a string
   (outside the schema Maestro reads exactly)`), where the Python would go on with Python's semantics on
   arbitrary input (`1` and `True` one dict key, `str.strip`'s separators, `int()` of any digit string):
@@ -155,7 +157,7 @@ read, that count becomes a lower bound and the error is reported under `worktree
   integer `-0` (serde_json reads -0.0). A graph or policy is read within a YAML subset, the rule
   `maestro_store::yaml` follows for asks. These are refused with the reason and line named: a document
   the subset check cannot scan; a tab; a CR outside CRLF; a control character; U+0085, U+2028 and U+2029;
-  a byte-order mark past the start; anchors and aliases, tags and merge keys; a plain scalar holding `?`;
+  a byte-order mark; anchors and aliases, tags and merge keys; a plain scalar holding `?`;
   a plain scalar PyYAML (YAML 1.1) and serde_yaml (YAML 1.2) read differently (`yes`, `off`, `0250`,
   `0o17`, `1e3`, `1:20`, `2026-10-23`, `.inf`); and a mapping key that is not a string. Quote the value
   to keep it. Each rule is there because a differential fuzz (`yaml_differential`, `json_differential` in
@@ -165,11 +167,9 @@ read, that count becomes a lower bound and the error is reported under `worktree
   `cargo test` on goldens of PyYAML's and Python's readings. A refusal is always allowed: the CLI also
   refuses some documents Python reads. Known differences inside both: the CLI flags follow the
   subcommand (`maestro delegation plan G --repo N=P`, not `--repo N=P plan G`); JSON is printed with sorted
-  keys and two-space indent; a duplicate YAML key is refused where PyYAML keeps the last value; timestamps
-  are read in the extended ISO form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes); a
-  message prints unassigned code points that Python's `repr` escapes; a timestamp between 6.7e16 s and
-  `time_t`'s limit raises `OSError`, macOS's kind, where another platform's Python may raise another;
-  `maestro economy capacity` refuses a `--usage` that is not a list. The sample cache, transcript reading
+  keys and two-space indent; a duplicate YAML key is refused where PyYAML keeps the last value; a
+  message prints unassigned code points that Python's `repr` escapes; a document serde_yaml cannot parse
+  (a `%` directive among them) stops with its `YAMLError`; `maestro economy capacity` refuses a `--usage` that is not a list. The sample cache, transcript reading
   and the economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
   (maestro-paseo `shared/tiers.ts`).
   - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation

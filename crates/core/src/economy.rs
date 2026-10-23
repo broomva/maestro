@@ -79,61 +79,97 @@ impl Mode {
     }
 }
 
-/// `parse_ts`: none for null or `""`; a number is epoch seconds, or milliseconds above 1e11;
-/// a string is ISO 8601 as `datetime.fromisoformat` reads it, naive meaning UTC.
+/// `parse_ts`: none for null or `""`; a number is epoch seconds, or milliseconds above 1e11; a
+/// string is `YYYY-MM-DDTHH:MM:SS[.ffffff]` in UTC (`Z` or `+00:00`), the form the usage endpoint and
+/// the samples write. Anything else, or an instant outside `datetime`'s years, is outside the
+/// schema (`crate::schema`), which callers check first; here it is refused as `timestamp`.
 pub fn parse_ts(v: Option<&Value>) -> Result<Option<i64>, Fault> {
+    let refused = |why: &str| Fault::Refused { field: "timestamp".into(), why: why.into() };
     match v {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) if s.is_empty() => Ok(None),
-        Some(Value::Bool(b)) => from_seconds(*b as i64 as f64).map(Some),
-        Some(Value::Number(n)) => {
-            let f = n.as_f64().unwrap_or(f64::NAN);
-            from_seconds(f / if f > 1e11 { 1000.0 } else { 1.0 }).map(Some)
-        }
-        Some(other) => {
-            let s = py::str_of(other);
-            let t = py::strip(&s).replace('Z', "+00:00");
-            from_iso(&t).map(Some).map_err(Fault::Value)
-        }
+        Some(Value::String(s)) => timestamp_us(s).map(Some).ok_or_else(|| refused(TIME_FORM)),
+        Some(Value::Number(n)) => epoch_us(n.as_f64().unwrap_or(f64::NAN)).map(Some).ok_or_else(|| refused(TIME_RANGE)),
+        Some(_) => Err(refused(TIME_FORM)),
     }
 }
 
-/// `datetime.fromtimestamp(f, utc)`: whole seconds, then the fraction rounded half-even to µs.
-/// Outside `datetime`'s years it raises as CPython does: a `ValueError` naming the year, an
-/// `OSError` where the year does not fit the C library's `int` (macOS), an `OverflowError`
-/// past `time_t`.
-fn from_seconds(f: f64) -> Result<i64, Fault> {
-    if f.is_nan() {
-        return Err(Fault::Value("Invalid value NaN (not a number)".into()));
-    }
-    if !f.is_finite() || f.abs() >= 9.2e18 {
-        return Err(Fault::Crash { kind: "OverflowError", msg: "timestamp out of range for platform time_t".into() });
+/// What a timestamp string must be.
+pub const TIME_FORM: &str = "a UTC timestamp YYYY-MM-DDTHH:MM:SS[.ffffff](Z|+00:00) within years 1..9999";
+/// What an epoch timestamp must be.
+pub const TIME_RANGE: &str = "epoch seconds (milliseconds above 1e11) within years 1..9999";
+
+/// `datetime.fromtimestamp(f / (1000 if f > 1e11 else 1), utc)` as epoch µs: whole seconds, then
+/// the fraction rounded half-even to µs, as CPython does. None outside `datetime`'s years.
+pub fn epoch_us(f: f64) -> Option<i64> {
+    let f = if f > 1e11 { f / 1000.0 } else { f };
+    // Past ±9e12 s (285,000 years) no year Python holds is near, and the µs would overflow i64.
+    if !f.is_finite() || f.abs() >= 9e12 {
+        return None;
     }
     let whole = f.trunc();
-    // Past ±9e12 s (285,000 years) no year Python holds is near, and the µs would overflow i64.
-    let us = if whole.abs() < 9e12 { Some(whole as i64 * US + round_half_even((f - whole) * 1e6)) } else { None };
-    let year = year_of(us.map_or(whole as i64, |us| us.div_euclid(US)));
-    if !(i64::from(i32::MIN) + 1900..=i64::from(i32::MAX) + 1900).contains(&year) {
-        return Err(Fault::Crash {
-            kind: "OSError",
-            msg: "[Errno 84] Value too large to be stored in data type".into(),
-        });
-    }
-    match us {
-        Some(us) if (DT_MIN_US..=DT_MAX_US).contains(&us) => Ok(us),
-        _ => Err(Fault::Value(format!("year must be in 1..9999, not {year}"))),
-    }
+    let us = whole as i64 * US + round_half_even((f - whole) * 1e6);
+    (DT_MIN_US..=DT_MAX_US).contains(&us).then_some(us)
 }
 
-/// The proleptic Gregorian year of an epoch second (Howard Hinnant's `civil_from_days`).
-fn year_of(secs: i64) -> i64 {
-    let z = secs.div_euclid(86_400) + 719_468;
+/// The strict UTC form as epoch µs, or None. `datetime.fromisoformat` reads every string this
+/// accepts to the same instant.
+pub fn timestamp_us(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    let num = |i: usize, n: usize| -> Option<i64> {
+        let d = b.get(i..i + n)?;
+        d.iter().all(u8::is_ascii_digit).then(|| d.iter().fold(0, |a, c| a * 10 + i64::from(c - b'0')))
+    };
+    let at = |i: usize, c: u8| b.get(i) == Some(&c);
+    if !(at(4, b'-') && at(7, b'-') && at(10, b'T') && at(13, b':') && at(16, b':')) {
+        return None;
+    }
+    let (y, m, d, hh, mm, ss) = (num(0, 4)?, num(5, 2)?, num(8, 2)?, num(11, 2)?, num(14, 2)?, num(17, 2)?);
+    let mut i = 19;
+    let mut us = 0;
+    if at(i, b'.') {
+        let n = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+        if !(1..=6).contains(&n) {
+            return None;
+        }
+        us = num(i + 1, n)? * 10i64.pow(6 - n as u32);
+        i += 1 + n;
+    }
+    if !matches!(&s[i..], "Z" | "+00:00") {
+        return None;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=dim[m as usize - 1]).contains(&d) {
+        return None;
+    }
+    if hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+    Some(((days_from_civil(y, m, d) * 24 + hh) * 60 + mm) * 60 * US + ss * US + us)
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's `days_from_civil`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The date of a day since 1970-01-01 (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    yoe + era * 400 + i64::from(mp >= 10)
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
 fn overflow() -> Fault {
@@ -162,100 +198,13 @@ pub fn add_hours(at: i64, hours: f64) -> Result<i64, Fault> {
     if (DT_MIN_US..=DT_MAX_US).contains(&sum) { Ok(sum) } else { Err(overflow()) }
 }
 
-fn digits(s: &str) -> Option<i64> {
-    (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok()).flatten()
-}
-
-/// The subset of `datetime.fromisoformat` the usage endpoint and the samples write:
-/// `YYYY-MM-DD[?HH[:MM[:SS[.f]]][±HH[:MM[:SS]]]]`, any one separator character. A field out of
-/// range carries the Python's message; any other shape is `Invalid isoformat string`.
-fn from_iso(t: &str) -> Result<i64, String> {
-    let invalid = || format!("Invalid isoformat string: {}", py::repr_str(t));
-    let chars: Vec<char> = t.chars().collect();
-    if chars.len() < 10 || chars[4] != '-' || chars[7] != '-' {
-        return Err(invalid());
-    }
-    let s = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
-    let field = |a, b| digits(&s(a, b)).ok_or_else(invalid);
-    let (y, m, d) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
-    let two = |p: Option<&str>| p.filter(|p| p.len() == 2).and_then(digits).ok_or_else(invalid);
-    let (mut hh, mut mm, mut ss, mut us, mut off) = (0, 0, 0, 0i64, 0i64);
-    if chars.len() > 10 {
-        let rest: String = chars[11..].iter().collect();
-        let split = rest.find(['+', '-']).unwrap_or(rest.len());
-        let (time, tz) = rest.split_at(split);
-        let mut parts = time.splitn(3, ':');
-        hh = two(parts.next())?;
-        if let Some(p) = parts.next() {
-            mm = two(Some(p))?;
-        }
-        if let Some(p) = parts.next() {
-            let (sec, frac) = p.split_once(['.', ',']).map_or((p, None), |(a, b)| (a, Some(b)));
-            ss = two(Some(sec))?;
-            if let Some(frac) = frac {
-                digits(frac).ok_or_else(invalid)?;
-                let six: String = frac.chars().chain(std::iter::repeat('0')).take(6).collect();
-                us = digits(&six).ok_or_else(invalid)?;
-            }
-        }
-        if !tz.is_empty() {
-            let sign = if tz.starts_with('-') { -1 } else { 1 };
-            let mut f = tz[1..].splitn(3, ':');
-            let oh = two(f.next())?;
-            let om = f.next().map_or(Ok(0), |p| two(Some(p)))?;
-            let os = f.next().map_or(Ok(0), |p| two(Some(p)))?;
-            off = sign * (oh * 3600 + om * 60 + os);
-            if off.abs() >= 86_400 {
-                return Err(invalid());
-            }
-        }
-    }
-    // The order and wording of datetime's own range checks.
-    if !(1..=9999).contains(&y) {
-        return Err(format!("year must be in 1..9999, not {y}"));
-    }
-    if !(1..=12).contains(&m) {
-        return Err(format!("month must be in 1..12, not {m}"));
-    }
-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let dim = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m as usize - 1];
-    if !(1..=dim).contains(&d) {
-        return Err(format!("day {d} must be in range 1..{dim} for month {m} in year {y}"));
-    }
-    for (name, v, max) in [("hour", hh, 23), ("minute", mm, 59), ("second", ss, 59)] {
-        if v > max {
-            return Err(format!("{name} must be in 0..{max}, not {v}"));
-        }
-    }
-    let date = jiff::civil::Date::new(y as i16, m as i8, d as i8).map_err(|_| invalid())?;
-    let utc = date
-        .at(hh as i8, mm as i8, ss as i8, 0)
-        .to_zoned(jiff::tz::TimeZone::UTC)
-        .map_err(|_| invalid())?
-        .timestamp()
-        .as_second();
-    Ok((utc - off) * US + us)
-}
-
-/// `iso(d)`: UTC, whole seconds, `+00:00`.
+/// `iso(d)`: UTC, whole seconds, `+00:00`. Every instant here is inside `datetime`'s years.
 pub fn iso(us: Option<i64>) -> Value {
     let Some(us) = us else { return Value::Null };
     let secs = us.div_euclid(US);
-    match jiff::Timestamp::from_second(secs) {
-        Ok(ts) => {
-            let dt = ts.to_zoned(jiff::tz::TimeZone::UTC).datetime();
-            Value::String(format!(
-                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
-                dt.year(),
-                dt.month(),
-                dt.day(),
-                dt.hour(),
-                dt.minute(),
-                dt.second()
-            ))
-        }
-        Err(_) => Value::Null,
-    }
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    let s = secs.rem_euclid(86_400);
+    Value::String(format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}+00:00", s / 3600, s / 60 % 60, s % 60))
 }
 
 fn hours_between(later: i64, earlier: i64) -> f64 {
@@ -784,16 +733,36 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_read_as_python_reads_them() {
+    fn timestamps_read_in_the_strict_utc_form_only() {
         assert_eq!(iso(Some(at("2026-10-22T12:00:00Z"))), json!("2026-10-22T12:00:00+00:00"));
-        assert_eq!(iso(Some(at("2026-10-22T07:00:00-05:00"))), json!("2026-10-22T12:00:00+00:00"));
-        assert_eq!(iso(Some(at("2026-10-22 12:00"))), json!("2026-10-22T12:00:00+00:00"));
+        assert_eq!(iso(Some(at("2026-10-22T12:00:00+00:00"))), json!("2026-10-22T12:00:00+00:00"));
         assert_eq!(at("2026-10-22T12:00:00.5Z") - at("2026-10-22T12:00:00Z"), 500_000);
+        assert_eq!(at("2026-10-22T12:00:00.123456+00:00") - at("2026-10-22T12:00:00Z"), 123_456);
+        // datetime's whole range, both ends, the leap day.
+        assert_eq!(iso(Some(at("0001-01-01T00:00:00Z"))), json!("0001-01-01T00:00:00+00:00"));
+        assert_eq!(iso(Some(at("9999-12-31T23:59:59.999999Z"))), json!("9999-12-31T23:59:59+00:00"));
+        assert_eq!(iso(Some(at("2024-02-29T00:00:00Z"))), json!("2024-02-29T00:00:00+00:00"));
         assert_eq!(
             parse_ts(Some(&json!(1_700_000_000_000i64))).unwrap(),
             parse_ts(Some(&json!(1_700_000_000))).unwrap()
         );
-        assert!(parse_ts(Some(&json!("yesterday"))).is_err());
+        for t in [
+            "yesterday",
+            "2026-10-22T07:00:00-05:00",
+            "2026-10-22 12:00",
+            "2026-10-22",
+            "2026-10-22T24:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "2026-10-22T12:00:00.Z",
+            "2026-10-22T12:00:00.1234567Z",
+            " 2026-10-22T12:00:00Z",
+        ] {
+            assert!(matches!(parse_ts(Some(&json!(t))), Err(Fault::Refused { .. })), "{t}");
+        }
+        // Above 1e11 a number is milliseconds: 253402300800000 ms is year 10000.
+        for n in [json!(253_402_300_800_000i64), json!(-62_135_596_801i64), json!(1e300), json!(-1e12)] {
+            assert!(matches!(parse_ts(Some(&n)), Err(Fault::Refused { .. })), "{n}");
+        }
         assert_eq!(parse_ts(Some(&json!(""))).unwrap(), None);
     }
 

@@ -29,6 +29,7 @@ import itertools
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -72,13 +73,35 @@ def _is_int(v):
     return type(v) is int and -2**63 <= v < 2**63
 
 
+def _time_ok(v):
+    """A timestamp inside the schema, by Python's own datetime: a strict UTC string or an epoch number
+    `fromtimestamp` reads (parse_ts's own division by 1000 above 1e11)."""
+    if v is None or v == "":
+        return True
+    if type(v) is str:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|\+00:00)", v):
+            return False
+        try:
+            dt.datetime.fromisoformat(v.replace("Z", "+00:00"))
+            return True
+        except ValueError:
+            return False
+    if type(v) in (int, float):
+        try:
+            dt.datetime.fromtimestamp(v / (1000 if v > 1e11 else 1), dt.timezone.utc)
+            return True
+        except (ValueError, OverflowError, OSError):
+            return False
+    return False
+
+
 TY = {
     "str": lambda v: v is None or type(v) is str,
     "int": lambda v: v is None or _is_int(v),
     "num": lambda v: v is None or type(v) in (int, float),
     "num!": lambda v: type(v) in (int, float),
     "bool": lambda v: v is None or type(v) is bool,
-    "time": lambda v: v is None or type(v) in (str, int, float),
+    "time": _time_ok,
 }
 SIGNALS = [("kind", "str"), ("paths", "strs"), ("est_loc", "int"), ("files", "int"), ("repos", "int"),
            ("public_api", "bool"), ("one_way_door", "bool"), ("spec", "str"), ("failed_attempts", "int"),
@@ -215,6 +238,8 @@ def refusal(case):
         elif fn in ("validate", "validate_disk", "brief"):
             _graph(a["graph"])
         elif fn in ("capacity", "resume_gate", "gate_bounds"):
+            if "now" in a and not _time_ok(a["now"]):
+                raise Refused("now")
             if "state" in a:
                 if type(a["state"]) is not dict:
                     raise Refused("state")
@@ -228,6 +253,9 @@ def refusal(case):
             _tiers(a["data"])
         elif fn == "require_human_paths":
             _policy(a["policy"])
+        elif fn == "parse_ts":
+            if not _time_ok(a["value"]):
+                raise Refused("value")
     except Refused as r:
         return str(r)
     return None
@@ -1149,6 +1177,42 @@ def json_differential(maestro, write):
     return total, read, len(bad)
 
 
+def time_differential(E, maestro):
+    """Every timestamp Maestro reads, Python's parse_ts reads to the same instant (iso compared): strings
+    near the strict form with random edits, and epoch numbers near datetime's ends and the 1e11 switch."""
+    rng = random.Random(4242)
+    stamps = ["0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999Z", "2024-02-29T12:00:00+00:00",
+              "2026-10-22T12:34:56.5Z", "1970-01-01T00:00:00+00:00"]
+    edits = list("0123456789TZ:+-., ") + ["+00:00", "-00:00", "+05:30", "24", "60", "99", ".1234567", "z", "t"]
+    cases = []
+    for _ in range(20000):
+        t = rng.choice(stamps)
+        for _ in range(rng.randint(1, 2)):
+            i = rng.randint(0, len(t))
+            t = t[:i] + rng.choice(edits) + t[i + rng.randint(0, 2):]
+        cases.append(t)
+    edges = [-62135596800, 253402300799, 1e11, 253402300799999, 253402300800000]
+    for _ in range(5000):
+        cases.append(rng.choice(edges) + rng.choice([-1, 1]) * rng.random() * rng.choice([1e-7, 1e-6, 0.5, 1, 1e3]))
+    cases = list(dict.fromkeys(cases))
+    got = rust_eval(maestro, [{"fn": "parse_ts", "args": {"value": v}} for v in cases])
+    bad, read = [], 0
+    for v, g in zip(cases, got):
+        if "ok" not in g:
+            continue
+        read += 1
+        try:
+            want = E.iso(E.parse_ts(v))
+        except Exception as e:  # noqa: BLE001 - any raise where Maestro reads a value is a misread
+            want = f"raises {type(e).__name__}"
+        if want != g["ok"]:
+            bad.append((v, want, g["ok"]))
+    for v, w, g in bad[:10]:
+        failures.append(f"timestamp misread: {v!r}: python {w}, rust {g}")
+    check("time differential", not bad, f"{len(bad)} timestamps read differently")
+    return len(cases), read, len(bad)
+
+
 def cli_scenarios(dpy, fpy, maestro, tmp, write):
     root = os.path.join(tmp, "repos")
     layout, cases = cli_layout(), cli_cases()
@@ -1313,6 +1377,9 @@ def main(argv=None):
               + ("written" if a.write else "checked"))
         total, read, misread = yaml_differential(ws, a.rev, maestro, a.write)
         print(f"yaml      {total} fuzzed documents: {read} read by the CLI, {misread} read differently by PyYAML; "
+              f"the rest refused")
+        total, read, misread = time_differential(E, maestro)
+        print(f"time      {total} fuzzed timestamps: {read} read by Maestro, {misread} read differently by Python; "
               f"the rest refused")
         total, read, misread = json_differential(maestro, a.write)
         print(f"json      {total} fuzzed documents: {read} read by the CLI, {misread} read differently by Python; "
