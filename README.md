@@ -141,11 +141,13 @@ read, that count becomes a lower bound and the error is reported under `worktree
   messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments. Known
   differences: the CLI flags follow the subcommand (`maestro delegation plan G --repo N=P`, not
   `--repo N=P plan G`); JSON is printed with sorted keys and two-space indent; YAML is read as YAML 1.2
-  (merge keys applied in PyYAML's order), so a duplicate key is refused where PyYAML keeps the last value
+  (merge keys applied in PyYAML's order, custom tags refused as `safe_load` refuses them, but a YAML error
+  worded without PyYAML's line and column, and a quoted `'<<'` key read as a merge), so a duplicate key is refused
+  where PyYAML keeps the last value
   and an unquoted `1e3` or `0o17` is a number where PyYAML keeps a string; timestamps are read in the
   extended ISO form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes), not the basic or
-  week forms Python 3.14 also accepts; a message escapes unassigned code points as Python's `repr` does
-  not. The sample cache, transcript reading and the
+  week forms Python 3.14 also accepts; a `depends_on` written as a mapping is iterated in sorted key order; a message prints unassigned code points
+  that Python's `repr` escapes. The sample cache, transcript reading and the
   economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
   (maestro-paseo `shared/tiers.ts`).
   - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation

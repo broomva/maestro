@@ -459,6 +459,188 @@
   {
    "cwd": "w",
    "json": false,
+   "name": "ok plan --repo bare={ROOT}/gone --repo bare={ROOT}/bare",
+   "py": [
+    "--repo",
+    "bare={ROOT}/gone",
+    "--repo",
+    "bare={ROOT}/bare",
+    "plan",
+    "{ROOT}/ok.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/ok.json",
+    "--repo",
+    "bare={ROOT}/gone",
+    "--repo",
+    "bare={ROOT}/bare"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "a                implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\nb                implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=a\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "ok plan --json --repo bare={ROOT}/gone --repo bare={ROOT}/bare",
+   "py": [
+    "--repo",
+    "bare={ROOT}/gone",
+    "--repo",
+    "bare={ROOT}/bare",
+    "plan",
+    "{ROOT}/ok.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/ok.json",
+    "--repo",
+    "bare={ROOT}/gone",
+    "--repo",
+    "bare={ROOT}/bare"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "[\n {\n  \"id\": \"a\",\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [\n   \"docs/specs/a.html\",\n   \"bare:docs/adrs/b.html\",\n   \"docs/specs/missing.html\"\n  ],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n },\n {\n  \"id\": \"b\",\n  \"repo\": \"bare\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [\n   \"w:docs/specs/a.html\"\n  ],\n  \"depends_on\": [\n   \"a\"\n  ],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "ok brief a --repo bare={ROOT}/gone --repo bare={ROOT}/bare",
+   "py": [
+    "--repo",
+    "bare={ROOT}/gone",
+    "--repo",
+    "bare={ROOT}/bare",
+    "brief",
+    "{ROOT}/ok.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/ok.json",
+    "a",
+    "--repo",
+    "bare={ROOT}/gone",
+    "--repo",
+    "bare={ROOT}/bare"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Read first, and work from it: `docs/specs/a.html`, `bare:docs/adrs/b.html` (repo `bare` at `{ROOT}/bare`), `docs/specs/missing.html`.\n- Done means: `make test`. Verification: **check**, the check's exit code.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "ok plan --repo bare={ROOT}/bare --repo bare={ROOT}/gone",
+   "py": [
+    "--repo",
+    "bare={ROOT}/bare",
+    "--repo",
+    "bare={ROOT}/gone",
+    "plan",
+    "{ROOT}/ok.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/ok.json",
+    "--repo",
+    "bare={ROOT}/bare",
+    "--repo",
+    "bare={ROOT}/gone"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo bare ({ROOT}/gone) is not here: bind it with --repo bare=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "ok plan --json --repo bare={ROOT}/bare --repo bare={ROOT}/gone",
+   "py": [
+    "--repo",
+    "bare={ROOT}/bare",
+    "--repo",
+    "bare={ROOT}/gone",
+    "plan",
+    "{ROOT}/ok.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/ok.json",
+    "--repo",
+    "bare={ROOT}/bare",
+    "--repo",
+    "bare={ROOT}/gone"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo bare ({ROOT}/gone) is not here: bind it with --repo bare=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "ok brief a --repo bare={ROOT}/bare --repo bare={ROOT}/gone",
+   "py": [
+    "--repo",
+    "bare={ROOT}/bare",
+    "--repo",
+    "bare={ROOT}/gone",
+    "brief",
+    "{ROOT}/ok.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/ok.json",
+    "a",
+    "--repo",
+    "bare={ROOT}/bare",
+    "--repo",
+    "bare={ROOT}/gone"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo bare ({ROOT}/gone) is not here: bind it with --repo bare=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
    "name": "nested plan ",
    "py": [
     "plan",
@@ -874,6 +1056,146 @@
     "crash": false,
     "stderr": "  [skip] g: its repo is not checked out here; structure checked only (--skip-absent-repos)\n",
     "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Done means: `make test`. Verification: **check**, the check's exit code.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "absent-spec plan ",
+   "py": [
+    "plan",
+    "{ROOT}/absent-spec.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/absent-spec.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "absent-spec plan --json ",
+   "py": [
+    "plan",
+    "{ROOT}/absent-spec.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/absent-spec.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "absent-spec brief a ",
+   "py": [
+    "brief",
+    "{ROOT}/absent-spec.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/absent-spec.json",
+    "a"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "absent-spec plan --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/absent-spec.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/absent-spec.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "a                implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=p20      after=-\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "absent-spec plan --json --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/absent-spec.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/absent-spec.json",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "[\n {\n  \"id\": \"a\",\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"p20\",\n  \"thinking\": \"medium\",\n  \"inputs\": [\n   \"gone:docs/specs/x.html\"\n  ],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"substantive\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"p20\",\n   \"needs\": [],\n   \"reasons\": [\n    \"substantive (>200 LOC, multi-file or public API): P20 verifies\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "absent-spec brief a --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "brief",
+    "{ROOT}/absent-spec.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/absent-spec.json",
+    "a",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Read first, and work from it: `gone:docs/specs/x.html` (repo `gone` at `{ROOT}/gone`).\n- Done means: `make test`. Verification: **p20**, by a different model than you.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
    }
   },
   {
@@ -2559,6 +2881,69 @@
     "code": 1,
     "crash": true,
     "stderr": "AttributeError",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "multi-merge.graph.yaml plan",
+   "py": [
+    "plan",
+    "{ROOT}/multi-merge.graph.yaml"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/multi-merge.graph.yaml"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "  [error] repos v and w are one directory ({ROOT}/w): a place has one name\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "multi-merge-policy.graph.yaml plan",
+   "py": [
+    "plan",
+    "{ROOT}/multi-merge-policy.graph.yaml"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/multi-merge-policy.graph.yaml"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "a                implement    frontier   claude/claude-opus-5-5       thinking=xhigh  verify=p20-full after=-\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "astral.json plan",
+   "py": [
+    "plan",
+    "{ROOT}/astral.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/astral.json"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "  [error] a: 'nested/x.rs' is inside repo n: write it as n:x.rs\n",
     "stdout": ""
    }
   },
@@ -4362,7 +4747,9 @@
    "bare"
   ],
   "files": {
+   "absent-spec.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"gone\": \"{ROOT}/gone\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"a.rs\"], \"spec\": \"gone:docs/specs/x.html\", \"est_loc\": 400}, \"done\": \"make test\", \"inputs\": [\"gone:docs/specs/x.html\"]}]}",
    "absent.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"gone\": \"{ROOT}/gone\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}, {\"id\": \"g\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"a.rs\"], \"spec\": \"docs/specs/x.html\"}, \"done\": \"make test\", \"repo\": \"gone\", \"inputs\": [\"docs/specs/x.html\"]}]}",
+   "astral.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"n\": \"{ROOT}/w/nested\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"nested/x.rs\"]}, \"done\": \"ship it \\ud83d\\ude80\"}]}",
    "bad-name.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"a:b\": \"{ROOT}/bare\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",
    "bare/docs/adrs/b.html": "",
    "economy.json": "{\"generatedAt\": \"2026-10-22T00:00:00Z\", \"tiers\": {\"standard\": {\"runs\": 10, \"raisedRuns\": 3, \"approved\": 4, \"firstPass\": 0.25, \"tokensPerApproved\": 1234567}, \"frontier\": {\"runs\": 2, \"approved\": 0, \"firstPass\": null, \"tokensPerApproved\": 980}}}",
@@ -4377,6 +4764,9 @@
    "merged-repos-nested.graph.yaml": "extra: &extra {n: {path: {ROOT}/w/nested, policy: none}}\nrepo: w\nrepos: {<<: *extra, w: {ROOT}/w}\nnodes:\n  - {id: a, done: t, signals: {paths: [nested/x.rs]}}\n",
    "merged-repos.graph.yaml": "extra: &extra {n: {path: {ROOT}/w/nested, policy: none}, v: {ROOT}/w-link}\nrepo: w\nrepos: {<<: *extra, w: {ROOT}/w}\nnodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n",
    "merged.graph.yaml": "repo: w\nrepos: {w: {ROOT}/w}\nreviewer: &reviewer\n  kind: review\n  done: check\nnodes:\n  - <<: *reviewer\n    id: r\n    tier: standard\n  - <<: *reviewer\n    id: s\n",
+   "multi-merge-policy.graph.yaml": "repo: m\nrepos: {m: {ROOT}/multi-merge-policy}\nnodes:\n  - {id: a, done: t, signals: {paths: [deploy/x.yaml]}}\n",
+   "multi-merge-policy/.control/policy.yaml": "h: &h {action: require_human, path_touched: deploy/}\na: &a {action: auto, path_touched: deploy/}\nauto_merge: {rules: [{<<: [*h, *a]}]}\n",
+   "multi-merge.graph.yaml": "a: &a {v: {ROOT}/w-link}\nb: &b {v: {ROOT}/bare}\nrepo: w\nrepos: {<<: [*a, *b], w: {ROOT}/w}\nnodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n",
    "nested.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"n\": \"{ROOT}/w/nested\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"nested/x.rs\"]}, \"done\": \"make test\"}]}",
    "no-path.json": "{\"repo\": \"w\", \"repos\": {\"w\": \"{ROOT}/w\", \"x\": {\"policy\": \"none\"}}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",
    "no-policy.json": "{\"repo\": \"b\", \"repos\": {\"b\": \"{ROOT}/bare\"}, \"nodes\": [{\"id\": \"a\", \"kind\": \"implement\", \"signals\": {\"paths\": [\"src/a.rs\"]}, \"done\": \"make test\"}]}",

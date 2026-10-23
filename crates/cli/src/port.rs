@@ -261,7 +261,13 @@ fn load_yaml(text: &str) -> Result<serde_yaml::Value, Fault> {
                 Y::Mapping(out)
             }
             Y::Sequence(s) => Y::Sequence(s.into_iter().map(merge).collect::<Result<_, _>>()?),
-            Y::Tagged(t) => merge(t.value)?,
+            // safe_load constructs only the standard tags; serde_yaml has resolved those already.
+            Y::Tagged(t) => {
+                return Err(Fault::Crash {
+                    kind: "ConstructorError",
+                    msg: format!("could not determine a constructor for the tag '{}'", t.tag),
+                });
+            }
             other => other,
         })
     }
@@ -281,19 +287,53 @@ fn keys_in_order(y: &serde_yaml::Value) -> Vec<String> {
     }
 }
 
+/// The keys of a JSON graph's `repos` object in file order, a repeated key at its first position
+/// (as `json.loads` builds the dict).
+fn json_repos_order(text: &str) -> Vec<String> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+    struct Keys(Vec<String>);
+    impl<'de> serde::Deserialize<'de> for Keys {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> Visitor<'de> for V {
+                type Value = Keys;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a mapping")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Keys, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some((k, IgnoredAny)) = m.next_entry::<String, IgnoredAny>()? {
+                        if !keys.contains(&k) {
+                            keys.push(k);
+                        }
+                    }
+                    Ok(Keys(keys))
+                }
+            }
+            d.deserialize_map(V)
+        }
+    }
+    #[derive(serde::Deserialize)]
+    struct Graph {
+        repos: Option<Keys>,
+    }
+    serde_json::from_str::<Graph>(text).ok().and_then(|g| g.repos).map(|k| k.0).unwrap_or_default()
+}
+
 /// The graph (`json.loads` for `.json`, else `yaml.safe_load(...) or {}`), and its `repos` names in
 /// file order. A graph that is not a mapping is the Python's AttributeError at its first `.get`.
 fn load_graph(path: &str) -> Result<(Value, Vec<String>), Fault> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| Fault::Crash { kind: "FileNotFoundError", msg: format!("{path}: {e}") })?;
-    let (v, ordered): (Value, serde_yaml::Value) = if path.ends_with(".json") {
+    let (v, order): (Value, Vec<String>) = if path.ends_with(".json") {
         let v =
             serde_json::from_str(&text).map_err(|e| Fault::Crash { kind: "JSONDecodeError", msg: e.to_string() })?;
-        (v, serde_yaml::from_str(&text).unwrap_or(serde_yaml::Value::Null))
+        (v, json_repos_order(&text))
     } else {
         let y = load_yaml(&text)?;
         let v = serde_json::to_value(&y).map_err(|e| Fault::Crash { kind: "YAMLError", msg: e.to_string() })?;
-        (if py::truthy(Some(&v)) { v } else { json!({}) }, y)
+        let order = y.get("repos").map(keys_in_order).unwrap_or_default();
+        (if py::truthy(Some(&v)) { v } else { json!({}) }, order)
     };
     if !v.is_object() {
         return Err(Fault::Crash {
@@ -301,7 +341,6 @@ fn load_graph(path: &str) -> Result<(Value, Vec<String>), Fault> {
             msg: format!("'{}' object has no attribute 'get'", d::type_name(&v)),
         });
     }
-    let order = ordered.get("repos").map(keys_in_order).unwrap_or_default();
     Ok((v, order))
 }
 

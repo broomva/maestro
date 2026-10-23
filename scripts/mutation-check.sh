@@ -262,5 +262,12 @@ mutate $port '                        explicit.push((k, merge(val)?));
 mutate $port 'for (k, val) in merged.into_iter().chain(explicit) {' 'for (k, val) in explicit.into_iter().chain(merged) {'
 mutate $port '    if !v.is_object() {' '    if false {'
 
+mutate $port 'Y::Sequence(seq) => seq.into_iter().rev().collect(),' 'Y::Sequence(seq) => seq.into_iter().collect(),'
+mutate $port 'bindings.iter().rev().find(|(n, _)| *n == name)' 'bindings.iter().find(|(n, _)| *n == name)'
+mutate $port '            Y::Tagged(t) => {
+                return Err(Fault::Crash {' '            Y::Tagged(t) => {
+                return merge(t.value);
+                return Err(Fault::Crash {'
+
 echo "mutation  $killed of $total killed"
 exit $failed

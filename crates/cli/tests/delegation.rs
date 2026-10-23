@@ -119,3 +119,28 @@ fn the_cli_matches_the_python_clis() {
         bad[..bad.len().min(5)].join("\n")
     );
 }
+
+/// PyYAML's safe_load constructs only the standard tags, so a custom tag makes the policy unreadable
+/// (assess refuses, exit 3) and the graph a traceback (exit 1). The wording of a YAML error is not
+/// the Python's (it has no line and column), so these are held here rather than in the CLI golden.
+#[test]
+fn a_custom_yaml_tag_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".control")).unwrap();
+    std::fs::write(
+        dir.path().join(".control/policy.yaml"),
+        "auto_merge: {rules: [!rule {action: require_human, path_touched: deploy/}]}\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_maestro"))
+        .current_dir(dir.path())
+        .args(["delegation", "assess", "--root", ".", "--kind", "implement", "--paths", "deploy/x"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("could not determine a constructor for the tag '!rule'"));
+    let out = plan(dir.path(), "nodes:\n  - !node {id: a, done: t}\n");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ConstructorError: could not determine a constructor"));
+}
