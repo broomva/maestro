@@ -43,7 +43,7 @@ maestro mcp                          # MCP server on stdio
 maestro serve --http [--bind ADDR]   # MCP server over Streamable HTTP at /mcp, 127.0.0.1:7171 by default
 maestro doctor [--bstack DIR]        # is the vendored path reader the one bstack generates (as of that checkout's last fetch)? exit 1 if stale or unread
 maestro delegation assess|plan|brief|ladder   # tiers, assessments and agent-graph rules (the workspace's delegation.py, ported)
-maestro economy capacity --usage F [--samples F] [--now T]   # capacity forecast, cadence mode and launch gates
+maestro economy capacity --usage F [--samples F] [--now T] [--state F]   # capacity forecast, cadence mode and launch gates; --state = provider_manager --json state (failover)
 maestro economy tiers [--path F]     # Maestro's economy by tier, and what to re-plan
 ```
 
@@ -137,8 +137,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
 - **Delegation and economy.** `maestro_core::delegation` and `maestro_core::economy` port the
   workspace's `scripts/delegation.py` (assessment, tier ladder, plan-graph rules, briefs) and the pure
   part of `scripts/fleet_economy.py` (capacity forecast, cadence modes, launch and resume gates, the
-  economy by tier), as of workspace `49069e398`; BRO-3223's spendable-account readiness and resume gate
-  (ws#1112) are not ported yet. The Python is the reference until the tick moves here (node `loops-port`). Its
+  economy by tier, and BRO-3223's spendable-account readiness, balancer bounds and resume gate), as of
+  workspace `3395842d0` (ws#1112). The Python is the reference until the tick moves here (node `loops-port`). Its
   messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments. Known
   differences: the CLI flags follow the subcommand (`maestro delegation plan G --repo N=P`, not
   `--repo N=P plan G`); JSON is printed with sorted keys and two-space indent; a graph or policy is read

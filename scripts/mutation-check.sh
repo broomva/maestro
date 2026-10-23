@@ -243,6 +243,33 @@ mutate $econ '.filter(|r| *r > now)' '.filter(|_| true)'
 mutate $econ '&& approved >= 3.0' '&& approved >= 0.0'
 mutate $econ 'Some(at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64))' 'Some(at + (hours * 3600.0).trunc() as i64 * US + round_half_even((hours * 3600.0).fract() * 1e6))'
 
+# The capacity gate (BRO-3223): who decides it, when a stale active account counts, who covers it by
+# failover, the pool headroom and relief come from, and the balancer state's bounds.
+mutate $econ 'if py::truthy(v.get("needs_login")) || py::truthy(v.get("limited")) {' 'if py::truthy(v.get("limited")) {'
+mutate $econ 'let limited = py::num(v.get("7d")).is_some_and(|s| s >= LIMIT_7D) && reset.is_none_or(|r| r > now);' 'let limited = py::num(v.get("7d")).is_some_and(|s| s > LIMIT_7D) && reset.is_none_or(|r| r > now);'
+mutate $econ '&& reset.is_none_or(|r| r > now);' ';'
+mutate $econ 'let young = py::num(v.get("age_s")).is_some_and(|a| a < gate.stale_ok_min * 60.0);' 'let young = py::num(v.get("age_s")).is_some_and(|a| a <= gate.stale_ok_min * 60.0);'
+mutate $econ 'if five.is_some() && (!stale || young || reset5.is_some_and(|r| r > now)) {' 'if five.is_some() && (!stale || young) {'
+mutate $econ 'if stale || five.is_none() || !spendable(v, now)? {' 'if stale || five.is_none() {'
+mutate $econ 'if f <= gate.standby_max' 'if f < gate.standby_max'
+mutate $econ '&& !seven.is_some_and(|s| s >= gate.standby_weekly_max)' '&& true'
+mutate $econ '&& !gate.held.contains(name)' '&& true'
+mutate $econ 'standbys.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(b.2)));' 'standbys.sort_by(|a, b| a.2.cmp(b.2));'
+mutate $econ '!py::truthy(v.get("needs_login")) && (py::truthy(v.get("active")) || !py::truthy(v.get("stale")))' 'py::truthy(v.get("active")) || !py::truthy(v.get("stale"))'
+mutate $econ 'let ok = usable(v).filter(|_| pool.contains(name));' 'let ok = usable(v);'
+mutate $econ 'for (_, v) in current.iter().filter(|(n, _)| pool.contains(n)) {' 'for (_, v) in current.iter() {'
+mutate $econ 'let usable7: Vec<f64> = current.iter().filter(|(n, _)| in_pool(n)).filter_map(|(_, v)| usable(v)).collect();' 'let usable7: Vec<f64> = current.iter().filter_map(|(_, v)| usable(v)).collect();'
+mutate $econ 'if now_s - at_seconds(p)? < SIGNAL_TTL_S {' 'if now_s - at_seconds(p)? <= SIGNAL_TTL_S {'
+mutate $econ '&& !hold.is_some_and(|h| h > now)' '&& true'
+mutate $econ '&& !pending;' ';'
+mutate $econ 'if p.get("result") == Some(&json!("limited")) && now_s - at_seconds(p)? < PROBE_HOLD_S {' 'if p.get("result") == Some(&json!("limited")) {'
+mutate $econ '&& as_dict(cfg, &empty)?.get("autoBalance") == Some(&Value::Bool(true))' '&& py::truthy(as_dict(cfg, &empty)?.get("autoBalance"))'
+mutate $econ '} else if let Some((name, _, max)) = top.filter(|t| t.2 >= RESUME_5H) {' '} else if let Some((name, _, max)) = top.filter(|t| t.2 > RESUME_5H) {'
+mutate $econ '} else if r["known"] != json!(true) {' '} else if false {'
+mutate $econ 'Some((_, _, b)) if f <= b => best,' 'Some((_, _, b)) if f < b => best,'
+mutate $econ 'let needs_login = py::truthy(a.get("needsLogin")) || a.get("hasStoredCredentials") == Some(&Value::Bool(false));' 'let needs_login = py::truthy(a.get("needsLogin"));'
+mutate $econ 'let underscores_ok = bytes.iter().enumerate().all(|(i, b)| {' 'let underscores_ok = true || bytes.iter().enumerate().all(|(i, b)| {'
+
 # Skipped nodes are checked for structure only; the plan CLI's binding guards (held by the CLI
 # golden in crates/cli/tests/delegation.rs).
 port=crates/cli/src/port.rs
