@@ -229,7 +229,7 @@ fn drop_inherited_git_repo() {}
 
 fn main() -> std::process::ExitCode {
     drop_inherited_git_repo();
-    let args = port::argv(std::env::args().collect());
+    let args: Vec<String> = std::env::args().collect();
     let hook = is_hook(&args);
     let port_cmd = args.iter().any(|a| a == "delegation" || a == "economy");
     let cli = match Cli::try_parse_from(&args) {

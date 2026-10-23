@@ -2199,6 +2199,255 @@
   {
    "cwd": "w",
    "json": false,
+   "name": "single plan --root ",
+   "py": [
+    "--root",
+    "",
+    "plan",
+    "{ROOT}/single.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/single.json",
+    "--root",
+    ""
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "a                implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "single plan --json --root ",
+   "py": [
+    "--root",
+    "",
+    "plan",
+    "{ROOT}/single.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/single.json",
+    "--root",
+    ""
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "[\n {\n  \"id\": \"a\",\n  \"repo\": \"\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [\n   \"docs/specs/a.html\"\n  ],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "single brief a --root ",
+   "py": [
+    "--root",
+    "",
+    "brief",
+    "{ROOT}/single.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/single.json",
+    "a",
+    "--root",
+    ""
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Read first, and work from it: `docs/specs/a.html`.\n- Done means: `make test`. Verification: **check**, the check's exit code.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "single plan --root {ROOT}/bare --root {ROOT}/w",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--root",
+    "{ROOT}/w",
+    "plan",
+    "{ROOT}/single.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/single.json",
+    "--root",
+    "{ROOT}/bare",
+    "--root",
+    "{ROOT}/w"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "a                implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "single plan --json --root {ROOT}/bare --root {ROOT}/w",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--root",
+    "{ROOT}/w",
+    "plan",
+    "{ROOT}/single.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/single.json",
+    "--root",
+    "{ROOT}/bare",
+    "--root",
+    "{ROOT}/w"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "[\n {\n  \"id\": \"a\",\n  \"repo\": \"\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [\n   \"docs/specs/a.html\"\n  ],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "single brief a --root {ROOT}/bare --root {ROOT}/w",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--root",
+    "{ROOT}/w",
+    "brief",
+    "{ROOT}/single.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/single.json",
+    "a",
+    "--root",
+    "{ROOT}/bare",
+    "--root",
+    "{ROOT}/w"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Read first, and work from it: `docs/specs/a.html`.\n- Done means: `make test`. Verification: **check**, the check's exit code.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "single plan --skip-absent-repos --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/single.json"
+   ],
+   "rs": [
+    "delegation",
+    "plan",
+    "{ROOT}/single.json",
+    "--skip-absent-repos",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "a                implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "single plan --json --skip-absent-repos --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "--skip-absent-repos",
+    "plan",
+    "{ROOT}/single.json",
+    "--json"
+   ],
+   "rs": [
+    "--json",
+    "delegation",
+    "plan",
+    "{ROOT}/single.json",
+    "--skip-absent-repos",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "[\n {\n  \"id\": \"a\",\n  \"repo\": \"\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [\n   \"docs/specs/a.html\"\n  ],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "single brief a --skip-absent-repos --skip-absent-repos",
+   "py": [
+    "--skip-absent-repos",
+    "--skip-absent-repos",
+    "brief",
+    "{ROOT}/single.json",
+    "a"
+   ],
+   "rs": [
+    "delegation",
+    "brief",
+    "{ROOT}/single.json",
+    "a",
+    "--skip-absent-repos",
+    "--skip-absent-repos"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Read first, and work from it: `docs/specs/a.html`.\n- Done means: `make test`. Verification: **check**, the check's exit code.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
    "name": "repos-list plan ",
    "py": [
     "plan",
@@ -3957,6 +4206,39 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root  --kind implement --paths src/a.rs deploy/x",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "deploy/x"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "deploy/x"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"governance\",\n \"author\": null,\n \"executor\": \"frontier\",\n \"thinking\": \"xhigh\",\n \"verify\": \"p20-full\",\n \"needs\": [],\n \"reasons\": [\n  \"governance-class paths: deploy/x\"\n ],\n \"contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"xhigh\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths a.rs b.rs --est-loc 300",
    "py": [
     "--root",
@@ -4051,6 +4333,43 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--est-loc",
+    "300"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs b.rs --est-loc 300",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--est-loc",
+    "300"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--kind",
     "implement",
     "--paths",
@@ -4189,6 +4508,45 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --est-loc 300 --spec docs/specs/a.html",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "300",
+    "--spec",
+    "docs/specs/a.html"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "300",
+    "--spec",
+    "docs/specs/a.html"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths a.rs --spec docs/specs/none.html",
    "py": [
     "--root",
@@ -4290,6 +4648,41 @@
     "code": 2,
     "crash": false,
     "stderr": "--spec docs/specs/none.html must be an existing file under docs/specs/, docs/adrs/, docs/plans/ of {ROOT}/bare\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --spec docs/specs/none.html",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--spec",
+    "docs/specs/none.html"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--spec",
+    "docs/specs/none.html"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "--spec docs/specs/none.html must be an existing file under docs/specs/, docs/adrs/, docs/plans/ of {ROOT}/w\n",
     "stdout": ""
    }
   },
@@ -4409,6 +4802,43 @@
   {
    "cwd": "w",
    "json": false,
+   "name": "assess --root  --kind rerun --done gh run rerun 1 --failed --brief --ticket BRO-1",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "rerun",
+    "--done",
+    "gh run rerun 1 --failed",
+    "--brief",
+    "--ticket",
+    "BRO-1"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "rerun",
+    "--done",
+    "gh run rerun 1 --failed",
+    "--brief",
+    "--ticket",
+    "BRO-1"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "## Delegation contract (BRO-1)\n- Your tier: **mechanical** (claude-haiku-5-5, thinking low). It is fixed for this run.\n- Done means: `gh run rerun 1 --failed`. Verification: **check**, the check's exit code.\n- Agents you start default to **mechanical**, with the model passed explicitly (Agent tool `model: haiku`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
    "name": "assess --root {ROOT}/w --kind rerun --brief",
    "py": [
     "--root",
@@ -4483,6 +4913,35 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--kind",
+    "rerun",
+    "--brief"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "--brief needs --done: a brief without a done check is not delegable\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": false,
+   "name": "assess --root  --kind rerun --brief",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "rerun",
+    "--brief"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--kind",
     "rerun",
     "--brief"
@@ -4628,6 +5087,49 @@
   },
   {
    "cwd": "w",
+   "json": false,
+   "name": "assess --root  --kind implement --paths a.rs b.rs --est-loc 300 --done x --brief",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--est-loc",
+    "300",
+    "--done",
+    "x",
+    "--brief"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--est-loc",
+    "300",
+    "--done",
+    "x",
+    "--brief"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 1,
+    "crash": false,
+    "stderr": "not delegable as one node: needs spec first (substantive (>200 LOC, multi-file or public API): P20 verifies; no spec for work this size: a frontier node writes it first, the executor works from it)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
    "json": true,
    "name": "assess --root {ROOT}/w --kind review --mode read-only --observed-tier apex",
    "py": [
@@ -4718,6 +5220,41 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--kind",
+    "review",
+    "--mode",
+    "read-only",
+    "--observed-tier",
+    "apex"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": null,\n \"executor\": \"apex\",\n \"thinking\": \"high\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"review is frontier work: a reviewer is pinned, never downgraded\",\n  \"an earlier run raised to apex: that is the floor now\"\n ],\n \"contract\": {\n  \"tier\": \"apex\",\n  \"provider\": \"claude/claude-fable-5-1\",\n  \"thinking\": \"high\",\n  \"agent\": \"fable\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind review --mode read-only --observed-tier apex",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "review",
+    "--mode",
+    "read-only",
+    "--observed-tier",
+    "apex"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--kind",
     "review",
     "--mode",
@@ -4861,6 +5398,47 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --failed-attempts 3 --allow-apex --mode conserve",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--failed-attempts",
+    "3",
+    "--allow-apex",
+    "--mode",
+    "conserve"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--failed-attempts",
+    "3",
+    "--allow-apex",
+    "--mode",
+    "conserve"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"apex\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\",\n  \"failed verification 3x, one rung each: standard -> apex\",\n  \"capacity conserve: thinking high -> medium; the tier stays\"\n ],\n \"contract\": {\n  \"tier\": \"apex\",\n  \"provider\": \"claude/claude-fable-5-1\",\n  \"thinking\": \"medium\",\n  \"agent\": \"fable\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths a.rs --failed-attempts -1 --est-loc -5 --files -2",
    "py": [
     "--root",
@@ -4970,6 +5548,49 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--failed-attempts",
+    "-1",
+    "--est-loc",
+    "-5",
+    "--files",
+    "-2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\",\n  \"failed verification -1x, one rung each: standard -> standard\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --failed-attempts -1 --est-loc -5 --files -2",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--failed-attempts",
+    "-1",
+    "--est-loc",
+    "-5",
+    "--files",
+    "-2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--kind",
     "implement",
     "--paths",
@@ -5123,6 +5744,49 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --est-loc  1_000  --mode critical --mode normal",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    " 1_000 ",
+    "--mode",
+    "critical",
+    "--mode",
+    "normal"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    " 1_000 ",
+    "--mode",
+    "critical",
+    "--mode",
+    "normal"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "assess --root {ROOT}/w --kind  --paths a.rs",
    "py": [
     "--root",
@@ -5202,6 +5866,37 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--kind",
+    "",
+    "--paths",
+    "a.rs"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --kind: invalid choice: '' (choose from archive, cleanup, closeout, decompose, design, docs, implement, merge-on-green, relay, rerun, research, resume, review, update-branch)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind  --paths a.rs",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "",
+    "--paths",
+    "a.rs"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--kind",
     "",
     "--paths",
@@ -5301,6 +5996,33 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root  --kind bogus",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "bogus"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "bogus"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --kind: invalid choice: 'bogus' (choose from archive, cleanup, closeout, decompose, design, docs, implement, merge-on-green, relay, rerun, research, resume, review, update-branch)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "assess --root {ROOT}/w --observed-tier x",
    "py": [
     "--root",
@@ -5384,6 +6106,33 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root  --observed-tier x",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--observed-tier",
+    "x"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--observed-tier",
+    "x"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --observed-tier: invalid choice: 'x' (choose from mechanical, standard, frontier, apex)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "assess --root {ROOT}/w --mode x",
    "py": [
     "--root",
@@ -5453,6 +6202,33 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--mode",
+    "x"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --mode: invalid choice: 'x' (choose from normal, conserve, critical, read_only)\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --mode x",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--mode",
+    "x"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--mode",
     "x"
    ],
@@ -5556,6 +6332,41 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--spec",
+    ""
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --spec ",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--spec",
+    ""
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--kind",
     "implement",
     "--paths",
@@ -5686,6 +6497,43 @@
   },
   {
    "cwd": "w",
+   "json": false,
+   "name": "assess --root  --kind rerun --done gh run rerun 1 --failed --brief --ticket ",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "rerun",
+    "--done",
+    "gh run rerun 1 --failed",
+    "--brief",
+    "--ticket",
+    ""
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "rerun",
+    "--done",
+    "gh run rerun 1 --failed",
+    "--brief",
+    "--ticket",
+    ""
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "## Delegation contract\n- Your tier: **mechanical** (claude-haiku-5-5, thinking low). It is fixed for this run.\n- Done means: `gh run rerun 1 --failed`. Verification: **check**, the check's exit code.\n- Agents you start default to **mechanical**, with the model passed explicitly (Agent tool `model: haiku`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+   }
+  },
+  {
+   "cwd": "w",
    "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths src/a.rs --paths deploy/prod.yaml",
    "py": [
@@ -5789,6 +6637,41 @@
     "crash": false,
     "stderr": "",
     "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths src/a.rs --paths deploy/prod.yaml",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "--paths",
+    "deploy/prod.yaml"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "src/a.rs",
+    "--paths",
+    "deploy/prod.yaml"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"governance\",\n \"author\": null,\n \"executor\": \"frontier\",\n \"thinking\": \"xhigh\",\n \"verify\": \"p20-full\",\n \"needs\": [],\n \"reasons\": [\n  \"governance-class paths: deploy/prod.yaml\"\n ],\n \"contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"xhigh\",\n  \"agent\": \"opus\"\n }\n}\n"
    }
   },
   {
@@ -5901,6 +6784,41 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root  --kind implement --paths deploy/prod.yaml --paths src/a.rs",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "deploy/prod.yaml",
+    "--paths",
+    "src/a.rs"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "deploy/prod.yaml",
+    "--paths",
+    "src/a.rs"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths a.rs b.rs --paths",
    "py": [
     "--root",
@@ -5990,6 +6908,41 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--paths"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": null,\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [],\n \"reasons\": [\n  \"bounded change: its done check verifies it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs b.rs --paths",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "b.rs",
+    "--paths"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--kind",
     "implement",
     "--paths",
@@ -6127,7 +7080,46 @@
   {
    "cwd": "w",
    "json": true,
-   "name": "assess --root {ROOT}/w --kind implement --paths a.rs --est-loc -\uff13\uff10\uff10 --repos \u1c52",
+   "name": "assess --root  --kind implement --paths a.rs --files \uff11\uff12 --est-loc \u0663_\u0660\u0660",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "\uff11\uff12",
+    "--est-loc",
+    "\u0663_\u0660\u0660"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "\uff11\uff12",
+    "--est-loc",
+    "\u0663_\u0660\u0660"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths a.rs --est-loc \uff13\uff10\uff10 --repos \u1c52",
    "py": [
     "--root",
     "{ROOT}/w",
@@ -6137,7 +7129,7 @@
     "--paths",
     "a.rs",
     "--est-loc",
-    "-\uff13\uff10\uff10",
+    "\uff13\uff10\uff10",
     "--repos",
     "\u1c52"
    ],
@@ -6151,7 +7143,7 @@
     "--paths",
     "a.rs",
     "--est-loc",
-    "-\uff13\uff10\uff10",
+    "\uff13\uff10\uff10",
     "--repos",
     "\u1c52"
    ],
@@ -6160,13 +7152,13 @@
     "code": 0,
     "crash": false,
     "stderr": "",
-    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [\n  \"decompose\"\n ],\n \"reasons\": [\n  \"bounded change: its done check verifies it\",\n  \"2 repos: a frontier plan splits it into one node per repo\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\",\n  \"decompose\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\",\n  \"2 repos: a frontier plan splits it into one node per repo\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
    }
   },
   {
    "cwd": "w",
    "json": true,
-   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs --est-loc -\uff13\uff10\uff10 --repos \u1c52",
+   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs --est-loc \uff13\uff10\uff10 --repos \u1c52",
    "py": [
     "--root",
     "{ROOT}/bare",
@@ -6176,7 +7168,7 @@
     "--paths",
     "a.rs",
     "--est-loc",
-    "-\uff13\uff10\uff10",
+    "\uff13\uff10\uff10",
     "--repos",
     "\u1c52"
    ],
@@ -6190,7 +7182,7 @@
     "--paths",
     "a.rs",
     "--est-loc",
-    "-\uff13\uff10\uff10",
+    "\uff13\uff10\uff10",
     "--repos",
     "\u1c52"
    ],
@@ -6205,7 +7197,7 @@
   {
    "cwd": "w",
    "json": true,
-   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs --est-loc -\uff13\uff10\uff10 --repos \u1c52",
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs --est-loc \uff13\uff10\uff10 --repos \u1c52",
    "py": [
     "--root",
     "{ROOT}/bare",
@@ -6216,7 +7208,7 @@
     "--paths",
     "a.rs",
     "--est-loc",
-    "-\uff13\uff10\uff10",
+    "\uff13\uff10\uff10",
     "--repos",
     "\u1c52"
    ],
@@ -6231,7 +7223,7 @@
     "--paths",
     "a.rs",
     "--est-loc",
-    "-\uff13\uff10\uff10",
+    "\uff13\uff10\uff10",
     "--repos",
     "\u1c52"
    ],
@@ -6240,7 +7232,330 @@
     "code": 0,
     "crash": false,
     "stderr": "",
-    "stdout": "{\n \"complexity\": \"bounded\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"check\",\n \"needs\": [\n  \"decompose\"\n ],\n \"reasons\": [\n  \"bounded change: its done check verifies it\",\n  \"2 repos: a frontier plan splits it into one node per repo\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\",\n  \"decompose\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\",\n  \"2 repos: a frontier plan splits it into one node per repo\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --est-loc \uff13\uff10\uff10 --repos \u1c52",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\uff13\uff10\uff10",
+    "--repos",
+    "\u1c52"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\uff13\uff10\uff10",
+    "--repos",
+    "\u1c52"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 0,
+    "crash": false,
+    "stderr": "",
+    "stdout": "{\n \"complexity\": \"substantive\",\n \"author\": \"frontier\",\n \"executor\": \"standard\",\n \"thinking\": \"medium\",\n \"verify\": \"p20\",\n \"needs\": [\n  \"spec\",\n  \"decompose\"\n ],\n \"reasons\": [\n  \"substantive (>200 LOC, multi-file or public API): P20 verifies\",\n  \"no spec for work this size: a frontier node writes it first, the executor works from it\",\n  \"2 repos: a frontier plan splits it into one node per repo\"\n ],\n \"contract\": {\n  \"tier\": \"standard\",\n  \"provider\": \"claude/claude-sonnet-5-5\",\n  \"thinking\": \"medium\",\n  \"agent\": \"sonnet\"\n },\n \"author_contract\": {\n  \"tier\": \"frontier\",\n  \"provider\": \"claude/claude-opus-5-5\",\n  \"thinking\": \"high\",\n  \"agent\": \"opus\"\n }\n}\n"
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths a.rs --est-loc \u001c900",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u001c900"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u001c900"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --est-loc: invalid int value: '\\x1c900'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs --est-loc \u001c900",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u001c900"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u001c900"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --est-loc: invalid int value: '\\x1c900'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs --est-loc \u001c900",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u001c900"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u001c900"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --est-loc: invalid int value: '\\x1c900'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --est-loc \u001c900",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u001c900"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u001c900"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --est-loc: invalid int value: '\\x1c900'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/w --kind implement --paths a.rs --files 3\u001f",
+   "py": [
+    "--root",
+    "{ROOT}/w",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "3\u001f"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/w",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "3\u001f"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --files: invalid int value: '3\\x1f'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --kind implement --paths a.rs --files 3\u001f",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "3\u001f"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "3\u001f"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --files: invalid int value: '3\\x1f'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root {ROOT}/bare --no-policy --kind implement --paths a.rs --files 3\u001f",
+   "py": [
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "3\u001f"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "{ROOT}/bare",
+    "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "3\u001f"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --files: invalid int value: '3\\x1f'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --files 3\u001f",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "3\u001f"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "3\u001f"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --files: invalid int value: '3\\x1f'\n",
+    "stdout": ""
    }
   },
   {
@@ -6353,6 +7668,41 @@
   {
    "cwd": "w",
    "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --est-loc \u00b2",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u00b2"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--est-loc",
+    "\u00b2"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --est-loc: invalid int value: '\u00b2'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
    "name": "assess --root {ROOT}/w --kind implement --paths a.rs --files x",
    "py": [
     "--root",
@@ -6442,6 +7792,41 @@
     "--root",
     "{ROOT}/bare",
     "--no-policy",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "x"
+   ],
+   "tool": "delegation",
+   "want": {
+    "code": 2,
+    "crash": false,
+    "stderr": "usage: delegation.py assess [-h]\n                            [--kind {archive,cleanup,closeout,decompose,design,docs,implement,merge-on-green,relay,rerun,research,resume,review,update-branch}]\n                            [--paths [PATHS ...]] [--est-loc EST_LOC]\n                            [--files FILES] [--repos REPOS] [--public-api]\n                            [--one-way-door] [--spec SPEC]\n                            [--failed-attempts FAILED_ATTEMPTS]\n                            [--observed-tier {mechanical,standard,frontier,apex}]\n                            [--mode {normal,conserve,critical,read_only}]\n                            [--allow-apex] [--done DONE] [--brief]\n                            [--ticket TICKET]\ndelegation.py assess: error: argument --files: invalid int value: 'x'\n",
+    "stdout": ""
+   }
+  },
+  {
+   "cwd": "w",
+   "json": true,
+   "name": "assess --root  --kind implement --paths a.rs --files x",
+   "py": [
+    "--root",
+    "",
+    "assess",
+    "--kind",
+    "implement",
+    "--paths",
+    "a.rs",
+    "--files",
+    "x"
+   ],
+   "rs": [
+    "delegation",
+    "assess",
+    "--root",
+    "",
     "--kind",
     "implement",
     "--paths",

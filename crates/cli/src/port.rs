@@ -21,12 +21,14 @@ pub enum DelegationCommand {
     #[command(args_override_self = true)]
     Assess(AssessArgs),
     /// Validate an agent graph; print each node's tier and Maestro fields.
+    #[command(args_override_self = true)]
     Plan {
         graph: String,
         #[command(flatten)]
         bind: BindArgs,
     },
     /// The delegation block for one node of a valid graph.
+    #[command(args_override_self = true)]
     Brief {
         graph: String,
         node: String,
@@ -97,6 +99,7 @@ pub struct AssessArgs {
 #[derive(Subcommand)]
 pub enum EconomyCommand {
     /// The snapshot's capacity section: forecast, cadence mode and launch gates.
+    #[command(args_override_self = true)]
     Capacity {
         /// `provider_manager.py --json usage` output; `-` reads stdin.
         #[arg(long)]
@@ -113,35 +116,11 @@ pub enum EconomyCommand {
         state: Option<String>,
     },
     /// Maestro's economy by tier, and what to re-plan.
+    #[command(args_override_self = true)]
     Tiers {
         #[arg(long)]
         path: Option<String>,
     },
-}
-
-/// The `type=int` flags of `delegation assess`.
-const INT_FLAGS: [&str; 4] = ["--est-loc", "--files", "--repos", "--failed-attempts"];
-
-/// argparse reads `-３００` after an int flag as a negative number (its matcher's `\d` is Unicode);
-/// clap's only reads ASCII, so such a value is joined to its flag (`--files=-３００`) before parsing.
-pub fn argv(args: Vec<String>) -> Vec<String> {
-    if !args.iter().any(|a| a == "delegation") {
-        return args;
-    }
-    let negative =
-        |v: &str| v.strip_prefix('-').is_some_and(|d| !d.is_empty() && d.chars().all(|c| py::decimal(c).is_some()));
-    let mut out = Vec::with_capacity(args.len());
-    let mut it = args.into_iter().peekable();
-    while let Some(a) = it.next() {
-        match it.peek() {
-            Some(v) if INT_FLAGS.contains(&a.as_str()) && negative(v) => {
-                let v = it.next().unwrap_or_default();
-                out.push(format!("{a}={v}"));
-            }
-            _ => out.push(a),
-        }
-    }
-    out
 }
 
 /// argparse's error line for a flag value its `type` refuses (`py_int`), as the port's usage errors
@@ -160,7 +139,8 @@ pub fn usage_error(e: &clap::Error) -> Option<ExitCode> {
 /// argparse's `type=int`: Python's `int()` on the argument (`" 1_000 "` is 1000, `"１２"` is 12).
 fn py_int(s: &str) -> Result<i64, String> {
     let bad = || format!("invalid int value: {}", py::repr_str(s));
-    let t = py::strip(s);
+    // int() strips str.isspace except U+001C..U+001F, which it refuses.
+    let t = s.trim_matches(|c: char| py::is_space(c) && !('\u{1c}'..='\u{1f}').contains(&c));
     let (neg, digits) = match t.strip_prefix('-') {
         Some(d) => (true, d),
         None => (false, t.strip_prefix('+').unwrap_or(t)),
@@ -174,7 +154,10 @@ fn py_int(s: &str) -> Result<i64, String> {
         return Err(bad());
     }
     let sign = if neg { "-" } else { "" };
-    format!("{sign}{}", ascii.replace('_', "")).parse().map_err(|_| bad())
+    // int() has no bound; a value past i64 is refused, never wrapped (README).
+    format!("{sign}{}", ascii.replace('_', ""))
+        .parse()
+        .map_err(|_| format!("an integer past 64 bits is refused: {}", py::repr_str(s)))
 }
 
 /// fleet_economy's `_fmt`: a count as `1.2M`, `3.4k`, or `%g`; `-` for none.
@@ -669,11 +652,22 @@ fn json_repos_order(text: &str) -> Vec<String> {
     serde_json::from_str::<Graph>(text).ok().and_then(|g| g.0).map(|k| k.0).unwrap_or_default()
 }
 
+/// The exception `open(path).read()` raises for `e`.
+fn os_error_kind(e: &std::io::Error) -> &'static str {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => "FileNotFoundError",
+        std::io::ErrorKind::IsADirectory => "IsADirectoryError",
+        std::io::ErrorKind::PermissionDenied => "PermissionError",
+        std::io::ErrorKind::InvalidData => "UnicodeDecodeError",
+        _ => "OSError",
+    }
+}
+
 /// The graph (`json.loads` for `.json`, else `yaml.safe_load(...) or {}`), and its `repos` names in
 /// file order. A graph that is not a mapping is the Python's AttributeError at its first `.get`.
 fn load_graph(path: &str) -> Result<(Value, Vec<String>), Fault> {
     let text = std::fs::read_to_string(path)
-        .map_err(|e| Fault::Crash { kind: "FileNotFoundError", msg: format!("{path}: {e}") })?;
+        .map_err(|e| Fault::Crash { kind: os_error_kind(&e), msg: format!("{path}: {e}") })?;
     let (v, order): (Value, Vec<String>) = if path.ends_with(".json") {
         let v = maestro_core::schema::parse_json(&text)
             .map_err(|e| Fault::Crash { kind: "JSONDecodeError", msg: e.to_string() })?;
@@ -788,7 +782,7 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
     if py::truthy(graph.get("repos")) && bind.root.is_some() {
         return fail("this graph names its repos: bind them with --repo NAME=PATH, not --root", 2);
     }
-    let root = bind.root.clone().unwrap_or_else(cwd);
+    let root = bind.root.clone().filter(|r| !r.is_empty()).unwrap_or_else(cwd); // `o.root or os.getcwd()`
     if let Some(bad) = bind.repos.iter().find(|x| x.split_once('=').is_none_or(|(n, p)| n.is_empty() || p.is_empty())) {
         return fail(format!("  [error] --repo takes NAME=PATH, not {}", py::repr_str(bad)), 2);
     }
@@ -959,7 +953,7 @@ fn assess(a: &AssessArgs) -> ExitCode {
     {
         return invalid_choice("--mode", m, &["normal", "conserve", "critical", "read_only"]);
     }
-    let root = a.root.clone().unwrap_or_else(cwd);
+    let root = a.root.clone().filter(|r| !r.is_empty()).unwrap_or_else(cwd); // `o.root or os.getcwd()`
     let human = if a.no_policy {
         vec![]
     } else {
@@ -1206,6 +1200,18 @@ fn yaml_case(text: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// `int()` under Python 3.14: Unicode digits and str.isspace padding read, except U+001C..U+001F.
+    #[test]
+    fn py_int_is_pythons_int() {
+        assert_eq!(super::py_int(" 1_000\u{3000}"), Ok(1000));
+        assert_eq!(super::py_int("-\u{ff13}\u{ff10}"), Ok(-30));
+        assert_eq!(super::py_int("+\u{663}"), Ok(3));
+        for bad in ["\u{1c}9", "9\u{1f}", "1__0", "_1", "1_", "\u{b2}", "", "-", "0x1"] {
+            assert!(super::py_int(bad).is_err(), "{bad:?}");
+        }
+        assert!(super::py_int("9223372036854775808").unwrap_err().contains("past 64 bits"));
+    }
+
     /// One witness per subset guard, each a document PyYAML reads differently from serde_yaml or
     /// raises on (checked with PyYAML 6 under Python 3.14): the fuzz golden measures misreads only, so
     /// a guard whose witness it lacks is held here.

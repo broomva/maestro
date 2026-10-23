@@ -948,7 +948,8 @@ def cli_cases():
         path = f"{R}/{name}.json"
         variants = [[], ["--skip-absent-repos"]]
         if name == "single":
-            variants += [["--root", W], ["--root", BARE]]
+            variants += [["--root", W], ["--root", BARE], ["--root", ""],
+                         ["--root", BARE, "--root", W], ["--skip-absent-repos", "--skip-absent-repos"]]
         if name == "ok":
             variants += [["--repo", f"bare={BARE}"], ["--repo", "nope=x"], ["--repo", "bad"], ["--root", W],
                          ["--repo", f"bare={R}/gone", "--repo", f"bare={BARE}"],
@@ -984,11 +985,14 @@ def cli_cases():
               ["--kind", "implement", "--paths", "deploy/prod.yaml", "--paths", "src/a.rs"],
               ["--kind", "implement", "--paths", "a.rs", "b.rs", "--paths"],
               ["--kind", "implement", "--paths", "a.rs", "--files", "１２", "--est-loc", "\u0663_\u0660\u0660"],
-              ["--kind", "implement", "--paths", "a.rs", "--est-loc", "-\uff13\uff10\uff10", "--repos", "\u1c52"],
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", "\uff13\uff10\uff10", "--repos", "\u1c52"],
+              # P20 port r1 B: int() refuses U+001C..U+001F that str.strip drops; an empty --root is cwd.
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", "\x1c900"],
+              ["--kind", "implement", "--paths", "a.rs", "--files", "3\x1f"],
               ["--kind", "implement", "--paths", "a.rs", "--est-loc", "\u00b2"],
               ["--kind", "implement", "--paths", "a.rs", "--files", "x"]]
     for args in assess:
-        for root_args in (["--root", W], ["--root", BARE], ["--root", BARE, "--no-policy"],
+        for root_args in (["--root", W], ["--root", BARE], ["--root", BARE, "--no-policy"], ["--root", ""],
                           ):
             add(f"assess {' '.join(root_args + args)}", [*root_args, "assess", *args],
                 ["delegation", "assess", *root_args, *args], parse_json="--brief" not in args)
