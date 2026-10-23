@@ -896,10 +896,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jiff",
  "maestro-core",
  "maestro-mcp",
  "maestro-store",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -909,6 +911,7 @@ dependencies = [
 name = "maestro-core"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "schemars",
  "serde",
  "serde_json",

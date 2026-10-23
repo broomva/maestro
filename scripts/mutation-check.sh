@@ -181,5 +181,36 @@ mutate $cli '    let _ = cmd.exec();' '    let _ = cmd;'
 mutate $cli 'if !GIT_REPO_ENV.iter().any(|k| std::env::var_os(k).is_some()) {' 'if std::env::var_os("GIT_DIR").is_none() {'
 mutate $tree '                    if same_path(Path::new(top), &tree.root) {' '                    if true {'
 
+# Ports of delegation.py and fleet_economy.py (BRO-3204), held to the Python's golden
+# (crates/core/tests/parity_delegation.rs): each guarded predicate, broken once.
+deleg=crates/core/src/delegation.rs
+econ=crates/core/src/economy.rs
+mutate $deleg 'let up = (tier as i64 + steps.max(0)).min(top as i64);' 'let up = tier as i64 + steps.max(0);'
+mutate $deleg "Some(('?', rest)) => text.first().is_some_and(|c| *c != '/') && glob(rest, &text[1..])," "Some(('?', rest)) => text.first().is_some() && glob(rest, &text[1..]),"
+mutate $deleg "if i == text.len() || text[i] == '/' {" 'if i == text.len() {'
+mutate $deleg 'if GOVERNANCE_ROOT.contains(&p.as_str()) {' 'if false {'
+mutate $deleg ' && CODE_EXT.iter().any(|e| base.ends_with(e)))' ')'
+mutate $deleg 'let big = loc > SUBSTANTIVE_LOC;' 'let big = loc >= SUBSTANTIVE_LOC;'
+mutate $deleg 'if !spec && (big || public_api || code_files > SPEC_FILES) {' 'if !spec && (big || public_api) {'
+mutate $deleg '        && seen > executor' '        && seen < executor'
+mutate $deleg '        && complexity != "governance"
+' '
+'
+mutate $deleg 'if kind == json!("review") && tier < Tier::Frontier {' 'if false {'
+mutate $deleg 'if let Some(&other) = produced_by.get(p) {' 'if let Some(&other) = None::<&usize> {'
+mutate $deleg '1 => return Ok(true),' '1 => return Ok(false),'
+mutate $deleg 'Some(s) if s < strength(&json!(a.verify))' 'Some(s) if s > strength(&json!(a.verify))'
+mutate $deleg 'Some(&p) => ups.contains(&p) && node(p).get("kind") == Some(&json!("design")),' 'Some(&p) => node(p).get("kind") == Some(&json!("design")),'
+mutate $deleg 'if norm.starts_with('"'"'/'"'"') || norm == ".." || norm.starts_with("../") {' 'if norm.starts_with('"'"'/'"'"') {'
+mutate $econ 'a5.filter(|a| *a >= READ_ONLY_5H)' 'a5.filter(|_| false)'
+mutate $econ '} else if crosses && runway < CRITICAL_RUNWAY_H {' '} else if false {'
+mutate $econ '} else if !py::truthy(fc.get("known")) {' '} else if false {'
+mutate $econ 'if let (Some(r), Some(_)) = (r, ok) {' 'if let (Some(r), _) = (r, ok) {'
+mutate $econ '&& (p.1 < last.1 || !same_window(p.2.as_ref(), last.2.as_ref())?)' '&& (p.1 < last.1)'
+mutate $econ '(None, _) => true,' '(None, _) => false,'
+mutate $econ '(ctx > HANDOFF_K, driven && ctx > SUCCESSOR_K)' '(ctx > HANDOFF_K, ctx > SUCCESSOR_K)'
+mutate $econ '(MIN_SPAN_H..=(7 * 24) as f64).contains(&open_h)' '(0.0..=f64::MAX).contains(&open_h)'
+mutate $econ '&& rd / rn >= REPLAN_RAISED' '&& rd / rn > REPLAN_RAISED'
+
 echo "mutation  $killed of $total killed"
 exit $failed

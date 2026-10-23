@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use std::io::Read as _;
 use std::path::PathBuf;
 
+mod port;
+
 #[derive(Parser)]
 #[command(name = "maestro", version, about = "Governance and orchestration metalayer for agent fleets")]
 struct Cli {
@@ -116,6 +118,19 @@ enum Command {
         #[arg(long)]
         bstack: Option<PathBuf>,
     },
+    /// Tiers, assessments and agent-graph rules (the workspace's delegation.py, ported).
+    Delegation {
+        #[command(subcommand)]
+        command: port::DelegationCommand,
+    },
+    /// Capacity forecast, cadence mode and launch gates (the workspace's fleet_economy.py, ported).
+    Economy {
+        #[command(subcommand)]
+        command: port::EconomyCommand,
+    },
+    /// Evaluate parity cases (JSON on stdin) with the ported functions: scripts/parity-delegation.py.
+    #[command(hide = true)]
+    ParityEval,
 }
 
 #[derive(Subcommand)]
@@ -232,6 +247,14 @@ fn main() -> std::process::ExitCode {
             println!("{out}");
         }
         return std::process::ExitCode::SUCCESS;
+    }
+
+    // The ports keep the Python's exit codes and need no workspace store.
+    match &cli.command {
+        Command::Delegation { command } => return port::delegation(command, cli.json),
+        Command::Economy { command } => return port::economy(command, cli.json),
+        Command::ParityEval => return port::eval_stdin(),
+        _ => {}
     }
 
     match run(&cli) {

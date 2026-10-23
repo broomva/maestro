@@ -42,6 +42,9 @@ maestro hosts                        # this node, surfaces and harnesses, each w
 maestro mcp                          # MCP server on stdio
 maestro serve --http [--bind ADDR]   # MCP server over Streamable HTTP at /mcp, 127.0.0.1:7171 by default
 maestro doctor [--bstack DIR]        # is the vendored path reader the one bstack generates (as of that checkout's last fetch)? exit 1 if stale or unread
+maestro delegation assess|plan|brief|ladder   # tiers, assessments and agent-graph rules (the workspace's delegation.py, ported)
+maestro economy capacity --usage F [--samples F] [--now T]   # capacity forecast, cadence mode and launch gates
+maestro economy tiers [--path F]     # Maestro's economy by tier, and what to re-plan
 ```
 
 Every command takes `--json`. Agents should use `--json`: it is the same data the MCP tools return,
@@ -131,6 +134,21 @@ read, that count becomes a lower bound and the error is reported under `worktree
       `plugin-rev`, run `scripts/parity-check.sh --write`, and review the diff.
 - **Limits.** `maestro asks` returns `total` and `truncated` alongside the page (`--limit`, default
   50).
+- **Delegation and economy.** `maestro_core::delegation` and `maestro_core::economy` port the
+  workspace's `scripts/delegation.py` (assessment, tier ladder, plan-graph rules, briefs) and the pure
+  part of `scripts/fleet_economy.py` (capacity forecast, cadence modes, launch and resume gates, the
+  economy by tier). The Python is the reference until the tick moves here (node `loops-port`); its
+  messages, rounding and exit codes are kept, so `maestro delegation` and `maestro economy` can stand in
+  for its CLIs. The sample cache, transcript reading and the economy ledger stay in the Python.
+  The tier ladder equals the plugin's `DEFAULT_TIER_LADDER` (maestro-paseo `shared/tiers.ts`).
+  - `fixtures/delegation/golden.json` is the Python's output on deterministic cases; the test
+    `crates/core/tests/parity_delegation.rs` holds the Rust to it, and `scripts/mutation-check.sh`
+    breaks each guarded predicate once.
+  - `python3 scripts/parity-delegation.py --workspace ~/broomva` fails unless the golden is the
+    Python's output at the workspace's `origin/main`, the same cases agree through `maestro
+    parity-eval`, both CLIs agree on every real `docs/plans/*.graph.yaml` and on scratch-repo
+    scenarios, both forecasts agree on the live usage snapshot, and the plugin's `tiers.ts` at
+    `fixtures/delegation/tiers-rev` agrees. `--write` regenerates the golden: review its diff.
 
 ## Harness registration
 
@@ -170,7 +188,7 @@ error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
 
 | Directory | Package | Role |
 |---|---|---|
-| `crates/core` | `maestro-core` | Typed domain, no I/O: work states and transitions, asks, needs, loops and drift, ticks and due tiers, initiatives, grants, fleet, sessions namespaced by surface, surfaces, harnesses and nodes, authority, context packets |
+| `crates/core` | `maestro-core` | Typed domain, no I/O: work states and transitions, asks, needs, loops and drift, ticks and due tiers, initiatives, grants, fleet, sessions namespaced by surface, surfaces, harnesses and nodes, authority, context packets, delegation tiers and plan graphs, the capacity economy |
 | `crates/store` | `maestro-store` | Readers for the on-disk control plane (working tree or a git revision) and the shared views |
 | `crates/mcp` | `maestro-mcp` | MCP server: read tools, the `maestro_context` prompt, and `maestro://` resources |
 | `crates/cli` | `maestro` | The `maestro` binary |
@@ -181,6 +199,7 @@ error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
 bash scripts/ci.sh             # the whole gate, as CI runs it (needs bun and network for parity)
 cargo test                     # the suite alone
 scripts/mutation-check.sh      # each guarded predicate's mutant must fail the suite
+python3 scripts/parity-delegation.py --workspace ~/broomva   # the delegation and economy ports against the workspace's Python
 ```
 
 Tests run against `fixtures/machine/`, a miniature machine layout, so they never touch real ledgers.
