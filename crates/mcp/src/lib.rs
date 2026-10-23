@@ -487,8 +487,7 @@ pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Va
             let a: AskFileArgs = parse(args.clone())?;
             let session = session_of(&a.session)?;
             // Writes go to the working tree, never to a git revision.
-            requests::compose_ask(&a.ask, &session, &caller)
-                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            requests::compose_ask(&a.ask).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
             let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);
             let rel = disk.rel(maestro_store::ASKS).map_err(|e| McpError::invalid_params(e, None))?;
             let dir = disk.paths.workspace.join(rel);

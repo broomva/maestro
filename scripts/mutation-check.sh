@@ -181,8 +181,8 @@ mutate $cli '    let _ = cmd.exec();' '    let _ = cmd;'
 mutate $cli 'if !GIT_REPO_ENV.iter().any(|k| std::env::var_os(k).is_some()) {' 'if std::env::var_os("GIT_DIR").is_none() {'
 mutate $tree '                    if same_path(Path::new(top), &tree.root) {' '                    if true {'
 
-# Agent requests (BRO-3267): the plugin's §5.5 lock as ported, the filer's refusals, the
-# validator's verdict over only new errors, and every caller unverified and held.
+# Agent requests (BRO-3267): the plugin's §5.5 lock as ported (the journal's), the filer's
+# refusals, the writer of record called with Maestro's session, and every caller held.
 locks=crates/store/src/locks.rs
 requests=crates/store/src/requests.rs
 request=crates/core/src/request.rs
@@ -194,15 +194,9 @@ mutate $locks '    hash.update(b"/");' '    hash.update(b"");'
 mutate $locks 'Ok(hash.finalize().iter().take(8)' 'Ok(hash.finalize().iter().take(9)'
 mutate $requests '    maestro_core::ask::OUTCOME_KEYS.contains(&key) || FILER_REFUSED.contains(&key)' '    FILER_REFUSED.contains(&key)'
 mutate $requests '&["answered_by", "answer_option",' '&["answer_option",'
-mutate $requests '            if !fresh.is_empty() {' '            if false {'
-mutate $requests '            let mut known = before.errors;' '            let mut known: Vec<String> = Vec::new();'
-mutate $requests '        .arg(real)' '        .arg(file)'
-mutate $requests 'let names = std::iter::once(added.id.as_str()).chain(added.uid.as_deref());' 'let names = std::iter::once(added.id.as_str()).chain(None);'
-mutate $requests 'was.iter().any(|a| a.id == *n || a.uid.as_deref() == Some(*n))' 'was.iter().any(|a| a.uid.as_deref() == Some(*n))'
-mutate $requests '    if new.len() > crate::LEDGER_LIMIT {' '    if false {'
-mutate $requests '    if *b != *a || asks_before != asks_after {' '    if asks_before != asks_after {'
-mutate $requests 'if col == 0 && !(indent == Some(0) && (trimmed == "-" || trimmed.starts_with("- "))) {' 'if col == 0 {'
-mutate $requests '"verified": verified' '"verified": true'
+mutate $requests '.args(["--json", "-", "--maestro-session", &session.to_string(), "--wait"])' '.args(["--json", "-", "--maestro-session", "x", "--wait"])'
+mutate $requests '        Ok(m) if m.is_file() => {}' '        Ok(_) => {}'
+mutate $requests '    if id.is_empty() {' '    if false {'
 mutate $request '            (Self::AskFile, _) => Disposition::Applied,' '            (Self::AskFile, _) => Disposition::Held,'
 mutate $request '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Held,' '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Recorded,'
 mutate $mcp '    let caller = Principal::Unverified;' '    let caller = Principal::Owner { via: "mcp".into() };'

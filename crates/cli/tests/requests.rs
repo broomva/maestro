@@ -77,7 +77,7 @@ fn a_filed_ask_is_appended_validated_and_listed() {
     assert_eq!(v["request"]["request"], "ask.file");
     assert_eq!(v["request"]["disposition"], "applied");
     assert_eq!(v["request"]["verified"], false);
-    assert_eq!(v["validator"], "ask_ledger.py: 6 ask(s), no new error");
+    assert!(v["validator"].as_str().is_some_and(|s| s.starts_with("filed filed-1 into ")), "{v}");
     let ids = listed(m.path());
     assert_eq!(ids.len(), 6);
     assert_eq!(ids.last().map(String::as_str), Some("filed-1"));
@@ -99,15 +99,15 @@ fn a_refused_ask_writes_nothing() {
     let mut bad: Value = serde_json::from_str(&ask("bad")).unwrap();
     bad["stakes"] = Value::String("STUB-INVALID".into());
     let cases: Vec<(String, &str)> = vec![
-        (bad.to_string(), "refused the ask"),
-        (ask("seed-1"), "already has an ask `seed-1`"),
+        (bad.to_string(), "would gain error(s)"),
+        (ask("seed-1"), "already has an ask 'seed-1'"),
         (
             {
                 let mut v: Value = serde_json::from_str(&ask("shadow")).unwrap();
                 v["uid"] = Value::String("seed-1".into());
                 v.to_string()
             },
-            "already has an ask `seed-1`",
+            "already has an ask 'seed-1'",
         ),
         (r#"{"id":"x","answer":"yes"}"#.to_string(), "`answer` is not the filer's"),
         (r#"{"id":"x","defaulted_at":"2026-10-23T00:00:00Z"}"#.to_string(), "`defaulted_at` is not the filer's"),
@@ -148,6 +148,24 @@ fn an_error_the_ledger_already_had_does_not_refuse_a_new_ask() {
     let out = file(m.path(), "after-legacy");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(ledger(m.path()).contains("id: \"after-legacy\""));
+}
+
+/// A symlinked ledger is not filed into: the writer replaces the ledger by rename, which would
+/// turn the link into a copy.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_ledger_is_refused() {
+    let m = machine();
+    let asks = m.path().join("ws/.control/asks");
+    std::fs::rename(asks.join("ledger.yaml"), m.path().join("real.yaml")).unwrap();
+    std::os::unix::fs::symlink(m.path().join("real.yaml"), asks.join("ledger.yaml")).unwrap();
+    let out = file(m.path(), "through-link");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not a regular file"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(std::fs::symlink_metadata(asks.join("ledger.yaml")).unwrap().file_type().is_symlink());
 }
 
 /// A ledger whose asks sit under `open_asks`: appending an `asks` list would hide them all.
@@ -222,8 +240,9 @@ fn no_spelling_of_a_taken_uid_is_filed() {
             .args(["ask", "file", "--session", "t3:-/x", "--ledger", "ledger.yaml", "--ask", &v.to_string()])
             .output()
             .unwrap();
+        let said = String::from_utf8_lossy(&out.stderr);
         assert!(
-            String::from_utf8_lossy(&out.stderr).contains("already has an ask"),
+            said.contains("already has an ask") || said.contains("must be a string matching"),
             "{uid}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
