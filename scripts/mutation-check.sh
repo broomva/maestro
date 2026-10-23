@@ -243,5 +243,24 @@ mutate $econ '.filter(|r| *r > now)' '.filter(|_| true)'
 mutate $econ '&& approved >= 3.0' '&& approved >= 0.0'
 mutate $econ 'Some(at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64))' 'Some(at + (hours * 3600.0).trunc() as i64 * US + round_half_even((hours * 3600.0).fract() * 1e6))'
 
+# Skipped nodes are checked for structure only; the plan CLI's binding guards (held by the CLI
+# golden in crates/cli/tests/delegation.rs); YAML merge keys in PyYAML's order.
+port=crates/cli/src/port.rs
+mutate $deleg 'if skip.contains(nid) {' 'if false {'
+mutate $port 'if !absent.is_empty() && !bind.skip_absent_repos {' 'if false {'
+mutate $port 'return true; // unknown here: not checked out, so never reported missing' 'return false;'
+mutate $port 'if let Some(first) = seen.get(r.dir.as_str()) {' 'if let Some(first) = None::<&&str> {'
+mutate $port '            if has_file {
+                return Err(Fault::Value(format!(' '            if false {
+                return Err(Fault::Value(format!('
+mutate $port '                        explicit.push((k, merge(val)?));
+                        continue;' '                        explicit.push((k, merge(val)?));
+                        continue;
+                    }
+                    if true {
+                        continue;'
+mutate $port 'for (k, val) in merged.into_iter().chain(explicit) {' 'for (k, val) in explicit.into_iter().chain(merged) {'
+mutate $port '    if !v.is_object() {' '    if false {'
+
 echo "mutation  $killed of $total killed"
 exit $failed

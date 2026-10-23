@@ -65,7 +65,8 @@ pub fn eval(case: &Value) -> Value {
             let exists = |r: &Ref| files.iter().any(|f| *f == format!("{}:{}", r.repo, r.path));
             let policy_for = |_: &str| Ok(human.clone());
             let disk = Disk { exists: &exists, policy_for: &policy_for };
-            match d::validate(&args["graph"], &[], Some(&disk), Some(&dirs), &HashSet::new()) {
+            let skip: HashSet<String> = strings(args.get("skip")).into_iter().collect();
+            match d::validate(&args["graph"], &[], Some(&disk), Some(&dirs), &skip) {
                 Ok((errors, nodes)) => json!({"ok": {
                     "errors": errors, "nodes": nodes.iter().map(d::PlanNode::to_json).collect::<Vec<_>>()
                 }}),

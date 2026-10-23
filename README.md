@@ -138,20 +138,28 @@ read, that count becomes a lower bound and the error is reported under `worktree
   workspace's `scripts/delegation.py` (assessment, tier ladder, plan-graph rules, briefs) and the pure
   part of `scripts/fleet_economy.py` (capacity forecast, cadence modes, launch and resume gates, the
   economy by tier). The Python is the reference until the tick moves here (node `loops-port`). Its
-  messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments, with three
-  known differences: the CLI flags follow the subcommand (`maestro delegation plan G --repo N=P`, not
-  `--repo N=P plan G`), JSON is printed with sorted keys and two-space indent, and a YAML graph with a
-  duplicate key is refused where PyYAML keeps the last value. The sample cache, transcript reading and the
+  messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments. Known
+  differences: the CLI flags follow the subcommand (`maestro delegation plan G --repo N=P`, not
+  `--repo N=P plan G`); JSON is printed with sorted keys and two-space indent; YAML is read as YAML 1.2
+  (merge keys applied in PyYAML's order), so a duplicate key is refused where PyYAML keeps the last value
+  and an unquoted `1e3` or `0o17` is a number where PyYAML keeps a string; timestamps are read in the
+  extended ISO form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes), not the basic or
+  week forms Python 3.14 also accepts; a message escapes unassigned code points as Python's `repr` does
+  not. The sample cache, transcript reading and the
   economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
   (maestro-paseo `shared/tiers.ts`).
   - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation
     with files on disk among them; the test `crates/core/tests/parity_delegation.rs` holds the Rust to
     it, and `scripts/mutation-check.sh` breaks the guards listed under "Ports of delegation.py".
-  - `python3 scripts/parity-delegation.py --workspace ~/broomva` fails unless the golden is the
+  - `fixtures/delegation/cli-golden.json` is the Python CLIs' output on scratch repos (bindings, nested,
+    absent and same-directory repos, policies, merge keys); `crates/cli/tests/delegation.rs` rebuilds the
+    layout and replays every case through the binary.
+  - `python3 scripts/parity-delegation.py --workspace ~/broomva` fails unless both goldens are the
     Python's output at the workspace's `origin/main`, the same cases agree through `maestro
-    parity-eval`, both CLIs agree on every real `docs/plans/*.graph.yaml` and on scratch-repo
-    scenarios, both forecasts agree on the live usage snapshot, and the plugin's `tiers.ts` at
-    `fixtures/delegation/tiers-rev` agrees. `--write` regenerates the golden: review its diff.
+    parity-eval`, both CLIs agree on every real `docs/plans/*.graph.yaml` and on the scratch-repo
+    scenarios, both forecasts agree on the live usage snapshot, 100,000 random runways agree to the
+    microsecond, and the plugin's `tiers.ts` at `fixtures/delegation/tiers-rev` agrees. `--write`
+    regenerates both goldens: review their diff.
 
 ## Harness registration
 

@@ -34,6 +34,7 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLDEN = os.path.join(REPO, "fixtures", "delegation", "golden.json")
+CLI_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "cli-golden.json")
 TIERS_REV = os.path.join(REPO, "fixtures", "delegation", "tiers-rev")
 PROVIDER_MANAGER = os.path.expanduser("~/.claude/skills/provider-manager/scripts/provider_manager.py")
 
@@ -73,7 +74,8 @@ def py_eval(D, E, case, tmp):
             human = a.get("human_paths") or []
             errors, nodes = D.validate(json.loads(json.dumps(a["graph"])),
                                        exists=lambda r: f"{r.repo}:{r.path}" in files,
-                                       policy_for=lambda name: human, dirs=dict(a.get("dirs") or []))
+                                       policy_for=lambda name: human, dirs=dict(a.get("dirs") or []),
+                                       skip=set(a.get("skip") or []))
             return {"ok": {"errors": errors, "nodes": [plan_json(D, n) for n in nodes]}}
         if fn == "add_hours":  # the timedelta the forecast adds, to the microsecond
             now = E.parse_ts(a["now"])
@@ -278,6 +280,12 @@ def disk_cases(rng):
     for g in nested:
         for dirs in ([["w", w], ["n", n]], [["n", n], ["w", w]]):
             cases.append({"fn": "validate_disk", "args": {"graph": g, "files": [], "dirs": dirs}})
+    # Nodes whose repo is not here: structure only (a done check), never assessed or returned.
+    skipped = {"repo": "w", "repos": {"w": w, "g": "/r/gone"}, "nodes": [
+        node("a"), node("g", repo="g", tier="mechanical", signals={"paths": ["a.rs", "b.rs"], "est_loc": 900}),
+        node("h", repo="g", done="  ")]}
+    for skip in ([], ["g"], ["g", "h"]):
+        cases.append({"fn": "validate_disk", "args": {"graph": skipped, "files": [], "dirs": [], "skip": skip}})
     for _ in range(300):
         h = rng.choice([rng.uniform(0, 400), rng.uniform(0, 1), rng.randrange(1, 10**6) / 8, rng.random() * 1e4])
         cases.append({"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z", "hours": h}})
@@ -420,51 +428,88 @@ def real_graphs(ws, dpy, maestro):
     return n
 
 
-def cli_scenarios(dpy, maestro, ws, tmp):
-    root = os.path.join(tmp, "repos")
-    w, m, bare = os.path.join(root, "w"), os.path.join(root, "w", "nested"), os.path.join(root, "bare")
-    for d in (os.path.join(w, ".control"), os.path.join(w, "docs", "specs"), m, os.path.join(bare, "docs", "adrs")):
-        os.makedirs(d, exist_ok=True)
-    with open(os.path.join(w, ".control", "policy.yaml"), "w") as f:
-        f.write("auto_merge:\n  rules:\n    - {action: require_human, path_touched: deploy/}\n")
-    for p in (os.path.join(w, "docs", "specs", "a.html"), os.path.join(bare, "docs", "adrs", "b.html")):
-        open(p, "w").close()
-    os.symlink(w, os.path.join(root, "w-link"))
+# --- CLI scenarios: scratch repos, both CLIs, and the committed CLI golden ----------------------------
+# Paths are written under "{ROOT}", the scratch root, so fixtures/delegation/cli-golden.json is the same
+# on every machine; crates/cli/tests/delegation.rs rebuilds LAYOUT and replays every case through the
+# binary, so the CLI's binding, policy and absent-repo guards are held by `cargo test` as well.
+R = "{ROOT}"
+W, NESTED, BARE = f"{R}/w", f"{R}/w/nested", f"{R}/bare"
+
+
+def cli_layout():
     good = node("a", inputs=["docs/specs/a.html", "bare:docs/adrs/b.html", "docs/specs/missing.html"],
                 signals={"paths": ["src/a.rs"]})
     graphs = {
-        "ok": {"repo": "w", "repos": {"w": w, "bare": {"path": bare, "policy": "none"}}, "nodes": [
+        "ok": {"repo": "w", "repos": {"w": W, "bare": {"path": BARE, "policy": "none"}}, "nodes": [
             good, node("b", repo="bare", depends_on=["a"], inputs=["w:docs/specs/a.html"])]},
-        "nested": {"repo": "w", "repos": {"w": w, "n": m}, "nodes": [node("a", signals={"paths": ["nested/x.rs"]})]},
-        "same-dir": {"repo": "w", "repos": {"w": w, "v": os.path.join(root, "w-link")}, "nodes": [node("a")]},
-        "absent": {"repo": "w", "repos": {"w": w, "gone": os.path.join(root, "gone")},
-                   "nodes": [node("a"), node("g", repo="gone", inputs=["docs/specs/x.html"])]},
-        "no-policy": {"repo": "b", "repos": {"b": bare}, "nodes": [node("a")]},
-        "policy-none-but-file": {"repo": "w", "repos": {"w": {"path": w, "policy": "none"}}, "nodes": [node("a")]},
-        "governed": {"repo": "w", "repos": {"w": w}, "nodes": [node("a", signals={"paths": ["deploy/x.yaml"]})]},
-        "bad-name": {"repo": "w", "repos": {"w": w, "a:b": bare}, "nodes": [node("a")]},
-        "no-path": {"repo": "w", "repos": {"w": w, "x": {"policy": "none"}}, "nodes": [node("a")]},
+        "nested": {"repo": "w", "repos": {"w": W, "n": NESTED}, "nodes": [node("a", signals={"paths": ["nested/x.rs"]})]},
+        "same-dir": {"repo": "w", "repos": {"w": W, "v": f"{R}/w-link"}, "nodes": [node("a")]},
+        "absent": {"repo": "w", "repos": {"w": W, "gone": f"{R}/gone"},
+                   "nodes": [node("a"), node("g", repo="gone", inputs=["docs/specs/x.html"],
+                                             signals={"paths": ["a.rs"], "spec": "docs/specs/x.html"})]},
+        "no-policy": {"repo": "b", "repos": {"b": BARE}, "nodes": [node("a")]},
+        "policy-none-but-file": {"repo": "w", "repos": {"w": {"path": W, "policy": "none"}}, "nodes": [node("a")]},
+        "governed": {"repo": "w", "repos": {"w": W}, "nodes": [node("a", signals={"paths": ["deploy/x.yaml"]})]},
+        "governed-merged-policy": {"repo": "m", "repos": {"m": f"{R}/merged-policy"},
+                                   "nodes": [node("a", signals={"paths": ["deploy/x.yaml"]})]},
+        "bad-name": {"repo": "w", "repos": {"w": W, "a:b": BARE}, "nodes": [node("a")]},
+        "no-path": {"repo": "w", "repos": {"w": W, "x": {"policy": "none"}}, "nodes": [node("a")]},
         "single": {"nodes": [node("a", inputs=["docs/specs/a.html"])]},
         "repos-list": {"repo": "w", "repos": ["w"], "nodes": [node("a")]},
-        "int-id": {"repo": "w", "repos": {"w": w}, "nodes": [node(1), node("a", depends_on=[1])]},
-        "int-id-only": {"repo": "w", "repos": {"w": w}, "nodes": [node(1)]},
+        "int-id": {"repo": "w", "repos": {"w": W}, "nodes": [node(1), node("a", depends_on=[1])]},
+        "int-id-only": {"repo": "w", "repos": {"w": W}, "nodes": [node(1)]},
     }
-    for name, g in graphs.items():
-        path = os.path.join(tmp, f"{name}.json")
-        with open(path, "w") as f:
-            json.dump(g, f)
-        variants = [([], []), (["--skip-absent-repos"], ["--skip-absent-repos"])]
+    files = {f"{name}.json": json.dumps(g) for name, g in graphs.items()}
+    # YAML merge keys, as PyYAML applies them, in nodes and in repos (merged repos come first).
+    files["merged.graph.yaml"] = (f"repo: w\nrepos: {{w: {W}}}\nreviewer: &reviewer\n  kind: review\n  done: check\n"
+                                  "nodes:\n  - <<: *reviewer\n    id: r\n    tier: standard\n  - <<: *reviewer\n    id: s\n")
+    files["merged-repos.graph.yaml"] = (f"extra: &extra {{n: {{path: {NESTED}, policy: none}}, v: {R}/w-link}}\n"
+                                        f"repo: w\nrepos: {{<<: *extra, w: {W}}}\n"
+                                        "nodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n")
+    files["merged-repos-nested.graph.yaml"] = (f"extra: &extra {{n: {{path: {NESTED}, policy: none}}}}\n"
+                                               f"repo: w\nrepos: {{<<: *extra, w: {W}}}\n"
+                                               "nodes:\n  - {id: a, done: t, signals: {paths: [nested/x.rs]}}\n")
+    files["merged-repos-absent.graph.yaml"] = (f"extra: &extra {{x: {R}/gone}}\nrepo: w\nrepos: {{<<: *extra, w: {W}}}\n"
+                                               "nodes:\n  - {id: a, done: t, signals: {paths: [a.rs]}}\n")
+    files["list.graph.yaml"] = "- a\n- b\n"
+    files["empty.graph.yaml"] = ""
+    files["w/.control/policy.yaml"] = "auto_merge:\n  rules:\n    - {action: require_human, path_touched: deploy/}\n"
+    files["merged-policy/.control/policy.yaml"] = ("r: &r {action: require_human}\n"
+                                                   "auto_merge: {rules: [{<<: *r, path_touched: deploy/}]}\n")
+    files["w/docs/specs/a.html"] = ""
+    files["bare/docs/adrs/b.html"] = ""
+    files["economy.json"] = json.dumps({"generatedAt": "2026-10-22T00:00:00Z", "tiers": {
+        "standard": {"runs": 10, "raisedRuns": 3, "approved": 4, "firstPass": 0.25, "tokensPerApproved": 1234567},
+        "frontier": {"runs": 2, "approved": 0, "firstPass": None, "tokensPerApproved": 980}}})
+    return {"dirs": ["w/nested", "bare"], "files": files, "symlinks": {"w-link": "w"}}
+
+
+def cli_cases():
+    cases = []
+
+    def add(name, py, rs, cwd="w", parse_json=False, tool="delegation"):
+        cases.append({"name": name, "tool": tool, "py": py, "rs": rs, "cwd": cwd, "json": parse_json})
+
+    names = ["ok", "nested", "same-dir", "absent", "no-policy", "policy-none-but-file", "governed",
+             "governed-merged-policy", "bad-name", "no-path", "single", "repos-list", "int-id", "int-id-only"]
+    for name in names:
+        path = f"{R}/{name}.json"
+        variants = [[], ["--skip-absent-repos"]]
         if name == "single":
-            variants += [(["--root", w], ["--root", w]), (["--root", bare], ["--root", bare])]
+            variants += [["--root", W], ["--root", BARE]]
         if name == "ok":
-            variants += [(["--repo", f"bare={bare}"], ["--repo", f"bare={bare}"]), (["--repo", "nope=x"], ["--repo", "nope=x"]),
-                         (["--repo", "bad"], ["--repo", "bad"]), (["--root", w], ["--root", w])]
-        for pre, post in variants:
-            for sub, extra in (("plan", []), ("plan", ["--json"]), ("brief", ["a"])):
-                py_cmd = ["python3", dpy, *pre, sub, path, *extra]
-                rs_cmd = [maestro, *(["--json"] if extra == ["--json"] else []), "delegation", sub, path,
-                          *([x for x in extra if x != "--json"]), *post]
-                compare_cli(f"cli {name} {sub} {' '.join(pre + extra)}", py_cmd, rs_cmd, w, parse_json=extra == ["--json"])
+            variants += [["--repo", f"bare={BARE}"], ["--repo", "nope=x"], ["--repo", "bad"], ["--root", W]]
+        for flags in variants:
+            add(f"{name} plan {' '.join(flags)}", [*flags, "plan", path], ["delegation", "plan", path, *flags])
+            add(f"{name} plan --json {' '.join(flags)}", [*flags, "plan", path, "--json"],
+                ["--json", "delegation", "plan", path, *flags], parse_json=True)
+            add(f"{name} brief a {' '.join(flags)}", [*flags, "brief", path, "a"], ["delegation", "brief", path, "a", *flags])
+    for g, extra in (("merged.graph.yaml", ["plan"]), ("merged.graph.yaml", ["brief", "s"]),
+                     ("merged-repos.graph.yaml", ["plan"]), ("merged-repos-nested.graph.yaml", ["plan"]),
+                     ("merged-repos-absent.graph.yaml", ["plan"]), ("list.graph.yaml", ["plan"]),
+                     ("empty.graph.yaml", ["plan"])):
+        sub, rest = extra[0], extra[1:]
+        add(f"{g} {' '.join(extra)}", [sub, f"{R}/{g}", *rest], ["delegation", sub, f"{R}/{g}", *rest])
     assess = [["--kind", "implement", "--paths", "src/a.rs", "deploy/x"],
               ["--kind", "implement", "--paths", "a.rs", "b.rs", "--est-loc", "300"],
               ["--kind", "implement", "--paths", "a.rs", "--est-loc", "300", "--spec", "docs/specs/a.html"],
@@ -474,21 +519,59 @@ def cli_scenarios(dpy, maestro, ws, tmp):
               ["--kind", "implement", "--paths", "a.rs", "b.rs", "--est-loc", "300", "--done", "x", "--brief"],
               ["--kind", "review", "--mode", "read-only", "--observed-tier", "apex"],
               ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "3", "--allow-apex", "--mode", "conserve"],
-              ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "-1", "--est-loc", "-5", "--files", "-2"]]
+              ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "-1", "--est-loc", "-5", "--files", "-2"],
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", " 1_000 ", "--mode", "critical", "--mode", "normal"]]
     for args in assess:
-        for root_args in (["--root", w], ["--root", bare], ["--root", bare, "--no-policy"]):
-            compare_cli(f"assess {' '.join(root_args + args)}", ["python3", dpy, *root_args, "assess", *args],
-                        [maestro, "delegation", "assess", *root_args, *args], w,
-                        parse_json="--brief" not in args)
-    compare_cli("ladder", ["python3", dpy, "ladder"], [maestro, "delegation", "ladder"], w, parse_json=True)
-    # YAML merge keys, as PyYAML applies them: a reviewer merged in from an anchor stays a reviewer.
-    merged = os.path.join(tmp, "merged.graph.yaml")
-    with open(merged, "w") as f:
-        f.write(f"repo: w\nrepos: {{w: {w}}}\nreviewer: &reviewer\n  kind: review\n  done: check\n"
-                "nodes:\n  - <<: *reviewer\n    id: r\n    tier: standard\n  - <<: *reviewer\n    id: s\n")
-    for sub, extra in (("plan", []), ("brief", ["s"])):
-        compare_cli(f"cli merge-keys {sub}", ["python3", dpy, sub, merged, *extra],
-                    [maestro, "delegation", sub, merged, *extra], w)
+        for root_args in (["--root", W], ["--root", BARE], ["--root", BARE, "--no-policy"],
+                          ["--root", f"{R}/merged-policy"]):
+            add(f"assess {' '.join(root_args + args)}", [*root_args, "assess", *args],
+                ["delegation", "assess", *root_args, *args], parse_json="--brief" not in args)
+    add("ladder", ["ladder"], ["delegation", "ladder"], parse_json=True)
+    add("tiers", ["tiers", "--path", f"{R}/economy.json"], ["economy", "tiers", "--path", f"{R}/economy.json"],
+        tool="economy")
+    add("tiers --json", ["tiers", "--json", "--path", f"{R}/economy.json"],
+        ["--json", "economy", "tiers", "--path", f"{R}/economy.json"], tool="economy", parse_json=True)
+    add("tiers missing", ["tiers", "--path", f"{R}/nope.json"], ["economy", "tiers", "--path", f"{R}/nope.json"],
+        tool="economy")
+    return cases
+
+
+def build_layout(layout, root):
+    for d in layout["dirs"]:
+        os.makedirs(os.path.join(root, d), exist_ok=True)
+    for rel, text in layout["files"].items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text.replace(R, root))
+    for link, target in layout["symlinks"].items():
+        os.symlink(os.path.join(root, target), os.path.join(root, link))
+
+
+def cli_scenarios(dpy, fpy, maestro, tmp, write):
+    root = os.path.join(tmp, "repos")
+    layout, cases = cli_layout(), cli_cases()
+    build_layout(layout, root)
+    sub = lambda xs: [x.replace(R, root) for x in xs]  # noqa: E731
+    out = []
+    for c in cases:
+        script = dpy if c["tool"] == "delegation" else fpy
+        cwd = os.path.join(root, c["cwd"])
+        compare_cli(f"cli {c['name']}", ["python3", script, *sub(c["py"])], [maestro, *sub(c["rs"])], cwd,
+                    parse_json=c["json"])
+        code, po, pe = run(["python3", script, *sub(c["py"])], cwd)
+        if code == 1 and "Traceback" in pe:  # the golden holds the exception kind, not Python's traceback
+            pe = pe.strip().splitlines()[-1].split(":", 1)[0]
+        out.append({**c, "want": {"code": code, "stdout": po.replace(root, R), "stderr": pe.replace(root, R),
+                                  "crash": code == 1 and pe.isidentifier()}})
+    text = json.dumps({"layout": layout, "cases": out}, indent=1, sort_keys=True) + "\n"
+    if write:
+        with open(CLI_GOLDEN, "w") as f:
+            f.write(text)
+    else:
+        check("cli golden", os.path.isfile(CLI_GOLDEN) and open(CLI_GOLDEN).read() == text,
+              f"{CLI_GOLDEN} is not the Python CLIs' output: rerun with --write and review the diff")
+    return len(out)
 
 
 def live_capacity(E, maestro):
@@ -573,7 +656,7 @@ def main(argv=None):
     with tempfile.TemporaryDirectory(prefix="parity-delegation.") as tmp:
         tmp = os.path.realpath(tmp)
         D, dpy = load(ws, a.rev, "delegation", tmp)
-        E, _ = load(ws, a.rev, "fleet_economy", tmp)
+        E, fpy = load(ws, a.rev, "fleet_economy", tmp)
         cases = all_cases()
         want = [py_eval(D, E, c, tmp) for c in cases]
         golden = [{**c, "want": w} for c, w in zip(cases, want)]
@@ -603,9 +686,9 @@ def main(argv=None):
         print(f"graphs    {graphs} real plan graphs: plan, plan --json, brief per node "
               + ("agree" if len(failures) == before else "DIFFER"))
         before = len(failures)
-        cli_scenarios(dpy, maestro, ws, tmp)
+        n_cli = cli_scenarios(dpy, fpy, maestro, tmp, a.write)
         codes = {c: cli_runs.count(c) for c in sorted(set(cli_runs))}
-        print(f"cli       {len(cli_runs)} invocations of both CLIs (by exit code {codes}) "
+        print(f"cli       {n_cli} golden cases; {len(cli_runs)} invocations of both CLIs (by exit code {codes}) "
               + ("agree" if len(failures) == before else "DIFFER"))
         live_capacity(E, maestro)
         # The forecast's timedelta, densely: 100,000 random runways to the microsecond.

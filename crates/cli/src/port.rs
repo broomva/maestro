@@ -18,6 +18,7 @@ use std::process::ExitCode;
 #[derive(Subcommand)]
 pub enum DelegationCommand {
     /// Tier, verifier and needs for one unit of work.
+    #[command(args_override_self = true)]
     Assess(AssessArgs),
     /// Validate an agent graph; print each node's tier and Maestro fields.
     Plan {
@@ -62,11 +63,11 @@ pub struct AssessArgs {
     #[arg(long, num_args = 0..)]
     paths: Vec<String>,
     /// Omit when unknown; unknown counts as 0 for the LOC rules.
-    #[arg(long, allow_negative_numbers = true)]
+    #[arg(long, allow_negative_numbers = true, value_parser = py_int)]
     est_loc: Option<i64>,
-    #[arg(long, allow_negative_numbers = true)]
+    #[arg(long, allow_negative_numbers = true, value_parser = py_int)]
     files: Option<i64>,
-    #[arg(long, default_value_t = 1, allow_negative_numbers = true)]
+    #[arg(long, default_value_t = 1, allow_negative_numbers = true, value_parser = py_int)]
     repos: i64,
     #[arg(long)]
     public_api: bool,
@@ -74,7 +75,7 @@ pub struct AssessArgs {
     one_way_door: bool,
     #[arg(long)]
     spec: Option<String>,
-    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true, value_parser = py_int)]
     failed_attempts: i64,
     #[arg(long)]
     observed_tier: Option<String>,
@@ -111,6 +112,36 @@ pub enum EconomyCommand {
         #[arg(long)]
         path: Option<String>,
     },
+}
+
+/// argparse's `type=int`: Python's `int()` on the argument (`" 1_000 "` is 1000).
+fn py_int(s: &str) -> Result<i64, String> {
+    let t = s.trim();
+    let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
+    let ok = digits.starts_with(|c: char| c.is_ascii_digit())
+        && digits.ends_with(|c: char| c.is_ascii_digit())
+        && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
+        && !digits.contains("__");
+    if !ok {
+        return Err(format!("invalid int value: {}", py::repr_str(s)));
+    }
+    t.replace('_', "").parse().map_err(|_| format!("invalid int value: {}", py::repr_str(s)))
+}
+
+/// fleet_economy's `_fmt`: a count as `1.2M`, `3.4k`, or `%g`; `-` for none.
+fn fmt_count(v: &Value) -> String {
+    let Some(n) = py::num(Some(v)) else { return "-".into() };
+    for (unit, div) in [("B", 1e9), ("M", 1e6), ("k", 1e3)] {
+        if n.abs() >= div {
+            return format!("{:.1}{unit}", n / div);
+        }
+    }
+    py::fmt_g(n)
+}
+
+/// `x or 0` printed as the Python prints it.
+fn or_zero(v: &Value) -> String {
+    if py::truthy(Some(v)) { py::str_of(v) } else { "0".into() }
 }
 
 fn fail(msg: impl AsRef<str>, code: u8) -> ExitCode {
@@ -195,26 +226,83 @@ pub fn realpath(filename: &str) -> String {
     path
 }
 
-/// The graph, and its `repos` names in file order (JSON values sort their keys; the Python's
-/// dict keeps file order, and its messages and nested-repo checks follow it).
-fn load_graph(path: &str) -> Result<(Value, Vec<String>), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let v: Value = if path.ends_with(".json") {
-        serde_json::from_str(&text).map_err(|e| e.to_string())?
-    } else {
-        // PyYAML applies merge keys (`<<: *anchor`); serde_yaml only on request.
-        let mut y: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| e.to_string())?;
-        y.apply_merge().map_err(|e| e.to_string())?;
-        serde_json::to_value(y).map_err(|e| e.to_string())?
-    };
-    let ordered: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|e| e.to_string())?;
-    let order = match ordered.get("repos") {
-        Some(serde_yaml::Value::Mapping(m)) => {
+/// YAML as PyYAML's `safe_load` builds it: merge keys (`<<: *anchor`) applied with PyYAML's order,
+/// merged keys first, each key at its first position, an explicit key's value winning, and of several
+/// merged mappings the first winning. serde_yaml's own `apply_merge` orders keys otherwise.
+fn load_yaml(text: &str) -> Result<serde_yaml::Value, Fault> {
+    fn merge(v: serde_yaml::Value) -> Result<serde_yaml::Value, Fault> {
+        use serde_yaml::Value as Y;
+        Ok(match v {
+            Y::Mapping(m) => {
+                let (mut merged, mut explicit) = (Vec::new(), Vec::new());
+                for (k, val) in m {
+                    if k.as_str() != Some("<<") {
+                        explicit.push((k, merge(val)?));
+                        continue;
+                    }
+                    let sources = match merge(val)? {
+                        Y::Sequence(seq) => seq.into_iter().rev().collect(),
+                        one => vec![one],
+                    };
+                    for src in sources {
+                        let Y::Mapping(src) = src else {
+                            return Err(Fault::Crash {
+                                kind: "ConstructorError",
+                                msg: "expected a mapping or list of mappings for merging".into(),
+                            });
+                        };
+                        merged.extend(src);
+                    }
+                }
+                let mut out = serde_yaml::Mapping::new();
+                for (k, val) in merged.into_iter().chain(explicit) {
+                    out.insert(k, val); // an existing key keeps its position
+                }
+                Y::Mapping(out)
+            }
+            Y::Sequence(s) => Y::Sequence(s.into_iter().map(merge).collect::<Result<_, _>>()?),
+            Y::Tagged(t) => merge(t.value)?,
+            other => other,
+        })
+    }
+    let y: serde_yaml::Value =
+        serde_yaml::from_str(text).map_err(|e| Fault::Crash { kind: "YAMLError", msg: e.to_string() })?;
+    merge(y)
+}
+
+/// The keys of a loaded mapping in file order (a JSON value sorts its keys; the Python's dict keeps
+/// file order, and its messages and nested-repo checks follow it).
+fn keys_in_order(y: &serde_yaml::Value) -> Vec<String> {
+    match y {
+        serde_yaml::Value::Mapping(m) => {
             m.keys().map(|k| serde_json::to_value(k).map(|k| py::str_of(&k)).unwrap_or_default()).collect()
         }
         _ => vec![],
+    }
+}
+
+/// The graph (`json.loads` for `.json`, else `yaml.safe_load(...) or {}`), and its `repos` names in
+/// file order. A graph that is not a mapping is the Python's AttributeError at its first `.get`.
+fn load_graph(path: &str) -> Result<(Value, Vec<String>), Fault> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| Fault::Crash { kind: "FileNotFoundError", msg: format!("{path}: {e}") })?;
+    let (v, ordered): (Value, serde_yaml::Value) = if path.ends_with(".json") {
+        let v =
+            serde_json::from_str(&text).map_err(|e| Fault::Crash { kind: "JSONDecodeError", msg: e.to_string() })?;
+        (v, serde_yaml::from_str(&text).unwrap_or(serde_yaml::Value::Null))
+    } else {
+        let y = load_yaml(&text)?;
+        let v = serde_json::to_value(&y).map_err(|e| Fault::Crash { kind: "YAMLError", msg: e.to_string() })?;
+        (if py::truthy(Some(&v)) { v } else { json!({}) }, y)
     };
-    Ok((if py::truthy(Some(&v)) { v } else { json!({}) }, order))
+    if !v.is_object() {
+        return Err(Fault::Crash {
+            kind: "AttributeError",
+            msg: format!("'{}' object has no attribute 'get'", d::type_name(&v)),
+        });
+    }
+    let order = ordered.get("repos").map(keys_in_order).unwrap_or_default();
+    Ok((v, order))
 }
 
 /// A repo's `.control/policy.yaml` require_human paths. An unreadable policy is `Fault::Value`
@@ -229,7 +317,10 @@ fn policy_of(root: &str) -> Result<Vec<String>, Fault> {
             _ => format!("{path}: {e}"),
         })
     })?;
-    let data: Value = serde_yaml::from_str(&text).map_err(|e| Fault::Value(format!("{path}: {e}")))?;
+    // Every failure to load is the Python's PolicyUnreadable (its `except Exception`).
+    let data = load_yaml(&text)
+        .and_then(|y| serde_json::to_value(y).map_err(|e| Fault::Value(e.to_string())))
+        .map_err(|f| Fault::Value(format!("{path}: {f}")))?;
     d::require_human_paths(&data).map_err(|f| match f {
         Fault::Value(m) => Fault::Value(format!("{path}: {m}")),
         crash => crash,
@@ -307,7 +398,7 @@ fn crash(f: &Fault) -> ExitCode {
 fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out: bool) -> ExitCode {
     let (graph, order) = match load_graph(graph_path) {
         Ok(g) => g,
-        Err(e) => return fail(format!("Traceback (most recent call last):\n  {e}"), 1),
+        Err(f) => return crash(&f),
     };
     if py::truthy(graph.get("repos")) && bind.root.is_some() {
         return fail("this graph names its repos: bind them with --repo NAME=PATH, not --root", 2);
@@ -603,7 +694,12 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
         EconomyCommand::Tiers { path } => {
             let path = path.clone().unwrap_or_else(|| expanduser("~/.config/maestro-paseo/economy.json"));
             let data: Value = match std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
+                .map_err(|e| match e.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        format!("[Errno 2] No such file or directory: {}", py::repr_str(&path))
+                    }
+                    _ => e.to_string(),
+                })
                 .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
             {
                 Ok(d) => d,
@@ -615,13 +711,21 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
                 println!("{}", serde_json::to_string_pretty(&out).expect("JSON"));
                 return ExitCode::SUCCESS;
             }
+            println!(
+                "{:10} {:>5} {:>8} {:>12} {:>10} {:>6} {:>5}",
+                "tier", "runs", "approved", "tok/approved", "first-pass", "raised", "escal"
+            );
             for r in &rows {
+                let fp = py::num(Some(&r["first_pass"])).map_or_else(|| "-".into(), |f| format!("{:.0}%", f * 100.0));
                 println!(
-                    "{:10} runs {} approved {} first-pass {}",
+                    "{:10} {:>5} {:>8} {:>12} {:>10} {:>6} {:>5}",
                     py::str_of(&r["tier"]),
                     py::str_of(&r["runs"]),
-                    py::str_of(&r["approved"]),
-                    py::str_of(&r["first_pass"])
+                    or_zero(&r["approved"]),
+                    fmt_count(&r["tokens_per_approved"]),
+                    fp,
+                    or_zero(&r["raised_runs"]),
+                    or_zero(&r["escalations"])
                 );
             }
             for s in signals {
