@@ -254,7 +254,8 @@ mutate $econ '.any(|p| now_s - at_seconds(p) < SIGNAL_TTL_S);' '.any(|p| now_s -
 mutate $econ '&& !hold.is_some_and(|h| h > now)' '&& true'
 mutate $econ '&& !pending;' ';'
 mutate $econ 'if p.get("result") == Some(&json!("limited")) && now_s - at_seconds(p) < PROBE_HOLD_S {' 'if p.get("result") == Some(&json!("limited")) {'
-mutate $econ '&& cfg.get("autoBalance") == Some(&Value::Bool(true))' '&& py::truthy(cfg.get("autoBalance"))'
+# Not `py::truthy`: the schema holds autoBalance to a bool, where truthiness is the same test.
+mutate $econ '&& cfg.get("autoBalance") == Some(&Value::Bool(true))' ''
 mutate $econ '} else if let Some((name, _, max)) = top.filter(|t| t.2 >= RESUME_5H) {' '} else if let Some((name, _, max)) = top.filter(|t| t.2 > RESUME_5H) {'
 mutate $econ '} else if r["known"] != json!(true) {' '} else if false {'
 mutate $econ 'Some((_, _, b)) if f <= b => best,' 'Some((_, _, b)) if f < b => best,'
