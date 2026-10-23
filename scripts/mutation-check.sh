@@ -196,9 +196,9 @@ mutate $deleg '        && seen > executor' '        && seen < executor'
 mutate $deleg '        && complexity != "governance"
 ' '
 '
-mutate $deleg 'if kind == json!("review") && tier < Tier::Frontier {' 'if false {'
+mutate $deleg 'if kind == "review" && tier < Tier::Frontier {' 'if false {'
 mutate $deleg 'if let Some(&other) = produced_by.get(p) {' 'if let Some(&other) = None::<&usize> {'
-mutate $deleg '1 => return Ok(true),' '1 => return Ok(false),'
+mutate $deleg '1 => return true,' '1 => return false,'
 mutate $deleg 'Some(s) if s < strength(&json!(a.verify))' 'Some(s) if s > strength(&json!(a.verify))'
 mutate $deleg 'Some(&p) => ups.contains(&p) && node(p).get("kind") == Some(&json!("design")),' 'Some(&p) => node(p).get("kind") == Some(&json!("design")),'
 mutate $deleg 'if norm.starts_with('"'"'/'"'"') || norm == ".." || norm.starts_with("../") {' 'if norm.starts_with('"'"'/'"'"') {'
@@ -210,16 +210,7 @@ mutate $econ '&& (p.1 < last.1 || !same_window(p.2.as_ref(), last.2.as_ref())?)'
 mutate $econ 'let crosses = relief.is_none_or(|rl| ex < rl);' 'let crosses = relief.is_some_and(|rl| ex < rl);'
 mutate $econ '(ctx > HANDOFF_K, driven && ctx > SUCCESSOR_K)' '(ctx > HANDOFF_K, ctx > SUCCESSOR_K)'
 mutate $econ '(MIN_SPAN_H..=(7 * 24) as f64).contains(&open_h)' '(0.0..=f64::MAX).contains(&open_h)'
-mutate $econ 'arith(&raised, "/")? / arith(&runs, "/")? >= REPLAN_RAISED' 'arith(&raised, "/")? / arith(&runs, "/")? > REPLAN_RAISED'
-# A repos that is not a mapping stops the run; it never plans as a single-repo graph.
-mutate $deleg 'return Err(Fault::attribute_error(format!("'"'"'{}'"'"' object has no attribute '"'"'keys'"'"'", type_name(other))));' 'let _ = other;
-            vec![]'
-mutate crates/cli/src/port.rs '            return Err(Fault::Crash {
-                kind: "AttributeError",
-                msg: format!("'"'"'{}'"'"' object has no attribute '"'"'items'"'"'", d::type_name(other)),
-            });' '            let _ = other;
-            vec![(home, json!(root))]'
-
+mutate $econ 'count(&raised) / count(&runs) >= REPLAN_RAISED' 'count(&raised) / count(&runs) > REPLAN_RAISED'
 # The disk-aware guards: a stated spec must exist; a spec input is found on disk; a path inside
 # another bound repo is refused.
 mutate $deleg '} else if disk.is_some_and(|d| !(d.exists)(s)) {' '} else if false {'
@@ -230,7 +221,7 @@ mutate $deleg '} else if tier < a.executor {' '} else if false {'
 mutate $deleg 'if tier > a.executor && !has_reason {' 'if false {'
 mutate $deleg 'if tier == Tier::Apex && !has_reason {' 'if false {'
 mutate $deleg 'if a.needs.contains(&"decompose") {' 'if false {'
-mutate $deleg 'Some(t) if (a.complexity == "governance" || kind_s == "review") && t < a.thinking =>' 'Some(t) if false && t < a.thinking =>'
+mutate $deleg 'Some(t) if (a.complexity == "governance" || kind == "review") && t < a.thinking =>' 'Some(t) if false && t < a.thinking =>'
 mutate $deleg 'if MECHANICAL_KINDS.contains(&kind) && paths.is_empty() && loc == 0 && gov.is_empty() {' 'if MECHANICAL_KINDS.contains(&kind) && loc == 0 && gov.is_empty() {'
 mutate $deleg '        && kind != "review"
 ' '
@@ -240,7 +231,7 @@ mutate $econ '|| at > now {' '{'
 mutate $econ 'if span < MIN_SPAN_H {' 'if false {'
 mutate $econ 'py::num(v.get("7d")).filter(|s| !py::truthy(v.get("limited")) && *s < 100.0)' 'py::num(v.get("7d")).filter(|s| *s < 100.0)'
 mutate $econ '.filter(|r| *r > now)' '.filter(|_| true)'
-mutate $econ 'if arith(&approved, ">=")? >= 3.0 && fp < REPLAN_FIRST_PASS {' 'if arith(&approved, ">=")? >= 0.0 && fp < REPLAN_FIRST_PASS {'
+mutate $econ 'if count(&approved) >= 3.0 && fp < REPLAN_FIRST_PASS {' 'if count(&approved) >= 0.0 && fp < REPLAN_FIRST_PASS {'
 mutate $econ 'let sum = at + whole as i64 * HOUR_US + round_half_even((hours - whole) * HOUR_US as f64);' 'let sum = at + (hours * 3600.0).trunc() as i64 * US + round_half_even((hours * 3600.0).fract() * 1e6);'
 
 # The capacity gate (BRO-3223): who decides it, when a stale active account counts, who covers it by
@@ -259,23 +250,21 @@ mutate $econ '!py::truthy(v.get("needs_login")) && (py::truthy(v.get("active")) 
 mutate $econ 'let ok = usable(v).filter(|_| pool.contains(name));' 'let ok = usable(v);'
 mutate $econ 'for (_, v) in current.iter().filter(|(n, _)| pool.contains(n)) {' 'for (_, v) in current.iter() {'
 mutate $econ 'let usable7: Vec<f64> = current.iter().filter(|(n, _)| in_pool(n)).filter_map(|(_, v)| usable(v)).collect();' 'let usable7: Vec<f64> = current.iter().filter_map(|(_, v)| usable(v)).collect();'
-mutate $econ 'if now_s - at_seconds(p)? < SIGNAL_TTL_S {' 'if now_s - at_seconds(p)? <= SIGNAL_TTL_S {'
+mutate $econ '.any(|p| now_s - at_seconds(p) < SIGNAL_TTL_S);' '.any(|p| now_s - at_seconds(p) <= SIGNAL_TTL_S);'
 mutate $econ '&& !hold.is_some_and(|h| h > now)' '&& true'
 mutate $econ '&& !pending;' ';'
-mutate $econ 'if p.get("result") == Some(&json!("limited")) && now_s - at_seconds(p)? < PROBE_HOLD_S {' 'if p.get("result") == Some(&json!("limited")) {'
-mutate $econ '&& as_dict(cfg, &empty)?.get("autoBalance") == Some(&Value::Bool(true))' '&& py::truthy(as_dict(cfg, &empty)?.get("autoBalance"))'
+mutate $econ 'if p.get("result") == Some(&json!("limited")) && now_s - at_seconds(p) < PROBE_HOLD_S {' 'if p.get("result") == Some(&json!("limited")) {'
+mutate $econ '&& cfg.get("autoBalance") == Some(&Value::Bool(true))' '&& py::truthy(cfg.get("autoBalance"))'
 mutate $econ '} else if let Some((name, _, max)) = top.filter(|t| t.2 >= RESUME_5H) {' '} else if let Some((name, _, max)) = top.filter(|t| t.2 > RESUME_5H) {'
 mutate $econ '} else if r["known"] != json!(true) {' '} else if false {'
 mutate $econ 'Some((_, _, b)) if f <= b => best,' 'Some((_, _, b)) if f < b => best,'
 mutate $econ 'let needs_login = py::truthy(a.get("needsLogin")) || a.get("hasStoredCredentials") == Some(&Value::Bool(false));' 'let needs_login = py::truthy(a.get("needsLogin"));'
-mutate $econ 'let underscores_ok = bytes.iter().enumerate().all(|(i, b)| {' 'let underscores_ok = true || bytes.iter().enumerate().all(|(i, b)| {'
 
 # Exact boundaries (P20 r1): resets and holds at now, a duplicate id's last email, a bool bound, the rank tie.
 mutate $econ 'let limited = py::num(v.get("7d")).is_some_and(|s| s >= LIMIT_7D) && reset.is_none_or(|r| r > now);' 'let limited = py::num(v.get("7d")).is_some_and(|s| s >= LIMIT_7D) && reset.is_none_or(|r| r >= now);'
 mutate $econ 'if five.is_some() && (!stale || young || reset5.is_some_and(|r| r > now)) {' 'if five.is_some() && (!stale || young || reset5.is_some_and(|r| r >= now)) {'
 mutate $econ '&& !hold.is_some_and(|h| h > now)' '&& !hold.is_some_and(|h| h >= now)'
 mutate $econ 'Some(slot) => slot.1 = name,' 'Some(_) => {}'
-mutate $econ 'Value::Bool(b) => Ok(*b as i64 as f64),' 'Value::Bool(_) => Ok(0.0),'
 mutate $econ 'standbys.push((f, seven.unwrap_or(0.0), name));' 'standbys.push((f, seven.unwrap_or(100.0), name));'
 
 # Skipped nodes are checked for structure only; the plan CLI's binding guards (held by the CLI
@@ -292,75 +281,49 @@ mutate $port '    if !v.is_object() {' '    if false {'
 mutate $port 'bindings.iter().rev().find(|(n, _)| *n == name)' 'bindings.iter().find(|(n, _)| *n == name)'
 # YAML outside the subset (anchors, tags, merge keys) is refused, never misread.
 mutate $port '            Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart(_, Some(_)) | Event::MappingStart(_, Some(_)) => {
-                "a tag"
+                "a tag".to_string()
             }' '            Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart(_, Some(_)) | Event::MappingStart(_, Some(_)) => {
                 continue
             }'
 mutate $port '                if *anchor > 0 =>' '                if false =>'
 mutate $port '    if has_merge_key(&y) {' '    if false {'
 
-# Where the Python raises, the port raises the same kind (P20 port arc 2, Stratum A): an unhashable
-# value where the Python hashes one, a non-mapping row or sample, a non-numeric tier count, a date past
-# datetime's years. Each guard is held by the golden's type cases or the CLI goldens.
-mutate $deleg '    if let Some(v) = kind_v {
-        hashed(v, "set element")?;
-    }' ''
-mutate $deleg '    if let Some(v) = sig.get("observed_tier") {
-        hashed(v, "dict key")?;
-    }' ''
-mutate $deleg '    if let Some(v) = sig.get("mode") {
-        hashed(v, "set element")?;
-    }' ''
-mutate $deleg '    if let Some(v) = py::or(get("repo"), None) {
-        hashed(v, "set element")?;
-    }' ''
-mutate $deleg '        hashed(&nid, "dict key")?;' ''
-mutate $deleg '            hashed(&d, "dict key")?;' ''
-mutate $deleg '        if let Some(v) = py::or(n.get("repo"), None) {
-            hashed(v, "set element")?;
-        }' ''
-mutate $deleg '        hashed(&tier_v, "dict key")?;' ''
-mutate $deleg '        hashed(&verify_v, "dict key")?;' ''
-mutate $deleg '        hashed(&spawn, "dict key")?;' ''
-mutate $deleg '        Value::Array(_) | Value::Object(_) => {
-            let t = type_name(v);' '        Value::Null => {
-            let t = type_name(v);'
-mutate $port '            if let Some(v) = here_v
-                && let Err(f) = d::hashed(v, "set element")' '            if let Some(v) = here_v.filter(|_| false)
-                && let Err(f) = d::hashed(v, "set element")'
-mutate $port '                if let Err(f) = d::hashed(id, "set element") {' '                if let Err(f) = Ok::<(), Fault>(()) {'
-mutate $deleg '        let digits = digits.trim_start_matches('"'"'0'"'"');' '        let digits = digits;'
-mutate $deleg '            (_, _, Some(f)) if f.is_finite() => Ok(PyInt::of_digits(&format!("{:.0}", f.trunc()))),' '            (_, _, Some(f)) if f.is_finite() => Ok(PyInt::small(f.trunc() as i64)),'
-mutate $deleg '            let shown = py::or(n.get("repo"), None).map_or_else(|| py::repr_str(&here), py::repr);' '            let shown = py::repr_str(&here);'
-mutate $econ '        if !a.is_object() {
-            return Err(attribute_error(a));
-        }' ''
-mutate $econ '        if !s.is_object() {
-            return Err(attribute_error(s));
-        }
-        let at = parse_ts(s.get("at"))?;' '        let at = parse_ts(s.get("at"))?;'
-mutate $econ '            Some(other) => return Err(attribute_error(other)),
-        };' '            Some(_) => None,
-        };'
-mutate $econ '            && at.is_some()
-            && !v.is_object()' '            && false'
-mutate $econ '    for s in samples {
-        if !s.is_object() {
-            return Err(attribute_error(s));
-        }
-        if let Some(at)' '    for s in samples {
-        if let Some(at)'
+# The schema (crates/core/src/schema.rs): every input is checked before any rule runs, and each
+# field type holds. Held by the golden's refusals (the harness's own reading of the schema) and
+# the CLI goldens. Then the dates past datetime's years, which stay inside the schema.
+schema=crates/core/src/schema.rs
+mutate $deleg '    crate::schema::graph(graph)?;' ''
+mutate $deleg '    crate::schema::signals("signals", sig)?;' ''
+mutate $deleg '    crate::schema::policy(policy)?;' ''
+mutate $econ '    crate::schema::usage(rows)?;
+    let mut accounts' '    let mut accounts'
+mutate $econ '    crate::schema::state(state)?;' ''
+mutate $econ '    crate::schema::samples(samples)?;' ''
+mutate $econ '    crate::schema::tiers(data)?;' ''
+mutate $schema '        (Ty::Int, Value::Number(n)) => n.is_i64(),' '        (Ty::Int, Value::Number(_)) => true,'
+mutate $schema '        (Ty::NumOnly, Value::Null) => false,' '        (Ty::NumOnly, Value::Null) => true,'
+mutate $schema '                if !x.is_string() {' '                if false {'
+mutate $schema '        (Ty::Bool, Value::Bool(_)) => true,' '        (Ty::Bool, Value::Bool(_) | Value::Number(_)) => true,'
+mutate $schema '        (Ty::Str, Value::String(_)) => true,' '        (Ty::Str, Value::String(_) | Value::Number(_)) => true,'
+mutate $schema '        let Value::Object(n) = n else { return Err(refuse(&at, "a mapping", n)) };' '        let Value::Object(n) = n else { continue };'
+mutate $schema '        Some(other) => Err(refuse(field, "a mapping", other)),' '        Some(_) => Ok(None),'
+mutate $schema '        Some(other) => Err(refuse(field, "a list", other)),' '        Some(_) => Ok(&[]),'
+mutate $schema '            if !float && lit.parse::<i64>().is_err() && lit.parse::<u64>().is_err() && lit != "-" {' '            if false {'
+# YAML 1.1 and 1.2 read these plain scalars differently; a key that is not a string.
+mutate $port '                    TScalarStyle::Plain => plain_scalar_outside(v, is_key),' '                    TScalarStyle::Plain => None,'
+mutate $port '    if is_key && py != Yaml11::Str {' '    if false {'
+mutate $port '        Yaml11::Bool if matches!(v, "true" | "True" | "TRUE" | "false" | "False" | "FALSE") => None,' '        Yaml11::Bool => None,'
+mutate $port '            if decimal && same { None } else { differ() }' '            if same { None } else { differ() }'
+mutate $port '            if plain && same { None } else { differ() }' '            if same { None } else { differ() }'
+mutate $port '            Some(serde_yaml::Value::String(x)) if x == v => None,' '            _ if true => None,'
+mutate $port '    if date || stamp {' '    if date {'
+mutate $port '        bin || oct || dec || hex || sexa' '        bin || dec || hex'
+mutate $port '        plain || dot || sexa || inf || nan' '        plain || inf || nan'
+mutate crates/core/src/py.rs "    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)" '    c.is_whitespace()'
 mutate $econ '        Some(us) if (DT_MIN_US..=DT_MAX_US).contains(&us) => Ok(us),' '        Some(us) => Ok(us),'
 mutate $econ '    if !(i64::from(i32::MIN) + 1900..=i64::from(i32::MAX) + 1900).contains(&year) {' '    if false {'
 mutate $econ '    if (DT_MIN_US..=DT_MAX_US).contains(&sum) { Ok(sum) } else { Err(overflow()) }' '    Ok(sum)'
 mutate $econ '    if opened < DT_MIN_US {' '    if false {'
-mutate $econ '        Value::Bool(b) => Ok(f64::from(u8::from(*b))),' '        Value::Bool(_) => Ok(f64::NAN),'
-mutate $econ '    if !tiers.is_object() {
-        return Err(attribute_error(tiers));
-    }' ''
-mutate $econ '    if !data.is_object() {
-        return Err(attribute_error(data));
-    }' ''
 
 echo "mutation  $killed of $total killed"
 exit $failed

@@ -138,29 +138,38 @@ read, that count becomes a lower bound and the error is reported under `worktree
   workspace's `scripts/delegation.py` (assessment, tier ladder, plan-graph rules, briefs) and the pure
   part of `scripts/fleet_economy.py` (capacity forecast, cadence modes, launch and resume gates, the
   economy by tier, and BRO-3223's spendable-account readiness, balancer bounds and resume gate), as of
-  workspace `3395842d0` (ws#1112). The Python is the reference until the tick moves here (node `loops-port`). Its
-  messages, rounding, exit codes and uncaught-error kinds are kept for the same arguments: where the
-  Python raises (an unhashable id or mode, a non-mapping usage row or sample, a non-numeric tier count, a
-  timestamp or runway past `datetime`'s years), Maestro raises the same kind and decides nothing. Known
-  differences: the CLI flags follow the subcommand (`maestro delegation plan G --repo N=P`, not
-  `--repo N=P plan G`); JSON is printed with sorted keys and two-space indent; a graph or policy is read
-  within a YAML subset, the rule `maestro_store::yaml` follows for asks: anchors and aliases, tags and merge
-  keys are refused with the reason named (a policy using one is unreadable, so classification fails closed),
-  never misread, since no graph or policy uses them and serde_yaml (YAML 1.2) and PyYAML build them
-  differently. Inside the subset, a duplicate key is refused where PyYAML keeps the last value and an
-  unquoted `1e3` or `0o17` is a number where PyYAML keeps a string; timestamps are read in the extended ISO
-  form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes); a `depends_on` written as a
-  mapping is iterated in sorted key order; a message prints unassigned code points that Python's `repr`
-  escapes; a repo named by a number (`repo: 7`) is the string `'7'` in a plan, and in an error about the
-  graph's own repo; a timestamp between 6.7e16 s and `time_t`'s limit raises `OSError`, macOS's kind,
-  where another platform's Python may raise another; `maestro economy capacity` refuses a `--usage` that
-  is not a list. The sample cache, transcript reading and the
-  economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
+  workspace `3395842d0` (ws#1112). The Python is the reference until the tick moves here (node `loops-port`).
+  **Parity is claimed inside a typed schema** (`maestro_core::schema`), the shapes the real inputs hold:
+  graph ids, kinds, repos, `done`, tiers and every list item are strings; signal counts are JSON integers
+  within 64 bits (not bools, not floats, not digit strings), and so are tier counts; flags are bools;
+  usage, sample and balancer numbers are numbers; timestamps are strings or epoch numbers. Inside it, messages, rounding, exit
+  codes and uncaught-error kinds are the Python's for the same arguments (a timestamp or runway past
+  `datetime`'s years raises the same kind and decides nothing). **Outside it Maestro refuses** before any
+  rule runs, naming the field (`graph.nodes[1].signals.est_loc: an integer within 64 bits, not a string
+  (outside the schema Maestro reads exactly)`), where the Python would go on with Python's semantics on
+  arbitrary input (`1` and `True` one dict key, `str.strip`'s separators, `int()` of any digit string):
+  `plan` and `brief` exit 1, `economy` exits 1, a policy outside it is unreadable (classification fails
+  closed), and a JSON integer no 64-bit integer holds is refused. A graph or policy is also read within a
+  YAML subset, the rule `maestro_store::yaml` follows for asks: anchors and aliases, tags, merge keys, a
+  plain scalar PyYAML (YAML 1.1) and serde_yaml (YAML 1.2) read differently (`yes`, `off`, `0250`, `0o17`,
+  `1e3`, `1:20`, `2026-10-23`, `.inf`), and a mapping key that is not a string are refused with the reason
+  and line named; quote the value to keep it. Known differences inside both: the CLI flags follow the
+  subcommand (`maestro delegation plan G --repo N=P`, not `--repo N=P plan G`); JSON is printed with sorted
+  keys and two-space indent; a duplicate YAML key is refused where PyYAML keeps the last value; timestamps
+  are read in the extended ISO form only (`2026-10-22T12:00:00Z`, the form the usage endpoint writes); a
+  message prints unassigned code points that Python's `repr` escapes; a timestamp between 6.7e16 s and
+  `time_t`'s limit raises `OSError`, macOS's kind, where another platform's Python may raise another;
+  `maestro economy capacity` refuses a `--usage` that is not a list. The sample cache, transcript reading
+  and the economy ledger stay in the Python. The tier ladder equals the plugin's `DEFAULT_TIER_LADDER`
   (maestro-paseo `shared/tiers.ts`).
   - `fixtures/delegation/golden.json` is the Python's output on deterministic cases, graph validation
     with files on disk among them; the test `crates/core/tests/parity_delegation.rs` holds the Rust to
     it, and `scripts/mutation-check.sh` breaks the guards listed under "Ports of delegation.py". Its
-    type cases give every graph, usage-row, sample, balancer-state and tier field a value of each type.
+    type cases give every graph, usage-row, sample, balancer-state and tier field a value of each type;
+    a case outside the schema holds the field the harness's own reading of the schema refuses
+    (`refusal` in `scripts/parity-delegation.py`), and the Rust must refuse that same field.
+  - `fixtures/delegation/yaml11-golden.json` is PyYAML's implicit resolver on 6,733 plain scalars; the
+    CLI's YAML 1.1 reading (`yaml11` in `crates/cli/src/port.rs`) is held to it by its unit test.
   - `fixtures/delegation/cli-golden.json` is the Python CLIs' output on scratch repos (bindings, nested,
     absent and same-directory repos, policies); `crates/cli/tests/delegation.rs` rebuilds the
     layout and replays every case through the binary.

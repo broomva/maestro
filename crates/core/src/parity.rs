@@ -24,6 +24,7 @@ fn fault(f: Fault) -> Value {
     match f {
         Fault::Value(m) => json!({"err": m}),
         Fault::Crash { kind, .. } => json!({"crash": kind}),
+        Fault::Refused { field, .. } => json!({"refused": field}),
     }
 }
 

@@ -21,6 +21,7 @@ pub mod loops;
 pub mod need;
 pub mod parity;
 pub mod py;
+pub mod schema;
 pub mod section;
 pub mod session;
 pub mod tick;

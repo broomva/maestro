@@ -5,9 +5,10 @@
 //! which model does the work, never what the work may reach. The assessment is a floor: an
 //! earlier raise (`observed_tier`) and each failed verification move it up.
 //!
-//! Graphs arrive as loaded YAML (JSON values), because the Python reads whatever the file holds
-//! and its messages name those values. This module does no I/O: on-disk existence and a repo's
-//! policy come in as closures (the `plan` CLI binds them).
+//! Graphs arrive as loaded YAML (JSON values) and are checked against `crate::schema` before any
+//! rule runs: parity with the Python is claimed inside the schema, and a graph outside it is
+//! refused with the field named. This module does no I/O: on-disk existence and a repo's policy
+//! come in as closures (the `plan` CLI binds them).
 
 use crate::py;
 use serde::Serialize;
@@ -218,20 +219,13 @@ pub fn is_spec_path(path: &str) -> bool {
 
 /// Why the Python would stop. `Value` is a `ValueError` the graph validator reports as a node
 /// error; `Crash` is one it lets through (a traceback, exit 1), with the Python exception's kind.
+/// `Refused` is Maestro's own: an input outside the schema it reads exactly (`crate::schema`),
+/// refused before any rule runs, where the Python would go on with Python's semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
     Value(String),
     Crash { kind: &'static str, msg: String },
-}
-
-impl Fault {
-    fn type_error(msg: String) -> Fault {
-        Fault::Crash { kind: "TypeError", msg }
-    }
-
-    fn attribute_error(msg: String) -> Fault {
-        Fault::Crash { kind: "AttributeError", msg }
-    }
+    Refused { field: String, why: String },
 }
 
 impl std::fmt::Display for Fault {
@@ -239,71 +233,8 @@ impl std::fmt::Display for Fault {
         match self {
             Fault::Value(m) => f.write_str(m),
             Fault::Crash { kind, msg } => write!(f, "{kind}: {msg}"),
+            Fault::Refused { field, why } => write!(f, "{field}: {why} ({})", crate::schema::OUTSIDE),
         }
-    }
-}
-
-/// Python's unbounded `int`: saturated to i64 for the comparisons (every one is against a small
-/// constant, which saturation keeps), and its exact decimal text for messages.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PyInt {
-    v: i64,
-    text: String,
-}
-
-impl PyInt {
-    fn small(v: i64) -> PyInt {
-        PyInt { v, text: v.to_string() }
-    }
-
-    /// An optional sign and ASCII digits, as Python prints the value.
-    fn of_digits(signed: &str) -> PyInt {
-        let (neg, digits) = match signed.strip_prefix('-') {
-            Some(d) => (true, d),
-            None => (false, signed.strip_prefix('+').unwrap_or(signed)),
-        };
-        let digits = digits.trim_start_matches('0');
-        if digits.is_empty() {
-            return PyInt::small(0);
-        }
-        let text = if neg { format!("-{digits}") } else { digits.to_string() };
-        let v = text.parse().unwrap_or(if neg { i64::MIN } else { i64::MAX });
-        PyInt { v, text }
-    }
-}
-
-/// `int(x)` on a loaded value.
-fn int_of(v: &Value) -> Result<PyInt, Fault> {
-    match v {
-        Value::Bool(b) => Ok(PyInt::small(*b as i64)),
-        Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
-            (Some(i), _, _) => Ok(PyInt::small(i)),
-            (None, Some(u), _) => Ok(PyInt::of_digits(&u.to_string())),
-            // A float's integer part, exactly: `{:.0}` of a whole f64 prints every digit.
-            (_, _, Some(f)) if f.is_finite() => Ok(PyInt::of_digits(&format!("{:.0}", f.trunc()))),
-            _ => Err(Fault::Crash {
-                kind: "OverflowError",
-                msg: format!("cannot convert float {} to integer", py::repr(v)),
-            }),
-        },
-        Value::String(s) => {
-            // Python's int(): optional sign, ASCII digits, single underscores between digits.
-            let t = s.trim();
-            let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
-            let ok = digits.starts_with(|c: char| c.is_ascii_digit())
-                && digits.ends_with(|c: char| c.is_ascii_digit())
-                && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
-                && !digits.contains("__");
-            if ok {
-                Ok(PyInt::of_digits(&t.replace('_', "")))
-            } else {
-                Err(Fault::Value(format!("invalid literal for int() with base 10: {}", py::repr_str(s))))
-            }
-        }
-        other => Err(Fault::type_error(format!(
-            "int() argument must be a string, a bytes-like object or a real number, not '{}'",
-            type_name(other)
-        ))),
     }
 }
 
@@ -320,40 +251,19 @@ pub fn type_name(v: &Value) -> &'static str {
     }
 }
 
-/// Python hashes `v` here (a dict key or a set member, stored or looked up): a list or a mapping
-/// is unhashable, a `TypeError` the Python does not catch. `as_` is "dict key" or "set element".
-pub fn hashed(v: &Value, as_: &str) -> Result<(), Fault> {
-    match v {
-        Value::Array(_) | Value::Object(_) => {
-            let t = type_name(v);
-            Err(Fault::type_error(format!("cannot use '{t}' as a {as_} (unhashable type: '{t}')")))
-        }
-        _ => Ok(()),
-    }
+/// `int(sig.get(k) or default)`: the schema holds an integer field to a JSON integer within 64 bits.
+fn int_or(sig: &Map<String, Value>, k: &str, default: i64) -> i64 {
+    sig.get(k).and_then(Value::as_i64).filter(|v| *v != 0).unwrap_or(default)
 }
 
-/// `int(sig.get(k) or default)`.
-fn int_or(sig: &Map<String, Value>, k: &str, default: i64) -> Result<PyInt, Fault> {
-    match sig.get(k) {
-        v if py::truthy(v) => int_of(v.expect("truthy is present")),
-        _ => Ok(PyInt::small(default)),
-    }
+/// `v or []`, iterated: the schema holds every list field to a list (of strings) or null.
+fn items(v: Option<&Value>) -> &[Value] {
+    v.and_then(Value::as_array).map_or(&[], Vec::as_slice)
 }
 
-/// Iterating a loaded value as Python would (`for x in v`): a list's items, a string's
-/// characters, a mapping's keys. Anything else is a `TypeError`.
-pub fn iter_of(v: &Value) -> Result<Vec<Value>, Fault> {
-    match v {
-        Value::Array(a) => Ok(a.clone()),
-        Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
-        Value::Object(o) => Ok(o.keys().map(|k| Value::String(k.clone())).collect()),
-        other => Err(Fault::type_error(format!("'{}' object is not iterable", type_name(other)))),
-    }
-}
-
-/// `v or []`, iterated.
-fn iter_or_empty(v: Option<&Value>) -> Result<Vec<Value>, Fault> {
-    if py::truthy(v) { iter_of(v.expect("truthy is present")) } else { Ok(Vec::new()) }
+/// A string field the schema holds to a string or null: `v or None`.
+pub fn text(v: Option<&Value>) -> Option<&str> {
+    v.and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
 /// What a unit of work needs.
@@ -373,29 +283,20 @@ pub struct Assessment {
 /// `sig` keys as the Python takes them: kind, paths, est_loc, files, repos, public_api,
 /// one_way_door, spec, failed_attempts, observed_tier, allow_apex, mode.
 pub fn assess(sig: &Map<String, Value>, human_paths: &[String]) -> Result<Assessment, Fault> {
-    let kind_v = py::or(sig.get("kind"), None);
-    if let Some(v) = kind_v {
-        hashed(v, "set element")?;
-    }
-    let kind = match kind_v {
-        None => "implement".to_string(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => py::str_of(other),
-    };
+    crate::schema::signals("signals", sig)?;
+    let kind = text(sig.get("kind")).unwrap_or("implement");
     let known = |k: &str| MECHANICAL_KINDS.contains(&k) || WORK_KINDS.contains(&k) || FRONTIER_KINDS.contains(&k);
-    if !matches!(kind_v, None | Some(Value::String(_))) || !known(&kind) {
+    if !known(kind) {
         let mut all: Vec<&str> = MECHANICAL_KINDS.iter().chain(&WORK_KINDS).chain(&FRONTIER_KINDS).copied().collect();
         all.sort_unstable();
-        let shown = kind_v.map_or_else(|| py::repr_str(&kind), py::repr);
         let list = all.iter().map(|k| py::repr_str(k)).collect::<Vec<_>>().join(", ");
-        return Err(Fault::Value(format!("unknown kind {shown}; one of [{list}]")));
+        return Err(Fault::Value(format!("unknown kind {}; one of [{list}]", py::repr_str(kind))));
     }
-    let kind = kind.as_str();
-    let paths: Vec<String> = iter_or_empty(sig.get("paths"))?.iter().map(py::str_of).collect();
-    let loc = int_or(sig, "est_loc", 0)?.v;
-    let files = int_or(sig, "files", 0)?.v.max(paths.len() as i64);
+    let paths: Vec<String> = items(sig.get("paths")).iter().map(py::str_of).collect();
+    let loc = int_or(sig, "est_loc", 0);
+    let files = int_or(sig, "files", 0).max(paths.len() as i64);
     let code_files = paths.iter().filter(|p| !is_test_path(p)).count();
-    let repos = int_or(sig, "repos", 1)?;
+    let repos = int_or(sig, "repos", 1);
     let gov: Vec<&String> = paths.iter().filter(|p| is_governance(p, human_paths)).collect();
     let one_way = py::truthy(sig.get("one_way_door"));
     let public_api = py::truthy(sig.get("public_api"));
@@ -463,42 +364,32 @@ pub fn assess(sig: &Map<String, Value>, human_paths: &[String]) -> Result<Assess
             complexity = "bounded";
             reasons.push("bounded change: its done check verifies it".into());
         }
-        if repos.v > 1 {
+        if repos > 1 {
             author = Some(Tier::Frontier);
             needs.push("decompose");
-            reasons.push(format!("{} repos: a frontier plan splits it into one node per repo", repos.text));
+            reasons.push(format!("{repos} repos: a frontier plan splits it into one node per repo"));
         }
     }
 
-    if let Some(v) = sig.get("observed_tier") {
-        hashed(v, "dict key")?;
-    }
     if let Some(seen) = Tier::of(sig.get("observed_tier"))
         && seen > executor
     {
         reasons.push(format!("an earlier run raised to {}: that is the floor now", seen.as_str()));
         executor = seen;
     }
-    let failed = int_or(sig, "failed_attempts", 0)?;
-    if failed.v != 0 {
+    let failed = int_or(sig, "failed_attempts", 0);
+    if failed != 0 {
         let top = if py::truthy(sig.get("allow_apex")) { Tier::Apex } else { TOP_DEFAULT };
-        let raised = bump(executor, failed.v, top);
+        let raised = bump(executor, failed, top);
         reasons.push(format!(
-            "failed verification {}x, one rung each: {} -> {}",
-            failed.text,
+            "failed verification {failed}x, one rung each: {} -> {}",
             executor.as_str(),
             raised.as_str()
         ));
         executor = raised;
     }
     let mut thinking = thinking.unwrap_or(executor.rung().thinking);
-    if let Some(v) = sig.get("mode") {
-        hashed(v, "set element")?;
-    }
-    let mode = match sig.get("mode") {
-        Some(Value::String(m)) => Some(norm_mode(m)),
-        _ => None,
-    };
+    let mode = sig.get("mode").and_then(Value::as_str).map(norm_mode);
     if let Some(mode) = mode
         && SAVING_MODES.contains(&mode.as_str())
         && complexity != "governance"
@@ -615,11 +506,6 @@ pub struct Disk<'a> {
     pub policy_for: &'a dyn Fn(&str) -> Result<Vec<String>, Fault>,
 }
 
-/// A loaded value as a map key: `1` and `"1"` are different keys, as in Python.
-fn key(v: &Value) -> String {
-    format!("{}:{}", type_name(v), py::repr(v))
-}
-
 /// Errors in an agent graph (empty when it may be dispatched), and the resolved nodes.
 /// `Err` is a fault the Python does not catch.
 pub fn validate(
@@ -629,26 +515,18 @@ pub fn validate(
     dirs: Option<&[(String, String)]>,
     skip: &HashSet<String>,
 ) -> Result<(Vec<String>, Vec<PlanNode>), Fault> {
+    crate::schema::graph(graph)?;
     let mut errors: Vec<String> = Vec::new();
     let mut out = Vec::new();
     let get = |k: &str| graph.get(k);
-    let raw = iter_or_empty(get("nodes"))?;
+    let raw = items(get("nodes"));
     if raw.is_empty() {
         return Ok((vec!["graph has no nodes".into()], vec![]));
     }
-    let home = py::or(get("repo"), None).map_or_else(String::new, py::str_of);
-    // `set((graph.get("repos") or {}).keys())`: repos is a mapping or nothing.
-    let mut names: Vec<String> = match py::or(get("repos"), None) {
-        Some(Value::Object(o)) => o.keys().cloned().collect(),
-        Some(other) => {
-            return Err(Fault::attribute_error(format!("'{}' object has no attribute 'keys'", type_name(other))));
-        }
-        None => vec![],
-    };
-    // `... or {home}` and `home not in names`: the graph's repo is a set member.
-    if let Some(v) = py::or(get("repo"), None) {
-        hashed(v, "set element")?;
-    }
+    let home = text(get("repo")).unwrap_or("").to_string();
+    // `set((graph.get("repos") or {}).keys()) or {home}`.
+    let mut names: Vec<String> =
+        get("repos").and_then(Value::as_object).map(|o| o.keys().cloned().collect()).unwrap_or_default();
     if names.is_empty() {
         names.push(home.clone());
     }
@@ -661,41 +539,32 @@ pub fn validate(
         ));
     }
     // Insertion-ordered, a duplicate id keeping its first position and its last value (a dict).
+    // The schema holds every node to a mapping, its id and each dependency to a string.
     let mut order: Vec<(String, Value)> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
-    for n in &raw {
-        if !n.is_object() {
-            errors.push(format!("a node is not a mapping: {}", py::repr(n)));
+    for n in raw {
+        let Some(nid) = text(n.get("id")) else {
+            errors.push("a node has no id".into());
             continue;
-        }
-        let nid = match n.get("id") {
-            v if py::truthy(v) => v.expect("truthy is present").clone(),
-            _ => {
-                errors.push("a node has no id".into());
-                continue;
-            }
         };
-        hashed(&nid, "dict key")?;
-        let k = key(&nid);
-        if let Some(&i) = index.get(&k) {
-            errors.push(format!("{}: duplicate id", py::str_of(&nid)));
+        if let Some(&i) = index.get(nid) {
+            errors.push(format!("{nid}: duplicate id"));
             order[i].1 = n.clone();
         } else {
-            index.insert(k, order.len());
-            order.push((py::str_of(&nid), n.clone()));
+            index.insert(nid.to_string(), order.len());
+            order.push((nid.to_string(), n.clone()));
         }
     }
     let node = |i: usize| &order[i].1;
-    let deps_of = |i: usize| iter_or_empty(node(i).get("depends_on"));
+    let deps_of = |i: usize| items(node(i).get("depends_on")).iter().filter_map(Value::as_str);
     for (i, (nid, _)) in order.iter().enumerate() {
-        for d in deps_of(i)? {
-            hashed(&d, "dict key")?;
-            if !index.contains_key(&key(&d)) {
-                errors.push(format!("{nid}: depends on unknown node {}", py::repr(&d)));
+        for d in deps_of(i) {
+            if !index.contains_key(d) {
+                errors.push(format!("{nid}: depends on unknown node {}", py::repr_str(d)));
             }
         }
     }
-    if has_cycle(&order, &index)? {
+    if has_cycle(&order, &index) {
         errors.push("depends_on has a cycle".into());
     }
 
@@ -709,44 +578,19 @@ pub fn validate(
     }
     let mut resolved: Vec<Resolved> = Vec::new();
     for (i, (nid, n)) in order.iter().enumerate() {
-        if let Some(v) = py::or(n.get("repo"), None) {
-            hashed(v, "set element")?;
-        }
-        let here = py::or(n.get("repo"), None).map_or_else(|| home.clone(), py::str_of);
+        let here = text(n.get("repo")).map_or_else(|| home.clone(), str::to_string);
         if !names.contains(&here) {
-            // `{here!r}`: the node's own value as written (a number reprs without quotes).
-            let shown = py::or(n.get("repo"), None).map_or_else(|| py::repr_str(&here), py::repr);
-            errors.push(format!("{nid}: repo {shown} is not one the graph names"));
+            errors.push(format!("{nid}: repo {} is not one the graph names", py::repr_str(&here)));
             continue;
         }
-        let sig_v = py::or(n.get("signals"), None);
-        let sig = match sig_v {
-            None => Some(Map::new()),
-            Some(Value::Object(o)) => Some(o.clone()),
-            Some(_) => None,
-        };
-        let lists = [
-            ("inputs", n.get("inputs")),
-            ("produces", n.get("produces")),
-            ("depends_on", n.get("depends_on")),
-            ("signals.paths", sig.as_ref().and_then(|s| s.get("paths"))),
-        ];
-        let bad: Vec<&str> =
-            lists.iter().filter(|(_, v)| v.is_some_and(|v| !v.is_null() && !v.is_array())).map(|(k, _)| *k).collect();
-        let Some(mut sig) = sig.filter(|_| bad.is_empty()) else {
-            errors.push(if bad.is_empty() {
-                format!("{nid}: signals must be a mapping")
-            } else {
-                format!("{nid}: {} must be a list", bad.join(", "))
-            });
-            continue;
-        };
+        // The schema holds signals to a mapping and every list field to a list.
+        let mut sig = n.get("signals").and_then(Value::as_object).cloned().unwrap_or_default();
         let attempt = (|| -> Result<Resolved, Fault> {
             let spec = match sig.get("spec") {
                 v if py::truthy(v) => Some(ref_of(v.expect("truthy is present"), &here, &names, dirs)?),
                 _ => None,
             };
-            let own = iter_or_empty(sig.get("paths"))?
+            let own = items(sig.get("paths"))
                 .iter()
                 .map(|x| ref_of(x, &here, &names, dirs))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -759,7 +603,7 @@ pub fn validate(
             }
             sig.insert("paths".into(), Value::Array(own.iter().map(|r| Value::String(r.path.clone())).collect()));
             let refs = |k: &str| -> Result<Vec<Ref>, Fault> {
-                iter_or_empty(n.get(k))?.iter().map(|x| ref_of(x, &here, &names, dirs)).collect()
+                items(n.get(k)).iter().map(|x| ref_of(x, &here, &names, dirs)).collect()
             };
             Ok(Resolved {
                 i,
@@ -785,42 +629,35 @@ pub fn validate(
             produced_by.insert(p.clone(), r.i);
         }
     }
-    let upstream = |start: usize| -> Result<HashSet<usize>, Fault> {
+    let upstream = |start: usize| -> HashSet<usize> {
         let mut seen = HashSet::new();
         let mut stack = vec![start];
         while let Some(i) = stack.pop() {
-            for d in deps_of(i)? {
-                if let Some(&j) = index.get(&key(&d))
+            for d in deps_of(i) {
+                if let Some(&j) = index.get(d)
                     && seen.insert(j)
                 {
                     stack.push(j);
                 }
             }
         }
-        Ok(seen)
+        seen
     };
 
     for r in resolved {
         let (nid, n) = (&order[r.i].0, &order[r.i].1);
         let here = r.here.as_str();
-        let done_blank = |n: &Value| -> Result<bool, Fault> {
-            match py::or(n.get("done"), None) {
-                None => Ok(true),
-                Some(Value::String(s)) => Ok(s.trim().is_empty()),
-                Some(other) => {
-                    Err(Fault::attribute_error(format!("'{}' object has no attribute 'strip'", type_name(other))))
-                }
-            }
-        };
+        // `not (n.get("done") or "").strip()`: the schema holds done to a string.
+        let done_blank = |n: &Value| text(n.get("done")).is_none_or(|s| py::strip(s).is_empty());
         if skip.contains(nid) {
-            if done_blank(n)? {
+            if done_blank(n) {
                 errors.push(format!("{nid}: no done check"));
             }
             continue;
         }
         let mut sig = r.sig;
-        let kind = py::or(py::or(n.get("kind"), sig.get("kind")), None).cloned().unwrap_or(json!("implement"));
-        sig.insert("kind".into(), kind.clone());
+        let kind = text(n.get("kind")).or(text(sig.get("kind"))).unwrap_or("implement").to_string();
+        sig.insert("kind".into(), json!(kind));
         let mut spec = r.spec;
         if let Some(s) = &spec {
             if !is_spec_path(&s.path) {
@@ -829,7 +666,7 @@ pub fn validate(
                 errors.push(format!("{nid}: spec {} does not exist", s.show(here)));
             }
         } else {
-            let ups = upstream(r.i)?;
+            let ups = upstream(r.i);
             spec = r
                 .inputs
                 .iter()
@@ -854,14 +691,12 @@ pub fn validate(
             }
             Err(crash) => return Err(crash),
         };
-        let tier_v = py::or(n.get("tier"), None).cloned().unwrap_or(json!(a.executor));
-        hashed(&tier_v, "dict key")?;
-        let Some(tier) = Tier::of(Some(&tier_v)) else {
-            errors.push(format!("{nid}: unknown tier {}", py::repr(&tier_v)));
+        let tier_s = text(n.get("tier")).unwrap_or(a.executor.as_str());
+        let Some(tier) = Tier::parse(tier_s) else {
+            errors.push(format!("{nid}: unknown tier {}", py::repr_str(tier_s)));
             continue;
         };
-        let kind_s = py::str_of(&kind);
-        if kind == json!("review") && tier < Tier::Frontier {
+        if kind == "review" && tier < Tier::Frontier {
             errors.push(format!("{nid}: a reviewer runs at frontier or above, never {}", tier.as_str()));
         } else if tier < a.executor {
             errors.push(format!(
@@ -892,11 +727,10 @@ pub fn validate(
             let repos = sig.get("repos").map_or_else(|| "None".to_string(), py::str_of);
             errors.push(format!("{nid}: spans {repos} repos: split it into one node per repo"));
         }
-        if done_blank(n)? {
+        if done_blank(n) {
             errors.push(format!("{nid}: no done check"));
         }
-        let verify_v = py::or(n.get("verify"), None).cloned().unwrap_or(json!(a.verify));
-        hashed(&verify_v, "dict key")?;
+        let verify_v = json!(text(n.get("verify")).unwrap_or(a.verify));
         let strength = |v: &Value| VERIFY.iter().find(|(k, _)| Some(*k) == v.as_str()).map(|(_, s)| *s);
         match strength(&verify_v) {
             None => errors.push(format!("{nid}: unknown verify {}", py::repr(&verify_v))),
@@ -905,8 +739,7 @@ pub fn validate(
             }
             Some(_) => {}
         }
-        let spawn = py::or(n.get("spawn_default"), None).cloned().unwrap_or(json!(tier));
-        hashed(&spawn, "dict key")?;
+        let spawn = json!(text(n.get("spawn_default")).unwrap_or(tier.as_str()));
         if Tier::of(Some(&spawn)).is_none() {
             errors.push(format!("{nid}: unknown spawn_default {}", py::repr(&spawn)));
         }
@@ -919,7 +752,7 @@ pub fn validate(
                 py::repr(&thinking_v),
                 Thinking::ALL.map(Thinking::as_str).join(", ")
             )),
-            Some(t) if (a.complexity == "governance" || kind_s == "review") && t < a.thinking => errors.push(format!(
+            Some(t) if (a.complexity == "governance" || kind == "review") && t < a.thinking => errors.push(format!(
                 "{nid}: thinking {} is below {}, which governance and reviews keep",
                 t.as_str(),
                 a.thinking.as_str()
@@ -929,14 +762,14 @@ pub fn validate(
         out.push(PlanNode {
             id: n["id"].clone(),
             repo: here.to_string(),
-            kind: kind_s,
+            kind,
             tier,
             spawn_default: spawn,
             verify: verify_v,
             thinking: thinking_v,
             inputs: r.inputs.iter().map(|x| x.show(here)).collect(),
             input_refs: r.inputs,
-            depends_on: iter_or_empty(n.get("depends_on"))?,
+            depends_on: items(n.get("depends_on")).to_vec(),
             done: n.get("done").cloned().unwrap_or(Value::Null),
             assessment: a,
         });
@@ -945,36 +778,26 @@ pub fn validate(
 }
 
 /// Depth-first, in node order, as the Python's `_cycle`.
-fn has_cycle(order: &[(String, Value)], index: &HashMap<String, usize>) -> Result<bool, Fault> {
+fn has_cycle(order: &[(String, Value)], index: &HashMap<String, usize>) -> bool {
     let mut state = vec![0u8; order.len()];
-    fn visit(
-        i: usize,
-        order: &[(String, Value)],
-        index: &HashMap<String, usize>,
-        state: &mut [u8],
-    ) -> Result<bool, Fault> {
+    fn visit(i: usize, order: &[(String, Value)], index: &HashMap<String, usize>, state: &mut [u8]) -> bool {
         match state[i] {
-            1 => return Ok(true),
-            2 => return Ok(false),
+            1 => return true,
+            2 => return false,
             _ => {}
         }
         state[i] = 1;
-        for d in iter_or_empty(order[i].1.get("depends_on"))? {
-            if let Some(&j) = index.get(&key(&d))
-                && visit(j, order, index, state)?
+        for d in items(order[i].1.get("depends_on")).iter().filter_map(Value::as_str) {
+            if let Some(&j) = index.get(d)
+                && visit(j, order, index, state)
             {
-                return Ok(true);
+                return true;
             }
         }
         state[i] = 2;
-        Ok(false)
+        false
     }
-    for i in 0..order.len() {
-        if visit(i, order, index, &mut state)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    (0..order.len()).any(|i| visit(i, order, index, &mut state))
 }
 
 /// What `brief_block` prints for one node: its tier, children's tier, thinking, verify, done, inputs.
@@ -1047,26 +870,16 @@ pub fn brief_block(node: &BriefNode, ticket: Option<&str>) -> String {
     lines.join("\n")
 }
 
-/// The `path_touched` of every require_human rule in a loaded `.control/policy.yaml`.
-/// `Fault::Value` means the policy is unreadable (classification must not go on without it);
-/// `Fault::Crash` is the Python's uncaught error on rules that are not iterable.
+/// The `path_touched` of every require_human rule in a loaded `.control/policy.yaml`. A policy
+/// outside the schema is `Fault::Refused`; the CLI reads any fault as unreadable, so
+/// classification fails closed.
 pub fn require_human_paths(policy: &Value) -> Result<Vec<String>, Fault> {
-    let empty = json!({});
-    let data = py::or(Some(policy), Some(&empty)).expect("or has a fallback");
-    let Value::Object(data) = data else {
-        return Err(Fault::Value(format!("'{}' object has no attribute 'get'", type_name(data))));
-    };
-    let am = match py::or(data.get("auto_merge"), None) {
-        None => return Ok(vec![]),
-        Some(Value::Object(o)) => o,
-        Some(other) => return Err(Fault::Value(format!("'{}' object has no attribute 'get'", type_name(other)))),
-    };
-    Ok(iter_or_empty(am.get("rules"))?
+    crate::schema::policy(policy)?;
+    let rules = policy.get("auto_merge").and_then(|am| am.get("rules"));
+    Ok(items(rules)
         .iter()
-        .filter(|r| {
-            r.is_object() && r.get("action") == Some(&json!("require_human")) && py::truthy(r.get("path_touched"))
-        })
-        .map(|r| py::str_of(&r["path_touched"]))
+        .filter(|r| r.get("action") == Some(&json!("require_human")))
+        .filter_map(|r| text(r.get("path_touched")).map(str::to_string))
         .collect())
 }
 

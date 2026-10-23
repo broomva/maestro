@@ -1,5 +1,5 @@
 //! `maestro delegation plan` binds a graph's repos as the workspace's delegation.py does: a
-//! `repos` that is not a mapping stops the run (the Python's AttributeError, exit 1), it never
+//! `repos` that is not a mapping stops the run (outside the schema, exit 1), it never
 //! falls back to a single-repo graph and dispatches.
 
 use std::process::Command;
@@ -24,7 +24,7 @@ fn a_repos_list_is_refused_not_planned() {
     let out = plan(dir.path(), &format!("repo: w\nrepos: [w]\n{NODES}"));
     assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stdout));
     assert!(out.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("AttributeError: 'list' object has no attribute 'items'"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("graph.repos: a mapping, not a list"));
 }
 
 #[test]
@@ -91,7 +91,13 @@ fn the_cli_matches_the_python_clis() {
         let stderr = String::from_utf8_lossy(&out.stderr).replace(&root_s, "{ROOT}");
         let want = &c["want"];
         let want_code = want["code"].as_i64().map(|c| c as i32);
-        let ok = if want["crash"].as_bool().unwrap() {
+        let ok = if want["refused"].as_bool() == Some(true) {
+            // Outside the schema: refused, naming the field (the golden's stderr).
+            code == Some(1)
+                && stdout.is_empty()
+                && stderr.contains(&format!("{}: ", want["stderr"].as_str().unwrap()))
+                && stderr.contains(maestro_core::schema::OUTSIDE)
+        } else if want["crash"].as_bool().unwrap() {
             code == Some(1)
                 && stderr.contains(&format!("\n  {}: ", want["stderr"].as_str().unwrap()))
                 && stdout == want["stdout"].as_str().unwrap()
@@ -151,6 +157,16 @@ fn yaml_outside_the_subset_is_refused() {
         ("x: &x {done: t}\nnodes:\n  - {id: a, signals: {paths: [a.rs]}}\n", "an anchor"),
         ("x: &a {id: a, done: t}\nnodes:\n  - *a\n", "an anchor"),
         ("nodes:\n  - {<<: {kind: review}, id: r, done: t, tier: standard}\n", "a merge key"),
+        // YAML 1.1 (PyYAML) and 1.2 (serde_yaml) read these plain scalars differently.
+        ("nodes:\n  - {id: a, done: yes}\n", "a plain scalar 'yes'"),
+        ("nodes:\n  - {id: a, done: t, signals: {est_loc: 0250}}\n", "a plain scalar '0250'"),
+        ("nodes:\n  - {id: a, done: t, signals: {est_loc: 1e3}}\n", "a plain scalar '1e3'"),
+        ("nodes:\n  - {id: a, done: 2026-10-23}\n", "a plain scalar '2026-10-23'"),
+        ("nodes:\n  - {id: 1:20, done: t}\n", "a plain scalar '1:20'"),
+        ("repos: {7: .}\nnodes:\n  - {id: a, done: t}\n", "a mapping key '7' that is not a string"),
+        // Inside the YAML subset, outside the schema: refused naming the field.
+        ("nodes:\n  - {id: 1, done: t}\n", "graph.nodes[0].id: a string, not an integer"),
+        ("nodes:\n  - {id: a, done: t, signals: {est_loc: '300'}}\n", "graph.nodes[0].signals.est_loc"),
     ] {
         let out = plan(dir.path(), graph);
         let err = String::from_utf8_lossy(&out.stderr);
@@ -180,7 +196,8 @@ fn malformed_usage_is_refused_not_read_as_capacity() {
     let dir = tempfile::tempdir().unwrap();
     let tiny = ACTIVE.replace(r#""sevenDayUtil":10"#, r#""sevenDayUtil":0.000001"#).replace("2026-10-28", "2026-10-29");
     for (usage, why) in [
-        (format!("[{ACTIVE},null]"), "AttributeError"),
+        (format!("[{ACTIVE},null]"), "usage[1]: a mapping, not null (outside the schema"),
+        (format!("[{}]", ACTIVE.replace("10,", "100000000000000000000,")), "does not fit 64 bits"),
         (format!("[{tiny}]"), "OverflowError: date value out of range"),
         (format!("{{\"a\": {ACTIVE}}}"), "--usage is a dict, not a list of rows"),
     ] {

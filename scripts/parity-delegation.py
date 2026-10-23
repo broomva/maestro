@@ -37,6 +37,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLDEN = os.path.join(REPO, "fixtures", "delegation", "golden.json")
 CLI_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "cli-golden.json")
 TIERS_REV = os.path.join(REPO, "fixtures", "delegation", "tiers-rev")
+YAML11_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "yaml11-golden.json")
 PROVIDER_MANAGER = os.path.expanduser("~/.claude/skills/provider-manager/scripts/provider_manager.py")
 
 failures: list[str] = []
@@ -61,9 +62,179 @@ def load(ws, rev, name, tmp):
     return mod, path
 
 
+# --- the schema the ports read exactly (crates/core/src/schema.rs), read independently ------------
+# Outside it Maestro refuses before any rule runs, naming the field; the golden then holds that
+# refusal instead of the Python's output. Named fields in the listed order, mappings with arbitrary
+# keys in sorted order, lists in order: the first refusal names the same field in both readers.
+def _is_int(v):
+    return type(v) is int and -2**63 <= v < 2**63
+
+
+TY = {
+    "str": lambda v: v is None or type(v) is str,
+    "int": lambda v: v is None or _is_int(v),
+    "num": lambda v: v is None or type(v) in (int, float),
+    "num!": lambda v: type(v) in (int, float),
+    "bool": lambda v: v is None or type(v) is bool,
+    "time": lambda v: v is None or type(v) in (str, int, float),
+}
+SIGNALS = [("kind", "str"), ("paths", "strs"), ("est_loc", "int"), ("files", "int"), ("repos", "int"),
+           ("public_api", "bool"), ("one_way_door", "bool"), ("spec", "str"), ("failed_attempts", "int"),
+           ("observed_tier", "str"), ("allow_apex", "bool"), ("mode", "str")]
+NODE = [("id", "str"), ("kind", "str"), ("repo", "str"), ("done", "str"), ("tier", "str"), ("verify", "str"),
+        ("thinking", "str"), ("spawn_default", "str"), ("reason", "str"), ("inputs", "strs"),
+        ("produces", "strs"), ("depends_on", "strs")]
+USAGE = [("id", "str"), ("email", "str"), ("fiveHourUtil", "num"), ("sevenDayUtil", "num"),
+         ("fiveHourResetsAt", "time"), ("sevenDayResetsAt", "time"), ("numbersAgeSeconds", "num"),
+         ("isActive", "bool"), ("isRateLimited", "bool"), ("stale", "bool"), ("needsLogin", "bool"),
+         ("hasStoredCredentials", "bool")]
+ACCOUNT = [("5h", "num"), ("7d", "num"), ("reset_5h", "time"), ("reset_7d", "time"), ("age_s", "num"),
+           ("active", "bool"), ("limited", "bool"), ("stale", "bool"), ("needs_login", "bool")]
+TIER_ROW = [("runs", "int"), ("raisedRuns", "int"), ("approved", "int"), ("raises", "int"),
+            ("escalations", "int"), ("unmeasured", "int"), ("firstPass", "num"), ("tokensPerApproved", "num")]
+
+
+class Refused(Exception):
+    pass
+
+
+def _fields(at, m, spec):
+    for k, ty in spec:
+        if k not in m:
+            continue
+        v = m[k]
+        if ty == "strs":
+            if v is None:
+                continue
+            if type(v) is not list:
+                raise Refused(f"{at}.{k}")
+            for i, x in enumerate(v):
+                if type(x) is not str:
+                    raise Refused(f"{at}.{k}[{i}]")
+        elif not TY[ty](v):
+            raise Refused(f"{at}.{k}")
+
+
+def _mapping(at, v):
+    if v is None:
+        return None
+    if type(v) is not dict:
+        raise Refused(at)
+    return v
+
+
+def _list(at, v):
+    if v is None:
+        return []
+    if type(v) is not list:
+        raise Refused(at)
+    return v
+
+
+def _graph(g):
+    if type(g) is not dict:
+        raise Refused("graph")
+    _fields("graph", g, [("repo", "str")])
+    for name, r in sorted((_mapping("graph.repos", g.get("repos")) or {}).items()):
+        if type(r) is dict:
+            _fields(f"graph.repos.{name}", r, [("path", "str"), ("policy", "str")])
+        elif r is not None and type(r) is not str:
+            raise Refused(f"graph.repos.{name}")
+    for i, n in enumerate(_list("graph.nodes", g.get("nodes"))):
+        if type(n) is not dict:
+            raise Refused(f"graph.nodes[{i}]")
+        _fields(f"graph.nodes[{i}]", n, NODE)
+        sig = _mapping(f"graph.nodes[{i}].signals", n.get("signals"))
+        if sig is not None:
+            _fields(f"graph.nodes[{i}].signals", sig, SIGNALS)
+
+
+def _usage(rows):
+    for i, r in enumerate(rows):
+        if type(r) is not dict:
+            raise Refused(f"usage[{i}]")
+        _fields(f"usage[{i}]", r, USAGE)
+
+
+def _samples(samples):
+    for i, s in enumerate(samples):
+        if type(s) is not dict:
+            raise Refused(f"samples[{i}]")
+        _fields(f"samples[{i}]", s, [("at", "time")])
+        for name, acc in sorted((_mapping(f"samples[{i}].accounts", s.get("accounts")) or {}).items()):
+            acc = _mapping(f"samples[{i}].accounts.{name}", acc)
+            if acc is not None:
+                _fields(f"samples[{i}].accounts.{name}", acc, ACCOUNT)
+
+
+def _state(st):
+    vg = _mapping("state.versionGate", st.get("versionGate"))
+    if vg is not None:
+        _fields("state.versionGate", vg, [("automaticSwitching", "str")])
+    cfg = _mapping("state.config", st.get("config"))
+    if cfg is not None:
+        _fields("state.config", cfg, [("autoBalance", "bool"), ("staleNumbersMinutes", "num!"),
+                                      ("standbyMax", "num!"), ("standbyWeeklyMax", "num!")])
+    _fields("state", st, [("holdUntil", "time")])
+    for i, p in enumerate(_list("state.pendingSignals", st.get("pendingSignals"))):
+        if type(p) is not dict:
+            raise Refused(f"state.pendingSignals[{i}]")
+        _fields(f"state.pendingSignals[{i}]", p, [("at", "num")])
+    for pid, p in sorted((_mapping("state.probes", st.get("probes")) or {}).items()):
+        if type(p) is not dict:
+            raise Refused(f"state.probes.{pid}")
+        _fields(f"state.probes.{pid}", p, [("result", "str"), ("at", "num")])
+
+
+def _tiers(data):
+    data = _mapping("data", data)
+    tiers = _mapping("data.tiers", (data or {}).get("tiers"))
+    for t, v in sorted((tiers or {}).items()):
+        v = _mapping(f"data.tiers.{t}", v)
+        if v is not None:
+            _fields(f"data.tiers.{t}", v, TIER_ROW)
+
+
+def _policy(p):
+    p = _mapping("policy", p)
+    am = _mapping("policy.auto_merge", (p or {}).get("auto_merge"))
+    for i, r in enumerate(_list("policy.auto_merge.rules", (am or {}).get("rules"))):
+        if type(r) is not dict:
+            raise Refused(f"policy.auto_merge.rules[{i}]")
+        _fields(f"policy.auto_merge.rules[{i}]", r, [("action", "str"), ("path_touched", "str")])
+
+
+def refusal(case):
+    """The field Maestro refuses in this case, or None when the case is inside the schema."""
+    fn, a = case["fn"], case["args"]
+    try:
+        if fn == "assess":
+            _fields("signals", a["sig"], SIGNALS)
+        elif fn in ("validate", "validate_disk", "brief"):
+            _graph(a["graph"])
+        elif fn in ("capacity", "resume_gate", "gate_bounds"):
+            if type(a.get("state")) is dict:
+                _state(a["state"])
+                _usage(a["usage"])
+            if fn != "gate_bounds":
+                _usage(a["usage"])
+            if fn == "capacity":
+                _samples(a["samples"])
+        elif fn == "tier_signals":
+            _tiers(a["data"])
+        elif fn == "require_human_paths":
+            _policy(a["policy"])
+    except Refused as r:
+        return str(r)
+    return None
+
+
 # --- the Python side of each case ----------------------------------------------------------------
 def py_eval(D, E, case, tmp):
     fn, a = case["fn"], case["args"]
+    field = refusal(case)
+    if field is not None:
+        return {"refused": field}
     try:
         if fn == "assess":
             return {"ok": D.assess(dict(a["sig"]), a.get("human_paths") or [])}
@@ -166,7 +337,9 @@ HUMAN = [[], ["scripts/*-hook.sh", "deploy/"]]
 
 
 def assess_cases(rng):
-    dims = {"kind": KINDS, "paths": PATH_SETS, "est_loc": [None, 0, 150, 200, 201, "300", " 1_000 ", "abc", 3.7, True],
+    # The random mixtures stay inside the schema (integer counts); the single-dimension pass also
+    # gives est_loc values outside it, which are refused (the type cases cover every field).
+    dims = {"kind": KINDS, "paths": PATH_SETS, "est_loc": [None, 0, 150, 200, 201, 300, 1000, -5, 2**62],
             "files": [None, 0, 1, 2, 5], "repos": [None, 1, 2, 3], "public_api": [False, True],
             "one_way_door": [False, True], "spec": [None, "docs/specs/x.html"], "failed_attempts": [0, 1, 2, 3, -1],
             "observed_tier": [None, "mechanical", "standard", "frontier", "apex", "bogus"],
@@ -178,6 +351,8 @@ def assess_cases(rng):
         for v in values:
             for h in HUMAN:
                 cases.append({"sig": {**base, k: v}, "human_paths": h})
+    for v in ["300", " 1_000 ", "abc", 3.7, True]:
+        cases.append({"sig": {**base, "est_loc": v}, "human_paths": []})
     for _ in range(600):  # and random mixtures of all of them
         sig = {k: rng.choice(v) for k, v in dims.items() if rng.random() < 0.8}
         cases.append({"sig": sig, "human_paths": rng.choice(HUMAN)})
@@ -758,6 +933,55 @@ def build_layout(layout, root):
         os.symlink(os.path.join(root, target), os.path.join(root, link))
 
 
+SCHEMA_OUTSIDE = "outside the schema Maestro reads exactly"
+
+
+def cli_refusal(c, layout):
+    """The field Maestro's CLI refuses for a scenario whose JSON input is outside the schema, or None."""
+    rel = next((x.replace(R + "/", "") for x in c["rs"] if x.startswith(R + "/") and x.endswith(".json")), None)
+    if rel is None or rel not in layout["files"]:
+        return None
+    data = json.loads(layout["files"][rel])
+    if c["tool"] == "economy":
+        return refusal({"fn": "tier_signals", "args": {"data": data}})
+    return refusal({"fn": "validate", "args": {"graph": data}}) if type(data) is dict else None
+
+
+def yaml11_golden(write):
+    """PyYAML's implicit resolver on plain scalars: the YAML 1.1 reading the CLI's subset check ports
+    (crates/cli/src/port.rs, `yaml11`), held to this golden by its unit test."""
+    import yaml
+    r = yaml.resolver.Resolver()
+    fixed = ["yes", "Yes", "YES", "yEs", "no", "No", "on", "ON", "off", "Off", "y", "n", "Y", "N", "true", "True",
+             "TRUE", "tRue", "false", "~", "null", "Null", "NULL", "nULL", "", "<<", "=", "0", "-0", "+0", "00", "0250",
+             "0o17", "0b101", "0b", "0x1F", "0x", "0x_f", "1_000", "1__0", "_1", "1_", "190:20:30", "1:20", "1:60",
+             "1:5", "0:20", "-1:20", "1.5", "1.", ".5", "._5", "1.5e3", "1.5e+3", "1.5E-3", "1e3", "1e+3", "1.0e",
+             "1.0e+", ".inf", "-.inf", "+.Inf", ".INF", "inf", ".nan", "-.nan", ".NaN", "nan", "1:20.5", "1:20.",
+             "2026-10-23", "2026-1-2", "2026-10-23T12:00:00Z", "2026-10-23t12:00:00", "2026-10-23 12:00:00",
+             "2026-10-23  1:00:00.5 -5", "2026-10-23T12:00:00+05:30", "2026-10-23T12:00:00 Z",
+             "2026-10-23T12:00:00+5", "2026-10-23T12:00", "2026-10-23x", "20261023", "12:00:00", "make test",
+             "-x", "1.2.3", "v1.0", "0.51.0", "+", "-", ".", "+.", "9223372036854775808", "-9223372036854775809",
+             "123456789012345678901234567890", "1e400", "1.0e400", "0x" + "f" * 20]
+    rng = random.Random(1111)
+    alphabet = "0123456789_:.-+eExXbBoOT Z" + "aefinyNOtrsl"
+    rand = ["".join(rng.choice(alphabet) for _ in range(rng.randint(1, 12))) for _ in range(4000)]
+    tokens = ["0", "1", "7", "9", "_", ":", "5", "59", ".", "e", "E", "+", "-", "x", "b", "f", "2026", "-10", "-1",
+              "-23", "T", "t", "12:00:00", ":30", " ", "\t", "Z", "inf", "nan", "NaN"]
+    rand += ["".join(rng.choice(tokens) for _ in range(rng.randint(1, 6))).strip() for _ in range(4000)]
+    cases = []
+    for s in dict.fromkeys(fixed + rand):
+        tag = r.resolve(yaml.ScalarNode, s, (True, False)).rsplit(":", 1)[-1]
+        cases.append([s, tag])
+    text = "[\n" + ",\n".join(json.dumps(c) for c in cases) + "\n]\n"
+    if write:
+        with open(YAML11_GOLDEN, "w") as f:
+            f.write(text)
+    else:
+        check("yaml11 golden", os.path.isfile(YAML11_GOLDEN) and open(YAML11_GOLDEN).read() == text,
+              f"{YAML11_GOLDEN} is not PyYAML's resolver output: rerun with --write and review the diff")
+    return len(cases)
+
+
 def cli_scenarios(dpy, fpy, maestro, tmp, write):
     root = os.path.join(tmp, "repos")
     layout, cases = cli_layout(), cli_cases()
@@ -767,6 +991,13 @@ def cli_scenarios(dpy, fpy, maestro, tmp, write):
     for c in cases:
         script = dpy if c["tool"] == "delegation" else fpy
         cwd = os.path.join(root, c["cwd"])
+        field = cli_refusal(c, layout)
+        if field is not None:  # outside the schema: Maestro refuses, naming the field; the Python is not compared
+            rc, ro, re_ = run([maestro, *sub(c["rs"])], cwd)
+            check(f"cli {c['name']}", rc == 1 and ro == "" and f"{field}: " in re_ and SCHEMA_OUTSIDE in re_,
+                  f"want a refusal of {field}; rust exit {rc}: {re_[:300]}")
+            out.append({**c, "want": {"code": 1, "stdout": "", "stderr": field, "crash": False, "refused": True}})
+            continue
         compare_cli(f"cli {c['name']}", ["python3", script, *sub(c["py"])], [maestro, *sub(c["rs"])], cwd,
                     parse_json=c["json"])
         code, po, pe = run(["python3", script, *sub(c["py"])], cwd)
@@ -899,6 +1130,9 @@ def main(argv=None):
             by_fn[c["fn"]] = by_fn.get(c["fn"], 0) + 1
         print(f"cases     {len(cases) - len(bad)} of {len(cases)} agree ("
               + ", ".join(f"{k} {v}" for k, v in sorted(by_fn.items())) + ")")
+        refused = sum(1 for w in want if "refused" in w)
+        print(f"schema    {refused} cases outside the schema, refused naming the same field; "
+              f"{len(cases) - refused} compared with the Python")
         before = len(failures)
         graphs = real_graphs(ws, dpy, maestro)
         print(f"graphs    {graphs} real plan graphs: plan, plan --json, brief per node "
@@ -908,6 +1142,8 @@ def main(argv=None):
         codes = {c: cli_runs.count(c) for c in sorted(set(cli_runs))}
         print(f"cli       {n_cli} golden cases; {len(cli_runs)} invocations of both CLIs (by exit code {codes}) "
               + ("agree" if len(failures) == before else "DIFFER"))
+        print(f"yaml11    {yaml11_golden(a.write)} plain scalars: PyYAML's resolver golden "
+              + ("written" if a.write else "checked"))
         live_capacity(E, maestro)
         # The forecast's timedelta, densely: 100,000 random runways to the microsecond.
         rng = random.Random()

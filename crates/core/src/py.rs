@@ -21,6 +21,16 @@ pub fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
+/// `str.isspace()`: Rust's White_Space and the four separators U+001C..U+001F Python adds.
+pub fn is_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// `str.strip()` with no argument.
+pub fn strip(s: &str) -> &str {
+    s.trim_matches(is_space)
+}
+
 /// `a or b` on loaded values: `a` when truthy, else `b`.
 pub fn or<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
     if truthy(a) { a } else { b }

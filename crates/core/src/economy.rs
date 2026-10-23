@@ -92,7 +92,7 @@ pub fn parse_ts(v: Option<&Value>) -> Result<Option<i64>, Fault> {
         }
         Some(other) => {
             let s = py::str_of(other);
-            let t = s.trim().replace('Z', "+00:00");
+            let t = py::strip(&s).replace('Z', "+00:00");
             from_iso(&t).map(Some).map_err(Fault::Value)
         }
     }
@@ -268,11 +268,9 @@ pub type Accounts = Vec<(String, Map<String, Value>)>;
 /// `sample_from_usage`: one cache line from the usage rows, per account (email local part).
 /// A repeated name keeps its first position and its last row, as a Python dict does.
 pub fn sample_from_usage(rows: &[Value], now: i64) -> Result<(Value, Accounts), Fault> {
+    crate::schema::usage(rows)?;
     let mut accounts: Accounts = Vec::new();
     for a in rows {
-        if !a.is_object() {
-            return Err(attribute_error(a));
-        }
         let name = py::str_of(a.get("email").unwrap_or(&json!("?")));
         let name = name.split('@').next().unwrap_or("").to_string();
         let raw = |k: &str| a.get(k).cloned().unwrap_or(Value::Null);
@@ -308,24 +306,12 @@ fn same_window(a: Option<&Value>, b: Option<&Value>) -> Result<bool, Fault> {
 
 /// 7d percentage points per hour for one account over the last `WINDOW_H`, or none. Only the
 /// current window counts: a different reset stamp, or a utilization drop, starts a new segment.
-pub fn burn_rate(samples: &[Value], account: &str, now: i64) -> Result<Option<f64>, Fault> {
+/// The samples are inside the schema (`forecast` checks them).
+fn burn_rate(samples: &[Value], account: &str, now: i64) -> Result<Option<f64>, Fault> {
     let mut pts: Vec<(i64, f64, Option<Value>)> = Vec::new();
     for s in samples {
-        if !s.is_object() {
-            return Err(attribute_error(s));
-        }
         let at = parse_ts(s.get("at"))?;
-        let v = match py::or(s.get("accounts"), None) {
-            None => None,
-            Some(a @ Value::Object(_)) => py::or(a.get(account), None),
-            Some(other) => return Err(attribute_error(other)),
-        };
-        if let Some(v) = v
-            && at.is_some()
-            && !v.is_object()
-        {
-            return Err(attribute_error(v));
-        }
+        let v = s.get("accounts").and_then(|a| a.get(account)).filter(|v| v.is_object());
         let field = |k: &str| v.and_then(|v| v.get(k));
         let (Some(at), Some(seven)) = (at, py::num(field("7d"))) else { continue };
         if py::truthy(field("stale")) {
@@ -474,50 +460,19 @@ pub fn readiness(accounts: &Accounts, now: i64, gate: &Gate) -> Result<Map<Strin
 }
 
 /// `float(x)` on a loaded value: a number, a bool, or a string Python's float reads.
-fn py_float(v: &Value) -> Result<f64, Fault> {
-    match v {
-        Value::Number(n) => Ok(n.as_f64().unwrap_or(f64::NAN)),
-        Value::Bool(b) => Ok(*b as i64 as f64),
-        Value::String(s) => {
-            let t = s.trim();
-            let bytes = t.as_bytes();
-            // An underscore only between two digits, as in a Python literal.
-            let underscores_ok = bytes.iter().enumerate().all(|(i, b)| {
-                *b != b'_'
-                    || (i > 0 && i + 1 < bytes.len() && bytes[i - 1].is_ascii_digit() && bytes[i + 1].is_ascii_digit())
-            });
-            let parsed = underscores_ok.then(|| t.replace('_', "").parse::<f64>().ok()).flatten();
-            parsed.ok_or_else(|| Fault::Value(format!("could not convert string to float: {}", py::repr_str(s))))
-        }
-        other => Err(Fault::Crash {
-            kind: "TypeError",
-            msg: format!(
-                "float() argument must be a string or a real number, not {}",
-                crate::delegation::type_name(other)
-            ),
-        }),
-    }
+/// `float(v)` on a value the schema holds to a number.
+fn py_float(v: &Value) -> f64 {
+    v.as_f64().unwrap_or(f64::NAN)
 }
 
-fn attribute_error(v: &Value) -> Fault {
-    Fault::Crash {
-        kind: "AttributeError",
-        msg: format!("{} object has no attribute 'get'", crate::delegation::type_name(v)),
-    }
-}
-
-/// `x or {}` then `.get`: a falsy value reads as an empty dict; any other non-dict crashes.
-fn as_dict<'a>(v: Option<&'a Value>, empty: &'a Map<String, Value>) -> Result<&'a Map<String, Value>, Fault> {
-    match py::or(v, None) {
-        None => Ok(empty),
-        Some(Value::Object(m)) => Ok(m),
-        Some(other) => Err(attribute_error(other)),
-    }
+/// `x or {}` then `.get`: the schema holds `x` to a mapping or null.
+fn as_dict<'a>(v: Option<&'a Value>, empty: &'a Map<String, Value>) -> &'a Map<String, Value> {
+    v.and_then(Value::as_object).unwrap_or(empty)
 }
 
 /// `float(p.get("at") or 0)`.
-fn at_seconds(p: &Map<String, Value>) -> Result<f64, Fault> {
-    py::or(p.get("at"), None).map_or(Ok(0.0), py_float)
+fn at_seconds(p: &Map<String, Value>) -> f64 {
+    py::or(p.get("at"), None).map_or(0.0, py_float)
 }
 
 /// `gate_bounds()`: readiness()'s bounds from `provider_manager.py --json state` and the usage
@@ -525,46 +480,22 @@ fn at_seconds(p: &Map<String, Value>) -> Result<f64, Fault> {
 /// its own: the version gate verified, autoBalance on, no hold in force, and no StopFailure report
 /// pending. A standby a probe found limited within the balancer's hour is no failover target.
 pub fn gate_bounds(state: &Map<String, Value>, now: i64, rows: &[Value]) -> Result<Gate, Fault> {
+    crate::schema::state(state)?;
+    crate::schema::usage(rows)?;
     let empty = Map::new();
     let now_s = now as f64 / 1e6;
-    let cfg = py::or(state.get("config"), None);
+    let cfg = as_dict(state.get("config"), &empty);
     let hold = parse_ts(py::or(state.get("holdUntil"), None))?;
     // A pending StopFailure report the balancer has not resolved: its switch has not happened.
-    let mut pending = false;
-    match py::or(state.get("pendingSignals"), None) {
-        None => {}
-        Some(Value::Array(signals)) => {
-            for p in signals {
-                let Value::Object(p) = p else { return Err(attribute_error(p)) };
-                if now_s - at_seconds(p)? < SIGNAL_TTL_S {
-                    pending = true;
-                    break;
-                }
-            }
-        }
-        Some(v @ (Value::Object(_) | Value::String(_))) => return Err(attribute_error(v)),
-        Some(v) => {
-            return Err(Fault::Crash {
-                kind: "TypeError",
-                msg: format!("{} object is not iterable", crate::delegation::type_name(v)),
-            });
-        }
-    }
-    let switching = as_dict(state.get("versionGate"), &empty)?.get("automaticSwitching") == Some(&json!("on"));
-    let failover = switching
-        && as_dict(cfg, &empty)?.get("autoBalance") == Some(&Value::Bool(true))
-        && !hold.is_some_and(|h| h > now)
-        && !pending;
-    let mut names: Vec<(Value, String)> = Vec::new();
+    let signals = state.get("pendingSignals").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    let pending = signals.iter().filter_map(Value::as_object).any(|p| now_s - at_seconds(p) < SIGNAL_TTL_S);
+    let switching = as_dict(state.get("versionGate"), &empty).get("automaticSwitching") == Some(&json!("on"));
+    let failover =
+        switching && cfg.get("autoBalance") == Some(&Value::Bool(true)) && !hold.is_some_and(|h| h > now) && !pending;
+    // id -> account name, a repeated id keeping its last row (a dict).
+    let mut names: Vec<(Option<&str>, String)> = Vec::new();
     for a in rows {
-        let Value::Object(a) = a else { return Err(attribute_error(a)) };
-        let id = a.get("id").cloned().unwrap_or(Value::Null);
-        if matches!(id, Value::Array(_) | Value::Object(_)) {
-            return Err(Fault::Crash {
-                kind: "TypeError",
-                msg: format!("unhashable type: {}", crate::delegation::type_name(&id)),
-            });
-        }
+        let id = a.get("id").and_then(Value::as_str);
         let name = py::str_of(a.get("email").unwrap_or(&json!("?")));
         let name = name.split('@').next().unwrap_or("").to_string();
         match names.iter_mut().find(|(i, _)| *i == id) {
@@ -573,21 +504,20 @@ pub fn gate_bounds(state: &Map<String, Value>, now: i64, rows: &[Value]) -> Resu
         }
     }
     let mut held = Vec::new();
-    for (i, p) in as_dict(state.get("probes"), &empty)? {
-        let Some((_, name)) = names.iter().find(|(id, _)| id.as_str() == Some(i)) else { continue };
-        let Value::Object(p) = p else { return Err(attribute_error(p)) };
-        if p.get("result") == Some(&json!("limited")) && now_s - at_seconds(p)? < PROBE_HOLD_S {
+    for (i, p) in as_dict(state.get("probes"), &empty) {
+        let Some((_, name)) = names.iter().find(|(id, _)| *id == Some(i.as_str())) else { continue };
+        let p = p.as_object().expect("the schema holds a probe to a mapping");
+        if p.get("result") == Some(&json!("limited")) && now_s - at_seconds(p) < PROBE_HOLD_S {
             held.push(name.clone());
         }
     }
     held.sort();
-    let cfg = as_dict(cfg, &empty)?;
-    let bound = |k: &str, default: f64| cfg.get(k).map_or(Ok(default), py_float);
+    let bound = |k: &str, default: f64| cfg.get(k).map_or(default, py_float);
     Ok(Gate {
         failover,
-        stale_ok_min: bound("staleNumbersMinutes", STALE_OK_MIN)?,
-        standby_max: bound("standbyMax", STANDBY_MAX_5H)?,
-        standby_weekly_max: bound("standbyWeeklyMax", LIMIT_7D)?,
+        stale_ok_min: bound("staleNumbersMinutes", STALE_OK_MIN),
+        standby_max: bound("standbyMax", STANDBY_MAX_5H),
+        standby_weekly_max: bound("standbyWeeklyMax", LIMIT_7D),
         held,
     })
 }
@@ -640,6 +570,7 @@ fn usable(v: &Map<String, Value>) -> Option<f64> {
 /// `readiness()`'s: only an account the fleet can spend decides it, and capacity and relief come
 /// only from its pool (BRO-3223).
 pub fn forecast(current: &Accounts, samples: &[Value], now: i64, gate: &Gate) -> Result<Map<String, Value>, Fault> {
+    crate::schema::samples(samples)?;
     let mut rates: Vec<f64> = Vec::new();
     let mut headroom = 0.0;
     let mut per = Map::new();
@@ -771,9 +702,6 @@ pub fn capacity(usage_rows: &[Value], samples: &[Value], now: i64, gate: &Gate) 
     let cad = cadence(&current, &fc);
     let mut recent = 0;
     for s in samples {
-        if !s.is_object() {
-            return Err(attribute_error(s));
-        }
         if let Some(at) = parse_ts(s.get("at"))?
             && (now - at) as f64 / 1e6 <= (WINDOW_H * 3600) as f64
         {
@@ -799,31 +727,17 @@ pub const REPLAN_RAISED: f64 = 0.3;
 /// A tier whose approved work passes first time less often than this is too low.
 pub const REPLAN_FIRST_PASS: f64 = 0.5;
 
-/// A number to Python's arithmetic: an int or a float, and a bool as the int it is. Anything else
-/// in `a / b` or `a >= b` is a `TypeError`.
-fn arith(v: &Value, op: &str) -> Result<f64, Fault> {
-    match v {
-        Value::Number(n) => Ok(n.as_f64().unwrap_or(f64::NAN)),
-        Value::Bool(b) => Ok(f64::from(u8::from(*b))),
-        other => Err(Fault::Crash {
-            kind: "TypeError",
-            msg: format!("unsupported operand type(s) for {op}: '{}'", crate::delegation::type_name(other)),
-        }),
-    }
+/// A tier count in Python's arithmetic: the schema holds counts to JSON integers.
+fn count(v: &Value) -> f64 {
+    v.as_f64().unwrap_or(0.0)
 }
 
 /// Rows per tier from Maestro's economy.json, and the re-plan signals the tick acts on.
 pub fn tier_signals(data: &Value) -> Result<(Vec<Value>, Vec<String>), Fault> {
-    // `(data or {}).get("tiers") or {}`, then `tiers.get(t)`: a non-mapping fails `.get`.
+    crate::schema::tiers(data)?;
+    // `(data or {}).get("tiers") or {}`: the schema holds both to mappings or null.
     let empty = Value::Object(Map::new());
-    let data = py::or(Some(data), None).unwrap_or(&empty);
-    if !data.is_object() {
-        return Err(attribute_error(data));
-    }
-    let tiers = py::or(data.get("tiers"), None).unwrap_or(&empty);
-    if !tiers.is_object() {
-        return Err(attribute_error(tiers));
-    }
+    let tiers = data.get("tiers").filter(|t| t.is_object()).unwrap_or(&empty);
     let (mut rows, mut signals) = (Vec::new(), Vec::new());
     for t in TIER_ORDER {
         let Some(Value::Object(v)) = tiers.get(t) else { continue };
@@ -839,7 +753,7 @@ pub fn tier_signals(data: &Value) -> Result<(Vec<Value>, Vec<String>), Fault> {
         }));
         // `raised / runs >= REPLAN_RAISED`: runs is truthy here, so never a zero divisor.
         let raised = py::or(v.get("raisedRuns"), None).cloned().unwrap_or(json!(0));
-        if arith(&raised, "/")? / arith(&runs, "/")? >= REPLAN_RAISED {
+        if count(&raised) / count(&runs) >= REPLAN_RAISED {
             signals.push(format!(
                 "{t}: {}/{} runs raised a tier — assess this work one rung higher",
                 py::str_of(&raised),
@@ -849,7 +763,7 @@ pub fn tier_signals(data: &Value) -> Result<(Vec<Value>, Vec<String>), Fault> {
         // `_num(fp) and (approved or 0) >= 3 and fp < ...`: approved is compared only for a numeric fp.
         if let Some(fp) = py::num(v.get("firstPass")) {
             let approved = py::or(v.get("approved"), None).cloned().unwrap_or(json!(0));
-            if arith(&approved, ">=")? >= 3.0 && fp < REPLAN_FIRST_PASS {
+            if count(&approved) >= 3.0 && fp < REPLAN_FIRST_PASS {
                 signals.push(format!(
                     "{t}: first-pass {:.0}% over {} approved — briefs or tier too thin",
                     fp * 100.0,

@@ -2212,8 +2212,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "AttributeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.repos",
     "stdout": ""
    }
   },
@@ -2235,8 +2236,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "AttributeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.repos",
     "stdout": ""
    }
   },
@@ -2258,8 +2260,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "AttributeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.repos",
     "stdout": ""
    }
   },
@@ -2281,8 +2284,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "AttributeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.repos",
     "stdout": ""
    }
   },
@@ -2306,8 +2310,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "AttributeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.repos",
     "stdout": ""
    }
   },
@@ -2331,8 +2336,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "AttributeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.repos",
     "stdout": ""
    }
   },
@@ -2352,9 +2358,10 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
-    "stdout": "               1 implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\n"
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2374,10 +2381,11 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 0,
+    "code": 1,
     "crash": false,
-    "stderr": "",
-    "stdout": "[\n {\n  \"id\": 1,\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n },\n {\n  \"id\": \"a\",\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [],\n  \"depends_on\": [\n   1\n  ],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2397,10 +2405,11 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 0,
+    "code": 1,
     "crash": false,
-    "stderr": "",
-    "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Done means: `make test`. Verification: **check**, the check's exit code.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2421,9 +2430,10 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
-    "stdout": "               1 implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\n"
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2445,10 +2455,11 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 0,
+    "code": 1,
     "crash": false,
-    "stderr": "",
-    "stdout": "[\n {\n  \"id\": 1,\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n },\n {\n  \"id\": \"a\",\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [],\n  \"depends_on\": [\n   1\n  ],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2470,10 +2481,11 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 0,
+    "code": 1,
     "crash": false,
-    "stderr": "",
-    "stdout": "## Delegation contract\n- Your tier: **standard** (claude-sonnet-5-5, thinking medium). It is fixed for this run.\n- Done means: `make test`. Verification: **check**, the check's exit code.\n- Agents you start default to **standard**, with the model passed explicitly (Agent tool `model: sonnet`; Paseo `model` and `thinkingOptionId`; Maestro `--tier`); mechanical steps go to mechanical (`model: haiku`). Copy this block into every brief you write, with that child's own tier.\n- Raise when the work outgrows the assessment: a design call your inputs do not settle, a governance path, a one-way door, a failed verification. Start a higher-tier agent for the part that outgrew you and give it what you learned; you keep the rest. Say it in your final message, one line per raise: `TIER-RAISE: <from> -> <to>: <why>`. Raises are measured from transcripts, and the orchestrator re-plans on them; an unstated raise reads as a mis-assessment nobody explained.\n- Reviewers are pinned: a P20 reviewer, and an Explore run that serves a review, runs at frontier or cross-vendor. Never downgrade a reviewer.\n- Your tier changes nothing about what you may touch: scope, merge rule and gates are this brief's.\n"
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2491,10 +2503,11 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 0,
+    "code": 1,
     "crash": false,
-    "stderr": "",
-    "stdout": "               1 implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\n"
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2514,10 +2527,11 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 0,
+    "code": 1,
     "crash": false,
-    "stderr": "",
-    "stdout": "[\n {\n  \"id\": 1,\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2537,9 +2551,10 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 2,
+    "code": 1,
     "crash": false,
-    "stderr": "no node 'a'\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -2560,10 +2575,11 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 0,
+    "code": 1,
     "crash": false,
-    "stderr": "",
-    "stdout": "               1 implement    standard   claude/claude-sonnet-5-5     thinking=medium verify=check    after=-\n"
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2585,10 +2601,11 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 0,
+    "code": 1,
     "crash": false,
-    "stderr": "",
-    "stdout": "[\n {\n  \"id\": 1,\n  \"repo\": \"w\",\n  \"kind\": \"implement\",\n  \"tier\": \"standard\",\n  \"spawn_default\": \"standard\",\n  \"verify\": \"check\",\n  \"thinking\": \"medium\",\n  \"inputs\": [],\n  \"depends_on\": [],\n  \"done\": \"make test\",\n  \"assessment\": {\n   \"complexity\": \"bounded\",\n   \"author\": null,\n   \"executor\": \"standard\",\n   \"thinking\": \"medium\",\n   \"verify\": \"check\",\n   \"needs\": [],\n   \"reasons\": [\n    \"bounded change: its done check verifies it\"\n   ]\n  },\n  \"contract\": {\n   \"tier\": \"standard\",\n   \"provider\": \"claude/claude-sonnet-5-5\",\n   \"thinking\": \"medium\",\n   \"agent\": \"sonnet\"\n  }\n }\n]\n"
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
+    "stdout": ""
    }
   },
   {
@@ -2610,9 +2627,10 @@
    ],
    "tool": "delegation",
    "want": {
-    "code": 2,
+    "code": 1,
     "crash": false,
-    "stderr": "no node 'a'\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -2632,8 +2650,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -2655,8 +2674,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -2678,8 +2698,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -2701,8 +2722,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -2726,8 +2748,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -2751,8 +2774,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -2772,8 +2796,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].signals.mode",
     "stdout": ""
    }
   },
@@ -2795,8 +2820,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].signals.mode",
     "stdout": ""
    }
   },
@@ -2818,8 +2844,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].signals.mode",
     "stdout": ""
    }
   },
@@ -2841,8 +2868,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].signals.mode",
     "stdout": ""
    }
   },
@@ -2866,8 +2894,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].signals.mode",
     "stdout": ""
    }
   },
@@ -2891,8 +2920,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].signals.mode",
     "stdout": ""
    }
   },
@@ -2912,8 +2942,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[1].depends_on[0]",
     "stdout": ""
    }
   },
@@ -2935,8 +2966,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[1].depends_on[0]",
     "stdout": ""
    }
   },
@@ -2958,8 +2990,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[1].depends_on[0]",
     "stdout": ""
    }
   },
@@ -2981,8 +3014,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[1].depends_on[0]",
     "stdout": ""
    }
   },
@@ -3006,8 +3040,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[1].depends_on[0]",
     "stdout": ""
    }
   },
@@ -3031,8 +3066,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[1].depends_on[0]",
     "stdout": ""
    }
   },
@@ -3053,7 +3089,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3076,7 +3113,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3099,7 +3137,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3121,8 +3160,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3146,8 +3186,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3171,8 +3212,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3193,7 +3235,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3216,7 +3259,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3239,7 +3283,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3261,8 +3306,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3286,8 +3332,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3311,8 +3358,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].repo",
     "stdout": ""
    }
   },
@@ -3333,7 +3381,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -3356,7 +3405,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -3379,7 +3429,8 @@
    "want": {
     "code": 1,
     "crash": false,
-    "stderr": "  [error] repo gone ({ROOT}/gone) is not here: bind it with --repo gone=PATH, or pass --skip-absent-repos\n",
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -3401,8 +3452,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -3426,8 +3478,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -3451,8 +3504,9 @@
    "tool": "delegation",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "graph.nodes[0].id",
     "stdout": ""
    }
   },
@@ -4894,8 +4948,9 @@
    "tool": "economy",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "TypeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "data.tiers.standard.runs",
     "stdout": ""
    }
   },
@@ -4917,8 +4972,9 @@
    "tool": "economy",
    "want": {
     "code": 1,
-    "crash": true,
-    "stderr": "AttributeError",
+    "crash": false,
+    "refused": true,
+    "stderr": "data.tiers",
     "stdout": ""
    }
   }

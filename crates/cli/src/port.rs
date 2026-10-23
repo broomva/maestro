@@ -231,28 +231,285 @@ pub fn realpath(filename: &str) -> String {
 }
 
 /// The first YAML feature outside the subset this CLI reads as PyYAML's `safe_load` does: an
-/// anchor (so any alias, which must follow its anchor), a tag or a merge key. No graph or policy uses them, and each is a place where
-/// serde_yaml (YAML 1.2) and PyYAML build different values, so they are refused, with the reason and
-/// line named, never misread (the rule `maestro_store::yaml` follows for ask ledgers).
+/// anchor (so any alias, which must follow its anchor), a tag, a merge key, a plain scalar PyYAML
+/// (YAML 1.1) and serde_yaml (YAML 1.2) read differently, or a mapping key that is not a string. No
+/// graph or policy uses them, and each is a place where the two build different values, so they are
+/// refused, with the reason and line named, never misread (the rule `maestro_store::yaml` follows
+/// for ask ledgers).
 fn outside_subset(text: &str) -> Option<String> {
     use yaml_rust2::parser::{Event, Parser};
+    use yaml_rust2::scanner::TScalarStyle;
     let mut parser = Parser::new_from_str(text);
+    // Open collections: (is a mapping, the next node is a key).
+    let mut open: Vec<(bool, bool)> = Vec::new();
     loop {
         // A syntax error is serde_yaml's to report, with its own message.
         let Ok((event, mark)) = parser.next_token() else { return None };
+        let is_key = matches!(open.last(), Some((true, true)));
         let why = match &event {
             Event::StreamEnd => return None,
             Event::Scalar(_, _, _, Some(_)) | Event::SequenceStart(_, Some(_)) | Event::MappingStart(_, Some(_)) => {
-                "a tag"
+                "a tag".to_string()
             }
             Event::Scalar(_, _, anchor, _) | Event::SequenceStart(anchor, _) | Event::MappingStart(anchor, _)
                 if *anchor > 0 =>
             {
-                "an anchor"
+                "an anchor".to_string()
+            }
+            Event::Scalar(v, style, _, _) => {
+                let why = match style {
+                    TScalarStyle::Plain => plain_scalar_outside(v, is_key),
+                    _ => None,
+                };
+                if let Some(why) = why {
+                    why
+                } else {
+                    if let Some(top) = open.last_mut().filter(|t| t.0) {
+                        top.1 = !top.1;
+                    }
+                    continue;
+                }
+            }
+            Event::MappingStart(..) | Event::SequenceStart(..) => {
+                if is_key {
+                    "a mapping key that is not a string".to_string()
+                } else {
+                    open.push((matches!(event, Event::MappingStart(..)), true));
+                    continue;
+                }
+            }
+            Event::MappingEnd | Event::SequenceEnd => {
+                open.pop();
+                if let Some(top) = open.last_mut().filter(|t| t.0) {
+                    top.1 = !top.1;
+                }
+                continue;
             }
             _ => continue,
         };
         return Some(format!("{why} (line {})", mark.line()));
+    }
+}
+
+/// What PyYAML's `safe_load` resolves a plain scalar to (its implicit resolvers, YAML 1.1).
+#[derive(Debug, PartialEq, Eq)]
+enum Yaml11 {
+    Str,
+    Null,
+    Bool,
+    Int,
+    Float,
+    Timestamp,
+    Merge,
+    Value,
+}
+
+/// PyYAML's resolver regexes, by hand (Python `re.match` with `$`).
+fn yaml11(v: &str) -> Yaml11 {
+    let b = v.as_bytes();
+    let sign = |i: usize| if matches!(b.get(i), Some(b'+' | b'-')) { i + 1 } else { i };
+    // The end of a run of bytes in `set` from `i`.
+    let run = |mut i: usize, set: &dyn Fn(u8) -> bool| {
+        while i < b.len() && set(b[i]) {
+            i += 1;
+        }
+        i
+    };
+    let digit = |c: u8| c.is_ascii_digit();
+    let digit_ = |c: u8| c.is_ascii_digit() || c == b'_';
+    // `[eE][-+][0-9]+` or nothing, to the end.
+    let exp_end = |i: usize| {
+        i == b.len()
+            || (matches!(b[i], b'e' | b'E')
+                && matches!(b.get(i + 1), Some(b'+' | b'-'))
+                && run(i + 2, &digit) == b.len()
+                && i + 2 < b.len())
+    };
+    // `(:[0-5]?[0-9])+` from `i`: its end, if at least one group.
+    let sexagesimal = |mut i: usize| {
+        let mut groups = 0;
+        while b.get(i) == Some(&b':') {
+            let j = i + 1;
+            if b.get(j).is_some_and(|c| (b'0'..=b'5').contains(c)) && b.get(j + 1).is_some_and(|c| c.is_ascii_digit()) {
+                i = j + 2;
+            } else if b.get(j).is_some_and(|c| c.is_ascii_digit()) {
+                i = j + 1;
+            } else {
+                break;
+            }
+            groups += 1;
+        }
+        (groups > 0).then_some(i)
+    };
+    let is_bool = matches!(
+        v,
+        "yes"
+            | "Yes"
+            | "YES"
+            | "no"
+            | "No"
+            | "NO"
+            | "true"
+            | "True"
+            | "TRUE"
+            | "false"
+            | "False"
+            | "FALSE"
+            | "on"
+            | "On"
+            | "ON"
+            | "off"
+            | "Off"
+            | "OFF"
+    );
+    if is_bool {
+        return Yaml11::Bool;
+    }
+    if matches!(v, "~" | "null" | "Null" | "NULL" | "") {
+        return Yaml11::Null;
+    }
+    if v == "<<" {
+        return Yaml11::Merge;
+    }
+    if v == "=" {
+        return Yaml11::Value;
+    }
+    let s = sign(0);
+    let int = {
+        let bin =
+            b[s..].starts_with(b"0b") && s + 2 < b.len() && run(s + 2, &|c| matches!(c, b'0' | b'1' | b'_')) == b.len();
+        let oct = b.get(s) == Some(&b'0')
+            && s + 1 < b.len()
+            && run(s + 1, &|c| (b'0'..=b'7').contains(&c) || c == b'_') == b.len();
+        let dec = (b.get(s) == Some(&b'0') && s + 1 == b.len())
+            || (b.get(s).is_some_and(|c| (b'1'..=b'9').contains(c)) && run(s + 1, &digit_) == b.len());
+        let hex = b[s..].starts_with(b"0x")
+            && s + 2 < b.len()
+            && run(s + 2, &|c| c.is_ascii_hexdigit() || c == b'_') == b.len();
+        let sexa =
+            b.get(s).is_some_and(|c| (b'1'..=b'9').contains(c)) && sexagesimal(run(s + 1, &digit_)) == Some(b.len());
+        bin || oct || dec || hex || sexa
+    };
+    if int {
+        return Yaml11::Int;
+    }
+    let float = {
+        let lead = b.get(s).is_some_and(|c| c.is_ascii_digit());
+        let int_end = run(s, &digit_);
+        let plain = lead && b.get(int_end) == Some(&b'.') && exp_end(run(int_end + 1, &digit_));
+        let dot = b.first() == Some(&b'.') && b.len() > 1 && digit(b[1]) && exp_end(run(1, &digit_));
+        let sexa =
+            lead && sexagesimal(int_end).is_some_and(|i| b.get(i) == Some(&b'.') && run(i + 1, &digit_) == b.len());
+        let inf = matches!(&v[s..], ".inf" | ".Inf" | ".INF");
+        let nan = matches!(v, ".nan" | ".NaN" | ".NAN");
+        plain || dot || sexa || inf || nan
+    };
+    if float {
+        return Yaml11::Float;
+    }
+    let n = |i: usize, k: usize| b.len() >= i + k && b[i..i + k].iter().all(u8::is_ascii_digit);
+    let date = b.len() == 10 && n(0, 4) && b[4] == b'-' && n(5, 2) && b[7] == b'-' && n(8, 2);
+    let stamp = (|| {
+        if !(n(0, 4) && b.get(4) == Some(&b'-')) {
+            return false;
+        }
+        let mut i = 5;
+        let one_or_two = |i: usize| {
+            if n(i, 2) {
+                Some(i + 2)
+            } else if n(i, 1) {
+                Some(i + 1)
+            } else {
+                None
+            }
+        };
+        let Some(j) = one_or_two(i) else { return false };
+        if b.get(j) != Some(&b'-') {
+            return false;
+        }
+        let Some(j) = one_or_two(j + 1) else { return false };
+        i = if matches!(b.get(j), Some(b'T' | b't')) {
+            j + 1
+        } else {
+            let k = run(j, &|c| c == b' ' || c == b'\t');
+            if k == j {
+                return false;
+            }
+            k
+        };
+        let Some(j) = one_or_two(i) else { return false };
+        if !(b.get(j) == Some(&b':') && n(j + 1, 2) && b.get(j + 3) == Some(&b':') && n(j + 4, 2)) {
+            return false;
+        }
+        let mut i = j + 6;
+        if b.get(i) == Some(&b'.') {
+            i = run(i + 1, &digit);
+        }
+        if i == b.len() {
+            return true;
+        }
+        let k = run(i, &|c| c == b' ' || c == b'\t');
+        match b.get(k) {
+            Some(b'Z') => k + 1 == b.len(),
+            Some(b'+' | b'-') => {
+                let Some(j) = one_or_two(k + 1) else { return false };
+                j == b.len() || (b.get(j) == Some(&b':') && n(j + 1, 2) && j + 3 == b.len())
+            }
+            _ => false,
+        }
+    })();
+    if date || stamp {
+        return Yaml11::Timestamp;
+    }
+    Yaml11::Str
+}
+
+/// Why a plain scalar is outside the subset: PyYAML and serde_yaml would build different values
+/// from it, or it is a mapping key that is not a string. Inside: strings both read as the same
+/// string, the null words, `true`/`false` in their three spellings, decimal integers within 64 bits
+/// and `[-+]digits.digits` floats (with a signed exponent), which both read alike.
+fn plain_scalar_outside(v: &str, is_key: bool) -> Option<String> {
+    let both = serde_yaml::from_str::<serde_yaml::Value>(v).ok();
+    let shown = py::repr_str(v);
+    let differ = || Some(format!("a plain scalar {shown} that YAML 1.1 and 1.2 read differently (quote it)"));
+    let py = yaml11(v);
+    if py == Yaml11::Merge {
+        return Some("a merge key `<<`".into());
+    }
+    if is_key && py != Yaml11::Str {
+        return Some(format!("a mapping key {shown} that is not a string (quote it)"));
+    }
+    let b = v.as_bytes();
+    let s = usize::from(matches!(b.first(), Some(b'+' | b'-')));
+    let digits = |i: usize, j: usize| i < j && b[i..j].iter().all(u8::is_ascii_digit);
+    match py {
+        Yaml11::Str => match both {
+            Some(serde_yaml::Value::String(x)) if x == v => None,
+            _ => differ(),
+        },
+        Yaml11::Null => None,
+        Yaml11::Bool if matches!(v, "true" | "True" | "TRUE" | "false" | "False" | "FALSE") => None,
+        Yaml11::Int => {
+            let decimal = digits(s, b.len()) && (b[s] != b'0' || b.len() == s + 1);
+            let same = v
+                .parse::<i64>()
+                .ok()
+                .zip(both.as_ref().and_then(serde_yaml::Value::as_i64))
+                .is_some_and(|(a, b)| a == b);
+            if decimal && same { None } else { differ() }
+        }
+        Yaml11::Float => {
+            let dot = b.iter().position(|c| *c == b'.').unwrap_or(b.len());
+            let exp = b.iter().position(|c| matches!(c, b'e' | b'E')).unwrap_or(b.len());
+            let plain = digits(s, dot) && digits(dot + 1, exp) && (exp == b.len() || digits(exp + 2, b.len()));
+            let same = v
+                .parse::<f64>()
+                .ok()
+                .zip(both.as_ref().and_then(serde_yaml::Value::as_f64))
+                .is_some_and(|(a, b)| a == b);
+            if plain && same { None } else { differ() }
+        }
+        _ => differ(),
     }
 }
 
@@ -329,8 +586,8 @@ fn load_graph(path: &str) -> Result<(Value, Vec<String>), Fault> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| Fault::Crash { kind: "FileNotFoundError", msg: format!("{path}: {e}") })?;
     let (v, order): (Value, Vec<String>) = if path.ends_with(".json") {
-        let v =
-            serde_json::from_str(&text).map_err(|e| Fault::Crash { kind: "JSONDecodeError", msg: e.to_string() })?;
+        let v = maestro_core::schema::parse_json(&text)
+            .map_err(|e| Fault::Crash { kind: "JSONDecodeError", msg: e.to_string() })?;
         (v, json_repos_order(&text))
     } else {
         let y = load_yaml(&text)?;
@@ -344,6 +601,7 @@ fn load_graph(path: &str) -> Result<(Value, Vec<String>), Fault> {
             msg: format!("'{}' object has no attribute 'get'", d::type_name(&v)),
         });
     }
+    maestro_core::schema::graph(&v)?;
     Ok((v, order))
 }
 
@@ -363,10 +621,7 @@ fn policy_of(root: &str) -> Result<Vec<String>, Fault> {
     let data = load_yaml(&text)
         .and_then(|y| serde_json::to_value(y).map_err(|e| Fault::Value(e.to_string())))
         .map_err(|f| Fault::Value(format!("{path}: {f}")))?;
-    d::require_human_paths(&data).map_err(|f| match f {
-        Fault::Value(m) => Fault::Value(format!("{path}: {m}")),
-        crash => crash,
-    })
+    d::require_human_paths(&data).map_err(|f| Fault::Value(format!("{path}: {f}")))
 }
 
 struct Repo {
@@ -384,15 +639,9 @@ fn bind_repos(
 ) -> Result<Vec<(String, Repo)>, Fault> {
     let named = py::truthy(graph.get("repos"));
     let home = py::or(graph.get("repo"), None).map_or_else(String::new, py::str_of);
-    // `graph.get("repos") or {}`, then `.items()`: a truthy non-mapping is the Python's AttributeError.
-    let declared: Vec<(String, Value)> = match py::or(graph.get("repos"), None) {
-        Some(Value::Object(o)) => order.iter().filter_map(|k| o.get(k).map(|v| (k.clone(), v.clone()))).collect(),
-        Some(other) => {
-            return Err(Fault::Crash {
-                kind: "AttributeError",
-                msg: format!("'{}' object has no attribute 'items'", d::type_name(other)),
-            });
-        }
+    // `(graph.get("repos") or {}).items()`: the schema holds repos to a mapping or null.
+    let declared: Vec<(String, Value)> = match graph.get("repos").and_then(Value::as_object).filter(|o| !o.is_empty()) {
+        Some(o) => order.iter().filter_map(|k| o.get(k).map(|v| (k.clone(), v.clone()))).collect(),
         None => vec![(home, json!(root))],
     };
     let mut out: Vec<(String, Repo)> = Vec::new();
@@ -441,6 +690,7 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
     let (graph, order) = match load_graph(graph_path) {
         Ok(g) => g,
         Err(Fault::Value(why)) => return fail(format!("  [error] {graph_path}: {why}"), 1),
+        Err(f @ Fault::Refused { .. }) => return fail(format!("  [error] {graph_path}: {f}"), 1),
         Err(f) => return crash(&f),
     };
     if py::truthy(graph.get("repos")) && bind.root.is_some() {
@@ -470,29 +720,15 @@ fn plan_or_brief(graph_path: &str, node: Option<&str>, bind: &BindArgs, json_out
         }
         return ExitCode::from(1);
     }
-    let home_v = py::or(graph.get("repo"), None);
-    let home = home_v.map_or_else(String::new, py::str_of);
+    // `{n.get("id") for n in nodes if n.get("id") and (n.get("repo") or home) in absent}`; the
+    // schema holds ids and repos to strings.
+    let text = d::text;
+    let home = text(graph.get("repo")).unwrap_or("");
     let mut skipped: Vec<String> = Vec::new();
-    if let Ok(nodes) = d::iter_of(graph.get("nodes").unwrap_or(&json!([]))) {
-        for n in &nodes {
-            let Some(id) = n.get("id").filter(|v| py::truthy(Some(v))) else { continue };
-            if !n.is_object() {
-                continue;
-            }
-            // `{n.get("id") for n in ... if ... (n.get("repo") or home) in absent}`: both are hashed.
-            let here_v = py::or(n.get("repo"), None).or(home_v);
-            if let Some(v) = here_v
-                && let Err(f) = d::hashed(v, "set element")
-            {
-                return crash(&f);
-            }
-            let here = py::or(n.get("repo"), None).map_or_else(|| home.clone(), py::str_of);
-            if absent.contains(&here) {
-                if let Err(f) = d::hashed(id, "set element") {
-                    return crash(&f);
-                }
-                skipped.push(py::str_of(id));
-            }
+    for n in graph.get("nodes").and_then(Value::as_array).map_or(&[][..], Vec::as_slice) {
+        let Some(id) = text(n.get("id")) else { continue };
+        if absent.contains(text(n.get("repo")).unwrap_or(home)) {
+            skipped.push(id.to_string());
         }
     }
     skipped.sort();
@@ -658,7 +894,7 @@ fn assess(a: &AssessArgs) -> ExitCode {
     };
     if a.brief {
         let done = a.done.as_deref().unwrap_or("");
-        if done.trim().is_empty() {
+        if py::strip(done).is_empty() {
             return fail("--brief needs --done: a brief without a done check is not delegable", 2);
         }
         if !r.needs.is_empty() {
@@ -726,6 +962,7 @@ fn fault_text(f: Fault) -> String {
     match f {
         Fault::Value(m) => m,
         Fault::Crash { kind, msg } => format!("{kind}: {msg}"),
+        refused @ Fault::Refused { .. } => refused.to_string(),
     }
 }
 
@@ -733,7 +970,7 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
     match cmd {
         EconomyCommand::Capacity { usage, samples, now, state } => {
             let run = || -> Result<Value, String> {
-                let rows: Value = serde_json::from_str(&read_input(usage)?).map_err(|e| e.to_string())?;
+                let rows = maestro_core::schema::parse_json(&read_input(usage)?)?;
                 // `for a in rows or []`: nothing for a falsy value; a mapping or a string would be
                 // iterated and each item fail `.get`, a number is not iterable. Refused.
                 let rows = match rows {
@@ -742,7 +979,15 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
                     v => return Err(format!("--usage is a {}, not a list of rows", d::type_name(&v))),
                 };
                 let samples: Vec<Value> = match samples {
-                    Some(p) => read_input(p)?.lines().filter_map(|l| serde_json::from_str(l).ok()).collect(),
+                    // A line that is not JSON is skipped, as the tick skips it; one outside the schema is refused.
+                    Some(p) => read_input(p)?
+                        .lines()
+                        .filter_map(|l| match maestro_core::schema::parse_json(l) {
+                            Ok(v) => Some(Ok(v)),
+                            Err(e) if e.ends_with(&format!("({})", maestro_core::schema::OUTSIDE)) => Some(Err(e)),
+                            Err(_) => None,
+                        })
+                        .collect::<Result<_, _>>()?,
                     None => vec![],
                 };
                 let now = match now {
@@ -752,7 +997,7 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
                 let gate = match state {
                     None => e::Gate::default(),
                     Some(p) => {
-                        let st: Value = serde_json::from_str(&read_input(p)?).map_err(|e| e.to_string())?;
+                        let st = maestro_core::schema::parse_json(&read_input(p)?)?;
                         let st = st.as_object().ok_or("--state is not a JSON object")?;
                         e::gate_bounds(st, now, &rows).map_err(fault_text)?
                     }
@@ -776,13 +1021,14 @@ pub fn economy(cmd: &EconomyCommand, json_out: bool) -> ExitCode {
                     }
                     _ => e.to_string(),
                 })
-                .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+                .and_then(|t| maestro_core::schema::parse_json(&t))
             {
                 Ok(d) => d,
                 Err(err) => return fail(format!("no economy by tier yet ({err})"), 1),
             };
             let (rows, signals) = match e::tier_signals(&data) {
                 Ok(r) => r,
+                Err(f @ Fault::Refused { .. }) => return fail(format!("maestro: {f}"), 1),
                 Err(f) => return crash(&f),
             };
             if json_out {
@@ -822,11 +1068,74 @@ pub fn eval_stdin() -> ExitCode {
     if let Err(err) = std::io::stdin().read_to_string(&mut s) {
         return fail(err.to_string(), 2);
     }
-    let cases: Vec<Value> = match serde_json::from_str(&s) {
-        Ok(c) => c,
-        Err(err) => return fail(err.to_string(), 2),
-    };
+    let cases: Vec<Value> =
+        match maestro_core::schema::parse_json(&s).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())) {
+            Ok(c) => c,
+            Err(err) => return fail(&err, 2),
+        };
     let out: Vec<Value> = cases.iter().map(maestro_core::parity::eval).collect();
     println!("{}", serde_json::to_string(&out).expect("JSON"));
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hand-written resolver is PyYAML's on every scalar of its golden (`scripts/parity-delegation.py`).
+    #[test]
+    fn yaml11_is_pyyamls_resolver() {
+        let golden: Vec<(String, String)> =
+            serde_json::from_str(include_str!("../../../fixtures/delegation/yaml11-golden.json")).unwrap();
+        let mut bad = Vec::new();
+        for (s, tag) in &golden {
+            let want = match tag.as_str() {
+                "str" => Yaml11::Str,
+                "null" => Yaml11::Null,
+                "bool" => Yaml11::Bool,
+                "int" => Yaml11::Int,
+                "float" => Yaml11::Float,
+                "timestamp" => Yaml11::Timestamp,
+                "merge" => Yaml11::Merge,
+                "value" => Yaml11::Value,
+                other => panic!("tag {other}"),
+            };
+            if yaml11(s) != want {
+                bad.push(format!("{s:?}: want {want:?}, got {:?}", yaml11(s)));
+            }
+        }
+        assert!(golden.len() > 1000 && bad.is_empty(), "{} of {}:\n{}", bad.len(), golden.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn plain_scalars_both_readers_agree_on_are_inside() {
+        for v in ["make test", "a.rs", "true", "False", "null", "~", "", "0", "-7", "+3", "1.5", "-2.25e+3", "0.51.0"] {
+            assert_eq!(plain_scalar_outside(v, false), None, "{v}");
+        }
+        for v in [
+            "yes",
+            "off",
+            "0250",
+            "0o17",
+            "0x1F",
+            "1_000",
+            "1:20",
+            "1e3",
+            ".5",
+            "1.",
+            ".inf",
+            ".nan",
+            "2026-10-23",
+            "2026-10-23T12:00:00Z",
+            "9223372036854775808",
+            "=",
+            "<<",
+        ] {
+            assert!(plain_scalar_outside(v, false).is_some(), "{v}");
+        }
+        for v in ["1", "true", "null", "1.5"] {
+            assert!(plain_scalar_outside(v, true).is_some(), "key {v}");
+        }
+        assert_eq!(plain_scalar_outside("id", true), None);
+    }
 }
