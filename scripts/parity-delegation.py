@@ -455,6 +455,26 @@ def gate_cases(rng):
         st.pop("holdUntil", None), st.pop("pendingSignals", None)
         args = {"usage": rows, "now": iso_z(now), "state": st}
         cases += [{"fn": "resume_gate", "args": args}, {"fn": "capacity", "args": {**args, "samples": []}}]
+    # Exact boundaries (P20 r1, Stratum B): resets and holds at now, a duplicate id, a bool bound, a rank tie.
+    on = {"versionGate": {"automaticSwitching": "on"}, "config": {"autoBalance": True}}
+    acct = lambda name, **kw: {"id": name, "email": f"{name}@x.io", "fiveHourUtil": 10, "sevenDayUtil": 10,  # noqa: E731
+                               "isActive": False, **kw}
+    at_now, t = iso_z(now), now.timestamp()
+    edge = [
+        ([acct("a", isActive=True, sevenDayUtil=96, sevenDayResetsAt=at_now)], {}),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200, fiveHourUtil=92, fiveHourResetsAt=at_now),
+          acct("b")], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b")], {**on, "holdUntil": at_now}),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=20, sevenDayUtil=None),
+          acct("c", fiveHourUtil=20, sevenDayUtil=0.5)], on),
+        ([acct("a", isActive=True), {**acct("x"), "email": "b@x.io"}, {**acct("x"), "email": "c@x.io"}],
+         {**on, "probes": {"x": {"result": "limited", "at": t}}}),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=90)],
+         {**on, "config": {"autoBalance": True, "staleNumbersMinutes": True}}),
+    ]
+    for rows, st in edge:
+        args = {"usage": rows, "now": at_now, "state": st}
+        cases += [{"fn": "resume_gate", "args": args}, {"fn": "gate_bounds", "args": args}]
     # Malformed state the Python crashes or raises on, named by kind.
     bad = [{"pendingSignals": {"a": 1}}, {"pendingSignals": "x"}, {"pendingSignals": 5}, {"pendingSignals": [1]},
            {"versionGate": "on"}, {"versionGate": {"automaticSwitching": "on"}, "config": "x"}, {"config": [1]},

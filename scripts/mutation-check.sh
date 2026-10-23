@@ -270,6 +270,14 @@ mutate $econ 'Some((_, _, b)) if f <= b => best,' 'Some((_, _, b)) if f < b => b
 mutate $econ 'let needs_login = py::truthy(a.get("needsLogin")) || a.get("hasStoredCredentials") == Some(&Value::Bool(false));' 'let needs_login = py::truthy(a.get("needsLogin"));'
 mutate $econ 'let underscores_ok = bytes.iter().enumerate().all(|(i, b)| {' 'let underscores_ok = true || bytes.iter().enumerate().all(|(i, b)| {'
 
+# Exact boundaries (P20 r1): resets and holds at now, a duplicate id's last email, a bool bound, the rank tie.
+mutate $econ 'let limited = py::num(v.get("7d")).is_some_and(|s| s >= LIMIT_7D) && reset.is_none_or(|r| r > now);' 'let limited = py::num(v.get("7d")).is_some_and(|s| s >= LIMIT_7D) && reset.is_none_or(|r| r >= now);'
+mutate $econ 'if five.is_some() && (!stale || young || reset5.is_some_and(|r| r > now)) {' 'if five.is_some() && (!stale || young || reset5.is_some_and(|r| r >= now)) {'
+mutate $econ '&& !hold.is_some_and(|h| h > now)' '&& !hold.is_some_and(|h| h >= now)'
+mutate $econ 'Some(slot) => slot.1 = name,' 'Some(_) => {}'
+mutate $econ 'Value::Bool(b) => Ok(*b as i64 as f64),' 'Value::Bool(_) => Ok(0.0),'
+mutate $econ 'standbys.push((f, seven.unwrap_or(0.0), name));' 'standbys.push((f, seven.unwrap_or(100.0), name));'
+
 # Skipped nodes are checked for structure only; the plan CLI's binding guards (held by the CLI
 # golden in crates/cli/tests/delegation.rs).
 port=crates/cli/src/port.rs
