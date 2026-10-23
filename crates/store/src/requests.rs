@@ -387,3 +387,62 @@ fn random_id() -> Option<String> {
     std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut buf).ok()?;
     Some(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ask(id: &str) -> Map<String, Value> {
+        json!({ "id": id, "ask": "q?" }).as_object().unwrap().clone()
+    }
+
+    fn appended(text: &str) -> serde_yaml::Value {
+        let new = append_entry(text, &ask("new")).unwrap();
+        check_appended(text, &new, &ask("new")).unwrap_or_else(|e| panic!("{e}\n{new}"));
+        serde_yaml::from_str(&new).unwrap()
+    }
+
+    fn ids(v: &serde_yaml::Value) -> Vec<String> {
+        v["asks"].as_sequence().unwrap().iter().map(|a| a["id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn appends_to_every_list_shape() {
+        let indented = "arc: a\nasks:\n  - id: one\n    ask: x\n\n# trailing note\ndecisions: []\n";
+        let v = appended(indented);
+        assert_eq!(ids(&v), ["one", "new"]);
+        assert!(v["decisions"].as_sequence().unwrap().is_empty());
+        let column0 = "asks:\n- id: one\n  ask: x\n- id: two\n  ask: y\nlanes: [a]\n";
+        assert_eq!(ids(&appended(column0)), ["one", "two", "new"]);
+        assert_eq!(ids(&appended("arc: a\nasks: []\nlanes: [a]\n")), ["new"]);
+        assert_eq!(ids(&appended("arc: a\nasks: [] # none yet\n")), ["new"]);
+        assert_eq!(ids(&appended("arc: a\nlanes: [a]")), ["new"]);
+        assert_eq!(ids(&appended("asks:\n  - id: one\n    ask: |\n      x\n\n      y\n")), ["one", "new"]);
+        assert!(append_entry("asks: [{id: one}]\n", &ask("new")).is_err(), "a flow list is refused");
+    }
+
+    #[test]
+    fn a_changed_ledger_is_caught() {
+        let old = "arc: a\nasks:\n  - id: one\n";
+        let lost = "arc: a\nasks:\n  - id: new\n    ask: q?\n";
+        assert!(check_appended(old, lost, &ask("new")).is_err(), "an entry lost");
+        let moved = "arc: b\nasks:\n  - id: one\n  - id: new\n    ask: q?\n";
+        assert!(check_appended(old, moved, &ask("new")).is_err(), "another key changed");
+        let fine = "arc: a\nasks:\n  - id: one\n  - id: new\n    ask: q?\n";
+        check_appended(old, fine, &ask("new")).unwrap();
+    }
+
+    #[test]
+    fn the_filer_writes_no_owner_key_and_no_routable_origin() {
+        let session: SessionRef = "paseo:-/a1".parse().unwrap();
+        for key in OWNER_KEYS {
+            let mut a = ask("x");
+            a.insert((*key).to_string(), json!("v"));
+            assert!(compose_ask(&a, &session, &Principal::Unverified).is_err(), "{key}");
+        }
+        let out = compose_ask(&ask("x"), &session, &Principal::Unverified).unwrap();
+        assert_eq!(out["origin"], json!({ "via": "maestro", "session": "paseo:-/a1", "verified": false }));
+        assert!(out["asked_at"].as_str().is_some_and(|t| t.ends_with('Z')));
+        assert!(compose_ask(&ask("  "), &session, &Principal::Unverified).is_err());
+    }
+}

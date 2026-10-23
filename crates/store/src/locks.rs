@@ -364,6 +364,20 @@ mod tests {
         assert!(!holder_alive("4194303 1"));
     }
 
+    /// The key as the plugin computes it, from an independent SHA-256 (Python's hashlib).
+    #[test]
+    fn the_key_is_the_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = tmp.path().join("a b.yaml");
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let out = Command::new("python3")
+            .args(["-c", "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])"])
+            .arg(format!("{}/a b.yaml", dir.display()))
+            .output()
+            .unwrap();
+        assert_eq!(lock_key(&ledger).unwrap(), String::from_utf8(out.stdout).unwrap().trim());
+    }
+
     #[test]
     fn a_held_lock_refuses_then_releases() {
         let tmp = tempfile::tempdir().unwrap();

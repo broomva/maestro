@@ -121,6 +121,16 @@ fn a_refused_ask_writes_nothing() {
 }
 
 #[test]
+fn an_error_the_ledger_already_had_does_not_refuse_a_new_ask() {
+    let m = machine();
+    let path = m.path().join("ws/.control/asks/ledger.yaml");
+    std::fs::write(&path, ledger(m.path()).replace("ask: \"Seeded ask 2", "ask: \"STUB-INVALID Seeded ask 2")).unwrap();
+    let out = file(m.path(), "after-legacy");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(ledger(m.path()).contains("id: after-legacy"));
+}
+
+#[test]
 fn twenty_parallel_filers_lose_nothing() {
     let m = machine();
     let children: Vec<_> = (0..20)

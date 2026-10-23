@@ -181,5 +181,27 @@ mutate $cli '    let _ = cmd.exec();' '    let _ = cmd;'
 mutate $cli 'if !GIT_REPO_ENV.iter().any(|k| std::env::var_os(k).is_some()) {' 'if std::env::var_os("GIT_DIR").is_none() {'
 mutate $tree '                    if same_path(Path::new(top), &tree.root) {' '                    if true {'
 
+# Agent requests (BRO-3267): the plugin's §5.5 lock as ported, the filer's refusals, the
+# validator's verdict over only new errors, and every caller unverified and held.
+locks=crates/store/src/locks.rs
+requests=crates/store/src/requests.rs
+request=crates/core/src/request.rs
+mutate $locks 'if !out.status.success() || out.stdout.iter().all(u8::is_ascii_whitespace) {' 'if false {'
+mutate $locks '(Ps::Running(Some(actual)), Some(s)) => (actual - s).abs() <= 2,' '(Ps::Running(Some(_)), Some(_)) => true,'
+mutate $locks 'Some((!alive && age >= stale_after, words))' 'Some((!alive, words))'
+mutate $locks '    if !still_ours(&lock) {' '    if false {'
+mutate $locks '    hash.update(b"/");' '    hash.update(b"");'
+mutate $locks 'Ok(hash.finalize().iter().take(8)' 'Ok(hash.finalize().iter().take(9)'
+mutate $requests 'if let Some(key) = OWNER_KEYS.iter().find(|k| ask.contains_key(**k)) {' 'if let Some(key) = OWNER_KEYS.iter().find(|k| k.is_empty()) {'
+mutate $requests '            if !fresh.is_empty() {' '            if false {'
+mutate $requests 'let mut known = validate(&script, &paths.workspace, &path)?.0;' 'let mut known: Vec<String> = Vec::new();'
+mutate $requests '&& existing.asks.iter().any(|a| a.id == id || a.uid.as_deref() == Some(id.as_str()))' '&& false'
+mutate $requests '    if *b != *a || asks_before != asks_after {' '    if asks_before != asks_after {'
+mutate $requests 'if col == 0 && !(indent == Some(0) && (trimmed == "-" || trimmed.starts_with("- "))) {' 'if col == 0 {'
+mutate $requests '"verified": verified' '"verified": true'
+mutate $request '            (Self::AskFile, _) => Disposition::Applied,' '            (Self::AskFile, _) => Disposition::Held,'
+mutate $request '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Held,' '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Recorded,'
+mutate $mcp '    let caller = Principal::Unverified;' '    let caller = Principal::Owner { via: "mcp".into() };'
+
 echo "mutation  $killed of $total killed"
 exit $failed
