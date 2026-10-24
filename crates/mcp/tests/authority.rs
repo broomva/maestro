@@ -156,3 +156,17 @@ fn a_held_request_changes_nothing_but_the_journal() {
     }
     assert_eq!(lines, RequestKind::ALL.len() - 1);
 }
+
+/// An ask filed whose journal line failed on a busy lock is not a busy request: the ask is
+/// written, and a retry would be refused as a duplicate, so it never says retry (exit 75).
+#[test]
+fn an_unjournalled_filing_is_never_busy() {
+    use maestro_store::locks::LockError;
+    use maestro_store::requests::FileError;
+    let busy = FileError::Lock(LockError::Busy { holder: "pid 1".into(), what: "the requests journal".into() });
+    let e = maestro_mcp::unjournalled(std::path::Path::new("/ws/.control/asks/l.yaml"), "a-1", &busy);
+    let data = e.data.expect("data names the filed ask");
+    assert_eq!(data["filed"]["id"], "a-1");
+    assert!(data.get("busy").is_none_or(|b| b != &json!(true)), "{data}");
+    assert!(e.message.contains("filed `a-1`") && !e.message.contains(".."), "{}", e.message);
+}

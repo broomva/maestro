@@ -616,17 +616,7 @@ pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Va
             record.result = Some(json!({ "ledger": filed.ledger, "id": filed.id }));
             // The ask is written, so the request failed only if its journal line was not: say both.
             if let Err(e) = requests::record(&disk.paths, &record) {
-                let filed = json!({ "ledger": filed.ledger, "id": filed.id });
-                return Err(McpError::internal_error(
-                    format!(
-                        "filed `{}` in {}, but its requests journal line was not written: {}. The ask stands; filing it again is refused as a duplicate.",
-                        filed["id"].as_str().unwrap_or_default(),
-                        filed["ledger"].as_str().unwrap_or_default(),
-                        e.to_string().trim_end_matches('.')
-                    ),
-                    // Not busy: the ask is written, so a retry is refused as a duplicate.
-                    Some(json!({ "filed": filed })),
-                ));
+                return Err(unjournalled(&filed.ledger, &filed.id, &e));
             }
             return Ok(json!({ "request": record, "validator": filed.validator }));
         }
@@ -640,6 +630,19 @@ pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Va
     let record = requests::new_record(kind, session, &caller, payload);
     requests::record(&store.paths, &record).map_err(file_error)?;
     Ok(json!({ "request": record, "journal": requests::journal(&store.paths) }))
+}
+
+/// An ask filed whose journal line was not written. Never busy, even when the journal's lock was:
+/// the ask is in the ledger, so a retry is refused as a duplicate.
+pub fn unjournalled(ledger: &std::path::Path, id: &str, e: &requests::FileError) -> McpError {
+    McpError::internal_error(
+        format!(
+            "filed `{id}` in {}, but its requests journal line was not written: {}. The ask stands; filing it again is refused as a duplicate.",
+            ledger.display(),
+            e.to_string().trim_end_matches('.')
+        ),
+        Some(json!({ "filed": { "ledger": ledger, "id": id } })),
+    )
 }
 
 fn is_busy(e: &requests::FileError) -> bool {

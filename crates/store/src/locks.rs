@@ -415,6 +415,28 @@ mod tests {
         release(lock);
     }
 
+    /// A live holder is never reclaimed, however old its lock (the plugin's own grammar, another process).
+    #[test]
+    fn a_live_holder_is_never_reclaimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = tmp.path().join("a.yaml");
+        std::fs::write(&ledger, "").unwrap();
+        let root = tmp.path().join("locks");
+        let dir = root.join(format!("{}.d", lock_key(&ledger).unwrap()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut holder = Command::new("sleep").arg("30").spawn().unwrap();
+        let Ps::Running(Some(start)) = ps(holder.id()) else { panic!("ps cannot read the holder's start") };
+        let pid_file = format!("{} {start}\n", holder.id());
+        std::fs::write(dir.join("pid"), &pid_file).unwrap();
+        let reclaiming =
+            AcquireOptions { wait: Duration::from_millis(300), stale_after: Duration::ZERO, ..Default::default() };
+        let got = acquire(&ledger, &root, &reclaiming);
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        assert!(matches!(got, Err(LockError::Busy { .. })), "a live holder's lock was taken");
+        assert_eq!(std::fs::read_to_string(dir.join("pid")).unwrap(), pid_file);
+    }
+
     #[test]
     fn a_lock_taken_over_is_not_released_by_its_old_holder() {
         let tmp = tempfile::tempdir().unwrap();
