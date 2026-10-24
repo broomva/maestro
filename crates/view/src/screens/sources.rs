@@ -171,6 +171,10 @@ mod tests {
     fn a_source_the_plugin_drops_is_not_shown() {
         let kept = |v: serde_json::Value| of(Some(&json!([v]))).len() == 1;
         assert!(kept(json!({ "kind": "doc", "ref": " docs/a.md#x " })));
+        assert_eq!(
+            of(Some(&json!([{ "kind": "ticket", "ref": " BRO-7\n" }])))[0].url.as_deref(),
+            Some("https://linear.app/broomva/issue/BRO-7")
+        );
         assert!(kept(json!({ "kind": "session", "ref": "2fb204ca" })));
         assert!(!kept(json!({ "kind": "javascript", "ref": "x" })), "an unknown kind");
         assert!(!kept(json!({ "kind": "url", "ref": "data:text/html,x" })));

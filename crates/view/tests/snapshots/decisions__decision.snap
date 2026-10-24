@@ -9,7 +9,7 @@ expression: "portable(&r.html, m.path())"
 </header>
 <article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked 2026-10-17T12:00:00Z by claude:coordinator<span class="mv-pos">4 of 4</span>
+<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked 2026-10-17T12:00:00Z by <bdi>claude:coordinator</bdi>
 </p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
 <p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
@@ -97,15 +97,15 @@ expression: "portable(&r.html, m.path())"
 <span class="bv-code">session 2fb204ca</span>
 </li>
 </ul>
-<details class="mv-fold mv-tried" open>
-<summary>What the agent tried first</summary>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
 <span class="bv-code">read</span>: ws#983 and the fleet-cost memory</li>
 <li>
 <span class="bv-code">reroute</span>: no standing grant covers it</li>
 </ul>
-</details>
+</section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>

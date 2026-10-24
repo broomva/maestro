@@ -2,7 +2,7 @@
 //! their real tradeoffs, the sources, what the agent tried first, and where to answer.
 
 use super::rich::{self, Tradeoff};
-use super::{Entry, asker, kind, queue, tab_of};
+use super::{asker, kind, waiting};
 use crate::render::{Ctx, card, label, scope_errors};
 use maestro_core::ask::{Ask, AskState, Rung};
 use maestro_store::LedgerFile;
@@ -32,14 +32,7 @@ pub(crate) fn decision(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup
     let scoped = scope_errors(cx, section, ledger);
     let unread = scoped.errors.iter().any(|e| e.at != section.source);
     let body = match matches.as_slice() {
-        [(lf, a)] => {
-            let groups = queue(cx, None);
-            let tab = tab_of(a);
-            let same: Vec<&Entry> = groups.iter().flat_map(|g| &g.rows).filter(|e| e.tab() == tab).collect();
-            let at = same.iter().position(|e| e.lf.file == lf.file && e.ask.handle() == a.handle());
-            let waiting = at.is_some_and(|i| same[i].waiting);
-            body(cx, lf, a, waiting, at.map(|i| (i + 1, same.len())))
-        }
+        [(lf, a)] => body(cx, lf, a, a.state() == AskState::Open && waiting(cx, lf, a), false),
         [] if unread => html! {
             p class="mv-note" data-tone="danger" {
                 span class="bv-code" { (handle) } " could not be read. This is not the same as missing."
@@ -100,8 +93,8 @@ fn tried(entry: &Value) -> (Option<Rung>, String) {
 }
 
 /// The decision's full body. `waiting`: answered in the working tree, not yet landed.
-/// `position`: where it sits among its tab's open asks.
-pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: Option<(usize, usize)>) -> Markup {
+/// `ambiguous`: its handle names more than one ask in its ledger, which the owner path refuses.
+pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, ambiguous: bool) -> Markup {
     let state = a.state();
     let rich = rich::of(a);
     let free: Vec<_> = rich.tradeoffs.iter().filter(|r| r.option.is_none()).collect();
@@ -112,8 +105,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: 
                 span class="mv-chip" data-kind=(kind(a)) { (kind(a)) }
                 " " (lf.file)
                 @if let Some(at) = &a.asked_at { " · asked " (at) }
-                " by " (asker(lf, a))
-                @if let Some((n, of)) = position { span class="mv-pos" { (n) " of " (of) } }
+                " by " bdi { (asker(lf, a)) }
             }
             p class="mv-dtitle" { (a.title()) }
             @if let Some(stakes) = &a.stakes { p class="mv-stakes" { (stakes) } }
@@ -131,7 +123,8 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: 
             @if let Some(q) = question { p class="mv-dbody" { (q) } }
             @if let Some(why) = &a.why_you { p class="mv-dbody mv-why" { "Why you: " (why) } }
             @if let Some(details) = &rich.details {
-                details class="mv-fold" { summary { "Details" } p class="mv-pre" { (details) } }
+                // Sections, not folds: a poll swap keeps no state inside an opened decision.
+                section class="mv-fold" { h3 class="mv-fold-title" { "Details" } p class="mv-pre" { (details) } }
             }
             @if !a.options.is_empty() {
                 h3 class="mv-label bv-meta" { @if state == AskState::Open { "Choose one" } @else { "Options" } }
@@ -181,8 +174,8 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: 
                 }
             }
             @if !a.exhausted.is_empty() {
-                details class="mv-fold mv-tried" open {
-                    summary { "What the agent tried first" }
+                section class="mv-fold mv-tried" {
+                    h3 class="mv-fold-title" { "What the agent tried first" }
                     ul {
                         @for e in &a.exhausted {
                             @let (rung, what) = tried(e);
@@ -191,7 +184,13 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: 
                     }
                 }
             }
-            (outcome(cx, a, state, waiting))
+            @if ambiguous {
+                p class="mv-callout" data-tone="warning" {
+                    span class="bv-code" { (lf.file) "#" (a.handle()) } " names more than one ask in its ledger, and Paseo refuses an answer to an ambiguous handle. The ledger must give each its own uid."
+                }
+            } @else {
+                (outcome(cx, a, state, waiting))
+            }
         }
     }
 }

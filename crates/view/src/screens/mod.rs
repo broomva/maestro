@@ -16,7 +16,6 @@ use crate::catalog::Tab;
 use crate::render::Ctx;
 use maestro_core::ask::{Ask, AskClass, AskState};
 use maestro_store::LedgerFile;
-use std::collections::BTreeSet;
 
 /// One open ask in the queue.
 pub(crate) struct Entry<'a> {
@@ -24,6 +23,8 @@ pub(crate) struct Entry<'a> {
     pub ask: &'a Ask,
     /// Answered in the working tree, not yet on the tree read: waiting to land.
     pub waiting: bool,
+    /// Its handle names another ask in the same ledger too.
+    pub ambiguous: bool,
 }
 
 impl Entry<'_> {
@@ -43,6 +44,12 @@ impl Entry<'_> {
     pub fn handle(&self) -> String {
         format!("{}#{}", self.lf.file, self.ask.handle())
     }
+}
+
+/// Answered in the working tree while open on the tree read. Unknown (false) when the
+/// working tree could not be read; the inbox says so in its banner.
+pub(crate) fn waiting(cx: &Ctx, lf: &LedgerFile, ask: &Ask) -> bool {
+    cx.unlanded().data.iter().flatten().any(|r| r.ledger == lf.file && r.id == ask.handle())
 }
 
 pub(crate) fn tab_of(ask: &Ask) -> Tab {
@@ -94,8 +101,6 @@ impl Group<'_> {
 /// first, then by their oldest ask; inside a group blocking first, then oldest. Asks with no
 /// readable date sort after dated ones; ties go by ledger and handle, so the order is stable.
 pub(crate) fn queue<'a>(cx: &'a Ctx, project: Option<&str>) -> Vec<Group<'a>> {
-    let waiting: BTreeSet<(String, String)> =
-        cx.unlanded().data.iter().flatten().map(|r| (r.ledger.clone(), r.id.clone())).collect();
     let mut rows: Vec<Entry<'a>> = cx
         .reads
         .asks
@@ -104,7 +109,12 @@ pub(crate) fn queue<'a>(cx: &'a Ctx, project: Option<&str>) -> Vec<Group<'a>> {
         .flatten()
         .flat_map(|lf| lf.ledger.asks.iter().map(move |ask| (lf, ask)))
         .filter(|(_, ask)| ask.state() == AskState::Open)
-        .map(|(lf, ask)| Entry { lf, ask, waiting: waiting.contains(&(lf.file.clone(), ask.handle().to_string())) })
+        .map(|(lf, ask)| Entry {
+            lf,
+            ask,
+            waiting: waiting(cx, lf, ask),
+            ambiguous: lf.ledger.asks.iter().filter(|a| a.handle() == ask.handle()).count() > 1,
+        })
         .filter(|e| project.is_none_or(|p| e.project() == p))
         .collect();
     let undated = jiff::Timestamp::MAX;

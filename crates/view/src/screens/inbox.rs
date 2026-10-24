@@ -3,8 +3,8 @@
 //! full decision. The tabs are radio inputs and CSS, so they switch with no script: in the
 //! MCP App and in the snapshot a host without MCP Apps shows.
 //!
-//! Every count comes from one of two reads, and each read that came back in part marks every
-//! count taken from it as a lower bound: the asks (open, per tab) and the working tree (waiting).
+//! The counts depend on two reads, the asks at the tree read and the working tree's answers.
+//! If either came back in part, every count on the screen is marked a lower bound.
 
 use super::{Entry, Group, age, asker, decision::body, kind, queue};
 use crate::catalog::{DecisionsProps, Tab};
@@ -26,17 +26,16 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
     let groups = queue(cx, p.project.as_deref());
     let rows = || groups.iter().flat_map(|g| &g.rows);
     let count = |tab: Tab| rows().filter(|e| in_tab(e, tab)).count();
-    let partial = !section.errors.is_empty();
     let unlanded = cx.unlanded();
+    let partial = !section.errors.is_empty() || !unlanded.errors.is_empty();
     let waiting = rows().filter(|e| e.waiting).count();
-    let waiting_partial = !unlanded.errors.is_empty();
     // Radio names and ids unique in the document, so two inboxes never share a group.
     let key = cx.next_id();
     let body = html! {
         p class="mv-sub bv-meta" {
             (at_least(count(Tab::All), partial)) " open"
             @match &unlanded.data {
-                Some(_) => { " · " (at_least(waiting, waiting_partial)) " waiting to land" },
+                Some(_) => { " · " (at_least(waiting, partial)) " waiting to land" },
                 None => { " · waiting to land: " span class="mv-unavailable" { "unavailable" } },
             }
         }
@@ -52,7 +51,7 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
                     }
                 }
             }
-            (banner(cx, waiting, waiting_partial))
+            (banner(cx, waiting, partial))
             @for tab in Tab::ALL {
                 @if count(tab) == 0 {
                     p class="mv-tab-empty mv-empty bv-meta" data-tab=(tab.as_str()) {
@@ -103,13 +102,16 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
             }
             ul class="mv-list" {
                 @for e in &g.rows {
-                    li class="mv-irow" data-tab=(e.tab().as_str()) data-ask=(e.handle()) data-blocking=(e.ask.blocking) {
+                    // An ambiguous handle is no key: the bridge restores open rows by data-ask.
+                    li class="mv-irow" data-tab=(e.tab().as_str()) data-ask=[(!e.ambiguous).then(|| e.handle())]
+                        data-ambiguous=[e.ambiguous.then_some("true")] data-blocking=(e.ask.blocking) {
                         details {
                             summary {
                                 span class="mv-irow-meta bv-meta" {
                                     span class="mv-chip" data-kind=(kind(e.ask)) { (kind(e.ask)) }
-                                    " " (asker(e.lf, e.ask))
-                                    @if let Some(t) = e.ask.topics.first() { " · " (t) }
+                                    // Ledger text in its own bdi: a bidi override in it cannot reorder Maestro's words.
+                                    " " bdi { (asker(e.lf, e.ask)) }
+                                    @if let Some(t) = e.ask.topics.first() { " · " bdi { (t) } }
                                     @if e.ask.blocking { " · " span data-tone="attention" { "blocking" } }
                                 }
                                 span class="mv-irow-title" { (e.ask.title()) }
@@ -119,7 +121,7 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
                                     span class="mv-irow-rec" data-tone="info" { "Recommended: " (r.label) }
                                 }
                             }
-                            (body(cx, e.lf, e.ask, e.waiting, None))
+                            (body(cx, e.lf, e.ask, e.waiting, e.ambiguous))
                         }
                     }
                 }

@@ -188,7 +188,6 @@ fn the_decision_shows_every_field_it_names() {
         r#"<span class="bv-code">session 2fb204ca</span>"#,
         "What the agent tried first",
         r#"<span class="bv-code">reroute</span>: no standing grant covers it"#,
-        "4 of 4", // after merge-now, alt-blocking and new-key, which block and sort ahead
     ] {
         assert!(html.contains(shown), "missing {shown}\n{html}");
     }
@@ -214,8 +213,6 @@ fn the_answer_bar_writes_nothing() {
     let auth = render(&worktree(m.path()), &detail("decisions.yaml", "merge-policy")).html;
     assert!(auth.contains("No default: irreversible. It waits for you."), "{auth}");
     assert!(auth.contains(r#"data-tone="danger">Not reversible</span>"#), "{auth}");
-    assert!(auth.contains("1 of 1"), "{auth}");
-    assert!(!done.contains(" of "), "{done}");
 }
 
 #[test]
@@ -373,7 +370,10 @@ fn an_empty_tab_says_so() {
 fn a_uuid_agent_is_named_by_its_first_8() {
     let m = machine();
     let html = render(&worktree(m.path()), &detail("decisions.yaml", "jev-idea")).html;
-    assert!(html.contains(" by 9f3c2a1b"), "{html}");
+    // Ledger text sits in its own bdi, so a bidi override in it cannot reorder Maestro's words.
+    assert!(html.contains(" by <bdi>9f3c2a1b</bdi>"), "{html}");
+    let inbox_html = render(&worktree(m.path()), &inbox()).html;
+    assert!(inbox_html.contains("<bdi>claude:coordinator</bdi> · <bdi>cost</bdi>"), "{inbox_html}");
     assert!(!html.contains("9f3c2a1b-"), "{html}");
 }
 
@@ -387,4 +387,43 @@ fn the_decision_on_an_unread_or_ambiguous_ledger_says_so() {
     let html = render(&worktree(m.path()), &detail("decisions.yaml", "context-cost")).html;
     assert!(html.contains("is addressed by its uid"), "{html}");
     assert!(html.contains("decisions.yaml#fleet-cost-1"), "{html}");
+}
+
+#[test]
+fn a_partial_working_tree_makes_every_count_a_lower_bound() {
+    let m = machine();
+    let asks = m.path().join("workspace/.control/asks");
+    // A clean tree read: only ledgers that parse whole.
+    std::fs::remove_file(asks.join("broken.yaml")).unwrap();
+    std::fs::remove_file(asks.join("alt-key.yaml")).unwrap();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let clean = render(&store, &inbox()).html;
+    assert!(clean.contains(">6 open · 0 waiting to land<"), "{clean}");
+    // A local ledger that does not parse may hold answers: nothing on the screen is exact now.
+    std::fs::write(asks.join("local.yaml"), "asks: [unclosed\n").unwrap();
+    let html = render(&store, &inbox()).html;
+    assert!(html.contains("at least 6 open · at least 0 waiting to land"), "{html}");
+    assert!(html.contains(r#"<span class="mv-tab-count">6+</span>"#), "{html}");
+}
+
+#[test]
+fn an_ambiguous_handle_offers_no_answer_and_no_restore_key() {
+    let m = machine();
+    std::fs::write(
+        m.path().join("workspace/.control/asks/dup.yaml"),
+        "asks:\n  - id: same\n    class: decision\n    project: dup\n    headline: \"First\"\n    exhausted: [\"read: x\"]\n  - id: same\n    class: decision\n    project: dup\n    headline: \"Second\"\n    exhausted: [\"read: x\"]\n",
+    )
+    .unwrap();
+    let html = render(&worktree(m.path()), &spec(json!({ "type": "decisions", "props": { "project": "dup" } }))).html;
+    assert_eq!(html.matches(r#"data-ambiguous="true""#).count(), 2, "{html}");
+    // The bridge restores open rows by `.mv-irow[data-ask]`: an ambiguous row carries none.
+    assert!(!html.contains(r#"class="mv-irow" data-tab="decisions" data-ask="#), "{html}");
+    assert!(!html.contains("mv-answerbar"), "{html}");
+    assert_eq!(html.matches("Paseo refuses an answer to an ambiguous handle").count(), 2, "{html}");
+    let d = render(&worktree(m.path()), &detail("dup.yaml", "same")).html;
+    assert!(d.contains("names 2 asks, so none is shown"), "{d}");
 }

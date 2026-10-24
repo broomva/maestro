@@ -177,6 +177,8 @@ try {
       check(checked === "authority", `decisions: the swap kept the tab the owner chose (${checked})`);
       const open = await frame.locator(`.mv-irow[data-ask="${ask}"] > details`).getAttribute("open");
       check(open !== null, `decisions: the swap kept ${ask} open`);
+      const opened = await frame.locator(".mv-irow > details[open]").count();
+      check(opened === 1, `decisions: the swap opened no other row (${opened} open)`);
       await settle(tab);
       await tab.screenshot({ path: join(out, "decisions-live-edit-390.png"), fullPage: true });
       await ctx.close();

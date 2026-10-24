@@ -87,6 +87,7 @@ fn tradeoffs(raw: Option<&Value>, ask: &Ask) -> Vec<Tradeoff> {
         .filter_map(|row: &Map<String, Value>| {
             let option = match row.get("option") {
                 Some(Value::String(s)) => Some(s.clone()),
+                // Numbers arrive as JavaScript values (`7.0` is `7`), so this is `String(option)`.
                 Some(Value::Number(n)) => Some(n.to_string()),
                 _ => None,
             };
@@ -121,6 +122,21 @@ mod tests {
     }
 
     #[test]
+    fn caps_follow_rich_of() {
+        let ask = |extra: serde_json::Value| -> Ask {
+            let mut row = json!({ "id": "a", "options": [{ "id": "x", "label": "X" }] });
+            row.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(row).unwrap()
+        };
+        assert!(of(&ask(json!({ "summary": "s".repeat(700) }))).summary.is_some());
+        assert!(of(&ask(json!({ "summary": "s".repeat(701) }))).summary.is_none());
+        let d = of(&ask(json!({ "details": "d".repeat(8001) }))).details.unwrap();
+        assert_eq!(d.chars().count(), 8000);
+        let rows: Vec<_> = (0..9).map(|i| json!({ "option": "x", "cost": format!("c{i}") })).collect();
+        assert_eq!(of(&ask(json!({ "tradeoffs": rows }))).tradeoffs.len(), 8);
+    }
+
+    #[test]
     fn tradeoff_rows_follow_tradeoffs_of() {
         let ask: Ask = serde_json::from_value(json!({
             "id": "a",
@@ -128,6 +144,7 @@ mod tests {
             "tradeoffs": [
                 { "option": "x", "cost": "c" },
                 { "option": 7, "risk": "r" },
+                { "option": 7.0, "time": "t7" },
                 { "option": "nope", "cost": "c" },
                 { "option": "x", "label": "both", "cost": "c" },
                 { "label": "free", "time": "t" },
@@ -144,6 +161,7 @@ mod tests {
             vec![
                 (Some("x".into()), None, vec![("cost", "c".into())]),
                 (Some("7".into()), None, vec![("risk", "r".into())]),
+                (Some("7".into()), None, vec![("time", "t7".into())]),
                 (None, Some("free".into()), vec![("time", "t".into())]),
             ]
         );

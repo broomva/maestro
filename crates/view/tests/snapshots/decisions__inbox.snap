@@ -7,7 +7,7 @@ expression: "portable(&r.html, m.path())"
 <header class="mv-head">
 <h2 class="mv-title">Decisions</h2>
 </header>
-<p class="mv-sub bv-meta">at least 7 open · 0 waiting to land</p>
+<p class="mv-sub bv-meta">at least 7 open · at least 0 waiting to land</p>
 <div class="mv-inbox">
 <input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-all" value="all">
 <input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-decisions" value="decisions" checked>
@@ -36,14 +36,15 @@ expression: "portable(&r.html, m.path())"
 <details>
 <summary>
 <span class="mv-irow-meta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> demo-arc · <span data-tone="attention">blocking</span>
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>demo-arc</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Merge the demo PR now, or hold for review?</span>
 <span class="mv-irow-rec" data-tone="info">Recommended: Merge now</span>
 </summary>
 <article class="mv-decision" data-ask="demo-arc.yaml#merge-now" data-hash="5b70dab7a7f0afa6" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> demo-arc.yaml by demo-arc</p>
+<span class="mv-chip" data-kind="decision">decision</span> demo-arc.yaml by <bdi>demo-arc</bdi>
+</p>
 <p class="mv-dtitle">Merge the demo PR now, or hold for review?</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">merge</span>
 </p>
@@ -67,15 +68,15 @@ expression: "portable(&r.html, m.path())"
 </p>
 </li>
 </ol>
-<details class="mv-fold mv-tried" open>
-<summary>What the agent tried first</summary>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
 <span class="bv-code">read</span>: the review ledger records a pass</li>
 <li>
 <span class="bv-code">default</span>: holding is the reversible default</li>
 </ul>
-</details>
+</section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
@@ -90,25 +91,26 @@ expression: "portable(&r.html, m.path())"
 <details>
 <summary>
 <span class="mv-irow-meta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> alt-key · <span data-tone="attention">blocking</span>
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>alt-key</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Held under the corpus's other spelling?</span>
 </summary>
 <article class="mv-decision" data-ask="alt-key.yaml#alt-blocking" data-hash="7e423ddd550cb6e8" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> alt-key.yaml by alt-key</p>
+<span class="mv-chip" data-kind="decision">decision</span> alt-key.yaml by <bdi>alt-key</bdi>
+</p>
 <p class="mv-dtitle">Held under the corpus's other spelling?</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">alt</span>
 </p>
-<details class="mv-fold mv-tried" open>
-<summary>What the agent tried first</summary>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
 <span class="bv-code">read</span>: x</li>
 <li>
 <span class="bv-code">default</span>: y</li>
 </ul>
-</details>
+</section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
@@ -122,22 +124,24 @@ expression: "portable(&r.html, m.path())"
 <details>
 <summary>
 <span class="mv-irow-meta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> demo-arc</span>
+<span class="mv-chip" data-kind="idea">idea</span> <bdi>demo-arc</bdi>
+</span>
 <span class="mv-irow-title">Which name?</span>
 </summary>
 <article class="mv-decision" data-ask="demo-arc.yaml#pick-name" data-hash="70b46ca380a91c51" data-kind="idea">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> demo-arc.yaml by demo-arc</p>
+<span class="mv-chip" data-kind="idea">idea</span> demo-arc.yaml by <bdi>demo-arc</bdi>
+</p>
 <p class="mv-dtitle">Which name?</p>
-<details class="mv-fold mv-tried" open>
-<summary>What the agent tried first</summary>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
 <span class="bv-code">read</span>: none found</li>
 <li>
 <span class="bv-code">loop</span>: asked the coordinator</li>
 </ul>
-</details>
+</section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
@@ -161,23 +165,24 @@ expression: "portable(&r.html, m.path())"
 <details>
 <summary>
 <span class="mv-irow-meta bv-meta">
-<span class="mv-chip" data-kind="credential">credential</span> fleet-closeout · <span data-tone="attention">blocking</span>
+<span class="mv-chip" data-kind="credential">credential</span> <bdi>fleet-closeout</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Paste the &lt;b&gt;deploy&lt;/b&gt; key</span>
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#new-key" data-hash="0c93e589be7248a0" data-kind="credential">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="credential">credential</span> decisions.yaml · asked 2026-10-22T08:00:00Z by fleet-closeout</p>
+<span class="mv-chip" data-kind="credential">credential</span> decisions.yaml · asked 2026-10-22T08:00:00Z by <bdi>fleet-closeout</bdi>
+</p>
 <p class="mv-dtitle">Paste the &lt;b&gt;deploy&lt;/b&gt; key</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">deploy</span>
 </p>
-<details class="mv-fold mv-tried" open>
-<summary>What the agent tried first</summary>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
 <span class="bv-code">read</span>: keychain has none</li>
 </ul>
-</details>
+</section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
@@ -191,13 +196,15 @@ expression: "portable(&r.html, m.path())"
 <details>
 <summary>
 <span class="mv-irow-meta bv-meta">
-<span class="mv-chip" data-kind="authority">authority</span> fleet-closeout</span>
+<span class="mv-chip" data-kind="authority">authority</span> <bdi>fleet-closeout</bdi>
+</span>
 <span class="mv-irow-title">May Maestro's answers-only PRs merge on their own once their gates pass?</span>
 <span class="mv-irow-rec" data-tone="info">Recommended: A person merges them</span>
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#merge-policy" data-hash="ae8d1d0cd57f5f87" data-kind="authority">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="authority">authority</span> decisions.yaml · asked 2026-10-12 by fleet-closeout</p>
+<span class="mv-chip" data-kind="authority">authority</span> decisions.yaml · asked 2026-10-12 by <bdi>fleet-closeout</bdi>
+</p>
 <p class="mv-dtitle">May Maestro's answers-only PRs merge on their own once their gates pass?</p>
 <p class="mv-stakes">Each batch of your answers lands only when someone merges its PR.</p>
 <p class="mv-callout" data-tone="warning">No default: irreversible. It waits for you.</p>
@@ -220,15 +227,15 @@ expression: "portable(&r.html, m.path())"
 </p>
 </li>
 </ol>
-<details class="mv-fold mv-tried" open>
-<summary>What the agent tried first</summary>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
 <span class="bv-code">read</span>: the merge policy</li>
 <li>
 <span class="bv-code">preauth</span>: no grant covers merges</li>
 </ul>
-</details>
+</section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
@@ -252,14 +259,15 @@ expression: "portable(&r.html, m.path())"
 <details>
 <summary>
 <span class="mv-irow-meta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> claude:coordinator · cost · <span data-tone="attention">blocking</span>
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>claude:coordinator</bdi> · <bdi>cost</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</span>
 <span class="mv-irow-rec" data-tone="info">Recommended: Rotate long orchestrators by handoff</span>
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked 2026-10-17T12:00:00Z by claude:coordinator</p>
+<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked 2026-10-17T12:00:00Z by <bdi>claude:coordinator</bdi>
+</p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
 <p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
 <p class="mv-callout" data-tone="warning">If you don't answer: wait: nothing changes and spend continues</p>
@@ -346,15 +354,15 @@ expression: "portable(&r.html, m.path())"
 <span class="bv-code">session 2fb204ca</span>
 </li>
 </ul>
-<details class="mv-fold mv-tried" open>
-<summary>What the agent tried first</summary>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
 <span class="bv-code">read</span>: ws#983 and the fleet-cost memory</li>
 <li>
 <span class="bv-code">reroute</span>: no standing grant covers it</li>
 </ul>
-</details>
+</section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
@@ -378,20 +386,22 @@ expression: "portable(&r.html, m.path())"
 <details>
 <summary>
 <span class="mv-irow-meta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> 9f3c2a1b</span>
+<span class="mv-chip" data-kind="idea">idea</span> <bdi>9f3c2a1b</bdi>
+</span>
 <span class="mv-irow-title">Run the Jev-vs-/kg retrieval experiment?</span>
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="054eeb374aa3c779" data-kind="idea">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked 2026-10-20T00:00:00Z by 9f3c2a1b</p>
+<span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked 2026-10-20T00:00:00Z by <bdi>9f3c2a1b</bdi>
+</p>
 <p class="mv-dtitle">Run the Jev-vs-/kg retrieval experiment?</p>
-<details class="mv-fold mv-tried" open>
-<summary>What the agent tried first</summary>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
 <span class="bv-code">loop</span>: filed by the idea triage</li>
 </ul>
-</details>
+</section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
