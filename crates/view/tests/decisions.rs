@@ -270,7 +270,7 @@ fn an_answer_in_the_working_tree_waits_to_land() {
     assert!(html.contains(r#"<p class="mv-banner-title">at least 1 waiting to land</p>"#), "{html}");
     assert!(html.contains(r#"<span class="mv-irow-rec" data-tone="success">Waiting to land</span>"#), "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
-    assert!(d.contains("Answered in the working tree; waiting to land on"), "{d}");
+    assert!(d.contains("Answered in the working tree or on maestro/answers; waiting to land on"), "{d}");
     // Answered, if not landed: what silence would do no longer applies.
     assert!(!d.contains("If you don't answer"), "{d}");
     assert!(!d.contains("mv-answerbar"), "{d}");
@@ -628,4 +628,57 @@ fn an_archived_ask_is_said_archived_and_offers_nothing() {
     .unwrap();
     let d = render(&worktree(m.path()), &detail("arch.yaml", "gone")).html;
     assert!(d.contains("Archived: archived.") && !d.contains("mv-answerbar"), "{d}");
+}
+
+/// A git workspace at `main` with a `maestro/answers` branch made by `on_branch` (run on the
+/// branch, then committed); the working tree is left on `main`.
+fn with_answers_branch(on_branch: impl FnOnce(&Path)) -> (tempfile::TempDir, Store) {
+    let m = machine();
+    let ws = m.path().join("workspace");
+    let asks = ws.join(".control/asks");
+    std::fs::remove_file(asks.join("broken.yaml")).unwrap();
+    std::fs::remove_file(asks.join("alt-key.yaml")).unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    git(&ws, &["checkout", "-q", "-b", "maestro/answers"]);
+    on_branch(&asks);
+    git(&ws, &["add", "-A"]);
+    git(&ws, &["commit", "-q", "-m", "branch"]);
+    git(&ws, &["checkout", "-q", "main"]);
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    (m, store)
+}
+
+#[test]
+fn an_answers_branch_that_does_not_read_is_unavailable_never_none() {
+    let (m, store) = with_answers_branch(|asks| {
+        std::fs::remove_dir_all(asks).unwrap();
+        std::fs::write(asks, "not a directory").unwrap();
+    });
+    // No local asks directory either: the branch was the only place answers could wait.
+    std::fs::remove_dir_all(m.path().join("workspace/.control/asks")).unwrap();
+    let html = render(&store, &inbox()).html;
+    assert!(html.contains(r#"waiting to land: <span class="mv-unavailable">unavailable</span>"#), "{html}");
+    assert!(html.contains("Answers waiting to land could not be read. This is not the same as none."), "{html}");
+    assert!(!html.contains("mv-answerbar"), "{html}");
+}
+
+#[test]
+fn a_broken_ledger_on_the_answers_branch_makes_only_its_asks_unknown() {
+    let (_m, store) = with_answers_branch(|asks| {
+        std::fs::write(asks.join("decisions.yaml"), "asks: [unclosed\n").unwrap();
+    });
+    let html = render(&store, &inbox()).html;
+    assert_eq!(html.matches("Not offered here").count(), 4, "decisions.yaml's open asks: {html}");
+    let demo = render(&store, &detail("demo-arc.yaml", "merge-now")).html;
+    assert!(demo.contains("mv-answerbar"), "{demo}");
+}
+
+#[test]
+fn an_answer_given_as_text_is_shown_as_written() {
+    // demo-arc.yaml's old-one carries `answer: "yes"` and no option.
+    let m = machine();
+    let d = render(&worktree(m.path()), &detail("demo-arc.yaml", "old-one")).html;
+    assert!(d.contains("Answered: yes"), "{d}");
 }

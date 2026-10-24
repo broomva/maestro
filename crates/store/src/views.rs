@@ -205,22 +205,22 @@ fn answered_in(asks: &[LedgerFile]) -> Answered {
 }
 
 /// Answers on [`ANSWERS_BRANCH`]. A workspace without the branch holds none there; a branch
-/// that exists but does not read is an error, and its answers are unknown.
-fn answered_on_branch(store: &Store) -> (Answered, Vec<SourceError>) {
+/// that exists but does not read at all is `None` with its errors: its answers are unknown.
+fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
     let branch = Store::new(store.paths.clone(), crate::TreeSource::GitRev(format!("refs/heads/{ANSWERS_BRANCH}")));
     // `Tree::resolved` says this when the revision names nothing: the branch is not there.
     if branch.tree.unresolved.as_deref().is_some_and(|r| r.starts_with("no commit is named")) {
-        return (Answered::new(), Vec::new());
+        return (Some(Answered::new()), Vec::new());
     }
     let read = branch.asks();
     let mut errors = read.errors;
     match read.data {
-        Some(asks) => (answered_in(&asks), errors),
+        Some(asks) => (Some(answered_in(&asks)), errors),
         None => {
             if errors.is_empty() {
                 errors.push(SourceError { at: read.source, reason: "unread".into() });
             }
-            (Answered::new(), errors)
+            (None, errors)
         }
     }
 }
@@ -234,6 +234,10 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
         return Section::ok("worktree", Vec::new());
     }
     let (on_branch, mut errors) = answered_on_branch(store);
+    // Nothing read from the branch: what waits to land there is unknown, never none.
+    let Some(on_branch) = on_branch else {
+        return Section { source: format!("git:refs/heads/{ANSWERS_BRANCH}"), data: None, errors };
+    };
     let waiting = |answered: &Answered| -> Vec<AskRef> {
         at_rev
             .iter()

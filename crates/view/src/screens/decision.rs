@@ -205,7 +205,7 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
     html! {
         @if state == AskState::Open && landing == Landing::Waiting {
             p class="mv-callout" data-tone="success" {
-                "Answered in the working tree; waiting to land on " span class="bv-code" { (cx.snap.tree) } "."
+                "Answered in the working tree or on maestro/answers; waiting to land on " span class="bv-code" { (cx.snap.tree) } "."
             }
         } @else if state == AskState::Open && landing == Landing::Unknown {
             // Unknown is never shown as unanswered: no answer bar invites a second answer.
