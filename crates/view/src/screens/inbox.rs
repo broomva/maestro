@@ -31,12 +31,14 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
     let unlanded = cx.unlanded();
     // A row whose landing is unknown may be waiting too: then no count on the screen is exact.
     let partial = !section.errors.is_empty() || rows().any(|e| e.landing == Landing::Unknown);
-    // The whole inbox shows the store's count when it is known (the plugin's batch count, with
-    // answers to asks the tree no longer holds); otherwise the rows seen waiting, a lower bound.
-    let known = cx.snap.asks.data.as_ref().and_then(|c| c.unlanded).filter(|_| p.project.is_none());
-    let waiting = match known {
+    // What waits to land is counted for the checkout, never per project: an answer to an ask the
+    // tree does not hold has no row to place it in one. The store's count when it is known (the
+    // plugin's batch count); otherwise the rows seen waiting in the whole inbox, a lower bound
+    // (the store makes no count only when a read came back in part).
+    let whole = queue(cx, None);
+    let waiting = match cx.snap.asks.data.as_ref().and_then(|c| c.unlanded) {
         Some(n) => (n, false),
-        None => (rows().filter(|e| e.landing == Landing::Waiting).count(), partial),
+        None => (whole.iter().flat_map(|g| &g.rows).filter(|e| e.landing == Landing::Waiting).count(), true),
     };
     // Reading the working tree itself, there is nothing to land onto it: no count is made.
     let worktree = cx.store.tree.source == maestro_store::TreeSource::WorkingTree;
@@ -45,10 +47,13 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
     let body = html! {
         p class="mv-sub bv-meta" {
             (at_least(count(Tab::All), partial)) " open"
-            @match &unlanded.data {
-                Some(_) if !worktree => { " · " (at_least(waiting.0, waiting.1)) " answered, not yet landed" },
-                Some(_) => {},
-                None => { " · answered, not yet landed: " span class="mv-unavailable" { "unavailable" } },
+            // Beside one project's open count, a checkout's count would read as that project's.
+            @if p.project.is_none() {
+                @match &unlanded.data {
+                    Some(_) if !worktree => { " · " (at_least(waiting.0, waiting.1)) " answered, not yet landed" },
+                    Some(_) => {},
+                    None => { " · answered, not yet landed: " span class="mv-unavailable" { "unavailable" } },
+                }
             }
         }
         div class="mv-inbox" {
@@ -63,7 +68,7 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
                     }
                 }
             }
-            (banner(cx, waiting.0, waiting.1))
+            (banner(cx, waiting.0, waiting.1, p.project.is_some()))
             @for tab in Tab::ALL {
                 @if count(tab) == 0 {
                     p class="mv-tab-empty mv-empty bv-meta" data-tab=(tab.as_str()) {
@@ -84,7 +89,7 @@ fn in_tab(e: &Entry, tab: Tab) -> bool {
 /// What Maestro saw answered and not yet landed, named by the sources it read. Paseo may hold
 /// answers in other checkouts; the banner says so, so its number is never read as a total.
 /// An unread source is said, never shown as none.
-fn banner(cx: &Ctx, waiting: usize, partial: bool) -> Markup {
+fn banner(cx: &Ctx, waiting: usize, partial: bool, filtered: bool) -> Markup {
     let elsewhere = "Paseo may hold answers in other checkouts, which this screen does not read.";
     html! {
         @if cx.store.tree.source == maestro_store::TreeSource::WorkingTree {
@@ -101,7 +106,10 @@ fn banner(cx: &Ctx, waiting: usize, partial: bool) -> Markup {
                 p class="mv-banner-title" {
                     (at_least(waiting, partial)) " answered in this checkout or on maestro/answers, not yet on " span class="bv-code" { (cx.snap.tree) }
                 }
-                p class="bv-meta" { (elsewhere) }
+                p class="bv-meta" {
+                    @if filtered { "Counted for the whole checkout, not this project alone. " }
+                    (elsewhere)
+                }
             }
         }
     }

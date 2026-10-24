@@ -558,7 +558,13 @@ fn a_waiting_answer_is_placed_by_the_plugins_key_not_its_text() {
         "{html}"
     );
     assert!(!html.contains(r#"mv-irow-title">By id</span><span class="mv-irow-rec" data-tone="success">"#), "{html}");
-    assert!(html.contains("2 open · 1 answered, not yet landed"), "{html}");
+    // One project's open count stands alone; the checkout's count is the banner's, and it says so.
+    assert!(html.contains(">2 open<"), "{html}");
+    assert!(
+        html.contains(r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers, not yet on"#),
+        "{html}"
+    );
+    assert!(html.contains("Counted for the whole checkout, not this project alone."), "{html}");
     // The uid-less ask is open and nothing answers it: the owner path is offered for it alone.
     assert_eq!(html.matches("mv-answerbar").count(), 1, "{html}");
     assert!(!html.contains("Not offered here"), "{html}");
@@ -808,8 +814,13 @@ fn asks_sharing_a_key_are_unknown_and_their_one_answer_waits_once() {
     assert_eq!(html.matches("Not offered here").count(), 2, "{html}");
     assert!(!html.contains("Waiting to land</span>") && !html.contains("Recommended:"), "{html}");
     assert!(!html.contains("mv-answerbar") && !html.contains("Choose one"), "{html}");
-    // No read failed, yet which ask the answer waits for is not known: that count is a bound.
-    assert!(html.contains("2 open · at least 0 answered, not yet landed"), "{html}");
+    // No read failed: the checkout's count is the plugin's batch count, exact, though which of the
+    // two asks the answer waits for is not known.
+    assert!(html.contains(">at least 2 open<"), "{html}");
+    assert!(
+        html.contains(r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers, not yet on"#),
+        "{html}"
+    );
     assert_eq!(maestro_store::views::snapshot(&store).asks.data.unwrap().unlanded, Some(1));
 }
 
@@ -897,4 +908,31 @@ fn gates_are_said_only_for_a_blocking_ask() {
     .unwrap();
     let d = render(&worktree(m.path()), &detail("g.yaml", "g")).html;
     assert!(!d.contains("lane-x"), "{d}");
+}
+
+#[test]
+fn an_answer_to_an_ask_the_tree_does_not_hold_is_counted_for_the_checkout_never_a_project_zero() {
+    // Filed and answered in the working tree only: no row holds it, so no project can count it.
+    let (_m, store) = clean_at_main(|asks| {
+        std::fs::write(
+            asks.join("new.yaml"),
+            "asks:\n  - id: b\n    project: proj\n    headline: \"New\"\n    answer: \"yes\"\n    answered_at: \"2026-10-03T00:00:00Z\"\n    status: resolved\n",
+        )
+        .unwrap();
+    });
+    assert_eq!(maestro_store::views::snapshot(&store).asks.data.unwrap().unlanded, Some(1));
+    let all = render(&store, &inbox()).html;
+    assert!(all.contains(" open · 1 answered, not yet landed<"), "{all}");
+    assert!(!all.contains("Counted for the whole checkout"), "{all}");
+    for project in ["proj", "maestro"] {
+        let html = render(&store, &spec(json!({ "type": "decisions", "props": { "project": project } }))).html;
+        assert!(!html.contains("answered, not yet landed"), "{html}");
+        assert!(
+            html.contains(
+                r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers, not yet on"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains("Counted for the whole checkout, not this project alone."), "{html}");
+    }
 }
