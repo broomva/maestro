@@ -15,7 +15,7 @@ case $screen in view | decisions) ;; *) echo "usage: e2e.sh [view|decisions] [DI
 out=${2:-$(mktemp -d)}
 mkdir -p "$out"
 cargo build -q --locked -p maestro
-bin=$PWD/target/debug/maestro
+bin=${CARGO_TARGET_DIR:-$PWD/target}/debug/maestro
 scratch=$(mktemp -d)
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true; rm -rf "$scratch"' EXIT
@@ -60,7 +60,9 @@ if [ "$screen" = decisions ]; then
   echo "== decisions, scratch fixture"
   BROOMVA_HOME=$scratch/broomva-home MAESTRO_WORK_ROOT=$scratch/work serve 7199 --workspace "$scratch/workspace" --tree worktree
   mkdir -p "$out/fixture"
-  bun run e2e.ts --url http://127.0.0.1:7199/mcp --spec "$scratch/decisions-spec.json" --out "$out/fixture" --decisions
+  bun run e2e.ts --url http://127.0.0.1:7199/mcp --spec "$scratch/decisions-spec.json" --out "$out/fixture" --decisions \
+    --edit "$scratch/workspace/.control/asks/decisions.yaml" --from "label: \"A person merges them\"" \
+    --to "label: \"A person merges each batch\"" --expect "A person merges each batch"
   echo "screenshots: $out"
   exit 0
 fi

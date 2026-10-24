@@ -224,7 +224,8 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
     let answered_here: BTreeSet<(String, String)> = local
         .iter()
         .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        .filter(|(_, a)| a.state() != AskState::Open)
+        // Answered, not archived: an ask archived in the working tree is not an answer waiting to land.
+        .filter(|(_, a)| a.state() == AskState::Answered)
         .map(|(lf, a)| (lf.file.clone(), a.handle().to_string()))
         .collect();
     let refs = at_rev

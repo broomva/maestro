@@ -10,23 +10,65 @@ pub(crate) struct Source {
     pub url: Option<String>,
 }
 
-/// The sources the ask lists. An entry without a text `kind` and `ref` is not shown.
+/// `SOURCE_KINDS`
+const KINDS: [&str; 7] = ["ticket", "pr", "doc", "spec", "url", "file", "session"];
+/// `SOURCES_MAX`
+const MAX: usize = 10;
+
+/// The sources the ask lists, as `sourcesOf` keeps them: a known kind and a ref of that kind's
+/// shape (trimmed), its label if it is at most 80 long; at most ten.
 pub(crate) fn of(sources: Option<&Value>) -> Vec<Source> {
     sources
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(|s| s.is_object())
         .filter_map(|s| {
             let kind = s.get("kind")?.as_str()?;
-            let r = s.get("ref")?.as_str()?;
-            let label = s.get("label").and_then(Value::as_str).filter(|l| !l.is_empty());
-            Some(Source {
-                kind: kind.into(),
-                text: label.map_or_else(|| text(kind, r), str::to_string),
-                url: url(kind, r),
-            })
+            let r = super::rich::trim_ws(s.get("ref").and_then(Value::as_str).unwrap_or(""));
+            if !KINDS.contains(&kind) || !shape(kind, r) {
+                return None;
+            }
+            let label = super::rich::words(s.get("label"), 80);
+            Some(Source { kind: kind.into(), text: label.unwrap_or_else(|| text(kind, r)), url: url(kind, r) })
         })
+        .take(MAX)
         .collect()
+}
+
+/// `sourceShape`
+fn shape(kind: &str, r: &str) -> bool {
+    match kind {
+        "ticket" => ticket(r),
+        "pr" => pr(r).is_some(),
+        "url" => https(r),
+        "session" => session(r),
+        _ => safe_relative(r),
+    }
+}
+
+/// `/^[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$/`
+fn session(r: &str) -> bool {
+    let hex = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let parts: Vec<&str> = r.split('-').collect();
+    match parts.as_slice() {
+        [a] => hex(a, 8),
+        [a, b, c, d, e] => hex(a, 8) && hex(b, 4) && hex(c, 4) && hex(d, 4) && hex(e, 12),
+        _ => false,
+    }
+}
+
+/// `safeRelative(ref)`: no control character; the path before any `#` is relative, with no
+/// `~`, `:` or backslash, and no empty, `.` or `..` part.
+fn safe_relative(r: &str) -> bool {
+    if r.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}') {
+        return false;
+    }
+    let path = r.split('#').next().unwrap_or("");
+    if path.is_empty() || path.starts_with('/') || path.starts_with('~') || path.contains(':') || path.contains('\\') {
+        return false;
+    }
+    path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// `/^[A-Z][A-Z0-9]{1,9}-\d+$/`
@@ -71,12 +113,20 @@ fn url(kind: &str, r: &str) -> Option<String> {
 fn text(kind: &str, r: &str) -> String {
     match kind {
         "doc" | "spec" | "file" => {
-            let (path, anchor) = r.split_once('#').map_or((r, None), |(p, a)| (p, Some(a)));
+            // `ref.split("#", 2)`: the path, and the anchor up to any second `#`.
+            let mut parts = r.split('#');
+            let path = parts.next().unwrap_or(r);
             let name = path.rsplit('/').next().unwrap_or(r);
-            anchor.map_or_else(|| name.to_string(), |a| format!("{name}#{a}"))
+            match parts.next() {
+                Some(anchor) if !anchor.is_empty() => format!("{name}#{anchor}"),
+                _ => name.to_string(),
+            }
         }
         "session" => format!("session {}", r.chars().take(8).collect::<String>()),
-        "url" => r.strip_prefix("https://").unwrap_or(r).trim_end_matches('/').to_string(),
+        "url" => {
+            let host = r.strip_prefix("https://").unwrap_or(r);
+            host.strip_suffix('/').unwrap_or(host).to_string()
+        }
         _ => r.to_string(),
     }
 }
@@ -110,8 +160,28 @@ mod tests {
         assert_eq!(text("session", "2fb204ca-0b7b-42cd-b9e1-4b95e7be50bb"), "session 2fb204ca");
         assert_eq!(text("url", "https://example.com/"), "example.com");
         assert_eq!(text("ticket", "BRO-1"), "BRO-1");
+        assert_eq!(text("doc", "a/b.md#x#y"), "b.md#x");
+        assert_eq!(text("url", "https://e.com//"), "e.com/");
         let s = of(Some(&json!([{ "kind": "pr", "ref": "a/b#1", "label": "view-core" }, { "kind": "ticket" }, "x"])));
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].text, "view-core");
+    }
+
+    #[test]
+    fn a_source_the_plugin_drops_is_not_shown() {
+        let kept = |v: serde_json::Value| of(Some(&json!([v]))).len() == 1;
+        assert!(kept(json!({ "kind": "doc", "ref": " docs/a.md#x " })));
+        assert!(kept(json!({ "kind": "session", "ref": "2fb204ca" })));
+        assert!(!kept(json!({ "kind": "javascript", "ref": "x" })), "an unknown kind");
+        assert!(!kept(json!({ "kind": "url", "ref": "data:text/html,x" })));
+        assert!(!kept(json!({ "kind": "ticket", "ref": "nope" })));
+        assert!(!kept(json!({ "kind": "session", "ref": "2FB204CA" })));
+        for bad in ["/etc/passwd", "~/x", "a/../b", "a//b", "./a", "c:x", "a\\b", "a\u{1}b", ""] {
+            assert!(!kept(json!({ "kind": "file", "ref": bad })), "{bad:?}");
+        }
+        let long = json!({ "kind": "ticket", "ref": "BRO-1", "label": "x".repeat(81) });
+        assert_eq!(of(Some(&json!([long])))[0].text, "BRO-1", "a label over 80 falls back to the ref");
+        let many: Vec<_> = (0..12).map(|i| json!({ "kind": "ticket", "ref": format!("BRO-{i}") })).collect();
+        assert_eq!(of(Some(&json!(many))).len(), 10);
     }
 }

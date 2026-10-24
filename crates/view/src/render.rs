@@ -40,9 +40,18 @@ pub(crate) struct Ctx<'a> {
     /// Asks answered in the working tree but open at the read tree, read once per render
     /// and only by a block that shows them.
     unlanded: std::cell::OnceCell<Section<Vec<AskRef>>>,
+    /// Blocks that need document-unique ids (the inbox's radio groups) take the next number.
+    ids: std::cell::Cell<usize>,
 }
 
 impl Ctx<'_> {
+    /// A number no other block of this render has taken.
+    pub(crate) fn next_id(&self) -> usize {
+        let n = self.ids.get();
+        self.ids.set(n + 1);
+        n
+    }
+
     pub(crate) fn unlanded(&self) -> &Section<Vec<AskRef>> {
         self.unlanded.get_or_init(|| {
             let at_rev = self.reads.asks.data.as_deref().unwrap_or_default();
@@ -60,7 +69,7 @@ pub fn render(store: &Store, v: &Validated) -> Rendered {
 pub fn render_at(store: &Store, v: &Validated, at: jiff::Timestamp) -> Rendered {
     let reads = Reads::of(store);
     let snap = views::snapshot_of(store, &reads, at);
-    let cx = Ctx { store, reads, snap, at, unlanded: std::cell::OnceCell::new() };
+    let cx = Ctx { store, reads, snap, at, unlanded: std::cell::OnceCell::new(), ids: std::cell::Cell::new(0) };
     let body = html! {
         div class="mv-screen" {
             (node(&cx, &v.root))

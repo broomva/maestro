@@ -1,15 +1,23 @@
 //! One decision, full length: stakes first, what silence does, the summary, the options with
 //! their real tradeoffs, the sources, what the agent tried first, and where to answer.
 
-use super::{Entry, asker, kind, queue, sources, tab_of};
+use super::rich::{self, Tradeoff};
+use super::{Entry, asker, kind, queue, tab_of};
 use crate::render::{Ctx, card, label, scope_errors};
 use maestro_core::ask::{Ask, AskState, Rung};
 use maestro_store::LedgerFile;
 use maud::{Markup, html};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-/// The tradeoff cells the ask format names, in the order they are shown.
-const CELLS: [(&str, &str); 4] = [("cost", "Cost"), ("risk", "Risk"), ("time", "Time"), ("reversibility", "Undo")];
+/// A tradeoff axis as the design labels it (`reversibility` is the design's Undo row).
+fn axis_label(axis: &str) -> &'static str {
+    match axis {
+        "cost" => "Cost",
+        "risk" => "Risk",
+        "time" => "Time",
+        _ => "Undo",
+    }
+}
 
 /// The `decision` block: one ask by ledger and uid or id, as the decision screen.
 pub(crate) fn decision(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup {
@@ -40,30 +48,34 @@ pub(crate) fn decision(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup
         [] if file.is_none() => {
             html! { p class="mv-note" data-tone="warning" { "No ledger named " span class="bv-code" { (ledger) } "." } }
         }
-        [] => html! { p class="mv-note" data-tone="warning" { "No ask " span class="bv-code" { (handle) } "." } },
-        many => {
-            html! { p class="mv-note" data-tone="warning" { span class="bv-code" { (handle) } " names " (many.len()) " asks; address it by uid." } }
-        }
+        [] => match file
+            .into_iter()
+            .flat_map(|lf| &lf.ledger.asks)
+            .find(|a| a.id == ask_id)
+            .and_then(|a| a.uid.as_deref())
+        {
+            // The id is there, but a uid addresses that ask.
+            Some(uid) => html! {
+                p class="mv-note" data-tone="warning" {
+                    span class="bv-code" { (handle) } " is addressed by its uid: " span class="bv-code" { (ledger) "#" (uid) } "."
+                }
+            },
+            None => html! { p class="mv-note" data-tone="warning" { "No ask " span class="bv-code" { (handle) } "." } },
+        },
+        many => html! {
+            p class="mv-note" data-tone="warning" {
+                span class="bv-code" { (handle) } " names " (many.len()) " asks, so none is shown: the ledger must give each its own uid or id."
+            }
+        },
     };
     card(id, "decision", "Decision", &scoped, None, body)
 }
 
-fn text<'a>(ask: &'a Ask, key: &str) -> Option<&'a str> {
-    ask.extra.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
-}
-
-/// The tradeoff rows the ask carries, as objects.
-fn tradeoffs(ask: &Ask) -> Vec<&Map<String, Value>> {
-    ask.extra.get("tradeoffs").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object).collect()
-}
-
-fn cells(row: &Map<String, Value>) -> Markup {
+fn cells(row: &Tradeoff) -> Markup {
     html! {
         dl class="mv-cells" {
-            @for (key, name) in CELLS {
-                @if let Some(v) = row.get(key).and_then(Value::as_str).filter(|v| !v.is_empty()) {
-                    div class="mv-cell" { dt class="bv-meta" { (name) } dd { (v) } }
-                }
+            @for (axis, v) in &row.cells {
+                div class="mv-cell" { dt class="bv-meta" { (axis_label(axis)) } dd { (v) } }
             }
         }
     }
@@ -91,10 +103,8 @@ fn tried(entry: &Value) -> (Option<Rung>, String) {
 /// `position`: where it sits among its tab's open asks.
 pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: Option<(usize, usize)>) -> Markup {
     let state = a.state();
-    let rows = tradeoffs(a);
-    let free: Vec<_> = rows.iter().filter(|r| r.get("option").and_then(Value::as_str).is_none()).collect();
-    let srcs = sources::of(a.extra.get("sources"));
-    let summary = text(a, "summary");
+    let rich = rich::of(a);
+    let free: Vec<_> = rich.tradeoffs.iter().filter(|r| r.option.is_none()).collect();
     let question = a.ask.as_deref().or(a.question.as_deref()).filter(|q| *q != a.title());
     html! {
         article class="mv-decision" data-ask=(format!("{}#{}", lf.file, a.handle())) data-hash=(a.hash()) data-kind=(kind(a)) {
@@ -117,10 +127,10 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: 
             @if a.blocking && !a.gates.is_empty() {
                 p class="mv-gates bv-meta" { "Blocks " @for (i, g) in a.gates.iter().enumerate() { @if i > 0 { ", " } span class="bv-code" { (g) } } }
             }
-            @if let Some(s) = summary { p class="mv-dbody" { (s) } }
+            @if let Some(s) = &rich.summary { p class="mv-dbody" { (s) } }
             @if let Some(q) = question { p class="mv-dbody" { (q) } }
             @if let Some(why) = &a.why_you { p class="mv-dbody mv-why" { "Why you: " (why) } }
-            @if let Some(details) = text(a, "details") {
+            @if let Some(details) = &rich.details {
                 details class="mv-fold" { summary { "Details" } p class="mv-pre" { (details) } }
             }
             @if !a.options.is_empty() {
@@ -142,7 +152,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: 
                                     @if o.status_quo { span class="mv-badge" { "Status quo" } }
                                 }
                             }
-                            @for row in rows.iter().filter(|r| r.get("option").and_then(Value::as_str) == Some(o.id.as_str())) {
+                            @for row in rich.tradeoffs.iter().filter(|r| r.option.as_deref() == Some(o.id.as_str())) {
                                 (cells(row))
                             }
                         }
@@ -153,14 +163,14 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, position: 
                 h3 class="mv-label bv-meta" { "Tradeoffs" }
                 ul class="mv-free" {
                     @for row in &free {
-                        li { p class="mv-dopt-label" { (row.get("label").and_then(Value::as_str).unwrap_or("")) } (cells(row)) }
+                        li { p class="mv-dopt-label" { (row.label.as_deref().unwrap_or("")) } (cells(row)) }
                     }
                 }
             }
-            @if !srcs.is_empty() {
+            @if !rich.sources.is_empty() {
                 h3 class="mv-label bv-meta" { "Sources" }
                 ul class="mv-sources" {
-                    @for s in &srcs {
+                    @for s in &rich.sources {
                         li class="mv-source-chip" data-kind=(s.kind) {
                             @match &s.url {
                                 Some(url) => a href=(url) target="_blank" rel="noopener noreferrer" { (s.text) },

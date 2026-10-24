@@ -7,27 +7,29 @@ expression: "portable(&r.html, m.path())"
 <header class="mv-head">
 <h2 class="mv-title">Decisions</h2>
 </header>
-<p class="mv-sub bv-meta">at least 7 to answer · 0 waiting to land</p>
+<p class="mv-sub bv-meta">at least 7 open · 0 waiting to land</p>
 <div class="mv-inbox">
-<input class="mv-tab-input" type="radio" name="mv-tabs-043a7187" id="mv-tab-043a7187-all" value="all">
-<input class="mv-tab-input" type="radio" name="mv-tabs-043a7187" id="mv-tab-043a7187-decisions" value="decisions" checked>
-<input class="mv-tab-input" type="radio" name="mv-tabs-043a7187" id="mv-tab-043a7187-authority" value="authority">
-<input class="mv-tab-input" type="radio" name="mv-tabs-043a7187" id="mv-tab-043a7187-ideas" value="ideas">
+<input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-all" value="all">
+<input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-decisions" value="decisions" checked>
+<input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-authority" value="authority">
+<input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-ideas" value="ideas">
 <nav class="mv-tabs" aria-label="Decision kinds">
-<label class="mv-tab" for="mv-tab-043a7187-all" data-tab="all">All <span class="mv-tab-count">7</span>
+<label class="mv-tab" for="mv-tab-0-all" data-tab="all">All <span class="mv-tab-count">7+</span>
 </label>
-<label class="mv-tab" for="mv-tab-043a7187-decisions" data-tab="decisions">Decisions <span class="mv-tab-count">4</span>
+<label class="mv-tab" for="mv-tab-0-decisions" data-tab="decisions">Decisions <span class="mv-tab-count">4+</span>
 </label>
-<label class="mv-tab" for="mv-tab-043a7187-authority" data-tab="authority">Authority <span class="mv-tab-count">1</span>
+<label class="mv-tab" for="mv-tab-0-authority" data-tab="authority">Authority <span class="mv-tab-count">1+</span>
 </label>
-<label class="mv-tab" for="mv-tab-043a7187-ideas" data-tab="ideas">Ideas <span class="mv-tab-count">2</span>
+<label class="mv-tab" for="mv-tab-0-ideas" data-tab="ideas">Ideas <span class="mv-tab-count">2+</span>
 </label>
 </nav>
 <div class="mv-groups">
 <section class="mv-group" data-tabs="all decisions ideas">
 <header class="mv-group-head bv-meta">
 <span class="mv-group-name">demo</span>
-<span class="mv-group-age">22 d</span>
+<span class="mv-group-age" data-tab="all">22 d</span>
+<span class="mv-group-age" data-tab="decisions">22 d</span>
+<span class="mv-group-age" data-tab="ideas">22 d</span>
 </header>
 <ul class="mv-list">
 <li class="mv-irow" data-tab="decisions" data-ask="demo-arc.yaml#merge-now" data-blocking="true">
@@ -150,7 +152,9 @@ expression: "portable(&r.html, m.path())"
 <section class="mv-group" data-tabs="all decisions authority">
 <header class="mv-group-head bv-meta">
 <span class="mv-group-name">maestro</span>
-<span class="mv-group-age">11 d</span>
+<span class="mv-group-age" data-tab="all">11 d</span>
+<span class="mv-group-age" data-tab="decisions">1 d</span>
+<span class="mv-group-age" data-tab="authority">11 d</span>
 </header>
 <ul class="mv-list">
 <li class="mv-irow" data-tab="decisions" data-ask="decisions.yaml#new-key" data-blocking="true">
@@ -240,7 +244,8 @@ expression: "portable(&r.html, m.path())"
 <section class="mv-group" data-tabs="all decisions">
 <header class="mv-group-head bv-meta">
 <span class="mv-group-name">fleet</span>
-<span class="mv-group-age">6 d</span>
+<span class="mv-group-age" data-tab="all">6 d</span>
+<span class="mv-group-age" data-tab="decisions">6 d</span>
 </header>
 <ul class="mv-list">
 <li class="mv-irow" data-tab="decisions" data-ask="decisions.yaml#fleet-cost-1" data-blocking="true">
@@ -340,9 +345,6 @@ expression: "portable(&r.html, m.path())"
 <li class="mv-source-chip" data-kind="session">
 <span class="bv-code">session 2fb204ca</span>
 </li>
-<li class="mv-source-chip" data-kind="url">
-<span class="bv-code">not a link</span>
-</li>
 </ul>
 <details class="mv-fold mv-tried" open>
 <summary>What the agent tried first</summary>
@@ -368,19 +370,20 @@ expression: "portable(&r.html, m.path())"
 <section class="mv-group" data-tabs="all ideas">
 <header class="mv-group-head bv-meta">
 <span class="mv-group-name">research</span>
-<span class="mv-group-age">3 d</span>
+<span class="mv-group-age" data-tab="all">3 d</span>
+<span class="mv-group-age" data-tab="ideas">3 d</span>
 </header>
 <ul class="mv-list">
 <li class="mv-irow" data-tab="ideas" data-ask="decisions.yaml#jev-idea" data-blocking="false">
 <details>
 <summary>
 <span class="mv-irow-meta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> fleet-closeout</span>
+<span class="mv-chip" data-kind="idea">idea</span> 9f3c2a1b</span>
 <span class="mv-irow-title">Run the Jev-vs-/kg retrieval experiment?</span>
 </summary>
-<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="439265f22d6e4dd6" data-kind="idea">
+<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="054eeb374aa3c779" data-kind="idea">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked 2026-10-20T00:00:00Z by fleet-closeout</p>
+<span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked 2026-10-20T00:00:00Z by 9f3c2a1b</p>
 <p class="mv-dtitle">Run the Jev-vs-/kg retrieval experiment?</p>
 <details class="mv-fold mv-tried" open>
 <summary>What the agent tried first</summary>

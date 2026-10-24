@@ -86,6 +86,10 @@ body { padding: var(--bv-space-3); }
 .mv-tab { padding: var(--bv-space-1) var(--bv-space-3); border: 1px solid var(--border); border-radius: var(--bv-radius-full); font-size: var(--bv-text-sm); cursor: pointer; user-select: none; }
 .mv-tab-count { color: var(--muted-foreground); font-variant-numeric: tabular-nums; font-size: var(--bv-text-xs); }
 .mv-tab-empty { display: none; }
+/* A group shows the age of the oldest ask the checked tab shows. */
+.mv-group-age { display: none; }
+/* Ledger text is isolated: a bidi override in a title cannot reorder what follows it. */
+.mv-irow-title, .mv-irow-meta, .mv-irow-rec, .mv-dtitle, .mv-dmeta, .mv-group-name, .mv-decision p, .mv-decision li { unicode-bidi: isolate; }
 .mv-banner { padding: var(--bv-space-2) var(--bv-space-3); border: 1px solid var(--border); border-radius: var(--bv-radius-lg); margin: 0; }
 .mv-banner p { margin: 0; }
 .mv-banner-title { font-weight: 500; }
@@ -105,20 +109,24 @@ body { padding: var(--bv-space-3); }
 .mv-tab-input[value="all"]:checked ~ .mv-tabs .mv-tab[data-tab="all"] .mv-tab-count { color: inherit; }
 .mv-tab-input[value="all"]:focus-visible ~ .mv-tabs .mv-tab[data-tab="all"] { outline: 2px solid var(--ring); outline-offset: 2px; }
 .mv-tab-input[value="all"]:checked ~ .mv-tab-empty[data-tab="all"] { display: block; }
+.mv-tab-input[value="all"]:checked ~ .mv-groups .mv-group-age[data-tab="all"] { display: inline; }
 .mv-tab-input[value="decisions"]:checked ~ .mv-tabs .mv-tab[data-tab="decisions"] { background: var(--foreground); color: var(--background); border-color: var(--foreground); }
 .mv-tab-input[value="decisions"]:checked ~ .mv-tabs .mv-tab[data-tab="decisions"] .mv-tab-count { color: inherit; }
 .mv-tab-input[value="decisions"]:focus-visible ~ .mv-tabs .mv-tab[data-tab="decisions"] { outline: 2px solid var(--ring); outline-offset: 2px; }
 .mv-tab-input[value="decisions"]:checked ~ .mv-tab-empty[data-tab="decisions"] { display: block; }
+.mv-tab-input[value="decisions"]:checked ~ .mv-groups .mv-group-age[data-tab="decisions"] { display: inline; }
 .mv-tab-input[value="decisions"]:checked ~ .mv-groups .mv-group:not([data-tabs~="decisions"]), .mv-tab-input[value="decisions"]:checked ~ .mv-groups .mv-irow:not([data-tab="decisions"]) { display: none; }
 .mv-tab-input[value="authority"]:checked ~ .mv-tabs .mv-tab[data-tab="authority"] { background: var(--foreground); color: var(--background); border-color: var(--foreground); }
 .mv-tab-input[value="authority"]:checked ~ .mv-tabs .mv-tab[data-tab="authority"] .mv-tab-count { color: inherit; }
 .mv-tab-input[value="authority"]:focus-visible ~ .mv-tabs .mv-tab[data-tab="authority"] { outline: 2px solid var(--ring); outline-offset: 2px; }
 .mv-tab-input[value="authority"]:checked ~ .mv-tab-empty[data-tab="authority"] { display: block; }
+.mv-tab-input[value="authority"]:checked ~ .mv-groups .mv-group-age[data-tab="authority"] { display: inline; }
 .mv-tab-input[value="authority"]:checked ~ .mv-groups .mv-group:not([data-tabs~="authority"]), .mv-tab-input[value="authority"]:checked ~ .mv-groups .mv-irow:not([data-tab="authority"]) { display: none; }
 .mv-tab-input[value="ideas"]:checked ~ .mv-tabs .mv-tab[data-tab="ideas"] { background: var(--foreground); color: var(--background); border-color: var(--foreground); }
 .mv-tab-input[value="ideas"]:checked ~ .mv-tabs .mv-tab[data-tab="ideas"] .mv-tab-count { color: inherit; }
 .mv-tab-input[value="ideas"]:focus-visible ~ .mv-tabs .mv-tab[data-tab="ideas"] { outline: 2px solid var(--ring); outline-offset: 2px; }
 .mv-tab-input[value="ideas"]:checked ~ .mv-tab-empty[data-tab="ideas"] { display: block; }
+.mv-tab-input[value="ideas"]:checked ~ .mv-groups .mv-group-age[data-tab="ideas"] { display: inline; }
 .mv-tab-input[value="ideas"]:checked ~ .mv-groups .mv-group:not([data-tabs~="ideas"]), .mv-tab-input[value="ideas"]:checked ~ .mv-groups .mv-irow:not([data-tab="ideas"]) { display: none; }
 
 .mv-decision { display: flex; flex-direction: column; gap: var(--bv-space-3); min-width: 0; }
@@ -148,7 +156,7 @@ body { padding: var(--bv-space-3); }
 .mv-fold > summary { cursor: pointer; font-weight: 500; }
 .mv-fold ul { margin: var(--bv-space-2) 0 0; padding-left: var(--bv-space-4); color: var(--muted-foreground); overflow-wrap: anywhere; }
 .mv-answerbar { display: flex; flex-direction: column; gap: var(--bv-space-2); }
-.mv-note-field { width: 100%; resize: none; font: inherit; font-size: var(--bv-text-sm); padding: var(--bv-space-2); border: 1px solid var(--border); border-radius: var(--bv-radius-lg); background: transparent; color: var(--muted-foreground); }
+.mv-note-field { width: 100%; resize: none; font: inherit; font-size: var(--bv-text-sm); padding: var(--bv-space-2); border: 1px solid var(--border); border-radius: var(--bv-radius-lg); background: transparent; color: var(--muted-foreground); opacity: 0.6; cursor: not-allowed; }
 /* Not a button: phase 1 answers nothing here, so the answer bar names where to answer instead. */
 .mv-answer-cta { padding: var(--bv-space-2) var(--bv-space-3); border: 1px dashed var(--border); border-radius: var(--bv-radius-lg); text-align: center; font-weight: 500; }
 /* Opened in the inbox, a decision sits under its row: its title is the row's, and its bar is not pinned. */

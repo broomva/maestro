@@ -201,7 +201,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
 Maestro decides every value on it:
 
 - `maestro_ui_catalog` lists the block types (`stack`, `snapshot`, `needs`, `asks`, `ask`, `work`,
-  `loops`, `initiatives`, `fleet`) and their props. Props are handles and filters only (a ledger
+  `loops`, `initiatives`, `fleet`, and the Decisions screens `decisions` and `decision`) and their
+  props. The Decisions screens read only: Paseo's Maestro plugin still writes every answer. Props are handles and filters only (a ledger
   name, an ask id, a project, a state, a limit); no block carries text, numbers or markup.
 - `maestro_ui_render { root, blocks }` validates the spec, places what it can and reports every drop
   with its reason (an unknown type, a prop the type does not take, a cycle, a missing or unreachable

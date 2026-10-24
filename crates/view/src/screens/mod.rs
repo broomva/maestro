@@ -6,6 +6,7 @@
 
 mod decision;
 mod inbox;
+mod rich;
 mod sources;
 
 pub(crate) use decision::decision;
@@ -146,14 +147,14 @@ pub(crate) fn instant(text: &str) -> Option<jiff::Timestamp> {
     text.parse::<jiff::civil::Date>().ok().and_then(|d| utc(d.to_datetime(jiff::civil::Time::midnight())))
 }
 
-/// How long ago, in the inbox's short form: minutes under an hour, hours under two days, else days.
+/// How long ago, in whole days: `today` under a day, else `N d`. Days, not minutes, so an age
+/// changes the screen (and so its revision, which a poll swaps on) at most once a day.
 /// A date after the render's clock has no age.
 pub(crate) fn age(from: jiff::Timestamp, at: jiff::Timestamp) -> Option<String> {
     let secs = at.as_second() - from.as_second();
     match secs {
         ..0 => None,
-        0..3600 => Some(format!("{} m", secs / 60)),
-        3600..172_800 => Some(format!("{} h", secs / 3600)),
+        0..86_400 => Some("today".into()),
         _ => Some(format!("{} d", secs / 86_400)),
     }
 }
@@ -181,13 +182,13 @@ mod tests {
     }
 
     #[test]
-    fn ages_switch_units_at_an_hour_and_two_days() {
+    fn ages_are_whole_days() {
         let at: jiff::Timestamp = "2026-10-23T12:00:00Z".parse().unwrap();
         let ago = |s: i64| age(jiff::Timestamp::from_second(at.as_second() - s).unwrap(), at);
-        assert_eq!(ago(0).as_deref(), Some("0 m"));
-        assert_eq!(ago(3599).as_deref(), Some("59 m"));
-        assert_eq!(ago(3600).as_deref(), Some("1 h"));
-        assert_eq!(ago(172_799).as_deref(), Some("47 h"));
+        assert_eq!(ago(0).as_deref(), Some("today"));
+        assert_eq!(ago(86_399).as_deref(), Some("today"));
+        assert_eq!(ago(86_400).as_deref(), Some("1 d"));
+        assert_eq!(ago(172_799).as_deref(), Some("1 d"));
         assert_eq!(ago(172_800).as_deref(), Some("2 d"));
         assert_eq!(ago(-1), None);
     }

@@ -96,9 +96,6 @@ expression: "portable(&r.html, m.path())"
 <li class="mv-source-chip" data-kind="session">
 <span class="bv-code">session 2fb204ca</span>
 </li>
-<li class="mv-source-chip" data-kind="url">
-<span class="bv-code">not a link</span>
-</li>
 </ul>
 <details class="mv-fold mv-tried" open>
 <summary>What the agent tried first</summary>

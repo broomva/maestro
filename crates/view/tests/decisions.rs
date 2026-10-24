@@ -71,7 +71,7 @@ fn tab_count(html: &str, tab: &str) -> usize {
     let at = html.find(&format!(r#"data-tab="{tab}">"#)).unwrap_or_else(|| panic!("no tab {tab}"));
     let rest = &html[at..];
     let open = rest.find(r#"<span class="mv-tab-count">"#).unwrap() + r#"<span class="mv-tab-count">"#.len();
-    rest[open..open + rest[open..].find('<').unwrap()].parse().unwrap()
+    rest[open..open + rest[open..].find('<').unwrap()].trim_end_matches('+').parse().unwrap()
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -120,7 +120,12 @@ fn tabs_count_open_asks_and_add_up_to_all() {
     let ideas = render(&worktree(m.path()), &spec(json!({ "type": "decisions", "props": { "tab": "ideas" } }))).html;
     assert!(ideas.contains(r#"value="ideas" checked"#) && !ideas.contains(r#"value="decisions" checked"#));
     // broken.yaml does not parse: counts are lower bounds and say so.
-    assert!(html.contains("at least 7 to answer"), "{html}");
+    assert!(html.contains("at least 7 open"), "{html}");
+    for tab in ["all", "decisions", "authority", "ideas"] {
+        let at = html.find(&format!(r#"data-tab="{tab}">"#)).unwrap();
+        let chip = &html[at..at + html[at..].find("</label>").unwrap()];
+        assert!(chip.contains("+</span>"), "{tab} chip is not marked a lower bound: {chip}");
+    }
 }
 
 #[test]
@@ -151,9 +156,15 @@ fn rows_are_grouped_by_project_blocking_first_with_age() {
         "{html}"
     );
     assert!(
-        html.contains(r#"<span class="mv-group-name">fleet</span><span class="mv-group-age">6 d</span>"#),
+        html.contains(
+            r#"<span class="mv-group-name">fleet</span><span class="mv-group-age" data-tab="all">6 d</span>"#
+        ),
         "{html}"
     );
+    // A group's age per tab is its oldest ask in that tab: maestro is 11 days old in All (the
+    // authority ask of 10-12), 1 day in Decisions (only the key asked 10-22).
+    let maestro = r#"<span class="mv-group-age" data-tab="all">11 d</span><span class="mv-group-age" data-tab="decisions">1 d</span><span class="mv-group-age" data-tab="authority">11 d</span>"#;
+    assert!(html.contains(maestro), "{html}");
     assert!(html.contains("Recommended: Rotate long orchestrators by handoff"), "{html}");
 }
 
@@ -181,9 +192,8 @@ fn the_decision_shows_every_field_it_names() {
     ] {
         assert!(html.contains(shown), "missing {shown}\n{html}");
     }
-    // A source the plugin would not link is named, never linked.
-    assert!(!html.contains("javascript:"), "{html}");
-    assert!(html.contains(r#"<span class="bv-code">not a link</span>"#), "{html}");
+    // A source the plugin drops (a url that is not https) is not shown at all, as in the plugin.
+    assert!(!html.contains("javascript:") && !html.contains("not a link"), "{html}");
 }
 
 #[test]
@@ -257,9 +267,10 @@ fn answered_locally() -> (tempfile::TempDir, Store) {
 fn an_answer_in_the_working_tree_waits_to_land() {
     let (_m, store) = answered_locally();
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("1 answer waiting to land"), "{html}");
-    // The working tree's broken.yaml is unread there too, so the waiting count is a lower bound.
-    assert!(html.contains("at least 6 to answer · at least 1 waiting to land"), "{html}");
+    // The working tree's broken.yaml is unread there too, so the waiting count is a lower bound,
+    // in the sentence and in the banner alike.
+    assert!(html.contains("at least 7 open · at least 1 waiting to land"), "{html}");
+    assert!(html.contains(r#"<p class="mv-banner-title">at least 1 waiting to land</p>"#), "{html}");
     assert!(html.contains(r#"<span class="mv-irow-rec" data-tone="success">Waiting to land</span>"#), "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(d.contains("Answered in the working tree; waiting to land on"), "{d}");
@@ -286,4 +297,94 @@ fn a_project_prop_keeps_one_project() {
         render(&worktree(m.path()), &spec(json!({ "type": "decisions", "props": { "project": "maestro" } }))).html;
     assert_eq!(html.matches(r#"<li class="mv-irow""#).count(), 2, "{html}");
     assert_eq!(tab_count(&html, "all"), 2);
+}
+
+#[test]
+fn an_ask_archived_in_the_working_tree_is_not_waiting_to_land() {
+    let m = machine();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let file = ws.join(".control/asks/decisions.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let archived = text.replacen("    gates: [fleet-cost]\n", "    gates: [fleet-cost]\n    status: archived\n", 1);
+    assert_ne!(text, archived);
+    std::fs::write(&file, archived).unwrap();
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let html = render(&store, &inbox()).html;
+    assert!(html.contains("at least 0 waiting to land"), "{html}");
+    assert!(!html.contains("Waiting to land</span>"), "{html}");
+    let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
+    assert!(!d.contains("Answered in the working tree"), "{d}");
+}
+
+#[test]
+fn two_inboxes_on_one_page_never_share_a_radio_group() {
+    let m = machine();
+    let two = json!({ "root": "m", "blocks": {
+        "m": { "type": "stack", "children": ["a", "b"] },
+        "a": { "type": "decisions" },
+        "b": { "type": "decisions", "props": { "tab": "ideas" } } } });
+    let html = render(&worktree(m.path()), &two).html;
+    let attr = |key: &str| -> Vec<String> {
+        let pat = format!(" {key}=\"");
+        html.match_indices(&pat)
+            .map(|(i, _)| {
+                let rest = &html[i + pat.len()..];
+                rest[..rest.find('"').unwrap()].to_string()
+            })
+            .collect()
+    };
+    let names: std::collections::BTreeSet<String> = attr("name").into_iter().collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    let ids = attr("id");
+    let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
+    assert_eq!(ids.len(), unique.len(), "{ids:?}");
+}
+
+#[test]
+fn a_group_that_holds_nothing_sorts_after_one_that_blocks_even_when_older() {
+    let m = machine();
+    std::fs::write(
+        m.path().join("workspace/.control/asks/old.yaml"),
+        "asks:\n  - id: ancient\n    class: idea\n    project: attic\n    asked_at: \"2026-01-01\"\n    headline: \"An old idea\"\n    blocking: false\n    exhausted: [\"read: x\"]\n",
+    )
+    .unwrap();
+    let html = render(&worktree(m.path()), &inbox()).html;
+    let attic = html.find(r#"<span class="mv-group-name">attic</span>"#).unwrap();
+    let fleet = html.find(r#"<span class="mv-group-name">fleet</span>"#).unwrap();
+    assert!(fleet < attic, "a blocking group must come first: {html}");
+}
+
+#[test]
+fn an_empty_tab_says_so() {
+    let m = machine();
+    let html =
+        render(&worktree(m.path()), &spec(json!({ "type": "decisions", "props": { "project": "research" } }))).html;
+    for tab in ["decisions", "authority"] {
+        let note = format!(r#"data-tab="{tab}">Nothing to answer here in what could be read.</p>"#);
+        assert!(html.contains(&note), "{html}");
+    }
+    assert!(!html.contains(r#"data-tab="ideas">Nothing"#), "{html}");
+}
+
+#[test]
+fn a_uuid_agent_is_named_by_its_first_8() {
+    let m = machine();
+    let html = render(&worktree(m.path()), &detail("decisions.yaml", "jev-idea")).html;
+    assert!(html.contains(" by 9f3c2a1b"), "{html}");
+    assert!(!html.contains("9f3c2a1b-"), "{html}");
+}
+
+#[test]
+fn the_decision_on_an_unread_or_ambiguous_ledger_says_so() {
+    let m = machine();
+    // broken.yaml does not parse: the decision is unread, which is not the same as missing.
+    let html = render(&worktree(m.path()), &detail("broken.yaml", "x")).html;
+    assert!(html.contains("could not be read. This is not the same as missing."), "{html}");
+    // An ask with a uid is addressed by it, and the screen says which.
+    let html = render(&worktree(m.path()), &detail("decisions.yaml", "context-cost")).html;
+    assert!(html.contains("is addressed by its uid"), "{html}");
+    assert!(html.contains("decisions.yaml#fleet-cost-1"), "{html}");
 }

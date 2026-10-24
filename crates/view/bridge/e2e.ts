@@ -130,7 +130,8 @@ try {
         const what = `${where} ${width}px`;
         for (const name of ["all", "decisions", "authority", "ideas"]) {
           await scope.locator(`.mv-tab[data-tab="${name}"]`).first().click();
-          const want = Number(await scope.locator(`.mv-tab[data-tab="${name}"] .mv-tab-count`).first().textContent());
+          // A partial read marks counts as lower bounds ("7+"); the rows shown are the count itself.
+          const want = Number.parseInt((await scope.locator(`.mv-tab[data-tab="${name}"] .mv-tab-count`).first().textContent()) ?? "", 10);
           const rows = scope.locator(".mv-irow");
           const visible: string[] = [];
           for (let i = 0; i < (await rows.count()); i++) {
@@ -154,9 +155,33 @@ try {
         await ctx.close();
       }
     }
-  }
-
-  if (edit) {
+    if (edit) {
+      // A poll that swaps in a changed screen keeps the tab and the row the owner opened.
+      const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+      const tab = await ctx.newPage();
+      await tab.goto(`http://127.0.0.1:${host.port}/?theme=light`);
+      const frame = tab.frameLocator("#app");
+      await frame.locator(".mv-inbox").waitFor({ timeout: 15000 });
+      await frame.locator('.mv-tab[data-tab="authority"]').click();
+      const row = frame.locator('.mv-irow[data-tab="authority"]').first();
+      const ask = await row.getAttribute("data-ask");
+      await row.locator("summary").first().click();
+      const text = await readFile(edit, "utf8");
+      const from = arg("from") as string;
+      check(text.includes(from), `scratch ledger holds "${from}"`);
+      await writeFile(edit, text.replace(from, arg("to") as string));
+      const before = polls;
+      await frame.getByText(arg("expect") ?? (arg("to") as string)).first().waitFor({ timeout: 30000 });
+      check(polls > before, `decisions: the App polled and swapped in the edit (${polls - before} poll(s))`);
+      const checked = await frame.locator(".mv-tab-input:checked").getAttribute("value");
+      check(checked === "authority", `decisions: the swap kept the tab the owner chose (${checked})`);
+      const open = await frame.locator(`.mv-irow[data-ask="${ask}"] > details`).getAttribute("open");
+      check(open !== null, `decisions: the swap kept ${ask} open`);
+      await settle(tab);
+      await tab.screenshot({ path: join(out, "decisions-live-edit-390.png"), fullPage: true });
+      await ctx.close();
+    }
+  } else if (edit) {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const tab = await ctx.newPage();
     await tab.goto(`http://127.0.0.1:${host.port}/?theme=light`);
