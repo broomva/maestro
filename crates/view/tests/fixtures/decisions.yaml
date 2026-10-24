@@ -68,10 +68,14 @@ asks:
     blocking: false
     preanswerable: true
     exhausted: ["loop: filed by the idea triage"]
+    options:
+      - { id: later, label: "Later", reversible: true }
+      - { id: now, label: "Run it now", reversible: true, recommended: true }
   - id: done-before
     class: decision
     project: fleet
     headline: "Rotate the Tuesday loop?"
+    default: "keep the loop as it is"
     blocking: false
     preanswerable: true
     exhausted: ["read: x"]

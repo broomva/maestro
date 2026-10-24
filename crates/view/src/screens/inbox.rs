@@ -4,9 +4,10 @@
 //! MCP App and in the snapshot a host without MCP Apps shows.
 //!
 //! The counts depend on two reads, the asks at the tree read and the working tree's answers.
-//! If either came back in part, every count on the screen is marked a lower bound.
+//! The card stands on both ([`joined`]): if either came back in part, the card says which
+//! source and every count on the screen is marked a lower bound.
 
-use super::{Entry, Group, age, asker, decision::body, kind, queue};
+use super::{Entry, Group, Landing, age, asker, decision::body, joined, kind, queue};
 use crate::catalog::{DecisionsProps, Tab};
 use crate::render::{Ctx, card};
 use maud::{Markup, html};
@@ -22,13 +23,13 @@ fn plus(n: usize, partial: bool) -> String {
 }
 
 pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
-    let section = &cx.reads.asks;
+    let section = joined(cx, None);
     let groups = queue(cx, p.project.as_deref());
     let rows = || groups.iter().flat_map(|g| &g.rows);
     let count = |tab: Tab| rows().filter(|e| in_tab(e, tab)).count();
     let unlanded = cx.unlanded();
-    let partial = !section.errors.is_empty() || !unlanded.errors.is_empty();
-    let waiting = rows().filter(|e| e.waiting).count();
+    let partial = !section.errors.is_empty();
+    let waiting = rows().filter(|e| e.landing == Landing::Waiting).count();
     // Radio names and ids unique in the document, so two inboxes never share a group.
     let key = cx.next_id();
     let body = html! {
@@ -62,7 +63,7 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
             div class="mv-groups" { @for g in &groups { (group(cx, g)) } }
         }
     };
-    card(id, "decisions", "Decisions", section, None, body)
+    card(id, "decisions", "Decisions", &section, None, body)
 }
 
 fn in_tab(e: &Entry, tab: Tab) -> bool {
@@ -102,8 +103,8 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
             }
             ul class="mv-list" {
                 @for e in &g.rows {
-                    // An ambiguous handle is no key: the bridge restores open rows by data-ask.
-                    li class="mv-irow" data-tab=(e.tab().as_str()) data-ask=[(!e.ambiguous).then(|| e.handle())]
+                    // A handle another ask shares is no key: the bridge restores open rows by data-ask.
+                    li class="mv-irow" data-tab=(e.tab().as_str()) data-ask=[e.keyed.then(|| e.handle())]
                         data-ambiguous=[e.ambiguous.then_some("true")] data-blocking=(e.ask.blocking) {
                         details {
                             summary {
@@ -115,13 +116,15 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
                                     @if e.ask.blocking { " · " span data-tone="attention" { "blocking" } }
                                 }
                                 span class="mv-irow-title" { (e.ask.title()) }
-                                @if e.waiting {
-                                    span class="mv-irow-rec" data-tone="success" { "Waiting to land" }
-                                } @else if let Some(r) = e.ask.recommended() {
-                                    span class="mv-irow-rec" data-tone="info" { "Recommended: " (r.label) }
+                                @match e.landing {
+                                    Landing::Waiting => span class="mv-irow-rec" data-tone="success" { "Waiting to land" },
+                                    Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "May already be answered: the working tree could not be read" },
+                                    Landing::NotWaiting => @if let Some(r) = e.ask.recommended() {
+                                        span class="mv-irow-rec" data-tone="info" { "Recommended: " (r.label) }
+                                    },
                                 }
                             }
-                            (body(cx, e.lf, e.ask, e.waiting, e.ambiguous))
+                            (body(cx, e.lf, e.ask, e.landing, e.ambiguous))
                         }
                     }
                 }

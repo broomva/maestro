@@ -389,12 +389,29 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="idea">idea</span> <bdi>9f3c2a1b</bdi>
 </span>
 <span class="mv-irow-title">Run the Jev-vs-/kg retrieval experiment?</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: Run it now</span>
 </summary>
-<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="054eeb374aa3c779" data-kind="idea">
+<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="b5830ab7d58b1689" data-kind="idea">
 <p class="mv-dmeta bv-meta">
 <span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked 2026-10-20T00:00:00Z by <bdi>9f3c2a1b</bdi>
 </p>
 <p class="mv-dtitle">Run the Jev-vs-/kg retrieval experiment?</p>
+<h3 class="mv-label bv-meta">Choose one</h3>
+<ol class="mv-dopts">
+<li class="mv-dopt" data-option="later" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Later</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+<li class="mv-dopt" data-option="now" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">Run it now</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="info">Recommended</span>
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+</ol>
 <section class="mv-fold mv-tried">
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
@@ -405,7 +422,8 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions</p>
+<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Run it now)</span>
+</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">jev-idea</span>.</p>
 </div>
 </article>

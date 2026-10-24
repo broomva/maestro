@@ -2,7 +2,7 @@
 //! their real tradeoffs, the sources, what the agent tried first, and where to answer.
 
 use super::rich::{self, Tradeoff};
-use super::{asker, kind, waiting};
+use super::{Landing, asker, joined, kind, landing};
 use crate::render::{Ctx, card, label, scope_errors};
 use maestro_core::ask::{Ask, AskState, Rung};
 use maestro_store::LedgerFile;
@@ -23,16 +23,17 @@ fn axis_label(axis: &str) -> &'static str {
 pub(crate) fn decision(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup {
     let section = &cx.reads.asks;
     let file: Option<&LedgerFile> = section.data.iter().flatten().find(|lf| lf.file == ledger);
-    let matches: Vec<_> = file
-        .into_iter()
-        .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        .filter(|(_, a)| a.uid.as_deref() == Some(ask_id) || (a.uid.is_none() && a.id == ask_id))
-        .collect();
+    // The plugin's namespaces: a handle is a uid, else an id among asks without one.
+    let all = || file.into_iter().flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)));
+    let mut matches: Vec<_> = all().filter(|(_, a)| a.uid.as_deref() == Some(ask_id)).collect();
+    if matches.is_empty() {
+        matches = all().filter(|(_, a)| a.uid.is_none() && a.id == ask_id).collect();
+    }
     let handle = format!("{ledger}#{ask_id}");
     let scoped = scope_errors(cx, section, ledger);
     let unread = scoped.errors.iter().any(|e| e.at != section.source);
     let body = match matches.as_slice() {
-        [(lf, a)] => body(cx, lf, a, a.state() == AskState::Open && waiting(cx, lf, a), false),
+        [(lf, a)] => body(cx, lf, a, landing(cx, lf, a), false),
         [] if unread => html! {
             p class="mv-note" data-tone="danger" {
                 span class="bv-code" { (handle) } " could not be read. This is not the same as missing."
@@ -61,7 +62,8 @@ pub(crate) fn decision(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup
             }
         },
     };
-    card(id, "decision", "Decision", &scoped, None, body)
+    // The card stands on both reads, scoped to this ledger, so its state explains the outcome.
+    card(id, "decision", "Decision", &joined(cx, Some(ledger)), None, body)
 }
 
 fn cells(row: &Tradeoff) -> Markup {
@@ -92,9 +94,9 @@ fn tried(entry: &Value) -> (Option<Rung>, String) {
     (rung, what)
 }
 
-/// The decision's full body. `waiting`: answered in the working tree, not yet landed.
+/// The decision's full body. `landing`: whether its answer waits to land (read for open asks).
 /// `ambiguous`: its handle names more than one ask in its ledger, which the owner path refuses.
-pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, ambiguous: bool) -> Markup {
+pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguous: bool) -> Markup {
     let state = a.state();
     let rich = rich::of(a);
     let free: Vec<_> = rich.tradeoffs.iter().filter(|r| r.option.is_none()).collect();
@@ -189,20 +191,25 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, waiting: bool, ambiguous:
                     span class="bv-code" { (lf.file) "#" (a.handle()) } " names more than one ask in its ledger, and Paseo refuses an answer to an ambiguous handle. The ledger must give each its own uid."
                 }
             } @else {
-                (outcome(cx, a, state, waiting))
+                (outcome(cx, a, state, landing))
             }
         }
     }
 }
 
 /// Where the answer stands, or where to give it. Phase 1 writes nothing: the plugin is the one writer.
-fn outcome(cx: &Ctx, a: &Ask, state: AskState, waiting: bool) -> Markup {
+fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
     let given =
         a.answer_option.as_deref().and_then(|id| a.options.iter().find(|o| o.id == id)).map(|o| o.label.as_str());
     html! {
-        @if waiting {
+        @if state == AskState::Open && landing == Landing::Waiting {
             p class="mv-callout" data-tone="success" {
                 "Answered in the working tree; waiting to land on " span class="bv-code" { (cx.snap.tree) } "."
+            }
+        } @else if state == AskState::Open && landing == Landing::Unknown {
+            // Unknown is never shown as unanswered: no answer bar invites a second answer.
+            p class="mv-callout" data-tone="warning" {
+                "The working tree's copy of this ledger could not be read, so it may already be answered there. Check Paseo · Maestro · Decisions before answering."
             }
         } @else if state == AskState::Answered {
             p class="mv-callout" data-tone="success" {

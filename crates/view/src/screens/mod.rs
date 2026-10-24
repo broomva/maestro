@@ -1,8 +1,9 @@
 //! The Decisions screens (design page 11, screens 1 and 2): the inbox and one decision.
 //!
-//! Both read the asks the render read once, in one order (the queue), so the inbox's rows and a
-//! decision's "1 of 10" agree. Phase 1 answers nothing here: Paseo's Maestro plugin is still
-//! the one writer, and these screens say so where the answer would go.
+//! Both depend on two reads: the asks at the tree read, and the working tree's answers that have
+//! not landed. [`landing`] and [`joined`] are the only places the two meet, so no screen can
+//! show one read's state as if it were both. Phase 1 answers nothing here: Paseo's Maestro
+//! plugin is still the one writer, and these screens say so where the answer would go.
 
 mod decision;
 mod inbox;
@@ -14,6 +15,7 @@ pub(crate) use inbox::inbox;
 
 use crate::catalog::Tab;
 use crate::render::Ctx;
+use maestro_core::Section;
 use maestro_core::ask::{Ask, AskClass, AskState};
 use maestro_store::LedgerFile;
 
@@ -21,10 +23,12 @@ use maestro_store::LedgerFile;
 pub(crate) struct Entry<'a> {
     pub lf: &'a LedgerFile,
     pub ask: &'a Ask,
-    /// Answered in the working tree, not yet on the tree read: waiting to land.
-    pub waiting: bool,
-    /// Its handle names another ask in the same ledger too.
+    pub landing: Landing,
+    /// Its uid, or its id among asks without one, names another ask in its ledger too: the
+    /// plugin's `ambiguity()`, which refuses an answer to either.
     pub ambiguous: bool,
+    /// Its handle is its ledger's only one in either namespace, so it can key the row.
+    pub keyed: bool,
 }
 
 impl Entry<'_> {
@@ -46,10 +50,58 @@ impl Entry<'_> {
     }
 }
 
-/// Answered in the working tree while open on the tree read. Unknown (false) when the
-/// working tree could not be read; the inbox says so in its banner.
-pub(crate) fn waiting(cx: &Ctx, lf: &LedgerFile, ask: &Ask) -> bool {
-    cx.unlanded().data.iter().flatten().any(|r| r.ledger == lf.file && r.id == ask.handle())
+/// Whether an open ask's answer is waiting to land: answered in the working tree, still open
+/// on the tree read. Unknown when the working tree's read could hide this ledger's answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Landing {
+    Waiting,
+    NotWaiting,
+    Unknown,
+}
+
+/// Whether a working-tree read error may hide `file`'s answers: every error but one that names
+/// a different ledger file (`worktree:<asks>/<file>` or `…/<file>#<entry>`).
+fn covers(at: &str, file: &str) -> bool {
+    let path = at.strip_prefix("worktree:").unwrap_or(at);
+    let path = path.split('#').next().unwrap_or(path);
+    match path.rsplit_once('/') {
+        Some((_, name)) if name.ends_with(".yaml") || name.ends_with(".yml") => name == file,
+        _ => true,
+    }
+}
+
+pub(crate) fn landing(cx: &Ctx, lf: &LedgerFile, ask: &Ask) -> Landing {
+    let unlanded = cx.unlanded();
+    let Some(refs) = &unlanded.data else { return Landing::Unknown };
+    if unlanded.errors.iter().any(|e| covers(&e.at, &lf.file)) {
+        return Landing::Unknown;
+    }
+    if refs.iter().any(|r| r.ledger == lf.file && r.id == ask.handle()) {
+        Landing::Waiting
+    } else {
+        Landing::NotWaiting
+    }
+}
+
+/// What a card on these screens stands on: the asks read at the tree and the working tree's
+/// answers, with both reads' errors. For one ledger, only errors that may hide its asks.
+pub(crate) fn joined(cx: &Ctx, ledger: Option<&str>) -> Section<()> {
+    let asks = match ledger {
+        Some(l) => crate::render::scope_errors(cx, &cx.reads.asks, l).map(|_| ()),
+        None => cx.reads.asks.as_ref().map(|_| ()),
+    };
+    let mut errors = asks.errors;
+    errors.extend(cx.unlanded().errors.iter().filter(|e| ledger.is_none_or(|l| covers(&e.at, l))).cloned());
+    Section { source: asks.source, data: asks.data, errors }
+}
+
+/// The plugin's `ambiguity()`: a uid twice, or an id twice among asks without a uid.
+pub(crate) fn ambiguous(lf: &LedgerFile, ask: &Ask) -> bool {
+    let same = |a: &&Ask| match &ask.uid {
+        Some(uid) => a.uid.as_ref() == Some(uid),
+        None => a.uid.is_none() && a.id == ask.id,
+    };
+    lf.ledger.asks.iter().filter(same).count() > 1
 }
 
 pub(crate) fn tab_of(ask: &Ask) -> Tab {
@@ -112,8 +164,9 @@ pub(crate) fn queue<'a>(cx: &'a Ctx, project: Option<&str>) -> Vec<Group<'a>> {
         .map(|(lf, ask)| Entry {
             lf,
             ask,
-            waiting: waiting(cx, lf, ask),
-            ambiguous: lf.ledger.asks.iter().filter(|a| a.handle() == ask.handle()).count() > 1,
+            landing: landing(cx, lf, ask),
+            ambiguous: ambiguous(lf, ask),
+            keyed: lf.ledger.asks.iter().filter(|a| a.handle() == ask.handle()).count() == 1,
         })
         .filter(|e| project.is_none_or(|p| e.project() == p))
         .collect();

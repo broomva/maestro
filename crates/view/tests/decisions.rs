@@ -427,3 +427,93 @@ fn an_ambiguous_handle_offers_no_answer_and_no_restore_key() {
     let d = render(&worktree(m.path()), &detail("dup.yaml", "same")).html;
     assert!(d.contains("names 2 asks, so none is shown"), "{d}");
 }
+
+/// The fixture machine in git mode at a clean revision (only ledgers that parse whole),
+/// with `local` applied to the working tree afterwards.
+fn clean_at_main(local: impl FnOnce(&Path)) -> (tempfile::TempDir, Store) {
+    let m = machine();
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::remove_file(asks.join("broken.yaml")).unwrap();
+    std::fs::remove_file(asks.join("alt-key.yaml")).unwrap();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    local(&asks);
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    (m, store)
+}
+
+#[test]
+fn an_unread_working_tree_never_invites_an_answer() {
+    let (_m, store) = clean_at_main(|asks| {
+        std::fs::remove_dir_all(asks).unwrap();
+        std::fs::write(asks, "not a directory").unwrap();
+    });
+    let html = render(&store, &inbox()).html;
+    // The card names the working tree's failure, so every "at least" has its reason.
+    assert!(html.contains(r#"data-type="decisions" data-state="partial""#), "{html}");
+    assert!(html.contains("worktree:"), "{html}");
+    assert!(!html.contains("mv-answerbar") && !html.contains("Recommended: "), "{html}");
+    assert_eq!(html.matches("May already be answered").count(), 6, "{html}");
+    let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
+    assert!(d.contains(r#"data-type="decision" data-state="partial""#), "{d}");
+    assert!(d.contains("may already be answered there"), "{d}");
+    assert!(!d.contains("mv-answerbar"), "{d}");
+}
+
+#[test]
+fn one_unread_working_tree_ledger_is_unknown_and_the_rest_are_not() {
+    let (_m, store) = clean_at_main(|asks| {
+        std::fs::write(asks.join("decisions.yaml"), "asks: [unclosed\n").unwrap();
+    });
+    let html = render(&store, &inbox()).html;
+    assert!(html.contains(r#"data-type="decisions" data-state="partial""#), "{html}");
+    assert_eq!(html.matches("May already be answered").count(), 4, "decisions.yaml's open asks: {html}");
+    // demo-arc.yaml read cleanly in both trees: its rows still offer the owner path.
+    let demo = &html[html.find(r#"data-ask="demo-arc.yaml#merge-now""#).unwrap()..];
+    let demo = &demo[..demo[1..].find(r#"<li class="mv-irow""#).map_or(demo.len(), |n| n + 1)];
+    assert!(demo.contains("Recommended: Merge now") && demo.contains("mv-answerbar"), "{demo}");
+    let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
+    assert!(d.contains(r#"data-state="partial""#) && !d.contains("mv-answerbar"), "{d}");
+    // The other ledger's decision stands on reads that cover it: no error, the owner path offered.
+    let other = render(&store, &detail("demo-arc.yaml", "merge-now")).html;
+    assert!(other.contains(r#"data-type="decision" data-state="ok""#), "{other}");
+    assert!(other.contains("mv-answerbar"), "{other}");
+}
+
+#[test]
+fn the_row_recommends_the_recommended_option_not_the_first() {
+    let m = machine();
+    let html = render(&worktree(m.path()), &inbox()).html;
+    assert!(html.contains("Recommended: Run it now"), "{html}");
+    assert!(!html.contains("Recommended: Later"), "{html}");
+}
+
+#[test]
+fn a_default_is_said_only_while_the_ask_is_open() {
+    let m = machine();
+    let done = render(&worktree(m.path()), &detail("decisions.yaml", "done-before")).html;
+    assert!(!done.contains("If you don't answer"), "{done}");
+}
+
+#[test]
+fn uids_and_ids_are_separate_namespaces_as_in_the_plugin() {
+    let m = machine();
+    std::fs::write(
+        m.path().join("workspace/.control/asks/ns.yaml"),
+        "asks:\n  - id: px\n    uid: shared\n    project: ns\n    headline: \"By uid\"\n    exhausted: [\"read: x\"]\n  - id: shared\n    project: ns\n    headline: \"By id\"\n    exhausted: [\"read: x\"]\n  - id: px\n    project: ns\n    headline: \"Plain px\"\n    exhausted: [\"read: x\"]\n",
+    )
+    .unwrap();
+    let html = render(&worktree(m.path()), &spec(json!({ "type": "decisions", "props": { "project": "ns" } }))).html;
+    // The plugin answers all three: a uid and an id among uid-less asks never collide (`px` is
+    // one ask's id and the other's uid-less id), so each offers the owner path.
+    assert!(!html.contains("data-ambiguous"), "{html}");
+    assert_eq!(html.matches("mv-answerbar").count(), 3, "{html}");
+    // Two share the text `shared`, so neither keys a row for the bridge; `px` alone does.
+    assert!(!html.contains(r#"data-tab="decisions" data-ask="ns.yaml#shared""#), "{html}");
+    assert!(html.contains(r#"class="mv-irow" data-tab="decisions" data-ask="ns.yaml#px""#), "{html}");
+    // A handle is a uid first: `shared` addresses the ask whose uid it is.
+    let d = render(&worktree(m.path()), &detail("ns.yaml", "shared")).html;
+    assert!(d.contains("By uid") && !d.contains("By id"), "{d}");
+}

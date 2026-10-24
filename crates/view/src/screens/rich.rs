@@ -4,7 +4,9 @@
 
 use super::sources::{self, Source};
 use maestro_core::ask::Ask;
-use serde_json::{Map, Value};
+use maestro_core::ask::js_string;
+use maestro_core::js::JsValue;
+use serde_json::Value;
 
 const SUMMARY_MAX: usize = 700;
 const DETAILS_MAX: usize = 8000;
@@ -72,34 +74,37 @@ pub(crate) fn of(ask: &Ask) -> Rich {
     Rich {
         summary: words(get("summary"), SUMMARY_MAX),
         details,
-        tradeoffs: tradeoffs(get("tradeoffs"), ask),
+        tradeoffs: tradeoffs(ask),
         sources: sources::of(get("sources")),
     }
 }
 
 /// `tradeoffsOf`: rows naming exactly one of an option of this ask or a free label, with at
 /// least one cell; at most eight.
-fn tradeoffs(raw: Option<&Value>, ask: &Ask) -> Vec<Tradeoff> {
-    raw.and_then(Value::as_array)
+fn tradeoffs(ask: &Ask) -> Vec<Tradeoff> {
+    // From the row as read (JavaScript values), not its JSON copy, where `.inf` becomes null.
+    let text = |v: Option<&JsValue>, max| words(v.map(JsValue::to_json).as_ref(), max);
+    ask.row
+        .get("tradeoffs")
+        .and_then(JsValue::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_object)
-        .filter_map(|row: &Map<String, Value>| {
+        .filter_map(JsValue::as_object)
+        .filter_map(|row| {
+            // `String(entry.option)` for a string or a number, as written: `.inf` is `Infinity`.
             let option = match row.get("option") {
-                Some(Value::String(s)) => Some(s.clone()),
-                // Numbers arrive as JavaScript values (`7.0` is `7`), so this is `String(option)`.
-                Some(Value::Number(n)) => Some(n.to_string()),
+                Some(JsValue::Str(s)) => Some(s.clone()),
+                Some(JsValue::Num(x)) => Some(js_string(*x)),
                 _ => None,
             };
-            let label = words(row.get("label"), LABEL_MAX);
+            let label = text(row.get("label"), LABEL_MAX);
             if option.is_none() == label.is_none() {
                 return None;
             }
             if option.as_ref().is_some_and(|o| !ask.options.iter().any(|x| &x.id == o)) {
                 return None;
             }
-            let cells: Vec<_> =
-                AXES.iter().filter_map(|axis| Some((*axis, words(row.get(*axis), CELL_MAX)?))).collect();
+            let cells: Vec<_> = AXES.iter().filter_map(|axis| Some((*axis, text(row.get(*axis), CELL_MAX)?))).collect();
             (!cells.is_empty()).then_some(Tradeoff { option, label, cells })
         })
         .take(TRADEOFF_ROWS_MAX)
@@ -119,6 +124,23 @@ mod tests {
         assert_eq!(words(Some(&json!(5)), 10), None, "a number is not a cell");
         assert_eq!(flat_length("a\u{00a0}b"), 3, "a no-break space is not whitespace to either reader");
         assert_eq!(flat_length("🙂🙂"), 2, "code points, not UTF-16 units");
+    }
+
+    #[test]
+    fn a_non_finite_option_reads_as_javascript_writes_it() {
+        let mut ask: Ask = serde_json::from_value(json!({
+            "id": "a", "options": [{ "id": "Infinity", "label": "Inf" }],
+            "tradeoffs": [{ "option": 0, "cost": "c" }]
+        }))
+        .unwrap();
+        // YAML's `.inf`, as the reader holds it.
+        let rows = ask.row.as_object_mut().unwrap().get_mut("tradeoffs").unwrap();
+        let JsValue::Arr(rows) = rows else { panic!("tradeoffs is a list") };
+        let JsValue::Obj(row) = &mut rows[0] else { panic!("a row is a mapping") };
+        row.insert("option".into(), JsValue::Num(f64::INFINITY));
+        let got = of(&ask).tradeoffs;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].option.as_deref(), Some("Infinity"));
     }
 
     #[test]
