@@ -142,6 +142,52 @@ pub struct InitiativesProps {
     pub all: bool,
 }
 
+/// The inbox's tabs. Authority and Ideas are their classes; Decisions is every other open
+/// ask (decision, credential, scope, external, artifact, or none), so the three tabs add up to All.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Tab {
+    All,
+    #[default]
+    Decisions,
+    Authority,
+    Ideas,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Self::All, Self::Decisions, Self::Authority, Self::Ideas];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Decisions => "decisions",
+            Self::Authority => "authority",
+            Self::Ideas => "ideas",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Decisions => "Decisions",
+            Self::Authority => "Authority",
+            Self::Ideas => "Ideas",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionsProps {
+    /// The tab shown first; the others are one tap away on the screen.
+    #[serde(default)]
+    pub tab: Tab,
+    /// Only asks of this project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
+    pub project: Option<String>,
+}
+
 /// One validated block. The type names are the catalog's; props are typed, so a value the
 /// catalog does not name cannot reach the renderer.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -156,6 +202,8 @@ pub enum Block {
     Loops(LoopsProps),
     Initiatives(InitiativesProps),
     Fleet(NoProps),
+    Decisions(DecisionsProps),
+    Decision(AskProps),
 }
 
 struct Kind {
@@ -237,6 +285,20 @@ const KINDS: &[Kind] = &[
         children: false,
         schema: schema_of::<NoProps>,
         parse: |v| props(v).map(Block::Fleet),
+    },
+    Kind {
+        name: "decisions",
+        description: "The Decisions inbox: open asks in tabs (All, Decisions, Authority, Ideas) with counts, answers waiting to land, grouped by project with age; each row opens to its full detail. Read-only: answering stays in Paseo's Maestro until a later phase.",
+        children: false,
+        schema: schema_of::<DecisionsProps>,
+        parse: |v| props(v).map(Block::Decisions),
+    },
+    Kind {
+        name: "decision",
+        description: "One ask as the decision screen: stakes, the default if unanswered, summary, options with Recommended / Reversible / Status quo and their cost and risk, sources, what the agent tried first, and where to answer it.",
+        children: false,
+        schema: schema_of::<AskProps>,
+        parse: |v| props(v).map(Block::Decision),
     },
 ];
 
@@ -527,10 +589,11 @@ fn check(block: &Block) -> Result<(), String> {
             p.project.as_deref().map_or(Ok(()), |v| handle("project", v))?;
             limit(p.limit)
         }
-        Block::Ask(p) => {
+        Block::Ask(p) | Block::Decision(p) => {
             handle("ledger", &p.ledger)?;
             handle("id", &p.id)
         }
+        Block::Decisions(p) => p.project.as_deref().map_or(Ok(()), |v| handle("project", v)),
         Block::Work(p) => limit(p.limit),
         Block::Loops(p) => p.id.as_deref().map_or(Ok(()), |v| handle("id", v)),
     }

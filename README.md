@@ -201,7 +201,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
 Maestro decides every value on it:
 
 - `maestro_ui_catalog` lists the block types (`stack`, `snapshot`, `needs`, `asks`, `ask`, `work`,
-  `loops`, `initiatives`, `fleet`) and their props. Props are handles and filters only (a ledger
+  `loops`, `initiatives`, `fleet`, and the Decisions screens `decisions` and `decision`) and their
+  props. The Decisions screens read only: Paseo's Maestro plugin still writes every answer. Props are handles and filters only (a ledger
   name, an ask id, a project, a state, a limit); no block carries text, numbers or markup.
 - `maestro_ui_render { root, blocks }` validates the spec, places what it can and reports every drop
   with its reason (an unknown type, a prop the type does not take, a cycle, a missing or unreachable
@@ -220,7 +221,7 @@ Maestro decides every value on it:
   sha256. The page's Content-Security-Policy allows no fetch and no script but that bridge, by its
   hash, so markup in a forged tool result runs nothing (the e2e checks it). There is no WebAssembly:
   T3's CSP blocks it.
-- `scripts/view-e2e.sh [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
+- `scripts/e2e.sh [view|decisions] [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
   (the ext-apps `AppBridge`) against `maestro serve --http`: on the real ledgers at `origin/main`,
   and on a scratch copy of the fixture that it edits to prove the poll; it also sends a forged result
   whose inline handler must not run. It writes screenshots at 390

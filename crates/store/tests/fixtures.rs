@@ -219,7 +219,8 @@ fn git_revision_reads_and_unlanded_answers() {
     assert_eq!(demo(asks.data.as_ref().unwrap()), AskState::Open);
     let waiting = views::unlanded(&at_main, asks.data.as_deref().unwrap()).data.unwrap();
     assert_eq!(waiting.len(), 1);
-    assert_eq!(waiting[0].id, "merge-now");
+    let demo_arc = asks.data.as_ref().unwrap().iter().find(|l| l.file == "demo-arc.yaml").unwrap();
+    assert!(waiting[0].is("demo-arc.yaml", &demo_arc.ledger.asks[0]), "{waiting:?}");
 
     let local = Store::new(paths, TreeSource::WorkingTree);
     assert_eq!(demo(&local.asks().data.unwrap()), AskState::Answered);

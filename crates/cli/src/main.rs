@@ -479,11 +479,23 @@ fn human_snapshot(v: &Value) {
     };
     section("needs", needs);
     let a = &v["asks"]["data"];
+    // Reading the working tree itself, nothing lands onto it and maestro/answers is not read: no
+    // count is made. A count that could not be read says so, never 0.
+    let landing = if v["tree"] == "worktree" {
+        String::new()
+    } else if a["unlanded"].is_null() {
+        ", answered in this checkout or on maestro/answers: unread".into()
+    } else {
+        // A read that came back in part may hide answers: the count is then a lower bound.
+        let partial = v["asks"]["errors"].as_array().is_some_and(|e| !e.is_empty());
+        let least = if partial { "at least " } else { "" };
+        format!(", {least}{} answered in this checkout or on maestro/answers, not yet landed", a["unlanded"])
+    };
     section(
         "asks",
         format!(
-            "{} open ({} blocking, {} answered locally and waiting to land), {} answered, {} ledgers",
-            a["open"], a["open_blocking"], a["unlanded"], a["answered"], a["ledgers"]
+            "{} open ({} blocking{landing}), {} answered, {} ledgers",
+            a["open"], a["open_blocking"], a["answered"], a["ledgers"]
         ),
     );
     let w = &v["work"]["data"];

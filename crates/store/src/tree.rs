@@ -267,6 +267,19 @@ impl Tree {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Whether the repo holds the full ref `name`, by `show-ref --exists` (git >= 2.43): 2 is
+    /// absent. Anything else is there, or an error: a broken ref (1), a git without the flag, no
+    /// repo. A broken ref is never read as absent: it may stand over a packed one.
+    pub fn has_ref(&self, name: &str) -> Result<bool, String> {
+        let output =
+            git_command(&self.root).args(["show-ref", "--exists", name]).output().map_err(|e| e.to_string())?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(2) => Ok(false),
+            _ => Err(format!("`{name}` does not read: {}", String::from_utf8_lossy(&output.stderr).trim())),
+        }
+    }
 }
 
 /// `git -C <root>`. The CLI drops an inherited GIT_DIR (and the like) at startup, so the root

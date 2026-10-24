@@ -4,11 +4,13 @@
 // calls (maestro_ui_poll) to a running `maestro serve --http`.
 //
 //   bun run e2e.ts --url http://127.0.0.1:7199/mcp --spec spec.json --out <dir>
-//                  [--edit <ledger file> --from <text> --to <text> --expect <shown text>]
+//                  [--edit <ledger file> --from <text> --to <text> --expect <shown text>] [--decisions]
 //
 // Writes screenshots at 390 px and 1440 px (light and dark) and exits non-zero on any
 // failed check. With --edit it rewrites one ledger line after the first render and waits
-// for the App's poll to show it; use it on a scratch copy only.
+// for the App's poll to show it; use it on a scratch copy only. With --decisions the spec's
+// root must be a `decisions` block: each tab is pressed in the App and in the scriptless
+// snapshot (what a host without MCP Apps shows), and a row is opened to its full decision.
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -68,6 +70,20 @@ const host = Bun.serve({
   },
 });
 
+// After a row opens, the host resizes the frame to the App's new height: wait until it fits,
+// so a screenshot shows the opened decision whole.
+async function fit(tab: import("playwright").Page) {
+  // The App runs in a sandboxed frame: read its height from inside it, the frame's from the host.
+  const inner = tab.frames().find((f) => f !== tab.mainFrame());
+  for (let i = 0; i < 100; i++) {
+    const content = (await inner?.evaluate(() => document.documentElement.scrollHeight)) ?? 0;
+    const frame = await tab.evaluate(() => (document.getElementById("app") as HTMLElement).getBoundingClientRect().height);
+    if (frame + 2 >= content) return;
+    await tab.waitForTimeout(100);
+  }
+  check(false, "the frame never fit the opened decision");
+}
+
 // Let the swap's view transition finish and the frame take the App's reported height.
 async function settle(tab: import("playwright").Page) {
   const inner = tab.frames().find((f) => f !== tab.mainFrame());
@@ -111,7 +127,99 @@ try {
     await ctx.close();
   }
 
-  if (edit) {
+  if (process.argv.includes("--decision")) {
+    // The standalone decision: its title shown, the answer bar pinned in view, no writer.
+    for (const width of [390, 1440]) {
+      const ctx = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 } });
+      const tab = await ctx.newPage();
+      await tab.goto(`http://127.0.0.1:${host.port}/?theme=dark`);
+      const frame = tab.frameLocator("#app");
+      await frame.locator("article.mv-decision").waitFor({ timeout: 15000 });
+      await settle(tab);
+      check(await frame.locator(".mv-dtitle").isVisible(), `decision ${width}px: its title is shown`);
+      check(await frame.locator(".mv-answerbar").isVisible(), `decision ${width}px: the answer bar is shown`);
+      const pinned = await frame.locator(".mv-answerbar").evaluate((el) => getComputedStyle(el).position);
+      check(pinned === "sticky", `decision ${width}px: the answer bar is pinned (${pinned})`);
+      check((await frame.locator("form, button, [onclick]").count()) === 0, `decision ${width}px: no writer`);
+      await tab.screenshot({ path: join(out, `decision-${width}.png`), fullPage: true });
+      await ctx.close();
+    }
+  }
+
+  if (process.argv.includes("--decisions")) {
+    const snap = await client.callTool({ name: "maestro_ui_render", arguments: { ...spec, format: "snapshot" } });
+    const doc = (snap.structuredContent as any)?.text ?? (snap.content as any)?.[0]?.text;
+    check(typeof doc === "string" && doc.includes("data-snapshot"), "snapshot render returns a standalone document");
+    for (const width of [390, 1440]) {
+      for (const where of ["app", "snapshot"] as const) {
+        const ctx = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 }, javaScriptEnabled: where === "app" });
+        const tab = await ctx.newPage();
+        tab.on("pageerror", (e) => check(false, `page error: ${e.message}`));
+        if (where === "app") await tab.goto(`http://127.0.0.1:${host.port}/?theme=dark`);
+        else await tab.setContent(doc);
+        const scope = where === "app" ? tab.frameLocator("#app") : tab.locator("html");
+        await scope.locator(".mv-inbox").first().waitFor({ timeout: 15000 });
+        if (where === "app") await settle(tab);
+        const what = `${where} ${width}px`;
+        for (const name of ["all", "decisions", "authority", "ideas"]) {
+          await scope.locator(`.mv-tab[data-tab="${name}"]`).first().click();
+          // A partial read marks counts as lower bounds ("7+"); the rows shown are the count itself.
+          const want = Number.parseInt((await scope.locator(`.mv-tab[data-tab="${name}"] .mv-tab-count`).first().textContent()) ?? "", 10);
+          const rows = scope.locator(".mv-irow");
+          const visible: string[] = [];
+          for (let i = 0; i < (await rows.count()); i++) {
+            if (await rows.nth(i).isVisible()) visible.push((await rows.nth(i).getAttribute("data-tab")) ?? "");
+          }
+          const right = name === "all" || visible.every((t) => t === name);
+          check(visible.length === want && right, `${what}: tab ${name} shows its ${want} rows (${visible.length} shown)`);
+          const empty = await scope.locator(`.mv-tab-empty[data-tab="${name}"]`).isVisible().catch(() => false);
+          check(empty === (want === 0), `${what}: tab ${name} says it is empty only when it is (${empty})`);
+        }
+        await scope.locator(`.mv-tab[data-tab="all"]`).first().click();
+        const first = scope.locator(".mv-irow").first();
+        await first.locator("summary").first().click();
+        const article = first.locator("article.mv-decision");
+        check(await article.isVisible(), `${what}: a row opens to its decision`);
+        check((await article.locator("form, button, [onclick]").count()) === 0, `${what}: the decision holds no writer`);
+        const overflow = await scope.locator("body").evaluate((b) => b.scrollWidth - b.clientWidth);
+        check(overflow <= 0, `${what}: no horizontal overflow with a row open (${overflow}px)`);
+        if (where === "app") {
+          await settle(tab);
+          await fit(tab);
+        }
+        await tab.screenshot({ path: join(out, `decisions-${where}-open-${width}.png`), fullPage: true });
+        await ctx.close();
+      }
+    }
+    if (edit) {
+      // A poll that swaps in a changed screen keeps the tab and the row the owner opened.
+      const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+      const tab = await ctx.newPage();
+      await tab.goto(`http://127.0.0.1:${host.port}/?theme=light`);
+      const frame = tab.frameLocator("#app");
+      await frame.locator(".mv-inbox").waitFor({ timeout: 15000 });
+      await frame.locator('.mv-tab[data-tab="authority"]').click();
+      const row = frame.locator('.mv-irow[data-tab="authority"]').first();
+      const ask = await row.getAttribute("data-ask");
+      await row.locator("summary").first().click();
+      const text = await readFile(edit, "utf8");
+      const from = arg("from") as string;
+      check(text.includes(from), `scratch ledger holds "${from}"`);
+      await writeFile(edit, text.replace(from, arg("to") as string));
+      const before = polls;
+      await frame.getByText(arg("expect") ?? (arg("to") as string)).first().waitFor({ timeout: 30000 });
+      check(polls > before, `decisions: the App polled and swapped in the edit (${polls - before} poll(s))`);
+      const checked = await frame.locator(".mv-tab-input:checked").getAttribute("value");
+      check(checked === "authority", `decisions: the swap kept the tab the owner chose (${checked})`);
+      const open = await frame.locator(`.mv-irow[data-ask="${ask}"] > details`).getAttribute("open");
+      check(open !== null, `decisions: the swap kept ${ask} open`);
+      const opened = await frame.locator(".mv-irow > details[open]").count();
+      check(opened === 1, `decisions: the swap opened no other row (${opened} open)`);
+      await settle(tab);
+      await tab.screenshot({ path: join(out, "decisions-live-edit-390.png"), fullPage: true });
+      await ctx.close();
+    }
+  } else if (edit) {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const tab = await ctx.newPage();
     await tab.goto(`http://127.0.0.1:${host.port}/?theme=light`);

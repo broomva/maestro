@@ -1,0 +1,25 @@
+---
+source: crates/view/tests/decisions.rs
+expression: "portable(&render(&worktree(empty.path()), &inbox()).html, empty.path())"
+---
+<div class="mv-screen">
+<section class="mv-card bv-card" data-block="s" data-type="decisions" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Decisions</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:.broomva/asks</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/asks</span>
+</p>
+</section>
+<footer class="mv-foot bv-meta">Read from <span class="bv-code">worktree</span>
+</footer>
+</div>
