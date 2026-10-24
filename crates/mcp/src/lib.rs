@@ -18,9 +18,9 @@ use rmcp::ErrorData as McpError;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptRequestParams, GetPromptResponse,
-    GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-    Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-    Resource, ResourceContents, Role, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
+    GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult, MetaObject,
+    PaginatedRequestParams, Prompt, PromptArgument, PromptMessage, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, Resource, ResourceContents, Role, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use schemars::JsonSchema;
@@ -41,7 +41,21 @@ pub struct ToolSpec {
     pub request: Option<RequestKind>,
     /// What the tool may change: `read` for reads; for a request, the one place it writes.
     pub scope: &'static str,
+    /// Where the tool shows in an MCP Apps host.
+    pub ui: Ui,
     schema: fn() -> Value,
+}
+
+/// A tool's place in an MCP Apps host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ui {
+    /// A plain tool.
+    None,
+    /// The host opens the App with this tool's result; the model and the App may call it.
+    Opens,
+    /// Meant for the App only: `_meta.ui.visibility` is `["app"]`. A host that honours it hides
+    /// the tool from the model; plain `tools/list` still lists it, so it must stay read-only.
+    AppOnly,
 }
 
 fn schema_of<T: JsonSchema>() -> Value {
@@ -99,6 +113,29 @@ pub struct InitiativesArgs {
     /// Include parked, done and killed initiatives.
     #[serde(default)]
     pub all: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UiRenderArgs {
+    /// The block id to start from.
+    pub root: String,
+    /// Blocks by id: `{ type, props?, children? }`, types from `maestro_ui_catalog`.
+    pub blocks: serde_json::Map<String, Value>,
+    /// `app` (default) for an MCP Apps host; `snapshot` returns a standalone HTML document as
+    /// the text result, for a host without MCP Apps (T3's `html_render` in Claude threads).
+    pub format: Option<String>,
+    /// `light` or `dark`, for a snapshot.
+    pub theme: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UiPollArgs {
+    /// The spec the last render placed (its `spec`).
+    pub spec: Value,
+    /// The revision the App holds; an equal one returns no html.
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -174,6 +211,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<NoArgs>,
     },
     ToolSpec {
@@ -183,6 +221,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<NeedsArgs>,
     },
     ToolSpec {
@@ -192,6 +231,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<AsksArgs>,
     },
     ToolSpec {
@@ -201,6 +241,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<AskGetArgs>,
     },
     ToolSpec {
@@ -210,6 +251,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<WorkArgs>,
     },
     ToolSpec {
@@ -219,6 +261,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<LoopsArgs>,
     },
     ToolSpec {
@@ -228,6 +271,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<InitiativesArgs>,
     },
     ToolSpec {
@@ -237,6 +281,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<NoArgs>,
     },
     ToolSpec {
@@ -246,6 +291,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::Read,
         request: None,
         scope: "read",
+        ui: Ui::None,
         schema: schema_of::<ContextArgs>,
     },
     ToolSpec {
@@ -255,6 +301,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::AgentRequest,
         request: Some(RequestKind::AskFile),
         scope: "asks: appends one ask to one ledger",
+        ui: Ui::None,
         schema: schema_of::<AskFileArgs>,
     },
     ToolSpec {
@@ -264,6 +311,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::AgentRequest,
         request: Some(RequestKind::WorkQueue),
         scope: "requests journal: appends one held request",
+        ui: Ui::None,
         schema: schema_of::<WorkQueueArgs>,
     },
     ToolSpec {
@@ -273,6 +321,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::AgentRequest,
         request: Some(RequestKind::ActionRequest),
         scope: "requests journal: appends one held request",
+        ui: Ui::None,
         schema: schema_of::<ActionRequestArgs>,
     },
     ToolSpec {
@@ -282,6 +331,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::AgentRequest,
         request: Some(RequestKind::SessionClose),
         scope: "requests journal: appends one request",
+        ui: Ui::None,
         schema: schema_of::<SessionCloseArgs>,
     },
     ToolSpec {
@@ -291,6 +341,7 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::AgentRequest,
         request: Some(RequestKind::Handback),
         scope: "requests journal: appends one request",
+        ui: Ui::None,
         schema: schema_of::<HandbackArgs>,
     },
     ToolSpec {
@@ -300,7 +351,38 @@ pub const TOOLS: &[ToolSpec] = &[
         authority: Authority::AgentRequest,
         request: Some(RequestKind::Escalate),
         scope: "requests journal: appends one request",
+        ui: Ui::None,
         schema: schema_of::<EscalateArgs>,
+    },
+    ToolSpec {
+        name: "maestro_ui_catalog",
+        title: "UI catalog",
+        description: "The block types maestro_ui_render accepts, with their props. Blocks carry types and ledger handles only; Maestro reads every value shown.",
+        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::None,
+        schema: schema_of::<NoArgs>,
+    },
+    ToolSpec {
+        name: "maestro_ui_render",
+        title: "Show in Maestro",
+        description: "Render a screen from catalog blocks: { root, blocks: { id: { type, props?, children? } } }. Maestro validates the spec, reads every value from the ledgers at call time, and reports each dropped block with its reason. In an MCP Apps host the result opens Maestro's App, which keeps it current; format snapshot returns a standalone HTML document instead.",
+        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::Opens,
+        schema: schema_of::<UiRenderArgs>,
+    },
+    ToolSpec {
+        name: "maestro_ui_poll",
+        title: "Refresh view",
+        description: "For Maestro's App: render a placed spec again and return html only when its revision changed.",
+        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::AppOnly,
+        schema: schema_of::<UiPollArgs>,
     },
 ];
 
@@ -455,6 +537,42 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
             Ok(json!(section))
         }
         "maestro_fleet_get" => Ok(json!(store.fleet())),
+        "maestro_ui_catalog" => Ok(maestro_view::catalog()),
+        "maestro_ui_render" => {
+            let a: UiRenderArgs = parse(args)?;
+            let snapshot = match a.format.as_deref().unwrap_or("app") {
+                "app" => false,
+                "snapshot" => true,
+                other => return Err(McpError::invalid_params(format!("unknown format `{other}`"), None)),
+            };
+            let theme = match a.theme.as_deref() {
+                None => None,
+                Some(t @ ("light" | "dark")) => Some(t),
+                Some(other) => return Err(McpError::invalid_params(format!("unknown theme `{other}`"), None)),
+            };
+            let spec = json!({ "root": a.root, "blocks": a.blocks });
+            let v = maestro_view::validate(&spec).map_err(|e| McpError::invalid_params(e, None))?;
+            let r = maestro_view::render(store, &v);
+            let mut out = json!(r);
+            out["text"] = if snapshot {
+                Value::String(maestro_view::page::snapshot(&r.html, theme))
+            } else {
+                Value::String(render_summary(&r))
+            };
+            Ok(out)
+        }
+        "maestro_ui_poll" => {
+            let a: UiPollArgs = parse(args)?;
+            let v = maestro_view::validate(&a.spec).map_err(|e| McpError::invalid_params(e, None))?;
+            let r = maestro_view::render(store, &v);
+            if a.revision.as_deref() == Some(r.revision.as_str()) {
+                Ok(json!({ "revision": r.revision, "changed": false, "tree": r.tree }))
+            } else {
+                let mut out = json!(r);
+                out["changed"] = Value::Bool(true);
+                Ok(out)
+            }
+        }
         "maestro_context" => {
             let a: ContextArgs = parse(args)?;
             let packet =
@@ -515,10 +633,29 @@ pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Va
     Ok(json!({ "request": record, "journal": requests::journal(&store.paths) }))
 }
 
+/// What a render placed and dropped, for the model; the App shows the html itself.
+fn render_summary(r: &maestro_view::Rendered) -> String {
+    let mut out = format!("Rendered from {} (revision {}).", r.tree, r.revision.get(..12).unwrap_or_default());
+    if r.drops.is_empty() {
+        out.push_str(" Nothing was dropped.");
+    } else {
+        out.push_str(&format!(" {} dropped:", r.drops.len()));
+        for d in &r.drops {
+            out.push_str(&format!("\n- `{}`: {}", d.block, d.reason));
+        }
+    }
+    out
+}
+
 pub const RESOURCES: &[(&str, &str, &str)] = &[
     ("maestro://snapshot", "snapshot", "Control-plane snapshot (JSON)"),
     ("maestro://needs", "needs", "Holds on the owner (JSON)"),
     ("maestro://context", "context", "Governance context for this server's workspace (markdown)"),
+    (
+        maestro_view::page::APP_URI,
+        "view",
+        "Maestro's MCP App: renders maestro_ui_render results and keeps them current",
+    ),
 ];
 
 /// A long-lived server. It keeps where to read, never what it read: each request
@@ -551,13 +688,18 @@ impl MaestroServer {
             .map(|spec| {
                 let schema = (spec.schema)();
                 let object = schema.as_object().cloned().unwrap_or_default();
-                Tool::new(spec.name, spec.description, Arc::new(object)).with_title(spec.title).with_annotations(
-                    ToolAnnotations::with_title(spec.title)
-                        .read_only(spec.authority == Authority::Read)
-                        .destructive(false)
-                        .idempotent(spec.authority == Authority::Read)
-                        .open_world(false),
-                )
+                let tool =
+                    Tool::new(spec.name, spec.description, Arc::new(object)).with_title(spec.title).with_annotations(
+                        ToolAnnotations::with_title(spec.title)
+                            .read_only(spec.authority == Authority::Read)
+                            .destructive(false)
+                            .idempotent(spec.authority == Authority::Read)
+                            .open_world(false),
+                    );
+                match ui_meta(spec.ui) {
+                    Some(meta) => tool.with_meta(meta),
+                    None => tool,
+                }
             })
             .collect()
     }
@@ -571,9 +713,25 @@ impl MaestroServer {
                 let packet = views::context(store, ContextScope::default());
                 Ok((packet.render_markdown(8), "text/markdown"))
             }
+            maestro_view::page::APP_URI => Ok((maestro_view::page::app(), maestro_view::page::APP_MIME)),
             other => Err(McpError::resource_not_found(format!("no resource {other}"), None)),
         }
     }
+}
+
+/// The MCP Apps `_meta` for a tool: `ui.resourceUri` and `ui.visibility`, plus the flat
+/// `ui/resourceUri` key older hosts read.
+fn ui_meta(ui: Ui) -> Option<MetaObject> {
+    let visibility = match ui {
+        Ui::None => return None,
+        Ui::Opens => json!(["model", "app"]),
+        Ui::AppOnly => json!(["app"]),
+    };
+    let uri = maestro_view::page::APP_URI;
+    let mut meta = MetaObject::new();
+    meta.insert("ui".into(), json!({ "resourceUri": uri, "visibility": visibility }));
+    meta.insert("ui/resourceUri".into(), json!(uri));
+    Some(meta)
 }
 
 fn prompt_arg(name: &str, description: &str) -> PromptArgument {
@@ -627,7 +785,7 @@ impl ServerHandler for MaestroServer {
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             match outcome {
                 Ok(value) => {
-                    if let Some(md) = value.get("markdown").and_then(|m| m.as_str()) {
+                    if let Some(md) = value.get("markdown").or_else(|| value.get("text")).and_then(|m| m.as_str()) {
                         let mut result = CallToolResult::structured(value.clone());
                         result.content = vec![ContentBlock::text(md.to_string())];
                         Ok(result.into())

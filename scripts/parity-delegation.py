@@ -1,0 +1,1531 @@
+#!/usr/bin/env python3
+"""Parity of Maestro's delegation and economy ports with the workspace's Python (BRO-3204).
+
+The Python is the reference: scripts/delegation.py and scripts/fleet_economy.py at the workspace's
+origin/main (--rev). This harness
+
+  1. runs the Python on deterministic cases and checks fixtures/delegation/golden.json is its output
+     (--write regenerates it; review the diff). crates/core/tests/parity_delegation.rs holds the Rust
+     to that golden, so `cargo test` and the mutation check need no Python;
+  2. runs the same cases through `maestro parity-eval` and compares;
+  3. runs both CLIs on every real docs/plans/*.graph.yaml (plan, plan --json, brief per node), on CLI
+     scenarios in scratch repos (bindings, nested and absent repos, policies) and on assess;
+  4. runs both capacity forecasts on the live usage snapshot (provider_manager.py --json usage) and the
+     coordinator's sample cache, read-only, and both tier readers on Maestro's economy.json if present;
+  5. checks the plugin's tier ladder and model mapping (maestro-paseo shared/tiers.ts at the commit in
+     fixtures/delegation/tiers-rev, run under bun) against the Rust and the Python.
+
+Exit 0 only on full agreement. Needs git, cargo, bun and network (for step 5).
+
+    python3 scripts/parity-delegation.py --workspace ~/broomva [--write] [--maestro target/debug/maestro]
+"""
+from __future__ import annotations
+
+import copy
+import argparse
+import datetime as dt
+import importlib.util
+import itertools
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import tempfile
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GOLDEN = os.path.join(REPO, "fixtures", "delegation", "golden.json")
+CLI_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "cli-golden.json")
+TIERS_REV = os.path.join(REPO, "fixtures", "delegation", "tiers-rev")
+YAML11_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "yaml11-golden.json")
+YAML_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "yaml-golden.json")
+JSON_GOLDEN = os.path.join(REPO, "fixtures", "delegation", "json-golden.json")
+PRINTABLE_RS = os.path.join(REPO, "crates", "core", "src", "py_printable.rs")
+PROVIDER_MANAGER = os.path.expanduser("~/.claude/skills/provider-manager/scripts/provider_manager.py")
+
+failures: list[str] = []
+cli_runs: list[int] = []  # the Python's exit code of each CLI comparison
+
+
+def check(name, ok, detail=""):
+    if not ok:
+        failures.append(f"{name}: {detail}")
+    return ok
+
+
+def load(ws, rev, name, tmp):
+    src = subprocess.run(["git", "-C", ws, "show", f"{rev}:scripts/{name}.py"], check=True, capture_output=True,
+                         text=True).stdout
+    path = os.path.join(tmp, f"{name}.py")
+    with open(path, "w") as f:
+        f.write(src)
+    spec = importlib.util.spec_from_file_location(f"ref_{name}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod, path
+
+
+# --- the schema the ports read exactly (crates/core/src/schema.rs), read independently ------------
+# Outside it Maestro refuses before any rule runs, naming the field; the golden then holds that
+# refusal instead of the Python's output. Named fields in the listed order, mappings with arbitrary
+# keys in sorted order, lists in order: the first refusal names the same field in both readers.
+def _is_int(v):
+    return type(v) is int and -2**63 <= v < 2**63
+
+
+def _time_ok(v):
+    """A timestamp inside the schema, by Python's own datetime: a strict UTC string or an epoch number
+    `fromtimestamp` reads (parse_ts's own division by 1000 above 1e11)."""
+    if v is None or v == "":
+        return True
+    if type(v) is str:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|\+00:00)", v):
+            return False
+        try:
+            dt.datetime.fromisoformat(v.replace("Z", "+00:00"))
+            return True
+        except ValueError:
+            return False
+    if type(v) in (int, float):
+        try:
+            dt.datetime.fromtimestamp(v / (1000 if v > 1e11 else 1), dt.timezone.utc)
+            return True
+        except (ValueError, OverflowError, OSError):
+            return False
+    return False
+
+
+TY = {
+    "str": lambda v: v is None or type(v) is str,
+    "int": lambda v: v is None or _is_int(v),
+    "num": lambda v: v is None or type(v) in (int, float),
+    "num!": lambda v: type(v) in (int, float),
+    "bool": lambda v: v is None or type(v) is bool,
+    "time": _time_ok,
+}
+SIGNALS = [("kind", "str"), ("paths", "strs"), ("est_loc", "int"), ("files", "int"), ("repos", "int"),
+           ("public_api", "bool"), ("one_way_door", "bool"), ("spec", "str"), ("failed_attempts", "int"),
+           ("observed_tier", "str"), ("allow_apex", "bool"), ("mode", "str")]
+NODE = [("id", "str"), ("kind", "str"), ("repo", "str"), ("done", "str"), ("tier", "str"), ("verify", "str"),
+        ("thinking", "str"), ("spawn_default", "str"), ("reason", "str"), ("inputs", "strs"),
+        ("produces", "strs"), ("depends_on", "strs")]
+USAGE = [("id", "str"), ("email", "str"), ("fiveHourUtil", "num"), ("sevenDayUtil", "num"),
+         ("fiveHourResetsAt", "time"), ("sevenDayResetsAt", "time"), ("numbersAgeSeconds", "num"),
+         ("isActive", "bool"), ("isRateLimited", "bool"), ("stale", "bool"), ("needsLogin", "bool"),
+         ("hasStoredCredentials", "bool")]
+ACCOUNT = [("5h", "num"), ("7d", "num"), ("reset_5h", "time"), ("reset_7d", "time"), ("age_s", "num"),
+           ("active", "bool"), ("limited", "bool"), ("stale", "bool"), ("needs_login", "bool")]
+TIER_ROW = [("runs", "int"), ("raisedRuns", "int"), ("approved", "int"), ("raises", "int"),
+            ("escalations", "int"), ("unmeasured", "int"), ("firstPass", "num"), ("tokensPerApproved", "num")]
+
+
+class Refused(Exception):
+    pass
+
+
+def _fields(at, m, spec):
+    for k, ty in spec:
+        if k not in m:
+            continue
+        v = m[k]
+        if ty == "strs":
+            if v is None:
+                continue
+            if type(v) is not list:
+                raise Refused(f"{at}.{k}")
+            for i, x in enumerate(v):
+                if type(x) is not str:
+                    raise Refused(f"{at}.{k}[{i}]")
+        elif not TY[ty](v):
+            raise Refused(f"{at}.{k}")
+
+
+def _mapping(at, v):
+    if v is None:
+        return None
+    if type(v) is not dict:
+        raise Refused(at)
+    return v
+
+
+def _list(at, v):
+    if v is None:
+        return []
+    if type(v) is not list:
+        raise Refused(at)
+    return v
+
+
+def _graph(g):
+    if type(g) is not dict:
+        raise Refused("graph")
+    _fields("graph", g, [("repo", "str")])
+    for name, r in sorted((_mapping("graph.repos", g.get("repos")) or {}).items()):
+        if type(r) is dict:
+            _fields(f"graph.repos.{name}", r, [("path", "str"), ("policy", "str")])
+        elif r is not None and type(r) is not str:
+            raise Refused(f"graph.repos.{name}")
+    for i, n in enumerate(_list("graph.nodes", g.get("nodes"))):
+        if type(n) is not dict:
+            raise Refused(f"graph.nodes[{i}]")
+        _fields(f"graph.nodes[{i}]", n, NODE)
+        sig = _mapping(f"graph.nodes[{i}].signals", n.get("signals"))
+        if sig is not None:
+            _fields(f"graph.nodes[{i}].signals", sig, SIGNALS)
+
+
+def _usage(rows):
+    for i, r in enumerate(rows):
+        if type(r) is not dict:
+            raise Refused(f"usage[{i}]")
+        _fields(f"usage[{i}]", r, USAGE)
+
+
+def _samples(samples):
+    for i, s in enumerate(samples):
+        if type(s) is not dict:
+            raise Refused(f"samples[{i}]")
+        _fields(f"samples[{i}]", s, [("at", "time")])
+        for name, acc in sorted((_mapping(f"samples[{i}].accounts", s.get("accounts")) or {}).items()):
+            acc = _mapping(f"samples[{i}].accounts.{name}", acc)
+            if acc is not None:
+                _fields(f"samples[{i}].accounts.{name}", acc, ACCOUNT)
+
+
+def _state(st):
+    vg = _mapping("state.versionGate", st.get("versionGate"))
+    if vg is not None:
+        _fields("state.versionGate", vg, [("automaticSwitching", "str")])
+    cfg = _mapping("state.config", st.get("config"))
+    if cfg is not None:
+        _fields("state.config", cfg, [("autoBalance", "bool"), ("staleNumbersMinutes", "num!"),
+                                      ("standbyMax", "num!"), ("standbyWeeklyMax", "num!")])
+    _fields("state", st, [("holdUntil", "time")])
+    for i, p in enumerate(_list("state.pendingSignals", st.get("pendingSignals"))):
+        if type(p) is not dict:
+            raise Refused(f"state.pendingSignals[{i}]")
+        _fields(f"state.pendingSignals[{i}]", p, [("at", "num")])
+    for pid, p in sorted((_mapping("state.probes", st.get("probes")) or {}).items()):
+        if type(p) is not dict:
+            raise Refused(f"state.probes.{pid}")
+        _fields(f"state.probes.{pid}", p, [("result", "str"), ("at", "num")])
+
+
+def _tiers(data):
+    data = _mapping("data", data)
+    tiers = _mapping("data.tiers", (data or {}).get("tiers"))
+    for t, v in sorted((tiers or {}).items()):
+        v = _mapping(f"data.tiers.{t}", v)
+        if v is not None:
+            _fields(f"data.tiers.{t}", v, TIER_ROW)
+
+
+def _policy(p):
+    p = _mapping("policy", p)
+    am = _mapping("policy.auto_merge", (p or {}).get("auto_merge"))
+    for i, r in enumerate(_list("policy.auto_merge.rules", (am or {}).get("rules"))):
+        if type(r) is not dict:
+            raise Refused(f"policy.auto_merge.rules[{i}]")
+        _fields(f"policy.auto_merge.rules[{i}]", r, [("action", "str"), ("path_touched", "str")])
+
+
+def refusal(case):
+    """The field Maestro refuses in this case, or None when the case is inside the schema."""
+    fn, a = case["fn"], case["args"]
+    try:
+        if fn == "assess":
+            _fields("signals", a["sig"], SIGNALS)
+        elif fn in ("validate", "validate_disk", "brief"):
+            _graph(a["graph"])
+        elif fn in ("capacity", "resume_gate", "gate_bounds"):
+            if "now" in a and not _time_ok(a["now"]):
+                raise Refused("now")
+            if "state" in a:
+                if type(a["state"]) is not dict:
+                    raise Refused("state")
+                _state(a["state"])
+                _usage(a["usage"])
+            if fn != "gate_bounds":
+                _usage(a["usage"])
+            if fn == "capacity":
+                _samples(a["samples"])
+        elif fn == "tier_signals":
+            _tiers(a["data"])
+        elif fn == "require_human_paths":
+            _policy(a["policy"])
+        elif fn == "parse_ts":
+            if not _time_ok(a["value"]):
+                raise Refused("value")
+    except Refused as r:
+        return str(r)
+    return None
+
+
+# --- the Python side of each case ----------------------------------------------------------------
+def py_eval(D, E, case, tmp):
+    fn, a = case["fn"], case["args"]
+    field = refusal(case)
+    if field is not None:
+        return {"refused": field}
+    try:
+        if fn == "assess":
+            return {"ok": D.assess(dict(a["sig"]), a.get("human_paths") or [])}
+        if fn == "validate":
+            errors, nodes = D.validate(json.loads(json.dumps(a["graph"])), a.get("human_paths") or [])
+            return {"ok": {"errors": errors, "nodes": [plan_json(D, n) for n in nodes]}}
+        if fn == "validate_disk":
+            files = set(a.get("files") or [])
+            human = a.get("human_paths") or []
+            errors, nodes = D.validate(json.loads(json.dumps(a["graph"])),
+                                       exists=lambda r: f"{r.repo}:{r.path}" in files,
+                                       policy_for=lambda name: human, dirs=dict(a.get("dirs") or []),
+                                       skip=set(a.get("skip") or []))
+            return {"ok": {"errors": errors, "nodes": [plan_json(D, n) for n in nodes]}}
+        if fn == "add_hours":  # the timedelta the forecast adds, to the microsecond
+            now = E.parse_ts(a["now"])
+            return {"ok": (now + dt.timedelta(hours=a["hours"]) - now) // dt.timedelta(microseconds=1)}
+        if fn == "brief":
+            errors, nodes = D.validate(json.loads(json.dumps(a["graph"])))
+            if errors:
+                return {"err": "\n".join(errors)}
+            node = next((n for n in nodes if str(n["id"]) == a["node"]), None)
+            if node is None:
+                return {"err": "no node"}
+            return {"ok": D.brief_block({**node, "repo_dirs": {}}, a.get("ticket"))}
+        if fn == "rule_matches":
+            return {"ok": D.rule_matches(a["rule"], a["path"])}
+        if fn == "is_governance":
+            return {"ok": D.is_governance(a["path"], a.get("human_paths") or [])}
+        if fn == "is_test_path":
+            return {"ok": D.is_test_path(a["path"])}
+        if fn == "normpath":
+            return {"ok": os.path.normpath(a["path"])}
+        if fn == "require_human_paths":
+            path = os.path.join(tmp, "policy.yaml")
+            with open(path, "w") as f:
+                json.dump(a["policy"], f)
+            try:
+                return {"ok": D.require_human_paths(path)}
+            except D.PolicyUnreadable as e:
+                return {"err": str(e).removeprefix(f"{path}: ")}
+        if fn == "parse_ts":
+            return {"ok": E.iso(E.parse_ts(a["value"]))}
+        if fn in ("capacity", "resume_gate", "gate_bounds"):
+            now = E.parse_ts(a["now"])
+            gate = E.gate_bounds(a["state"], now, a["usage"]) if "state" in a else {}
+            if fn == "gate_bounds":
+                return {"ok": gate}
+            if fn == "resume_gate":
+                return {"ok": E.resume_gate(E.sample_from_usage(a["usage"], now)["accounts"], now, **gate)}
+            return {"ok": E.capacity(a["usage"], a["samples"], now, **gate)}
+        if fn == "session_gates":
+            real = E.session_tokens
+            E.session_tokens = lambda path, now: {"context_k": a["context_k"]}
+            try:
+                r = E.session_row("x" * 8, "", "unused", None, a["driven"])
+            finally:
+                E.session_tokens = real
+            return {"ok": {"handoff_candidate": r["handoff_candidate"], "successor_due": r["successor_due"]}}
+        if fn == "tier_signals":
+            rows, signals = E.tier_signals(a["data"])
+            return {"ok": {"rows": rows, "replan": signals}}
+        raise KeyError(fn)
+    except ValueError as e:
+        return {"err": str(e)}
+    except Exception as e:  # what the Python does not catch: a traceback, compared by its kind
+        return {"crash": type(e).__name__}
+
+
+def plan_json(D, n):
+    return {**{k: v for k, v in n.items() if k != "input_refs"}, "contract": D.contract(n["tier"], n["thinking"])}
+
+
+def same(a, b):
+    """Equal values of equal JSON types (an int is not a float, a bool is not an int)."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(same(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def same_result(want, got):
+    """A crash is compared by the Python exception's type name, like every other value."""
+    return same(want, got)
+
+
+# --- deterministic cases -------------------------------------------------------------------------
+KINDS = ["rerun", "update-branch", "merge-on-green", "archive", "cleanup", "closeout", "relay", "resume",
+         "implement", "research", "docs", "design", "decompose", "review", "bogus", None, ""]
+PATH_SETS = [[], ["src/a.rs"], ["src/a.rs", "src/b.rs"], ["tests/x.rs"],
+             ["src/a.rs", "b.py", "c.ts", "d.go", "e.rb"],
+             ["a_test.go", "x.spec.ts", "openapi.spec.yaml", "b.rs", "c.rs"], [".control/policy.yaml"],
+             ["CLAUDE.md"], ["./AGENTS.md"], ["scripts/x-hook.sh"], ["docs/notes/README.md"],
+             ["Scripts/Delegation.py"], ["deploy/prod.yaml", "src/a.rs"], ["sub/claude.md"],
+             ["a.rs", "b.rs", "c.rs", "d.rs"], ["test_a.py", "spec/b.rb", "__tests__/c.js", "x.test.ts"]]
+HUMAN = [[], ["scripts/*-hook.sh", "deploy/"]]
+
+
+def assess_cases(rng):
+    # The random mixtures stay inside the schema (integer counts); the single-dimension pass also
+    # gives est_loc values outside it, which are refused (the type cases cover every field).
+    dims = {"kind": KINDS, "paths": PATH_SETS, "est_loc": [None, 0, 150, 200, 201, 300, 1000, -5, 2**62],
+            "files": [None, 0, 1, 2, 5], "repos": [None, 1, 2, 3], "public_api": [False, True],
+            "one_way_door": [False, True], "spec": [None, "docs/specs/x.html"], "failed_attempts": [0, 1, 2, 3, -1],
+            "observed_tier": [None, "mechanical", "standard", "frontier", "apex", "bogus"],
+            "allow_apex": [False, True], "mode": [None, "normal", "conserve", "critical", "read_only", "read-only",
+                                                 "bogus"]}
+    base = {"kind": "implement", "paths": ["src/a.rs"]}
+    cases = []
+    for k, values in dims.items():  # each dimension alone, from a bounded base
+        for v in values:
+            for h in HUMAN:
+                cases.append({"sig": {**base, k: v}, "human_paths": h})
+    for v in ["300", " 1_000 ", "abc", 3.7, True]:
+        cases.append({"sig": {**base, "est_loc": v}, "human_paths": []})
+    for _ in range(600):  # and random mixtures of all of them
+        sig = {k: rng.choice(v) for k, v in dims.items() if rng.random() < 0.8}
+        cases.append({"sig": sig, "human_paths": rng.choice(HUMAN)})
+    return [{"fn": "assess", "args": c} for c in cases]
+
+
+def node(nid, **kw):
+    n = {"id": nid, "kind": "implement", "signals": {"paths": ["src/a.rs"]}, "done": "make test"}
+    n.update(kw)
+    return n
+
+
+DESIGN = node("spec", kind="design", signals={}, produces=["docs/specs/a.html"], done="spec_check")
+GRAPHS = [
+    {"nodes": []},
+    {"nodes": [node("a")]},
+    {"nodes": [node("a"), node("a")]},
+    {"nodes": ["not a node", {"kind": "implement"}, node("a")]},
+    {"nodes": [node("a", depends_on=["b"])]},
+    {"nodes": [node("a", depends_on=["b"]), node("b", depends_on=["a"])]},
+    {"nodes": [node("a", depends_on="ab"), node("b")]},
+    {"repo": "w", "repos": {"w": ".", "m": "../m"}, "nodes": [node("a", repo="x")]},
+    {"repo": "zz", "repos": {"w": "."}, "nodes": [node("a")]},
+    {"nodes": [node("a", signals="nope")]},
+    {"nodes": [node("a", inputs="docs/specs/a.html", produces=7)]},
+    {"nodes": [node("a", signals={"paths": ["../escape.rs"]})]},
+    {"nodes": [node("a", signals={"paths": ["/abs.rs"]})]},
+    {"nodes": [node("a", signals={"paths": ["other:x.rs"]})]},
+    {"repo": "w", "repos": {"w": ".", "m": "m"}, "nodes": [node("a", signals={"paths": ["m:x.rs"]})]},
+    {"nodes": [node("a", produces=["out.txt"]), node("b", produces=["./out.txt"])]},
+    {"nodes": [node("a", signals={"paths": ["a.rs", "b.rs"], "est_loc": 400})]},
+    {"nodes": [DESIGN, node("a", inputs=["docs/specs/a.html"], depends_on=["spec"],
+                            signals={"paths": ["a.rs", "b.rs"], "est_loc": 400, "public_api": True})]},
+    {"nodes": [DESIGN, node("a", inputs=["docs/specs/a.html"],
+                            signals={"paths": ["a.rs", "b.rs"], "est_loc": 400})]},
+    {"nodes": [node("a", signals={"paths": ["a.rs"], "spec": "notes/x.md", "est_loc": 400})]},
+    {"nodes": [node("a", signals={"paths": ["a.rs"], "spec": "docs/specs/x.html", "est_loc": 400})]},
+    {"nodes": [node("a", signals={"paths": ["a.rs"], "repos": 2})]},
+    {"nodes": [node("a", tier="mechanical")]},
+    {"nodes": [node("a", tier="frontier")]},
+    {"nodes": [node("a", tier="frontier", reason="hard")]},
+    {"nodes": [node("a", tier="apex")]},
+    {"nodes": [node("a", tier="apex", reason="hardest", thinking="xhigh")]},
+    {"nodes": [node("a", tier="bogus")]},
+    {"nodes": [node("r", kind="review", tier="standard")]},
+    {"nodes": [node("r", kind="review", signals={})]},
+    {"nodes": [node("r", kind="review", signals={}, thinking="low")]},
+    {"nodes": [node("g", signals={"paths": [".control/policy.yaml"]}, thinking="medium")]},
+    {"nodes": [node("g", signals={"paths": [".control/policy.yaml"]}, verify="p20")]},
+    {"nodes": [node("a", done="  ")]},
+    {"nodes": [node("a", done=None)]},
+    {"nodes": [node("a", verify="bogus", thinking="max", spawn_default="nope")]},
+    {"nodes": [node("a", signals={"paths": ["a.rs"], "est_loc": "many"})]},
+    {"nodes": [node("a", kind="bogus")]},
+    {"nodes": [node("a", signals={"kind": "rerun"})]},
+    {"nodes": [node("a", kind="rerun", signals={})]},
+    {"nodes": [node("a", signals={"paths": ["a.rs", "x/test_b.py"]}, spawn_default="mechanical")]},
+    {"nodes": [node(1), node("b", depends_on=[1, 2])]},
+    {"nodes": [node("a", done=3)]},
+    {"repo": "w", "repos": ["w"], "nodes": [node("a")]},
+    {"nodes": [node("a", tier="bad\u00a0tier\u200b\u2028\ue000\xad")]},
+    {"repo": "w", "repos": "w", "nodes": [node("a")]},
+    {"nodes": [node("a", signals={"paths": ["a.rs"], "est_loc": [1]})]},
+    {"nodes": [node("a", signals={"paths": 7})]},
+    {"nodes": [node("a", signals={"paths": ["scripts/x-hook.sh"]})], "_human": ["scripts/*-hook.sh"]},
+    {"ticket": "BRO-1", "repo": "w", "repos": {"w": ".", "m": "m"},
+     "nodes": [node("a", inputs=["docs/specs/a.html", "m:docs/adrs/b.html"], signals={"paths": ["a.rs"]}),
+               node("b", repo="m", depends_on=["a"], inputs=["w:docs/specs/a.html"], verify="p20-full")]},
+]
+
+
+def graph_cases():
+    cases = []
+    for g in GRAPHS:
+        human = g.pop("_human", [])
+        cases.append({"fn": "validate", "args": {"graph": g, "human_paths": human}})
+    for g in GRAPHS:
+        for n in g.get("nodes") or []:
+            if isinstance(n, dict) and isinstance(n.get("id"), str):
+                cases.append({"fn": "brief", "args": {"graph": g, "node": n["id"], "ticket": g.get("ticket")}})
+    return cases
+
+
+def disk_cases(rng):
+    """validate with files on disk and bound repo directories."""
+    w, n = "/r/w", "/r/w/nested"
+    graphs = [
+        ({"nodes": [node("a", signals={"paths": ["a.rs"], "spec": "docs/specs/x.html", "est_loc": 400})]}, []),
+        ({"nodes": [node("a", signals={"paths": ["a.rs"], "spec": "docs/specs/x.html", "est_loc": 400})]},
+         [":docs/specs/x.html"]),
+        ({"nodes": [node("a", inputs=["docs/specs/x.html"], signals={"paths": ["a.rs", "b.rs"], "est_loc": 400})]},
+         [":docs/specs/x.html"]),
+        ({"nodes": [node("a", inputs=["docs/specs/x.html"], signals={"paths": ["a.rs", "b.rs"], "est_loc": 400})]}, []),
+        ({"nodes": [node("a", inputs=["notes/x.html", "docs/adrs/y.html"],
+                         signals={"paths": ["a.rs"], "public_api": True})]}, [":notes/x.html", ":docs/adrs/y.html"]),
+        ({"nodes": [DESIGN, node("a", inputs=["docs/specs/a.html"], depends_on=["spec"],
+                                 signals={"paths": ["a.rs"], "est_loc": 400})]}, []),
+    ]
+    cases = [{"fn": "validate_disk", "args": {"graph": g, "files": f, "dirs": []}} for g, f in graphs]
+    nested = [
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", signals={"paths": ["nested/x.rs"]})]},
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", signals={"paths": ["nested"]})]},
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", inputs=["nested/docs/specs/a.html"])]},
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", signals={"paths": ["nestedx/a.rs"]})]},
+        {"repo": "w", "repos": {"w": w, "n": n}, "nodes": [node("a", repo="n", signals={"paths": ["x.rs"]})]},
+    ]
+    for g in nested:
+        for dirs in ([["w", w], ["n", n]], [["n", n], ["w", w]]):
+            cases.append({"fn": "validate_disk", "args": {"graph": g, "files": [], "dirs": dirs}})
+    # Nodes whose repo is not here: structure only (a done check), never assessed or returned.
+    skipped = {"repo": "w", "repos": {"w": w, "g": "/r/gone"}, "nodes": [
+        node("a"), node("g", repo="g", tier="mechanical", signals={"paths": ["a.rs", "b.rs"], "est_loc": 900}),
+        node("h", repo="g", done="  ")]}
+    for skip in ([], ["g"], ["g", "h"]):
+        cases.append({"fn": "validate_disk", "args": {"graph": skipped, "files": [], "dirs": [], "skip": skip}})
+    for _ in range(300):
+        h = rng.choice([rng.uniform(0, 400), rng.uniform(0, 1), rng.randrange(1, 10**6) / 8, rng.random() * 1e4])
+        cases.append({"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z", "hours": h}})
+    cases += [{"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z", "hours": h}}
+              for h in [0.0, 1.5, 1 / 3, 2.5e-10, 1.25e-10, 3.75e-10, 1e-12, 123.456789,
+                        # where hours * 3600 then rounding (not CPython's timedelta) is 1 µs off
+                        6687.660218274861, 9987.080269162361, 7009.91369442625, 9937.848669440416]]
+    return cases
+
+
+def small_cases():
+    rules = ["scripts/*-hook.sh", "a?c", "*", "**", "x*y*z", "Docs/", "[x]", "a.b", "*.md", "?"]
+    paths = ["scripts/a-hook.sh", "scripts/x/a-hook.sh", "abc", "a/c", "docs/x", "xay/z", "xyz", "[x]", "a.b",
+             "axb", "readme.md", "dir/readme.md", "", "a"]
+    cases = [{"fn": "rule_matches", "args": {"rule": r, "path": p}} for r in rules for p in paths]
+    gov = ["CLAUDE.md", "./agents.md", "x/claude.md", ".control/policy.yaml", "a/.broomva/loops/x", "METALAYER.md",
+           "references/delegation.md", "scripts/fleet_economy.py", "docs/references/current-work.md",
+           "x/docs/references/workspace-context.md", "docs/references/agent-operating-protocols.md", "deploy/x", "scripts/a-hook.sh", "src/a.rs"]
+    cases += [{"fn": "is_governance", "args": {"path": p, "human_paths": h}} for p in gov for h in HUMAN]
+    tests = ["tests/a.rs", "src/test/a.rs", "__tests__/a.js", "spec/a.rb", "test_a.py", "a.test.ts", "a_test.go",
+             "a_spec.rb", "a.spec.ts", "openapi.spec.yaml", "x.spec.md", "src/a.rs", "Tests/A.RS", "contest.rs",
+             "attest/a.rs"]
+    cases += [{"fn": "is_test_path", "args": {"path": p}} for p in tests]
+    norms = ["", ".", "a/./b/", "../a", "a/../..", "/../a", "//a", "///a/b/../c", "a/..", "a//b", "./x", "x/"]
+    cases += [{"fn": "normpath", "args": {"path": p}} for p in norms]
+    policies = [{}, None, [], {"auto_merge": None}, {"auto_merge": []}, {"auto_merge": {"rules": "x"}},
+                {"auto_merge": {"rules": 5}},
+                {"auto_merge": {"rules": [{"action": "require_human", "path_touched": ".control/"},
+                                          {"action": "require_human"}, {"action": "allow", "path_touched": "x"},
+                                          "junk", {"action": "require_human", "path_touched": 7}]}}]
+    cases += [{"fn": "require_human_paths", "args": {"policy": p}} for p in policies]
+    stamps = ["2026-10-22T12:00:00Z", "2026-10-22T12:00:00+00:00", "2026-10-22T07:00:00-05:00",
+              "2026-10-22T12:00:00.123456Z", "2026-10-22T12:00:00.5Z", "2026-10-22 12:00", "2026-10-22T12",
+              "2026-10-22", " 2026-10-22T12:00:00Z ", "2026-02-30T00:00:00", "2026-10-22T25:00:00", "garbage",
+              "", None, 1_700_000_000, 1_700_000_000_000, 1_700_000_000.25, True, "2026-10-22T12:00:00.1234567Z",
+              "2026-10-22T12:00:00+05:30"]
+    cases += [{"fn": "parse_ts", "args": {"value": s}} for s in stamps]
+    cases += [{"fn": "session_gates", "args": {"context_k": c, "driven": d}}
+              for c in [None, 0, 399, 400, 401, 600, 601] for d in [False, True]]
+    datas = [{}, {"tiers": None}, {"tiers": {"standard": {"runs": 0}}},
+             {"tiers": {"standard": {"runs": 10, "raisedRuns": 3, "approved": 4, "firstPass": 0.25},
+                        "frontier": {"runs": 4, "raisedRuns": 1, "approved": 2, "firstPass": 0.125},
+                        "unknown": {"runs": 2.0, "raisedRuns": 2.0, "approved": 3, "firstPass": 0.005},
+                        "apex": "nope"}}]
+    cases += [{"fn": "tier_signals", "args": {"data": d}} for d in datas]
+    return cases
+
+
+def capacity_cases(rng):
+    now = dt.datetime(2026, 10, 22, 12, 0, tzinfo=dt.timezone.utc)
+    iso = lambda d: d.isoformat().replace("+00:00", "Z")  # noqa: E731
+    cases = []
+    for _ in range(150):
+        rows = []
+        for i in range(rng.choice([0, 1, 2, 3])):
+            reset = rng.choice([now + dt.timedelta(hours=2), now + dt.timedelta(days=3, minutes=7),
+                                now - dt.timedelta(hours=1), None, now + dt.timedelta(days=6, hours=23)])
+            rows.append({"email": rng.choice([f"acct{i}@x.io", f"acct{i}", "dup@a.io"]) if i else f"main@x.io",
+                         "fiveHourUtil": rng.choice([None, 10, 50, 95, 96.5, 99.99]),
+                         "sevenDayUtil": rng.choice([None, 0, 12.5, 45.5, 89, 90, 99.9, 100, "x"]),
+                         "sevenDayResetsAt": None if reset is None else rng.choice(
+                             [iso(reset), int(reset.timestamp() * 1000)]),
+                         "fiveHourResetsAt": iso(now + dt.timedelta(hours=1)),
+                         "isActive": i == 0 or rng.random() < 0.2, "isRateLimited": rng.random() < 0.15,
+                         "stale": rng.random() < 0.1})
+        samples = []
+        names = [str(r.get("email", "?")).split("@")[0] for r in rows]
+        for h in range(rng.choice([0, 1, 2, 8, 30]), 0, -1):
+            at = now - dt.timedelta(hours=h * rng.choice([0.4, 1, 1.5]))
+            accts = {}
+            for n, r in zip(names, rows):
+                seven = r["sevenDayUtil"]
+                if isinstance(seven, (int, float)):
+                    seven = max(0.0, seven - h * rng.choice([0, 0.5, 1.25]))
+                    if rng.random() < 0.05:
+                        seven += 30  # a drop afterwards: a reset
+                accts[n] = {"7d": seven, "reset_7d": rng.choice([r["sevenDayResetsAt"], r["sevenDayResetsAt"],
+                                                                 iso(now + dt.timedelta(days=5))]),
+                            "stale": rng.random() < 0.05}
+            samples.append({"at": iso(at) if rng.random() < 0.97 else iso(now + dt.timedelta(hours=1)),
+                            "accounts": accts})
+        cases.append({"fn": "capacity", "args": {"usage": rows, "samples": samples, "now": iso(now)}})
+    return cases
+
+
+def gate_rows(rng, now, iso):
+    """Usage rows on the gate's boundaries (BRO-3223): 5h at 70 and 90, 7d at 95, stale ages either
+    side of 30 minutes, the 5h window open or reset, needs-login, no stored credentials."""
+    rows = []
+    for i in range(rng.choice([0, 1, 2, 3, 4])):
+        reset7 = rng.choice([now + dt.timedelta(days=2), now - dt.timedelta(minutes=5), None])
+        rows.append({"id": f"id{i}", "email": f"a{i}@x.io" if rng.random() < 0.9 else "a0@y.io",
+                     "fiveHourUtil": rng.choice([None, 0, 10, 69.9, 70, 70.1, 89.9, 90, 92, "x"]),
+                     "sevenDayUtil": rng.choice([None, 5, 50.5, 89, 94.9, 95, 99]),
+                     "sevenDayResetsAt": None if reset7 is None else iso(reset7),
+                     "fiveHourResetsAt": rng.choice([iso(now + dt.timedelta(hours=2)), iso(now - dt.timedelta(minutes=1)),
+                                                     None, int((now + dt.timedelta(hours=1)).timestamp())]),
+                     "isActive": (i == 0 and rng.random() < 0.9) or rng.random() < 0.1,
+                     "isRateLimited": rng.random() < 0.15, "stale": rng.random() < 0.45,
+                     "numbersAgeSeconds": rng.choice([None, 0, 1799, 1800, 1801, 7200, 59.5]),
+                     **rng.choice([{}, {}, {"needsLogin": True}, {"needsLogin": 0}, {"hasStoredCredentials": False},
+                                   {"hasStoredCredentials": True}, {"hasStoredCredentials": None}])})
+    return rows
+
+
+def gate_state(rng, now, rows):
+    """`provider_manager.py --json state` shapes: failover on or off, holds, pending signals at the TTL,
+    probes either side of the hour, bounds as numbers or strings, and a few malformed values."""
+    t = now.timestamp()
+    st = {}
+    if rng.random() < 0.9:
+        st["versionGate"] = rng.choice([{"automaticSwitching": "on"}] * 9 + [{"automaticSwitching": "off"}, {}, None])
+    if rng.random() < 0.9:
+        cfg = {"autoBalance": rng.choice([True] * 8 + [False, 1, "true", None])}
+        for k, vals in (("staleNumbersMinutes", [30, 10, 60.5, "45", " 5 ", "1_0"]),
+                        ("standbyMax", [70, 50, 80.0, "70"]), ("standbyWeeklyMax", [95, 90, 99.5])):
+            if rng.random() < 0.5:
+                cfg[k] = rng.choice(vals)
+        st["config"] = cfg
+    if rng.random() < 0.3:
+        st["holdUntil"] = rng.choice([None, "", iso_z(now + dt.timedelta(minutes=10)),
+                                      iso_z(now - dt.timedelta(minutes=10)), int((t + 600) * 1000)])
+    if rng.random() < 0.4:
+        st["pendingSignals"] = rng.choice([[], [{"at": t - 899}], [{"at": t - 900}], [{"at": t - 3000}, {"at": t - 10}],
+                                           [{"at": str(t - 5)}], [{}], [{"at": None}]])
+    if rng.random() < 0.6 and rows:
+        probes = {}
+        for r in rng.sample(rows, rng.randint(1, len(rows))):
+            probes[r["id"]] = {"result": rng.choice(["limited", "limited", "ok"]),
+                               "at": rng.choice([t - 3599, t - 3600, t - 10, t - 7200, str(t - 60)])}
+        if rng.random() < 0.2:
+            probes["ghost"] = {"result": "limited", "at": t}
+        st["probes"] = dict(sorted(probes.items()))  # Rust's map iterates sorted; so does this dict
+    return st
+
+
+def iso_z(d):
+    return d.isoformat().replace("+00:00", "Z")
+
+
+def gate_cases(rng):
+    now = dt.datetime(2026, 10, 22, 12, 0, tzinfo=dt.timezone.utc)
+    cases = []
+    for _ in range(600):
+        rows = gate_rows(rng, now, iso_z)
+        args = {"usage": rows, "now": iso_z(now)}
+        if rng.random() < 0.85:
+            args["state"] = gate_state(rng, now, rows)
+        cases.append({"fn": "resume_gate", "args": args})
+        if "state" in args:
+            cases.append({"fn": "gate_bounds", "args": args})
+        if rng.random() < 0.3:
+            cases.append({"fn": "capacity", "args": {**args, "samples": []}})
+    # Failover live and at least two accounts: who covers a stale or unspendable active account.
+    for _ in range(200):
+        rows = []
+        while len(rows) < 2:
+            rows = gate_rows(rng, now, iso_z)
+        st = gate_state(rng, now, rows)
+        st.update(versionGate={"automaticSwitching": "on"}, config={**(st.get("config") or {}), "autoBalance": True})
+        st.pop("holdUntil", None), st.pop("pendingSignals", None)
+        args = {"usage": rows, "now": iso_z(now), "state": st}
+        cases += [{"fn": "resume_gate", "args": args}, {"fn": "capacity", "args": {**args, "samples": []}}]
+    # The same, kept only inside the schema: most generated rows or states carry a value the schema
+    # refuses, which left the standby test and its order unkilled (mutation at 6116390).
+    typed = 0
+    while typed < 400:
+        rows = []
+        while len(rows) < 2:
+            rows = gate_rows(rng, now, iso_z)
+        st = gate_state(rng, now, rows)
+        st.update(versionGate={"automaticSwitching": "on"},
+                  config={**(st.get("config") or {}), "autoBalance": rng.random() < 0.85})
+        args = {"usage": rows, "now": iso_z(now), "state": st}
+        if refusal({"fn": "resume_gate", "args": args}) is None:
+            typed += 1
+            cases.append({"fn": "resume_gate", "args": args})
+    # Exact boundaries (P20 r1, Stratum B): resets and holds at now, a duplicate id, a bool bound, a rank tie.
+    on = {"versionGate": {"automaticSwitching": "on"}, "config": {"autoBalance": True}}
+    acct = lambda name, **kw: {"id": name, "email": f"{name}@x.io", "fiveHourUtil": 10, "sevenDayUtil": 10,  # noqa: E731
+                               "isActive": False, **kw}
+    at_now, t = iso_z(now), now.timestamp()
+    edge = [
+        ([acct("a", isActive=True, sevenDayUtil=96, sevenDayResetsAt=at_now)], {}),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200, fiveHourUtil=92, fiveHourResetsAt=at_now),
+          acct("b")], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b")], {**on, "holdUntil": at_now}),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=20, sevenDayUtil=None),
+          acct("c", fiveHourUtil=20, sevenDayUtil=0.5)], on),
+        ([acct("a", isActive=True), {**acct("x"), "email": "b@x.io"}, {**acct("x"), "email": "c@x.io"}],
+         {**on, "probes": {"x": {"result": "limited", "at": t}}}),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=90)],
+         {**on, "config": {"autoBalance": True, "staleNumbersMinutes": True}}),
+        # P20 port r5, Stratum B: a standby named "" covers, and the reason names no one (`if r["covered_by"]`).
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "id": "", "email": ""}], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "email": ""}], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), {**acct("b"), "id": ""}], on),
+        # A standby exactly at standbyMax is one the balancer fails over to ("at or under").
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=70)], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=40)],
+         {**on, "config": {"autoBalance": True, "standbyMax": 40}}),
+        # The standby that covers is the least used: 5h, then 7d, then name (`min(standbys)`).
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=60),
+          acct("c", fiveHourUtil=20)], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("b", fiveHourUtil=20, sevenDayUtil=50),
+          acct("c", fiveHourUtil=20, sevenDayUtil=5)], on),
+        ([acct("a", isActive=True, stale=True, numbersAgeSeconds=7200), acct("d", fiveHourUtil=20),
+          acct("c", fiveHourUtil=20)], on),
+    ]
+    for rows, st in edge:
+        args = {"usage": rows, "now": at_now, "state": st}
+        cases += [{"fn": "resume_gate", "args": args}, {"fn": "gate_bounds", "args": args}]
+    # Malformed state the Python crashes or raises on, named by kind.
+    bad = [{"pendingSignals": {"a": 1}}, {"pendingSignals": "x"}, {"pendingSignals": 5}, {"pendingSignals": [1]},
+           {"versionGate": "on"}, {"versionGate": {"automaticSwitching": "on"}, "config": "x"}, {"config": [1]},
+           {"probes": [1]}, {"config": {"staleNumbersMinutes": None}}, {"config": {"standbyMax": "abc"}},
+           {"config": {"standbyMax": "1__0"}}, {"holdUntil": "soon"}, {"pendingSignals": [{"at": "x"}]},
+           {"probes": {"id0": "limited"}}, {"probes": {"id0": {"result": "limited", "at": "x"}}}]
+    rows = [{"id": "id0", "email": "a0@x.io", "fiveHourUtil": 10, "sevenDayUtil": 10, "isActive": True}]
+    cases += [{"fn": "gate_bounds", "args": {"usage": rows, "now": iso_z(now), "state": b}} for b in bad]
+    cases += [{"fn": "gate_bounds", "args": {"usage": [{"id": [1], "email": "a"}], "now": iso_z(now), "state": {}}},
+              {"fn": "gate_bounds", "args": {"usage": rows, "now": iso_z(now), "state": []}}]
+    return cases
+
+
+# Every field, given a value of each type: where the Python raises (P20 Stratum A, port arc 2: an
+# unhashable id or mode, a non-mapping usage row or sample, a non-numeric tier count, a timestamp or
+# runway past datetime's years), Maestro must raise the same kind, never decide. Not swept: numbers
+# between 6.7e16 s and time_t's limit, where the kind is the platform's (OSError on macOS).
+TYPE_VALS = {"list": ["x"], "dict": {"k": 1}, "null": None, "int": 7, "float": 1.5, "bool": True, "str": "zz",
+             "emptylist": [], "emptydict": {}, "huge": 1e300, "tiny": 1e-6, "neg": -5,
+             "year10k": 253402300800, "ts": "2026-10-29T00:00:00Z"}
+
+
+def type_cases():
+    cases = []
+    tv = TYPE_VALS.items
+    base = {"repo": "workspace", "nodes": [
+        {"id": "a", "kind": "implement", "done": "true", "inputs": [], "produces": ["b.rs"], "depends_on": [],
+         "tier": "standard", "verify": "check", "thinking": "medium", "spawn_default": "standard",
+         "signals": {"paths": ["a.rs"], "mode": "conserve", "est_loc": 10, "files": 1, "observed_tier": "standard",
+                     "failed_attempts": 0, "public_api": False, "repos": 1, "kind": "implement"}},
+        {"id": "b", "kind": "implement", "done": "true", "signals": {"paths": ["c.rs"]}, "depends_on": ["a"]}]}
+    for name, v in tv():
+        for k in ("repo", "repos", "nodes"):
+            if k == "repo" and name in ("int", "float", "bool", "huge", "tiny", "neg", "year10k"):
+                continue  # a numeric repo name is printed as a string (README, known differences)
+            g = copy.deepcopy(base); g[k] = v
+            cases.append({"fn": "validate", "args": {"graph": g}})
+        for k in ("id", "kind", "done", "signals", "inputs", "produces", "depends_on", "tier", "verify", "thinking",
+                  "spawn_default", "repo"):
+            g = copy.deepcopy(base); g["nodes"][0][k] = v
+            cases.append({"fn": "validate", "args": {"graph": g}})
+        for k in base["nodes"][0]["signals"]:
+            g = copy.deepcopy(base); g["nodes"][0]["signals"][k] = v
+            cases.append({"fn": "validate", "args": {"graph": g}})
+        for where in ("depends_on", "inputs", "produces"):
+            g = copy.deepcopy(base); g["nodes"][1 if where == "depends_on" else 0][where] = [v]
+            cases.append({"fn": "validate", "args": {"graph": g}})
+    now = "2026-10-23T00:00:00Z"
+    row = {"id": "a", "email": "a@x.io", "fiveHourUtil": 10, "sevenDayUtil": 10,
+           "sevenDayResetsAt": "2026-10-28T00:00:00Z", "fiveHourResetsAt": "2026-10-23T01:00:00Z", "isActive": True,
+           "isRateLimited": False, "stale": False, "numbersAgeSeconds": 10, "needsLogin": False,
+           "hasStoredCredentials": True}
+    row2 = {**row, "id": "b", "email": "b@x.io", "isActive": False}
+    sample = {"at": "2026-10-22T20:00:00Z",
+              "accounts": {"a": {"7d": 8, "reset_7d": "2026-10-28T00:00:00Z", "stale": False}}}
+    state = {"versionGate": {"automaticSwitching": "on"},
+             "config": {"autoBalance": True, "staleNumbersMinutes": 30, "standbyMax": 70, "standbyWeeklyMax": 95},
+             "holdUntil": None, "pendingSignals": [], "probes": {"b": {"result": "ok", "at": 1761177600}}}
+    tiers = {"tiers": {"standard": {"runs": 10, "raisedRuns": 3, "approved": 4, "firstPass": 0.25,
+                                    "tokensPerApproved": 5, "raises": 1, "escalations": 0, "unmeasured": 0}}}
+    for name, v in tv():
+        for k in row:
+            r = {**row, k: v}
+            for fn in ("capacity", "resume_gate"):
+                cases.append({"fn": fn, "args": {"usage": [r, row2], "samples": [sample], "now": now}})
+                cases.append({"fn": fn, "args": {"usage": [r, row2], "samples": [sample], "now": now, "state": state}})
+        cases.append({"fn": "capacity", "args": {"usage": [row, v], "samples": [], "now": now}})
+        cases.append({"fn": "capacity", "args": {"usage": [row], "samples": [v], "now": now}})
+        cases.append({"fn": "capacity", "args": {"usage": [], "samples": [v], "now": now}})
+        for k in ("at", "accounts"):
+            cases.append({"fn": "capacity", "args": {"usage": [row], "samples": [{**sample, k: v}], "now": now}})
+        for k in ("7d", "reset_7d", "stale"):
+            s = copy.deepcopy(sample); s["accounts"]["a"][k] = v
+            cases.append({"fn": "capacity", "args": {"usage": [row], "samples": [s], "now": now}})
+        s = copy.deepcopy(sample); s["accounts"]["a"] = v
+        cases.append({"fn": "capacity", "args": {"usage": [row], "samples": [s], "now": now}})
+        for k in state:
+            st = {**state, k: v}
+            for fn in ("gate_bounds", "resume_gate", "capacity"):
+                cases.append({"fn": fn, "args": {"usage": [row, row2], "samples": [], "now": now, "state": st}})
+        for k in tiers["tiers"]["standard"]:
+            d = copy.deepcopy(tiers); d["tiers"]["standard"][k] = v
+            cases.append({"fn": "tier_signals", "args": {"data": d}})
+        cases.append({"fn": "tier_signals", "args": {"data": {"tiers": {"standard": v}}}})
+        cases.append({"fn": "tier_signals", "args": {"data": {"tiers": v}}})
+        cases.append({"fn": "tier_signals", "args": {"data": v}})
+        cases.append({"fn": "parse_ts", "args": {"value": v}})
+    for h in (6.7e7, 7e7, -1e8, 1e8, 1.1e8, 1e300):
+        cases.append({"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z", "hours": h}})
+    for s in (253402300799, 253402300799.9999999, -62135596800, -62135596801, 1e13, -1e13, 1e15, 1e20, -1e20):
+        cases.append({"fn": "parse_ts", "args": {"value": s}})
+    return cases
+
+
+def all_cases():
+    rng = random.Random(3204)
+    return (assess_cases(rng) + graph_cases() + disk_cases(rng) + small_cases() + capacity_cases(rng)
+            + gate_cases(random.Random(3223)) + type_cases())
+
+
+# --- runners -------------------------------------------------------------------------------------
+def run(cmd, cwd=None, stdin=None):
+    p = subprocess.run(cmd, cwd=cwd, input=stdin, capture_output=True, text=True)
+    return p.returncode, p.stdout, p.stderr
+
+
+def rust_eval(maestro, cases):
+    code, out, err = run([maestro, "parity-eval"], stdin=json.dumps(cases))
+    if code:
+        raise SystemExit(f"maestro parity-eval failed ({code}): {err}")
+    return json.loads(out)
+
+
+def compare_cli(name, py_cmd, rs_cmd, cwd, parse_json=False):
+    pc, po, pe = run(py_cmd, cwd)
+    rc, ro, re_ = run(rs_cmd, cwd)
+    cli_runs.append(pc)
+    if pc == 1 and "Traceback" in pe:  # an uncaught Python error: the Rust exits 1 with the same exception kind
+        kind = pe.strip().splitlines()[-1].split(":", 1)[0]
+        return check(name, rc == 1 and "Traceback" in re_ and f"\n  {kind}: " in re_ and po == ro,
+                     f"python raised {kind}; rust exit {rc}: {re_[:200]}")
+    ok = check(name, pc == rc, f"exit python {pc} rust {rc}\n  py: {pe[:300]}\n  rs: {re_[:300]}")
+    if pc == 2 and pe.startswith("usage: "):  # argparse: the same error line; its usage block is not reproduced
+        pe = "error: " + pe.rstrip("\n").rsplit("\n", 1)[-1].split(": error: ", 1)[-1] + "\n"
+    ok &= check(name, pe == re_, f"stderr differs\n  py: {pe[:600]}\n  rs: {re_[:600]}")
+    if parse_json and pc == 0:
+        ok &= check(name, same(json.loads(po), json.loads(ro)), "JSON stdout differs")
+    else:
+        ok &= check(name, po == ro, f"stdout differs\n  py: {po[:600]}\n  rs: {ro[:600]}")
+    return ok
+
+
+def real_graphs(ws, dpy, maestro):
+    import yaml
+    n = 0
+    for g in sorted(os.listdir(os.path.join(ws, "docs", "plans"))):
+        if not g.endswith(".graph.yaml"):
+            continue
+        path = os.path.join("docs", "plans", g)
+        with open(os.path.join(ws, path)) as f:
+            graph = yaml.safe_load(f) or {}
+        bind = ["--repo", "workspace=."] if "workspace" in (graph.get("repos") or {}) else []
+        pre = bind + ["--skip-absent-repos"]
+        rs_bind = bind + ["--skip-absent-repos"]
+        compare_cli(f"plan {g}", ["python3", dpy, *pre, "plan", path], [maestro, "delegation", "plan", path, *rs_bind], ws)
+        compare_cli(f"plan --json {g}", ["python3", dpy, *pre, "plan", path, "--json"],
+                    [maestro, "--json", "delegation", "plan", path, *rs_bind], ws, parse_json=True)
+        for nd in graph.get("nodes") or []:
+            nid = str(nd.get("id"))
+            compare_cli(f"brief {g} {nid}", ["python3", dpy, *pre, "brief", path, nid],
+                        [maestro, "delegation", "brief", path, nid, *rs_bind], ws)
+        n += 1
+    return n
+
+
+# --- CLI scenarios: scratch repos, both CLIs, and the committed CLI golden ----------------------------
+# Paths are written under "{ROOT}", the scratch root, so fixtures/delegation/cli-golden.json is the same
+# on every machine; crates/cli/tests/delegation.rs rebuilds LAYOUT and replays every case through the
+# binary, so the CLI's binding, policy and absent-repo guards are held by `cargo test` as well.
+R = "{ROOT}"
+W, NESTED, BARE = f"{R}/w", f"{R}/w/nested", f"{R}/bare"
+
+
+def cli_layout():
+    good = node("a", inputs=["docs/specs/a.html", "bare:docs/adrs/b.html", "docs/specs/missing.html"],
+                signals={"paths": ["src/a.rs"]})
+    graphs = {
+        "ok": {"repo": "w", "repos": {"w": W, "bare": {"path": BARE, "policy": "none"}}, "nodes": [
+            good, node("b", repo="bare", depends_on=["a"], inputs=["w:docs/specs/a.html"])]},
+        "nested": {"repo": "w", "repos": {"w": W, "n": NESTED}, "nodes": [node("a", signals={"paths": ["nested/x.rs"]})]},
+        "same-dir": {"repo": "w", "repos": {"w": W, "v": f"{R}/w-link"}, "nodes": [node("a")]},
+        "absent": {"repo": "w", "repos": {"w": W, "gone": f"{R}/gone"},
+                   "nodes": [node("a"), node("g", repo="gone", inputs=["docs/specs/x.html"],
+                                             signals={"paths": ["a.rs"], "spec": "docs/specs/x.html"})]},
+        "absent-spec": {"repo": "w", "repos": {"w": W, "gone": f"{R}/gone"}, "nodes": [
+            node("a", inputs=["gone:docs/specs/x.html"],
+                 signals={"paths": ["a.rs"], "spec": "gone:docs/specs/x.html", "est_loc": 400})]},
+        "no-policy": {"repo": "b", "repos": {"b": BARE}, "nodes": [node("a")]},
+        "policy-none-but-file": {"repo": "w", "repos": {"w": {"path": W, "policy": "none"}}, "nodes": [node("a")]},
+        "governed": {"repo": "w", "repos": {"w": W}, "nodes": [node("a", signals={"paths": ["deploy/x.yaml"]})]},
+        "bad-name": {"repo": "w", "repos": {"w": W, "a:b": BARE}, "nodes": [node("a")]},
+        "no-path": {"repo": "w", "repos": {"w": W, "x": {"policy": "none"}}, "nodes": [node("a")]},
+        "single": {"nodes": [node("a", inputs=["docs/specs/a.html"])]},
+        "repos-list": {"repo": "w", "repos": ["w"], "nodes": [node("a")]},
+        "int-id": {"repo": "w", "repos": {"w": W}, "nodes": [node(1), node("a", depends_on=[1])]},
+        "int-id-only": {"repo": "w", "repos": {"w": W}, "nodes": [node(1)]},
+        # P20 port arc 2, Stratum A: values the Python hashes, so a list raises before anything is planned.
+        "list-id": {"repo": "w", "repos": {"w": W}, "nodes": [node(["evil"])]},
+        "list-mode": {"repo": "w", "repos": {"w": W}, "nodes": [node("a", signals={"paths": ["a.rs"], "mode": ["conserve"]})]},
+        "list-dep": {"repo": "w", "repos": {"w": W}, "nodes": [node("a"), node("b", depends_on=[["a"]])]},
+        # The CLI's skipped set hashes `(repo or home)` before validate sees the graph.
+        "list-repo-absent": {"repo": "w", "repos": {"w": W, "gone": f"{R}/gone"},
+                             "nodes": [node("a", repo=["gone"]), node("g", repo="gone")]},
+        # ...even where validate would stop first, on a home the graph does not name.
+        "list-repo-unnamed-home": {"repo": "zz", "repos": {"w": W, "gone": f"{R}/gone"},
+                                   "nodes": [node("a", repo=["gone"])]},
+        "list-id-unnamed-home": {"repo": "zz", "repos": {"w": W, "gone": f"{R}/gone"},
+                                 "nodes": [node(["x"], repo="gone")]},
+    }
+    files = {f"{name}.json": json.dumps(g) for name, g in graphs.items()}
+    files["astral.json"] = json.dumps({"repo": "w", "repos": {"w": W, "n": NESTED},
+                                       "nodes": [node("a", done="ship it \U0001F680", signals={"paths": ["nested/x.rs"]})]})
+    # P20 port r5, Stratum B: `json.loads` keeps the last `repos` and a repeated name at its first position.
+    nodes = json.dumps([node("a"), node("b", repo="bare", depends_on=["a"])])
+    files["dup-repos.json"] = (f'{{"repo": "w", "repos": {{"zz": "{R}/gone"}}, "repos": {{"w": "{W}", "bare": '
+                               f'{{"path": "{BARE}", "policy": "none"}}}}, "nodes": {nodes}}}')
+    files["dup-repo-key.json"] = (f'{{"repo": "w", "repos": {{"bare": "{R}/gone", "w": "{W}", "bare": '
+                                  f'{{"path": "{BARE}", "policy": "none"}}}}, "nodes": {nodes}}}')
+    files["list.graph.yaml"] = "- a\n- b\n"
+    files["empty.graph.yaml"] = ""
+    files["w/.control/policy.yaml"] = "auto_merge:\n  rules:\n    - {action: require_human, path_touched: deploy/}\n"
+    files["w/docs/specs/a.html"] = ""
+    files["bare/docs/adrs/b.html"] = ""
+    files["economy-str-runs.json"] = json.dumps({"tiers": {"standard": {"runs": "10", "raisedRuns": 3, "approved": 4,
+                                                                         "firstPass": 0.25}}})
+    files["economy-list.json"] = json.dumps({"tiers": ["standard"]})
+    files["economy.json"] = json.dumps({"generatedAt": "2026-10-22T00:00:00Z", "tiers": {
+        "standard": {"runs": 10, "raisedRuns": 3, "approved": 4, "firstPass": 0.25, "tokensPerApproved": 1234567},
+        "frontier": {"runs": 2, "approved": 0, "firstPass": None, "tokensPerApproved": 980}}})
+    return {"dirs": ["w/nested", "bare"], "files": files, "symlinks": {"w-link": "w"}}
+
+
+def cli_cases():
+    cases = []
+
+    def add(name, py, rs, cwd="w", parse_json=False, tool="delegation"):
+        cases.append({"name": name, "tool": tool, "py": py, "rs": rs, "cwd": cwd, "json": parse_json})
+
+    names = ["ok", "nested", "same-dir", "absent", "absent-spec", "no-policy", "policy-none-but-file", "governed",
+             "bad-name", "no-path", "single", "repos-list", "int-id", "int-id-only", "list-id", "list-mode",
+             "list-dep", "list-repo-absent", "list-repo-unnamed-home", "list-id-unnamed-home", "dup-repos", "dup-repo-key"]
+    for name in names:
+        path = f"{R}/{name}.json"
+        variants = [[], ["--skip-absent-repos"]]
+        if name == "single":
+            variants += [["--root", W], ["--root", BARE], ["--root", ""],
+                         ["--root", BARE, "--root", W], ["--skip-absent-repos", "--skip-absent-repos"]]
+        if name == "ok":
+            variants += [["--repo", f"bare={BARE}"], ["--repo", "nope=x"], ["--repo", "bad"], ["--root", W], ["--root", ""],
+                         ["--repo", f"bare={R}/gone", "--repo", f"bare={BARE}"],
+                         ["--repo", f"bare={BARE}", "--repo", f"bare={R}/gone"]]
+        for flags in variants:
+            add(f"{name} plan {' '.join(flags)}", [*flags, "plan", path], ["delegation", "plan", path, *flags])
+            add(f"{name} plan --json {' '.join(flags)}", [*flags, "plan", path, "--json"],
+                ["--json", "delegation", "plan", path, *flags], parse_json=True)
+            add(f"{name} brief a {' '.join(flags)}", [*flags, "brief", path, "a"], ["delegation", "brief", path, "a", *flags])
+    for g, extra in (("list.graph.yaml", ["plan"]),
+                     ("astral.json", ["plan"]),
+                     ("empty.graph.yaml", ["plan"])):
+        sub, rest = extra[0], extra[1:]
+        add(f"{g} {' '.join(extra)}", [sub, f"{R}/{g}", *rest], ["delegation", sub, f"{R}/{g}", *rest])
+    assess = [["--kind", "implement", "--paths", "src/a.rs", "deploy/x"],
+              ["--kind", "implement", "--paths", "a.rs", "b.rs", "--est-loc", "300"],
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", "300", "--spec", "docs/specs/a.html"],
+              ["--kind", "implement", "--paths", "a.rs", "--spec", "docs/specs/none.html"],
+              ["--kind", "rerun", "--done", "gh run rerun 1 --failed", "--brief", "--ticket", "BRO-1"],
+              ["--kind", "rerun", "--brief"],
+              ["--kind", "implement", "--paths", "a.rs", "b.rs", "--est-loc", "300", "--done", "x", "--brief"],
+              ["--kind", "review", "--mode", "read-only", "--observed-tier", "apex"],
+              ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "3", "--allow-apex", "--mode", "conserve"],
+              ["--kind", "implement", "--paths", "a.rs", "--failed-attempts", "-1", "--est-loc", "-5", "--files", "-2"],
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", " 1_000 ", "--mode", "critical", "--mode", "normal"],
+              # P20 port r5, Stratum B: an empty string is falsy in the Python.
+              ["--kind", "", "--paths", "a.rs"],
+              ["--kind", "bogus"], ["--observed-tier", "x"], ["--mode", "x"],
+              # P20 port arc 2 r1 (A MAJOR): argparse checks choices at every occurrence, in argv order.
+              ["--kind", "bogus", "--kind", "implement"], ["--mode", "x", "--mode", "normal"],
+              ["--observed-tier", "x", "--observed-tier", "apex"], ["--mode", "bogus", "--kind", "bogus2"],
+              ["--kind", "implement", "--paths", "a.rs", "--spec", ""],
+              ["--kind", "rerun", "--done", "gh run rerun 1 --failed", "--brief", "--ticket", ""],
+              # Port continuation (Codex): a repeated nargs="*" flag replaces; int() reads Unicode digits.
+              ["--kind", "implement", "--paths", "src/a.rs", "--paths", "deploy/prod.yaml"],
+              ["--kind", "implement", "--paths", "deploy/prod.yaml", "--paths", "src/a.rs"],
+              ["--kind", "implement", "--paths", "a.rs", "b.rs", "--paths"],
+              ["--kind", "implement", "--paths", "a.rs", "--files", "１２", "--est-loc", "\u0663_\u0660\u0660"],
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", "\uff13\uff10\uff10", "--repos", "\u1c52"],
+              # P20 port r1 B: int() refuses U+001C..U+001F that str.strip drops; an empty --root is cwd.
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", "\x1c900"],
+              ["--kind", "implement", "--paths", "a.rs", "--files", "3\x1f"],
+              ["--kind", "implement", "--paths", "a.rs", "--est-loc", "\u00b2"],
+              ["--kind", "implement", "--paths", "a.rs", "--files", "x"]]
+    for args in assess:
+        for root_args in (["--root", W], ["--root", BARE], ["--root", BARE, "--no-policy"], ["--root", ""],
+                          ):
+            add(f"assess {' '.join(root_args + args)}", [*root_args, "assess", *args],
+                ["delegation", "assess", *root_args, *args], parse_json="--brief" not in args)
+    add("ladder", ["ladder"], ["delegation", "ladder"], parse_json=True)
+    add("tiers", ["tiers", "--path", f"{R}/economy.json"], ["economy", "tiers", "--path", f"{R}/economy.json"],
+        tool="economy")
+    add("tiers --json", ["tiers", "--json", "--path", f"{R}/economy.json"],
+        ["--json", "economy", "tiers", "--path", f"{R}/economy.json"], tool="economy", parse_json=True)
+    add("tiers missing", ["tiers", "--path", f"{R}/nope.json"], ["economy", "tiers", "--path", f"{R}/nope.json"],
+        tool="economy")
+    for bad in ("economy-str-runs.json", "economy-list.json"):
+        add(f"tiers {bad}", ["tiers", "--path", f"{R}/{bad}"], ["economy", "tiers", "--path", f"{R}/{bad}"], tool="economy")
+    return cases
+
+
+def build_layout(layout, root):
+    for d in layout["dirs"]:
+        os.makedirs(os.path.join(root, d), exist_ok=True)
+    for rel, text in layout["files"].items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text.replace(R, root))
+    for link, target in layout["symlinks"].items():
+        os.symlink(os.path.join(root, target), os.path.join(root, link))
+
+
+SCHEMA_OUTSIDE = "outside the schema Maestro reads exactly"
+
+
+def cli_refusal(c, layout):
+    """The field Maestro's CLI refuses for a scenario whose JSON input is outside the schema, or None."""
+    rel = next((x.replace(R + "/", "") for x in c["rs"] if x.startswith(R + "/") and x.endswith(".json")), None)
+    if rel is None or rel not in layout["files"]:
+        return None
+    data = json.loads(layout["files"][rel])
+    if c["tool"] == "economy":
+        return refusal({"fn": "tier_signals", "args": {"data": data}})
+    return refusal({"fn": "validate", "args": {"graph": data}}) if type(data) is dict else None
+
+
+def yaml11_golden(write):
+    """PyYAML's implicit resolver on plain scalars: the YAML 1.1 reading the CLI's subset check ports
+    (crates/cli/src/port.rs, `yaml11`), held to this golden by its unit test."""
+    import yaml
+    r = yaml.resolver.Resolver()
+    fixed = ["yes", "Yes", "YES", "yEs", "no", "No", "on", "ON", "off", "Off", "y", "n", "Y", "N", "true", "True",
+             "TRUE", "tRue", "false", "~", "null", "Null", "NULL", "nULL", "", "<<", "=", "0", "-0", "+0", "00", "0250",
+             "0o17", "0b101", "0b", "0x1F", "0x", "0x_f", "1_000", "1__0", "_1", "1_", "190:20:30", "1:20", "1:60",
+             "1:5", "0:20", "-1:20", "1.5", "1.", ".5", "._5", "1.5e3", "1.5e+3", "1.5E-3", "1e3", "1e+3", "1.0e",
+             "1.0e+", ".inf", "-.inf", "+.Inf", ".INF", "inf", ".nan", "-.nan", ".NaN", "nan", "1:20.5", "1:20.",
+             "2026-10-23", "2026-1-2", "2026-10-23T12:00:00Z", "2026-10-23t12:00:00", "2026-10-23 12:00:00",
+             "2026-10-23  1:00:00.5 -5", "2026-10-23T12:00:00+05:30", "2026-10-23T12:00:00 Z",
+             "2026-10-23T12:00:00+5", "2026-10-23T12:00", "2026-10-23x", "20261023", "12:00:00", "make test",
+             "-x", "1.2.3", "v1.0", "0.51.0", "+", "-", ".", "+.", "9223372036854775808", "-9223372036854775809",
+             "123456789012345678901234567890", "1e400", "1.0e400", "0x" + "f" * 20]
+    rng = random.Random(1111)
+    alphabet = "0123456789_:.-+eExXbBoOT Z" + "aefinyNOtrsl"
+    rand = ["".join(rng.choice(alphabet) for _ in range(rng.randint(1, 12))) for _ in range(4000)]
+    tokens = ["0", "1", "7", "9", "_", ":", "5", "59", ".", "e", "E", "+", "-", "x", "b", "f", "2026", "-10", "-1",
+              "-23", "T", "t", "12:00:00", ":30", " ", "\t", "Z", "inf", "nan", "NaN"]
+    rand += ["".join(rng.choice(tokens) for _ in range(rng.randint(1, 6))).strip() for _ in range(4000)]
+    cases = []
+    for s in dict.fromkeys(fixed + rand):
+        tag = r.resolve(yaml.ScalarNode, s, (True, False)).rsplit(":", 1)[-1]
+        cases.append([s, tag])
+    text = "[\n" + ",\n".join(json.dumps(c) for c in cases) + "\n]\n"
+    if write:
+        with open(YAML11_GOLDEN, "w") as f:
+            f.write(text)
+    else:
+        check("yaml11 golden", os.path.isfile(YAML11_GOLDEN) and open(YAML11_GOLDEN).read() == text,
+              f"{YAML11_GOLDEN} is not PyYAML's resolver output: rerun with --write and review the diff")
+    return len(cases)
+
+
+# --- YAML: PyYAML's safe_load against the CLI's reader, differentially --------------------------
+YAML_TRICKY = ["\t", "\r", "\r\n", "\x85", "\u2028", "\u2029", "\ufeff", "\x00", "\x1c", "\x7f", "\xa0", "\u3000", "?",
+               "&", "*", "!", "|", ">", "#", ":", ",", "[", "]", "{", "}", "-", '"', "'", "%", "@", "`", " ", "\n", ".",
+               "~", "=", "<", "\\", "\\n", "0", "1", "yes", "x", "é", "→", ": ", "- ", "? ", "  ", "\n  ", "\n- ", "---",
+               "...", "|-", ">-", "|+", "#c", "&a", "*a", "!t", "'q'", '"q"', "{a: 1}", "[1, 2]", "1.5", "0x1", "null",
+               "~", "\x01", "1: ", "[?1]"]
+YAML_SMALL = ["a: b\n", "a: [b, c]\n", "a: {b: c, d: [e]}\n", "- a\n- b: c\n", "a:\n  b: c\n  d:\n    - e\n",
+              "a: |\n  x\n  y\n", "a: >\n  x\n  y\n", "a: 'x y'\n", 'a: "x\\ty"\n', "a: x\n  y\n", "{a: b}\n",
+              "[a, {b: c}]\n", "1: a\n", "a: [?1]\n",
+              "nodes:\n  - id: a\n    done: make test\n    signals: {paths: [a.rs], est_loc: 10}\n"]
+
+
+def yaml_docs(ws, rev, n, seed):
+    """Documents near the real graphs and near small YAML, each with a few random edits."""
+    rng = random.Random(seed)
+    names = subprocess.run(["git", "-C", ws, "ls-tree", "--name-only", rev, "docs/plans/"], capture_output=True,
+                           text=True, check=True).stdout.split()
+    bases = [subprocess.run(["git", "-C", ws, "show", f"{rev}:{p}"], capture_output=True, text=True, check=True).stdout
+             for p in names if p.endswith(".graph.yaml")]
+    out = []
+    for _ in range(n):
+        if rng.random() < 0.15 and bases:
+            lines = rng.choice(bases).split("\n")
+            k = rng.randint(0, max(0, len(lines) - 6))
+            t = "\n".join(lines[k:k + rng.randint(3, 12)]) + "\n"
+        else:
+            t = rng.choice(YAML_SMALL)
+        for _ in range(rng.randint(1, 4)):
+            i, op = rng.randint(0, len(t)), rng.random()
+            if op < 0.7:
+                t = t[:i] + rng.choice(YAML_TRICKY) + t[i:]
+            elif op < 0.9 and t:
+                t = t[:i] + t[i + 1:]
+            else:
+                j = rng.randint(0, len(t))
+                t = t[:i] + t[j:j + rng.randint(1, 8)] + t[i:]
+        out.append(t)
+    return list(dict.fromkeys(out))
+
+
+def pyyaml_reading(t):
+    """PyYAML's value as JSON, or None where it raises or builds what JSON cannot hold (a date, a
+    non-string key, a set): the CLI must then refuse the document."""
+    import yaml
+
+    def plain(v):
+        if isinstance(v, dict):
+            return all(type(k) is str and plain(x) for k, x in v.items())
+        if isinstance(v, list):
+            return all(plain(x) for x in v)
+        return v is None or type(v) in (str, int, float, bool)
+    try:
+        v = yaml.safe_load(t)
+        return {"value": json.loads(json.dumps(v, allow_nan=False))} if plain(v) else None
+    except Exception:
+        return None
+
+
+def yaml_differential(ws, rev, maestro, write):
+    """Every document the CLI reads, PyYAML reads to the same value (types strict). A refusal is
+    allowed. Live on 4 x 20,000 fresh documents; a 6,000-document golden for `cargo test`."""
+    bad, read, total = [], 0, 0
+    for seed in (1, 2, 3, 4):
+        ds = yaml_docs(ws, rev, 20000, seed)
+        got = rust_eval(maestro, [{"fn": "load_yaml", "args": {"text": t}} for t in ds])
+        for t, g in zip(ds, got):
+            total += 1
+            if "ok" in g:
+                read += 1
+                want = pyyaml_reading(t)
+                if want is None or not same(want["value"], g["ok"]):
+                    bad.append((t, want, g))
+    for t, w, g in bad[:10]:
+        failures.append(f"yaml misread: {t!r}\n  pyyaml: {json.dumps(w)[:300]}\n  rust: {json.dumps(g)[:300]}")
+    check("yaml differential", not bad, f"{len(bad)} documents read differently")
+    golden = [{"text": t, "pyyaml": pyyaml_reading(t)} for t in yaml_docs(ws, rev, 6000, 7)]
+    text = "[\n" + ",\n".join(json.dumps(g, sort_keys=True) for g in golden) + "\n]\n"
+    if write:
+        with open(YAML_GOLDEN, "w") as f:
+            f.write(text)
+    else:
+        check("yaml golden", os.path.isfile(YAML_GOLDEN) and open(YAML_GOLDEN).read() == text,
+              f"{YAML_GOLDEN} is not PyYAML's reading: rerun with --write and review the diff")
+    return total, read, len(bad)
+
+
+# --- JSON: Python's json.loads against the CLI's reader (schema::parse_json), differentially ----
+JSON_TRICKY = ["NaN", "-NaN", "Infinity", "-Infinity", "1e400", "-1e400", "1E309", "1e-400", "100000000000000000000",
+               "-9223372036854775809", "18446744073709551615", "-0", "-0.0", "1E2", "0.1", "1.7976931348623157e308",
+               "true", "null", '"x"', '"\\ud800"', '"\\u00e9"', "\ufeff", " ", ",", ":", "[", "]", "{", "}", '"',
+               "\\", "\t", "\n", "-", ".", "e", "+", "0", "9", '"a": 1', '"a": 2']
+JSON_BASES = [json.dumps({"email": "a@x.io", "fiveHourUtil": 10.5, "sevenDayUtil": 10, "isActive": True,
+                          "sevenDayResetsAt": "2026-10-28T00:00:00Z", "numbersAgeSeconds": 3, "id": "u1"}),
+              json.dumps([{"fiveHourUtil": 1, "stale": False}, {"sevenDayUtil": None}]),
+              json.dumps({"config": {"standbyMax": 70.0, "autoBalance": True}, "holdUntil": 1761177600.5,
+                          "pendingSignals": [], "probes": {"x": {"at": 1.0, "result": "ok"}}}),
+              json.dumps({"tiers": {"standard": {"runs": 10, "firstPass": 0.25}}}), "[1, 2.5, -3]", '{"a": [1, {"b": null}]}']
+
+
+def json_docs(n, seed):
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        t = rng.choice(JSON_BASES)
+        for _ in range(rng.randint(1, 3)):
+            i, op = rng.randint(0, len(t)), rng.random()
+            if op < 0.4:  # replace a number or a word with a tricky token
+                spots = [k for k in range(len(t)) if t[k].isdigit() or t[k] in "tfn"]
+                if spots:
+                    k = rng.choice(spots)
+                    j = k
+                    while j < len(t) and (t[j].isalnum() or t[j] in ".-+"):
+                        j += 1
+                    t = t[:k] + rng.choice(JSON_TRICKY) + t[j:]
+            elif op < 0.85:
+                t = t[:i] + rng.choice(JSON_TRICKY) + t[i:]
+            elif t:
+                t = t[:i] + t[i + 1:]
+        out.append(t)
+    return list(dict.fromkeys(out))
+
+
+def python_json(t):
+    """Python's value, or None where it raises or reads a value JSON cannot print (NaN, inf)."""
+    try:
+        return {"value": json.loads(json.dumps(json.loads(t), allow_nan=False))}
+    except (ValueError, RecursionError):
+        return None
+
+
+def json_differential(maestro, write):
+    """Every JSON input the CLI reads, Python reads to the same value (types strict); a refusal is allowed."""
+    bad, read, total = [], 0, 0
+    for seed in (1, 2, 3):
+        ds = json_docs(20000, seed)
+        got = rust_eval(maestro, [{"fn": "load_json", "args": {"text": t}} for t in ds])
+        for t, g in zip(ds, got):
+            total += 1
+            if "ok" in g:
+                read += 1
+                want = python_json(t)
+                if want is None or not same(want["value"], g["ok"]):
+                    bad.append((t, want, g))
+    for t, w, g in bad[:10]:
+        failures.append(f"json misread: {t!r}\n  python: {json.dumps(w)[:300]}\n  rust: {json.dumps(g)[:300]}")
+    check("json differential", not bad, f"{len(bad)} documents read differently")
+    def utf8(g):  # a lone surrogate (Python reads `"\\ud800"`) cannot be written for serde_json to read back
+        try:
+            json.dumps(g, ensure_ascii=False).encode("utf-8")
+            return True
+        except UnicodeEncodeError:
+            return False
+    golden = [g for g in ({"text": t, "python": python_json(t)} for t in json_docs(4000, 7)) if utf8(g)]
+    text = "[\n" + ",\n".join(json.dumps(g, sort_keys=True) for g in golden) + "\n]\n"
+    if write:
+        with open(JSON_GOLDEN, "w") as f:
+            f.write(text)
+    else:
+        check("json golden", os.path.isfile(JSON_GOLDEN) and open(JSON_GOLDEN).read() == text,
+              f"{JSON_GOLDEN} is not Python's reading: rerun with --write and review the diff")
+    return total, read, len(bad)
+
+
+def time_differential(E, maestro):
+    """Every timestamp Maestro reads, Python's parse_ts reads to the same instant (iso compared): strings
+    near the strict form with random edits, and epoch numbers near datetime's ends and the 1e11 switch."""
+    rng = random.Random(4242)
+    stamps = ["0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999Z", "2024-02-29T12:00:00+00:00",
+              "2026-10-22T12:34:56.5Z", "1970-01-01T00:00:00+00:00"]
+    edits = list("0123456789TZ:+-., ") + ["+00:00", "-00:00", "+05:30", "24", "60", "99", ".1234567", "z", "t"]
+    cases = []
+    for _ in range(20000):
+        t = rng.choice(stamps)
+        for _ in range(rng.randint(1, 2)):
+            i = rng.randint(0, len(t))
+            t = t[:i] + rng.choice(edits) + t[i + rng.randint(0, 2):]
+        cases.append(t)
+    edges = [-62135596800, 253402300799, 1e11, 253402300799999, 253402300800000]
+    for _ in range(5000):
+        cases.append(rng.choice(edges) + rng.choice([-1, 1]) * rng.random() * rng.choice([1e-7, 1e-6, 0.5, 1, 1e3]))
+    cases = list(dict.fromkeys(cases))
+    got = rust_eval(maestro, [{"fn": "parse_ts", "args": {"value": v}} for v in cases])
+    bad, read = [], 0
+    for v, g in zip(cases, got):
+        if "ok" not in g:
+            continue
+        read += 1
+        try:
+            want = E.iso(E.parse_ts(v))
+        except Exception as e:  # noqa: BLE001 - any raise where Maestro reads a value is a misread
+            want = f"raises {type(e).__name__}"
+        if want != g["ok"]:
+            bad.append((v, want, g["ok"]))
+    for v, w, g in bad[:10]:
+        failures.append(f"timestamp misread: {v!r}: python {w}, rust {g}")
+    check("time differential", not bad, f"{len(bad)} timestamps read differently")
+    return len(cases), read, len(bad)
+
+
+def printable_table(write):
+    """crates/core/src/py_printable.rs: the code points `str.isprintable` refuses, from this Python's
+    own Unicode tables, so `repr` escapes exactly what the reference Python escapes."""
+    import unicodedata
+    ranges, start = [], None
+    for c in range(0x110000):
+        if not chr(c).isprintable():
+            start = c if start is None else start
+        elif start is not None:
+            ranges.append((start, c - 1))
+            start = None
+    if start is not None:
+        ranges.append((start, 0x10FFFF))
+    body = "".join(f"    (0x{a:x}, 0x{b:x}),\n" for a, b in ranges)
+    # int() reads every Unicode decimal digit; each runs 0..9 from a zero (asserted).
+    zeros = [c for c in range(0x110000) if unicodedata.decimal(chr(c), None) == 0]
+    assert all(unicodedata.decimal(chr(z + i), None) == i for z in zeros for i in range(10))
+    assert sum(unicodedata.decimal(chr(c), None) is not None for c in range(0x110000)) == 10 * len(zeros)
+    zbody = "".join(f"    0x{z:x},\n" for z in zeros)
+    text = (f"//! Generated by scripts/parity-delegation.py (`printable_table`) from Python {sys.version.split()[0]},\n"
+            f"//! Unicode {unicodedata.unidata_version}: the code points `str.isprintable` refuses, as inclusive\n"
+            "//! ranges in order. `py::repr_str` escapes exactly these. Regenerate with `--write` under the\n"
+            "//! Python that runs the reference scripts.\n\n"
+            f"#[rustfmt::skip]\npub(crate) const NONPRINTABLE: [(u32, u32); {len(ranges)}] = [\n{body}];\n\n"
+            "/// The zero of every run of Unicode decimal digits (`unicodedata.decimal`), in order; `int()`\n"
+            "/// reads each run as 0..9.\n"
+            f"#[rustfmt::skip]\npub(crate) const DECIMAL_ZEROS: [u32; {len(zeros)}] = [\n{zbody}];\n")
+    if write:
+        with open(PRINTABLE_RS, "w") as f:
+            f.write(text)
+    else:
+        check("printable table", os.path.isfile(PRINTABLE_RS) and open(PRINTABLE_RS).read() == text,
+              f"{PRINTABLE_RS} is not this Python's str.isprintable (Unicode {unicodedata.unidata_version}): "
+              "rerun with --write under the reference Python")
+    return len(ranges), unicodedata.unidata_version
+
+
+def repr_differential(maestro):
+    """`repr` of one-character strings, Python's against Maestro's: every range edge of the table and
+    20,000 random code points (surrogates excluded: JSON cannot carry them)."""
+    import unicodedata  # noqa: F401 - the table's version is this Python's
+    rng = random.Random(1717)
+    text = open(PRINTABLE_RS).read()
+    edges = [int(x, 16) for x in re.findall(r"0x([0-9a-f]+)", text)]
+    points = {c + d for c in edges for d in (-1, 0, 1)} | {rng.randrange(0x110000) for _ in range(20000)}
+    points = sorted(c for c in points if 0 <= c < 0x110000 and not 0xD800 <= c <= 0xDFFF)
+    got = rust_eval(maestro, [{"fn": "repr", "args": {"text": chr(c)}} for c in points])
+    bad = [(c, repr(chr(c)), g.get("ok")) for c, g in zip(points, got) if g.get("ok") != repr(chr(c))]
+    for c, w, g in bad[:10]:
+        failures.append(f"repr U+{c:04X}: python {w}, rust {g}")
+    check("repr differential", not bad, f"{len(bad)} code points repr differently")
+    return len(points), len(bad)
+
+
+def cli_scenarios(dpy, fpy, maestro, tmp, write):
+    root = os.path.join(tmp, "repos")
+    layout, cases = cli_layout(), cli_cases()
+    build_layout(layout, root)
+    sub = lambda xs: [x.replace(R, root) for x in xs]  # noqa: E731
+    out = []
+    for c in cases:
+        script = dpy if c["tool"] == "delegation" else fpy
+        cwd = os.path.join(root, c["cwd"])
+        field = cli_refusal(c, layout)
+        if field is not None:  # outside the schema: Maestro refuses, naming the field; the Python is not compared
+            rc, ro, re_ = run([maestro, *sub(c["rs"])], cwd)
+            check(f"cli {c['name']}", rc == 1 and ro == "" and f"{field}: " in re_ and SCHEMA_OUTSIDE in re_,
+                  f"want a refusal of {field}; rust exit {rc}: {re_[:300]}")
+            out.append({**c, "want": {"code": 1, "stdout": "", "stderr": field, "crash": False, "refused": True}})
+            continue
+        compare_cli(f"cli {c['name']}", ["python3", script, *sub(c["py"])], [maestro, *sub(c["rs"])], cwd,
+                    parse_json=c["json"])
+        code, po, pe = run(["python3", script, *sub(c["py"])], cwd)
+        if code == 1 and "Traceback" in pe:  # the golden holds the exception kind, not Python's traceback
+            pe = pe.strip().splitlines()[-1].split(":", 1)[0]
+        out.append({**c, "want": {"code": code, "stdout": po.replace(root, R), "stderr": pe.replace(root, R),
+                                  "crash": code == 1 and pe.isidentifier()}})
+    text = json.dumps({"layout": layout, "cases": out}, indent=1, sort_keys=True) + "\n"
+    if write:
+        with open(CLI_GOLDEN, "w") as f:
+            f.write(text)
+    else:
+        check("cli golden", os.path.isfile(CLI_GOLDEN) and open(CLI_GOLDEN).read() == text,
+              f"{CLI_GOLDEN} is not the Python CLIs' output: rerun with --write and review the diff")
+    return len(out)
+
+
+def live_capacity(E, maestro):
+    if not os.path.isfile(PROVIDER_MANAGER):
+        return check("live usage", False, f"{PROVIDER_MANAGER} is missing")
+    code, out, err = run(["python3", PROVIDER_MANAGER, "--json", "usage"])
+    if not check("live usage", code == 0, f"provider_manager exit {code}: {err[:200]}"):
+        return False
+    rows = json.loads(out)
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    home = os.environ.get("BROOMVA_HOME") or os.path.expanduser("~/.broomva")
+    cache = os.path.join(home, "cache", "coordinator-tick", "usage-samples.jsonl")
+    samples = []
+    if os.path.isfile(cache):  # read-only: the tick owns this cache
+        with open(cache) as f:
+            for line in f:
+                try:
+                    s = json.loads(line)
+                except ValueError:
+                    continue
+                at = E.parse_ts(s.get("at"))
+                if at and (now - at).total_seconds() <= E.KEEP_H * 3600:
+                    samples.append(s)
+    samples.append(E.sample_from_usage(rows, now))
+    code, out, err = run(["python3", PROVIDER_MANAGER, "--json", "state"])
+    if not check("live balancer state", code == 0, f"provider_manager state exit {code}: {err[:200]}"):
+        return False
+    state = json.loads(out)
+    case = {"fn": "capacity", "args": {"usage": rows, "samples": samples, "now": E.iso(now), "state": state}}
+    gate = {"fn": "resume_gate", "args": {"usage": rows, "now": E.iso(now), "state": state}}
+    want, want_gate = py_eval(None, E, case, None), py_eval(None, E, gate, None)
+    got, got_gate = rust_eval(maestro, [case, gate])
+    print(f"live      resume gate {(want_gate.get('ok') or {}).get('resume')}: {(want_gate.get('ok') or {}).get('why')}")
+    check("live resume gate", same_result(want_gate, got_gate),
+          f"\n  py: {json.dumps(want_gate)[:800]}\n  rs: {json.dumps(got_gate)[:800]}")
+    print(f"live      {len(rows)} accounts, {len(samples)} samples, mode "
+          f"{(want.get('ok') or {}).get('cadence', {}).get('mode')}")
+    return check("live capacity", same_result(want, got), f"\n  py: {json.dumps(want)[:800]}\n  rs: {json.dumps(got)[:800]}")
+
+
+def plugin_tiers(maestro, D, tmp):
+    rev = open(TIERS_REV).read().strip()
+    url = os.environ.get("MAESTRO_PASEO_URL", "https://github.com/broomva/maestro-paseo")
+    plugin = os.path.join(tmp, "plugin")
+    subprocess.run(["git", "init", "-q", plugin], check=True)
+    if run(["git", "-C", plugin, "fetch", "-q", "--depth", "1", url, rev])[0]:
+        return check("plugin tiers", False, f"cannot fetch {url} at {rev}")
+    subprocess.run(["git", "-C", plugin, "checkout", "-q", "FETCH_HEAD"], check=True)
+    models = ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5-20261001", "claude-fable-5-1", "Claude-OPUS",
+              "gpt-5.6-terra", "", "haiku-and-opus", "codex"]
+    providers = ["claude/claude-sonnet-5-5", "claude/", "claude", " claude/opus ", "", "a/b/c"]
+    probe = os.path.join(plugin, ".tiers-probe.ts")
+    with open(probe, "w") as f:
+        f.write('import { DEFAULT_TIER_LADDER, tierOfModel, modelOfProvider } from "./shared/tiers";\n'
+                f"const models = {json.dumps(models)}; const providers = {json.dumps(providers)};\n"
+                "console.log(JSON.stringify({ladder: DEFAULT_TIER_LADDER, "
+                "tiers: models.map(m => tierOfModel(m)), models: providers.map(p => modelOfProvider(p))}));\n")
+    code, out, err = run(["bun", probe], cwd=plugin)
+    if not check("plugin tiers", code == 0, f"bun: {err[:300]}"):
+        return False
+    ts = json.loads(out)
+    _, lad, _ = run([maestro, "delegation", "ladder"])
+    lad = json.loads(lad)
+    ok = check("plugin ladder", all(ts["ladder"][t] == {"provider": lad[t]["provider"], "thinkingOptionId": lad[t]["thinking"]}
+                                    for t in ts["ladder"]) and set(ts["ladder"]) == set(lad), f"{ts['ladder']} vs {lad}")
+    ok &= check("python ladder", all(D.LADDER[t] == lad[t] for t in D.LADDER) and set(D.LADDER) == set(lad),
+                f"{D.LADDER} vs {lad}")
+    got = rust_eval(maestro, [{"fn": "tier_of_model", "args": {"model": m}} for m in models]
+                    + [{"fn": "model_of_provider", "args": {"provider": p}} for p in providers])
+    got = [g["ok"] for g in got]
+    ok &= check("plugin tierOfModel/modelOfProvider", got == ts["tiers"] + ts["models"], f"{got} vs {ts}")
+    return ok
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("--workspace", default=os.path.expanduser("~/broomva"))
+    p.add_argument("--rev", default="origin/main", help="the workspace revision whose Python is the reference")
+    p.add_argument("--maestro", help="a built maestro binary (default: cargo build, then target/debug/maestro)")
+    p.add_argument("--write", action="store_true", help="regenerate fixtures/delegation/golden.json")
+    p.add_argument("--offline", action="store_true", help="skip the plugin tiers check (needs network)")
+    a = p.parse_args(argv)
+    try:  # the reference reads YAML with PyYAML; without it every YAML step would report noise
+        import yaml  # noqa: F401
+    except ImportError:
+        print("parity-delegation needs PyYAML (the reference's YAML reader): pip install pyyaml")
+        return 2
+    ws = os.path.realpath(os.path.expanduser(a.workspace))
+    maestro = a.maestro
+    if not maestro:
+        subprocess.run(["cargo", "build", "-q", "--locked", "-p", "maestro"], cwd=REPO, check=True)
+        target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(REPO, "target")
+        maestro = os.path.join(target, "debug", "maestro")
+    maestro = os.path.abspath(maestro)
+    with tempfile.TemporaryDirectory(prefix="parity-delegation.") as tmp:
+        tmp = os.path.realpath(tmp)
+        D, dpy = load(ws, a.rev, "delegation", tmp)
+        E, fpy = load(ws, a.rev, "fleet_economy", tmp)
+        n_ranges, unicode = printable_table(a.write)
+        print(f"printable {n_ranges} ranges of str.isprintable at Unicode {unicode} "
+              + ("written" if a.write else "checked"))
+        n_points, n_bad = repr_differential(maestro)
+        print(f"repr      {n_points} code points: {n_points - n_bad} repr as Python's")
+        cases = all_cases()
+        want = [py_eval(D, E, c, tmp) for c in cases]
+        golden = [{**c, "want": w} for c, w in zip(cases, want)]
+        # One case per line, so a regenerated golden diffs by case.
+        text = "[\n" + ",\n".join(json.dumps(g, sort_keys=True, separators=(",", ":")) for g in golden) + "\n]\n"
+        if a.write:
+            os.makedirs(os.path.dirname(GOLDEN), exist_ok=True)
+            with open(GOLDEN, "w") as f:
+                f.write(text)
+            print(f"golden    wrote {len(golden)} cases from {a.rev}")
+        else:
+            check("golden", os.path.isfile(GOLDEN) and open(GOLDEN).read() == text,
+                  f"{GOLDEN} is not the Python's output at {a.rev}: rerun with --write and review the diff")
+        got = rust_eval(maestro, cases)
+        bad = [(c, w, g) for c, w, g in zip(cases, want, got) if not same_result(w, g)]
+        for c, w, g in bad[:10]:
+            failures.append(f"case {c['fn']}: {json.dumps(c['args'])[:300]}\n  py: {json.dumps(w)[:500]}\n  rs: {json.dumps(g)[:500]}")
+        if len(bad) > 10:
+            failures.append(f"... and {len(bad) - 10} more cases")
+        by_fn = {}
+        for c in cases:
+            by_fn[c["fn"]] = by_fn.get(c["fn"], 0) + 1
+        print(f"cases     {len(cases) - len(bad)} of {len(cases)} agree ("
+              + ", ".join(f"{k} {v}" for k, v in sorted(by_fn.items())) + ")")
+        refused = sum(1 for w in want if "refused" in w)
+        print(f"schema    {refused} cases outside the schema, refused naming the same field; "
+              f"{len(cases) - refused} compared with the Python")
+        before = len(failures)
+        graphs = real_graphs(ws, dpy, maestro)
+        print(f"graphs    {graphs} real plan graphs: plan, plan --json, brief per node "
+              + ("agree" if len(failures) == before else "DIFFER"))
+        before = len(failures)
+        n_cli = cli_scenarios(dpy, fpy, maestro, tmp, a.write)
+        codes = {c: cli_runs.count(c) for c in sorted(set(cli_runs))}
+        print(f"cli       {n_cli} golden cases; {len(cli_runs)} invocations of both CLIs (by exit code {codes}) "
+              + ("agree" if len(failures) == before else "DIFFER"))
+        print(f"yaml11    {yaml11_golden(a.write)} plain scalars: PyYAML's resolver golden "
+              + ("written" if a.write else "checked"))
+        total, read, misread = yaml_differential(ws, a.rev, maestro, a.write)
+        print(f"yaml      {total} fuzzed documents: {read} read by the CLI, {misread} read differently by PyYAML; "
+              f"the rest refused")
+        total, read, misread = time_differential(E, maestro)
+        print(f"time      {total} fuzzed timestamps: {read} read by Maestro, {misread} read differently by Python; "
+              f"the rest refused")
+        total, read, misread = json_differential(maestro, a.write)
+        print(f"json      {total} fuzzed documents: {read} read by the CLI, {misread} read differently by Python; "
+              f"the rest refused")
+        live_capacity(E, maestro)
+        # The forecast's timedelta, densely: 100,000 random runways to the microsecond.
+        rng = random.Random()
+        sweep = [{"fn": "add_hours", "args": {"now": "2026-10-22T12:00:00Z",
+                                              "hours": rng.choice([rng.uniform(0, 400), rng.random() * 1e4])}}
+                 for _ in range(100_000)]
+        got = rust_eval(maestro, sweep)
+        off = sum(1 for c, g in zip(sweep, got) if not same(py_eval(D, E, c, tmp), g))
+        print(f"timedelta {len(sweep) - off} of {len(sweep)} random runways agree to the microsecond")
+        check("timedelta sweep", off == 0, f"{off} runways differ")
+        if not a.offline:
+            before = len(failures)
+            plugin_tiers(maestro, D, tmp)
+            print("plugin    tiers.ts at " + open(TIERS_REV).read().strip()[:12] + " "
+                  + ("agrees" if len(failures) == before else "DIFFERS"))
+    for f in failures:
+        print(f"FAIL {f}")
+    print("parity-delegation " + ("ok" if not failures else f"FAILED ({len(failures)})"))
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

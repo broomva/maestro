@@ -68,10 +68,13 @@ fn mcp_handshake_lists_and_calls_tools() {
             "maestro_needs_list",
             "maestro_session_close",
             "maestro_snapshot",
+            "maestro_ui_catalog",
+            "maestro_ui_poll",
+            "maestro_ui_render",
             "maestro_work_list",
             "maestro_work_queue",
         ],
-        "every harness registration answers these nine reads and six agent requests"
+        "every harness registration answers these tools"
     );
     assert!(!names.iter().any(|n| n.contains("answer")), "no owner verb is listed");
 

@@ -1,0 +1,115 @@
+/* Maestro view: the screen layer over the Broomva foundation tokens (inlined before this file).
+   Content is matte; glass is kept for the control layer (.mv-control) only.
+   Motion is one spring, used for fragment swaps; reduced motion and reduced transparency
+   each have a fallback. */
+
+:root {
+  /* One spring (unit mass, stiffness 170, damping 20: damping ratio 0.77, 2.3% overshoot),
+     integrated over 600 ms and sampled every 25 ms for linear(). */
+  --mv-spring: linear(0, 0.045, 0.151, 0.286, 0.427, 0.560, 0.677, 0.775, 0.853, 0.912, 0.956, 0.986, 1.005, 1.016, 1.022, 1.023, 1.022, 1.020, 1.017, 1.013, 1.010, 1.008, 1.005, 1.003, 1);
+  --mv-spring-dur: 600ms;
+  --mv-tone-attention: var(--bv-blue);
+  --mv-tone-info: var(--bv-info);
+  --mv-tone-warning: var(--bv-warning);
+  --mv-tone-danger: var(--bv-danger);
+  --mv-tone-success: var(--bv-success);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { padding: var(--bv-space-3); }
+
+#maestro-root { max-width: 960px; margin: 0 auto; }
+#maestro-root[data-stale="true"]::before {
+  content: "Not refreshed: the last update failed. Showing the previous read.";
+  display: block;
+  margin-bottom: var(--bv-space-2);
+  color: var(--muted-foreground);
+  font-size: var(--bv-text-xs);
+}
+
+.mv-screen { display: flex; flex-direction: column; gap: var(--bv-space-4); }
+.mv-stack { display: flex; flex-direction: column; gap: var(--bv-space-4); }
+.mv-stack[data-gap="tight"] { gap: var(--bv-space-2); }
+.mv-stack[data-gap="loose"] { gap: var(--bv-space-6); }
+
+.mv-card { padding: var(--bv-space-4); min-width: 0; }
+.mv-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--bv-space-3); margin-bottom: var(--bv-space-3); }
+.mv-title { font-size: var(--bv-text-lg); font-weight: 500; }
+.mv-count { font-variant-numeric: tabular-nums; color: var(--muted-foreground); font-size: var(--bv-text-sm); }
+.mv-unavailable { color: var(--mv-tone-danger); font-weight: 500; }
+
+.mv-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.mv-row { display: flex; flex-direction: column; gap: 2px; padding: var(--bv-space-2) 0; border-top: 1px solid var(--border); min-width: 0; }
+.mv-row:first-child { border-top: 0; padding-top: 0; }
+.mv-row-title { font-size: var(--bv-text-sm); font-weight: 500; overflow-wrap: anywhere; }
+.mv-row-meta { overflow-wrap: anywhere; }
+.mv-row-body { font-size: var(--bv-text-sm); color: var(--accent-foreground); overflow-wrap: anywhere; }
+
+.mv-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--bv-space-3); }
+.mv-tile { display: flex; flex-direction: column; gap: 2px; padding: var(--bv-space-3); border-radius: var(--bv-radius-lg); background: var(--muted); }
+.mv-tile-value { font-size: var(--bv-text-xl); font-weight: 500; font-variant-numeric: tabular-nums; }
+.mv-tile[data-tone="attention"] .mv-tile-value { color: var(--mv-tone-attention); }
+.mv-tile[data-tone="warning"] .mv-tile-value { color: var(--mv-tone-warning); }
+.mv-tile[data-tone="danger"] .mv-tile-value { color: var(--mv-tone-danger); }
+
+.mv-ask { display: flex; flex-direction: column; gap: var(--bv-space-2); }
+.mv-ask-title { font-size: var(--bv-text-base); font-weight: 500; overflow-wrap: anywhere; }
+.mv-ask-why { font-size: var(--bv-text-sm); color: var(--accent-foreground); }
+.mv-options { margin: 0; padding-left: var(--bv-space-5); display: flex; flex-direction: column; gap: var(--bv-space-2); }
+.mv-option { font-size: var(--bv-text-sm); }
+.mv-option[data-recommended="true"] .mv-option-label { font-weight: 500; }
+.mv-option-consequence { margin-top: 2px; }
+
+.mv-badge { display: inline-block; padding: 1px var(--bv-space-2); border-radius: var(--bv-radius-full); border: 1px solid var(--border); font-size: var(--bv-text-xs); margin-right: var(--bv-space-1); }
+[data-tone="attention"] { color: var(--mv-tone-attention); }
+[data-tone="info"] { color: var(--mv-tone-info); }
+[data-tone="warning"] { color: var(--mv-tone-warning); }
+[data-tone="danger"] { color: var(--mv-tone-danger); }
+[data-tone="success"] { color: var(--mv-tone-success); }
+.mv-tile[data-tone] { color: inherit; }
+
+.mv-note { font-size: var(--bv-text-sm); margin: var(--bv-space-2) 0 0; }
+.mv-empty, .mv-more { margin: 0; }
+.mv-more { margin-top: var(--bv-space-2); }
+.mv-errors { margin-top: var(--bv-space-2); font-size: var(--bv-text-xs); }
+.mv-errors ul { margin: var(--bv-space-1) 0 0; padding-left: var(--bv-space-4); overflow-wrap: anywhere; }
+.mv-source { margin-top: var(--bv-space-3); overflow-wrap: anywhere; }
+.mv-foot { text-align: right; overflow-wrap: anywhere; }
+
+/* The control layer: the only glass in the view. */
+.mv-control {
+  position: sticky;
+  bottom: var(--bv-space-3);
+  padding: var(--bv-space-2) var(--bv-space-3);
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--bv-radius-2xl);
+  backdrop-filter: blur(22px) saturate(1.8);
+  -webkit-backdrop-filter: blur(22px) saturate(1.8);
+}
+
+/* Fragment swaps run as a view transition on the spring. */
+::view-transition-old(root), ::view-transition-new(root) {
+  animation-duration: var(--mv-spring-dur);
+  animation-timing-function: var(--mv-spring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .mv-control { background: var(--card); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+
+@media (prefers-contrast: more) {
+  .mv-row { border-top-color: var(--bv-border-25); }
+  .bv-card { border-color: var(--bv-border-25); }
+}
+
+@media (max-width: 480px) {
+  body { padding: var(--bv-space-2); }
+  .mv-card { padding: var(--bv-space-3); }
+  .mv-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -13,13 +13,14 @@ repository = "https://github.com/broomva/maestro"
 maestro-core = { path = "crates/core" }
 maestro-store = { path = "crates/store" }
 maestro-mcp = { path = "crates/mcp" }
+maestro-view = { path = "crates/view" }
 anyhow = "1"
 jiff = "0.2"
 clap = { version = "4.6", features = ["derive", "env"] }
 rmcp = { version = "3.6", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 serde_yaml = "0.9"
 yaml-rust2 = { version = "0.8", default-features = false }
 sha2 = "0.10"

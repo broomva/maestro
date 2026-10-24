@@ -117,6 +117,8 @@ fn a_read_tool_writes_nothing() {
     for spec in TOOLS.iter().filter(|t| t.authority == Authority::Read) {
         let args = match spec.name {
             "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
+            "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
+            "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
             _ => json!({}),
         };
         call(&store, spec.name, args).unwrap_or_else(|e| panic!("{}: {}", spec.name, e.message));
