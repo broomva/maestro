@@ -6,7 +6,7 @@
 
 use crate::catalog::{AskFilter, Block, Drop, Gap, Node, Validated};
 use maestro_core::Section;
-use maestro_core::ask::AskState;
+use maestro_core::ask::{AskRef, AskState};
 use maestro_store::views::{self, Reads, Snapshot};
 use maestro_store::{LedgerFile, Store};
 use maud::{Markup, html};
@@ -31,10 +31,24 @@ pub struct Rendered {
     pub spec: serde_json::Value,
 }
 
-struct Ctx<'a> {
-    store: &'a Store,
-    reads: Reads,
-    snap: Snapshot,
+pub(crate) struct Ctx<'a> {
+    pub(crate) store: &'a Store,
+    pub(crate) reads: Reads,
+    pub(crate) snap: Snapshot,
+    /// The render's clock: ages on the decisions screens are measured from it.
+    pub(crate) at: jiff::Timestamp,
+    /// Asks answered in the working tree but open at the read tree, read once per render
+    /// and only by a block that shows them.
+    unlanded: std::cell::OnceCell<Section<Vec<AskRef>>>,
+}
+
+impl Ctx<'_> {
+    pub(crate) fn unlanded(&self) -> &Section<Vec<AskRef>> {
+        self.unlanded.get_or_init(|| {
+            let at_rev = self.reads.asks.data.as_deref().unwrap_or_default();
+            views::unlanded(self.store, at_rev)
+        })
+    }
 }
 
 /// Render `v` from `store`, read now. Each call reads the store anew.
@@ -46,7 +60,7 @@ pub fn render(store: &Store, v: &Validated) -> Rendered {
 pub fn render_at(store: &Store, v: &Validated, at: jiff::Timestamp) -> Rendered {
     let reads = Reads::of(store);
     let snap = views::snapshot_of(store, &reads, at);
-    let cx = Ctx { store, reads, snap };
+    let cx = Ctx { store, reads, snap, at, unlanded: std::cell::OnceCell::new() };
     let body = html! {
         div class="mv-screen" {
             (node(&cx, &v.root))
@@ -80,6 +94,8 @@ fn node(cx: &Ctx, n: &Node) -> Markup {
         Block::Loops(p) => loops(cx, &n.id, p.id.as_deref(), p.drifting),
         Block::Initiatives(p) => initiatives(cx, &n.id, p.all),
         Block::Fleet(_) => fleet(cx, &n.id),
+        Block::Decisions(p) => crate::screens::inbox(cx, &n.id, p),
+        Block::Decision(p) => crate::screens::decision(cx, &n.id, &p.ledger, &p.id),
     }
 }
 
@@ -88,7 +104,14 @@ fn rows(limit: Option<u8>) -> usize {
 }
 
 /// A card for one source: its title, a count or "unavailable", the body, and the source line.
-fn card<T>(id: &str, kind: &str, title: &str, section: &Section<T>, count: Option<usize>, body: Markup) -> Markup {
+pub(crate) fn card<T>(
+    id: &str,
+    kind: &str,
+    title: &str,
+    section: &Section<T>,
+    count: Option<usize>,
+    body: Markup,
+) -> Markup {
     let state = match (&section.data, section.errors.is_empty()) {
         (None, _) => "unavailable",
         (Some(_), false) => "partial",
@@ -115,7 +138,7 @@ fn card<T>(id: &str, kind: &str, title: &str, section: &Section<T>, count: Optio
     }
 }
 
-fn errors<T>(section: &Section<T>) -> Markup {
+pub(crate) fn errors<T>(section: &Section<T>) -> Markup {
     html! {
         @if !section.errors.is_empty() {
             details class="mv-errors" {
@@ -129,7 +152,7 @@ fn errors<T>(section: &Section<T>) -> Markup {
     }
 }
 
-fn empty(text: &str) -> Markup {
+pub(crate) fn empty(text: &str) -> Markup {
     html! { p class="mv-empty bv-meta" { (text) } }
 }
 
@@ -315,7 +338,11 @@ fn ask(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup {
     card(id, "ask", "Ask", &scoped, None, body)
 }
 
-fn scope_errors<'a>(cx: &Ctx, section: &'a Section<Vec<LedgerFile>>, ledger: &str) -> Section<&'a Vec<LedgerFile>> {
+pub(crate) fn scope_errors<'a>(
+    cx: &Ctx,
+    section: &'a Section<Vec<LedgerFile>>,
+    ledger: &str,
+) -> Section<&'a Vec<LedgerFile>> {
     let mut s = section.as_ref();
     let file_at = cx.store.rel(maestro_store::ASKS).map(|dir| format!("{dir}/{ledger}"));
     s.errors.retain(|e| {
@@ -384,7 +411,7 @@ fn loops(cx: &Ctx, id: &str, only: Option<&str>, drifting: bool) -> Markup {
 }
 
 /// The serde name of a drift class or notice, which is its label everywhere else too.
-fn label<T: Serialize>(v: &T) -> String {
+pub(crate) fn label<T: Serialize>(v: &T) -> String {
     match serde_json::to_value(v) {
         Ok(serde_json::Value::String(s)) => s.replace('_', " "),
         Ok(serde_json::Value::Object(o)) => {

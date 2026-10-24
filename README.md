@@ -220,7 +220,7 @@ Maestro decides every value on it:
   sha256. The page's Content-Security-Policy allows no fetch and no script but that bridge, by its
   hash, so markup in a forged tool result runs nothing (the e2e checks it). There is no WebAssembly:
   T3's CSP blocks it.
-- `scripts/view-e2e.sh [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
+- `scripts/e2e.sh [view|decisions] [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
   (the ext-apps `AppBridge`) against `maestro serve --http`: on the real ledgers at `origin/main`,
   and on a scratch copy of the fixture that it edits to prove the poll; it also sends a forged result
   whose inline handler must not run. It writes screenshots at 390

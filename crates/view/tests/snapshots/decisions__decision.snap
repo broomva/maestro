@@ -1,0 +1,126 @@
+---
+source: crates/view/tests/decisions.rs
+expression: "portable(&r.html, m.path())"
+---
+<div class="mv-screen">
+<section class="mv-card bv-card" data-block="s" data-type="decision" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Decision</h2>
+</header>
+<article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
+<p class="mv-dmeta bv-meta">
+<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked 2026-10-17T12:00:00Z by claude:coordinator<span class="mv-pos">4 of 4</span>
+</p>
+<p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
+<p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
+<p class="mv-callout" data-tone="warning">If you don't answer: wait: nothing changes and spend continues</p>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">fleet-cost</span>
+</p>
+<p class="mv-dbody">Long sessions drive the fleet's cost: about 19% of sessions over 400K context carry about 87% of it. Rotating long orchestrators by handoff caps the biggest spenders and leaves workers alone.</p>
+<p class="mv-dbody">Which context-cost policy should the fleet run?</p>
+<p class="mv-dbody mv-why">Why you: It trades quality on long workers for spend, which is your call.</p>
+<h3 class="mv-label bv-meta">Choose one</h3>
+<ol class="mv-dopts">
+<li class="mv-dopt" data-option="rotate" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">Rotate long orchestrators by handoff</p>
+<p class="mv-dopt-text">Orchestrators roll over at a set context size; workers are untouched.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="info">Recommended</span>
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+<dl class="mv-cells">
+<div class="mv-cell">
+<dt class="bv-meta">Cost</dt>
+<dd>Saves on long orchestrators only</dd>
+</div>
+<div class="mv-cell">
+<dt class="bv-meta">Risk</dt>
+<dd>Workers untouched</dd>
+</div>
+<div class="mv-cell">
+<dt class="bv-meta">Undo</dt>
+<dd>Stop rotating</dd>
+</div>
+</dl>
+</li>
+<li class="mv-dopt" data-option="both" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Both: rotate, plus 300K compaction</p>
+<p class="mv-dopt-text">Lower cost and some quality risk on long workers.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+<dl class="mv-cells">
+<div class="mv-cell">
+<dt class="bv-meta">Cost</dt>
+<dd>Saves more</dd>
+</div>
+<div class="mv-cell">
+<dt class="bv-meta">Risk</dt>
+<dd>Some quality risk on long workers</dd>
+</div>
+<div class="mv-cell">
+<dt class="bv-meta">Undo</dt>
+<dd>Turn compaction off</dd>
+</div>
+</dl>
+</li>
+<li class="mv-dopt" data-option="wait" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Re-measure in a week</p>
+<p class="mv-dopt-text">No change.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+<span class="mv-badge">Status quo</span>
+</p>
+</li>
+</ol>
+<h3 class="mv-label bv-meta">Tradeoffs</h3>
+<ul class="mv-free">
+<li>
+<p class="mv-dopt-label">Measuring first</p>
+<dl class="mv-cells">
+<div class="mv-cell">
+<dt class="bv-meta">Time</dt>
+<dd>One week</dd>
+</div>
+</dl>
+</li>
+</ul>
+<h3 class="mv-label bv-meta">Sources</h3>
+<ul class="mv-sources">
+<li class="mv-source-chip" data-kind="pr">
+<a href="https://github.com/broomva/workspace/pull/983" target="_blank" rel="noopener noreferrer">Cost-levers study #983</a>
+</li>
+<li class="mv-source-chip" data-kind="ticket">
+<a href="https://linear.app/broomva/issue/BRO-3001" target="_blank" rel="noopener noreferrer">BRO-3001</a>
+</li>
+<li class="mv-source-chip" data-kind="session">
+<span class="bv-code">session 2fb204ca</span>
+</li>
+<li class="mv-source-chip" data-kind="url">
+<span class="bv-code">not a link</span>
+</li>
+</ul>
+<details class="mv-fold mv-tried" open>
+<summary>What the agent tried first</summary>
+<ul>
+<li>
+<span class="bv-code">read</span>: ws#983 and the fleet-cost memory</li>
+<li>
+<span class="bv-code">reroute</span>: no standing grant covers it</li>
+</ul>
+</details>
+<div class="mv-control mv-answerbar">
+<textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
+</textarea>
+<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Rotate long orchestrators by handoff)</span>
+</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">fleet-cost-1</span>.</p>
+</div>
+</article>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/asks</span>
+</p>
+</section>
+<footer class="mv-foot bv-meta">Read from <span class="bv-code">worktree</span>
+</footer>
+</div>

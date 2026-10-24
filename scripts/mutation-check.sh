@@ -425,6 +425,24 @@ mutate $page '    while let Some(at) = rest.find("@font-face") {' '    while let
 mutate $mcp '            if a.revision.as_deref() == Some(r.revision.as_str()) {' '            if false {'
 mutate $mcp '        Ui::AppOnly => json!(["app"]),' '        Ui::AppOnly => json!(["model", "app"]),'
 
+# Decisions (BRO-3269): tabs by class, open asks only, answers waiting to land and an unread
+# working tree said, lower bounds said, the plugin's link rules, the queue order, ages, and the
+# answer bar only on an open ask that has not been answered locally.
+scr=crates/view/src/screens
+mutate $scr/mod.rs 'Some(AskClass::Authority) => Tab::Authority,' ''
+mutate $scr/mod.rs '.filter(|(_, ask)| ask.state() == AskState::Open)' '.filter(|_| true)'
+mutate $scr/mod.rs 'waiting: waiting.contains(&(lf.file.clone(), ask.handle().to_string()))' 'waiting: false'
+mutate $scr/mod.rs '(!a.ask.blocking, a.asked()' '(a.ask.blocking, a.asked()'
+mutate $scr/mod.rs '0..3600 =>' '0..60 =>'
+mutate $scr/inbox.rs '@if unlanded.data.is_none() {' '@if false {'
+mutate $scr/inbox.rs 'let floor = if section.errors.is_empty() { "" } else { "at least " };' 'let floor = "";'
+mutate $scr/sources.rs '"url" if https(r) => Some(r.to_string()),' '"url" => Some(r.to_string()),'
+mutate $scr/sources.rs "host.bytes().all(|b| matches!(b, b'!'..=b'.' | b'0'..=b'~'))" 'true'
+mutate $scr/sources.rs '"ticket" if ticket(r) =>' '"ticket" =>'
+mutate $scr/decision.rs '} @else if state == AskState::Answered {' '} @else if false {'
+mutate $scr/decision.rs '@if waiting {' '@if false {'
+mutate $scr/decision.rs '.filter(|e| e.tab() == tab)' ''
+
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
