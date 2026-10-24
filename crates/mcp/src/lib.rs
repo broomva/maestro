@@ -639,7 +639,12 @@ pub fn unjournalled(ledger: &std::path::Path, id: &str, e: &requests::FileError)
         format!(
             "filed `{id}` in {}, but its requests journal line was not written: {}. The ask stands; filing it again is refused as a duplicate.",
             ledger.display(),
-            e.to_string().trim_end_matches('.')
+            // The lock's own words say "try again", which is wrong here: name only the holder.
+            match e {
+                requests::FileError::Lock(maestro_store::locks::LockError::Busy { holder, .. }) =>
+                    format!("another writer held the journal's lock ({holder}) for the whole wait"),
+                other => other.to_string().trim_end_matches('.').to_string(),
+            }
         ),
         Some(json!({ "filed": { "ledger": ledger, "id": id } })),
     )

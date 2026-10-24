@@ -169,4 +169,5 @@ fn an_unjournalled_filing_is_never_busy() {
     assert_eq!(data["filed"]["id"], "a-1");
     assert!(data.get("busy").is_none_or(|b| b != &json!(true)), "{data}");
     assert!(e.message.contains("filed `a-1`") && !e.message.contains(".."), "{}", e.message);
+    assert!(!e.message.to_lowercase().contains("try again"), "{}", e.message);
 }
