@@ -47,6 +47,39 @@ maestro economy capacity --usage F [--samples F] [--now T] [--state F]   # capac
 maestro economy tiers [--path F]     # Maestro's economy by tier, and what to re-plan
 ```
 
+Agent requests (BRO-3267). Each names the session making it (`--session surface:env/id`, or
+`MAESTRO_SESSION`), is journalled in `$BROOMVA_HOME/ledger/requests/requests.jsonl`, and starts nothing:
+
+```bash
+maestro ask file --ledger L.yaml --ask '<json>'   # file one ask (or JSON on stdin) into an existing ledger
+maestro queue --title T --brief B                 # queue work for the owner to dispatch: held
+maestro action-request --action A --reason R      # one exact action the owner must allow: held
+maestro close --receipt R                         # this session's work is finished, with its evidence
+maestro handback --summary S [--next N]
+maestro escalate --reason R
+```
+
+- **Filing.** `ask file` files through the workspace's writer of record, `ask_ledger.py file` (or
+  `MAESTRO_ASK_LEDGER`; BRO-3406), and writes no YAML itself. The writer holds the ledger's §5.5 lock
+  (the Paseo plugin's `server/locks.ts`; root `MAESTRO_PASEO_ASK_LOCKS`, else
+  `~/.local/state/control-asks/locks`, which Maestro passes on) and the flock, appends the ask in the
+  line shape its own `stamp` and `archive` edit, records the origin `{via: maestro, session, verified:
+  false}`, and replaces the ledger only when it reads back as the ledger's asks plus exactly that ask with
+  no new validator error. It writes to the working tree. It refuses an answer, a status or an origin in
+  the ask, an id or uid outside `^[A-Za-z0-9][A-Za-z0-9._-]*$` or one any existing ask is addressed by,
+  values Maestro's reader would read back otherwise (integers beyond ±(2^53 − 1), `-0.0`), a result over
+  the readers' 1 MiB limit, and a ledger that does not exist or is a symlink. A lock busy for the
+  whole wait (the writer's exit 75, or the journal's) makes `maestro` exit 75 too, and MCP answers an
+  error with `data.busy: true`: retry. An ask filed whose journal line cannot be written is a failed
+  request whose error names the filed ask (filing it again is refused as a duplicate).
+  `crates/store/src/locks.rs` (the same lock, ported) guards the requests journal.
+- **Unverified callers.** Until sessions are verified against their surface (BRO-3268), every caller is
+  unverified: an ask is filed with `origin: {via: maestro, session, verified: false}` and no `agent_id`,
+  so no answer is routed into a session on a caller's word; every other request is held.
+- **Not a trust boundary.** The CLI takes its workspace, home and validator from the caller's
+  environment (`BROOMVA_WORKSPACE`, `MAESTRO_ASK_LEDGER`): it files for an agent that could write the
+  file itself, and it records that agent as unverified. Verification is the surfaces' (BRO-3268).
+
 Every command takes `--json` (`delegation brief` prints its markdown block either way). Agents should use `--json`: it is the same data the MCP tools return,
 because the CLI and the MCP server share one dispatch.
 
@@ -129,6 +162,12 @@ read, that count becomes a lower bound and the error is reported under `worktree
     - `scripts/parity-fuzz.py` is a differential fuzz against the plugin. Anything Maestro reads must
       match, and anything the plugin refuses Maestro must refuse. A ledger drawn from the subset
       grammar that the plugin reads must be read, so a reader refusing everything cannot pass.
+    - `scripts/lock-parity.sh` runs the plugin's own lock and answer code (bun, same pin) against
+      the built binary. On the requests journal it meets Maestro's own lock port: each waits for the
+      other's lock, a dead holder's or a reused pid's old lock is reclaimed, and 20 writers beside 20
+      plugin holds write 20 whole lines. On the ledger it meets the writer of record, which holds that
+      lock: `LOCK_PARITY_WRITER=<ask_ledger.py>` runs the real one; CI runs the stub, which proves
+      Maestro's wiring only.
     - `scripts/parity-check.sh` regenerates the golden from the plugin at the revision pinned in
       `fixtures/parity/plugin-rev` and fails on any difference; CI runs it. To move the pin, edit
       `plugin-rev`, run `scripts/parity-check.sh --write`, and review the diff.
@@ -257,6 +296,9 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 | `MAESTRO_WORK_ROOT` | `workRoot` from `$BROOMVA_HOME/config/maestro/config.json`, then from `~/.config/maestro-paseo/config.json`, else the registry's `machine.work` (`~/.broomva/work`, or the legacy `~/maestro` while only it exists) |
 | `BROOMVA_HOME` | `~/.broomva` |
 | `MAESTRO_FLEET_STATE` | `~/.local/state/fleet-reconcile` |
+| `MAESTRO_PASEO_ASK_LOCKS` | `~/.local/state/control-asks/locks` (the plugin's ask-ledger lock root) |
+| `MAESTRO_ASK_LEDGER` | `<workspace>/scripts/ask_ledger.py` (the writer `ask file` runs: `ask_ledger.py file`) |
+| `MAESTRO_SESSION` | none: the session agent requests name |
 
 Inside the workspace, each name is read from `.broomva/<name>` when the tree has it and from
 `.control/<name>` otherwise, on disk and at a git revision alike; a tree holding both is a read
@@ -269,7 +311,7 @@ error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
 |---|---|---|
 | `crates/core` | `maestro-core` | Typed domain, no I/O: work states and transitions, asks, needs, loops and drift, ticks and due tiers, initiatives, grants, fleet, sessions namespaced by surface, surfaces, harnesses and nodes, authority, context packets, delegation tiers and plan graphs, the capacity economy |
 | `crates/store` | `maestro-store` | Readers for the on-disk control plane (working tree or a git revision) and the shared views |
-| `crates/mcp` | `maestro-mcp` | MCP server: read tools, the `maestro_context` prompt, and `maestro://` resources |
+| `crates/mcp` | `maestro-mcp` | MCP server: read tools, agent request tools, the `maestro_context` prompt, and `maestro://` resources |
 | `crates/cli` | `maestro` | The `maestro` binary |
 
 ## Develop

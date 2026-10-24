@@ -425,6 +425,33 @@ mutate $page '    while let Some(at) = rest.find("@font-face") {' '    while let
 mutate $mcp '            if a.revision.as_deref() == Some(r.revision.as_str()) {' '            if false {'
 mutate $mcp '        Ui::AppOnly => json!(["app"]),' '        Ui::AppOnly => json!(["model", "app"]),'
 
+# Agent requests (BRO-3267): the plugin's §5.5 lock as ported (the journal's), the filer's
+# refusals, the writer of record called with Maestro's session, and every caller held.
+locks=crates/store/src/locks.rs
+requests=crates/store/src/requests.rs
+request=crates/core/src/request.rs
+mutate $locks 'if !out.status.success() || out.stdout.iter().all(u8::is_ascii_whitespace) {' 'if false {'
+mutate $locks '(Ps::Running(Some(actual)), Some(s)) => (actual - s).abs() <= 2,' '(Ps::Running(Some(_)), Some(_)) => true,'
+mutate $locks 'Some((!alive && age >= stale_after, words))' 'Some((!alive, words))'
+mutate $locks '    if !still_ours(&lock) {' '    if false {'
+mutate $locks '    hash.update(b"/");' '    hash.update(b"");'
+mutate $locks 'Ok(hash.finalize().iter().take(8)' 'Ok(hash.finalize().iter().take(9)'
+mutate $requests '    maestro_core::ask::OUTCOME_KEYS.contains(&key) || FILER_REFUSED.contains(&key)' '    FILER_REFUSED.contains(&key)'
+mutate $requests $'    "answered_by",\n    "answer_option",' '    "answer_option",'
+mutate $requests '.args(["--json", "-", &format!("--maestro-session={session}"), "--wait"])' '.args(["--json", "-", "--maestro-session=x", "--wait"])'
+mutate $requests '        Ok(m) if m.is_file() => {}' '        Ok(_) => {}'
+mutate $requests '    if id.is_empty() {' '    if false {'
+mutate $request '            (Self::AskFile, _) => Disposition::Applied,' '            (Self::AskFile, _) => Disposition::Held,'
+mutate $request '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Held,' '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Recorded,'
+mutate $mcp '    let caller = Principal::Unverified;' '    let caller = Principal::Owner { via: "mcp".into() };'
+# A filed ask whose journal line fails is a failed request; a busy lock exits 75 to retry (P20 r1).
+mutate $mcp '            if let Err(e) = requests::record(&disk.paths, &record) {' '            if let Some(e) = requests::record(&disk.paths, &record).err().filter(|_| false) {'
+mutate $mcp '        Some(json!({ "filed": { "ledger": ledger, "id": id } })),' '        Some(json!({ "filed": { "ledger": ledger, "id": id }, "busy": true })),'
+mutate $locks '        Some(text) => holder_alive(text),' '        Some(_text) => false,'
+mutate $mcp 'McpError::internal_error(other.to_string(), busy.then(|| json!({ "busy": true })))' 'McpError::internal_error(other.to_string(), None)'
+mutate $cli '            if e.downcast_ref::<Busy>().is_some() {' '            if false {'
+mutate $mcp '                            .idempotent(spec.authority == Authority::Read)' '                            .idempotent(true)'
+
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

@@ -14,6 +14,7 @@ step cargo test --workspace --locked
 # MUTANTS_SHARDED=1 here only after every shard passed; run alone, this runs them all.
 if [ "${MUTANTS_SHARDED:-}" = 1 ]; then echo "== mutation: ran in the workflow's shards"; else step scripts/mutation-check.sh; fi
 step scripts/parity-check.sh
+step scripts/lock-parity.sh
 step scripts/tail-bench.sh
 step scripts/bridge-check.sh
 echo "== ci green"

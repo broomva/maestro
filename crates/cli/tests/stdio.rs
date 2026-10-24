@@ -55,18 +55,24 @@ fn mcp_handshake_lists_and_calls_tools() {
     assert_eq!(
         sorted,
         [
+            "maestro_action_request",
+            "maestro_ask_file",
             "maestro_ask_get",
             "maestro_asks_list",
             "maestro_context",
+            "maestro_escalate",
             "maestro_fleet_get",
+            "maestro_handback",
             "maestro_initiatives_list",
             "maestro_loops_get",
             "maestro_needs_list",
+            "maestro_session_close",
             "maestro_snapshot",
             "maestro_ui_catalog",
             "maestro_ui_poll",
             "maestro_ui_render",
             "maestro_work_list",
+            "maestro_work_queue",
         ],
         "every harness registration answers these tools"
     );

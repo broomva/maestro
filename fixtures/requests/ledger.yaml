@@ -1,0 +1,130 @@
+# Seeded ledger for the request tests (BRO-3267): five asks the plugin can answer.
+arc: requests-fixture
+ticket: BRO-3267
+tz: America/Bogota
+opened: '2026-10-23'
+lanes: [fixture]
+
+asks:
+
+  - id: seed-1
+    asked_at: '2026-10-23T00:00:01Z'
+    headline: "Should seeded ask 1 stay open?"
+    stakes: "Nothing is blocked; a fixture."
+    why_you: "Only the owner answers asks."
+    ask: "Seeded ask 1: keep it or close it?"
+    options:
+      - id: keep
+        label: "Keep"
+        consequence: "It stays open."
+        reversible: true
+        recommended: true
+      - id: close
+        label: "Close"
+        consequence: "It is closed."
+        reversible: true
+        status_quo: true
+    blocking: false
+    default: "keep"
+    preanswerable: false
+    class: decision
+    gates: [fixture]
+    exhausted: ["read: a fixture", "default: a fixture"]
+
+  - id: seed-2
+    asked_at: '2026-10-23T00:00:02Z'
+    headline: "Should seeded ask 2 stay open?"
+    stakes: "Nothing is blocked; a fixture."
+    why_you: "Only the owner answers asks."
+    ask: "Seeded ask 2: keep it or close it?"
+    options:
+      - id: keep
+        label: "Keep"
+        consequence: "It stays open."
+        reversible: true
+        recommended: true
+      - id: close
+        label: "Close"
+        consequence: "It is closed."
+        reversible: true
+        status_quo: true
+    blocking: false
+    default: "keep"
+    preanswerable: false
+    class: decision
+    gates: [fixture]
+    exhausted: ["read: a fixture", "default: a fixture"]
+
+  - id: seed-3
+    asked_at: '2026-10-23T00:00:03Z'
+    headline: "Should seeded ask 3 stay open?"
+    stakes: "Nothing is blocked; a fixture."
+    why_you: "Only the owner answers asks."
+    ask: "Seeded ask 3: keep it or close it?"
+    options:
+      - id: keep
+        label: "Keep"
+        consequence: "It stays open."
+        reversible: true
+        recommended: true
+      - id: close
+        label: "Close"
+        consequence: "It is closed."
+        reversible: true
+        status_quo: true
+    blocking: false
+    default: "keep"
+    preanswerable: false
+    class: decision
+    gates: [fixture]
+    exhausted: ["read: a fixture", "default: a fixture"]
+
+  - id: seed-4
+    asked_at: '2026-10-23T00:00:04Z'
+    headline: "Should seeded ask 4 stay open?"
+    stakes: "Nothing is blocked; a fixture."
+    why_you: "Only the owner answers asks."
+    ask: "Seeded ask 4: keep it or close it?"
+    options:
+      - id: keep
+        label: "Keep"
+        consequence: "It stays open."
+        reversible: true
+        recommended: true
+      - id: close
+        label: "Close"
+        consequence: "It is closed."
+        reversible: true
+        status_quo: true
+    blocking: false
+    default: "keep"
+    preanswerable: false
+    class: decision
+    gates: [fixture]
+    exhausted: ["read: a fixture", "default: a fixture"]
+
+  - id: seed-5
+    asked_at: '2026-10-23T00:00:05Z'
+    headline: "Should seeded ask 5 stay open?"
+    stakes: "Nothing is blocked; a fixture."
+    why_you: "Only the owner answers asks."
+    ask: "Seeded ask 5: keep it or close it?"
+    options:
+      - id: keep
+        label: "Keep"
+        consequence: "It stays open."
+        reversible: true
+        recommended: true
+      - id: close
+        label: "Close"
+        consequence: "It is closed."
+        reversible: true
+        status_quo: true
+    blocking: false
+    default: "keep"
+    preanswerable: false
+    class: decision
+    gates: [fixture]
+    exhausted: ["read: a fixture", "default: a fixture"]
+
+decisions: []

@@ -9,7 +9,9 @@ compile_error!("maestro-store reads the Broomva path registry, whose reader is U
 
 pub mod broomva_paths;
 pub mod doctor;
+pub mod locks;
 pub mod paths;
+pub mod requests;
 pub mod tree;
 pub mod views;
 pub mod yaml;
