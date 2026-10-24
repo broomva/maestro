@@ -25,7 +25,8 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
 ## Gates
 
 ```bash
-bash scripts/ci.sh   # fmt, clippy, tests, mutation check, plugin parity; CI runs it as the `ci` check
+bash scripts/ci.sh   # fmt, clippy, tests, mutation check, plugin parity; CI runs it as the `ci` check,
+                     # after four `mutants` jobs split the mutation check (MUTANT_SHARD=i/N)
 ```
 
 A behaviour change ships with a test. A guard, such as an authority check, a drift rule or a
