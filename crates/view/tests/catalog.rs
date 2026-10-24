@@ -333,22 +333,69 @@ fn every_class_of_format_character_is_refused_in_a_handle() {
 }
 
 #[test]
-fn the_drop_report_and_echoed_ids_are_bounded() {
+fn the_drop_report_is_bounded() {
     let mut blocks = serde_json::Map::new();
     blocks.insert("r".into(), json!({ "type": "snapshot" }));
-    let long = "x".repeat(10_000);
-    blocks.insert(long.clone(), json!({ "type": "snapshot" }));
-    for i in 0..200 {
+    for i in 0..201 {
         blocks.insert(format!("u{i}"), json!({ "type": "snapshot" }));
     }
     let v = validate(&json!({ "root": "r", "blocks": blocks })).unwrap();
     assert_eq!(v.drops.len(), catalog::MAX_DROPS + 1, "{:?}", v.drops.last());
     assert_eq!(v.drops.last().unwrap().reason, "137 more drops not listed");
-    let v = validate(
-        &json!({ "root": "r", "blocks": { "r": { "type": "snapshot" }, long.clone(): { "type": "snapshot" } } }),
-    )
+}
+
+#[test]
+fn a_child_reference_drop_echoes_a_bounded_parent_id() {
+    // 63 leaf blocks with the longest id each list 64 children: 4,032 drops, each naming
+    // its parent. Only MAX_DROPS are built and every reason stays short.
+    let long = |i: usize| format!("{i:0>width$}", width = MAX_HANDLE);
+    let mut blocks = serde_json::Map::new();
+    blocks.insert("r".into(), json!({ "type": "stack", "children": (0..63).map(long).collect::<Vec<_>>() }));
+    for i in 0..63 {
+        blocks.insert(long(i), json!({ "type": "fleet", "children": vec!["x"; MAX_BLOCKS] }));
+    }
+    let v = validate(&json!({ "root": "r", "blocks": blocks })).unwrap();
+    assert_eq!(v.drops.len(), catalog::MAX_DROPS + 1);
+    assert_eq!(v.drops.last().unwrap().reason, format!("{} more drops not listed", 63 * 64 - catalog::MAX_DROPS));
+    assert!(v.drops.iter().all(|d| d.reason.chars().count() < MAX_HANDLE + 60), "{:?}", v.drops[0]);
+}
+
+fn refused(spec: serde_json::Value, why: &str) {
+    let e = validate(&spec).unwrap_err();
+    assert!(e.contains(why), "{e}");
+    assert!(e.len() < 120, "{} bytes: an error never echoes the name it refuses", e.len());
+}
+
+#[test]
+fn every_name_a_spec_sends_is_a_handle() {
+    let long = "x".repeat(MAX_HANDLE + 1);
+    let snap = json!({ "type": "snapshot" });
+    refused(json!({ "root": long, "blocks": { "r": snap } }), "`root` is longer");
+    refused(json!({ "root": "r\u{202e}", "blocks": { "r": snap } }), "`root` holds an invisible");
+    refused(json!({ "root": "r", "blocks": { "r": snap, long.clone(): snap } }), "`block id` is longer");
+    refused(json!({ "root": "r", "blocks": { "r": snap, "a\u{0}": snap } }), "`block id` holds a control");
+    refused(json!({ "root": "r", "blocks": { "r": { "type": long } } }), "`type` is longer");
+    refused(
+        json!({ "root": "r", "blocks": { "r": { "type": "snapshot", long.clone(): 1 } } }),
+        "`block key` is longer",
+    );
+    refused(json!({ "root": "r", "blocks": { "r": { "type": "stack", "children": [long] } } }), "`child id` is longer");
+    refused(json!({ "root": "r", "blocks": { "r": snap }, long.clone(): 1 }), "takes only `root` and `blocks`");
+}
+
+#[test]
+fn a_serde_message_is_clipped() {
+    let long = "Z".repeat(10_000);
+    let v = validate(&json!({
+        "root": "r",
+        "blocks": { "r": { "type": "stack", "children": ["w"] }, "w": { "type": "work", "props": { "limit": long } } }
+    }))
     .unwrap();
-    assert_eq!(v.drops[0].block.chars().count(), MAX_HANDLE + 1, "clipped, with an ellipsis");
-    let e = validate(&json!({ "root": long, "blocks": { "r": { "type": "snapshot" } } })).unwrap_err();
-    assert!(e.len() < 2 * MAX_HANDLE + 100, "{} bytes", e.len());
+    assert_eq!(v.drops.len(), 1);
+    assert!(v.drops[0].reason.starts_with("invalid props: "), "{}", v.drops[0].reason);
+    assert!(
+        v.drops[0].reason.chars().count() <= "invalid props: ".len() + MAX_HANDLE + 1,
+        "{}",
+        v.drops[0].reason.len()
+    );
 }

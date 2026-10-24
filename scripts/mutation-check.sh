@@ -388,8 +388,14 @@ mutate $render '        [] if unread => html! {' '        [] if false => html! {
 mutate $render '                @for i in list.iter().take(MAX_ROWS) {' '                @for i in list.iter() {'
 mutate $cat '    if blocks.len() > MAX_SPEC_BLOCKS {' '    if false {'
 mutate $cat "        | '\\u{E0001}' | '\\u{E0020}'..='\\u{E007F}')" "        )"
-mutate $cat '    if drops.len() > MAX_DROPS {' '    if false {'
-mutate $cat '        d.block = clip(&d.block);' '        d.block = d.block.clone();'
+mutate $cat '        if self.drops.len() < MAX_DROPS {' '        if true {'
+mutate $cat '    handle("root", root)?;' '    let _ = root;'
+mutate $cat '        handle("block id", id)?;' '        let _ = id;'
+mutate $cat '            handle("block key", key)?;' '            let _ = key;'
+mutate $cat '            handle("type", kind)?;' '            let _ = kind;'
+mutate $cat '            handle("child id", child)?;' '            let _ = child;'
+mutate $cat 'format!("invalid props: {}", clip(&e))' 'format!("invalid props: {e}")'
+mutate $cat '            return Err("the spec takes only `root` and `blocks`".into());' '            return Err(format!("the spec takes only `root` and `blocks`, not `{key}`"));'
 mutate $cat '        .find(|(_, n)| *n > MAX_BLOCKS)' '        .find(|(_, n)| *n > usize::MAX - 1)'
 mutate $cat '    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 50))]

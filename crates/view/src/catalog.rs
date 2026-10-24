@@ -28,11 +28,12 @@ pub const MAX_SPEC_BLOCKS: usize = 4 * MAX_BLOCKS;
 /// Most drops reported one by one; the rest are counted in one closing drop.
 pub const MAX_DROPS: usize = MAX_BLOCKS;
 
-/// An id as it is echoed back: at most [`MAX_HANDLE`] characters.
-fn clip(id: &str) -> String {
-    match id.char_indices().nth(MAX_HANDLE) {
-        Some((at, _)) => format!("{}…", &id[..at]),
-        None => id.to_string(),
+/// Text echoed back that is not a handle (a serde message, a non-string child): at most
+/// [`MAX_HANDLE`] characters.
+fn clip(text: &str) -> String {
+    match text.char_indices().nth(MAX_HANDLE) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
     }
 }
 
@@ -292,7 +293,7 @@ pub fn validate(spec: &Value) -> Result<Validated, String> {
     let obj = spec.as_object().ok_or("the spec must be an object { root, blocks }")?;
     for key in obj.keys() {
         if key != "root" && key != "blocks" {
-            return Err(format!("the spec takes only `root` and `blocks`, not `{key}`"));
+            return Err("the spec takes only `root` and `blocks`".into());
         }
     }
     let root_id = obj.get("root").and_then(Value::as_str).ok_or("`root` must be a block id")?;
@@ -300,35 +301,38 @@ pub fn validate(spec: &Value) -> Result<Validated, String> {
     if blocks.len() > MAX_SPEC_BLOCKS {
         return Err(format!("the spec sends {} blocks; at most {MAX_SPEC_BLOCKS}", blocks.len()));
     }
+    names(root_id, blocks)?;
     if let Some((id, n)) = blocks
         .iter()
         .filter_map(|(id, b)| Some((id, b.get("children")?.as_array()?.len())))
         .find(|(_, n)| *n > MAX_BLOCKS)
     {
-        return Err(format!("block `{}` lists {n} children; at most {MAX_BLOCKS}", clip(id)));
+        return Err(format!("block `{id}` lists {n} children; at most {MAX_BLOCKS}"));
     }
     if !blocks.contains_key(root_id) {
-        return Err(format!("`root` names `{}`, which is not in `blocks`", clip(root_id)));
+        return Err(format!("`root` names `{root_id}`, which is not in `blocks`"));
     }
-    let mut walk =
-        Walk { blocks, placed: BTreeSet::new(), dropped: BTreeSet::new(), drops: Vec::new(), kept: Map::new() };
+    let mut walk = Walk {
+        blocks,
+        placed: BTreeSet::new(),
+        dropped: BTreeSet::new(),
+        drops: Vec::new(),
+        unlisted: 0,
+        kept: Map::new(),
+    };
     let root = walk.place(root_id, 0).ok_or_else(|| {
         let why = walk.drops.first().map_or_else(String::new, |d| format!(": {}", d.reason));
-        format!("the root block `{}` does not validate{why}", clip(root_id))
+        format!("the root block `{root_id}` does not validate{why}")
     })?;
     for (id, raw) in blocks {
         if !walk.placed.contains(id.as_str()) && !walk.dropped.contains(id.as_str()) {
             let kind = raw.get("type").and_then(Value::as_str).map(str::to_string);
-            walk.drops.push(Drop { block: id.clone(), r#type: kind, reason: "not reachable from the root".into() });
+            walk.record(Drop { block: id.clone(), r#type: kind, reason: "not reachable from the root".into() });
         }
     }
     let mut drops = walk.drops;
-    for d in &mut drops {
-        d.block = clip(&d.block);
-    }
-    if drops.len() > MAX_DROPS {
-        let more = drops.len() - MAX_DROPS;
-        drops.truncate(MAX_DROPS);
+    if walk.unlisted > 0 {
+        let more = walk.unlisted;
         drops.push(Drop { block: "…".into(), r#type: None, reason: format!("{more} more drops not listed") });
     }
     let kept = json!({ "root": root_id, "blocks": Value::Object(walk.kept) });
@@ -340,20 +344,30 @@ struct Walk<'a> {
     placed: BTreeSet<&'a str>,
     dropped: BTreeSet<&'a str>,
     drops: Vec<Drop>,
+    /// Drops past [`MAX_DROPS`], counted and not built.
+    unlisted: usize,
     kept: Map<String, Value>,
 }
 
 impl<'a> Walk<'a> {
+    fn record(&mut self, drop: Drop) {
+        if self.drops.len() < MAX_DROPS {
+            self.drops.push(drop);
+        } else {
+            self.unlisted += 1;
+        }
+    }
+
     fn drop(&mut self, id: &'a str, kind: Option<&str>, reason: impl Into<String>) -> Option<Node> {
         self.dropped.insert(id);
-        self.drops.push(Drop { block: id.to_string(), r#type: kind.map(str::to_string), reason: reason.into() });
+        self.record(Drop { block: id.to_string(), r#type: kind.map(str::to_string), reason: reason.into() });
         None
     }
 
     fn place(&mut self, id: &'a str, depth: usize) -> Option<Node> {
         let Some((key, raw)) = self.blocks.get_key_value(id) else {
             // A child that names no block: recorded under the name it was given.
-            self.drops.push(Drop { block: id.to_string(), r#type: None, reason: "no block has this id".into() });
+            self.record(Drop { block: id.to_string(), r#type: None, reason: "no block has this id".into() });
             return None;
         };
         let id = key.as_str();
@@ -383,7 +397,8 @@ impl<'a> Walk<'a> {
         let raw_props = raw.get("props").cloned().unwrap_or_else(|| json!({}));
         let block = match (kind.parse)(raw_props).and_then(|b| check(&b).map(|()| b)) {
             Ok(b) => b,
-            Err(e) => return self.drop(id, Some(kind_name), format!("invalid props: {e}")),
+            // serde quotes the offending key or value, so its message is clipped.
+            Err(e) => return self.drop(id, Some(kind_name), format!("invalid props: {}", clip(&e))),
         };
         let child_ids: Vec<&'a str> = match raw.get("children") {
             None => Vec::new(),
@@ -393,8 +408,8 @@ impl<'a> Walk<'a> {
                     match c.as_str() {
                         Some(s) => ids.push(s),
                         None => {
-                            self.drops.push(Drop {
-                                block: c.to_string(),
+                            self.record(Drop {
+                                block: clip(&c.to_string()),
                                 r#type: None,
                                 reason: format!("a child of `{id}` must be a block id string"),
                             });
@@ -417,7 +432,7 @@ impl<'a> Walk<'a> {
                     let ckind = craw.get("type").and_then(Value::as_str);
                     self.drop(ckey.as_str(), ckind, format!("`{id}` is a {kind_name}, which takes no children"));
                 } else {
-                    self.drops.push(Drop {
+                    self.record(Drop {
                         block: child.to_string(),
                         r#type: None,
                         reason: format!("`{id}` is a {kind_name}, which takes no children"),
@@ -443,6 +458,27 @@ impl<'a> Walk<'a> {
         self.kept.insert(id.to_string(), Value::Object(kept));
         Some(Node { id: id.to_string(), block, children })
     }
+}
+
+/// Every name a spec sends that a drop or the page may echo back (the root, block ids, block
+/// keys, type names, child references) is a handle, or the spec is refused whole: each id and
+/// reason stays bounded and holds no control or invisible formatting character.
+fn names(root: &str, blocks: &Map<String, Value>) -> Result<(), String> {
+    handle("root", root)?;
+    for (id, raw) in blocks {
+        handle("block id", id)?;
+        let Some(raw) = raw.as_object() else { continue };
+        for key in raw.keys() {
+            handle("block key", key)?;
+        }
+        if let Some(kind) = raw.get("type").and_then(Value::as_str) {
+            handle("type", kind)?;
+        }
+        for child in raw.get("children").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+            handle("child id", child)?;
+        }
+    }
+    Ok(())
 }
 
 fn handle(field: &str, value: &str) -> Result<(), String> {
