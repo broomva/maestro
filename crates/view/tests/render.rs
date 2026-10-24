@@ -164,39 +164,65 @@ fn a_missing_ledger_is_named_missing() {
     assert!(!r.html.contains("could not be read. This is not the same as missing."), "{}", r.html);
 }
 
-#[test]
-fn lists_without_a_limit_stop_at_fifty_and_say_what_was_cut() {
+/// The fixture plus `n` more records of one list type, written by `add(dir, i)`.
+fn with_many(n: usize, add: impl Fn(&Path, usize)) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     copy_tree(&fixture(), tmp.path());
-    let dir = tmp.path().join("workspace/.control/initiatives");
-    let demo = std::fs::read_to_string(dir.join("demo.yaml")).unwrap();
-    let id =
-        demo.lines().find_map(|l| l.strip_prefix("id: ")).expect("demo.yaml has a top-level id").trim().to_string();
-    for n in 0..60 {
-        std::fs::write(
-            dir.join(format!("bulk-{n:02}.yaml")),
-            demo.replacen(&format!("id: {id}"), &format!("id: bulk-{n:02}"), 1),
-        )
-        .unwrap();
+    for i in 0..n {
+        add(tmp.path(), i);
     }
-    let v = validate(&json!({ "root": "a", "blocks": { "a": { "type": "initiatives", "props": { "all": true } } } }))
-        .unwrap();
-    let r = render_at(&store_at(tmp.path()), &v, at());
+    tmp
+}
+
+fn rows_of(root: &Path, kind: &str) -> String {
+    let v = validate(&json!({ "root": "a", "blocks": { "a": { "type": kind, "props": {} } } })).unwrap();
+    let r = render_at(&store_at(root), &v, at());
     assert_eq!(r.html.matches(r#"<li class="mv-row""#).count(), 50, "{}", r.html);
-    assert!(r.html.contains("12 more not shown"), "{}", r.html);
+    r.html
+}
+
+/// Write `copy` of `from` with its top-level `id: <old>` line renamed.
+fn renamed(from: &Path, to: &Path, id: &str) {
+    let text = std::fs::read_to_string(from).unwrap();
+    let old = text.lines().find_map(|l| l.strip_prefix("id: ")).expect("a top-level id").trim().to_string();
+    std::fs::write(to, text.replacen(&format!("id: {old}"), &format!("id: {id}"), 1)).unwrap();
 }
 
 #[test]
-fn lists_respect_their_limit_and_say_what_was_cut() {
-    let root = fixture();
-    let v = validate(&json!({
-        "root": "a",
-        "blocks": { "a": { "type": "asks", "props": { "state": "all", "limit": 1 } } }
-    }))
-    .unwrap();
-    let r = render_at(&store_at(&root), &v, at());
-    assert_eq!(r.html.matches(r#"<li class="mv-row""#).count(), 1, "{}", r.html);
-    assert!(r.html.contains(" more not shown"), "{}", r.html);
+fn lists_without_a_limit_stop_at_fifty_and_say_what_was_cut() {
+    // Initiatives: the fixture's 2 plus 60.
+    let t = with_many(60, |root, i| {
+        let dir = root.join("workspace/.control/initiatives");
+        renamed(&dir.join("demo.yaml"), &dir.join(format!("bulk-{i:02}.yaml")), &format!("bulk-{i:02}"));
+    });
+    let v = validate(&json!({ "root": "a", "blocks": { "a": { "type": "initiatives", "props": { "all": true } } } }))
+        .unwrap();
+    let html = render_at(&store_at(t.path()), &v, at()).html;
+    assert_eq!(html.matches(r#"<li class="mv-row""#).count(), 50, "{html}");
+    assert!(html.contains("12 more not shown"), "{html}");
+
+    // Loops: 60 more definitions.
+    let t = with_many(60, |root, i| {
+        let dir = root.join("workspace/.broomva/loops");
+        renamed(&dir.join("silent.yaml"), &dir.join(format!("bulk-{i:02}.yaml")), &format!("bulk-{i:02}"));
+    });
+    let fixture_loops = std::fs::read_dir(fixture().join("workspace/.broomva/loops")).unwrap().count();
+    assert!(rows_of(t.path(), "loops").contains(&format!("{} more not shown", fixture_loops + 60 - 50)));
+
+    // Fleet: 60 more scopes, one report each.
+    let t = with_many(60, |root, i| {
+        let dir = root.join(format!("fleet-reconcile/bulk-{i:02}/ticks/00001"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("report.json"),
+            format!(
+                r#"{{"v":1,"tick":1,"ts":"2026-10-01T00:00:00Z","scope":"bulk-{i:02}","mode":"report","sessions":[]}}"#
+            ),
+        )
+        .unwrap();
+    });
+    let fixture_scopes = std::fs::read_dir(fixture().join("fleet-reconcile")).unwrap().count();
+    assert!(rows_of(t.path(), "fleet").contains(&format!("{} more not shown", fixture_scopes + 60 - 50)));
 }
 
 fn copy_tree(from: &Path, to: &Path) {

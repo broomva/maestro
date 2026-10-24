@@ -94,7 +94,7 @@ fn handles_and_limits_are_bounded() {
             "c": { "type": "asks", "props": { "limit": 0 } },
             "d": { "type": "work", "props": { "limit": 51 } },
             "e": { "type": "loops", "props": { "id": "a\nb" } },
-            "f": { "type": "ask", "props": { "ledger": "a\u{202e}b.yaml", "id": "x" } },
+            "f": { "type": "ask", "props": { "ledger": "a\u{202e}b\u{E0041}.yaml", "id": "x" } },
         }
     }))
     .unwrap();
@@ -190,15 +190,18 @@ fn depth_and_count_are_capped() {
     let deep = format!("d{}", MAX_DEPTH + 1);
     assert!(v.drops.iter().any(|d| d.block == deep && d.reason.contains("deeper than")), "{:?}", v.drops);
 
+    // Two stacks of 40 and 30 snapshots: main, a, s0..s39, b and s40..s60 make 64; s61..s69 are over.
     let mut blocks = serde_json::Map::new();
-    let children: Vec<Value> = (0..MAX_BLOCKS + 3).map(|i| json!(format!("s{i}"))).collect();
-    blocks.insert("main".into(), json!({ "type": "stack", "children": children }));
-    for i in 0..MAX_BLOCKS + 3 {
+    blocks.insert("main".into(), json!({ "type": "stack", "children": ["a", "b"] }));
+    let kids = |r: std::ops::Range<usize>| r.map(|i| json!(format!("s{i}"))).collect::<Vec<Value>>();
+    blocks.insert("a".into(), json!({ "type": "stack", "children": kids(0..40) }));
+    blocks.insert("b".into(), json!({ "type": "stack", "children": kids(40..70) }));
+    for i in 0..70 {
         blocks.insert(format!("s{i}"), json!({ "type": "snapshot" }));
     }
     let v = validate(&json!({ "root": "main", "blocks": blocks })).unwrap();
     assert_eq!(ids(&v.root).len(), MAX_BLOCKS);
-    assert_eq!(v.drops.iter().filter(|d| d.reason.contains("over the limit")).count(), 4);
+    assert_eq!(v.drops.iter().filter(|d| d.reason.contains("over the limit")).count(), 9);
 }
 
 #[test]
@@ -235,4 +238,41 @@ fn the_catalog_lists_every_type_with_a_props_schema() {
     let v = validate(&json!({ "root": "b", "blocks": { "b": { "type": "work", "props": { "state": "Needs you" } } } }))
         .unwrap();
     assert!(matches!(v.root.block, Block::Work(_)));
+}
+
+#[test]
+fn an_oversized_spec_is_refused_whole() {
+    let mut blocks = serde_json::Map::new();
+    blocks.insert("r".into(), json!({ "type": "snapshot" }));
+    for i in 0..maestro_view::catalog::MAX_SPEC_BLOCKS {
+        blocks.insert(format!("u{i}"), json!({ "type": "snapshot" }));
+    }
+    let e = validate(&json!({ "root": "r", "blocks": blocks })).unwrap_err();
+    assert!(e.contains("at most 256"), "{e}");
+    blocks.retain(|k, _| k == "r" || k.len() < 4); // r, u0..u99
+    assert!(validate(&json!({ "root": "r", "blocks": blocks.clone() })).is_ok());
+
+    let kids: Vec<String> = (0..=maestro_view::catalog::MAX_BLOCKS).map(|i| format!("u{i}")).collect();
+    blocks.insert("r".into(), json!({ "type": "stack", "children": kids }));
+    let e = validate(&json!({ "root": "r", "blocks": blocks.clone() })).unwrap_err();
+    assert!(e.contains("lists 65 children; at most 64"), "{e}");
+    blocks.insert("r".into(), json!({ "type": "stack", "children": kids[..64] }));
+    assert!(validate(&json!({ "root": "r", "blocks": blocks })).is_ok());
+}
+
+#[test]
+fn the_published_schema_admits_what_the_validator_admits() {
+    let cat = maestro_view::catalog();
+    let props = |t: &str| cat["blocks"].as_array().unwrap().iter().find(|b| b["type"] == t).unwrap()["props"].clone();
+    for t in ["needs", "asks", "work"] {
+        let limit = &props(t)["properties"]["limit"];
+        assert_eq!((limit["minimum"].as_u64(), limit["maximum"].as_u64()), (Some(1), Some(50)), "{t}: {limit}");
+    }
+    let states = props("work")["properties"]["state"]["enum"].clone();
+    let labels: Vec<String> = serde_json::from_value(states).unwrap();
+    for l in &labels {
+        let s: maestro_core::work::WorkState = serde_json::from_value(json!(l)).unwrap();
+        assert_eq!(s.label(), l);
+    }
+    assert_eq!(labels.len(), 6);
 }

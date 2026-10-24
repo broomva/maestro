@@ -22,6 +22,9 @@ pub const MAX_DEPTH: usize = 6;
 pub const MAX_HANDLE: usize = 200;
 /// Largest `limit` a list block takes.
 pub const MAX_LIMIT: u8 = 50;
+/// Most blocks a spec may send, placed or not; most children one block may list. Past these
+/// the spec is refused whole, so the work and the drop report stay bounded.
+pub const MAX_SPEC_BLOCKS: usize = 4 * MAX_BLOCKS;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +55,7 @@ pub struct NeedsProps {
     pub project: Option<String>,
     /// Rows shown (1–50, default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 50))]
     pub limit: Option<u8>,
 }
 
@@ -77,6 +81,7 @@ pub struct AsksProps {
     pub blocking: bool,
     /// Rows shown (1–50, default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 50))]
     pub limit: Option<u8>,
 }
 
@@ -94,10 +99,11 @@ pub struct AskProps {
 pub struct WorkProps {
     /// Canonical state label: `Queued`, `Running`, `Stuck`, `Needs you`, `Done`, `Standing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<String>")]
+    #[schemars(with = "Option<String>", extend("enum" = ["Queued", "Running", "Stuck", "Needs you", "Done", "Standing"]))]
     pub state: Option<WorkState>,
     /// Rows shown (1–50, default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 50))]
     pub limit: Option<u8>,
 }
 
@@ -230,7 +236,7 @@ pub fn catalog() -> Value {
             "shape": "{ root: <block id>, blocks: { <block id>: { type, props?, children?: [<block id>] } } }",
             "rule": "Send block types and ledger handles only. Every value on screen is read by Maestro from the ledgers; a block that does not validate is dropped and the drop is reported.",
         },
-        "limits": { "blocks": MAX_BLOCKS, "depth": MAX_DEPTH, "handle_chars": MAX_HANDLE, "limit": MAX_LIMIT },
+        "limits": { "blocks": MAX_BLOCKS, "spec_blocks": MAX_SPEC_BLOCKS, "depth": MAX_DEPTH, "handle_chars": MAX_HANDLE, "limit": MAX_LIMIT },
         "blocks": blocks,
     })
 }
@@ -276,6 +282,16 @@ pub fn validate(spec: &Value) -> Result<Validated, String> {
     }
     let root_id = obj.get("root").and_then(Value::as_str).ok_or("`root` must be a block id")?;
     let blocks = obj.get("blocks").and_then(Value::as_object).ok_or("`blocks` must be an object of blocks by id")?;
+    if blocks.len() > MAX_SPEC_BLOCKS {
+        return Err(format!("the spec sends {} blocks; at most {MAX_SPEC_BLOCKS}", blocks.len()));
+    }
+    if let Some((id, n)) = blocks
+        .iter()
+        .filter_map(|(id, b)| Some((id, b.get("children")?.as_array()?.len())))
+        .find(|(_, n)| *n > MAX_BLOCKS)
+    {
+        return Err(format!("block `{id}` lists {n} children; at most {MAX_BLOCKS}"));
+    }
     if !blocks.contains_key(root_id) {
         return Err(format!("`root` names `{root_id}`, which is not in `blocks`"));
     }
@@ -421,12 +437,15 @@ fn handle(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Unicode format characters (category Cf) that can reorder or hide text: bidi overrides and
-/// isolates, zero-width marks, the soft hyphen, the BOM. A handle is shown back to the owner.
+/// The Unicode format characters (category Cf, Unicode 16): bidi overrides and isolates,
+/// zero-width marks, the soft hyphen, the BOM, invisible tags. A handle is shown back to the owner.
 fn is_format(c: char) -> bool {
     matches!(c,
-        '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+        '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}'
+        | '\u{08E2}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
 }
 
 fn limit(value: Option<u8>) -> Result<(), String> {
