@@ -4,7 +4,7 @@
 use super::rich::{self, Tradeoff};
 use super::{Landing, asker, joined, kind, landing};
 use crate::render::{Ctx, card, label, scope_errors};
-use maestro_core::ask::{Ask, AskState, Rung};
+use maestro_core::ask::{Ask, AskClass, AskState, Rung};
 use maestro_store::LedgerFile;
 use maud::{Markup, html};
 use serde_json::Value;
@@ -210,7 +210,7 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
         } @else if state == AskState::Open && landing == Landing::Unknown {
             // Unknown is never shown as unanswered: no answer bar invites a second answer.
             p class="mv-callout" data-tone="warning" {
-                "Part of this ledger could not be read, at the tree read or in the working tree, so this ask may already be answered, or Paseo may refuse it. Check Paseo · Maestro · Decisions."
+                "Maestro cannot tell whether this ask is already answered, or whether Paseo would take an answer to it: part of its ledger did not read, or its handle names two asks. Check Paseo · Maestro · Decisions."
             }
         } @else if state == AskState::Answered {
             p class="mv-callout" data-tone="success" {
@@ -224,9 +224,15 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
         } @else {
             div class="mv-control mv-answerbar" {
                 textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)" {}
+                // The plugin answers ideas under Initiatives, and only with develop, park or kill;
+                // the place is named, and no idea option is recommended as an answer here.
                 p class="mv-answer-cta" {
-                    "To answer: Paseo · Maestro · Decisions"
-                    @if let Some(r) = a.recommended() { span class="bv-meta" { " (recommended: " (r.label) ")" } }
+                    @if a.class == Some(AskClass::Idea) {
+                        "To answer: Paseo · Maestro · Initiatives"
+                    } @else {
+                        "To answer: Paseo · Maestro · Decisions"
+                        @if let Some(r) = a.recommended() { span class="bv-meta" { " (recommended: " (r.label) ")" } }
+                    }
                 }
                 p class="mv-answer-why bv-meta" {
                     "Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as "

@@ -94,7 +94,7 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="decision">decision</span> <bdi>alt-key</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Held under the corpus's other spelling?</span>
-<span class="mv-irow-rec" data-tone="warning">Not offered here: part of its ledger could not be read</span>
+<span class="mv-irow-rec" data-tone="warning">Not offered here: whether it is answered, or answerable, is unknown</span>
 </summary>
 <article class="mv-decision" data-ask="alt-key.yaml#alt-blocking" data-hash="7e423ddd550cb6e8" data-kind="decision">
 <p class="mv-dmeta bv-meta">
@@ -112,7 +112,7 @@ expression: "portable(&r.html, m.path())"
 <span class="bv-code">default</span>: y</li>
 </ul>
 </section>
-<p class="mv-callout" data-tone="warning">Part of this ledger could not be read, at the tree read or in the working tree, so this ask may already be answered, or Paseo may refuse it. Check Paseo · Maestro · Decisions.</p>
+<p class="mv-callout" data-tone="warning">Maestro cannot tell whether this ask is already answered, or whether Paseo would take an answer to it: part of its ledger did not read, or its handle names two asks. Check Paseo · Maestro · Decisions.</p>
 </article>
 </details>
 </li>
@@ -141,7 +141,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions</p>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Initiatives</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">pick-name</span>.</p>
 </div>
 </article>
@@ -164,14 +164,31 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="credential">credential</span> <bdi>fleet-closeout</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Paste the &lt;b&gt;deploy&lt;/b&gt; key</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: Paste it now</span>
 </summary>
-<article class="mv-decision" data-ask="decisions.yaml#new-key" data-hash="0c93e589be7248a0" data-kind="credential">
+<article class="mv-decision" data-ask="decisions.yaml#new-key" data-hash="b7d37ffe8758bf00" data-kind="credential">
 <p class="mv-dmeta bv-meta">
 <span class="mv-chip" data-kind="credential">credential</span> decisions.yaml · asked 2026-10-22T08:00:00Z by <bdi>fleet-closeout</bdi>
 </p>
 <p class="mv-dtitle">Paste the &lt;b&gt;deploy&lt;/b&gt; key</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">deploy</span>
 </p>
+<h3 class="mv-label bv-meta">Choose one</h3>
+<ol class="mv-dopts">
+<li class="mv-dopt" data-option="later" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Later</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+<li class="mv-dopt" data-option="paste" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">Paste it now</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="info">Recommended</span>
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+</ol>
 <section class="mv-fold mv-tried">
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
@@ -182,7 +199,8 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions</p>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Paste it now)</span>
+</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">new-key</span>.</p>
 </div>
 </article>
@@ -385,23 +403,22 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="idea">idea</span> <bdi>9f3c2a1b</bdi>
 </span>
 <span class="mv-irow-title">Run the Jev-vs-/kg retrieval experiment?</span>
-<span class="mv-irow-rec" data-tone="info">Recommended: Run it now</span>
 </summary>
-<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="b5830ab7d58b1689" data-kind="idea">
+<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="4e0b3b5d6873501f" data-kind="idea">
 <p class="mv-dmeta bv-meta">
 <span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked 2026-10-20T00:00:00Z by <bdi>9f3c2a1b</bdi>
 </p>
 <p class="mv-dtitle">Run the Jev-vs-/kg retrieval experiment?</p>
 <h3 class="mv-label bv-meta">Choose one</h3>
 <ol class="mv-dopts">
-<li class="mv-dopt" data-option="later" data-recommended="false" data-chosen="false">
-<p class="mv-dopt-label">Later</p>
+<li class="mv-dopt" data-option="park" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Park it</p>
 <p class="mv-chips">
 <span class="mv-badge" data-tone="success">Reversible</span>
 </p>
 </li>
-<li class="mv-dopt" data-option="now" data-recommended="true" data-chosen="false">
-<p class="mv-dopt-label">Run it now</p>
+<li class="mv-dopt" data-option="develop" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">Develop it</p>
 <p class="mv-chips">
 <span class="mv-badge" data-tone="info">Recommended</span>
 <span class="mv-badge" data-tone="success">Reversible</span>
@@ -418,8 +435,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Run it now)</span>
-</p>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Initiatives</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">jev-idea</span>.</p>
 </div>
 </article>

@@ -460,7 +460,7 @@ fn an_unread_working_tree_never_invites_an_answer() {
     assert_eq!(html.matches("Not offered here").count(), 6, "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(d.contains(r#"data-type="decision" data-state="partial""#), "{d}");
-    assert!(d.contains("may already be answered, or Paseo may refuse it"), "{d}");
+    assert!(d.contains("Maestro cannot tell whether this ask is already answered"), "{d}");
     assert!(!d.contains("mv-answerbar"), "{d}");
 }
 
@@ -488,8 +488,13 @@ fn one_unread_working_tree_ledger_is_unknown_and_the_rest_are_not() {
 fn the_row_recommends_the_recommended_option_not_the_first() {
     let m = machine();
     let html = render(&worktree(m.path()), &inbox()).html;
-    assert!(html.contains("Recommended: Run it now"), "{html}");
+    assert!(html.contains("Recommended: Paste it now"), "{html}");
     assert!(!html.contains("Recommended: Later"), "{html}");
+    // An idea is answered under Initiatives, and only with develop, park or kill: no option of
+    // it is put forward as the answer here.
+    assert!(!html.contains("Recommended: Develop it"), "{html}");
+    let idea = render(&worktree(m.path()), &detail("decisions.yaml", "jev-idea")).html;
+    assert!(idea.contains("To answer: Paseo · Maestro · Initiatives") && !idea.contains("(recommended:"), "{idea}");
 }
 
 #[test]
@@ -542,6 +547,8 @@ fn a_waiting_answer_that_cannot_say_which_ask_it_answers_is_unknown() {
     // Neither is claimed waiting, and neither is offered as plainly unanswered.
     assert!(!html.contains("Waiting to land</span>"), "{html}");
     assert_eq!(html.matches("Not offered here").count(), 2, "{html}");
+    // No read failed, yet an answer is waiting that cannot be placed: no count is exact.
+    assert!(html.contains("at least 2 open · at least 0 waiting to land"), "{html}");
     assert!(!html.contains("mv-answerbar"), "{html}");
 }
 
@@ -581,4 +588,44 @@ fn an_answer_waiting_in_another_ledger_is_not_this_ones() {
     assert!(!d.contains("waiting to land on") && d.contains("mv-answerbar"), "{d}");
     let t = render(&store, &detail("twin.yaml", "merge-now")).html;
     assert!(t.contains("waiting to land on"), "{t}");
+}
+
+#[test]
+fn an_answer_on_the_answers_branch_waits_to_land() {
+    // Paseo's plugin lands an answer on maestro/answers before its batch PR merges (spec R2).
+    let m = machine();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    git(&ws, &["checkout", "-q", "-b", "maestro/answers"]);
+    let file = ws.join(".control/asks/decisions.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let answered = text.replacen(
+        "    gates: [fleet-cost]\n",
+        "    gates: [fleet-cost]\n    answer_option: rotate\n    answered_at: \"2026-10-23T11:00:00Z\"\n",
+        1,
+    );
+    assert_ne!(text, answered);
+    std::fs::write(&file, answered).unwrap();
+    git(&ws, &["commit", "-q", "-am", "answer"]);
+    // The working tree is back on main: only the branch holds the answer.
+    git(&ws, &["checkout", "-q", "main"]);
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
+    assert!(d.contains("waiting to land on") && !d.contains("mv-answerbar"), "{d}");
+    let html = render(&store, &inbox()).html;
+    assert!(html.contains("or on maestro/answers"), "{html}");
+}
+
+#[test]
+fn an_archived_ask_is_said_archived_and_offers_nothing() {
+    let m = machine();
+    std::fs::write(
+        m.path().join("workspace/.control/asks/arch.yaml"),
+        "asks:\n  - id: gone\n    headline: \"Gone\"\n    status: archived\n    exhausted: [\"read: x\"]\n    options:\n      - { id: x, label: X, recommended: true }\n",
+    )
+    .unwrap();
+    let d = render(&worktree(m.path()), &detail("arch.yaml", "gone")).html;
+    assert!(d.contains("Archived: archived.") && !d.contains("mv-answerbar"), "{d}");
 }

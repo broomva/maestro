@@ -28,7 +28,8 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
     let rows = || groups.iter().flat_map(|g| &g.rows);
     let count = |tab: Tab| rows().filter(|e| in_tab(e, tab)).count();
     let unlanded = cx.unlanded();
-    let partial = !section.errors.is_empty();
+    // A row whose landing is unknown may be waiting too: then no count on the screen is exact.
+    let partial = !section.errors.is_empty() || rows().any(|e| e.landing == Landing::Unknown);
     let waiting = rows().filter(|e| e.landing == Landing::Waiting).count();
     // Radio names and ids unique in the document, so two inboxes never share a group.
     let key = cx.next_id();
@@ -81,7 +82,7 @@ fn banner(cx: &Ctx, waiting: usize, partial: bool) -> Markup {
         } @else if waiting > 0 {
             div class="mv-banner" data-tone="info" {
                 p class="mv-banner-title" { (at_least(waiting, partial)) " waiting to land" }
-                p class="bv-meta" { "answered in the working tree, not yet on " span class="bv-code" { (cx.snap.tree) } }
+                p class="bv-meta" { "answered in the working tree or on maestro/answers, not yet on " span class="bv-code" { (cx.snap.tree) } }
             }
         }
     }
@@ -118,8 +119,8 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
                                 span class="mv-irow-title" { (e.ask.title()) }
                                 @match e.landing {
                                     Landing::Waiting => span class="mv-irow-rec" data-tone="success" { "Waiting to land" },
-                                    Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "Not offered here: part of its ledger could not be read" },
-                                    Landing::NotWaiting => @if let Some(r) = e.ask.recommended() {
+                                    Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "Not offered here: whether it is answered, or answerable, is unknown" },
+                                    Landing::NotWaiting => @if let Some(r) = e.ask.recommended().filter(|_| e.tab() != Tab::Ideas) {
                                         span class="mv-irow-rec" data-tone="info" { "Recommended: " (r.label) }
                                     },
                                 }

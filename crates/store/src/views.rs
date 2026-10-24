@@ -184,59 +184,91 @@ pub struct AskCounts {
     pub open_blocking: usize,
     pub answered: usize,
     pub archived: usize,
-    /// Open on the read revision but answered in the working tree: waiting to land.
+    /// Open on the read revision but answered in the working tree or on `maestro/answers`:
+    /// waiting to land.
     pub unlanded: usize,
 }
 
-/// Asks open at the store's git revision but answered in the workspace working tree.
-/// Empty when the store already reads the working tree. The section's errors are the
-/// working tree's own read failures: an unreadable local ledger hides answers waiting
-/// to land, so the count is then a lower bound, and `data` is `None` when nothing local was readable.
+/// The branch Paseo's Maestro plugin lands owner answers on before their batch PR merges
+/// (spec row R2). An answer there is waiting to land as much as one in the working tree.
+pub const ANSWERS_BRANCH: &str = "maestro/answers";
+
+type Answered = BTreeSet<(String, String)>;
+
+fn answered_in(asks: &[LedgerFile]) -> Answered {
+    asks.iter()
+        .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
+        // Answered, not archived: an ask archived there is not an answer waiting to land.
+        .filter(|(_, a)| a.state() == AskState::Answered)
+        .map(|(lf, a)| (lf.file.clone(), a.handle().to_string()))
+        .collect()
+}
+
+/// Answers on [`ANSWERS_BRANCH`]. A workspace without the branch holds none there; a branch
+/// that exists but does not read is an error, and its answers are unknown.
+fn answered_on_branch(store: &Store) -> (Answered, Vec<SourceError>) {
+    let branch = Store::new(store.paths.clone(), crate::TreeSource::GitRev(format!("refs/heads/{ANSWERS_BRANCH}")));
+    // `Tree::resolved` says this when the revision names nothing: the branch is not there.
+    if branch.tree.unresolved.as_deref().is_some_and(|r| r.starts_with("no commit is named")) {
+        return (Answered::new(), Vec::new());
+    }
+    let read = branch.asks();
+    let mut errors = read.errors;
+    match read.data {
+        Some(asks) => (answered_in(&asks), errors),
+        None => {
+            if errors.is_empty() {
+                errors.push(SourceError { at: read.source, reason: "unread".into() });
+            }
+            (Answered::new(), errors)
+        }
+    }
+}
+
+/// Asks open at the store's git revision but answered in the workspace working tree or on
+/// [`ANSWERS_BRANCH`]. Empty when the store already reads the working tree. The section's
+/// errors are those two reads' failures: an unreadable ledger there hides answers waiting to
+/// land, so the count is then a lower bound, and `data` is `None` when nothing local was readable.
 pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
     if store.tree.source == crate::TreeSource::WorkingTree {
         return Section::ok("worktree", Vec::new());
     }
-    // No local asks directory holds no local answers: nothing waits, and nothing is unread.
+    let (on_branch, mut errors) = answered_on_branch(store);
+    let waiting = |answered: &Answered| -> Vec<AskRef> {
+        at_rev
+            .iter()
+            .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
+            .filter(|(lf, a)| {
+                a.state() == AskState::Open && answered.contains(&(lf.file.clone(), a.handle().to_string()))
+            })
+            .map(|(lf, a)| AskRef { ledger: lf.file.clone(), id: a.handle().to_string() })
+            .collect()
+    };
+    // No local asks directory holds no local answers: nothing waits there, and nothing is unread.
     // Anything else in its place (a file, a dangling link) is unread, and the read reports it.
     let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree);
     let rel = match local.rel(crate::ASKS) {
         Ok(rel) => rel,
         Err(reason) => {
             let at = local.tree.label(crate::ASKS);
-            return Section { source: at.clone(), data: None, errors: vec![SourceError { at, reason }] };
+            errors.push(SourceError { at: at.clone(), reason });
+            return Section { source: at, data: None, errors };
         }
     };
     let local_dir = store.paths.workspace.join(&rel);
     if std::fs::symlink_metadata(&local_dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
-        return Section::ok(format!("worktree:{rel}"), Vec::new());
+        return Section::partial(format!("worktree:{rel}"), waiting(&on_branch), errors);
     }
     let local = local.asks();
-    let errors: Vec<SourceError> = local
-        .errors
-        .iter()
-        .map(|e| SourceError {
-            at: if e.at.starts_with("worktree:") { e.at.clone() } else { format!("worktree:{}", e.at) },
-            reason: e.reason.clone(),
-        })
-        .collect();
+    errors.extend(local.errors.iter().map(|e| SourceError {
+        at: if e.at.starts_with("worktree:") { e.at.clone() } else { format!("worktree:{}", e.at) },
+        reason: e.reason.clone(),
+    }));
     let source = local.source;
     let Some(local) = local.data else { return Section { source, data: None, errors } };
-    let answered_here: BTreeSet<(String, String)> = local
-        .iter()
-        .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        // Answered, not archived: an ask archived in the working tree is not an answer waiting to land.
-        .filter(|(_, a)| a.state() == AskState::Answered)
-        .map(|(lf, a)| (lf.file.clone(), a.handle().to_string()))
-        .collect();
-    let refs = at_rev
-        .iter()
-        .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        .filter(|(lf, a)| {
-            a.state() == AskState::Open && answered_here.contains(&(lf.file.clone(), a.handle().to_string()))
-        })
-        .map(|(lf, a)| AskRef { ledger: lf.file.clone(), id: a.handle().to_string() })
-        .collect();
-    Section::partial(source, refs, errors)
+    let mut answered = on_branch;
+    answered.extend(answered_in(&local));
+    Section::partial(source, waiting(&answered), errors)
 }
 
 pub fn ask_counts(asks: &[LedgerFile]) -> AskCounts {
