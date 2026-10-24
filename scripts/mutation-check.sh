@@ -387,6 +387,9 @@ mutate $render '            || file_at.is_err()' '            || true'
 mutate $render '        [] if unread => html! {' '        [] if false => html! {'
 mutate $render '                @for i in list.iter().take(MAX_ROWS) {' '                @for i in list.iter() {'
 mutate $cat '    if blocks.len() > MAX_SPEC_BLOCKS {' '    if false {'
+mutate $cat "        | '\\u{E0001}' | '\\u{E0020}'..='\\u{E007F}')" "        )"
+mutate $cat '    if drops.len() > MAX_DROPS {' '    if false {'
+mutate $cat '        d.block = clip(&d.block);' '        d.block = d.block.clone();'
 mutate $cat '        .find(|(_, n)| *n > MAX_BLOCKS)' '        .find(|(_, n)| *n > usize::MAX - 1)'
 mutate $cat '    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 50))]

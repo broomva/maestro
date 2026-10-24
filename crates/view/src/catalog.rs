@@ -25,6 +25,16 @@ pub const MAX_LIMIT: u8 = 50;
 /// Most blocks a spec may send, placed or not; most children one block may list. Past these
 /// the spec is refused whole, so the work and the drop report stay bounded.
 pub const MAX_SPEC_BLOCKS: usize = 4 * MAX_BLOCKS;
+/// Most drops reported one by one; the rest are counted in one closing drop.
+pub const MAX_DROPS: usize = MAX_BLOCKS;
+
+/// An id as it is echoed back: at most [`MAX_HANDLE`] characters.
+fn clip(id: &str) -> String {
+    match id.char_indices().nth(MAX_HANDLE) {
+        Some((at, _)) => format!("{}…", &id[..at]),
+        None => id.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +62,7 @@ pub struct NoProps {}
 pub struct NeedsProps {
     /// Only holds for this project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
     pub project: Option<String>,
     /// Rows shown (1–50, default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +86,7 @@ pub struct AsksProps {
     #[serde(default)]
     pub state: AskFilter,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
     pub project: Option<String>,
     /// Only asks that block a lane.
     #[serde(default)]
@@ -89,8 +101,10 @@ pub struct AsksProps {
 #[serde(deny_unknown_fields)]
 pub struct AskProps {
     /// Ledger file name, e.g. `bro-2827-answers-landing.yaml`.
+    #[schemars(length(min = 1, max = 200))]
     pub ledger: String,
     /// Ask `uid` or `id`.
+    #[schemars(length(min = 1, max = 200))]
     pub id: String,
 }
 
@@ -99,7 +113,7 @@ pub struct AskProps {
 pub struct WorkProps {
     /// Canonical state label: `Queued`, `Running`, `Stuck`, `Needs you`, `Done`, `Standing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(with = "Option<String>", extend("enum" = ["Queued", "Running", "Stuck", "Needs you", "Done", "Standing"]))]
+    #[schemars(with = "Option<String>", extend("enum" = ["Queued", "Running", "Stuck", "Needs you", "Done", "Standing", null]))]
     pub state: Option<WorkState>,
     /// Rows shown (1–50, default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +126,7 @@ pub struct WorkProps {
 pub struct LoopsProps {
     /// One loop id; omit for all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
     pub id: Option<String>,
     /// Only loops with drift or notices.
     #[serde(default)]
@@ -290,16 +305,16 @@ pub fn validate(spec: &Value) -> Result<Validated, String> {
         .filter_map(|(id, b)| Some((id, b.get("children")?.as_array()?.len())))
         .find(|(_, n)| *n > MAX_BLOCKS)
     {
-        return Err(format!("block `{id}` lists {n} children; at most {MAX_BLOCKS}"));
+        return Err(format!("block `{}` lists {n} children; at most {MAX_BLOCKS}", clip(id)));
     }
     if !blocks.contains_key(root_id) {
-        return Err(format!("`root` names `{root_id}`, which is not in `blocks`"));
+        return Err(format!("`root` names `{}`, which is not in `blocks`", clip(root_id)));
     }
     let mut walk =
         Walk { blocks, placed: BTreeSet::new(), dropped: BTreeSet::new(), drops: Vec::new(), kept: Map::new() };
     let root = walk.place(root_id, 0).ok_or_else(|| {
         let why = walk.drops.first().map_or_else(String::new, |d| format!(": {}", d.reason));
-        format!("the root block `{root_id}` does not validate{why}")
+        format!("the root block `{}` does not validate{why}", clip(root_id))
     })?;
     for (id, raw) in blocks {
         if !walk.placed.contains(id.as_str()) && !walk.dropped.contains(id.as_str()) {
@@ -307,8 +322,17 @@ pub fn validate(spec: &Value) -> Result<Validated, String> {
             walk.drops.push(Drop { block: id.clone(), r#type: kind, reason: "not reachable from the root".into() });
         }
     }
+    let mut drops = walk.drops;
+    for d in &mut drops {
+        d.block = clip(&d.block);
+    }
+    if drops.len() > MAX_DROPS {
+        let more = drops.len() - MAX_DROPS;
+        drops.truncate(MAX_DROPS);
+        drops.push(Drop { block: "…".into(), r#type: None, reason: format!("{more} more drops not listed") });
+    }
     let kept = json!({ "root": root_id, "blocks": Value::Object(walk.kept) });
-    Ok(Validated { root, drops: walk.drops, kept })
+    Ok(Validated { root, drops, kept })
 }
 
 struct Walk<'a> {

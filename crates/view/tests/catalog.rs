@@ -269,10 +269,86 @@ fn the_published_schema_admits_what_the_validator_admits() {
         assert_eq!((limit["minimum"].as_u64(), limit["maximum"].as_u64()), (Some(1), Some(50)), "{t}: {limit}");
     }
     let states = props("work")["properties"]["state"]["enum"].clone();
-    let labels: Vec<String> = serde_json::from_value(states).unwrap();
+    let published: Vec<Option<String>> = serde_json::from_value(states).unwrap();
+    assert_eq!(published.len(), 7);
+    let labels: Vec<String> = published.into_iter().flatten().collect();
     for l in &labels {
         let s: maestro_core::work::WorkState = serde_json::from_value(json!(l)).unwrap();
         assert_eq!(s.label(), l);
     }
     assert_eq!(labels.len(), 6);
+    // `null` is published and accepted alike.
+    assert!(
+        validate(&json!({ "root": "w", "blocks": { "w": { "type": "work", "props": { "state": null } } } })).is_ok()
+    );
+    // Handles publish the bounds the validator enforces.
+    for (t, field) in [("needs", "project"), ("asks", "project"), ("ask", "ledger"), ("ask", "id"), ("loops", "id")] {
+        let p = &props(t)["properties"][field];
+        assert_eq!(
+            (p["minLength"].as_u64(), p["maxLength"].as_u64()),
+            (Some(1), Some(MAX_HANDLE as u64)),
+            "{t}.{field}: {p}"
+        );
+    }
+}
+
+#[test]
+fn every_class_of_format_character_is_refused_in_a_handle() {
+    // One from each run of Unicode 16's Cf set.
+    for c in [
+        '\u{00AD}',
+        '\u{0600}',
+        '\u{061C}',
+        '\u{06DD}',
+        '\u{070F}',
+        '\u{0890}',
+        '\u{08E2}',
+        '\u{180E}',
+        '\u{200B}',
+        '\u{202A}',
+        '\u{2060}',
+        '\u{2066}',
+        '\u{FEFF}',
+        '\u{FFF9}',
+        '\u{110BD}',
+        '\u{110CD}',
+        '\u{13430}',
+        '\u{1BCA0}',
+        '\u{1D173}',
+        '\u{E0001}',
+        '\u{E0041}',
+    ] {
+        let v = validate(&json!({
+            "root": "m",
+            "blocks": { "m": { "type": "stack", "children": ["a"] }, "a": { "type": "loops", "props": { "id": format!("a{c}b") } } }
+        }))
+        .unwrap();
+        assert!(
+            reasons(&v).iter().any(|(_, r)| r.contains("invisible formatting")),
+            "U+{:04X}: {:?}",
+            c as u32,
+            v.drops
+        );
+    }
+}
+
+#[test]
+fn the_drop_report_and_echoed_ids_are_bounded() {
+    let mut blocks = serde_json::Map::new();
+    blocks.insert("r".into(), json!({ "type": "snapshot" }));
+    let long = "x".repeat(10_000);
+    blocks.insert(long.clone(), json!({ "type": "snapshot" }));
+    for i in 0..200 {
+        blocks.insert(format!("u{i}"), json!({ "type": "snapshot" }));
+    }
+    let v = validate(&json!({ "root": "r", "blocks": blocks })).unwrap();
+    assert_eq!(v.drops.len(), catalog::MAX_DROPS + 1, "{:?}", v.drops.last());
+    assert_eq!(v.drops.last().unwrap().reason, "137 more drops not listed");
+    let v = validate(
+        &json!({ "root": "r", "blocks": { "r": { "type": "snapshot" }, long.clone(): { "type": "snapshot" } } }),
+    )
+    .unwrap();
+    assert_eq!(v.drops[0].block.chars().count(), MAX_HANDLE + 1, "clipped, with an ellipsis");
+    let e = validate(&json!({ "root": long, "blocks": { "r": { "type": "snapshot" } } })).unwrap_err();
+    assert!(e.len() < 2 * MAX_HANDLE + 100, "{} bytes", e.len());
 }
