@@ -1,6 +1,6 @@
 //! The human text: an unread section prints `unavailable (<where>: <why>)`, never a count, and a
-//! partial one prints its counts as a lower bound with why (BRO-3322); `maestro hosts` says its
-//! capabilities are the surfaces', not Maestro's.
+//! partial one says its counts come from a partial read, claiming no bound (BRO-3322);
+//! `maestro hosts` says its capabilities are the surfaces', not Maestro's.
 
 use std::path::Path;
 use std::process::Command;
@@ -93,22 +93,24 @@ fn a_readable_section_prints_its_counts() {
 }
 
 #[test]
-fn a_partial_section_prints_a_lower_bound_and_why() {
+fn a_partial_section_says_its_counts_come_from_a_partial_read() {
     let tmp = tempfile::tempdir().unwrap();
     let text = stdout(partial(tmp.path()).arg("snapshot"));
     let (mark, rest) = line(&text, "asks");
     assert_eq!(mark, "partial", "{text}");
-    assert!(rest.starts_with("at least 1 open ("), "{rest}");
-    assert!(rest.contains("b.yaml: outside the YAML subset"), "names the ledger that failed: {rest}");
+    assert!(rest.starts_with("1 open ("), "{rest}");
+    assert!(rest.contains(" ledgers, from a partial read (.control/asks/b.yaml: outside the YAML subset"), "{rest}");
     let (mark, rest) = line(&text, "needs");
     assert_eq!(mark, "partial", "{text}");
-    assert!(rest.starts_with("at least 0 holds on the owner ("), "{rest}");
+    assert!(rest.starts_with("0 holds on the owner, from a partial read ("), "{rest}");
+    assert!(!text.contains("at least"), "a partial read claims no bound: {text}");
 }
 
 #[test]
-fn the_asks_and_work_commands_print_unavailable_or_a_lower_bound() {
+fn the_asks_and_work_commands_print_unavailable_or_their_partial_read() {
     let tmp = tempfile::tempdir().unwrap();
-    assert!(stdout(partial(tmp.path()).arg("asks")).starts_with("at least 1 ask\n"));
+    let asks = stdout(partial(tmp.path()).arg("asks"));
+    assert!(asks.starts_with("1 ask, from a partial read (.control/asks/b.yaml: "), "{asks}");
     let work = stdout(partial(tmp.path()).arg("work"));
     assert!(work.starts_with("work: unavailable (fs:"), "{work}");
     let other = tempfile::tempdir().unwrap();

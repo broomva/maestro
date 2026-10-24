@@ -402,12 +402,11 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
             }
             let list = v["asks"].as_array().cloned().unwrap_or_default();
             let total = v["total"].as_u64().unwrap_or(list.len() as u64);
-            // A partial read counts what it read: a lower bound.
-            let bound = if errors_of(&v).is_empty() { "" } else { "at least " };
+            let from = partial(&errors_of(&v));
             if v["truncated"].as_bool() == Some(true) {
-                println!("{} of {bound}{total} asks (raise --limit for the rest)", list.len());
+                println!("{} of {total} asks{from} (raise --limit for the rest)", list.len());
             } else {
-                println!("{bound}{total} ask{}", if total == 1 { "" } else { "s" });
+                println!("{total} ask{}{from}", if total == 1 { "" } else { "s" });
             }
             for a in &list {
                 let flag = if a["blocking"].as_bool() == Some(true) { "blocking " } else { "" };
@@ -472,14 +471,15 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
 fn human_snapshot(v: &Value) {
     println!("Maestro snapshot  {}  tree {}", s(&v["generated_at"]), s(&v["tree"]));
     // Unread is not empty (BRO-3322): an unread section prints why, never its counts, and a
-    // partial one prints its counts as a lower bound, with why.
+    // partial one says its counts come from a partial read, and why. It claims no bound: some
+    // counts (loop drift, notices) are derived from what a read did not find.
     let section = |name: &str, line: String| {
         let sec = &v[name];
         let errors = sec["errors"].as_array().cloned().unwrap_or_default();
         let (mark, line) = if sec["data"].is_null() {
             ("unreadable", unavailable(&errors))
         } else if !errors.is_empty() {
-            ("partial", format!("at least {} ({})", if line.is_empty() { "none" } else { &line }, reasons(&errors)))
+            ("partial", format!("{line}{}", partial(&errors)))
         } else {
             ("ok", line)
         };
@@ -531,6 +531,11 @@ fn reasons(errors: &[Value]) -> String {
         [e] => one(e),
         [e, rest @ ..] => format!("{}; and {} more, use --json", one(e), rest.len()),
     }
+}
+
+/// `, from a partial read (<where>: <why>)`, or nothing for a whole read.
+fn partial(errors: &[Value]) -> String {
+    if errors.is_empty() { String::new() } else { format!(", from a partial read ({})", reasons(errors)) }
 }
 
 /// A command's read errors, from its JSON.
