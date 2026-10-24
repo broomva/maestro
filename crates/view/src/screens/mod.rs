@@ -17,7 +17,7 @@ use crate::catalog::Tab;
 use crate::render::Ctx;
 use maestro_core::Section;
 use maestro_core::ask::{Ask, AskClass, AskState};
-use maestro_store::LedgerFile;
+use maestro_store::{LedgerFile, views};
 
 /// One open ask in the queue.
 pub(crate) struct Entry<'a> {
@@ -63,30 +63,13 @@ pub(crate) enum Landing {
     Unknown,
 }
 
-/// Whether a working-tree read error may hide `file`'s answers: every error but one that names
-/// a different ledger file (`worktree:<asks>/<file>` or `…/<file>#<entry>`).
-fn covers(at: &str, file: &str) -> bool {
-    let path = at.strip_prefix("worktree:").unwrap_or(at);
-    let path = path.split('#').next().unwrap_or(path);
-    match path.rsplit_once('/') {
-        Some((_, name)) if name.ends_with(".yaml") || name.ends_with(".yml") => name == file,
-        _ => true,
-    }
-}
-
-/// Unknown also when the tree read has an error inside this ledger: an entry that did not read
-/// may share an ask's uid or id, and the plugin then refuses the answer (`ambiguity()` counts
-/// every row). So a ledger read in part never offers the owner path as if it were whole.
+/// An ask's landing, as [`views::waits`] decides it for every screen and tool.
 pub(crate) fn landing(cx: &Ctx, lf: &LedgerFile, ask: &Ask) -> Landing {
-    if cx.reads.asks.errors.iter().any(|e| e.at != cx.reads.asks.source && covers(&e.at, &lf.file)) {
-        return Landing::Unknown;
+    match views::waits(&cx.reads.asks, cx.unlanded(), lf, ask) {
+        Some(true) => Landing::Waiting,
+        Some(false) => Landing::NotSeen,
+        None => Landing::Unknown,
     }
-    let unlanded = cx.unlanded();
-    let Some(refs) = &unlanded.data else { return Landing::Unknown };
-    if unlanded.errors.iter().any(|e| covers(&e.at, &lf.file)) {
-        return Landing::Unknown;
-    }
-    if refs.iter().any(|r| r.is(&lf.file, ask)) { Landing::Waiting } else { Landing::NotSeen }
 }
 
 /// What a card on these screens stands on: the asks read at the tree and the answers in the
@@ -97,18 +80,11 @@ pub(crate) fn joined(cx: &Ctx, ledger: Option<&str>) -> Section<()> {
         None => cx.reads.asks.as_ref().map(|_| ()),
     };
     let mut errors = asks.errors;
-    errors.extend(cx.unlanded().errors.iter().filter(|e| ledger.is_none_or(|l| covers(&e.at, l))).cloned());
+    errors.extend(cx.unlanded().errors.iter().filter(|e| ledger.is_none_or(|l| views::may_hide(&e.at, l))).cloned());
     Section { source: asks.source, data: asks.data, errors }
 }
 
-/// The plugin's `ambiguity()`: a uid twice, or an id twice among asks without a uid.
-pub(crate) fn ambiguous(lf: &LedgerFile, ask: &Ask) -> bool {
-    let same = |a: &&Ask| match &ask.uid {
-        Some(uid) => a.uid.as_ref() == Some(uid),
-        None => a.uid.is_none() && a.id == ask.id,
-    };
-    lf.ledger.asks.iter().filter(same).count() > 1
-}
+pub(crate) use views::ambiguous;
 
 pub(crate) fn tab_of(ask: &Ask) -> Tab {
     match ask.class {
@@ -244,11 +220,11 @@ mod tests {
 
     #[test]
     fn an_error_covers_only_its_own_ledger() {
-        assert!(covers("worktree:.control/asks/a.yml", "a.yml"));
-        assert!(!covers("worktree:.control/asks/a.yml", "b.yaml"));
-        assert!(!covers(".control/asks/a.yaml#2", "b.yaml"));
-        assert!(covers(".control/asks/a.yaml#2", "a.yaml"));
-        assert!(covers("worktree:.control/asks", "a.yaml"), "a directory error covers every ledger");
+        assert!(views::may_hide("worktree:.control/asks/a.yml", "a.yml"));
+        assert!(!views::may_hide("worktree:.control/asks/a.yml", "b.yaml"));
+        assert!(!views::may_hide(".control/asks/a.yaml#2", "b.yaml"));
+        assert!(views::may_hide(".control/asks/a.yaml#2", "a.yaml"));
+        assert!(views::may_hide("worktree:.control/asks", "a.yaml"), "a directory error covers every ledger");
     }
 
     #[test]

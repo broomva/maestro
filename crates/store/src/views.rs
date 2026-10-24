@@ -220,6 +220,46 @@ impl Waiting {
     }
 }
 
+/// Whether a read error at `at` may hide `ledger`'s asks or answers: every error but one that
+/// names a different ledger file (`<source>:<asks>/<file>` or `…/<file>#<entry>`).
+pub fn may_hide(at: &str, ledger: &str) -> bool {
+    let path = at.split('#').next().unwrap_or(at);
+    match path.rsplit_once('/') {
+        Some((_, name)) if name.ends_with(".yaml") || name.ends_with(".yml") => name == ledger,
+        _ => true,
+    }
+}
+
+/// The plugin's `ambiguity()`: a uid twice, or an id twice among asks without a uid. Paseo
+/// refuses an answer to such a handle.
+pub fn ambiguous(lf: &LedgerFile, ask: &Ask) -> bool {
+    let same = |a: &&Ask| match &ask.uid {
+        Some(uid) => a.uid.as_ref() == Some(uid),
+        None => a.uid.is_none() && a.id == ask.id,
+    };
+    lf.ledger.asks.iter().filter(same).count() > 1
+}
+
+/// Whether `ask` in `lf`, read at the tree in `asks`, has an answer waiting to land: the one
+/// place this is decided, for every screen and tool. `None` when it is not known: a read that
+/// may hide this ledger's entries or answers failed (an entry that did not read may share its
+/// handle), or its handle names two asks.
+pub fn waits(
+    asks: &Section<Vec<LedgerFile>>,
+    unlanded: &Section<Vec<Waiting>>,
+    lf: &LedgerFile,
+    ask: &Ask,
+) -> Option<bool> {
+    if asks.errors.iter().any(|e| e.at != asks.source && may_hide(&e.at, &lf.file)) {
+        return None;
+    }
+    let refs = unlanded.data.as_ref()?;
+    if unlanded.errors.iter().any(|e| may_hide(&e.at, &lf.file)) || ambiguous(lf, ask) {
+        return None;
+    }
+    Some(refs.iter().any(|r| r.is(&lf.file, ask)))
+}
+
 /// The asks in `asks` whose state passes `closed`, by ledger and key.
 fn closed_in(asks: &[LedgerFile], closed: impl Fn(AskState) -> bool) -> Answered {
     asks.iter()
@@ -277,12 +317,19 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
     }
     // `None` once a read failed whole: what waits to land is then unknown, never none.
     let (mut answered, mut errors) = answered_on_branch(store);
+    // The plugin's `unlandedAnswers`: an answer waits when the first ask at the read tree with its
+    // key is open. One answer is one wait, however many asks share its key.
     let waiting = |answered: &Answered| -> Vec<Waiting> {
-        at_rev
+        let mut first = std::collections::BTreeMap::new();
+        for lf in at_rev {
+            for a in &lf.ledger.asks {
+                first.entry((lf.file.clone(), key(a))).or_insert_with(|| a.state());
+            }
+        }
+        answered
             .iter()
-            .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-            .filter(|(lf, a)| a.state() == AskState::Open && answered.contains(&(lf.file.clone(), key(a))))
-            .map(|(lf, a)| Waiting { ledger: lf.file.clone(), key: key(a) })
+            .filter(|k| first.get(*k) == Some(&AskState::Open))
+            .map(|(ledger, key)| Waiting { ledger: ledger.clone(), key: key.clone() })
             .collect()
     };
     // No local asks directory holds no local answers: nothing waits there, and nothing is unread.

@@ -268,16 +268,15 @@ impl Tree {
         &self.root
     }
 
-    /// Whether the repo holds the full ref `name`, by `show-ref --verify`: 1 is absent; any other
-    /// failure (a ref naming a missing object, no repo) is an error, never absent.
+    /// Whether the repo holds the full ref `name`, by `show-ref --exists` (git >= 2.43): 2 is
+    /// absent. Anything else is there, or an error: a broken ref (1), a git without the flag, no
+    /// repo. A broken ref is never read as absent: it may stand over a packed one.
     pub fn has_ref(&self, name: &str) -> Result<bool, String> {
-        let output = git_command(&self.root)
-            .args(["show-ref", "--verify", "--quiet", name])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let output =
+            git_command(&self.root).args(["show-ref", "--exists", name]).output().map_err(|e| e.to_string())?;
         match output.status.code() {
             Some(0) => Ok(true),
-            Some(1) => Ok(false),
+            Some(2) => Ok(false),
             _ => Err(format!("`{name}` does not read: {}", String::from_utf8_lossy(&output.stderr).trim())),
         }
     }

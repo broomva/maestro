@@ -773,6 +773,68 @@ fn an_answers_branch_that_does_not_resolve_is_unread_never_absent() {
 }
 
 #[test]
+fn a_broken_branch_ref_over_a_packed_one_is_unread_never_absent() {
+    let (m, _) = with_answers_branch(|asks| std::fs::write(asks.join("more.yaml"), "asks: []\n").unwrap());
+    let ws = m.path().join("workspace");
+    git(&ws, &["pack-refs", "--all"]);
+    // A crashed write leaves an empty loose ref; git ignores it, and the packed one stands under it.
+    std::fs::create_dir_all(ws.join(".git/refs/heads/maestro")).unwrap();
+    std::fs::write(ws.join(".git/refs/heads/maestro/answers"), "").unwrap();
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let asks = maestro_store::views::snapshot(&store).asks;
+    assert_eq!(asks.data.unwrap().unlanded, None);
+    assert!(asks.errors.iter().any(|e| e.at.starts_with("maestro/answers:")), "{:?}", asks.errors);
+}
+
+#[test]
+fn asks_sharing_a_key_are_unknown_and_their_one_answer_waits_once() {
+    // Two uid-less asks named `dup`: the plugin's `ambiguity()` refuses an answer to either, and
+    // its `unlandedAnswers` counts the one answer once.
+    let m = machine();
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::remove_file(asks.join("broken.yaml")).unwrap();
+    std::fs::remove_file(asks.join("alt-key.yaml")).unwrap();
+    let open = "asks:\n  - id: dup\n    project: dd\n    headline: \"First\"\n    exhausted: [\"read: x\"]\n    options:\n      - { id: a, label: A, recommended: true }\n  - id: dup\n    project: dd\n    headline: \"Second\"\n    exhausted: [\"read: x\"]\n";
+    std::fs::write(asks.join("dd.yaml"), open).unwrap();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let answered = open.replacen("    headline: \"First\"\n", "    headline: \"First\"\n    answer: \"yes\"\n", 1);
+    assert_ne!(open, answered);
+    std::fs::write(asks.join("dd.yaml"), answered).unwrap();
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let html = render(&store, &spec(json!({ "type": "decisions", "props": { "project": "dd" } }))).html;
+    assert_eq!(html.matches("Not offered here").count(), 2, "{html}");
+    assert!(!html.contains("Waiting to land</span>") && !html.contains("Recommended:"), "{html}");
+    assert!(!html.contains("mv-answerbar") && !html.contains("Choose one"), "{html}");
+    // No read failed, yet which ask the answer waits for is not known: that count is a bound.
+    assert!(html.contains("2 open · at least 0 answered, not yet landed"), "{html}");
+    assert_eq!(maestro_store::views::snapshot(&store).asks.data.unwrap().unlanded, Some(1));
+}
+
+#[test]
+fn a_key_whose_first_ask_is_closed_at_the_tree_does_not_wait() {
+    // The plugin's `unlandedAnswers` reads main by key, first entry wins: the first `dup` is
+    // answered at main, so an answer to `dup` elsewhere is not waiting, though the second is open.
+    let m = machine();
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::remove_file(asks.join("broken.yaml")).unwrap();
+    std::fs::remove_file(asks.join("alt-key.yaml")).unwrap();
+    let at_main = "asks:\n  - id: dup\n    headline: \"First\"\n    answer: \"done\"\n    exhausted: [\"read: x\"]\n  - id: dup\n    headline: \"Second\"\n    exhausted: [\"read: x\"]\n";
+    std::fs::write(asks.join("dd.yaml"), at_main).unwrap();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let both = at_main.replacen("    headline: \"Second\"\n", "    headline: \"Second\"\n    answer: \"yes\"\n", 1);
+    assert_ne!(both, at_main);
+    std::fs::write(asks.join("dd.yaml"), both).unwrap();
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    assert_eq!(maestro_store::views::snapshot(&store).asks.data.unwrap().unlanded, Some(0));
+}
+
+#[test]
 fn an_ask_closed_on_the_answers_branch_waits_to_land_as_the_plugin_counts_it() {
     // The plugin's `unlandedAnswers` takes any entry answered or otherwise closed on the branch.
     let (_m, store) = with_answers_branch(|asks| {

@@ -69,3 +69,15 @@ fn a_waiting_answer_is_counted_exactly() {
     });
     assert!(line.contains(", 1 answered in this checkout or on maestro/answers, not yet landed"), "{line}");
 }
+
+#[test]
+fn a_count_from_a_partial_read_is_a_lower_bound() {
+    let line = asks_line("main", |ws| {
+        git(ws, &["checkout", "-q", "-b", "maestro/answers"]);
+        std::fs::write(ws.join(".control/asks/b.yaml"), "asks: [unclosed\n").unwrap();
+        git(ws, &["add", "."]);
+        git(ws, &["commit", "-q", "-m", "broken"]);
+        git(ws, &["checkout", "-q", "main"]);
+    });
+    assert!(line.contains(", at least 0 answered in this checkout or on maestro/answers, not yet landed"), "{line}");
+}

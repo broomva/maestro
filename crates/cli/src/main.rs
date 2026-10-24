@@ -486,7 +486,10 @@ fn human_snapshot(v: &Value) {
     } else if a["unlanded"].is_null() {
         ", answered in this checkout or on maestro/answers: unread".into()
     } else {
-        format!(", {} answered in this checkout or on maestro/answers, not yet landed", a["unlanded"])
+        // A read that came back in part may hide answers: the count is then a lower bound.
+        let partial = v["asks"]["errors"].as_array().is_some_and(|e| !e.is_empty());
+        let least = if partial { "at least " } else { "" };
+        format!(", {least}{} answered in this checkout or on maestro/answers, not yet landed", a["unlanded"])
     };
     section(
         "asks",

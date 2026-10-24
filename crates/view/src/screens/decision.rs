@@ -130,7 +130,10 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                 section class="mv-fold" { h3 class="mv-fold-title" { "Details" } p class="mv-pre" { (details) } }
             }
             @if !a.options.is_empty() {
-                h3 class="mv-label bv-meta" { @if state == AskState::Open { "Choose one" } @else { "Options" } }
+                // "Choose one" only where the owner path is offered, as the answer bar is.
+                h3 class="mv-label bv-meta" {
+                    @if state == AskState::Open && landing == Landing::NotSeen && !ambiguous { "Choose one" } @else { "Options" }
+                }
                 ol class="mv-dopts" {
                     @for o in &a.options {
                         li class="mv-dopt" data-option=(o.id) data-recommended=(o.recommended)
@@ -189,7 +192,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
             }
             @if ambiguous {
                 p class="mv-callout" data-tone="warning" {
-                    span class="bv-code" { (lf.file) "#" (a.handle()) } " names more than one ask in its ledger, and Paseo refuses an answer to an ambiguous handle. The ledger must give each its own uid."
+                    span class="bv-code" { bdi { (lf.file) "#" (a.handle()) } } " names more than one ask in its ledger, and Paseo refuses an answer to an ambiguous handle. The ledger must give each its own uid."
                 }
             } @else {
                 (outcome(cx, a, state, landing))
