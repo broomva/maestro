@@ -149,6 +149,7 @@ mod tests {
         assert_eq!(url("url", "http://example.com"), None);
         assert_eq!(url("url", "javascript:alert(1)"), None);
         assert_eq!(url("url", "https://exa mple.com"), None);
+        assert_eq!(url("url", "https://example.com/a b"), None, "a space in the path");
         assert_eq!(url("url", "https://example.com/ü"), None);
         assert_eq!(url("file", "docs/a.md"), None);
         assert_eq!(url("session", "2fb204ca"), None);
@@ -180,6 +181,7 @@ mod tests {
         assert!(!kept(json!({ "kind": "url", "ref": "data:text/html,x" })));
         assert!(!kept(json!({ "kind": "ticket", "ref": "nope" })));
         assert!(!kept(json!({ "kind": "session", "ref": "2FB204CA" })));
+        assert!(!kept(json!({ "kind": "file", "ref": "a\u{7f}b" })), "DEL");
         for bad in ["/etc/passwd", "~/x", "a/../b", "a//b", "./a", "c:x", "a\\b", "a\u{1}b", ""] {
             assert!(!kept(json!({ "kind": "file", "ref": bad })), "{bad:?}");
         }

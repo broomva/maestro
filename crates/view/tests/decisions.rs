@@ -207,7 +207,7 @@ fn the_answer_bar_writes_nothing() {
     assert!(html.contains("<textarea class=\"mv-note-field\" rows=\"1\" disabled"), "{html}");
     // An answered ask shows its answer and no answer bar.
     let done = render(&worktree(m.path()), &detail("decisions.yaml", "done-before")).html;
-    assert!(done.contains("Answered: Rotate it · by owner"), "{done}");
+    assert!(done.contains("Answered: <bdi>Rotate it</bdi> · by <bdi>owner</bdi>"), "{done}");
     assert!(!done.contains("mv-answerbar") && !done.contains("Choose one"), "{done}");
     // An ask with no default says it waits; a positional count is only for open asks.
     let auth = render(&worktree(m.path()), &detail("decisions.yaml", "merge-policy")).html;
@@ -468,7 +468,7 @@ fn an_unread_working_tree_never_invites_an_answer() {
     assert_eq!(html.matches("Not offered here").count(), 6, "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(d.contains(r#"data-type="decision" data-state="partial""#), "{d}");
-    assert!(d.contains("Maestro cannot tell whether this ask is already answered"), "{d}");
+    assert!(d.contains("Maestro cannot tell for sure whether this ask is answered"), "{d}");
     assert!(!d.contains("mv-answerbar"), "{d}");
 }
 
@@ -635,7 +635,7 @@ fn an_archived_ask_is_said_archived_and_offers_nothing() {
     )
     .unwrap();
     let d = render(&worktree(m.path()), &detail("arch.yaml", "gone")).html;
-    assert!(d.contains("Archived: archived.") && !d.contains("mv-answerbar"), "{d}");
+    assert!(d.contains("Archived: <bdi>archived</bdi>.") && !d.contains("mv-answerbar"), "{d}");
 }
 
 /// A git workspace at `main` with a `maestro/answers` branch made by `on_branch` (run on the
@@ -691,7 +691,7 @@ fn an_answer_given_as_text_is_shown_as_written() {
     // demo-arc.yaml's old-one carries `answer: "yes"` and no option.
     let m = machine();
     let d = render(&worktree(m.path()), &detail("demo-arc.yaml", "old-one")).html;
-    assert!(d.contains("Answered: yes"), "{d}");
+    assert!(d.contains("Answered: <bdi>yes</bdi>"), "{d}");
 }
 
 #[test]
@@ -713,4 +713,78 @@ fn no_screen_claims_an_ask_is_unanswered() {
     let wt = render(&worktree(m.path()), &inbox()).html;
     assert!(wt.contains("Answers on maestro/answers are not read here."), "{wt}");
     assert!(!wt.contains("answered, not yet landed"), "{wt}");
+}
+
+#[test]
+fn an_answer_counts_only_for_its_own_namespace() {
+    // A (uid `shared`) is answered on main already; B (uid-less id `shared`) is open. With no
+    // change anywhere, nothing waits to land: B is not taken for A's answer.
+    let open_b = "asks:\n  - id: px\n    uid: shared\n    project: ns\n    headline: \"A\"\n    answered_at: \"2026-10-20T00:00:00Z\"\n    answer: \"done\"\n    exhausted: [\"read: x\"]\n  - id: shared\n    project: ns\n    headline: \"B\"\n    exhausted: [\"read: x\"]\n";
+    let m = machine();
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::remove_file(asks.join("broken.yaml")).unwrap();
+    std::fs::remove_file(asks.join("alt-key.yaml")).unwrap();
+    std::fs::write(asks.join("ns.yaml"), open_b).unwrap();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let unlanded = maestro_store::views::unlanded(&store, store.asks().data.as_deref().unwrap());
+    assert_eq!(unlanded.data.unwrap().len(), 0);
+}
+
+#[test]
+fn a_decision_beside_an_entry_that_did_not_read_claims_no_state() {
+    let m = machine();
+    std::fs::write(
+        m.path().join("workspace/.control/asks/sib.yaml"),
+        "asks:\n  - id: u1\n    headline: \"Done?\"\n    answered_at: \"2026-10-20T00:00:00Z\"\n    answer: \"yes\"\n    exhausted: [\"read: x\"]\n  - uid: u1\n    headline: \"no id\"\n",
+    )
+    .unwrap();
+    let d = render(&worktree(m.path()), &detail("sib.yaml", "u1")).html;
+    assert!(d.contains("Maestro cannot tell for sure"), "{d}");
+    assert!(!d.contains("Answered: ") && !d.contains("mv-answerbar"), "{d}");
+}
+
+#[test]
+fn an_unread_waiting_count_is_none_never_zero() {
+    let (_m, store) = with_answers_branch(|asks| {
+        std::fs::remove_dir_all(asks).unwrap();
+        std::fs::write(asks, "not a directory").unwrap();
+    });
+    let snap = maestro_store::views::snapshot(&store);
+    assert_eq!(snap.asks.data.unwrap().unlanded, None);
+}
+
+#[test]
+fn a_branch_answer_waits_even_with_no_local_asks_directory() {
+    let (m, store) = with_answers_branch(|asks| {
+        let file = asks.join("decisions.yaml");
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(
+            &file,
+            text.replacen(
+                "    gates: [fleet-cost]\n",
+                "    gates: [fleet-cost]\n    answered_at: \"2026-10-23T11:00:00Z\"\n",
+                1,
+            ),
+        )
+        .unwrap();
+    });
+    std::fs::remove_dir_all(m.path().join("workspace/.control/asks")).unwrap();
+    let html = render(&store, &inbox()).html;
+    assert!(html.contains("Waiting to land</span>"), "{html}");
+}
+
+#[test]
+fn gates_are_said_only_for_a_blocking_ask() {
+    let m = machine();
+    std::fs::write(
+        m.path().join("workspace/.control/asks/g.yaml"),
+        "asks:\n  - id: g\n    headline: \"G\"\n    blocking: false\n    gates: [lane-x]\n    exhausted: [\"read: x\"]\n",
+    )
+    .unwrap();
+    let d = render(&worktree(m.path()), &detail("g.yaml", "g")).html;
+    assert!(!d.contains("lane-x"), "{d}");
 }

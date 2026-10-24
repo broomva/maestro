@@ -170,6 +170,7 @@ mod tests {
                 { "option": "nope", "cost": "c" },
                 { "option": "x", "label": "both", "cost": "c" },
                 { "label": "free", "time": "t" },
+                { "label": "x".repeat(61), "time": "too long a label" },
                 { "label": "no cells" },
                 { "option": "x", "cost": 5 },
                 { "option": "x", "cost": "x".repeat(161) }

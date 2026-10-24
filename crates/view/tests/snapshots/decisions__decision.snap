@@ -9,12 +9,14 @@ expression: "portable(&r.html, m.path())"
 </header>
 <article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked 2026-10-17T12:00:00Z by <bdi>claude:coordinator</bdi>
+<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
 </p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
 <p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
 <p class="mv-callout" data-tone="warning">If you don't answer: wait: nothing changes and spend continues</p>
-<p class="mv-gates bv-meta">Blocks <span class="bv-code">fleet-cost</span>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>fleet-cost</bdi>
+</span>
 </p>
 <p class="mv-dbody">Long sessions drive the fleet's cost: about 19% of sessions over 400K context carry about 87% of it. Rotating long orchestrators by handoff caps the biggest spenders and leaves workers alone.</p>
 <p class="mv-dbody">Which context-cost policy should the fleet run?</p>

@@ -50,7 +50,9 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="decision">decision</span> demo-arc.yaml by <bdi>demo-arc</bdi>
 </p>
 <p class="mv-dtitle">Merge the demo PR now, or hold for review?</p>
-<p class="mv-gates bv-meta">Blocks <span class="bv-code">merge</span>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>merge</bdi>
+</span>
 </p>
 <p class="mv-dbody">Merge the demo PR now?</p>
 <h3 class="mv-label bv-meta">Choose one</h3>
@@ -97,14 +99,16 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="decision">decision</span> <bdi>alt-key</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Held under the corpus's other spelling?</span>
-<span class="mv-irow-rec" data-tone="warning">Not offered here: whether it is answered, or answerable, is unknown</span>
+<span class="mv-irow-rec" data-tone="warning">Not offered here: whether it is answered, or answerable, is not known</span>
 </summary>
 <article class="mv-decision" data-ask="alt-key.yaml#alt-blocking" data-hash="7e423ddd550cb6e8" data-kind="decision">
 <p class="mv-dmeta bv-meta">
 <span class="mv-chip" data-kind="decision">decision</span> alt-key.yaml by <bdi>alt-key</bdi>
 </p>
 <p class="mv-dtitle">Held under the corpus's other spelling?</p>
-<p class="mv-gates bv-meta">Blocks <span class="bv-code">alt</span>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>alt</bdi>
+</span>
 </p>
 <section class="mv-fold mv-tried">
 <h3 class="mv-fold-title">What the agent tried first</h3>
@@ -115,7 +119,7 @@ expression: "portable(&r.html, m.path())"
 <span class="bv-code">default</span>: y</li>
 </ul>
 </section>
-<p class="mv-callout" data-tone="warning">Maestro cannot tell whether this ask is already answered, or whether Paseo would take an answer to it: part of its ledger did not read, or its handle names two asks. Check Paseo · Maestro · Decisions.</p>
+<p class="mv-callout" data-tone="warning">Maestro cannot tell for sure whether this ask is answered, or whether Paseo would take an answer to it. Paseo · Maestro · Decisions shows it.</p>
 </article>
 </details>
 </li>
@@ -171,10 +175,12 @@ expression: "portable(&r.html, m.path())"
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#new-key" data-hash="b7d37ffe8758bf00" data-kind="credential">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="credential">credential</span> decisions.yaml · asked 2026-10-22T08:00:00Z by <bdi>fleet-closeout</bdi>
+<span class="mv-chip" data-kind="credential">credential</span> decisions.yaml · asked <bdi>2026-10-22T08:00:00Z</bdi> by <bdi>fleet-closeout</bdi>
 </p>
 <p class="mv-dtitle">Paste the &lt;b&gt;deploy&lt;/b&gt; key</p>
-<p class="mv-gates bv-meta">Blocks <span class="bv-code">deploy</span>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>deploy</bdi>
+</span>
 </p>
 <h3 class="mv-label bv-meta">Choose one</h3>
 <ol class="mv-dopts">
@@ -219,7 +225,7 @@ expression: "portable(&r.html, m.path())"
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#merge-policy" data-hash="ae8d1d0cd57f5f87" data-kind="authority">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="authority">authority</span> decisions.yaml · asked 2026-10-12 by <bdi>fleet-closeout</bdi>
+<span class="mv-chip" data-kind="authority">authority</span> decisions.yaml · asked <bdi>2026-10-12</bdi> by <bdi>fleet-closeout</bdi>
 </p>
 <p class="mv-dtitle">May Maestro's answers-only PRs merge on their own once their gates pass?</p>
 <p class="mv-stakes">Each batch of your answers lands only when someone merges its PR.</p>
@@ -281,12 +287,14 @@ expression: "portable(&r.html, m.path())"
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked 2026-10-17T12:00:00Z by <bdi>claude:coordinator</bdi>
+<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
 </p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
 <p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
 <p class="mv-callout" data-tone="warning">If you don't answer: wait: nothing changes and spend continues</p>
-<p class="mv-gates bv-meta">Blocks <span class="bv-code">fleet-cost</span>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>fleet-cost</bdi>
+</span>
 </p>
 <p class="mv-dbody">Long sessions drive the fleet's cost: about 19% of sessions over 400K context carry about 87% of it. Rotating long orchestrators by handoff caps the biggest spenders and leaves workers alone.</p>
 <p class="mv-dbody">Which context-cost policy should the fleet run?</p>
@@ -406,7 +414,7 @@ expression: "portable(&r.html, m.path())"
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="4e0b3b5d6873501f" data-kind="idea">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked 2026-10-20T00:00:00Z by <bdi>9f3c2a1b</bdi>
+<span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked <bdi>2026-10-20T00:00:00Z</bdi> by <bdi>9f3c2a1b</bdi>
 </p>
 <p class="mv-dtitle">Run the Jev-vs-/kg retrieval experiment?</p>
 <h3 class="mv-label bv-meta">Choose one</h3>

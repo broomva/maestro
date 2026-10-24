@@ -131,7 +131,7 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
                                 span class="mv-irow-title" { (e.ask.title()) }
                                 @match e.landing {
                                     Landing::Waiting => span class="mv-irow-rec" data-tone="success" { "Waiting to land" },
-                                    Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "Not offered here: whether it is answered, or answerable, is unknown" },
+                                    Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "Not offered here: whether it is answered, or answerable, is not known" },
                                     Landing::NotSeen => @if let Some(r) = e.ask.recommended().filter(|_| e.tab() != Tab::Ideas) {
                                         span class="mv-irow-rec" data-tone="info" { "Recommended: " (r.label) }
                                     },

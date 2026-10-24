@@ -106,7 +106,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
             p class="mv-dmeta bv-meta" {
                 span class="mv-chip" data-kind=(kind(a)) { (kind(a)) }
                 " " (lf.file)
-                @if let Some(at) = &a.asked_at { " · asked " (at) }
+                @if let Some(at) = &a.asked_at { " · asked " bdi { (at) } }
                 " by " bdi { (asker(lf, a)) }
             }
             p class="mv-dtitle" { (a.title()) }
@@ -120,7 +120,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                 }
             }
             @if a.blocking && !a.gates.is_empty() {
-                p class="mv-gates bv-meta" { "Blocks " @for (i, g) in a.gates.iter().enumerate() { @if i > 0 { ", " } span class="bv-code" { (g) } } }
+                p class="mv-gates bv-meta" { "Blocks " @for (i, g) in a.gates.iter().enumerate() { @if i > 0 { ", " } span class="bv-code" { bdi { (g) } } } }
             }
             @if let Some(s) = &rich.summary { p class="mv-dbody" { (s) } }
             @if let Some(q) = question { p class="mv-dbody" { (q) } }
@@ -199,28 +199,36 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
 }
 
 /// Where the answer stands, or where to give it. Phase 1 writes nothing: the plugin is the one writer.
+/// Where Paseo's plugin shows an ask and takes its answer: ideas under Initiatives (with
+/// develop, park or kill only), every other ask under Decisions.
+fn place(a: &Ask) -> &'static str {
+    if a.class == Some(AskClass::Idea) { "Paseo · Maestro · Initiatives" } else { "Paseo · Maestro · Decisions" }
+}
+
 fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
     let given =
         a.answer_option.as_deref().and_then(|id| a.options.iter().find(|o| o.id == id)).map(|o| o.label.as_str());
     html! {
-        @if state == AskState::Open && landing == Landing::Waiting {
+        @if landing == Landing::Unknown {
+            // Unknown comes first, whatever the entry says: a sibling that did not read, or a
+            // handle two asks share, may make this row not the ask Paseo holds. No bar, no claim.
+            p class="mv-callout" data-tone="warning" {
+                "Maestro cannot tell for sure whether this ask is answered, or whether Paseo would take an answer to it. "
+                (place(a)) " shows it."
+            }
+        } @else if state == AskState::Open && landing == Landing::Waiting {
             p class="mv-callout" data-tone="success" {
                 "Answered in this checkout or on maestro/answers; not yet on " span class="bv-code" { (cx.snap.tree) } "."
-            }
-        } @else if state == AskState::Open && landing == Landing::Unknown {
-            // Unknown is never shown as unanswered: no answer bar invites a second answer.
-            p class="mv-callout" data-tone="warning" {
-                "Maestro cannot tell whether this ask is already answered, or whether Paseo would take an answer to it: part of its ledger did not read, or its handle names two asks. Check Paseo · Maestro · Decisions."
             }
         } @else if state == AskState::Answered {
             p class="mv-callout" data-tone="success" {
                 "Answered"
-                @if let Some(x) = given.or(a.answer.as_deref()).or(a.answer_option.as_deref()) { ": " (x) }
-                @if let Some(by) = &a.answered_by { " · by " (by) }
-                @if let Some(at) = &a.answered_at { " · " (at) }
+                @if let Some(x) = given.or(a.answer.as_deref()).or(a.answer_option.as_deref()) { ": " bdi { (x) } }
+                @if let Some(by) = &a.answered_by { " · by " bdi { (by) } }
+                @if let Some(at) = &a.answered_at { " · " bdi { (at) } }
             }
         } @else if state == AskState::Archived {
-            p class="mv-callout" { "Archived" @if let Some(s) = &a.status { ": " (s) } "." }
+            p class="mv-callout" { "Archived" @if let Some(s) = &a.status { ": " bdi { (s) } } "." }
         } @else {
             div class="mv-control mv-answerbar" {
                 textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)" {}
@@ -230,11 +238,7 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
                 // the ask is unanswered, only where it is open and where to look and answer.
                 p class="mv-answer-cta" {
                     "Open at " span class="bv-code" { (cx.snap.tree) } ". "
-                    @if a.class == Some(AskClass::Idea) {
-                        "Paseo · Maestro · Initiatives"
-                    } @else {
-                        "Paseo · Maestro · Decisions"
-                    }
+                    (place(a))
                     " shows whether it has been answered since, and is where to answer it."
                 }
                 p class="mv-answer-why bv-meta" {
