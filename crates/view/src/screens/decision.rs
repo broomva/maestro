@@ -111,7 +111,8 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
             }
             p class="mv-dtitle" { (a.title()) }
             @if let Some(stakes) = &a.stakes { p class="mv-stakes" { (stakes) } }
-            @if state == AskState::Open {
+            // What silence does is said only while the ask waits on the owner.
+            @if state == AskState::Open && landing == Landing::NotWaiting {
                 @if let Some(d) = &a.default {
                     p class="mv-callout" data-tone="warning" { "If you don't answer: " (d) }
                 } @else if let Some(why) = &a.no_default_because {
@@ -209,7 +210,7 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
         } @else if state == AskState::Open && landing == Landing::Unknown {
             // Unknown is never shown as unanswered: no answer bar invites a second answer.
             p class="mv-callout" data-tone="warning" {
-                "The working tree's copy of this ledger could not be read, so it may already be answered there. Check Paseo · Maestro · Decisions before answering."
+                "Part of this ledger could not be read, at the tree read or in the working tree, so this ask may already be answered, or Paseo may refuse it. Check Paseo · Maestro · Decisions."
             }
         } @else if state == AskState::Answered {
             p class="mv-callout" data-tone="success" {
@@ -224,7 +225,7 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
             div class="mv-control mv-answerbar" {
                 textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)" {}
                 p class="mv-answer-cta" {
-                    "Answer in Paseo · Maestro · Decisions"
+                    "To answer: Paseo · Maestro · Decisions"
                     @if let Some(r) = a.recommended() { span class="bv-meta" { " (recommended: " (r.label) ")" } }
                 }
                 p class="mv-answer-why bv-meta" {

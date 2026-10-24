@@ -46,6 +46,9 @@ cat >"$scratch/fixture-spec.json" <<'JSON'
   "work": { "type": "work" } } }
 JSON
 
+cat >"$scratch/decision-spec.json" <<'JSON'
+{ "root": "d", "blocks": { "d": { "type": "decision", "props": { "ledger": "decisions.yaml", "id": "fleet-cost-1" } } } }
+JSON
 cat >"$scratch/decisions-spec.json" <<'JSON'
 { "root": "inbox", "blocks": { "inbox": { "type": "decisions" } } }
 JSON
@@ -63,6 +66,9 @@ if [ "$screen" = decisions ]; then
   bun run e2e.ts --url http://127.0.0.1:7199/mcp --spec "$scratch/decisions-spec.json" --out "$out/fixture" --decisions \
     --edit "$scratch/workspace/.control/asks/decisions.yaml" --from "label: \"A person merges them\"" \
     --to "label: \"A person merges each batch\"" --expect "A person merges each batch"
+  echo "== decision, standalone, scratch fixture"
+  mkdir -p "$out/decision"
+  bun run e2e.ts --url http://127.0.0.1:7199/mcp --spec "$scratch/decision-spec.json" --out "$out/decision" --decision
   echo "screenshots: $out"
   exit 0
 fi

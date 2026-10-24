@@ -80,7 +80,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Merge now)</span>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Merge now)</span>
 </p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">merge-now</span>.</p>
 </div>
@@ -94,6 +94,7 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="decision">decision</span> <bdi>alt-key</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Held under the corpus's other spelling?</span>
+<span class="mv-irow-rec" data-tone="warning">Not offered here: part of its ledger could not be read</span>
 </summary>
 <article class="mv-decision" data-ask="alt-key.yaml#alt-blocking" data-hash="7e423ddd550cb6e8" data-kind="decision">
 <p class="mv-dmeta bv-meta">
@@ -111,12 +112,7 @@ expression: "portable(&r.html, m.path())"
 <span class="bv-code">default</span>: y</li>
 </ul>
 </section>
-<div class="mv-control mv-answerbar">
-<textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
-</textarea>
-<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions</p>
-<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">alt-blocking</span>.</p>
-</div>
+<p class="mv-callout" data-tone="warning">Part of this ledger could not be read, at the tree read or in the working tree, so this ask may already be answered, or Paseo may refuse it. Check Paseo · Maestro · Decisions.</p>
 </article>
 </details>
 </li>
@@ -145,7 +141,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions</p>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">pick-name</span>.</p>
 </div>
 </article>
@@ -186,7 +182,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions</p>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">new-key</span>.</p>
 </div>
 </article>
@@ -239,7 +235,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: A person merges them)</span>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: A person merges them)</span>
 </p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">merge-policy</span>.</p>
 </div>
@@ -366,7 +362,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Rotate long orchestrators by handoff)</span>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Rotate long orchestrators by handoff)</span>
 </p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">fleet-cost-1</span>.</p>
 </div>
@@ -422,7 +418,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">Answer in Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Run it now)</span>
+<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Run it now)</span>
 </p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">jev-idea</span>.</p>
 </div>

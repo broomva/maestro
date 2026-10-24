@@ -433,6 +433,12 @@ mutate $scr/mod.rs 'Some(AskClass::Authority) => Tab::Authority,' ''
 mutate $scr/mod.rs '.filter(|(_, ask)| ask.state() == AskState::Open)' '.filter(|_| true)'
 mutate $scr/mod.rs 'landing: landing(cx, lf, ask),' 'landing: Landing::NotWaiting,'
 mutate $scr/mod.rs 'if unlanded.errors.iter().any(|e| covers(&e.at, &lf.file)) {' 'if false {'
+mutate $scr/mod.rs 'if cx.reads.asks.errors.iter().any(|e| e.at != cx.reads.asks.source && covers(&e.at, &lf.file)) {' 'if false {'
+mutate $scr/mod.rs 'if !refs.iter().any(|r| r.ledger == lf.file && r.id == ask.handle()) {' 'if !refs.iter().any(|r| r.id == ask.handle()) {'
+mutate $scr/mod.rs 'Some((_, name)) if name.ends_with(".yaml") || name.ends_with(".yml") => name == file,' 'Some((_, name)) if name.ends_with(".yaml") => name == file,'
+mutate $scr/mod.rs '    if lf.ledger.asks.iter().filter(|a| a.handle() == ask.handle()).count() > 1 {
+        Landing::Unknown' '    if false {
+        Landing::Unknown'
 mutate $scr/mod.rs 'Some((_, name)) if name.ends_with(".yaml") || name.ends_with(".yml") => name == file,' 'Some((_, name)) if name.ends_with(".yaml") || name.ends_with(".yml") => true,'
 mutate $scr/mod.rs 'ambiguous: ambiguous(lf, ask),' 'ambiguous: false,'
 mutate $scr/mod.rs 'None => a.uid.is_none() && a.id == ask.id,' 'None => a.id == ask.id,'
@@ -465,8 +471,11 @@ mutate $scr/decision.rs '} @else if state == AskState::Open && landing == Landin
 mutate $scr/decision.rs 'let mut matches: Vec<_> = all().filter(|(_, a)| a.uid.as_deref() == Some(ask_id)).collect();' 'let mut matches: Vec<_> = all().filter(|(_, a)| a.uid.as_deref() == Some(ask_id) || a.id == ask_id).collect();'
 mutate $scr/rich.rs 'Some(JsValue::Num(x)) => Some(js_string(*x)),' 'Some(JsValue::Num(x)) => Some(x.to_string()),'
 mutate $scr/mod.rs '    errors.extend(cx.unlanded().errors.iter().filter(|e| ledger.is_none_or(|l| covers(&e.at, l))).cloned());' ''
-mutate $scr/decision.rs '            @if state == AskState::Open {
-                @if let Some(d) = &a.default {' '            @if true {
+mutate $scr/decision.rs '            @if state == AskState::Open && landing == Landing::NotWaiting {
+                @if let Some(d) = &a.default {' '            @if state == AskState::Open {
+                @if let Some(d) = &a.default {'
+mutate $scr/decision.rs '            @if state == AskState::Open && landing == Landing::NotWaiting {
+                @if let Some(d) = &a.default {' '            @if landing == Landing::NotWaiting {
                 @if let Some(d) = &a.default {'
 mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 

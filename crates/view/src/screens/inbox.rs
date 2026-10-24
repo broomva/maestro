@@ -118,7 +118,7 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
                                 span class="mv-irow-title" { (e.ask.title()) }
                                 @match e.landing {
                                     Landing::Waiting => span class="mv-irow-rec" data-tone="success" { "Waiting to land" },
-                                    Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "May already be answered: the working tree could not be read" },
+                                    Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "Not offered here: part of its ledger could not be read" },
                                     Landing::NotWaiting => @if let Some(r) = e.ask.recommended() {
                                         span class="mv-irow-rec" data-tone="info" { "Recommended: " (r.label) }
                                     },

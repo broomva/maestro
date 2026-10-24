@@ -200,7 +200,7 @@ fn the_answer_bar_writes_nothing() {
     let m = machine();
     let html = render(&worktree(m.path()), &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(html.contains("mv-answerbar"), "{html}");
-    assert!(html.contains("Answer in Paseo · Maestro · Decisions"), "{html}");
+    assert!(html.contains("To answer: Paseo · Maestro · Decisions"), "{html}");
     for writer in ["<form", "<button", "formaction", "<script", " onclick", "data-action"] {
         assert!(!html.contains(writer), "{writer} in {html}");
     }
@@ -271,6 +271,8 @@ fn an_answer_in_the_working_tree_waits_to_land() {
     assert!(html.contains(r#"<span class="mv-irow-rec" data-tone="success">Waiting to land</span>"#), "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(d.contains("Answered in the working tree; waiting to land on"), "{d}");
+    // Answered, if not landed: what silence would do no longer applies.
+    assert!(!d.contains("If you don't answer"), "{d}");
     assert!(!d.contains("mv-answerbar"), "{d}");
 }
 
@@ -455,10 +457,10 @@ fn an_unread_working_tree_never_invites_an_answer() {
     assert!(html.contains(r#"data-type="decisions" data-state="partial""#), "{html}");
     assert!(html.contains("worktree:"), "{html}");
     assert!(!html.contains("mv-answerbar") && !html.contains("Recommended: "), "{html}");
-    assert_eq!(html.matches("May already be answered").count(), 6, "{html}");
+    assert_eq!(html.matches("Not offered here").count(), 6, "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(d.contains(r#"data-type="decision" data-state="partial""#), "{d}");
-    assert!(d.contains("may already be answered there"), "{d}");
+    assert!(d.contains("may already be answered, or Paseo may refuse it"), "{d}");
     assert!(!d.contains("mv-answerbar"), "{d}");
 }
 
@@ -469,7 +471,7 @@ fn one_unread_working_tree_ledger_is_unknown_and_the_rest_are_not() {
     });
     let html = render(&store, &inbox()).html;
     assert!(html.contains(r#"data-type="decisions" data-state="partial""#), "{html}");
-    assert_eq!(html.matches("May already be answered").count(), 4, "decisions.yaml's open asks: {html}");
+    assert_eq!(html.matches("Not offered here").count(), 4, "decisions.yaml's open asks: {html}");
     // demo-arc.yaml read cleanly in both trees: its rows still offer the owner path.
     let demo = &html[html.find(r#"data-ask="demo-arc.yaml#merge-now""#).unwrap()..];
     let demo = &demo[..demo[1..].find(r#"<li class="mv-irow""#).map_or(demo.len(), |n| n + 1)];
@@ -516,4 +518,67 @@ fn uids_and_ids_are_separate_namespaces_as_in_the_plugin() {
     // A handle is a uid first: `shared` addresses the ask whose uid it is.
     let d = render(&worktree(m.path()), &detail("ns.yaml", "shared")).html;
     assert!(d.contains("By uid") && !d.contains("By id"), "{d}");
+}
+
+#[test]
+fn a_waiting_answer_that_cannot_say_which_ask_it_answers_is_unknown() {
+    // `shared` is one ask's uid and another's uid-less id. The one with the uid is answered in
+    // the working tree only, and the waiting answer is named `shared`, which fits both.
+    let m = machine();
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::remove_file(asks.join("broken.yaml")).unwrap();
+    std::fs::remove_file(asks.join("alt-key.yaml")).unwrap();
+    let open = "asks:\n  - id: px\n    uid: shared\n    project: ns\n    headline: \"By uid\"\n    exhausted: [\"read: x\"]\n  - id: shared\n    project: ns\n    headline: \"By id\"\n    exhausted: [\"read: x\"]\n";
+    std::fs::write(asks.join("ns.yaml"), open).unwrap();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let answered = open.replacen("    headline: \"By uid\"\n", "    headline: \"By uid\"\n    answer: \"yes\"\n", 1);
+    assert_ne!(open, answered);
+    std::fs::write(asks.join("ns.yaml"), answered).unwrap();
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let html = render(&store, &spec(json!({ "type": "decisions", "props": { "project": "ns" } }))).html;
+    // Neither is claimed waiting, and neither is offered as plainly unanswered.
+    assert!(!html.contains("Waiting to land</span>"), "{html}");
+    assert_eq!(html.matches("Not offered here").count(), 2, "{html}");
+    assert!(!html.contains("mv-answerbar"), "{html}");
+}
+
+#[test]
+fn an_entry_that_did_not_read_withholds_its_ledgers_owner_path() {
+    // The second entry has a uid but no id: it does not read, yet the plugin counts its uid and
+    // refuses `u1` as ambiguous. Nothing in that ledger is offered as answerable.
+    let m = machine();
+    std::fs::write(
+        m.path().join("workspace/.control/asks/amb.yaml"),
+        "asks:\n  - id: a\n    uid: u1\n    project: amb\n    headline: \"Pick A?\"\n    exhausted: [\"read: x\"]\n    options:\n      - { id: x, label: Do X, recommended: true }\n  - uid: u1\n    headline: \"same uid, no id\"\n",
+    )
+    .unwrap();
+    let html = render(&worktree(m.path()), &spec(json!({ "type": "decisions", "props": { "project": "amb" } }))).html;
+    assert!(!html.contains("mv-answerbar") && !html.contains("Recommended: Do X"), "{html}");
+    assert!(html.contains("Not offered here"), "{html}");
+    let d = render(&worktree(m.path()), &detail("amb.yaml", "u1")).html;
+    assert!(!d.contains("mv-answerbar") && d.contains(r#"data-state="partial""#), "{d}");
+}
+
+#[test]
+fn an_answer_waiting_in_another_ledger_is_not_this_ones() {
+    // twin.yaml holds an ask with merge-now's id; only twin's is answered in the working tree.
+    let m = machine();
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::remove_file(asks.join("broken.yaml")).unwrap();
+    std::fs::remove_file(asks.join("alt-key.yaml")).unwrap();
+    let twin = "asks:\n  - id: merge-now\n    project: twin\n    headline: \"Twin\"\n    exhausted: [\"read: x\"]\n";
+    std::fs::write(asks.join("twin.yaml"), twin).unwrap();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    std::fs::write(asks.join("twin.yaml"), twin.replace("    headline", "    answer: \"done\"\n    headline")).unwrap();
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let d = render(&store, &detail("demo-arc.yaml", "merge-now")).html;
+    assert!(!d.contains("waiting to land on") && d.contains("mv-answerbar"), "{d}");
+    let t = render(&store, &detail("twin.yaml", "merge-now")).html;
+    assert!(t.contains("waiting to land on"), "{t}");
 }

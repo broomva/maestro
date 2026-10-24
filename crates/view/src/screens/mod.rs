@@ -70,16 +70,27 @@ fn covers(at: &str, file: &str) -> bool {
     }
 }
 
+/// Unknown also when the tree read has an error inside this ledger: an entry that did not read
+/// may share an ask's uid or id, and the plugin then refuses the answer (`ambiguity()` counts
+/// every row). So a ledger read in part never offers the owner path as if it were whole.
 pub(crate) fn landing(cx: &Ctx, lf: &LedgerFile, ask: &Ask) -> Landing {
+    if cx.reads.asks.errors.iter().any(|e| e.at != cx.reads.asks.source && covers(&e.at, &lf.file)) {
+        return Landing::Unknown;
+    }
     let unlanded = cx.unlanded();
     let Some(refs) = &unlanded.data else { return Landing::Unknown };
     if unlanded.errors.iter().any(|e| covers(&e.at, &lf.file)) {
         return Landing::Unknown;
     }
-    if refs.iter().any(|r| r.ledger == lf.file && r.id == ask.handle()) {
-        Landing::Waiting
+    if !refs.iter().any(|r| r.ledger == lf.file && r.id == ask.handle()) {
+        return Landing::NotWaiting;
+    }
+    // A waiting answer is named by its handle alone: when a uid and a uid-less id in this ledger
+    // share that text, it cannot say which of the two it answers.
+    if lf.ledger.asks.iter().filter(|a| a.handle() == ask.handle()).count() > 1 {
+        Landing::Unknown
     } else {
-        Landing::NotWaiting
+        Landing::Waiting
     }
 }
 
@@ -234,6 +245,15 @@ mod tests {
         assert_eq!(t("2026-10-13").as_deref(), Some("2026-10-13T00:00:00Z"));
         assert_eq!(t("2026-10-13T08:00:00-05:00").as_deref(), Some("2026-10-13T13:00:00Z"));
         assert_eq!(t("last week"), None);
+    }
+
+    #[test]
+    fn an_error_covers_only_its_own_ledger() {
+        assert!(covers("worktree:.control/asks/a.yml", "a.yml"));
+        assert!(!covers("worktree:.control/asks/a.yml", "b.yaml"));
+        assert!(!covers(".control/asks/a.yaml#2", "b.yaml"));
+        assert!(covers(".control/asks/a.yaml#2", "a.yaml"));
+        assert!(covers("worktree:.control/asks", "a.yaml"), "a directory error covers every ledger");
     }
 
     #[test]

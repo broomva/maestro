@@ -70,6 +70,20 @@ const host = Bun.serve({
   },
 });
 
+// After a row opens, the host resizes the frame to the App's new height: wait until it fits,
+// so a screenshot shows the opened decision whole.
+async function fit(tab: import("playwright").Page) {
+  // The App runs in a sandboxed frame: read its height from inside it, the frame's from the host.
+  const inner = tab.frames().find((f) => f !== tab.mainFrame());
+  for (let i = 0; i < 100; i++) {
+    const content = (await inner?.evaluate(() => document.documentElement.scrollHeight)) ?? 0;
+    const frame = await tab.evaluate(() => (document.getElementById("app") as HTMLElement).getBoundingClientRect().height);
+    if (frame + 2 >= content) return;
+    await tab.waitForTimeout(100);
+  }
+  check(false, "the frame never fit the opened decision");
+}
+
 // Let the swap's view transition finish and the frame take the App's reported height.
 async function settle(tab: import("playwright").Page) {
   const inner = tab.frames().find((f) => f !== tab.mainFrame());
@@ -113,6 +127,25 @@ try {
     await ctx.close();
   }
 
+  if (process.argv.includes("--decision")) {
+    // The standalone decision: its title shown, the answer bar pinned in view, no writer.
+    for (const width of [390, 1440]) {
+      const ctx = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 } });
+      const tab = await ctx.newPage();
+      await tab.goto(`http://127.0.0.1:${host.port}/?theme=dark`);
+      const frame = tab.frameLocator("#app");
+      await frame.locator("article.mv-decision").waitFor({ timeout: 15000 });
+      await settle(tab);
+      check(await frame.locator(".mv-dtitle").isVisible(), `decision ${width}px: its title is shown`);
+      check(await frame.locator(".mv-answerbar").isVisible(), `decision ${width}px: the answer bar is shown`);
+      const pinned = await frame.locator(".mv-answerbar").evaluate((el) => getComputedStyle(el).position);
+      check(pinned === "sticky", `decision ${width}px: the answer bar is pinned (${pinned})`);
+      check((await frame.locator("form, button, [onclick]").count()) === 0, `decision ${width}px: no writer`);
+      await tab.screenshot({ path: join(out, `decision-${width}.png`), fullPage: true });
+      await ctx.close();
+    }
+  }
+
   if (process.argv.includes("--decisions")) {
     const snap = await client.callTool({ name: "maestro_ui_render", arguments: { ...spec, format: "snapshot" } });
     const doc = (snap.structuredContent as any)?.text ?? (snap.content as any)?.[0]?.text;
@@ -150,7 +183,10 @@ try {
         check((await article.locator("form, button, [onclick]").count()) === 0, `${what}: the decision holds no writer`);
         const overflow = await scope.locator("body").evaluate((b) => b.scrollWidth - b.clientWidth);
         check(overflow <= 0, `${what}: no horizontal overflow with a row open (${overflow}px)`);
-        if (where === "app") await settle(tab);
+        if (where === "app") {
+          await settle(tab);
+          await fit(tab);
+        }
         await tab.screenshot({ path: join(out, `decisions-${where}-open-${width}.png`), fullPage: true });
         await ctx.close();
       }
