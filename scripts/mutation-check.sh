@@ -372,6 +372,59 @@ mutate $port '    #[arg(long, value_parser = tier_choice)]' '    #[arg(long)]'
 mutate $port '    if py::truthy(graph.get("repos")) && bind.root.as_deref().is_some_and(|r| !r.is_empty()) {' '    if py::truthy(graph.get("repos")) && bind.root.is_some() {'
 mutate $port '                            repos = m.next_value::<Option<Keys>>()?;' '                            repos = repos.or(m.next_value::<Option<Keys>>()?);'
 
+# View (BRO-3203): the catalog validator drops what it cannot place and records each drop; an
+# unread source renders unavailable, never 0; an ask card carries only its own ledger's errors;
+# the page fetches nothing; an unchanged poll sends no html; the poll is offered to the App only.
+cat=crates/view/src/catalog.rs
+render=crates/view/src/render.rs
+page=crates/view/src/page.rs
+mutate $cat 'if let Some(extra) = raw.keys().find(|k| !matches!(k.as_str(), "type" | "props" | "children")) {' 'if let Some(extra) = None::<&String> {'
+mutate $cat '        if self.placed.contains(id) {' '        if false {'
+mutate $cat '        if depth > MAX_DEPTH {' '        if false {'
+mutate $cat '        if self.placed.len() >= MAX_BLOCKS {' '        if false {'
+mutate $cat '            if !kind.children {' '            if false {'
+mutate $cat 'if !walk.placed.contains(id.as_str()) && !walk.dropped.contains(id.as_str()) {' 'if false {'
+mutate $cat '    if value.chars().count() > MAX_HANDLE {' '    if false {'
+mutate $cat '    if value.chars().any(char::is_control) {' '    if false {'
+mutate $cat '    if value.chars().any(is_format) {' '    if false {'
+mutate $cat '        let Some(kind) = KINDS.iter().find(|k| k.name == kind_name) else {' '        let Some(kind) = KINDS.iter().find(|k| k.name == kind_name).or(KINDS.first()) else {'
+mutate $cat '        Some(n) if n == 0 || n > MAX_LIMIT =>' '        Some(n) if n > MAX_LIMIT =>'
+mutate $render '        (None, _) => "unavailable",' '        (None, _) => "ok",'
+mutate $render '                None => span class="mv-tile-value mv-unavailable" { "unavailable" },' '                None => span class="mv-tile-value" { "0" },'
+mutate $render '            || file_at.is_err()' '            || true'
+mutate $render '        [] if unread => html! {' '        [] if false => html! {'
+mutate $render '                @for i in list.iter().take(MAX_ROWS) {' '                @for i in list.iter() {'
+mutate $cat '    if blocks.len() > MAX_SPEC_BLOCKS {' '    if false {'
+mutate $cat "        | '\\u{E0001}' | '\\u{E0020}'..='\\u{E007F}')" "        )"
+mutate $cat '        if self.drops.len() < MAX_DROPS {' '        if true {'
+mutate $cat '    handle("root", root)?;' '    let _ = root;'
+mutate $cat '        handle("block id", id)?;' '        let _ = id;'
+mutate $cat '            handle("block key", key)?;' '            let _ = key;'
+mutate $cat '            handle("type", kind)?;' '            let _ = kind;'
+mutate $cat '            handle("child id", child)?;' '            let _ = child;'
+mutate $cat 'format!("invalid props: {}", clip(&e))' 'format!("invalid props: {e}")'
+mutate $cat '            return Err("the spec takes only `root` and `blocks`".into());' '            return Err(format!("the spec takes only `root` and `blocks`, not `{key}`"));'
+mutate $cat '        .find(|(_, n)| *n > MAX_BLOCKS)' '        .find(|(_, n)| *n > usize::MAX - 1)'
+mutate $cat '    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 50))]
+    pub limit: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Default' '    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Default'
+mutate $render '                @for r in list.iter().take(MAX_ROWS) {' '                @for r in list.iter() {'
+mutate $render '                @for f in list.iter().take(MAX_ROWS) {' '                @for f in list.iter() {'
+mutate $page "script-src 'sha256-{hash}'\")" "script-src 'unsafe-inline'\")"
+mutate $page '            out.push(if i <= chunk.len() {' '            out.push(if i < chunk.len() {'
+mutate $mcp '#[serde(deny_unknown_fields)]
+pub struct UiRenderArgs {' 'pub struct UiRenderArgs {'
+mutate $page '    while let Some(at) = rest.find("@font-face") {' '    while let Some(at) = None::<usize> {'
+mutate $mcp '            if a.revision.as_deref() == Some(r.revision.as_str()) {' '            if false {'
+mutate $mcp '        Ui::AppOnly => json!(["app"]),' '        Ui::AppOnly => json!(["model", "app"]),'
+
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

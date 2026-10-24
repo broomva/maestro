@@ -1,0 +1,16 @@
+{
+  "name": "maestro-view-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run build.ts",
+    "check": "bun run build.ts --check"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2",
+    "playwright": "1.64.0"
+  }
+}

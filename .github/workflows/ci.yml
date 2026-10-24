@@ -62,6 +62,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
+        with:
+          # The MCP App bridge is a checked-in bun build; scripts/bridge-check.sh rebuilds it with this bun.
+          bun-version: 1.4.3
       - run: bash scripts/ci.sh
         env:
           MUTANTS_SHARDED: 1

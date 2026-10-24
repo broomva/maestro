@@ -1,0 +1,28 @@
+---
+source: crates/view/tests/render.rs
+expression: "portable(&r.html, &root)"
+---
+<div class="mv-screen">
+<div class="mv-stack" data-gap="normal" data-block="m">
+<section class="mv-card bv-card" data-block="a" data-type="ask" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Ask</h2>
+</header>
+<p class="mv-note" data-tone="warning">No ask <span class="bv-code">demo-arc.yaml#no-such</span>.</p>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/asks</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="b" data-type="ask" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Ask</h2>
+</header>
+<p class="mv-note" data-tone="warning">No ledger named <span class="bv-code">nope.yaml</span>.</p>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/asks</span>
+</p>
+</section>
+</div>
+<footer class="mv-foot bv-meta">Read from <span class="bv-code">worktree</span>
+</footer>
+</div>

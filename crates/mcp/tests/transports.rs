@@ -166,6 +166,8 @@ async fn every_tool_scenario_is_identical_over_stdio_and_http() {
     for spec in maestro_mcp::TOOLS {
         let args = match spec.name {
             "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
+            "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
+            "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
             _ => json!({}),
         };
         let got = agree(&t, &store, spec.name, args).await;
@@ -208,6 +210,23 @@ async fn every_tool_scenario_is_identical_over_stdio_and_http() {
     agree(&t, &store, "maestro_loops_get", json!({ "drifting": true })).await;
     agree(&t, &store, "maestro_initiatives_list", json!({ "all": true })).await;
     agree(&t, &store, "maestro_work_list", json!({ "limit": "x" })).await;
+    // ui.rs: a render's text is its summary, a snapshot's text is the document, a bad spec is an error
+    let spec = json!({ "root": "m", "blocks": { "m": { "type": "stack", "children": ["a", "x"] },
+        "a": { "type": "ask", "props": { "ledger": "demo-arc.yaml", "id": "merge-now" } }, "x": { "type": "nope" } } });
+    let r = agree(&t, &store, "maestro_ui_render", spec.clone()).await;
+    assert_eq!(r["content"][0]["text"], r["structuredContent"]["text"]);
+    let mut snap = spec.clone();
+    snap["format"] = json!("snapshot");
+    agree(&t, &store, "maestro_ui_render", snap).await;
+    let bad = agree(&t, &store, "maestro_ui_render", json!({ "root": "z", "blocks": {} })).await;
+    assert_eq!(bad["isError"], true);
+    agree(
+        &t,
+        &store,
+        "maestro_ui_poll",
+        json!({ "spec": r["structuredContent"]["spec"], "revision": r["structuredContent"]["revision"] }),
+    )
+    .await;
 
     t.stop().await;
 }

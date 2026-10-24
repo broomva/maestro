@@ -1,0 +1,165 @@
+---
+source: crates/view/tests/render.rs
+expression: "portable(&r.html, empty.path())"
+---
+<div class="mv-screen">
+<div class="mv-stack" data-gap="normal" data-block="main">
+<section class="mv-card bv-card" data-block="snap" data-type="snapshot" data-state="partial">
+<header class="mv-head">
+<h2 class="mv-title">Snapshot</h2>
+</header>
+<div class="mv-tiles">
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value mv-unavailable">unavailable</span>
+<span class="mv-tile-label bv-meta">Needs you</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value mv-unavailable">unavailable</span>
+<span class="mv-tile-label bv-meta">Open asks</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value mv-unavailable">unavailable</span>
+<span class="mv-tile-label bv-meta">Running</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value mv-unavailable">unavailable</span>
+<span class="mv-tile-label bv-meta">Stuck</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value mv-unavailable">unavailable</span>
+<span class="mv-tile-label bv-meta">Loops drifting</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value mv-unavailable">unavailable</span>
+<span class="mv-tile-label bv-meta">Live initiatives</span>
+</div>
+</div>
+<p class="mv-note" data-tone="warning">5 sections read in part or not at all; counts are lower bounds or unavailable.</p>
+</section>
+<section class="mv-card bv-card" data-block="needs" data-type="needs" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Needs you</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">2 sources could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:.broomva/asks</span>: No such file or directory (os error 2)</li>
+<li>
+<span class="bv-code">fs:<fixture>/work</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/asks + fs:<fixture>/work</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="asks" data-type="asks" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Asks</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:.broomva/asks</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/asks</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="ask" data-type="ask" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Ask</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:.broomva/asks</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/asks</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="work" data-type="work" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Work</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">fs:<fixture>/work</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<fixture>/work</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="loops" data-type="loops" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Loops</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">2 sources could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:.broomva/loops</span>: No such file or directory (os error 2)</li>
+<li>
+<span class="bv-code">fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/loops + fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="init" data-type="initiatives" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Initiatives</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:.broomva/initiatives</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/initiatives</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="fleet" data-type="fleet" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Fleet</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">fs:<fixture>/fleet-reconcile</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<fixture>/fleet-reconcile</span>
+</p>
+</section>
+</div>
+<footer class="mv-foot bv-meta">Read from <span class="bv-code">worktree</span>
+</footer>
+</div>

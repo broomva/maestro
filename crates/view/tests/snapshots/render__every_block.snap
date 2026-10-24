@@ -1,0 +1,226 @@
+---
+source: crates/view/tests/render.rs
+expression: "portable(&r.html, &root)"
+---
+<div class="mv-screen">
+<div class="mv-stack" data-gap="normal" data-block="main">
+<section class="mv-card bv-card" data-block="snap" data-type="snapshot" data-state="partial">
+<header class="mv-head">
+<h2 class="mv-title">Snapshot</h2>
+</header>
+<div class="mv-tiles">
+<div class="mv-tile" data-tone="attention">
+<span class="mv-tile-value">3</span>
+<span class="mv-tile-label bv-meta">Needs you</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value">3</span>
+<span class="mv-tile-label bv-meta">Open asks</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value">0</span>
+<span class="mv-tile-label bv-meta">Running</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value">0</span>
+<span class="mv-tile-label bv-meta">Stuck</span>
+</div>
+<div class="mv-tile" data-tone="warning">
+<span class="mv-tile-value">2</span>
+<span class="mv-tile-label bv-meta">Loops drifting</span>
+</div>
+<div class="mv-tile" data-tone="neutral">
+<span class="mv-tile-value">1</span>
+<span class="mv-tile-label bv-meta">Live initiatives</span>
+</div>
+</div>
+<p class="mv-note" data-tone="warning">2 sections read in part or not at all; counts are lower bounds or unavailable.</p>
+</section>
+<section class="mv-card bv-card" data-block="needs" data-type="needs" data-state="partial">
+<header class="mv-head">
+<h2 class="mv-title">Needs you</h2>
+<span class="mv-count">3</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row" data-key="ask:alt-key.yaml#alt-blocking">
+<span class="mv-row-title">Held under the corpus's other spelling?</span>
+<span class="mv-row-meta bv-meta">ask · demo</span>
+</li>
+<li class="mv-row" data-key="ask:demo-arc.yaml#merge-now">
+<span class="mv-row-title">Merge the demo PR now, or hold for review?</span>
+<span class="mv-row-meta bv-meta">ask · demo · since 2026-10-01T10:00Z</span>
+</li>
+<li class="mv-row" data-key="work:22222222-0000-0000-0000-000000000000">
+<span class="mv-row-title">Held for you</span>
+<span class="mv-row-meta bv-meta">owner step · since 2026-10-03T01:00:00Z</span>
+</li>
+</ul>
+<details class="mv-errors">
+<summary data-tone="warning">Partial: 2 sources could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">.control/asks/broken.yaml</span>: outside the YAML subset Maestro reads exactly: what this reader's YAML parser refuses (while parsing a flow sequence, expected ',' or ']' at byte 12 line 2 column 1)</li>
+<li>
+<span class="bv-code">.control/asks/alt-key.yaml#2</span>: entry is not a mapping</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/asks + fs:<fixture>/work</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="asks" data-type="asks" data-state="partial">
+<header class="mv-head">
+<h2 class="mv-title">Asks</h2>
+<span class="mv-count">5</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row" data-ask="alt-key.yaml#alt-blocking">
+<span class="mv-row-title">Held under the corpus's other spelling?</span>
+<span class="mv-row-meta bv-meta">alt-key.yaml · <span data-tone="attention">blocking</span>
+</span>
+</li>
+<li class="mv-row" data-ask="alt-key.yaml#resolved-by-resolution">
+<span class="mv-row-title">Answered under the resolution key?</span>
+<span class="mv-row-meta bv-meta">alt-key.yaml · <span data-tone="attention">blocking</span>
+</span>
+</li>
+<li class="mv-row" data-ask="demo-arc.yaml#merge-now">
+<span class="mv-row-title">Merge the demo PR now, or hold for review?</span>
+<span class="mv-row-meta bv-meta">demo-arc.yaml · <span data-tone="attention">blocking</span>
+</span>
+</li>
+<li class="mv-row" data-ask="demo-arc.yaml#pick-name">
+<span class="mv-row-title">Which name?</span>
+<span class="mv-row-meta bv-meta">demo-arc.yaml</span>
+</li>
+<li class="mv-row" data-ask="demo-arc.yaml#old-one">
+<span class="mv-row-title">Done already?</span>
+<span class="mv-row-meta bv-meta">demo-arc.yaml · <span data-tone="attention">blocking</span>
+</span>
+</li>
+</ul>
+<details class="mv-errors">
+<summary data-tone="warning">Partial: 2 sources could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">.control/asks/broken.yaml</span>: outside the YAML subset Maestro reads exactly: what this reader's YAML parser refuses (while parsing a flow sequence, expected ',' or ']' at byte 12 line 2 column 1)</li>
+<li>
+<span class="bv-code">.control/asks/alt-key.yaml#2</span>: entry is not a mapping</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/asks</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="ask" data-type="ask" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Ask</h2>
+</header>
+<div class="mv-ask" data-ask="demo-arc.yaml#merge-now" data-hash="5b70dab7a7f0afa6">
+<p class="mv-ask-title">Merge the demo PR now, or hold for review?</p>
+<p class="mv-row-meta bv-meta">open · <span data-tone="attention">blocking</span> · demo</p>
+<ol class="mv-options">
+<li class="mv-option" data-option="merge" data-recommended="true">
+<span class="mv-option-label">Merge now</span> <span class="mv-badge" data-tone="info">recommended</span>
+<p class="mv-option-consequence bv-meta">Ships today.</p>
+</li>
+<li class="mv-option" data-option="hold" data-recommended="false">
+<span class="mv-option-label">Hold</span>
+<p class="mv-option-consequence bv-meta">Nothing changes.</p>
+</li>
+</ol>
+<p class="mv-hash bv-meta">entry <span class="bv-code">5b70dab7a7f0</span>
+</p>
+</div>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/asks</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="work" data-type="work" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Work</h2>
+<span class="mv-count">3</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row" data-work="held-for-you">
+<span class="mv-row-title">Held for you</span>
+<span class="mv-row-meta bv-meta">
+<span class="mv-state" data-state="Queued">Queued</span> · 2026-10-03T01:00:00Z</span>
+</li>
+<li class="mv-row" data-work="quiet-run">
+<span class="mv-row-title">Quiet run</span>
+<span class="mv-row-meta bv-meta">
+<span class="mv-state" data-state="Standing">Standing</span> · 2026-10-03T00:31:00Z</span>
+</li>
+<li class="mv-row" data-work="demo-task">
+<span class="mv-row-title">Demo task title</span>
+<span class="mv-row-meta bv-meta">
+<span class="mv-state" data-state="Needs you">Needs you</span> · 2026-10-02T01:00:00Z</span>
+</li>
+</ul>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<fixture>/work</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="loops" data-type="loops" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Loops</h2>
+<span class="mv-count">2</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row" data-loop="demo-tick">
+<span class="mv-row-title">Demo coordinator tick</span>
+<span class="mv-row-meta bv-meta">interval: 2h · t3-schedule · last tick 2026-10-01T02:00:00Z</span>
+<span class="mv-badge" data-tone="warning">tick unclosed</span>
+</li>
+<li class="mv-row" data-loop="silent">
+<span class="mv-row-title">Silent loop</span>
+<span class="mv-row-meta bv-meta">hourly · launchd · no tick recorded</span>
+<span class="mv-badge" data-tone="info">review overdue</span>
+<span class="mv-badge" data-tone="info">no tick receipts</span>
+</li>
+</ul>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/loops + fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="init" data-type="initiatives" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Initiatives</h2>
+<span class="mv-count">2</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row" data-initiative="demo">
+<span class="mv-row-title">Demo initiative</span>
+<span class="mv-row-meta bv-meta">active</span>
+<p class="mv-row-body">Next: Ship the demo.</p>
+</li>
+<li class="mv-row" data-initiative="parked">
+<span class="mv-row-title">Parked initiative</span>
+<span class="mv-row-meta bv-meta">parked</span>
+<p class="mv-row-body">Next: Nothing.</p>
+</li>
+</ul>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/initiatives</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="fleet" data-type="fleet" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Fleet</h2>
+<span class="mv-count">1</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row" data-scope="broomva">
+<span class="mv-row-title">broomva</span>
+<span class="mv-row-meta bv-meta">tick 12 · 2026-10-02T00:00:00Z · 2 sessions · 0 drift · dry run</span>
+</li>
+</ul>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<fixture>/fleet-reconcile</span>
+</p>
+</section>
+</div>
+<footer class="mv-foot bv-meta">Read from <span class="bv-code">worktree</span>
+</footer>
+</div>
