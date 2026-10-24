@@ -123,6 +123,12 @@ mutate $session 'if id.is_empty() {
             // A blank ID' 'if false {
             // A blank ID'
 mutate $cli 'if std::time::Instant::now() >= deadline {' 'if false {'
+# Text: an unread section prints why, never its counts (BRO-3322); hosts claims no adapter.
+mutate $cli '("unreadable", unavailable(&errors))' '("unreadable", line)'
+mutate $cli '[e] => format!("unavailable ({})", s(&e["reason"])),' '[_] => "unavailable".to_string(),'
+mutate $cli '[e, rest @ ..] => format!("unavailable ({}; and {} more, use --json)", s(&e["reason"]), rest.len()),' '[e, ..] => format!("unavailable ({})", s(&e["reason"])),'
+mutate $cli '    println!("These are what each surface and harness can do. Maestro launches and sends nothing yet (BRO-3276).");
+' ''
 mutate $cli 'status.success().then_some(buf)' 'Some(buf)'
 mutate $cli 'let _ = child.kill();' ''
 mutate $cli 'let buf = rx.recv_timeout(left).ok()?.ok()?;' 'let buf = rx.recv().ok()?.ok()?;'

@@ -111,6 +111,9 @@ enum Command {
     /// What each surface may do, and the standing invariants.
     Authority,
     /// This node, and the known surfaces and harnesses with their capabilities.
+    ///
+    /// A capability says what the surface or harness can do, not what Maestro does with it:
+    /// Maestro launches and sends nothing until its host adapters land (BRO-3276).
     Hosts,
     /// Self-checks: is the vendored path reader the one bstack generates from its registry?
     Doctor {
@@ -462,14 +465,16 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
 
 fn human_snapshot(v: &Value) {
     println!("Maestro snapshot  {}  tree {}", s(&v["generated_at"]), s(&v["tree"]));
+    // An unread section prints why, never its counts: unread is not empty (BRO-3322).
     let section = |name: &str, line: String| {
         let sec = &v[name];
-        let mark = if sec["data"].is_null() {
-            "unreadable"
-        } else if sec["errors"].as_array().is_some_and(|e| !e.is_empty()) {
-            "partial"
+        let errors = sec["errors"].as_array().cloned().unwrap_or_default();
+        let (mark, line) = if sec["data"].is_null() {
+            ("unreadable", unavailable(&errors))
+        } else if !errors.is_empty() {
+            ("partial", line)
         } else {
-            "ok"
+            ("ok", line)
         };
         println!("  {name:<12} {mark:<11} {line}");
     };
@@ -504,6 +509,15 @@ fn human_snapshot(v: &Value) {
     let fleet_line =
         fleet.iter().map(|f| format!("{} tick {}", s(&f["scope"]), f["tick"])).collect::<Vec<_>>().join(", ");
     section("fleet", fleet_line);
+}
+
+/// `unavailable (<first reason>)`, naming how many more there are.
+fn unavailable(errors: &[Value]) -> String {
+    match errors {
+        [] => "unavailable".to_string(),
+        [e] => format!("unavailable ({})", s(&e["reason"])),
+        [e, rest @ ..] => format!("unavailable ({}; and {} more, use --json)", s(&e["reason"]), rest.len()),
+    }
 }
 
 fn context(cli: &Cli, store: &Store) -> Result<String> {
@@ -583,6 +597,7 @@ fn hosts(as_json: bool) {
             println!("  {:<12} {}", s(&r[key]), true_keys(&r["capabilities"]));
         }
     }
+    println!("These are what each surface and harness can do. Maestro launches and sends nothing yet (BRO-3276).");
 }
 
 /// This machine: `MAESTRO_NODE` (a stable node ID), else `tailscale status`, else unknown.
