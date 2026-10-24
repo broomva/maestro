@@ -185,8 +185,9 @@ pub struct AskCounts {
     pub answered: usize,
     pub archived: usize,
     /// Open on the read revision but answered in the working tree or on `maestro/answers`:
-    /// waiting to land. `None` when those could not be read (unread is not none), and when the
-    /// store reads the working tree itself: nothing lands onto it, so no count is made.
+    /// waiting to land, as the plugin's batch counts them. `None` when it is not known: a read
+    /// came back in part or not at all (unread is not none), or the store reads the working
+    /// tree itself (nothing lands onto it, so no count is made).
     pub unlanded: Option<usize>,
 }
 
@@ -309,8 +310,8 @@ fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
 
 /// Asks open at the store's git revision but answered in the workspace working tree or on
 /// [`ANSWERS_BRANCH`]. Empty when the store already reads the working tree. The section's
-/// errors are those two reads' failures: an unreadable ledger there hides answers waiting to
-/// land, so the count is then a lower bound, and `data` is `None` when either read failed whole.
+/// errors are those two reads' failures: an unreadable ledger there may hide answers waiting to
+/// land, so the rows are then the ones seen, and `data` is `None` when either read failed whole.
 pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
     if store.reads_worktree() {
         return Section::ok("worktree", Vec::new());
@@ -328,7 +329,8 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
         }
         answered
             .iter()
-            .filter(|k| first.get(*k) == Some(&AskState::Open))
+            // Open there, or not held there at all: such an answer still waits (the plugin).
+            .filter(|k| first.get(*k).is_none_or(|s| *s == AskState::Open))
             .map(|(ledger, key)| Waiting { ledger: ledger.clone(), key: key.clone() })
             .collect()
     };
@@ -450,11 +452,15 @@ pub struct Snapshot {
     pub fleet: Section<Vec<FleetSummary>>,
 }
 
-/// Ask counts, with the working tree's read errors joined in: they make the unlanded count a lower bound.
+/// Ask counts, with the working tree's read errors joined in: with any read error the unlanded count is not known.
 fn asks_with_unlanded(store: &Store, asks: &Section<Vec<LedgerFile>>) -> Section<AskCounts> {
+    let whole_tree = asks.errors.is_empty();
     let mut section = asks.as_ref().map(|a| {
         let waiting = unlanded(store, a);
-        let count = waiting.data.as_ref().map(Vec::len).filter(|_| !store.reads_worktree());
+        // The plugin's batch count, known only when every read was whole: an entry that did not
+        // read may hold an answer, or shadow one by its key. Never a bound that may be false.
+        let whole = whole_tree && waiting.errors.is_empty();
+        let count = waiting.data.as_ref().map(Vec::len).filter(|_| whole && !store.reads_worktree());
         (AskCounts { unlanded: count, ..ask_counts(a) }, waiting.errors)
     });
     let local_errors = section.data.as_mut().map(|(_, e)| std::mem::take(e)).unwrap_or_default();

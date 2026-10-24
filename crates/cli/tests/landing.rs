@@ -1,5 +1,5 @@
 //! The human snapshot's landing clause (BRO-3269): a count of answers not yet landed only where
-//! one is made, "unread" where it could not be read, never 0 or null in their place.
+//! one is made and known, "not known" otherwise, never 0 or null in their place.
 
 use std::path::Path;
 use std::process::Command;
@@ -41,13 +41,13 @@ fn asks_line(tree: &str, branch: impl FnOnce(&Path)) -> String {
 }
 
 #[test]
-fn a_count_that_could_not_be_read_says_unread_never_null() {
+fn a_count_that_could_not_be_read_says_not_known_never_null() {
     let line = asks_line("main", |ws| {
         // maestro/answers names an object the repo does not hold.
         std::fs::create_dir_all(ws.join(".git/refs/heads/maestro")).unwrap();
         std::fs::write(ws.join(".git/refs/heads/maestro/answers"), format!("{}\n", "1".repeat(40))).unwrap();
     });
-    assert!(line.contains("answered in this checkout or on maestro/answers: unread"), "{line}");
+    assert!(line.contains("answered in this checkout or on maestro/answers: not known"), "{line}");
     assert!(!line.contains("null") && !line.contains("0 answered in this checkout"), "{line}");
 }
 
@@ -71,7 +71,7 @@ fn a_waiting_answer_is_counted_exactly() {
 }
 
 #[test]
-fn a_count_from_a_partial_read_is_a_lower_bound() {
+fn a_count_from_a_partial_read_is_not_known() {
     let line = asks_line("main", |ws| {
         git(ws, &["checkout", "-q", "-b", "maestro/answers"]);
         std::fs::write(ws.join(".control/asks/b.yaml"), "asks: [unclosed\n").unwrap();
@@ -79,5 +79,6 @@ fn a_count_from_a_partial_read_is_a_lower_bound() {
         git(ws, &["commit", "-q", "-m", "broken"]);
         git(ws, &["checkout", "-q", "main"]);
     });
-    assert!(line.contains(", at least 0 answered in this checkout or on maestro/answers, not yet landed"), "{line}");
+    // A ledger that did not read may hold an answer: the count is not known, never a bound.
+    assert!(line.contains("answered in this checkout or on maestro/answers: not known"), "{line}");
 }

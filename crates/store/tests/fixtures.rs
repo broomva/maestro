@@ -286,6 +286,89 @@ fn unlanded_reports_an_unreadable_working_tree_ledger() {
         snap.asks.errors.iter().any(|e| e.at.starts_with("worktree:")),
         "the snapshot shows the count is a lower bound"
     );
+    // The tree at main read whole, the working tree did not: the count is not known.
+    assert_eq!(snap.asks.data.unwrap().unlanded, None);
+}
+
+#[test]
+fn reading_the_working_tree_makes_no_unlanded_count() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks:\n  - id: a\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let asks = views::snapshot(&Store::new(paths, TreeSource::WorkingTree)).asks;
+    assert!(asks.errors.is_empty(), "{:?}", asks.errors);
+    assert_eq!(asks.data.unwrap().unlanded, None, "nothing lands onto the working tree: no count, not 0");
+}
+
+#[test]
+fn one_unreadable_working_tree_ledger_makes_the_count_unknown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks:\n  - id: a\n").unwrap();
+    std::fs::write(ws.join(".control/asks/c.yaml"), "asks:\n  - id: c\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks: [unclosed\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let s = Store::new(paths, TreeSource::GitRev("main".into()));
+    let waiting = views::unlanded(&s, s.asks().data.as_deref().unwrap());
+    assert!(waiting.data.is_some() && !waiting.errors.is_empty(), "{waiting:?}");
+    // c.yaml read and holds no answer, a.yaml did not read and may: 0 would be a false count.
+    let snap = views::snapshot(&s);
+    assert!(snap.asks.errors.iter().any(|e| e.at.starts_with("worktree:")));
+    assert_eq!(snap.asks.data.unwrap().unlanded, None);
+}
+
+#[test]
+fn an_unreadable_ledger_at_the_read_tree_makes_the_count_unknown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks: [unclosed\n").unwrap();
+    std::fs::write(ws.join(".control/asks/c.yaml"), "asks:\n  - id: c\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    // Mended in the working tree, so only the read tree's entry is unread: it may shadow an answer.
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks:\n  - id: a\n").unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let s = Store::new(paths, TreeSource::GitRev("main".into()));
+    let at_main = s.asks();
+    assert!(!at_main.errors.is_empty());
+    assert!(views::unlanded(&s, at_main.data.as_deref().unwrap()).errors.is_empty());
+    assert_eq!(views::snapshot(&s).asks.data.unwrap().unlanded, None);
+}
+
+#[test]
+fn an_answer_to_an_ask_the_tree_does_not_hold_still_waits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks:\n  - id: a\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    // Filed and answered in the working tree only: main holds no ask with this key.
+    std::fs::write(
+        ws.join(".control/asks/b.yaml"),
+        "asks:\n  - id: b\n    answer: \"x\"\n    answered_at: \"2026-10-03T00:00:00Z\"\n    status: resolved\n",
+    )
+    .unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws;
+    let s = Store::new(paths, TreeSource::GitRev("main".into()));
+    let waiting = views::unlanded(&s, s.asks().data.as_deref().unwrap());
+    assert!(waiting.errors.is_empty(), "{:?}", waiting.errors);
+    let ledgers: Vec<_> = waiting.data.unwrap().iter().map(|w| w.ledger.clone()).collect();
+    assert_eq!(ledgers, ["b.yaml"]);
+    assert_eq!(views::snapshot(&s).asks.data.unwrap().unlanded, Some(1));
 }
 
 #[test]

@@ -31,7 +31,13 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
     let unlanded = cx.unlanded();
     // A row whose landing is unknown may be waiting too: then no count on the screen is exact.
     let partial = !section.errors.is_empty() || rows().any(|e| e.landing == Landing::Unknown);
-    let waiting = rows().filter(|e| e.landing == Landing::Waiting).count();
+    // The whole inbox shows the store's count when it is known (the plugin's batch count, with
+    // answers to asks the tree no longer holds); otherwise the rows seen waiting, a lower bound.
+    let known = cx.snap.asks.data.as_ref().and_then(|c| c.unlanded).filter(|_| p.project.is_none());
+    let waiting = match known {
+        Some(n) => (n, false),
+        None => (rows().filter(|e| e.landing == Landing::Waiting).count(), partial),
+    };
     // Reading the working tree itself, there is nothing to land onto it: no count is made.
     let worktree = cx.store.tree.source == maestro_store::TreeSource::WorkingTree;
     // Radio names and ids unique in the document, so two inboxes never share a group.
@@ -40,7 +46,7 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
         p class="mv-sub bv-meta" {
             (at_least(count(Tab::All), partial)) " open"
             @match &unlanded.data {
-                Some(_) if !worktree => { " · " (at_least(waiting, partial)) " answered, not yet landed" },
+                Some(_) if !worktree => { " · " (at_least(waiting.0, waiting.1)) " answered, not yet landed" },
                 Some(_) => {},
                 None => { " · answered, not yet landed: " span class="mv-unavailable" { "unavailable" } },
             }
@@ -57,7 +63,7 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
                     }
                 }
             }
-            (banner(cx, waiting, partial))
+            (banner(cx, waiting.0, waiting.1))
             @for tab in Tab::ALL {
                 @if count(tab) == 0 {
                     p class="mv-tab-empty mv-empty bv-meta" data-tab=(tab.as_str()) {
