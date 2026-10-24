@@ -78,23 +78,45 @@ def _dead(d: Path) -> bool:
             return False
     except FileNotFoundError:
         return False  # released: take it with the next mkdir
+    # As locks.rs `holder_alive`: an unreadable pid file is dead; a missing or unreadable start,
+    # or one `ps` cannot give, is alive; otherwise the start must agree within 2 s.
     try:
-        pid, start = ((d / "pid").read_text().split() + [""])[:2]
-        os.kill(int(pid), 0)
+        words = (d / "pid").read_text().split()
+        pid = int(words[0])
+        if pid <= 0:
+            return True
+    except (OSError, ValueError, IndexError):
+        return True
+    try:
+        os.kill(pid, 0)
     except ProcessLookupError:
         return True
-    except (OSError, ValueError):
-        return True
-    out = subprocess.run(["ps", "-o", "etime=", "-p", pid], capture_output=True, text=True).stdout
-    return not start.isdigit() or abs(_start_of(out) - int(start)) > 2
+    except PermissionError:
+        pass
+    try:
+        start = float(words[1])
+    except (IndexError, ValueError):
+        return False
+    out = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)], capture_output=True, text=True).stdout
+    if not out.strip():
+        return False
+    return abs(_start_of(out) - start) > 2
+
+
+RECLAIM_STALE_S = 60  # locks.ts RECLAIM_STALE_MS
 
 
 def _reclaim(d: Path) -> None:
     """Moves a dead holder's lock aside under the `.reclaim.d` mutex, re-checking it there."""
-    mutex = Path(f"{d}.reclaim.d")
+    mutex = d.with_name(d.name.removesuffix(".d") + ".reclaim.d")  # `<key>.reclaim.d`, as locks.ts
     try:
         mutex.mkdir()
     except FileExistsError:
+        try:  # a reclaimer that died left its mutex: break it once it is old, as locks.ts does
+            if time.time() - mutex.stat().st_mtime >= RECLAIM_STALE_S:
+                mutex.rmdir()
+        except OSError:
+            pass
         return
     try:
         if _dead(d):
@@ -163,7 +185,7 @@ def file(ledger: Path, ask: dict, session, wait: float) -> str:
             d.mkdir()
             break
         except FileExistsError:
-            if _dead(d):
+            if _dead(d) and time.time() < deadline:
                 _reclaim(d)
                 continue
             if time.time() >= deadline:

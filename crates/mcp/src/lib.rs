@@ -619,11 +619,13 @@ pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Va
                 let filed = json!({ "ledger": filed.ledger, "id": filed.id });
                 return Err(McpError::internal_error(
                     format!(
-                        "filed `{}` in {}, but its requests journal line was not written: {e}. The ask stands; filing it again is refused as a duplicate.",
+                        "filed `{}` in {}, but its requests journal line was not written: {}. The ask stands; filing it again is refused as a duplicate.",
                         filed["id"].as_str().unwrap_or_default(),
-                        filed["ledger"].as_str().unwrap_or_default()
+                        filed["ledger"].as_str().unwrap_or_default(),
+                        e.to_string().trim_end_matches('.')
                     ),
-                    Some(json!({ "filed": filed, "busy": is_busy(&e) })),
+                    // Not busy: the ask is written, so a retry is refused as a duplicate.
+                    Some(json!({ "filed": filed })),
                 ));
             }
             return Ok(json!({ "request": record, "validator": filed.validator }));

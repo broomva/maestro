@@ -16,7 +16,9 @@
 //   6. a dead holder's 200 s old lock is reclaimed by Maestro;
 //   7. a live pid whose start time is not the recorded one (a reused pid), 200 s old, is reclaimed;
 //   8. 20 parallel `maestro queue` while the plugin takes and releases the same lock 20 times:
-//      20 whole journal lines, and no plugin hold saw the journal change under it.
+//      20 whole journal lines, and no plugin hold saw the journal change under it;
+//   9. the plugin's own live lock, aged 200 s: never reclaimed; `maestro queue` waits it out and
+//      exits 75 (busy), and the lock is still the plugin's.
 // Usage: bun .lock-parity.ts <maestro binary> <fixtures/requests> <scratch dir>
 import { copyFileSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -216,5 +218,23 @@ for (const [n, pid, what] of [
   for (let i = 0; i < 20; i++) if (got.filter((t) => t === `par-${i}`).length !== 1) fail(`par-${i} is not one line`);
   if (got.length !== 20) fail(`${got.length} journal lines, want 20`);
   console.log("lock-parity 8 ok: 20 journal writers and 20 plugin holds, 20 whole lines, none under a plugin hold");
+}
+
+// 9. A live holder is never reclaimed, however old its lock.
+{
+  const m = machine();
+  const path = journalOf(m.root);
+  const lock = await acquireLock(path, journalLocks(m.root));
+  const dir = join(journalLocks(m.root), `${await lockKey(path)}.d`);
+  const token = readFileSync(join(dir, "token"), "utf8");
+  const old = new Date(Date.now() - 200_000);
+  utimesSync(dir, old, old);
+  const r = await queue(m.root, "live-holder");
+  if (r.code !== 75) fail(`maestro took a live holder's old lock or did not say busy (exit ${r.code}): ${r.stderr}`);
+  if (!existsSync(join(dir, "token")) || readFileSync(join(dir, "token"), "utf8") !== token)
+    fail("the plugin's live lock was taken away");
+  if (lines(path).length !== 0) fail("maestro wrote the journal under a live holder's lock");
+  await releaseLock(lock);
+  console.log("lock-parity 9 ok: a live holder's 200 s old lock was kept; maestro waited it out and exited 75");
 }
 console.log("lock-parity ok");

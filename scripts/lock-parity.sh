@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lock parity: Maestro's port of the plugin's §5.5 lock against the plugin's own code
 # (server/locks.ts and its answer path), at the revision pinned in fixtures/parity/plugin-rev.
-# See scripts/lock-parity.ts for the eight checks. Needs git, bun, cargo and network;
+# See scripts/lock-parity.ts for the nine checks. Needs git, bun, cargo and network;
 # MAESTRO_PASEO_DIR=<checkout at the pin> skips the fetch. LOCK_PARITY_WRITER=<ask_ledger.py> runs the
 # ledger checks with the real writer of record instead of the stub.
 set -euo pipefail
