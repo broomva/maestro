@@ -277,7 +277,7 @@ error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
 ```bash
 bash scripts/ci.sh             # the whole gate, as CI runs it (needs bun and network for parity)
 cargo test                     # the suite alone
-scripts/mutation-check.sh      # each guarded predicate's mutant must fail the suite
+scripts/mutation-check.sh      # each guarded predicate's mutant must fail the suite (MUTANT_SHARD=i/N: every Nth)
 python3 scripts/parity-delegation.py --workspace ~/broomva   # the delegation and economy ports against the workspace's Python
 ```
 

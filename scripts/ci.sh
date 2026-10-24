@@ -10,7 +10,9 @@ step() { echo "== $*"; "$@"; }
 step cargo fmt --all --check
 step cargo clippy --workspace --all-targets --locked -- -D warnings
 step cargo test --workspace --locked
-step scripts/mutation-check.sh
+# The workflow runs the mutants in shards before this job (BRO-3446) and sets
+# MUTANTS_SHARDED=1 here only after every shard passed; run alone, this runs them all.
+if [ "${MUTANTS_SHARDED:-}" = 1 ]; then echo "== mutation: ran in the workflow's shards"; else step scripts/mutation-check.sh; fi
 step scripts/parity-check.sh
 step scripts/tail-bench.sh
 step scripts/bridge-check.sh

@@ -12,6 +12,12 @@ cd "$(dirname "$0")/.."
 command -v timeout >/dev/null || { echo "mutation-check needs \`timeout\` (GNU coreutils)"; exit 3; }
 limit=${MUTANT_TIMEOUT_SECS:-900}
 [[ $limit =~ ^[1-9][0-9]*$ ]] || { echo "MUTANT_TIMEOUT_SECS must be a positive whole number of seconds"; exit 3; }
+# MUTANT_SHARD=i/N runs only the mutants whose position (0-based, in file order) is i mod N, so
+# N jobs with i = 0..N-1 together run every mutant once (BRO-3446). Unset, it runs them all.
+shard=${MUTANT_SHARD:-0/1}
+[[ $shard =~ ^(0|[1-9][0-9]*)/([1-9][0-9]*)$ ]] && ((BASH_REMATCH[1] < BASH_REMATCH[2])) \
+  || { echo "MUTANT_SHARD must be i/N with 0 <= i < N"; exit 3; }
+shard_i=${BASH_REMATCH[1]} shard_n=${BASH_REMATCH[2]}
 
 copy=$(mktemp -d)
 trap 'rm -rf "$copy"' EXIT
@@ -35,11 +41,13 @@ fi
 echo "baseline  green"
 
 set +e
-failed=0 killed=0 total=0
+failed=0 killed=0 total=0 seen=0
 mutate() { # file, old, new[, crash]: the anchor must occur exactly once. `crash` names the one
   # abort that counts as a kill, for a guard whose whole purpose is to prevent it (`stack
   # overflow`): the runtime's own whole line plus the test process's SIGABRT, never a timeout.
   local file=$1 old=$2 new=$3 crash=${4:-} code caught
+  seen=$((seen + 1))
+  (((seen - 1) % shard_n == shard_i)) || return 0
   total=$((total + 1))
   git checkout -q -- . && git clean -qfdx -e log -e .target || { echo "cannot reset the copy"; exit 3; }
   if ! python3 - "$file" "$old" "$new" <<'PY'
@@ -417,5 +425,6 @@ mutate $page '    while let Some(at) = rest.find("@font-face") {' '    while let
 mutate $mcp '            if a.revision.as_deref() == Some(r.revision.as_str()) {' '            if false {'
 mutate $mcp '        Ui::AppOnly => json!(["app"]),' '        Ui::AppOnly => json!(["model", "app"]),'
 
-echo "mutation  $killed of $total killed"
+echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
+[ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
