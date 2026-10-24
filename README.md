@@ -206,7 +206,9 @@ Maestro decides every value on it:
 - `maestro_ui_render { root, blocks }` validates the spec, places what it can and reports every drop
   with its reason (an unknown type, a prop the type does not take, a cycle, a missing or unreachable
   block, more than 64 blocks or 6 levels). It reads every value from a Store built for that call and
-  renders HTML with maud. A source that could not be read renders as unavailable, never as 0. In an MCP
+  renders HTML with maud. A source that could not be read renders as unavailable, never as 0 (an ask
+  card on a ledger that exists but did not read says so, not "no ledger"). Lists without a `limit`
+  (loops, initiatives, fleet) stop at 50 rows and say how many more there are. In an MCP
   Apps host the result opens `ui://maestro/view.html`, which shows it and polls the app-only
   `maestro_ui_poll` with its revision every 15 s while visible; a poll returns html only when the
   revision (sha256 of the html) changed. `format: "snapshot"` returns a standalone HTML document with
@@ -215,10 +217,13 @@ Maestro decides every value on it:
   script, `assets/bridge.js`: the official MCP Apps client (`@modelcontextprotocol/ext-apps` 2.0.3),
   built with bun from `crates/view/bridge/src`. The build is checked in; `scripts/bridge-check.sh`
   (in `ci.sh`) fails unless it is what bun 1.4.3 builds from the source, and the crate's test pins its
-  sha256. There is no WebAssembly: T3's CSP blocks it.
+  sha256. The page's Content-Security-Policy allows no fetch and no script but that bridge, by its
+  hash, so markup in a forged tool result runs nothing (the e2e checks it). There is no WebAssembly:
+  T3's CSP blocks it.
 - `scripts/view-e2e.sh [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
   (the ext-apps `AppBridge`) against `maestro serve --http`: on the real ledgers at `origin/main`,
-  and on a scratch copy of the fixture that it edits to prove the poll. It writes screenshots at 390
+  and on a scratch copy of the fixture that it edits to prove the poll; it also sends a forged result
+  whose inline handler must not run. It writes screenshots at 390
   and 1440 px, light and dark. It is not in `ci.sh` (it needs WebKit: `cd crates/view/bridge && bun
   install && bunx playwright install webkit`).
 

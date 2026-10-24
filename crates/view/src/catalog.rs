@@ -415,7 +415,18 @@ fn handle(field: &str, value: &str) -> Result<(), String> {
     if value.chars().any(char::is_control) {
         return Err(format!("`{field}` holds a control character"));
     }
+    if value.chars().any(is_format) {
+        return Err(format!("`{field}` holds an invisible formatting character"));
+    }
     Ok(())
+}
+
+/// Unicode format characters (category Cf) that can reorder or hide text: bidi overrides and
+/// isolates, zero-width marks, the soft hyphen, the BOM. A handle is shown back to the owner.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
 }
 
 fn limit(value: Option<u8>) -> Result<(), String> {

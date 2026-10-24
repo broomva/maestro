@@ -88,23 +88,25 @@ fn handles_and_limits_are_bounded() {
     let v = validate(&json!({
         "root": "main",
         "blocks": {
-            "main": { "type": "stack", "children": ["a", "b", "c", "d", "e"] },
+            "main": { "type": "stack", "children": ["a", "b", "c", "d", "e", "f"] },
             "a": { "type": "ask", "props": { "ledger": long, "id": "x" } },
             "b": { "type": "ask", "props": { "ledger": "l.yaml", "id": "" } },
             "c": { "type": "asks", "props": { "limit": 0 } },
             "d": { "type": "work", "props": { "limit": 51 } },
             "e": { "type": "loops", "props": { "id": "a\nb" } },
+            "f": { "type": "ask", "props": { "ledger": "a\u{202e}b.yaml", "id": "x" } },
         }
     }))
     .unwrap();
     assert_eq!(ids(&v.root), ["main"]);
     let r = reasons(&v);
-    assert_eq!(r.len(), 5, "{r:?}");
+    assert_eq!(r.len(), 6, "{r:?}");
     assert!(r[0].1.contains("longer than 200"), "{r:?}");
     assert!(r[1].1.contains("`id` is empty"), "{r:?}");
     assert!(r[2].1.contains("`limit` must be 1"), "{r:?}");
     assert!(r[3].1.contains("`limit` must be 1"), "{r:?}");
     assert!(r[4].1.contains("control character"), "{r:?}");
+    assert!(r[5].1.contains("invisible formatting character"), "{r:?}");
     // The edges are inside.
     let ok = validate(&json!({
         "root": "main",

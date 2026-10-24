@@ -112,6 +112,16 @@ fn the_app_resource_is_the_mcp_apps_page() {
 }
 
 #[test]
+fn render_and_poll_refuse_an_argument_they_do_not_take() {
+    let s = store_at(&fixture_root());
+    let mut args = spec();
+    args["extra"] = json!(1);
+    assert!(call(&s, "maestro_ui_render", args).is_err(), "an unknown render argument is refused, not ignored");
+    let poll = json!({ "spec": spec(), "revision": null, "extra": 1 });
+    assert!(call(&s, "maestro_ui_poll", poll).is_err());
+}
+
+#[test]
 fn the_catalog_tool_returns_the_catalog() {
     let s = store_at(&fixture_root());
     assert_eq!(call(&s, "maestro_ui_catalog", json!({})).unwrap(), maestro_view::catalog());

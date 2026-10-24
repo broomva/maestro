@@ -98,6 +98,19 @@ try {
     }
   }
 
+  {
+    // A forged tool result carrying an inline handler is swapped in as markup and runs nothing.
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const tab = await ctx.newPage();
+    await tab.goto(`http://127.0.0.1:${host.port}/?theme=light&hostile=1`);
+    const frame = tab.frameLocator("#app");
+    await frame.locator("#forged").waitFor({ timeout: 15000 });
+    await tab.waitForTimeout(500);
+    const pwned = await frame.locator("html").getAttribute("data-pwned");
+    check(pwned === null, `a forged result's inline handler did not run (data-pwned=${pwned})`);
+    await ctx.close();
+  }
+
   if (edit) {
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const tab = await ctx.newPage();

@@ -47,7 +47,8 @@ pub enum Ui {
     None,
     /// The host opens the App with this tool's result; the model and the App may call it.
     Opens,
-    /// Only the App calls it; the model is not offered it.
+    /// Meant for the App only: `_meta.ui.visibility` is `["app"]`. A host that honours it hides
+    /// the tool from the model; plain `tools/list` still lists it, so it must stay read-only.
     AppOnly,
 }
 
@@ -109,6 +110,7 @@ pub struct InitiativesArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UiRenderArgs {
     /// The block id to start from.
     pub root: String,
@@ -122,6 +124,7 @@ pub struct UiRenderArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UiPollArgs {
     /// The spec the last render placed (its `spec`).
     pub spec: Value,

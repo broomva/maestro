@@ -34,6 +34,28 @@ fn the_app_page_holds_one_script_and_no_remote_fetch() {
     assert!(!html.contains("<link"));
 }
 
+/// The same digest as `BRIDGE_SHA256`, base64 as CSP writes it
+/// (`openssl dgst -sha256 -binary assets/bridge.js | base64`). Update both together.
+const BRIDGE_CSP_HASH: &str = "KULjNgTs2cGp/WKPyyp4NNSPJc4d/5zC+lTOzTHUi7U=";
+
+#[test]
+fn the_app_page_runs_only_the_pinned_bridge_and_fetches_nothing() {
+    let csp = page::app_csp();
+    assert_eq!(
+        csp,
+        format!("default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'sha256-{BRIDGE_CSP_HASH}'")
+    );
+    let html = page::app();
+    let meta = format!(r#"<meta http-equiv="Content-Security-Policy" content="{csp}">"#);
+    let at = html.find(&meta).expect("the App page declares its policy");
+    assert!(
+        at < html.find("<style").unwrap() && at < html.find("<script").unwrap(),
+        "the policy precedes what it governs"
+    );
+    let doc = page::snapshot("<p>x</p>", None);
+    assert!(doc.contains(r#"<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">"#));
+}
+
 #[test]
 fn the_css_keeps_the_foundation_tokens_and_the_fallbacks() {
     let css = page::css();

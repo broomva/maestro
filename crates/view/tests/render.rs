@@ -142,6 +142,48 @@ fn an_unparsed_ledger_marks_its_own_ask_card() {
     .unwrap();
     let r = render_at(&store_at(&root), &v, at());
     assert!(r.html.contains(r#"data-type="ask" data-state="partial""#), "{}", r.html);
+    // A ledger that exists but did not parse is unread, never "no ledger named".
+    assert!(
+        r.html.contains("broken.yaml#anything</span> could not be read. This is not the same as missing."),
+        "{}",
+        r.html
+    );
+    assert!(!r.html.contains("No ledger named"), "{}", r.html);
+}
+
+#[test]
+fn a_missing_ledger_is_named_missing() {
+    let root = fixture();
+    let v = validate(&json!({
+        "root": "a",
+        "blocks": { "a": { "type": "ask", "props": { "ledger": "absent.yaml", "id": "x" } } }
+    }))
+    .unwrap();
+    let r = render_at(&store_at(&root), &v, at());
+    assert!(r.html.contains("No ledger named"), "{}", r.html);
+    assert!(!r.html.contains("could not be read. This is not the same as missing."), "{}", r.html);
+}
+
+#[test]
+fn lists_without_a_limit_stop_at_fifty_and_say_what_was_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_tree(&fixture(), tmp.path());
+    let dir = tmp.path().join("workspace/.control/initiatives");
+    let demo = std::fs::read_to_string(dir.join("demo.yaml")).unwrap();
+    let id =
+        demo.lines().find_map(|l| l.strip_prefix("id: ")).expect("demo.yaml has a top-level id").trim().to_string();
+    for n in 0..60 {
+        std::fs::write(
+            dir.join(format!("bulk-{n:02}.yaml")),
+            demo.replacen(&format!("id: {id}"), &format!("id: bulk-{n:02}"), 1),
+        )
+        .unwrap();
+    }
+    let v = validate(&json!({ "root": "a", "blocks": { "a": { "type": "initiatives", "props": { "all": true } } } }))
+        .unwrap();
+    let r = render_at(&store_at(tmp.path()), &v, at());
+    assert_eq!(r.html.matches(r#"<li class="mv-row""#).count(), 50, "{}", r.html);
+    assert!(r.html.contains("12 more not shown"), "{}", r.html);
 }
 
 #[test]

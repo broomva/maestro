@@ -14,6 +14,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const DEFAULT_ROWS: usize = 8;
+/// The most rows a list without a `limit` prop shows (loops, initiatives, fleet).
+const MAX_ROWS: usize = crate::catalog::MAX_LIMIT as usize;
 
 /// One render: the fragment the app swaps in, its revision, and what was dropped.
 #[derive(Debug, Clone, Serialize)]
@@ -266,6 +268,9 @@ fn ask(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup {
         .filter(|a| a.uid.as_deref() == Some(ask_id) || (a.uid.is_none() && a.id == ask_id))
         .collect();
     let handle = format!("{ledger}#{ask_id}");
+    // Errors that may hide the asked-for entry belong on this card; a different ledger's do not.
+    let scoped = scope_errors(cx, section, ledger);
+    let unread = scoped.errors.iter().any(|e| e.at != section.source);
     let body = match matches.as_slice() {
         [a] => html! {
             div class="mv-ask" data-ask=(handle) data-hash=(a.hash()) {
@@ -294,6 +299,11 @@ fn ask(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup {
                 p class="mv-hash bv-meta" { "entry " span class="bv-code" { (a.hash().get(..12).unwrap_or_default()) } }
             }
         },
+        [] if unread => html! {
+            p class="mv-note" data-tone="danger" {
+                span class="bv-code" { (handle) } " could not be read. This is not the same as missing."
+            }
+        },
         [] if file.is_none() => {
             html! { p class="mv-note" data-tone="warning" { "No ledger named " span class="bv-code" { (ledger) } "." } }
         }
@@ -302,8 +312,6 @@ fn ask(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup {
             html! { p class="mv-note" data-tone="warning" { span class="bv-code" { (handle) } " names " (many.len()) " asks; address it by uid." } }
         }
     };
-    // Errors that may hide the asked-for entry belong on this card; a different ledger's do not.
-    let scoped = scope_errors(cx, section, ledger);
     card(id, "ask", "Ask", &scoped, None, body)
 }
 
@@ -354,7 +362,7 @@ fn loops(cx: &Ctx, id: &str, only: Option<&str>, drifting: bool) -> Markup {
     let body = html! {
         @if list.is_empty() { (empty(if drifting { "No loop is drifting." } else { "No loops." })) } @else {
             ul class="mv-list" {
-                @for r in &list {
+                @for r in list.iter().take(MAX_ROWS) {
                     li class="mv-row" data-loop=(r.id) {
                         span class="mv-row-title" { (r.title) }
                         span class="mv-row-meta bv-meta" {
@@ -369,6 +377,7 @@ fn loops(cx: &Ctx, id: &str, only: Option<&str>, drifting: bool) -> Markup {
                     }
                 }
             }
+            (more(list.len().min(MAX_ROWS), list.len()))
         }
     };
     card(id, "loops", "Loops", section, section.data.as_ref().map(|_| list.len()), body)
@@ -391,7 +400,7 @@ fn initiatives(cx: &Ctx, id: &str, all: bool) -> Markup {
     let body = html! {
         @if list.is_empty() { (empty("No live initiatives.")) } @else {
             ul class="mv-list" {
-                @for i in &list {
+                @for i in list.iter().take(MAX_ROWS) {
                     li class="mv-row" data-initiative=(i.id) {
                         span class="mv-row-title" { (i.title) }
                         span class="mv-row-meta bv-meta" { (label(&i.status)) }
@@ -399,6 +408,7 @@ fn initiatives(cx: &Ctx, id: &str, all: bool) -> Markup {
                     }
                 }
             }
+            (more(list.len().min(MAX_ROWS), list.len()))
         }
     };
     card(id, "initiatives", "Initiatives", section, section.data.as_ref().map(|_| list.len()), body)
@@ -410,7 +420,7 @@ fn fleet(cx: &Ctx, id: &str) -> Markup {
     let body = html! {
         @if list.is_empty() { (empty("No fleet report.")) } @else {
             ul class="mv-list" {
-                @for f in &list {
+                @for f in list.iter().take(MAX_ROWS) {
                     li class="mv-row" data-scope=(f.scope) {
                         span class="mv-row-title" { (f.scope) }
                         span class="mv-row-meta bv-meta" {
@@ -420,6 +430,7 @@ fn fleet(cx: &Ctx, id: &str) -> Markup {
                     }
                 }
             }
+            (more(list.len().min(MAX_ROWS), list.len()))
         }
     };
     card(id, "fleet", "Fleet", section, section.data.as_ref().map(|_| list.len()), body)

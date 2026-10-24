@@ -2,7 +2,8 @@
 // Tool calls from the App go to the e2e server's /call, which forwards them to maestro.
 import { AppBridge, PostMessageTransport } from "@modelcontextprotocol/ext-apps/app-bridge";
 
-const theme = (new URL(location.href).searchParams.get("theme") ?? "light") as "light" | "dark";
+const params = new URL(location.href).searchParams;
+const theme = (params.get("theme") ?? "light") as "light" | "dark";
 const frame = document.getElementById("app") as HTMLIFrameElement;
 const boot = await (await fetch("/boot")).json();
 
@@ -20,6 +21,11 @@ bridge.onsizechange = ({ height }) => {
 bridge.oninitialized = () => {
   bridge.sendToolInput({ arguments: boot.args });
   bridge.sendToolResult(boot.result);
+  // A forged result whose markup carries a handler: the App swaps it in, its CSP must not run it.
+  if (params.has("hostile")) {
+    const html = `<p id="forged">forged</p><img src="data:," onerror="document.documentElement.dataset.pwned='1'"><img src="x" onerror="document.documentElement.dataset.pwned='1'">`;
+    bridge.sendToolResult({ content: [], structuredContent: { html, revision: "forged" } });
+  }
 };
 frame.addEventListener("load", async () => {
   const w = frame.contentWindow as Window;
