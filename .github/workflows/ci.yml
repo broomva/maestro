@@ -14,11 +14,11 @@ permissions:
   contents: read
 jobs:
   mutants:
-    name: mutants (${{ matrix.shard }}/4)
+    name: mutants (${{ strategy.job-index }}/${{ strategy.job-total }})
     # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
     runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
-    # Each shard runs a quarter of the mutants against the whole suite (253 in all at BRO-3203:
-    # about 70-90 min serial, so about 20-25 min a shard).
+    # Each shard runs a quarter of the mutants against the whole suite (about 250 by BRO-3203:
+    # 70-90 min serial). Add shards by growing the list; the split follows it.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -26,7 +26,8 @@ jobs:
         shard: [0, 1, 2, 3]
     env:
       CARGO_TERM_COLOR: always
-      MUTANT_SHARD: ${{ matrix.shard }}/4
+      # Derived from the matrix, so the shards always cover every mutant.
+      MUTANT_SHARD: ${{ strategy.job-index }}/${{ strategy.job-total }}
     steps:
       # The job runs build scripts: keep the token out of .git/config.
       - uses: actions/checkout@v4
