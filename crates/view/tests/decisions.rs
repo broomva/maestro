@@ -200,7 +200,7 @@ fn the_answer_bar_writes_nothing() {
     let m = machine();
     let html = render(&worktree(m.path()), &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(html.contains("mv-answerbar"), "{html}");
-    assert!(html.contains("To answer: Paseo · Maestro · Decisions"), "{html}");
+    assert!(html.contains("shows whether it has been answered since, and is where to answer it."), "{html}");
     for writer in ["<form", "<button", "formaction", "<script", " onclick", "data-action"] {
         assert!(!html.contains(writer), "{writer} in {html}");
     }
@@ -266,11 +266,16 @@ fn an_answer_in_the_working_tree_waits_to_land() {
     let html = render(&store, &inbox()).html;
     // The working tree's broken.yaml is unread there too, so the waiting count is a lower bound,
     // in the sentence and in the banner alike.
-    assert!(html.contains("at least 7 open · at least 1 waiting to land"), "{html}");
-    assert!(html.contains(r#"<p class="mv-banner-title">at least 1 waiting to land</p>"#), "{html}");
+    assert!(html.contains("at least 7 open · at least 1 answered, not yet landed"), "{html}");
+    assert!(
+        html.contains(
+            r#"<p class="mv-banner-title">at least 1 answered in this checkout or on maestro/answers, not yet on"#
+        ),
+        "{html}"
+    );
     assert!(html.contains(r#"<span class="mv-irow-rec" data-tone="success">Waiting to land</span>"#), "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
-    assert!(d.contains("Answered in the working tree or on maestro/answers; waiting to land on"), "{d}");
+    assert!(d.contains("Answered in this checkout or on maestro/answers; not yet on"), "{d}");
     // Answered, if not landed: what silence would do no longer applies.
     assert!(!d.contains("If you don't answer"), "{d}");
     assert!(!d.contains("mv-answerbar"), "{d}");
@@ -284,9 +289,12 @@ fn an_unread_working_tree_is_not_none_waiting() {
     std::fs::remove_dir_all(&dir).unwrap();
     std::fs::write(&dir, "not a directory").unwrap();
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("Answers waiting to land could not be read. This is not the same as none."), "{html}");
-    assert!(html.contains(r#"waiting to land: <span class="mv-unavailable">unavailable</span>"#), "{html}");
-    assert!(!html.contains("0 waiting to land"), "{html}");
+    assert!(
+        html.contains("Answers given and not yet landed could not be read. This is not the same as none."),
+        "{html}"
+    );
+    assert!(html.contains(r#"answered, not yet landed: <span class="mv-unavailable">unavailable</span>"#), "{html}");
+    assert!(!html.contains("0 answered, not yet landed"), "{html}");
 }
 
 #[test]
@@ -312,7 +320,7 @@ fn an_ask_archived_in_the_working_tree_is_not_waiting_to_land() {
     std::fs::write(&file, archived).unwrap();
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("at least 0 waiting to land"), "{html}");
+    assert!(html.contains("at least 0 answered, not yet landed"), "{html}");
     assert!(!html.contains("Waiting to land</span>"), "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(!d.contains("Answered in the working tree"), "{d}");
@@ -404,11 +412,11 @@ fn a_partial_working_tree_makes_every_count_a_lower_bound() {
     git(&ws, &["commit", "-q", "-m", "seed"]);
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let clean = render(&store, &inbox()).html;
-    assert!(clean.contains(">6 open · 0 waiting to land<"), "{clean}");
+    assert!(clean.contains(">6 open · 0 answered, not yet landed<"), "{clean}");
     // A local ledger that does not parse may hold answers: nothing on the screen is exact now.
     std::fs::write(asks.join("local.yaml"), "asks: [unclosed\n").unwrap();
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("at least 6 open · at least 0 waiting to land"), "{html}");
+    assert!(html.contains("at least 6 open · at least 0 answered, not yet landed"), "{html}");
     assert!(html.contains(r#"<span class="mv-tab-count">6+</span>"#), "{html}");
 }
 
@@ -494,7 +502,7 @@ fn the_row_recommends_the_recommended_option_not_the_first() {
     // it is put forward as the answer here.
     assert!(!html.contains("Recommended: Develop it"), "{html}");
     let idea = render(&worktree(m.path()), &detail("decisions.yaml", "jev-idea")).html;
-    assert!(idea.contains("To answer: Paseo · Maestro · Initiatives") && !idea.contains("(recommended:"), "{idea}");
+    assert!(idea.contains("Paseo · Maestro · Initiatives shows whether") && !idea.contains("(recommended:"), "{idea}");
 }
 
 #[test]
@@ -548,7 +556,7 @@ fn a_waiting_answer_that_cannot_say_which_ask_it_answers_is_unknown() {
     assert!(!html.contains("Waiting to land</span>"), "{html}");
     assert_eq!(html.matches("Not offered here").count(), 2, "{html}");
     // No read failed, yet an answer is waiting that cannot be placed: no count is exact.
-    assert!(html.contains("at least 2 open · at least 0 waiting to land"), "{html}");
+    assert!(html.contains("at least 2 open · at least 0 answered, not yet landed"), "{html}");
     assert!(!html.contains("mv-answerbar"), "{html}");
 }
 
@@ -585,9 +593,9 @@ fn an_answer_waiting_in_another_ledger_is_not_this_ones() {
     std::fs::write(asks.join("twin.yaml"), twin.replace("    headline", "    answer: \"done\"\n    headline")).unwrap();
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let d = render(&store, &detail("demo-arc.yaml", "merge-now")).html;
-    assert!(!d.contains("waiting to land on") && d.contains("mv-answerbar"), "{d}");
+    assert!(!d.contains("not yet on") && d.contains("mv-answerbar"), "{d}");
     let t = render(&store, &detail("twin.yaml", "merge-now")).html;
-    assert!(t.contains("waiting to land on"), "{t}");
+    assert!(t.contains("not yet on"), "{t}");
 }
 
 #[test]
@@ -613,7 +621,7 @@ fn an_answer_on_the_answers_branch_waits_to_land() {
     git(&ws, &["checkout", "-q", "main"]);
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
-    assert!(d.contains("waiting to land on") && !d.contains("mv-answerbar"), "{d}");
+    assert!(d.contains("not yet on") && !d.contains("mv-answerbar"), "{d}");
     let html = render(&store, &inbox()).html;
     assert!(html.contains("or on maestro/answers"), "{html}");
 }
@@ -659,8 +667,11 @@ fn an_answers_branch_that_does_not_read_is_unavailable_never_none() {
     // No local asks directory either: the branch was the only place answers could wait.
     std::fs::remove_dir_all(m.path().join("workspace/.control/asks")).unwrap();
     let html = render(&store, &inbox()).html;
-    assert!(html.contains(r#"waiting to land: <span class="mv-unavailable">unavailable</span>"#), "{html}");
-    assert!(html.contains("Answers waiting to land could not be read. This is not the same as none."), "{html}");
+    assert!(html.contains(r#"answered, not yet landed: <span class="mv-unavailable">unavailable</span>"#), "{html}");
+    assert!(
+        html.contains("Answers given and not yet landed could not be read. This is not the same as none."),
+        "{html}"
+    );
     assert!(!html.contains("mv-answerbar"), "{html}");
 }
 
@@ -681,4 +692,25 @@ fn an_answer_given_as_text_is_shown_as_written() {
     let m = machine();
     let d = render(&worktree(m.path()), &detail("demo-arc.yaml", "old-one")).html;
     assert!(d.contains("Answered: yes"), "{d}");
+}
+
+#[test]
+fn no_screen_claims_an_ask_is_unanswered() {
+    // Maestro reads this checkout and maestro/answers; Paseo may hold answers in other
+    // checkouts. So the bar names where the ask is open and where to look, never "answer it",
+    // the banner names its sources and what it does not read, and no total is claimed.
+    let (_m, store) = clean_at_main(|_| {});
+    let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
+    assert!(d.contains("Open at <span class=\"bv-code\">git:main@"), "{d}");
+    assert!(d.contains("shows whether it has been answered since"), "{d}");
+    assert!(!d.contains("(recommended:") && !d.contains("To answer"), "{d}");
+    let html = render(&store, &inbox()).html;
+    assert!(html.contains("Paseo may hold answers in other checkouts, which this screen does not read."), "{html}");
+    assert!(html.contains("0 answered in this checkout or on maestro/answers, not yet on"), "{html}");
+    assert!(!html.contains("waiting to land<"), "{html}");
+    // Reading the working tree itself, no landing count is made and the branch is said unread.
+    let m = machine();
+    let wt = render(&worktree(m.path()), &inbox()).html;
+    assert!(wt.contains("Answers on maestro/answers are not read here."), "{wt}");
+    assert!(!wt.contains("answered, not yet landed"), "{wt}");
 }

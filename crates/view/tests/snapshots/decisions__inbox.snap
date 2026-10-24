@@ -7,7 +7,7 @@ expression: "portable(&r.html, m.path())"
 <header class="mv-head">
 <h2 class="mv-title">Decisions</h2>
 </header>
-<p class="mv-sub bv-meta">at least 7 open · at least 0 waiting to land</p>
+<p class="mv-sub bv-meta">at least 7 open</p>
 <div class="mv-inbox">
 <input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-all" value="all">
 <input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-decisions" value="decisions" checked>
@@ -23,6 +23,10 @@ expression: "portable(&r.html, m.path())"
 <label class="mv-tab" for="mv-tab-0-ideas" data-tab="ideas">Ideas <span class="mv-tab-count">2+</span>
 </label>
 </nav>
+<div class="mv-banner" data-tone="info">
+<p class="mv-banner-title">Reading this checkout's working tree</p>
+<p class="bv-meta">Answers on maestro/answers are not read here. Paseo may hold answers in other checkouts, which this screen does not read.</p>
+</div>
 <div class="mv-groups">
 <section class="mv-group" data-tabs="all decisions ideas">
 <header class="mv-group-head bv-meta">
@@ -80,8 +84,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Merge now)</span>
-</p>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">merge-now</span>.</p>
 </div>
 </article>
@@ -141,7 +144,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Initiatives</p>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Initiatives shows whether it has been answered since, and is where to answer it.</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">pick-name</span>.</p>
 </div>
 </article>
@@ -199,8 +202,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Paste it now)</span>
-</p>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">new-key</span>.</p>
 </div>
 </article>
@@ -253,8 +255,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: A person merges them)</span>
-</p>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">merge-policy</span>.</p>
 </div>
 </article>
@@ -380,8 +381,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Rotate long orchestrators by handoff)</span>
-</p>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">fleet-cost-1</span>.</p>
 </div>
 </article>
@@ -435,7 +435,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Initiatives</p>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Initiatives shows whether it has been answered since, and is where to answer it.</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">jev-idea</span>.</p>
 </div>
 </article>

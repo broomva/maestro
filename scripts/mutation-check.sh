@@ -431,7 +431,7 @@ mutate $mcp '        Ui::AppOnly => json!(["app"]),' '        Ui::AppOnly => jso
 scr=crates/view/src/screens
 mutate $scr/mod.rs 'Some(AskClass::Authority) => Tab::Authority,' ''
 mutate $scr/mod.rs '.filter(|(_, ask)| ask.state() == AskState::Open)' '.filter(|_| true)'
-mutate $scr/mod.rs 'landing: landing(cx, lf, ask),' 'landing: Landing::NotWaiting,'
+mutate $scr/mod.rs 'landing: landing(cx, lf, ask),' 'landing: Landing::NotSeen,'
 mutate $scr/mod.rs 'if unlanded.errors.iter().any(|e| covers(&e.at, &lf.file)) {' 'if false {'
 mutate $scr/mod.rs 'if cx.reads.asks.errors.iter().any(|e| e.at != cx.reads.asks.source && covers(&e.at, &lf.file)) {' 'if false {'
 mutate $scr/mod.rs 'if !refs.iter().any(|r| r.ledger == lf.file && r.id == ask.handle()) {' 'if !refs.iter().any(|r| r.id == ask.handle()) {'
@@ -446,7 +446,7 @@ mutate $scr/mod.rs '(!a.ask.blocking, a.asked()' '(a.ask.blocking, a.asked()'
 mutate $scr/mod.rs '0..86_400 =>' '0..1 =>'
 mutate $scr/mod.rs '(!g.rows.iter().any(|r| r.ask.blocking), g.oldest()' '(false, g.oldest()'
 mutate $scr/mod.rs '.map(|id| if uuid(&id) { id[..8].to_string() } else { id })' '.map(|id| id)'
-mutate $scr/inbox.rs '@if cx.unlanded().data.is_none() {' '@if false {'
+mutate $scr/inbox.rs '} @else if cx.unlanded().data.is_none() {' '} @else if false {'
 mutate $scr/inbox.rs 'let partial = !section.errors.is_empty() || rows().any(|e| e.landing == Landing::Unknown);' 'let partial = !section.errors.is_empty();'
 mutate $scr/inbox.rs 'let partial = !section.errors.is_empty() || rows().any(|e| e.landing == Landing::Unknown);' 'let partial = rows().any(|e| e.landing == Landing::Unknown);'
 mutate $scr/inbox.rs '.filter(|_| e.tab() != Tab::Ideas)' ''
@@ -455,8 +455,12 @@ mutate crates/store/src/views.rs 'let mut answered = on_branch;' 'let mut answer
 mutate crates/store/src/views.rs 'let mut errors = read.errors;' 'let mut errors = Vec::new();'
 mutate crates/store/src/views.rs '            (None, errors)' '            (Some(Answered::new()), errors)'
 mutate $scr/decision.rs '} @else if state == AskState::Archived {' '} @else if false {'
+mutate $scr/decision.rs '" shows whether it has been answered since, and is where to answer it."' '" (answer it there)"'
+mutate $scr/inbox.rs 'p class="bv-meta" { (elsewhere) }' 'p class="bv-meta" {}'
+mutate $scr/inbox.rs '@if cx.store.tree.source == maestro_store::TreeSource::WorkingTree {' '@if false {'
+mutate $scr/inbox.rs 'Some(_) if !worktree =>' 'Some(_) =>'
 mutate $scr/decision.rs 'given.or(a.answer.as_deref()).or(a.answer_option.as_deref())' 'given.or(a.answer_option.as_deref())'
-mutate $scr/inbox.rs 'Landing::NotWaiting => @if let Some(r) = e.ask.recommended().filter(' 'Landing::NotWaiting => @if let Some(r) = e.ask.options.first().filter('
+mutate $scr/inbox.rs 'Landing::NotSeen => @if let Some(r) = e.ask.recommended().filter(' 'Landing::NotSeen => @if let Some(r) = e.ask.options.first().filter('
 mutate $scr/inbox.rs '@if count(tab) == 0 {' '@if false {'
 mutate crates/view/src/render.rs 'self.ids.set(n + 1);' 'self.ids.set(n);'
 mutate crates/store/src/views.rs '.filter(|(_, a)| a.state() == AskState::Answered)' '.filter(|(_, a)| a.state() != AskState::Open)'
@@ -479,11 +483,11 @@ mutate $scr/decision.rs '} @else if state == AskState::Open && landing == Landin
 mutate $scr/decision.rs 'let mut matches: Vec<_> = all().filter(|(_, a)| a.uid.as_deref() == Some(ask_id)).collect();' 'let mut matches: Vec<_> = all().filter(|(_, a)| a.uid.as_deref() == Some(ask_id) || a.id == ask_id).collect();'
 mutate $scr/rich.rs 'Some(JsValue::Num(x)) => Some(js_string(*x)),' 'Some(JsValue::Num(x)) => Some(x.to_string()),'
 mutate $scr/mod.rs '    errors.extend(cx.unlanded().errors.iter().filter(|e| ledger.is_none_or(|l| covers(&e.at, l))).cloned());' ''
-mutate $scr/decision.rs '            @if state == AskState::Open && landing == Landing::NotWaiting {
+mutate $scr/decision.rs '            @if state == AskState::Open && landing == Landing::NotSeen {
                 @if let Some(d) = &a.default {' '            @if state == AskState::Open {
                 @if let Some(d) = &a.default {'
-mutate $scr/decision.rs '            @if state == AskState::Open && landing == Landing::NotWaiting {
-                @if let Some(d) = &a.default {' '            @if landing == Landing::NotWaiting {
+mutate $scr/decision.rs '            @if state == AskState::Open && landing == Landing::NotSeen {
+                @if let Some(d) = &a.default {' '            @if landing == Landing::NotSeen {
                 @if let Some(d) = &a.default {'
 mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 

@@ -50,12 +50,16 @@ impl Entry<'_> {
     }
 }
 
-/// Whether an open ask's answer is waiting to land: answered in the working tree, still open
-/// on the tree read. Unknown when the working tree's read could hide this ledger's answers.
+/// What the sources Maestro reads say about an open ask's answer. Maestro reads the working
+/// tree and `maestro/answers`; Paseo may hold answers elsewhere (other checkouts), so no state
+/// here says an ask is unanswered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Landing {
+    /// Seen answered in a source read, still open on the tree read: waiting to land.
     Waiting,
-    NotWaiting,
+    /// Not seen answered in the sources read. Not "unanswered": Paseo may know otherwise.
+    NotSeen,
+    /// A source read could hide its answer, or its handle names two asks.
     Unknown,
 }
 
@@ -83,7 +87,7 @@ pub(crate) fn landing(cx: &Ctx, lf: &LedgerFile, ask: &Ask) -> Landing {
         return Landing::Unknown;
     }
     if !refs.iter().any(|r| r.ledger == lf.file && r.id == ask.handle()) {
-        return Landing::NotWaiting;
+        return Landing::NotSeen;
     }
     // A waiting answer is named by its handle alone: when a uid and a uid-less id in this ledger
     // share that text, it cannot say which of the two it answers.

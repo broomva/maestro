@@ -1,4 +1,4 @@
-//! The Decisions inbox: open asks in tabs with counts, the answers waiting to land, and the
+//! The Decisions inbox: open asks in tabs with counts, the answers seen waiting to land, and the
 //! asks grouped by project, oldest first where they hold work. Each row opens in place to the
 //! full decision. The tabs are radio inputs and CSS, so they switch with no script: in the
 //! MCP App and in the snapshot a host without MCP Apps shows.
@@ -31,14 +31,17 @@ pub(crate) fn inbox(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
     // A row whose landing is unknown may be waiting too: then no count on the screen is exact.
     let partial = !section.errors.is_empty() || rows().any(|e| e.landing == Landing::Unknown);
     let waiting = rows().filter(|e| e.landing == Landing::Waiting).count();
+    // Reading the working tree itself, there is nothing to land onto it: no count is made.
+    let worktree = cx.store.tree.source == maestro_store::TreeSource::WorkingTree;
     // Radio names and ids unique in the document, so two inboxes never share a group.
     let key = cx.next_id();
     let body = html! {
         p class="mv-sub bv-meta" {
             (at_least(count(Tab::All), partial)) " open"
             @match &unlanded.data {
-                Some(_) => { " · " (at_least(waiting, partial)) " waiting to land" },
-                None => { " · waiting to land: " span class="mv-unavailable" { "unavailable" } },
+                Some(_) if !worktree => { " · " (at_least(waiting, partial)) " answered, not yet landed" },
+                Some(_) => {},
+                None => { " · answered, not yet landed: " span class="mv-unavailable" { "unavailable" } },
             }
         }
         div class="mv-inbox" {
@@ -71,18 +74,27 @@ fn in_tab(e: &Entry, tab: Tab) -> bool {
     tab == Tab::All || e.tab() == tab
 }
 
-/// Answers given in the working tree that are not on the tree read yet. An unread working tree
-/// is said, never shown as none waiting.
+/// What Maestro saw answered and not yet landed, named by the sources it read. Paseo may hold
+/// answers in other checkouts; the banner says so, so its number is never read as a total.
+/// An unread source is said, never shown as none.
 fn banner(cx: &Ctx, waiting: usize, partial: bool) -> Markup {
+    let elsewhere = "Paseo may hold answers in other checkouts, which this screen does not read.";
     html! {
-        @if cx.unlanded().data.is_none() {
-            p class="mv-banner" data-tone="danger" {
-                "Answers waiting to land could not be read. This is not the same as none."
-            }
-        } @else if waiting > 0 {
+        @if cx.store.tree.source == maestro_store::TreeSource::WorkingTree {
             div class="mv-banner" data-tone="info" {
-                p class="mv-banner-title" { (at_least(waiting, partial)) " waiting to land" }
-                p class="bv-meta" { "answered in the working tree or on maestro/answers, not yet on " span class="bv-code" { (cx.snap.tree) } }
+                p class="mv-banner-title" { "Reading this checkout's working tree" }
+                p class="bv-meta" { "Answers on maestro/answers are not read here. " (elsewhere) }
+            }
+        } @else if cx.unlanded().data.is_none() {
+            p class="mv-banner" data-tone="danger" {
+                "Answers given and not yet landed could not be read. This is not the same as none."
+            }
+        } @else {
+            div class="mv-banner" data-tone="info" {
+                p class="mv-banner-title" {
+                    (at_least(waiting, partial)) " answered in this checkout or on maestro/answers, not yet on " span class="bv-code" { (cx.snap.tree) }
+                }
+                p class="bv-meta" { (elsewhere) }
             }
         }
     }
@@ -120,7 +132,7 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
                                 @match e.landing {
                                     Landing::Waiting => span class="mv-irow-rec" data-tone="success" { "Waiting to land" },
                                     Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "Not offered here: whether it is answered, or answerable, is unknown" },
-                                    Landing::NotWaiting => @if let Some(r) = e.ask.recommended().filter(|_| e.tab() != Tab::Ideas) {
+                                    Landing::NotSeen => @if let Some(r) = e.ask.recommended().filter(|_| e.tab() != Tab::Ideas) {
                                         span class="mv-irow-rec" data-tone="info" { "Recommended: " (r.label) }
                                     },
                                 }

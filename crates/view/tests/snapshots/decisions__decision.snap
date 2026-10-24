@@ -109,8 +109,7 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
-<p class="mv-answer-cta">To answer: Paseo · Maestro · Decisions<span class="bv-meta"> (recommended: Rotate long orchestrators by handoff)</span>
-</p>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
 <p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">fleet-cost-1</span>.</p>
 </div>
 </article>

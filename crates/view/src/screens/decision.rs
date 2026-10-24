@@ -112,7 +112,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
             p class="mv-dtitle" { (a.title()) }
             @if let Some(stakes) = &a.stakes { p class="mv-stakes" { (stakes) } }
             // What silence does is said only while the ask waits on the owner.
-            @if state == AskState::Open && landing == Landing::NotWaiting {
+            @if state == AskState::Open && landing == Landing::NotSeen {
                 @if let Some(d) = &a.default {
                     p class="mv-callout" data-tone="warning" { "If you don't answer: " (d) }
                 } @else if let Some(why) = &a.no_default_because {
@@ -205,7 +205,7 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
     html! {
         @if state == AskState::Open && landing == Landing::Waiting {
             p class="mv-callout" data-tone="success" {
-                "Answered in the working tree or on maestro/answers; waiting to land on " span class="bv-code" { (cx.snap.tree) } "."
+                "Answered in this checkout or on maestro/answers; not yet on " span class="bv-code" { (cx.snap.tree) } "."
             }
         } @else if state == AskState::Open && landing == Landing::Unknown {
             // Unknown is never shown as unanswered: no answer bar invites a second answer.
@@ -226,13 +226,16 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
                 textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)" {}
                 // The plugin answers ideas under Initiatives, and only with develop, park or kill;
                 // the place is named, and no idea option is recommended as an answer here.
+                // Maestro does not read every place Paseo keeps answers: the bar never says
+                // the ask is unanswered, only where it is open and where to look and answer.
                 p class="mv-answer-cta" {
+                    "Open at " span class="bv-code" { (cx.snap.tree) } ". "
                     @if a.class == Some(AskClass::Idea) {
-                        "To answer: Paseo · Maestro · Initiatives"
+                        "Paseo · Maestro · Initiatives"
                     } @else {
-                        "To answer: Paseo · Maestro · Decisions"
-                        @if let Some(r) = a.recommended() { span class="bv-meta" { " (recommended: " (r.label) ")" } }
+                        "Paseo · Maestro · Decisions"
                     }
+                    " shows whether it has been answered since, and is where to answer it."
                 }
                 p class="mv-answer-why bv-meta" {
                     "Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as "

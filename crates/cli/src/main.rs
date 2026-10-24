@@ -482,7 +482,7 @@ fn human_snapshot(v: &Value) {
     section(
         "asks",
         format!(
-            "{} open ({} blocking, {} answered locally and waiting to land), {} answered, {} ledgers",
+            "{} open ({} blocking, {} answered in this checkout or on maestro/answers, not yet landed), {} answered, {} ledgers",
             a["open"], a["open_blocking"], a["unlanded"], a["answered"], a["ledgers"]
         ),
     );
