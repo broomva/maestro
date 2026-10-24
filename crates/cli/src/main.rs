@@ -232,8 +232,26 @@ fn store(cli: &Cli) -> Result<Store> {
     Ok(Store::new(paths, source))
 }
 
+/// A lock another writer held for the whole wait: exit 75 (EX_TEMPFAIL), as `ask_ledger.py` does, to retry.
+#[derive(Debug)]
+struct Busy(String);
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Busy {}
+
 fn call(store: &Store, tool: &str, args: Value) -> Result<Value> {
-    maestro_mcp::call(store, tool, args).map_err(|e| anyhow::anyhow!("{}", e.message))
+    maestro_mcp::call(store, tool, args).map_err(|e| {
+        if e.data.as_ref().is_some_and(|d| d["busy"] == json!(true)) {
+            anyhow::Error::new(Busy(e.message.to_string()))
+        } else {
+            anyhow::anyhow!("{}", e.message)
+        }
+    })
 }
 
 fn print_errors(v: &Value) {
@@ -342,6 +360,9 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("maestro: {e:#}");
+            if e.downcast_ref::<Busy>().is_some() {
+                return std::process::ExitCode::from(75);
+            }
             std::process::ExitCode::FAILURE
         }
     }
@@ -425,9 +446,6 @@ fn request(cli: &Cli, store: &Store, tool: &str, args: Value) -> Result<()> {
             s(&r["session"]["id"])
         ),
         d => println!("{} {} {}: recorded, {}", s(&r["request"]), s(&r["id"]), s(&r["at"]), d.unwrap_or("?")),
-    }
-    if let Some(e) = v["journal_error"].as_str() {
-        eprintln!("maestro: the requests journal was not written: {e}");
     }
     Ok(())
 }

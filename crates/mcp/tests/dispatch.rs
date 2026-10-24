@@ -16,6 +16,8 @@ fn reads_say_read_only_and_requests_do_not() {
         let ann = tool.annotations.as_ref().expect("annotations");
         assert_eq!(ann.read_only_hint, Some(spec.authority == Authority::Read), "{}", tool.name);
         assert_eq!(ann.destructive_hint, Some(false), "{}", tool.name);
+        // A request appends a record each time it is made: only a read may be retried freely.
+        assert_eq!(ann.idempotent_hint, Some(spec.authority == Authority::Read), "{}", tool.name);
         assert_eq!(spec.request.is_some(), spec.authority == Authority::AgentRequest, "{}", tool.name);
         assert_eq!(tool.input_schema.get("type").and_then(|t| t.as_str()), Some("object"), "{}", tool.name);
     }

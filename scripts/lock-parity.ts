@@ -1,11 +1,22 @@
-// Lock parity with the Paseo plugin (BRO-3267): Maestro's port of server/locks.ts and the plugin's
-// own code meet on one ask ledger. Runs inside a plugin checkout (scripts/lock-parity.sh copies it
-// there), with the plugin's locks.ts and its answer path, against the built `maestro` binary.
+// Lock parity with the Paseo plugin (BRO-3267). Runs inside a plugin checkout (scripts/lock-parity.sh
+// copies it there), with the plugin's own locks.ts and answer path, against the built `maestro` binary.
+//
+// The ledger: `maestro ask file` holds no lock itself; its writer of record (ask_ledger.py file) does.
+// Checks 1-4 run that path with the writer named by LOCK_PARITY_WRITER (the workspace's real
+// ask_ledger.py), else with fixtures/requests/ask_ledger_stub.py, which hosted CI must use (the
+// workspace repository is private). With the stub they hold Maestro's wiring, not a lock port.
 //   1. the plugin holds the ledger's lock: `maestro ask file` waits for it, and lands after release;
-//   2. Maestro holds it (a slow validator): the plugin's acquireLock is refused (LockBusyError);
-//   3. a dead holder's lock, old enough, made as the plugin's grammar says: Maestro reclaims it;
+//   2. the writer holds it (a slow filing): the plugin's acquireLock is refused (stub only);
+//   3. a dead holder's lock, old enough, made as the plugin's grammar says, is reclaimed;
 //   4. 20 parallel `maestro ask file` while the plugin answers the five seeded asks: 25 entries,
 //      every filed id once, every answer in, the ledger reads (nothing lost, nothing torn).
+// The journal: Maestro's own port (crates/store/src/locks.rs) guards the requests journal. Checks 5-8
+// put the plugin's acquireLock against it on the journal's key:
+//   5. the plugin holds it: `maestro queue` waits and writes after the release;
+//   6. a dead holder's 200 s old lock is reclaimed by Maestro;
+//   7. a live pid whose start time is not the recorded one (a reused pid), 200 s old, is reclaimed;
+//   8. 20 parallel `maestro queue` while the plugin takes and releases the same lock 20 times:
+//      20 whole journal lines, and no plugin hold saw the journal change under it.
 // Usage: bun .lock-parity.ts <maestro binary> <fixtures/requests> <scratch dir>
 import { copyFileSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,14 +39,23 @@ function machine() {
   mkdirSync(join(root, "ws/scripts"), { recursive: true });
   copyFileSync(join(fixtures, "ledger.yaml"), join(root, "ws/.control/asks/ledger.yaml"));
   copyFileSync(join(fixtures, "ask_ledger_stub.py"), join(root, "ws/scripts/ask_ledger.py"));
+  mkdirSync(join(root, "broomva-home/ledger/requests"), { recursive: true });
   return { root, ledger: join(root, "ws/.control/asks/ledger.yaml"), locks: join(root, "locks") };
 }
 
+const writer = process.env.LOCK_PARITY_WRITER;
+console.log(`lock-parity ledger writer: ${writer ?? "fixtures/requests/ask_ledger_stub.py (wiring only)"}`);
+
 const askOf = (id: string) => JSON.stringify({ ...JSON.parse(readFileSync(join(fixtures, "ask.json"), "utf8")), id });
 
-async function file(root: string, id: string, env: Record<string, string> = {}) {
+const file = (root: string, id: string, env: Record<string, string> = {}) =>
+  run(root, ["ask", "file", "--session", `t3:-/${id}`, "--ledger", "ledger.yaml", "--ask", askOf(id)], env);
+const queue = (root: string, title: string) =>
+  run(root, ["queue", "--session", `t3:-/${title}`, "--title", title, "--brief", "lock parity"]);
+
+async function run(root: string, args: string[], env: Record<string, string> = {}) {
   const child = Bun.spawn(
-    [maestro, "ask", "file", "--session", `t3:-/${id}`, "--ledger", "ledger.yaml", "--ask", askOf(id)],
+    [maestro, ...args],
     {
       env: {
         PATH: process.env.PATH ?? "",
@@ -46,6 +66,7 @@ async function file(root: string, id: string, env: Record<string, string> = {}) 
         MAESTRO_PASEO_ASK_LOCKS: join(root, "locks"),
         MAESTRO_FLEET_STATE: join(root, "fleet"),
         MAESTRO_TREE: "worktree",
+        ...(writer ? { MAESTRO_ASK_LEDGER: writer } : {}),
         ...env,
       },
       stdout: "pipe",
@@ -70,8 +91,9 @@ async function file(root: string, id: string, env: Record<string, string> = {}) 
   console.log("lock-parity 1 ok: maestro waited for the plugin's lock and filed after its release");
 }
 
-// 2. Maestro holds; the plugin is refused.
-{
+// 2. The writer holds; the plugin is refused. Only the stub can be slowed (STUB_SLEEP_S).
+if (writer) console.log("lock-parity 2 skipped: the real writer cannot be held open on demand");
+else {
   const m = machine();
   const dir = join(m.locks, `${await lockKey(m.ledger)}.d`);
   const filing = file(m.root, "slow", { STUB_SLEEP_S: "2" });
@@ -132,5 +154,67 @@ async function file(root: string, id: string, env: Record<string, string> = {}) 
   const answered = asks.filter((a) => a.id.startsWith("seed-") && a.state !== "open").length;
   if (answered !== 5) fail(`${answered} of 5 plugin answers survived`);
   console.log("lock-parity 4 ok: 20 parallel filings and 5 plugin answers, 25 entries, 0 lost, 0 torn");
+}
+
+// The journal, under Maestro's own lock port.
+const journalOf = (root: string) => join(root, "broomva-home/ledger/requests/requests.jsonl");
+const journalLocks = (root: string) => join(root, "broomva-home/locks");
+const lines = (path: string) => (existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : []);
+
+// 5. The plugin holds the journal's lock; Maestro waits.
+{
+  const m = machine();
+  const lock = await acquireLock(journalOf(m.root), journalLocks(m.root));
+  const queued = queue(m.root, "after-plugin");
+  await sleep(1500);
+  if (lines(journalOf(m.root)).length !== 0) fail("maestro wrote the journal while the plugin held its lock");
+  const released = Date.now();
+  await releaseLock(lock);
+  const r = await queued;
+  if (r.code !== 0) fail(`maestro did not journal after the plugin released: ${r.stderr}`);
+  if (r.at < released || lines(journalOf(m.root)).length !== 1) fail("maestro did not wait for the plugin's lock");
+  console.log("lock-parity 5 ok: maestro's journal lock waited for the plugin's and wrote after its release");
+}
+
+// 6 and 7. Old locks of a dead holder, and of a live pid with another start time, are reclaimed.
+for (const [n, pid, what] of [
+  [6, "4194303 1", "a dead holder's 200 s old lock"],
+  [7, `${process.pid} 1`, "a reused pid's 200 s old lock (live pid, other start time)"],
+] as const) {
+  const m = machine();
+  const dir = join(journalLocks(m.root), `${await lockKey(journalOf(m.root))}.d`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "pid"), `${pid}\n`);
+  writeFileSync(join(dir, "token"), "planted\n");
+  const old = new Date(Date.now() - 200_000);
+  utimesSync(dir, old, old);
+  const r = await queue(m.root, `reclaim-${n}`);
+  if (r.code !== 0) fail(`maestro did not reclaim ${what}: ${r.stderr}`);
+  if (lines(journalOf(m.root)).length !== 1) fail(`check ${n}: the journal has no line`);
+  console.log(`lock-parity ${n} ok: maestro reclaimed ${what}`);
+}
+
+// 8. Twenty journal writers and the plugin's own holds on the same key.
+{
+  const m = machine();
+  const path = journalOf(m.root);
+  const writers = Array.from({ length: 20 }, (_, i) => queue(m.root, `par-${i}`));
+  const holds = (async () => {
+    for (let n = 0; n < 20; n++) {
+      const lock = await acquireLock(path, journalLocks(m.root), { waitMs: 30_000 });
+      const seen = lines(path).length;
+      await sleep(25);
+      if (lines(path).length !== seen) fail("the journal changed while the plugin held its lock");
+      await releaseLock(lock);
+      await sleep(5);
+    }
+  })();
+  const results = await Promise.all(writers);
+  await holds;
+  for (const [i, r] of results.entries()) if (r.code !== 0) fail(`writer par-${i}: ${r.stderr}`);
+  const got = lines(path).map((l) => JSON.parse(l).payload.title as string);
+  for (let i = 0; i < 20; i++) if (got.filter((t) => t === `par-${i}`).length !== 1) fail(`par-${i} is not one line`);
+  if (got.length !== 20) fail(`${got.length} journal lines, want 20`);
+  console.log("lock-parity 8 ok: 20 journal writers and 20 plugin holds, 20 whole lines, none under a plugin hold");
 }
 console.log("lock-parity ok");

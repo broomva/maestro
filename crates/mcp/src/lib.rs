@@ -610,16 +610,23 @@ pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Va
             let rel = disk.rel(maestro_store::ASKS).map_err(|e| McpError::invalid_params(e, None))?;
             let dir = disk.paths.workspace.join(rel);
             let filed =
-                requests::file_ask(&disk.paths, &dir, &a.ledger, &a.ask, &session, &caller).map_err(|e| match e {
-                    requests::FileError::Refused(m) => McpError::invalid_params(m, None),
-                    other => McpError::internal_error(other.to_string(), None),
-                })?;
+                requests::file_ask(&disk.paths, &dir, &a.ledger, &a.ask, &session, &caller).map_err(file_error)?;
             let mut record =
                 requests::new_record(kind, session, &caller, json!({ "ledger": a.ledger, "id": filed.id }));
             record.result = Some(json!({ "ledger": filed.ledger, "id": filed.id }));
-            // The ask is written; a journal line that cannot be is said, not thrown.
-            let journal = requests::record(&disk.paths, &record).err().map(|e| e.to_string());
-            return Ok(json!({ "request": record, "validator": filed.validator, "journal_error": journal }));
+            // The ask is written, so the request failed only if its journal line was not: say both.
+            if let Err(e) = requests::record(&disk.paths, &record) {
+                let filed = json!({ "ledger": filed.ledger, "id": filed.id });
+                return Err(McpError::internal_error(
+                    format!(
+                        "filed `{}` in {}, but its requests journal line was not written: {e}. The ask stands; filing it again is refused as a duplicate.",
+                        filed["id"].as_str().unwrap_or_default(),
+                        filed["ledger"].as_str().unwrap_or_default()
+                    ),
+                    Some(json!({ "filed": filed, "busy": is_busy(&e) })),
+                ));
+            }
+            return Ok(json!({ "request": record, "validator": filed.validator }));
         }
         RequestKind::WorkQueue => json!(parse::<WorkQueueArgs>(args)?),
         RequestKind::ActionRequest => json!(parse::<ActionRequestArgs>(args)?),
@@ -629,8 +636,23 @@ pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Va
     };
     let session = session_of(&session_text)?;
     let record = requests::new_record(kind, session, &caller, payload);
-    requests::record(&store.paths, &record).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    requests::record(&store.paths, &record).map_err(file_error)?;
     Ok(json!({ "request": record, "journal": requests::journal(&store.paths) }))
+}
+
+fn is_busy(e: &requests::FileError) -> bool {
+    matches!(e, requests::FileError::Lock(maestro_store::locks::LockError::Busy { .. }))
+}
+
+/// A refusal is the caller's to fix; a busy lock is to retry (`busy: true`; the CLI exits 75).
+fn file_error(e: requests::FileError) -> McpError {
+    match e {
+        requests::FileError::Refused(m) => McpError::invalid_params(m, None),
+        other => {
+            let busy = is_busy(&other);
+            McpError::internal_error(other.to_string(), busy.then(|| json!({ "busy": true })))
+        }
+    }
 }
 
 /// What a render placed and dropped, for the model; the App shows the html itself.

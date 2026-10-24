@@ -394,3 +394,51 @@ fn the_agent_cli_has_no_owner_verb() {
         }
     }
 }
+
+/// A writer that keeps finding the ledger locked exits 75; so does Maestro, and nothing is journalled.
+#[test]
+fn a_busy_ledger_exits_75_to_retry() {
+    let m = machine();
+    let busy = m.path().join("busy.py");
+    std::fs::write(
+        &busy,
+        "import sys\nsys.stdin.read()\nprint('error: held by pid 1', file=sys.stderr)\nsys.exit(75)\n",
+    )
+    .unwrap();
+    let out = maestro(m.path())
+        .env("MAESTRO_ASK_LEDGER", &busy)
+        .args(["ask", "file", "--session", "t3:local/test", "--ledger", "ledger.yaml", "--ask", &ask("busy-1")])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(75), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("held by pid 1"));
+    assert!(!m.path().join("broomva-home/ledger/requests/requests.jsonl").exists());
+}
+
+/// An ask filed whose journal line cannot be written is a failed request that says the ask stands.
+#[test]
+fn a_filed_ask_without_its_journal_line_fails_and_says_so() {
+    let m = machine();
+    std::fs::create_dir_all(m.path().join("broomva-home/ledger")).unwrap();
+    std::fs::write(m.path().join("broomva-home/ledger/requests"), "not a folder").unwrap();
+    let out = file(m.path(), "unjournalled-1");
+    assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stdout));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("filed `unjournalled-1`") && err.contains("journal line was not written"), "{err}");
+    assert!(ledger(m.path()).contains("id: \"unjournalled-1\""));
+    let again = file(m.path(), "unjournalled-1");
+    assert_eq!(again.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("unjournalled-1"));
+}
+
+/// A session whose surface starts with `-` reaches the writer as a value, never as an option.
+#[test]
+fn a_session_starting_with_a_dash_is_filed_as_given() {
+    let m = machine();
+    let out = maestro(m.path())
+        .args(["--json", "ask", "file", "--session=-h:-/a", "--ledger", "ledger.yaml", "--ask", &ask("dash-1")])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(ledger(m.path()).contains("session: \"-h:-/a\""), "{}", ledger(m.path()));
+}

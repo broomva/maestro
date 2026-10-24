@@ -166,7 +166,8 @@ pub fn file_ask(
         .arg(&script)
         .arg("file")
         .arg(&path)
-        .args(["--json", "-", "--maestro-session", &session.to_string(), "--wait"])
+        // One `--opt=value` word: a session starting with `-` is a value, never an option.
+        .args(["--json", "-", &format!("--maestro-session={session}"), "--wait"])
         .arg(FILE_WAIT.as_secs().to_string())
         .env("MAESTRO_PASEO_ASK_LOCKS", &paths.ask_locks)
         .current_dir(&paths.workspace)

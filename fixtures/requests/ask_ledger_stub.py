@@ -72,20 +72,49 @@ def _lock_dir(ledger: Path) -> Path:
 
 
 def _dead(d: Path) -> bool:
+    """Old (120 s) and its holder gone, or its pid running under another start time (reused)."""
     try:
         if time.time() - d.stat().st_mtime < 120:
             return False
-        pid = int((d / "pid").read_text().split()[0])
-        os.kill(pid, 0)
-        return False
+    except FileNotFoundError:
+        return False  # released: take it with the next mkdir
+    try:
+        pid, start = ((d / "pid").read_text().split() + [""])[:2]
+        os.kill(int(pid), 0)
     except ProcessLookupError:
         return True
-    except (OSError, ValueError, IndexError):
+    except (OSError, ValueError):
         return True
+    out = subprocess.run(["ps", "-o", "etime=", "-p", pid], capture_output=True, text=True).stdout
+    return not start.isdigit() or abs(_start_of(out) - int(start)) > 2
+
+
+def _reclaim(d: Path) -> None:
+    """Moves a dead holder's lock aside under the `.reclaim.d` mutex, re-checking it there."""
+    mutex = Path(f"{d}.reclaim.d")
+    try:
+        mutex.mkdir()
+    except FileExistsError:
+        return
+    try:
+        if _dead(d):
+            aside = Path(f"{d}.stale-{secrets.token_hex(4)}")
+            d.rename(aside)
+            for c in aside.glob("*"):
+                c.unlink()
+            aside.rmdir()
+    except OSError:
+        pass
+    finally:
+        mutex.rmdir()
 
 
 def _start() -> int:
     out = subprocess.run(["ps", "-o", "etime=", "-p", str(os.getpid())], capture_output=True, text=True).stdout
+    return _start_of(out)
+
+
+def _start_of(out: str) -> int:
     parts = [int(x) for x in out.strip().replace("-", ":").split(":") if x.isdigit()]
     return int(time.time()) - sum(u * n for u, n in zip([86400, 3600, 60, 1][-len(parts):], parts))
 
@@ -135,14 +164,7 @@ def file(ledger: Path, ask: dict, session, wait: float) -> str:
             break
         except FileExistsError:
             if _dead(d):
-                aside = Path(f"{d}.stale-{secrets.token_hex(4)}")
-                try:
-                    d.rename(aside)
-                    for c in aside.glob("*"):
-                        c.unlink()
-                    aside.rmdir()
-                except OSError:
-                    pass
+                _reclaim(d)
                 continue
             if time.time() >= deadline:
                 raise Busy(f"another writer holds the lock on {ledger}; nothing was written")
@@ -196,7 +218,14 @@ def file(ledger: Path, ask: dict, session, wait: float) -> str:
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "file":
         args = sys.argv[3:]
-        opt = lambda name, default=None: args[args.index(name) + 1] if name in args else default  # noqa: E731
+        def opt(name, default=None):  # `--name value` or `--name=value`, as argparse reads them
+            for i, a in enumerate(args):
+                if a == name:
+                    return args[i + 1]
+                if a.startswith(name + "="):
+                    return a[len(name) + 1 :]
+            return default
+
         try:
             raw = sys.stdin.read() if opt("--json") == "-" else Path(opt("--json")).read_text()
             filed = file(Path(sys.argv[2]), json.loads(raw), opt("--maestro-session"), float(opt("--wait", "30")))

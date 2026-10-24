@@ -68,9 +68,11 @@ maestro escalate --reason R
   no new validator error. It writes to the working tree. It refuses an answer, a status or an origin in
   the ask, an id or uid outside `^[A-Za-z0-9][A-Za-z0-9._-]*$` or one any existing ask is addressed by,
   values Maestro's reader would read back otherwise (integers beyond ±(2^53 − 1), `-0.0`), a result over
-  the readers' 1 MiB limit, and a ledger that does not exist or is a symlink. Exit 75 (the lock was busy)
-  is reported as busy, to retry. `crates/store/src/locks.rs` (the same lock, ported) guards the
-  requests journal.
+  the readers' 1 MiB limit, and a ledger that does not exist or is a symlink. A lock busy for the
+  whole wait (the writer's exit 75, or the journal's) makes `maestro` exit 75 too, and MCP answers an
+  error with `data.busy: true`: retry. An ask filed whose journal line cannot be written is a failed
+  request whose error names the filed ask (filing it again is refused as a duplicate).
+  `crates/store/src/locks.rs` (the same lock, ported) guards the requests journal.
 - **Unverified callers.** Until sessions are verified against their surface (BRO-3268), every caller is
   unverified: an ask is filed with `origin: {via: maestro, session, verified: false}` and no `agent_id`,
   so no answer is routed into a session on a caller's word; every other request is held.
@@ -161,8 +163,11 @@ read, that count becomes a lower bound and the error is reported under `worktree
       match, and anything the plugin refuses Maestro must refuse. A ledger drawn from the subset
       grammar that the plugin reads must be read, so a reader refusing everything cannot pass.
     - `scripts/lock-parity.sh` runs the plugin's own lock and answer code (bun, same pin) against
-      the built binary: each waits for the other's lock, a dead holder's old lock is reclaimed, and
-      20 parallel filings beside 5 plugin answers lose nothing.
+      the built binary. On the requests journal it meets Maestro's own lock port: each waits for the
+      other's lock, a dead holder's or a reused pid's old lock is reclaimed, and 20 writers beside 20
+      plugin holds write 20 whole lines. On the ledger it meets the writer of record, which holds that
+      lock: `LOCK_PARITY_WRITER=<ask_ledger.py>` runs the real one; CI runs the stub, which proves
+      Maestro's wiring only.
     - `scripts/parity-check.sh` regenerates the golden from the plugin at the revision pinned in
       `fixtures/parity/plugin-rev` and fails on any difference; CI runs it. To move the pin, edit
       `plugin-rev`, run `scripts/parity-check.sh --write`, and review the diff.
