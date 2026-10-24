@@ -3,7 +3,8 @@
 //! full decision. The tabs are radio inputs and CSS, so they switch with no script: in the
 //! MCP App and in the snapshot a host without MCP Apps shows.
 //!
-//! The counts depend on two reads, the asks at the tree read and the working tree's answers.
+//! The counts depend on two reads, the asks at the tree read and the answers in the working tree
+//! and on maestro/answers.
 //! The card stands on both ([`joined`]): if either came back in part, the card says which
 //! source and every count on the screen is marked a lower bound.
 
@@ -107,7 +108,7 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
     html! {
         section class="mv-group" data-tabs=(tabs.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" ")) {
             header class="mv-group-head bv-meta" {
-                span class="mv-group-name" { (g.name) }
+                span class="mv-group-name" { bdi { (g.name) } }
                 @for tab in &tabs {
                     @if let Some(a) = oldest(*tab).and_then(|t| age(t, cx.at)) {
                         span class="mv-group-age" data-tab=(tab.as_str()) { (a) }
@@ -133,7 +134,7 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
                                     Landing::Waiting => span class="mv-irow-rec" data-tone="success" { "Waiting to land" },
                                     Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "Not offered here: whether it is answered, or answerable, is not known" },
                                     Landing::NotSeen => @if let Some(r) = e.ask.recommended().filter(|_| e.tab() != Tab::Ideas) {
-                                        span class="mv-irow-rec" data-tone="info" { "Recommended: " (r.label) }
+                                        span class="mv-irow-rec" data-tone="info" { "Recommended: " bdi { (r.label) } }
                                     },
                                 }
                             }

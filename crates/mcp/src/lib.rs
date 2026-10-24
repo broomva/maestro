@@ -275,8 +275,9 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
             };
             let section = store.asks();
             let unlanded = views::unlanded(store, section.data.as_deref().unwrap_or_default());
-            // `None` when the answers not yet landed could not be read: each row says null, not false.
-            let waiting = unlanded.data.clone();
+            // `None` when the answers not yet landed could not be read, or when the store reads the
+            // working tree (nothing lands onto it): each row then says null, not false.
+            let waiting = unlanded.data.clone().filter(|_| !store.reads_worktree());
             let limit = a.limit.unwrap_or(50);
             let matching: Vec<_> = section
                 .data
@@ -303,7 +304,7 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
                         "asked_at": ask.asked_at,
                         "recommended": ask.recommended().map(|o| &o.id),
                         "hash": ask.hash(),
-                        "waiting_to_land": waiting.as_ref().map(|w| w.iter().any(|r| r.ledger == lf.file && r.id == ask.handle())),
+                        "waiting_to_land": waiting.as_ref().map(|w| w.iter().any(|r| r.is(&lf.file, ask))),
                     })
                 })
                 .collect();

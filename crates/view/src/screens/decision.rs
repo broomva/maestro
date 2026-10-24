@@ -105,7 +105,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
         article class="mv-decision" data-ask=(format!("{}#{}", lf.file, a.handle())) data-hash=(a.hash()) data-kind=(kind(a)) {
             p class="mv-dmeta bv-meta" {
                 span class="mv-chip" data-kind=(kind(a)) { (kind(a)) }
-                " " (lf.file)
+                " " bdi { (lf.file) }
                 @if let Some(at) = &a.asked_at { " · asked " bdi { (at) } }
                 " by " bdi { (asker(lf, a)) }
             }
@@ -114,7 +114,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
             // What silence does is said only while the ask waits on the owner.
             @if state == AskState::Open && landing == Landing::NotSeen {
                 @if let Some(d) = &a.default {
-                    p class="mv-callout" data-tone="warning" { "If you don't answer: " (d) }
+                    p class="mv-callout" data-tone="warning" { "If you don't answer: " bdi { (d) } }
                 } @else if let Some(why) = &a.no_default_because {
                     p class="mv-callout" data-tone="warning" { "No default: " (label(why)) ". It waits for you." }
                 }
@@ -124,7 +124,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
             }
             @if let Some(s) = &rich.summary { p class="mv-dbody" { (s) } }
             @if let Some(q) = question { p class="mv-dbody" { (q) } }
-            @if let Some(why) = &a.why_you { p class="mv-dbody mv-why" { "Why you: " (why) } }
+            @if let Some(why) = &a.why_you { p class="mv-dbody mv-why" { "Why you: " bdi { (why) } } }
             @if let Some(details) = &rich.details {
                 // Sections, not folds: a poll swap keeps no state inside an opened decision.
                 section class="mv-fold" { h3 class="mv-fold-title" { "Details" } p class="mv-pre" { (details) } }
@@ -182,7 +182,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                     ul {
                         @for e in &a.exhausted {
                             @let (rung, what) = tried(e);
-                            li { @if let Some(r) = rung { span class="bv-code" { (r.as_str()) } ": " } (what) }
+                            li { @if let Some(r) = rung { span class="bv-code" { (r.as_str()) } ": " } bdi { (what) } }
                         }
                     }
                 }
@@ -243,7 +243,7 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
                 }
                 p class="mv-answer-why bv-meta" {
                     "Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as "
-                    span class="bv-code" { (a.handle()) } "."
+                    span class="bv-code" { bdi { (a.handle()) } } "."
                 }
             }
         }

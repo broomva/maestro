@@ -4,7 +4,7 @@
 //! hooks) computes the same counts from the same inputs.
 
 use crate::{LedgerFile, Store, TickTail};
-use maestro_core::ask::{AskRef, AskState};
+use maestro_core::ask::{Ask, AskRef, AskState};
 use maestro_core::context::{AskBrief, ContextPacket, ContextScope, InitiativeBrief, LoopBrief};
 use maestro_core::fleet::FleetSummary;
 use maestro_core::initiative::Initiative;
@@ -185,7 +185,8 @@ pub struct AskCounts {
     pub answered: usize,
     pub archived: usize,
     /// Open on the read revision but answered in the working tree or on `maestro/answers`:
-    /// waiting to land. `None` when those could not be read (unread is not none).
+    /// waiting to land. `None` when those could not be read (unread is not none), and when the
+    /// store reads the working tree itself: nothing lands onto it, so no count is made.
     pub unlanded: Option<usize>,
 }
 
@@ -197,18 +198,33 @@ pub const ANSWERS_BRANCH: &str = "maestro/answers";
 /// uid (`answers-landing.ts`), so a uid and a uid-less id that share their text never match.
 type Answered = BTreeSet<(String, String)>;
 
-fn key(ask: &maestro_core::ask::Ask) -> String {
+fn key(ask: &Ask) -> String {
     match &ask.uid {
         Some(uid) => format!("u:{uid}"),
         None => format!("i:{}", ask.id),
     }
 }
 
-fn answered_in(asks: &[LedgerFile]) -> Answered {
+/// An ask open at the read revision whose answer waits to land: its ledger and the plugin's key.
+/// Match it with [`Waiting::is`], never by handle: a uid and a uid-less id may share their text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    pub ledger: String,
+    key: String,
+}
+
+impl Waiting {
+    /// Whether this is `ask` in `ledger`.
+    pub fn is(&self, ledger: &str, ask: &Ask) -> bool {
+        self.ledger == ledger && self.key == key(ask)
+    }
+}
+
+/// The asks in `asks` whose state passes `closed`, by ledger and key.
+fn closed_in(asks: &[LedgerFile], closed: impl Fn(AskState) -> bool) -> Answered {
     asks.iter()
         .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        // Answered, not archived: an ask archived there is not an answer waiting to land.
-        .filter(|(_, a)| a.state() == AskState::Answered)
+        .filter(|(_, a)| closed(a.state()))
         .map(|(lf, a)| (lf.file.clone(), key(a)))
         .collect()
 }
@@ -217,10 +233,18 @@ fn answered_in(asks: &[LedgerFile]) -> Answered {
 /// that exists but does not read at all is `None` with its errors: its answers are unknown.
 /// Its errors are labelled with the branch, so they never read as the tree read's.
 fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
-    let branch = Store::new(store.paths.clone(), crate::TreeSource::GitRev(format!("refs/heads/{ANSWERS_BRANCH}")));
-    // `Tree::resolved` says this when the revision names nothing: the branch is not there.
-    if branch.tree.unresolved.as_deref().is_some_and(|r| r.starts_with("no commit is named")) {
-        return (Some(Answered::new()), Vec::new());
+    let name = format!("refs/heads/{ANSWERS_BRANCH}");
+    let branch = Store::new(store.paths.clone(), crate::TreeSource::GitRev(name.clone()));
+    if branch.tree.unresolved.is_some() {
+        // Only a ref that is not there holds no answers; one that does not resolve is unread.
+        return match branch.tree.has_ref(&name) {
+            Ok(false) => (Some(Answered::new()), Vec::new()),
+            Ok(true) => {
+                let reason = branch.tree.unresolved.clone().unwrap_or_default();
+                (None, vec![SourceError { at: format!("{ANSWERS_BRANCH}:{name}"), reason }])
+            }
+            Err(reason) => (None, vec![SourceError { at: format!("{ANSWERS_BRANCH}:{name}"), reason }]),
+        };
     }
     let read = branch.asks();
     let mut errors: Vec<SourceError> = read
@@ -232,7 +256,8 @@ fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
         })
         .collect();
     match read.data {
-        Some(asks) => (Some(answered_in(&asks)), errors),
+        // The plugin's `unlandedAnswers`: any entry answered or otherwise closed on the branch.
+        Some(asks) => (Some(closed_in(&asks, |s| s != AskState::Open)), errors),
         None => {
             if errors.is_empty() {
                 errors.push(SourceError { at: read.source, reason: "unread".into() });
@@ -246,18 +271,18 @@ fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
 /// [`ANSWERS_BRANCH`]. Empty when the store already reads the working tree. The section's
 /// errors are those two reads' failures: an unreadable ledger there hides answers waiting to
 /// land, so the count is then a lower bound, and `data` is `None` when either read failed whole.
-pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
-    if store.tree.source == crate::TreeSource::WorkingTree {
+pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
+    if store.reads_worktree() {
         return Section::ok("worktree", Vec::new());
     }
     // `None` once a read failed whole: what waits to land is then unknown, never none.
     let (mut answered, mut errors) = answered_on_branch(store);
-    let waiting = |answered: &Answered| -> Vec<AskRef> {
+    let waiting = |answered: &Answered| -> Vec<Waiting> {
         at_rev
             .iter()
             .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
             .filter(|(lf, a)| a.state() == AskState::Open && answered.contains(&(lf.file.clone(), key(a))))
-            .map(|(lf, a)| AskRef { ledger: lf.file.clone(), id: a.handle().to_string() })
+            .map(|(lf, a)| Waiting { ledger: lf.file.clone(), key: key(a) })
             .collect()
     };
     // No local asks directory holds no local answers: nothing waits there, and nothing is unread.
@@ -279,7 +304,8 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
                     at: if e.at.starts_with("worktree:") { e.at.clone() } else { format!("worktree:{}", e.at) },
                     reason: e.reason.clone(),
                 }));
-                (read.source, read.data.map(|d| answered_in(&d)))
+                // Answered, not archived: an ask archived in the working tree is not an answer.
+                (read.source, read.data.map(|d| closed_in(&d, |s| s == AskState::Answered)))
             }
         }
     };
@@ -381,7 +407,8 @@ pub struct Snapshot {
 fn asks_with_unlanded(store: &Store, asks: &Section<Vec<LedgerFile>>) -> Section<AskCounts> {
     let mut section = asks.as_ref().map(|a| {
         let waiting = unlanded(store, a);
-        (AskCounts { unlanded: waiting.data.as_ref().map(Vec::len), ..ask_counts(a) }, waiting.errors)
+        let count = waiting.data.as_ref().map(Vec::len).filter(|_| !store.reads_worktree());
+        (AskCounts { unlanded: count, ..ask_counts(a) }, waiting.errors)
     });
     let local_errors = section.data.as_mut().map(|(_, e)| std::mem::take(e)).unwrap_or_default();
     section.errors.extend(local_errors);

@@ -30,7 +30,9 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-groups">
 <section class="mv-group" data-tabs="all decisions ideas">
 <header class="mv-group-head bv-meta">
-<span class="mv-group-name">demo</span>
+<span class="mv-group-name">
+<bdi>demo</bdi>
+</span>
 <span class="mv-group-age" data-tab="all">22 d</span>
 <span class="mv-group-age" data-tab="decisions">22 d</span>
 <span class="mv-group-age" data-tab="ideas">22 d</span>
@@ -43,11 +45,12 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="decision">decision</span> <bdi>demo-arc</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Merge the demo PR now, or hold for review?</span>
-<span class="mv-irow-rec" data-tone="info">Recommended: Merge now</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Merge now</bdi>
+</span>
 </summary>
 <article class="mv-decision" data-ask="demo-arc.yaml#merge-now" data-hash="5b70dab7a7f0afa6" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> demo-arc.yaml by <bdi>demo-arc</bdi>
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>demo-arc.yaml</bdi> by <bdi>demo-arc</bdi>
 </p>
 <p class="mv-dtitle">Merge the demo PR now, or hold for review?</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
@@ -78,16 +81,20 @@ expression: "portable(&r.html, m.path())"
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: the review ledger records a pass</li>
+<span class="bv-code">read</span>: <bdi>the review ledger records a pass</bdi>
+</li>
 <li>
-<span class="bv-code">default</span>: holding is the reversible default</li>
+<span class="bv-code">default</span>: <bdi>holding is the reversible default</bdi>
+</li>
 </ul>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
 <p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
-<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">merge-now</span>.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>merge-now</bdi>
+</span>.</p>
 </div>
 </article>
 </details>
@@ -103,7 +110,7 @@ expression: "portable(&r.html, m.path())"
 </summary>
 <article class="mv-decision" data-ask="alt-key.yaml#alt-blocking" data-hash="7e423ddd550cb6e8" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> alt-key.yaml by <bdi>alt-key</bdi>
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>alt-key.yaml</bdi> by <bdi>alt-key</bdi>
 </p>
 <p class="mv-dtitle">Held under the corpus's other spelling?</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
@@ -114,9 +121,11 @@ expression: "portable(&r.html, m.path())"
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: x</li>
+<span class="bv-code">read</span>: <bdi>x</bdi>
+</li>
 <li>
-<span class="bv-code">default</span>: y</li>
+<span class="bv-code">default</span>: <bdi>y</bdi>
+</li>
 </ul>
 </section>
 <p class="mv-callout" data-tone="warning">Maestro cannot tell for sure whether this ask is answered, or whether Paseo would take an answer to it. Paseo · Maestro · Decisions shows it.</p>
@@ -133,23 +142,27 @@ expression: "portable(&r.html, m.path())"
 </summary>
 <article class="mv-decision" data-ask="demo-arc.yaml#pick-name" data-hash="70b46ca380a91c51" data-kind="idea">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> demo-arc.yaml by <bdi>demo-arc</bdi>
+<span class="mv-chip" data-kind="idea">idea</span> <bdi>demo-arc.yaml</bdi> by <bdi>demo-arc</bdi>
 </p>
 <p class="mv-dtitle">Which name?</p>
 <section class="mv-fold mv-tried">
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: none found</li>
+<span class="bv-code">read</span>: <bdi>none found</bdi>
+</li>
 <li>
-<span class="bv-code">loop</span>: asked the coordinator</li>
+<span class="bv-code">loop</span>: <bdi>asked the coordinator</bdi>
+</li>
 </ul>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
 <p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Initiatives shows whether it has been answered since, and is where to answer it.</p>
-<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">pick-name</span>.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>pick-name</bdi>
+</span>.</p>
 </div>
 </article>
 </details>
@@ -158,7 +171,9 @@ expression: "portable(&r.html, m.path())"
 </section>
 <section class="mv-group" data-tabs="all decisions authority">
 <header class="mv-group-head bv-meta">
-<span class="mv-group-name">maestro</span>
+<span class="mv-group-name">
+<bdi>maestro</bdi>
+</span>
 <span class="mv-group-age" data-tab="all">11 d</span>
 <span class="mv-group-age" data-tab="decisions">1 d</span>
 <span class="mv-group-age" data-tab="authority">11 d</span>
@@ -171,11 +186,12 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="credential">credential</span> <bdi>fleet-closeout</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Paste the &lt;b&gt;deploy&lt;/b&gt; key</span>
-<span class="mv-irow-rec" data-tone="info">Recommended: Paste it now</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Paste it now</bdi>
+</span>
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#new-key" data-hash="b7d37ffe8758bf00" data-kind="credential">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="credential">credential</span> decisions.yaml · asked <bdi>2026-10-22T08:00:00Z</bdi> by <bdi>fleet-closeout</bdi>
+<span class="mv-chip" data-kind="credential">credential</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-22T08:00:00Z</bdi> by <bdi>fleet-closeout</bdi>
 </p>
 <p class="mv-dtitle">Paste the &lt;b&gt;deploy&lt;/b&gt; key</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
@@ -202,14 +218,17 @@ expression: "portable(&r.html, m.path())"
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: keychain has none</li>
+<span class="bv-code">read</span>: <bdi>keychain has none</bdi>
+</li>
 </ul>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
 <p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
-<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">new-key</span>.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>new-key</bdi>
+</span>.</p>
 </div>
 </article>
 </details>
@@ -221,11 +240,12 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="authority">authority</span> <bdi>fleet-closeout</bdi>
 </span>
 <span class="mv-irow-title">May Maestro's answers-only PRs merge on their own once their gates pass?</span>
-<span class="mv-irow-rec" data-tone="info">Recommended: A person merges them</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: <bdi>A person merges them</bdi>
+</span>
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#merge-policy" data-hash="ae8d1d0cd57f5f87" data-kind="authority">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="authority">authority</span> decisions.yaml · asked <bdi>2026-10-12</bdi> by <bdi>fleet-closeout</bdi>
+<span class="mv-chip" data-kind="authority">authority</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-12</bdi> by <bdi>fleet-closeout</bdi>
 </p>
 <p class="mv-dtitle">May Maestro's answers-only PRs merge on their own once their gates pass?</p>
 <p class="mv-stakes">Each batch of your answers lands only when someone merges its PR.</p>
@@ -253,16 +273,20 @@ expression: "portable(&r.html, m.path())"
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: the merge policy</li>
+<span class="bv-code">read</span>: <bdi>the merge policy</bdi>
+</li>
 <li>
-<span class="bv-code">preauth</span>: no grant covers merges</li>
+<span class="bv-code">preauth</span>: <bdi>no grant covers merges</bdi>
+</li>
 </ul>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
 <p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
-<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">merge-policy</span>.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>merge-policy</bdi>
+</span>.</p>
 </div>
 </article>
 </details>
@@ -271,7 +295,9 @@ expression: "portable(&r.html, m.path())"
 </section>
 <section class="mv-group" data-tabs="all decisions">
 <header class="mv-group-head bv-meta">
-<span class="mv-group-name">fleet</span>
+<span class="mv-group-name">
+<bdi>fleet</bdi>
+</span>
 <span class="mv-group-age" data-tab="all">6 d</span>
 <span class="mv-group-age" data-tab="decisions">6 d</span>
 </header>
@@ -283,22 +309,25 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="decision">decision</span> <bdi>claude:coordinator</bdi> · <bdi>cost</bdi> · <span data-tone="attention">blocking</span>
 </span>
 <span class="mv-irow-title">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</span>
-<span class="mv-irow-rec" data-tone="info">Recommended: Rotate long orchestrators by handoff</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Rotate long orchestrators by handoff</bdi>
+</span>
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
 </p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
 <p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
-<p class="mv-callout" data-tone="warning">If you don't answer: wait: nothing changes and spend continues</p>
+<p class="mv-callout" data-tone="warning">If you don't answer: <bdi>wait: nothing changes and spend continues</bdi>
+</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
 <bdi>fleet-cost</bdi>
 </span>
 </p>
 <p class="mv-dbody">Long sessions drive the fleet's cost: about 19% of sessions over 400K context carry about 87% of it. Rotating long orchestrators by handoff caps the biggest spenders and leaves workers alone.</p>
 <p class="mv-dbody">Which context-cost policy should the fleet run?</p>
-<p class="mv-dbody mv-why">Why you: It trades quality on long workers for spend, which is your call.</p>
+<p class="mv-dbody mv-why">Why you: <bdi>It trades quality on long workers for spend, which is your call.</bdi>
+</p>
 <h3 class="mv-label bv-meta">Choose one</h3>
 <ol class="mv-dopts">
 <li class="mv-dopt" data-option="rotate" data-recommended="true" data-chosen="false">
@@ -381,16 +410,20 @@ expression: "portable(&r.html, m.path())"
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: ws#983 and the fleet-cost memory</li>
+<span class="bv-code">read</span>: <bdi>ws#983 and the fleet-cost memory</bdi>
+</li>
 <li>
-<span class="bv-code">reroute</span>: no standing grant covers it</li>
+<span class="bv-code">reroute</span>: <bdi>no standing grant covers it</bdi>
+</li>
 </ul>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
 <p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
-<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">fleet-cost-1</span>.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>fleet-cost-1</bdi>
+</span>.</p>
 </div>
 </article>
 </details>
@@ -399,7 +432,9 @@ expression: "portable(&r.html, m.path())"
 </section>
 <section class="mv-group" data-tabs="all ideas">
 <header class="mv-group-head bv-meta">
-<span class="mv-group-name">research</span>
+<span class="mv-group-name">
+<bdi>research</bdi>
+</span>
 <span class="mv-group-age" data-tab="all">3 d</span>
 <span class="mv-group-age" data-tab="ideas">3 d</span>
 </header>
@@ -414,7 +449,7 @@ expression: "portable(&r.html, m.path())"
 </summary>
 <article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="4e0b3b5d6873501f" data-kind="idea">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> decisions.yaml · asked <bdi>2026-10-20T00:00:00Z</bdi> by <bdi>9f3c2a1b</bdi>
+<span class="mv-chip" data-kind="idea">idea</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-20T00:00:00Z</bdi> by <bdi>9f3c2a1b</bdi>
 </p>
 <p class="mv-dtitle">Run the Jev-vs-/kg retrieval experiment?</p>
 <h3 class="mv-label bv-meta">Choose one</h3>
@@ -437,14 +472,17 @@ expression: "portable(&r.html, m.path())"
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
-<span class="bv-code">loop</span>: filed by the idea triage</li>
+<span class="bv-code">loop</span>: <bdi>filed by the idea triage</bdi>
+</li>
 </ul>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
 <p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Initiatives shows whether it has been answered since, and is where to answer it.</p>
-<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">jev-idea</span>.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>jev-idea</bdi>
+</span>.</p>
 </div>
 </article>
 </details>

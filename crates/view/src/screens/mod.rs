@@ -1,8 +1,8 @@
 //! The Decisions screens (design page 11, screens 1 and 2): the inbox and one decision.
 //!
-//! Both depend on two reads: the asks at the tree read, and the working tree's answers that have
-//! not landed. [`landing`] and [`joined`] are the only places the two meet, so no screen can
-//! show one read's state as if it were both. Phase 1 answers nothing here: Paseo's Maestro
+//! Both depend on two reads: the asks at the tree read, and the answers in the working tree and
+//! on maestro/answers that have not landed. [`landing`] and [`joined`] are the only places the
+//! two meet, so no screen can show one read's state as if it were both. Phase 1 answers nothing here: Paseo's Maestro
 //! plugin is still the one writer, and these screens say so where the answer would go.
 
 mod decision;
@@ -86,20 +86,11 @@ pub(crate) fn landing(cx: &Ctx, lf: &LedgerFile, ask: &Ask) -> Landing {
     if unlanded.errors.iter().any(|e| covers(&e.at, &lf.file)) {
         return Landing::Unknown;
     }
-    if !refs.iter().any(|r| r.ledger == lf.file && r.id == ask.handle()) {
-        return Landing::NotSeen;
-    }
-    // A waiting answer is named by its handle alone: when a uid and a uid-less id in this ledger
-    // share that text, it cannot say which of the two it answers.
-    if lf.ledger.asks.iter().filter(|a| a.handle() == ask.handle()).count() > 1 {
-        Landing::Unknown
-    } else {
-        Landing::Waiting
-    }
+    if refs.iter().any(|r| r.is(&lf.file, ask)) { Landing::Waiting } else { Landing::NotSeen }
 }
 
-/// What a card on these screens stands on: the asks read at the tree and the working tree's
-/// answers, with both reads' errors. For one ledger, only errors that may hide its asks.
+/// What a card on these screens stands on: the asks read at the tree and the answers in the
+/// working tree and on maestro/answers, with both reads' errors. For one ledger, only errors that may hide its asks.
 pub(crate) fn joined(cx: &Ctx, ledger: Option<&str>) -> Section<()> {
     let asks = match ledger {
         Some(l) => crate::render::scope_errors(cx, &cx.reads.asks, l).map(|_| ()),

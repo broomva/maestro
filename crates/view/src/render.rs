@@ -6,7 +6,7 @@
 
 use crate::catalog::{AskFilter, Block, Drop, Gap, Node, Validated};
 use maestro_core::Section;
-use maestro_core::ask::{AskRef, AskState};
+use maestro_core::ask::AskState;
 use maestro_store::views::{self, Reads, Snapshot};
 use maestro_store::{LedgerFile, Store};
 use maud::{Markup, html};
@@ -37,9 +37,9 @@ pub(crate) struct Ctx<'a> {
     pub(crate) snap: Snapshot,
     /// The render's clock: ages on the decisions screens are measured from it.
     pub(crate) at: jiff::Timestamp,
-    /// Asks answered in the working tree but open at the read tree, read once per render
+    /// Asks answered in the working tree or on maestro/answers but open at the read tree, read once per render
     /// and only by a block that shows them.
-    unlanded: std::cell::OnceCell<Section<Vec<AskRef>>>,
+    unlanded: std::cell::OnceCell<Section<Vec<views::Waiting>>>,
     /// Blocks that need document-unique ids (the inbox's radio groups) take the next number.
     ids: std::cell::Cell<usize>,
 }
@@ -52,7 +52,7 @@ impl Ctx<'_> {
         n
     }
 
-    pub(crate) fn unlanded(&self) -> &Section<Vec<AskRef>> {
+    pub(crate) fn unlanded(&self) -> &Section<Vec<views::Waiting>> {
         self.unlanded.get_or_init(|| {
             let at_rev = self.reads.asks.data.as_deref().unwrap_or_default();
             views::unlanded(self.store, at_rev)

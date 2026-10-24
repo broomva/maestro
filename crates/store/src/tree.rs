@@ -267,6 +267,20 @@ impl Tree {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Whether the repo holds the full ref `name`, by `show-ref --verify`: 1 is absent; any other
+    /// failure (a ref naming a missing object, no repo) is an error, never absent.
+    pub fn has_ref(&self, name: &str) -> Result<bool, String> {
+        let output = git_command(&self.root)
+            .args(["show-ref", "--verify", "--quiet", name])
+            .output()
+            .map_err(|e| e.to_string())?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(format!("`{name}` does not read: {}", String::from_utf8_lossy(&output.stderr).trim())),
+        }
+    }
 }
 
 /// `git -C <root>`. The CLI drops an inherited GIT_DIR (and the like) at startup, so the root

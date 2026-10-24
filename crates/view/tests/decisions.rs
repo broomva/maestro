@@ -157,7 +157,7 @@ fn rows_are_grouped_by_project_blocking_first_with_age() {
     );
     assert!(
         html.contains(
-            r#"<span class="mv-group-name">fleet</span><span class="mv-group-age" data-tab="all">6 d</span>"#
+            r#"<span class="mv-group-name"><bdi>fleet</bdi></span><span class="mv-group-age" data-tab="all">6 d</span>"#
         ),
         "{html}"
     );
@@ -165,7 +165,7 @@ fn rows_are_grouped_by_project_blocking_first_with_age() {
     // authority ask of 10-12), 1 day in Decisions (only the key asked 10-22).
     let maestro = r#"<span class="mv-group-age" data-tab="all">11 d</span><span class="mv-group-age" data-tab="decisions">1 d</span><span class="mv-group-age" data-tab="authority">11 d</span>"#;
     assert!(html.contains(maestro), "{html}");
-    assert!(html.contains("Recommended: Rotate long orchestrators by handoff"), "{html}");
+    assert!(html.contains("Recommended: <bdi>Rotate long orchestrators by handoff</bdi>"), "{html}");
 }
 
 #[test]
@@ -174,10 +174,10 @@ fn the_decision_shows_every_field_it_names() {
     let html = render(&worktree(m.path()), &detail("decisions.yaml", "fleet-cost-1")).html;
     for shown in [
         "devteam ran out twice this week; context length is the lever.",
-        "If you don't answer: wait: nothing changes and spend continues",
+        "If you don't answer: <bdi>wait: nothing changes and spend continues",
         "about 19% of sessions over 400K context",
         "Which context-cost policy should the fleet run?",
-        "Why you: It trades quality",
+        "Why you: <bdi>It trades quality",
         r#"<span class="mv-badge" data-tone="info">Recommended</span>"#,
         r#"<span class="mv-badge" data-tone="success">Reversible</span>"#,
         r#"<span class="mv-badge">Status quo</span>"#,
@@ -187,7 +187,7 @@ fn the_decision_shows_every_field_it_names() {
         r#"<a href="https://linear.app/broomva/issue/BRO-3001""#,
         r#"<span class="bv-code">session 2fb204ca</span>"#,
         "What the agent tried first",
-        r#"<span class="bv-code">reroute</span>: no standing grant covers it"#,
+        r#"<span class="bv-code">reroute</span>: <bdi>no standing grant covers it"#,
     ] {
         assert!(html.contains(shown), "missing {shown}\n{html}");
     }
@@ -233,6 +233,7 @@ fn an_unread_asks_ledger_is_unavailable_never_zero() {
         assert!(html.contains(r#"data-state="unavailable""#), "{html}");
         assert!(html.contains("This is not the same as none."), "{html}");
         assert!(!html.contains("to answer") && !html.contains("mv-tab-count"), "{html}");
+        assert!(!html.contains("No ledger named"), "an unread tree is not a missing ledger: {html}");
     }
     insta::assert_snapshot!(
         "inbox_unavailable",
@@ -359,8 +360,8 @@ fn a_group_that_holds_nothing_sorts_after_one_that_blocks_even_when_older() {
     )
     .unwrap();
     let html = render(&worktree(m.path()), &inbox()).html;
-    let attic = html.find(r#"<span class="mv-group-name">attic</span>"#).unwrap();
-    let fleet = html.find(r#"<span class="mv-group-name">fleet</span>"#).unwrap();
+    let attic = html.find(r#"<span class="mv-group-name"><bdi>attic</bdi></span>"#).unwrap();
+    let fleet = html.find(r#"<span class="mv-group-name"><bdi>fleet</bdi></span>"#).unwrap();
     assert!(fleet < attic, "a blocking group must come first: {html}");
 }
 
@@ -483,7 +484,7 @@ fn one_unread_working_tree_ledger_is_unknown_and_the_rest_are_not() {
     // demo-arc.yaml read cleanly in both trees: its rows still offer the owner path.
     let demo = &html[html.find(r#"data-ask="demo-arc.yaml#merge-now""#).unwrap()..];
     let demo = &demo[..demo[1..].find(r#"<li class="mv-irow""#).map_or(demo.len(), |n| n + 1)];
-    assert!(demo.contains("Recommended: Merge now") && demo.contains("mv-answerbar"), "{demo}");
+    assert!(demo.contains("Recommended: <bdi>Merge now</bdi>") && demo.contains("mv-answerbar"), "{demo}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(d.contains(r#"data-state="partial""#) && !d.contains("mv-answerbar"), "{d}");
     // The other ledger's decision stands on reads that cover it: no error, the owner path offered.
@@ -496,7 +497,7 @@ fn one_unread_working_tree_ledger_is_unknown_and_the_rest_are_not() {
 fn the_row_recommends_the_recommended_option_not_the_first() {
     let m = machine();
     let html = render(&worktree(m.path()), &inbox()).html;
-    assert!(html.contains("Recommended: Paste it now"), "{html}");
+    assert!(html.contains("Recommended: <bdi>Paste it now</bdi>"), "{html}");
     assert!(!html.contains("Recommended: Later"), "{html}");
     // An idea is answered under Initiatives, and only with develop, park or kill: no option of
     // it is put forward as the answer here.
@@ -534,9 +535,9 @@ fn uids_and_ids_are_separate_namespaces_as_in_the_plugin() {
 }
 
 #[test]
-fn a_waiting_answer_that_cannot_say_which_ask_it_answers_is_unknown() {
+fn a_waiting_answer_is_placed_by_the_plugins_key_not_its_text() {
     // `shared` is one ask's uid and another's uid-less id. The one with the uid is answered in
-    // the working tree only, and the waiting answer is named `shared`, which fits both.
+    // the working tree only. The plugin keys answers `u:shared` and `i:shared`, so only it waits.
     let m = machine();
     let asks = m.path().join("workspace/.control/asks");
     std::fs::remove_file(asks.join("broken.yaml")).unwrap();
@@ -552,12 +553,15 @@ fn a_waiting_answer_that_cannot_say_which_ask_it_answers_is_unknown() {
     std::fs::write(asks.join("ns.yaml"), answered).unwrap();
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let html = render(&store, &spec(json!({ "type": "decisions", "props": { "project": "ns" } }))).html;
-    // Neither is claimed waiting, and neither is offered as plainly unanswered.
-    assert!(!html.contains("Waiting to land</span>"), "{html}");
-    assert_eq!(html.matches("Not offered here").count(), 2, "{html}");
-    // No read failed, yet an answer is waiting that cannot be placed: no count is exact.
-    assert!(html.contains("at least 2 open · at least 0 answered, not yet landed"), "{html}");
-    assert!(!html.contains("mv-answerbar"), "{html}");
+    assert!(
+        html.contains(r#"mv-irow-title">By uid</span><span class="mv-irow-rec" data-tone="success">Waiting to land"#),
+        "{html}"
+    );
+    assert!(!html.contains(r#"mv-irow-title">By id</span><span class="mv-irow-rec" data-tone="success">"#), "{html}");
+    assert!(html.contains("2 open · 1 answered, not yet landed"), "{html}");
+    // The uid-less ask is open and nothing answers it: the owner path is offered for it alone.
+    assert_eq!(html.matches("mv-answerbar").count(), 1, "{html}");
+    assert!(!html.contains("Not offered here"), "{html}");
 }
 
 #[test]
@@ -673,6 +677,10 @@ fn an_answers_branch_that_does_not_read_is_unavailable_never_none() {
         "{html}"
     );
     assert!(!html.contains("mv-answerbar"), "{html}");
+    let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
+    assert!(d.contains(r#"data-state="partial""#), "{d}");
+    assert!(d.contains("Maestro cannot tell for sure whether this ask is answered"), "{d}");
+    assert!(!d.contains("mv-answerbar"), "{d}");
 }
 
 #[test]
@@ -684,6 +692,8 @@ fn a_broken_ledger_on_the_answers_branch_makes_only_its_asks_unknown() {
     assert_eq!(html.matches("Not offered here").count(), 4, "decisions.yaml's open asks: {html}");
     let demo = render(&store, &detail("demo-arc.yaml", "merge-now")).html;
     assert!(demo.contains("mv-answerbar"), "{demo}");
+    // The branch's error is labelled with the branch, never as the tree read's own.
+    assert!(html.contains(r#"<span class="bv-code">maestro/answers:"#), "{html}");
 }
 
 #[test]
@@ -745,6 +755,44 @@ fn a_decision_beside_an_entry_that_did_not_read_claims_no_state() {
     let d = render(&worktree(m.path()), &detail("sib.yaml", "u1")).html;
     assert!(d.contains("Maestro cannot tell for sure"), "{d}");
     assert!(!d.contains("Answered: ") && !d.contains("mv-answerbar"), "{d}");
+}
+
+#[test]
+fn an_answers_branch_that_does_not_resolve_is_unread_never_absent() {
+    let (m, _) = with_answers_branch(|asks| std::fs::write(asks.join("more.yaml"), "asks: []\n").unwrap());
+    // The ref is there, but names an object the repo does not hold.
+    let git_dir = m.path().join("workspace/.git");
+    std::fs::write(git_dir.join("refs/heads/maestro/answers"), format!("{}\n", "1".repeat(40))).unwrap();
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let snap = maestro_store::views::snapshot(&store);
+    let asks = snap.asks;
+    assert_eq!(asks.data.unwrap().unlanded, None);
+    assert!(asks.errors.iter().any(|e| e.at.starts_with("maestro/answers:")), "{:?}", asks.errors);
+    let html = render(&store, &inbox()).html;
+    assert!(html.contains(r#"answered, not yet landed: <span class="mv-unavailable">unavailable</span>"#), "{html}");
+}
+
+#[test]
+fn an_ask_closed_on_the_answers_branch_waits_to_land_as_the_plugin_counts_it() {
+    // The plugin's `unlandedAnswers` takes any entry answered or otherwise closed on the branch.
+    let (_m, store) = with_answers_branch(|asks| {
+        let file = asks.join("decisions.yaml");
+        let text = std::fs::read_to_string(&file).unwrap();
+        let archived = text.replacen("    gates: [fleet-cost]\n", "    gates: [fleet-cost]\n    status: archived\n", 1);
+        assert_ne!(archived, text);
+        std::fs::write(&file, archived).unwrap();
+    });
+    let snap = maestro_store::views::snapshot(&store);
+    assert_eq!(snap.asks.data.unwrap().unlanded, Some(1));
+    let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
+    assert!(!d.contains("mv-answerbar"), "{d}");
+}
+
+#[test]
+fn the_working_tree_makes_no_waiting_count() {
+    let m = machine();
+    let snap = maestro_store::views::snapshot(&worktree(m.path()));
+    assert_eq!(snap.asks.data.unwrap().unlanded, None, "nothing lands onto the working tree: no count, not 0");
 }
 
 #[test]

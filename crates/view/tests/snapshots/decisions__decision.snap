@@ -9,18 +9,20 @@ expression: "portable(&r.html, m.path())"
 </header>
 <article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
 <p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> decisions.yaml · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
 </p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
 <p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
-<p class="mv-callout" data-tone="warning">If you don't answer: wait: nothing changes and spend continues</p>
+<p class="mv-callout" data-tone="warning">If you don't answer: <bdi>wait: nothing changes and spend continues</bdi>
+</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
 <bdi>fleet-cost</bdi>
 </span>
 </p>
 <p class="mv-dbody">Long sessions drive the fleet's cost: about 19% of sessions over 400K context carry about 87% of it. Rotating long orchestrators by handoff caps the biggest spenders and leaves workers alone.</p>
 <p class="mv-dbody">Which context-cost policy should the fleet run?</p>
-<p class="mv-dbody mv-why">Why you: It trades quality on long workers for spend, which is your call.</p>
+<p class="mv-dbody mv-why">Why you: <bdi>It trades quality on long workers for spend, which is your call.</bdi>
+</p>
 <h3 class="mv-label bv-meta">Choose one</h3>
 <ol class="mv-dopts">
 <li class="mv-dopt" data-option="rotate" data-recommended="true" data-chosen="false">
@@ -103,16 +105,20 @@ expression: "portable(&r.html, m.path())"
 <h3 class="mv-fold-title">What the agent tried first</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: ws#983 and the fleet-cost memory</li>
+<span class="bv-code">read</span>: <bdi>ws#983 and the fleet-cost memory</bdi>
+</li>
 <li>
-<span class="bv-code">reroute</span>: no standing grant covers it</li>
+<span class="bv-code">reroute</span>: <bdi>no standing grant covers it</bdi>
+</li>
 </ul>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
 </textarea>
 <p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
-<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">fleet-cost-1</span>.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>fleet-cost-1</bdi>
+</span>.</p>
 </div>
 </article>
 <p class="mv-source bv-meta">
