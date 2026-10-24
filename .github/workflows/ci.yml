@@ -1,5 +1,6 @@
-# The required check on main (ruleset `main: required checks`). It runs the same gate an
-# agent runs before a PR: scripts/ci.sh (fmt, clippy, tests, mutation, plugin parity).
+# The required check on main (ruleset `main: required checks`) is the `ci` job. It runs the same
+# gate an agent runs before a PR, scripts/ci.sh (fmt, clippy, tests, mutation, plugin parity),
+# with the mutation step split across the `mutants` shards first (BRO-3446).
 name: ci
 on:
   pull_request:
@@ -12,15 +13,45 @@ concurrency:
 permissions:
   contents: read
 jobs:
-  ci:
-    name: ci
+  mutants:
+    name: mutants (${{ matrix.shard }}/4)
     # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
     runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
-    # ci.sh runs every mutant against the whole suite (159 at BRO-3204: about 45 min hosted).
-    timeout-minutes: 90
+    # Each shard runs a quarter of the mutants against the whole suite (253 in all at BRO-3203:
+    # about 70-90 min serial, so about 20-25 min a shard).
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CARGO_TERM_COLOR: always
+      MUTANT_SHARD: ${{ matrix.shard }}/4
+    steps:
+      # The job runs build scripts: keep the token out of .git/config.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: bash scripts/mutation-check.sh
+  ci:
+    name: ci
+    needs: mutants
+    # always(): a job skipped because a need failed reports success to a required check, so this
+    # job runs anyway and its first step fails unless every shard succeeded.
+    if: ${{ always() }}
+    runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
+    timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
     steps:
+      - name: every mutant shard passed
+        env:
+          MUTANTS: ${{ needs.mutants.result }}
+        run: |
+          echo "mutants: $MUTANTS"
+          test "$MUTANTS" = success
       # The job runs build scripts and the plugin's code (parity): keep the token out of .git/config.
       - uses: actions/checkout@v4
         with:
@@ -31,3 +62,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
       - run: bash scripts/ci.sh
+        env:
+          MUTANTS_SHARDED: 1
