@@ -385,7 +385,7 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
         "maestro_needs_list" => {
             print_errors(&v);
             let Some(list) = v["data"].as_array().cloned() else {
-                println!("Needs you: unknown (the ask ledgers could not be read)");
+                println!("Needs you: {}", unavailable(&errors_of(&v)));
                 return Ok(());
             };
             let bound = if v["errors"].as_array().is_some_and(|e| !e.is_empty()) { "at least " } else { "" };
@@ -397,15 +397,17 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
         "maestro_asks_list" => {
             print_errors(&v);
             if v["readable"].as_bool() == Some(false) {
-                println!("asks: unreadable ({})", s(&v["source"]));
+                println!("asks: {}", unavailable(&errors_of(&v)));
                 return Ok(());
             }
             let list = v["asks"].as_array().cloned().unwrap_or_default();
             let total = v["total"].as_u64().unwrap_or(list.len() as u64);
+            // A partial read counts what it read: a lower bound.
+            let bound = if errors_of(&v).is_empty() { "" } else { "at least " };
             if v["truncated"].as_bool() == Some(true) {
-                println!("{} of {total} asks (raise --limit for the rest)", list.len());
+                println!("{} of {bound}{total} asks (raise --limit for the rest)", list.len());
             } else {
-                println!("{total} ask{}", if total == 1 { "" } else { "s" });
+                println!("{bound}{total} ask{}", if total == 1 { "" } else { "s" });
             }
             for a in &list {
                 let flag = if a["blocking"].as_bool() == Some(true) { "blocking " } else { "" };
@@ -415,6 +417,10 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
         "maestro_ask_get" => println!("{}", serde_json::to_string_pretty(&v)?),
         "maestro_work_list" => {
             print_errors(&v);
+            if v["readable"].as_bool() == Some(false) {
+                println!("work: {}", unavailable(&errors_of(&v)));
+                return Ok(());
+            }
             for w in v["items"].as_array().into_iter().flatten() {
                 println!("  {:<10} {}  {}", s(&w["work_state"]), s(&w["slug"]), s(&w["title"]));
             }
@@ -465,14 +471,15 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
 
 fn human_snapshot(v: &Value) {
     println!("Maestro snapshot  {}  tree {}", s(&v["generated_at"]), s(&v["tree"]));
-    // An unread section prints why, never its counts: unread is not empty (BRO-3322).
+    // Unread is not empty (BRO-3322): an unread section prints why, never its counts, and a
+    // partial one prints its counts as a lower bound, with why.
     let section = |name: &str, line: String| {
         let sec = &v[name];
         let errors = sec["errors"].as_array().cloned().unwrap_or_default();
         let (mark, line) = if sec["data"].is_null() {
             ("unreadable", unavailable(&errors))
         } else if !errors.is_empty() {
-            ("partial", line)
+            ("partial", format!("at least {} ({})", if line.is_empty() { "none" } else { &line }, reasons(&errors)))
         } else {
             ("ok", line)
         };
@@ -513,11 +520,22 @@ fn human_snapshot(v: &Value) {
 
 /// `unavailable (<first reason>)`, naming how many more there are.
 fn unavailable(errors: &[Value]) -> String {
+    if errors.is_empty() { "unavailable".to_string() } else { format!("unavailable ({})", reasons(errors)) }
+}
+
+/// The first read error, where and why, and how many more there are.
+fn reasons(errors: &[Value]) -> String {
+    let one = |e: &Value| format!("{}: {}", s(&e["at"]), s(&e["reason"]));
     match errors {
-        [] => "unavailable".to_string(),
-        [e] => format!("unavailable ({})", s(&e["reason"])),
-        [e, rest @ ..] => format!("unavailable ({}; and {} more, use --json)", s(&e["reason"]), rest.len()),
+        [] => String::new(),
+        [e] => one(e),
+        [e, rest @ ..] => format!("{}; and {} more, use --json", one(e), rest.len()),
     }
+}
+
+/// A command's read errors, from its JSON.
+fn errors_of(v: &Value) -> Vec<Value> {
+    v["errors"].as_array().cloned().unwrap_or_default()
 }
 
 fn context(cli: &Cli, store: &Store) -> Result<String> {

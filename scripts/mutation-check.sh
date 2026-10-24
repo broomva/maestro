@@ -123,10 +123,15 @@ mutate $session 'if id.is_empty() {
             // A blank ID' 'if false {
             // A blank ID'
 mutate $cli 'if std::time::Instant::now() >= deadline {' 'if false {'
-# Text: an unread section prints why, never its counts (BRO-3322); hosts claims no adapter.
+# Text: unread prints where and why, never a count; partial is a lower bound (BRO-3322); hosts claims no adapter.
 mutate $cli '("unreadable", unavailable(&errors))' '("unreadable", line)'
-mutate $cli '[e] => format!("unavailable ({})", s(&e["reason"])),' '[_] => "unavailable".to_string(),'
-mutate $cli '[e, rest @ ..] => format!("unavailable ({}; and {} more, use --json)", s(&e["reason"]), rest.len()),' '[e, ..] => format!("unavailable ({})", s(&e["reason"])),'
+mutate $cli '("partial", format!("at least {} ({})", if line.is_empty() { "none" } else { &line }, reasons(&errors)))' '("partial", line)'
+mutate $cli '[e] => one(e),' '[e] => s(&e["reason"]).to_string(),'
+mutate $cli '[e, rest @ ..] => format!("{}; and {} more, use --json", one(e), rest.len()),' '[e, ..] => one(e),'
+mutate $cli 'println!("Needs you: {}", unavailable(&errors_of(&v)));' 'println!("Needs you: unknown");'
+mutate $cli 'println!("asks: {}", unavailable(&errors_of(&v)));' 'println!("asks: unreadable");'
+mutate $cli 'let bound = if errors_of(&v).is_empty() { "" } else { "at least " };' 'let bound = "";'
+mutate $cli 'println!("work: {}", unavailable(&errors_of(&v)));' ''
 mutate $cli '    println!("These are what each surface and harness can do. Maestro launches and sends nothing yet (BRO-3276).");
 ' ''
 mutate $cli 'status.success().then_some(buf)' 'Some(buf)'
