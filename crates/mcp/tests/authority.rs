@@ -8,6 +8,17 @@ use maestro_core::request::{Disposition, RequestKind};
 use maestro_mcp::{MaestroServer, TOOLS, call};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::json;
+use std::process::Command;
+
+struct HeldJournalLock(Option<maestro_store::locks::Lock>);
+
+impl Drop for HeldJournalLock {
+    fn drop(&mut self) {
+        if let Some(lock) = self.0.take() {
+            maestro_store::locks::release(lock);
+        }
+    }
+}
 
 fn verb_name(verb: OwnerVerb) -> String {
     serde_json::to_value(verb).unwrap().as_str().unwrap().to_string()
@@ -170,4 +181,64 @@ fn an_unjournalled_filing_is_never_busy() {
     assert!(data.get("busy").is_none_or(|b| b != &json!(true)), "{data}");
     assert!(e.message.contains("filed `a-1`") && !e.message.contains(".."), "{}", e.message);
     assert!(!e.message.to_lowercase().contains("try again"), "{}", e.message);
+}
+
+/// Run in a child test process so its request-wait override cannot affect parallel tests. This
+/// goes through `call` and the real ask writer, holding the actual requests-journal lock.
+#[test]
+fn a_filed_ask_with_a_busy_journal_lock_has_no_busy_flag() {
+    const CHILD: &str = "BRO3267_MCP_BUSY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "a_filed_ask_with_a_busy_journal_lock_has_no_busy_flag", "--nocapture"])
+            .env(CHILD, "1")
+            .env("MAESTRO_REQUESTS_WAIT_MS", "100")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        return;
+    }
+
+    use maestro_store::locks::{self, AcquireOptions};
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    let asks = workspace.join(".control/asks");
+    std::fs::create_dir_all(&asks).unwrap();
+    std::fs::create_dir_all(workspace.join("scripts")).unwrap();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/requests");
+    std::fs::copy(fixtures.join("ledger.yaml"), asks.join("ledger.yaml")).unwrap();
+    std::fs::copy(fixtures.join("ask_ledger_stub.py"), workspace.join("scripts/ask_ledger.py")).unwrap();
+    let mut paths = Paths::under(tmp.path());
+    paths.ask_locks = tmp.path().join("ask-locks");
+    let store = Store::new(paths.clone(), TreeSource::WorkingTree);
+    let journal = paths.broomva_home.join("ledger/requests/requests.jsonl");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let _lock = HeldJournalLock(Some(
+        locks::acquire(
+            &journal,
+            &paths.broomva_home.join("locks"),
+            &AcquireOptions {
+                wait: std::time::Duration::from_secs(1),
+                what: "the test journal".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    ));
+    let mut ask: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixtures.join("ask.json")).unwrap()).unwrap();
+    ask["id"] = json!("mcp-busy-journal-1");
+    let error =
+        call(&store, "maestro_ask_file", json!({ "session": "t3:local/test", "ledger": "ledger.yaml", "ask": ask }))
+            .unwrap_err();
+    assert!(
+        error.message.contains("filed `mcp-busy-journal-1`") && error.message.contains("journal line was not written"),
+        "{}",
+        error.message
+    );
+    let data = error.data.expect("the filed ask is named in the error data");
+    assert_eq!(data["filed"]["id"], "mcp-busy-journal-1");
+    assert_ne!(data.get("busy"), Some(&json!(true)), "{data}");
+    assert!(std::fs::read_to_string(asks.join("ledger.yaml")).unwrap().contains("id: \"mcp-busy-journal-1\""));
+    assert!(!journal.exists(), "the journal line must be absent");
 }

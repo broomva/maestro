@@ -458,6 +458,7 @@ mutate $mcp '    let caller = Principal::Unverified;' '    let caller = Principa
 # A filed ask whose journal line fails is a failed request; a busy lock exits 75 to retry (P20 r1).
 mutate $mcp '            if let Err(e) = requests::record(&disk.paths, &record) {' '            if let Some(e) = requests::record(&disk.paths, &record).err().filter(|_| false) {'
 mutate $mcp '        Some(json!({ "filed": { "ledger": ledger, "id": id } })),' '        Some(json!({ "filed": { "ledger": ledger, "id": id }, "busy": true })),'
+mutate $mcp '        Some(json!({ "filed": { "ledger": ledger, "id": id } })),' '        Some(json!({ "filed": { "ledger": ledger, "id": id }, "busy": is_busy(e) })),'
 mutate $locks '        Some(text) => holder_alive(text),' '        Some(_text) => false,'
 mutate $mcp 'McpError::internal_error(other.to_string(), busy.then(|| json!({ "busy": true })))' 'McpError::internal_error(other.to_string(), None)'
 mutate $cli '            if e.downcast_ref::<Busy>().is_some() {' '            if false {'

@@ -308,6 +308,7 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 | `MAESTRO_FLEET_STATE` | `~/.local/state/fleet-reconcile` |
 | `MAESTRO_PASEO_ASK_LOCKS` | `~/.local/state/control-asks/locks` (the plugin's ask-ledger lock root) |
 | `MAESTRO_ASK_LEDGER` | `<workspace>/scripts/ask_ledger.py` (the writer `ask file` runs: `ask_ledger.py file`) |
+| `MAESTRO_REQUESTS_WAIT_MS` | `30000`: how long a request waits for the journal lock (1–60000 ms) |
 | `MAESTRO_SESSION` | none: the session agent requests name |
 | `MAESTRO_USAGE` | unset: a file holding `provider_manager.py --json usage` output, which the economy reads; unset, the economy is unavailable |
 

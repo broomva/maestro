@@ -22,6 +22,17 @@ use std::time::Duration;
 /// answer: an agent can wait, and each holder runs the validator (~0.1 s) under it.
 pub const FILE_WAIT: Duration = Duration::from_secs(30);
 
+/// The journal's wait can be shortened for a caller that has its own bounded retry policy.
+/// Invalid or out-of-range values keep the normal wait.
+fn journal_wait() -> Duration {
+    std::env::var("MAESTRO_REQUESTS_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| (1..=60_000).contains(millis))
+        .map(Duration::from_millis)
+        .unwrap_or(FILE_WAIT)
+}
+
 /// Keys an agent never files, beside the plugin's `OUTCOME_KEYS` ([`maestro_core::ask::OUTCOME_KEYS`]):
 /// the rest of an answer, a status, an archive mark, and the origin, which is Maestro's.
 pub const FILER_REFUSED: &[&str] = &[
@@ -210,7 +221,7 @@ pub fn record(paths: &Paths, record: &RequestRecord) -> Result<(), FileError> {
     std::fs::create_dir_all(dir)?;
     let root = paths.broomva_home.join("locks");
     let line = format!("{}\n", serde_json::to_string(record).map_err(|e| refused(e.to_string()))?);
-    let options = AcquireOptions { wait: FILE_WAIT, what: "the requests journal".into(), ..Default::default() };
+    let options = AcquireOptions { wait: journal_wait(), what: "the requests journal".into(), ..Default::default() };
     locks::with_lock(&file, &root, &options, |_| {
         use std::io::Write as _;
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&file)?;

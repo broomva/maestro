@@ -56,6 +56,33 @@ fn file(root: &Path, id: &str) -> Output {
         .unwrap()
 }
 
+struct HeldJournalLock(Option<maestro_store::locks::Lock>);
+
+impl Drop for HeldJournalLock {
+    fn drop(&mut self) {
+        if let Some(lock) = self.0.take() {
+            maestro_store::locks::release(lock);
+        }
+    }
+}
+
+fn hold_journal_lock(root: &Path) -> HeldJournalLock {
+    use maestro_store::locks::{self, AcquireOptions};
+    let journal = root.join("broomva-home/ledger/requests/requests.jsonl");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let lock = locks::acquire(
+        &journal,
+        &root.join("broomva-home/locks"),
+        &AcquireOptions {
+            wait: std::time::Duration::from_secs(1),
+            what: "the test journal".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    HeldJournalLock(Some(lock))
+}
+
 fn ledger(root: &Path) -> String {
     std::fs::read_to_string(root.join("ws/.control/asks/ledger.yaml")).unwrap()
 }
@@ -429,6 +456,40 @@ fn a_filed_ask_without_its_journal_line_fails_and_says_so() {
     let again = file(m.path(), "unjournalled-1");
     assert_eq!(again.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&again.stderr).contains("unjournalled-1"));
+}
+
+/// The real CLI path files through the stub writer, then hits the held journal lock. The
+/// already-filed ask is a failed request, never a retryable busy operation.
+#[test]
+fn a_filed_ask_with_a_busy_journal_lock_exits_one() {
+    let m = machine();
+    let _lock = hold_journal_lock(m.path());
+    let out = maestro(m.path())
+        .env("MAESTRO_REQUESTS_WAIT_MS", "100")
+        .args([
+            "--json",
+            "ask",
+            "file",
+            "--session",
+            "t3:local/test",
+            "--ledger",
+            "ledger.yaml",
+            "--ask",
+            &ask("busy-journal-1"),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("filed `busy-journal-1`") && err.contains("journal line was not written"), "{err}");
+    assert!(ledger(m.path()).contains("id: \"busy-journal-1\""), "the ask must have been filed");
+    assert!(!m.path().join("broomva-home/ledger/requests/requests.jsonl").exists(), "no journal line was written");
 }
 
 /// A session whose surface starts with `-` reaches the writer as a value, never as an option.
