@@ -187,7 +187,8 @@ body { padding: var(--bv-space-3); }
 .mv-beat-state { font-size: var(--bv-text-xs); }
 .mv-beats { display: flex; gap: 2px; margin-top: var(--bv-space-1); }
 .mv-beat-tick { flex: 1 1 0; max-width: 12px; height: 14px; border-radius: 2px; background: var(--muted); }
-.mv-beat-tick[data-outcome="ok"], .mv-beat-tick[data-outcome="ended"] { background: var(--mv-tone-success); }
+.mv-beat-tick[data-outcome="ok"] { background: var(--mv-tone-success); }
+.mv-beat-tick[data-outcome="ended"] { background: var(--muted-foreground); }
 .mv-beat-tick[data-outcome="partial"] { background: var(--mv-tone-warning); }
 .mv-beat-tick[data-outcome="failed"] { background: var(--mv-tone-danger); }
 .mv-beat-tick[data-outcome="open"] { background: transparent; border: 1px solid var(--mv-tone-info); }

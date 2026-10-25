@@ -141,7 +141,7 @@ fn an_unread_machine_says_unavailable_everywhere() {
     }
     let h = text_of(&r.html, "mv-headline-text");
     assert!(h.contains("could not be read") && h.contains("is not known"), "{h}");
-    assert!(!h.contains("Nothing needs you"), "{h}");
+    assert!(!h.contains("Nothing blocking needs you"), "{h}");
     for card in ["plan", "heartbeats", "economy", "receipts", "running", "nodes"] {
         assert!(r.html.contains(&format!(r#"data-type="{card}" data-state="unavailable""#)), "{card}");
     }
@@ -362,11 +362,15 @@ fn ok_needs_a_closed_tick_and_absence_needs_the_whole_ledger() {
     add_loop(m.path(), "drifty", "");
     add_loop(m.path(), "failing", "");
     add_loop(m.path(), "busy", "");
+    add_loop(m.path(), "mute", "");
+    add_loop(m.path(), "gone", "desired: retired\n");
     add_ticks(
         m.path(),
         &(tick("D1", "drifty", "2026-10-23T10:00:00Z", None)
             + &tick("F1", "failing", "2026-10-23T11:00:00Z", Some(("2026-10-23T11:10:00Z", "failed")))
-            + &tick("O1", "busy", "2026-10-23T11:45:00Z", None)),
+            + &tick("O1", "busy", "2026-10-23T11:45:00Z", None)
+            + &tick("M1", "mute", "2026-10-23T11:00:00Z", Some(("2026-10-23T11:05:00Z", "")))
+            + &tick("G1", "gone", "2026-10-23T11:00:00Z", Some(("2026-10-23T11:05:00Z", "ok")))),
     );
     let r = render(&worktree(m.path(), false), "health");
     assert_eq!(beat_of(&r.html, "demo-tick"), "ok");
@@ -376,6 +380,12 @@ fn ok_needs_a_closed_tick_and_absence_needs_the_whole_ledger() {
     assert_eq!(beat_of(&r.html, "failing"), "last tick failed");
     assert_eq!(beat_of(&r.html, "busy"), "not known", "a tick still open, inside its limit, is not proven ok");
     assert_eq!(beat_of(&r.html, "silent"), "no receipts");
+    assert_eq!(
+        beat_of(&r.html, "mute"),
+        "ended, no outcome recorded",
+        "a tick that closed without an outcome is not ok"
+    );
+    assert_eq!(beat_of(&r.html, "gone"), "retired", "a retired loop is not judged by its ticks");
 }
 
 #[test]
@@ -477,7 +487,7 @@ fn partial_reads_say_so_and_claim_no_none() {
     std::fs::write(m.path().join("work/today-run/_work.md"), "---\nnot: [valid\n---\n").unwrap();
     let r = render(&worktree(m.path(), false), "today");
     let h = text_of(&r.html, "mv-headline-text");
-    assert!(!h.contains("Nothing needs you") && !h.contains("No work is running"), "{h}");
+    assert!(!h.contains("Nothing blocking needs you") && !h.contains("No work is running"), "{h}");
     assert!(h.contains("found needing you in the part that was read"), "{h}");
     assert!(h.contains("running in the part that was read"), "{h}");
     assert!(r.html.contains(r#"data-pill="open asks" data-partial="true""#));

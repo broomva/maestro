@@ -140,7 +140,9 @@ fn sentence(c: &Counts) -> String {
     parts.push(match c.needs {
         Count { n: None, .. } => "What needs you could not be read.".to_string(),
         Count { n: Some(n), partial: true } => format!("{n} found needing you {PART}."),
-        Count { n: Some(0), .. } => "Nothing needs you.".to_string(),
+        // Needs count blocking asks and owner steps only: an open ask that does not block can
+        // still be the top decision, so a zero says nothing about it.
+        Count { n: Some(0), .. } => "Nothing blocking needs you.".to_string(),
         Count { n: Some(1), .. } => "One thing needs you.".to_string(),
         Count { n: Some(n), .. } => format!("{n} things need you."),
     });
@@ -154,7 +156,8 @@ fn sentence(c: &Counts) -> String {
     parts.push(match c.silent {
         Count { n: None, .. } => "Whether a loop has gone silent is not known.".to_string(),
         Count { n: Some(n), partial: true } => format!("{n} loops without tick receipts {PART}."),
-        Count { n: Some(0), .. } => "Every loop that names tick receipts has some.".to_string(),
+        // Only an active loop is checked for receipts; a paused or retired one is not.
+        Count { n: Some(0), .. } => "Every active loop that names tick receipts has some.".to_string(),
         Count { n: Some(1), .. } => "One loop has no tick receipts.".to_string(),
         Count { n: Some(n), .. } => format!("{n} loops have no tick receipts."),
     });
@@ -268,7 +271,17 @@ mod tests {
         let s = sentence(&c);
         assert!(s.contains("could not be read"), "{s}");
         assert!(s.contains("is not known"), "{s}");
-        assert!(!s.contains("Nothing needs you"), "{s}");
+        assert!(!s.contains("Nothing blocking needs you"), "{s}");
+    }
+
+    #[test]
+    fn a_whole_zero_names_what_was_counted() {
+        let whole0 = Count { n: Some(0), partial: false };
+        let c = Counts { needs: whole0, running: whole0, open: whole0, silent: whole0, landing: whole0 };
+        assert_eq!(
+            sentence(&c),
+            "Nothing blocking needs you. No work is running. Every active loop that names tick receipts has some."
+        );
     }
 
     #[test]

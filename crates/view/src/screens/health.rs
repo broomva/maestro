@@ -94,6 +94,10 @@ pub(crate) enum Beat {
     LastFailed,
     /// Desired paused, nothing wrong proven: no tick is expected.
     Paused,
+    /// Desired retired: the loop is gone from the plan, so no tick is expected and none is judged.
+    Retired,
+    /// The last tick closed but recorded no outcome: it ended, and nothing says how.
+    Ended,
     /// The whole ledger was read and holds no tick for it; its contract names no receipts.
     NoTicks,
     /// The ticks ledger was not read whole and clean, so what it does not show is not known.
@@ -109,6 +113,8 @@ impl Beat {
             Beat::NoReceipts => "no receipts",
             Beat::LastFailed => "last tick failed",
             Beat::Paused => "paused",
+            Beat::Retired => "retired",
+            Beat::Ended => "ended, no outcome recorded",
             Beat::NoTicks => "no ticks recorded",
             Beat::Unknown => "not known",
         }
@@ -119,7 +125,7 @@ impl Beat {
             Beat::Ok => "success",
             Beat::Drift | Beat::ReviewOverdue | Beat::LastFailed => "warning",
             Beat::NoReceipts => "danger",
-            Beat::Paused | Beat::NoTicks | Beat::Unknown => "neutral",
+            Beat::Paused | Beat::Retired | Beat::Ended | Beat::NoTicks | Beat::Unknown => "neutral",
         }
     }
 }
@@ -152,7 +158,7 @@ pub(crate) fn ticks_read<'a>(cx: &'a Ctx<'_>) -> Section<&'a maestro_store::Tick
 
 /// What a loop's row and its ticks prove. A tick seen (drift) or the registry alone (review
 /// overdue) proves itself; an absence (no receipts, no ticks) needs the ledger known; "ok" needs
-/// a last tick seen that closed and did not fail.
+/// a last tick seen that closed with the outcome ok.
 pub(crate) fn beat(row: &LoopRow, known: bool) -> Beat {
     let has = |k: NoticeKind| row.notices.iter().any(|n| n.kind == k);
     if !row.drift.is_empty() {
@@ -165,11 +171,15 @@ pub(crate) fn beat(row: &LoopRow, known: bool) -> Beat {
         Beat::Unknown
     } else if row.desired == Desired::Paused {
         Beat::Paused
+    } else if row.desired == Desired::Retired {
+        Beat::Retired
     } else {
         match &row.last_tick {
             None => Beat::NoTicks,
             Some(t) if matches!(t.outcome, Some(TickOutcome::Failed | TickOutcome::Partial)) => Beat::LastFailed,
-            Some(t) if t.is_closed() => Beat::Ok,
+            Some(t) if t.is_closed() && t.outcome == Some(TickOutcome::Ok) => Beat::Ok,
+            // Closed with no outcome recorded: it ended, and nothing proves it went well.
+            Some(t) if t.is_closed() => Beat::Ended,
             // Open but not yet unclosed (that would be drift): running now, not proven ok.
             Some(_) => Beat::Unknown,
         }
