@@ -20,6 +20,7 @@ pub mod js;
 pub mod loops;
 pub mod need;
 pub mod parity;
+pub mod plan;
 pub mod py;
 mod py_printable;
 pub mod schema;

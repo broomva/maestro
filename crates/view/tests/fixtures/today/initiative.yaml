@@ -1,0 +1,9 @@
+id: today-demo
+title: "Today demo"
+intent: "(not stated verbatim)"
+stated: 2026-10-20
+status: active
+next_action: "Build the demo."
+driver: none
+links:
+  linear: [BRO-1]

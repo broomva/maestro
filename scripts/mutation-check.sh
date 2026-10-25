@@ -535,6 +535,26 @@ mutate $scr/decision.rs '            @if state == AskState::Open && landing == L
                 @if let Some(d) = &a.default {'
 mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 
+# Today and the health rail (BRO-3270).
+td=crates/view/src/screens/today.rs
+hl=crates/view/src/screens/health.rs
+mutate $td '    (whole && cx.reads.ticks.errors.is_empty())' '    (whole)'
+mutate $td 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, Some(WorkState::Running)).len())' 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, None).len())'
+mutate $td '        None => "What needs you could not be read.".to_string(),' '        None => "Nothing needs you.".to_string(),'
+mutate $td '                None => span class="mv-pill-value mv-unavailable" { "unavailable" },' '                None => span class="mv-pill-value" { "0" },'
+mutate $hl '    } else if ledger_clean {' '    } else if true {'
+mutate $hl '    if row.notices.iter().any(|n| n.kind == NoticeKind::NoTickReceipts) {' '    if false {'
+mutate $hl '(from..=cx.at.as_second())' '(i64::MIN..=cx.at.as_second())'
+mutate $hl '                .filter(|i| i.status.is_live())' ''
+mutate $hl '        _ => None,
+    };
+    Section { source: plans.source.clone(), data, errors }' '        _ => Some(Vec::new()),
+    };
+    Section { source: plans.source.clone(), data, errors }'
+mutate crates/view/src/render.rs '    let running = by(maestro_core::work::WorkState::Running);' '    let running = s.work.data.as_ref().map(|w| w.get("Running").copied().unwrap_or(0));'
+mutate crates/store/src/lib.rs '            Ok(_) => Section::unavailable(label, "it is not a list of usage rows"),' '            Ok(_) => Section::ok(label, Vec::new()),'
+mutate crates/store/src/tree.rs 'out.trim().parse::<jiff::Timestamp>().map(Some)' 'out.trim().parse::<jiff::Timestamp>().map(|_| None)'
+
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

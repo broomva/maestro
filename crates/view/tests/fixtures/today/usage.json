@@ -1,0 +1,6 @@
+[
+  {"email": "main@x.io", "fiveHourResetsAt": "2026-10-23T14:00:00Z", "fiveHourUtil": 82, "isActive": true,
+   "isRateLimited": false, "sevenDayResetsAt": "2026-10-27T00:00:00Z", "sevenDayUtil": 64, "stale": false},
+  {"email": "spare@x.io", "fiveHourResetsAt": null, "fiveHourUtil": 5, "isActive": false,
+   "isRateLimited": false, "sevenDayResetsAt": null, "sevenDayUtil": 20, "stale": false}
+]

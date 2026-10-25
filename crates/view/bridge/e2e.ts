@@ -4,13 +4,16 @@
 // calls (maestro_ui_poll) to a running `maestro serve --http`.
 //
 //   bun run e2e.ts --url http://127.0.0.1:7199/mcp --spec spec.json --out <dir>
-//                  [--edit <ledger file> --from <text> --to <text> --expect <shown text>] [--decisions]
+//                  [--edit <ledger file> --from <text> --to <text> --expect <shown text>] [--decisions] [--today]
 //
 // Writes screenshots at 390 px and 1440 px (light and dark) and exits non-zero on any
 // failed check. With --edit it rewrites one ledger line after the first render and waits
 // for the App's poll to show it; use it on a scratch copy only. With --decisions the spec's
 // root must be a `decisions` block: each tab is pressed in the App and in the scriptless
 // snapshot (what a host without MCP Apps shows), and a row is opened to its full decision.
+// With --today the spec's root must be a `today` block: the headline names the tree read, the
+// pills agree with maestro_snapshot, and the health rail sits beside the feed at 1440 px and
+// under it at 390 px, in the App and in the scriptless snapshot.
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -125,6 +128,58 @@ try {
     const pwned = await frame.locator("html").getAttribute("data-pwned");
     check(pwned === null, `a forged result's inline handler did not run (data-pwned=${pwned})`);
     await ctx.close();
+  }
+
+  if (process.argv.includes("--today")) {
+    const snap = await client.callTool({ name: "maestro_snapshot", arguments: {} });
+    const s = (snap.structuredContent ?? JSON.parse((snap.content as any)[0].text)) as any;
+    const tree: string = (first.structuredContent as any).tree;
+    const doc = await client.callTool({ name: "maestro_ui_render", arguments: { ...spec, format: "snapshot" } });
+    const page = (doc.structuredContent as any)?.text ?? (doc.content as any)?.[0]?.text;
+    check(typeof page === "string" && page.includes("mv-today"), "today: snapshot render returns the screen");
+    const pill = async (scope: any, name: string) =>
+      ((await scope.locator(`.mv-pill[data-pill="${name}"] .mv-pill-value`).first().textContent()) ?? "").trim();
+    for (const width of [390, 1440]) {
+      for (const where of ["app", "snapshot"] as const) {
+        const ctx = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 900 }, colorScheme: "dark", javaScriptEnabled: where === "app" });
+        const tab = await ctx.newPage();
+        tab.on("pageerror", (e) => check(false, `page error: ${e.message}`));
+        if (where === "app") await tab.goto(`http://127.0.0.1:${host.port}/?theme=dark`);
+        else await tab.setContent(page);
+        const scope = where === "app" ? tab.frameLocator("#app") : tab.locator("html");
+        await scope.locator(".mv-today").first().waitFor({ timeout: 15000 });
+        if (where === "app") await settle(tab);
+        const what = `today ${where} ${width}px`;
+        const composed = ((await scope.locator(".mv-composed").first().textContent()) ?? "").trim();
+        const read = tree.startsWith("git:") ? tree.slice(4, tree.indexOf("@") + 8) : "the working tree";
+        check(composed.startsWith(`Composed by Maestro · ${read} · `), `${what}: the headline names ${read} (${composed})`);
+        check(await scope.locator(".mv-headline-text").first().isVisible(), `${what}: the headline is shown`);
+        const open = s.asks?.data ? String(s.asks.data.open) : "unavailable";
+        const needs = s.needs?.data ? String(s.needs.data.length) : "unavailable";
+        check((await pill(scope, "open asks")) === open, `${what}: open asks pill is the snapshot's (${open})`);
+        check((await pill(scope, "needs you")) === needs, `${what}: needs you pill is the snapshot's (${needs})`);
+        for (const name of ["running", "silent loops", "landing"]) {
+          const v = await pill(scope, name);
+          check(/^(\d+|unavailable)$/.test(v), `${what}: ${name} pill is a count or unavailable (${v})`);
+        }
+        const main = await scope.locator(".mv-today-main").first().boundingBox();
+        const rail = await scope.locator(".mv-today .mv-rail").first().boundingBox();
+        const beside = !!main && !!rail && rail.x >= main.x + main.width - 1;
+        const below = !!main && !!rail && rail.y >= main.y + main.height - 1;
+        check(width === 1440 ? beside : below, `${what}: the rail is ${width === 1440 ? "beside" : "under"} the feed`);
+        for (const card of ["top-decision", "running", "nodes", "plan", "heartbeats", "economy", "receipts"]) {
+          const el = scope.locator(`[data-type="${card}"]`).first();
+          const state = await el.getAttribute("data-state");
+          const says = state !== "unavailable" || ((await el.locator(".mv-count").first().textContent().catch(() => "")) ?? "").includes("unavailable") || (await el.textContent())?.includes("Could not be read");
+          check(state !== null && !!says, `${what}: ${card} card is ${state}`);
+        }
+        check((await scope.locator("form, button, [onclick]").count()) === 0, `${what}: no writer`);
+        const overflow = await scope.locator("body").first().evaluate((b: HTMLElement) => b.scrollWidth - b.clientWidth);
+        check(overflow <= 0, `${what}: no horizontal overflow (${overflow}px)`);
+        await tab.screenshot({ path: join(out, `today-${where}-${width}.png`), fullPage: true });
+        await ctx.close();
+      }
+    }
   }
 
   if (process.argv.includes("--decision")) {

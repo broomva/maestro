@@ -204,6 +204,8 @@ pub enum Block {
     Fleet(NoProps),
     Decisions(DecisionsProps),
     Decision(AskProps),
+    Today(NoProps),
+    Health(NoProps),
 }
 
 struct Kind {
@@ -299,6 +301,20 @@ const KINDS: &[Kind] = &[
         children: false,
         schema: schema_of::<AskProps>,
         parse: |v| props(v).map(Block::Decision),
+    },
+    Kind {
+        name: "today",
+        description: "The Today screen: a headline composed from one snapshot (naming the commit read and its age), counts (needs you, running, open asks, silent loops, landing), the top decision, work running now and nodes, beside the health rail.",
+        children: false,
+        schema: schema_of::<NoProps>,
+        parse: |v| props(v).map(Block::Today),
+    },
+    Kind {
+        name: "health",
+        description: "The health rail alone: the plan graphs of live initiatives, each loop's heartbeat (ok, drift, no receipts), the economy (5 h and 7 d usage, mode, launch gate) and the last hour's tick receipts.",
+        children: false,
+        schema: schema_of::<NoProps>,
+        parse: |v| props(v).map(Block::Health),
     },
 ];
 
@@ -580,7 +596,12 @@ fn limit(value: Option<u8>) -> Result<(), String> {
 /// Checks serde cannot express: handle length and characters, list limits.
 fn check(block: &Block) -> Result<(), String> {
     match block {
-        Block::Stack(_) | Block::Snapshot(_) | Block::Initiatives(_) | Block::Fleet(_) => Ok(()),
+        Block::Stack(_)
+        | Block::Snapshot(_)
+        | Block::Initiatives(_)
+        | Block::Fleet(_)
+        | Block::Today(_)
+        | Block::Health(_) => Ok(()),
         Block::Needs(p) => {
             p.project.as_deref().map_or(Ok(()), |v| handle("project", v))?;
             limit(p.limit)

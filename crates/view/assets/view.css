@@ -162,6 +162,49 @@ body { padding: var(--bv-space-3); }
 .mv-irow .mv-dtitle { display: none; }
 .mv-irow .mv-answerbar { position: static; }
 
+/* Today and the health rail (design page 10). Two columns from 900 px, one below. */
+#maestro-root:has(.mv-today) { max-width: 1280px; }
+.mv-today { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 340px); gap: var(--bv-space-4); align-items: start; }
+.mv-today-main, .mv-rail { display: flex; flex-direction: column; gap: var(--bv-space-4); min-width: 0; }
+.mv-headline { display: flex; flex-direction: column; gap: var(--bv-space-2); }
+.mv-composed { margin: 0; overflow-wrap: anywhere; }
+.mv-headline-text { margin: 0; font-size: var(--bv-text-2xl, 1.75rem); font-weight: 600; line-height: 1.2; overflow-wrap: anywhere; }
+.mv-pills { display: flex; flex-wrap: wrap; gap: var(--bv-space-2); }
+.mv-pill { padding: var(--bv-space-1) var(--bv-space-3); border: 1px solid var(--border); border-radius: var(--bv-radius-full); font-size: var(--bv-text-sm); color: var(--muted-foreground); }
+.mv-pill-value { font-variant-numeric: tabular-nums; font-weight: 500; }
+.mv-pill[data-tone="attention"] .mv-pill-value { color: var(--mv-tone-attention); }
+.mv-pill[data-tone="success"] .mv-pill-value { color: var(--mv-tone-success); }
+.mv-pill[data-tone="info"] .mv-pill-value { color: var(--mv-tone-info); }
+.mv-pill[data-tone="danger"] .mv-pill-value { color: var(--mv-tone-danger); }
+.mv-pill[data-tone] { color: var(--muted-foreground); }
+.mv-top { display: flex; flex-direction: column; gap: var(--bv-space-2); }
+.mv-top p { margin: 0; overflow-wrap: anywhere; unicode-bidi: isolate; }
+.mv-plan { display: flex; flex-direction: column; gap: var(--bv-space-2); margin-bottom: var(--bv-space-2); }
+.mv-plan p { margin: 0; overflow-wrap: anywhere; }
+.mv-plan-nodes { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--bv-space-1); }
+.mv-node { padding: 0 var(--bv-space-2); border: 1px solid var(--border); border-radius: var(--bv-radius-chip); font-size: var(--bv-text-xs); }
+.mv-beat-head { display: flex; justify-content: space-between; gap: var(--bv-space-2); }
+.mv-beat-state { font-size: var(--bv-text-xs); }
+.mv-beats { display: flex; gap: 2px; margin-top: var(--bv-space-1); }
+.mv-beat-tick { flex: 1 1 0; max-width: 12px; height: 14px; border-radius: 2px; background: var(--muted); }
+.mv-beat-tick[data-outcome="ok"], .mv-beat-tick[data-outcome="ended"] { background: var(--mv-tone-success); }
+.mv-beat-tick[data-outcome="partial"] { background: var(--mv-tone-warning); }
+.mv-beat-tick[data-outcome="failed"] { background: var(--mv-tone-danger); }
+.mv-beat-tick[data-outcome="open"] { background: transparent; border: 1px solid var(--mv-tone-info); }
+.mv-account { display: flex; flex-direction: column; gap: var(--bv-space-1); margin-top: var(--bv-space-2); }
+.mv-account p { margin: 0; }
+.mv-meter { display: flex; flex-direction: column; gap: 2px; }
+.mv-meter-head { display: flex; justify-content: space-between; font-size: var(--bv-text-xs); }
+.mv-meter-value { font-variant-numeric: tabular-nums; }
+.mv-meter-track { display: block; height: 6px; border-radius: var(--bv-radius-full); background: var(--muted); overflow: hidden; }
+.mv-meter-fill { display: block; height: 100%; background: var(--mv-tone-info); }
+.mv-meter-fill[data-high="true"] { background: var(--mv-tone-warning); }
+.mv-receipt .mv-row-title { font-weight: 400; }
+
+@media (max-width: 900px) {
+  .mv-today { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* The control layer: the only glass in the view. */
 .mv-control {
   position: sticky;

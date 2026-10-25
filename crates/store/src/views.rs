@@ -677,6 +677,20 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
 }
 
 /// Work items with a canonical state, or all of them.
+/// The economy as core's `capacity` computes it from the usage rows read now, with no samples
+/// and no balancer state: a stale active account then fails closed, as `maestro economy capacity`
+/// does without `--state`. Unread rows leave it unread; rows core refuses make it unavailable.
+pub fn economy(usage: &Section<Vec<serde_json::Value>>, at: jiff::Timestamp) -> Section<serde_json::Value> {
+    let Some(rows) = &usage.data else {
+        return Section { source: usage.source.clone(), data: None, errors: usage.errors.clone() };
+    };
+    let gate = maestro_core::economy::Gate::default();
+    match maestro_core::economy::capacity(rows, &[], at.as_microsecond(), &gate) {
+        Ok(v) => Section::partial(usage.source.clone(), v, usage.errors.clone()),
+        Err(e) => Section::unavailable(usage.source.clone(), e.to_string()),
+    }
+}
+
 pub fn work_by_state(work: &[WorkItem], state: Option<WorkState>) -> Vec<&WorkItem> {
     work.iter().filter(|w| state.is_none_or(|s| w.work_state == s)).collect()
 }

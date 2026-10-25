@@ -264,6 +264,16 @@ impl Tree {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// The committer date of the commit read, or `None` for the working tree.
+    pub fn committed_at(&self) -> Result<Option<jiff::Timestamp>, TreeError> {
+        let Some(commit) = self.commit_to_read()? else { return Ok(None) };
+        let out = self.git(&["show", "-s", "--format=%cI", commit])?;
+        out.trim().parse::<jiff::Timestamp>().map(Some).map_err(|e| TreeError::Git {
+            args: format!("show -s --format=%cI {commit}"),
+            stderr: format!("not a date: {e}"),
+        })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

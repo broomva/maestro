@@ -42,6 +42,11 @@ pub(crate) struct Ctx<'a> {
     unlanded: std::cell::OnceCell<Section<Vec<views::Waiting>>>,
     /// Blocks that need document-unique ids (the inbox's radio groups) take the next number.
     ids: std::cell::Cell<usize>,
+    /// The plan graphs, the economy and the read commit's date, read once per render and only
+    /// by a block that shows them.
+    plans: std::cell::OnceCell<Section<Vec<(String, maestro_core::plan::PlanGraph)>>>,
+    economy: std::cell::OnceCell<Section<serde_json::Value>>,
+    committed: std::cell::OnceCell<Result<Option<jiff::Timestamp>, String>>,
 }
 
 impl Ctx<'_> {
@@ -50,6 +55,19 @@ impl Ctx<'_> {
         let n = self.ids.get();
         self.ids.set(n + 1);
         n
+    }
+
+    pub(crate) fn plans(&self) -> &Section<Vec<(String, maestro_core::plan::PlanGraph)>> {
+        self.plans.get_or_init(|| self.store.plans())
+    }
+
+    pub(crate) fn economy(&self) -> &Section<serde_json::Value> {
+        self.economy.get_or_init(|| views::economy(&self.store.usage(), self.at))
+    }
+
+    /// When the commit read was made; `Ok(None)` for the working tree.
+    pub(crate) fn committed(&self) -> &Result<Option<jiff::Timestamp>, String> {
+        self.committed.get_or_init(|| self.store.committed_at())
     }
 
     pub(crate) fn unlanded(&self) -> &Section<Vec<views::Waiting>> {
@@ -69,7 +87,17 @@ pub fn render(store: &Store, v: &Validated) -> Rendered {
 pub fn render_at(store: &Store, v: &Validated, at: jiff::Timestamp) -> Rendered {
     let reads = Reads::of(store);
     let snap = views::snapshot_of(store, &reads, at);
-    let cx = Ctx { store, reads, snap, at, unlanded: std::cell::OnceCell::new(), ids: std::cell::Cell::new(0) };
+    let cx = Ctx {
+        store,
+        reads,
+        snap,
+        at,
+        unlanded: std::cell::OnceCell::new(),
+        ids: std::cell::Cell::new(0),
+        plans: std::cell::OnceCell::new(),
+        economy: std::cell::OnceCell::new(),
+        committed: std::cell::OnceCell::new(),
+    };
     let body = html! {
         div class="mv-screen" {
             (node(&cx, &v.root))
@@ -103,6 +131,8 @@ fn node(cx: &Ctx, n: &Node) -> Markup {
         Block::Loops(p) => loops(cx, &n.id, p.id.as_deref(), p.drifting),
         Block::Initiatives(p) => initiatives(cx, &n.id, p.all),
         Block::Fleet(_) => fleet(cx, &n.id),
+        Block::Today(_) => crate::screens::today(cx, &n.id),
+        Block::Health(_) => crate::screens::health(cx, &n.id),
         Block::Decisions(p) => crate::screens::inbox(cx, &n.id, p),
         Block::Decision(p) => crate::screens::decision(cx, &n.id, &p.ledger, &p.id),
     }
@@ -185,8 +215,10 @@ fn snapshot(cx: &Ctx, id: &str) -> Markup {
     let s = &cx.snap;
     let needs = s.needs.data.as_ref().map(Vec::len);
     let open = s.asks.data.as_ref().map(|a| a.open);
-    let running = s.work.data.as_ref().map(|w| w.get("Running").copied().unwrap_or(0));
-    let stuck = s.work.data.as_ref().map(|w| w.get("Stuck").copied().unwrap_or(0));
+    // By presentation state: the snapshot's work counts are keyed by the stored state.
+    let by = |state| cx.reads.work.data.as_deref().map(|w| views::work_by_state(w, Some(state)).len());
+    let running = by(maestro_core::work::WorkState::Running);
+    let stuck = by(maestro_core::work::WorkState::Stuck);
     let drifting =
         s.loops.data.as_ref().map(|l| l.iter().filter(|r| !r.drift.is_empty() || !r.notices.is_empty()).count());
     let live = s.initiatives.data.as_ref().map(Vec::len);

@@ -1,0 +1,155 @@
+---
+source: crates/view/tests/today.rs
+expression: "portable(&r.html, empty.path())"
+---
+<div class="mv-screen">
+<div class="mv-today" data-block="s" data-type="today">
+<div class="mv-today-main">
+<header class="mv-headline">
+<p class="mv-composed bv-meta">Composed by Maestro · <span class="bv-code">the working tree</span> · read now</p>
+<h1 class="mv-headline-text">What needs you could not be read. Running work could not be read. Whether a loop has gone silent is not known.</h1>
+<div class="mv-pills">
+<span class="mv-pill" data-tone="neutral" data-pill="needs you">
+<span class="mv-pill-value mv-unavailable">unavailable</span> needs you</span>
+<span class="mv-pill" data-tone="neutral" data-pill="running">
+<span class="mv-pill-value mv-unavailable">unavailable</span> running</span>
+<span class="mv-pill" data-tone="neutral" data-pill="open asks">
+<span class="mv-pill-value mv-unavailable">unavailable</span> open asks</span>
+<span class="mv-pill" data-tone="neutral" data-pill="silent loops">
+<span class="mv-pill-value mv-unavailable">unavailable</span> silent loops</span>
+<span class="mv-pill" data-tone="neutral" data-pill="landing">
+<span class="mv-pill-value mv-unavailable">unavailable</span> landing</span>
+</div>
+</header>
+<section class="mv-card bv-card" data-block="today-decision" data-type="top-decision" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Top decision</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:.broomva/asks</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/asks</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="today-running" data-type="running" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Running now</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">fs:<fixture>/work</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<fixture>/work</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="today-nodes" data-type="nodes" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Nodes</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">nodes</span>: Maestro reads no node census yet; host adapters bring one (BRO-3276)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">nodes</span>
+</p>
+</section>
+</div>
+<aside class="mv-rail">
+<section class="mv-card bv-card" data-block="health-plan" data-type="plan" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Plan</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">2 sources could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:docs/plans</span>: No such file or directory (os error 2)</li>
+<li>
+<span class="bv-code">worktree:.broomva/initiatives</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:docs/plans</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="health-loops" data-type="heartbeats" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Loop heartbeats</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">3 sources could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">worktree:.broomva/loops</span>: No such file or directory (os error 2)</li>
+<li>
+<span class="bv-code">fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>: No such file or directory (os error 2)</li>
+<li>
+<span class="bv-code">fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/loops + fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="health-economy" data-type="economy" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Economy</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">env:MAESTRO_USAGE</span>: no usage file is set</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">env:MAESTRO_USAGE</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="health-receipts" data-type="receipts" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Receipts, last hour</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>: No such file or directory (os error 2)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>
+</p>
+</section>
+</aside>
+</div>
+<footer class="mv-foot bv-meta">Read from <span class="bv-code">worktree</span>
+</footer>
+</div>

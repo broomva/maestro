@@ -221,7 +221,16 @@ Maestro decides every value on it:
   sha256. The page's Content-Security-Policy allows no fetch and no script but that bridge, by its
   hash, so markup in a forged tool result runs nothing (the e2e checks it). There is no WebAssembly:
   T3's CSP blocks it.
-- `scripts/e2e.sh [view|decisions] [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
+- `today` is the Today screen (design page 10): a headline composed from one snapshot that names the
+  commit read and its age, count pills (needs you, running, open asks, silent loops, landing), the
+  top decision in queue order, work running now with the tier, model, thinking, harness, node and
+  budget its frontmatter carries, and Nodes (unavailable until host adapters read a node census).
+  Beside it, `health` (also a block on its own): the plan graphs (`docs/plans/*.graph.yaml`) whose
+  ticket a live initiative links, with node state marked unavailable (it lives in Linear, which
+  Maestro does not read yet); each loop's heartbeat (ok, drift, review overdue, no receipts, or not
+  known when the ticks ledger did not read clean) with its last 24 ticks; the economy from core's
+  capacity over the usage rows in `MAESTRO_USAGE`; and the last hour's tick receipts.
+- `scripts/e2e.sh [view|decisions|today] [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
   (the ext-apps `AppBridge`) against `maestro serve --http`: on the real ledgers at `origin/main`,
   and on a scratch copy of the fixture that it edits to prove the poll; it also sends a forged result
   whose inline handler must not run. It writes screenshots at 390
@@ -258,6 +267,7 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 | `MAESTRO_WORK_ROOT` | `workRoot` from `$BROOMVA_HOME/config/maestro/config.json`, then from `~/.config/maestro-paseo/config.json`, else the registry's `machine.work` (`~/.broomva/work`, or the legacy `~/maestro` while only it exists) |
 | `BROOMVA_HOME` | `~/.broomva` |
 | `MAESTRO_FLEET_STATE` | `~/.local/state/fleet-reconcile` |
+| `MAESTRO_USAGE` | unset: a file holding `provider_manager.py --json usage` output, which the economy reads; unset, the economy is unavailable |
 
 Inside the workspace, each name is read from `.broomva/<name>` when the tree has it and from
 `.control/<name>` otherwise, on disk and at a git revision alike; a tree holding both is a read
