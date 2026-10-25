@@ -1,4 +1,6 @@
-//! The Decisions screens (design page 11, screens 1 and 2): the inbox and one decision.
+//! The screens: Today and its health rail (design page 10), and the Decisions screens (design
+//! page 11, screens 1 and 2), the inbox and one decision. The rest of this module is the
+//! Decisions queue, which Today's top decision reads too.
 //!
 //! Both depend on two reads: the asks at the tree read, and the answers in the working tree and
 //! on maestro/answers that have not landed. [`landing`] and [`joined`] are the only places the
@@ -6,12 +8,16 @@
 //! plugin is still the one writer, and these screens say so where the answer would go.
 
 mod decision;
+mod health;
 mod inbox;
 mod rich;
 mod sources;
+mod today;
 
 pub(crate) use decision::decision;
+pub(crate) use health::health;
 pub(crate) use inbox::inbox;
+pub(crate) use today::today;
 
 use crate::catalog::Tab;
 use crate::render::Ctx;

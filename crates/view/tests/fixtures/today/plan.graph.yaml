@@ -1,0 +1,8 @@
+ticket: BRO-1
+goal: "Ship the demo"
+nodes:
+  - id: spec
+    ticket: BRO-2
+  - id: build
+    ticket: BRO-3
+    depends_on: [spec]

@@ -1,0 +1,227 @@
+---
+source: crates/view/tests/today.rs
+expression: "portable(&r.html, m.path())"
+---
+<div class="mv-screen">
+<div class="mv-today" data-block="s" data-type="today">
+<div class="mv-today-main">
+<header class="mv-headline">
+<p class="mv-composed bv-meta">Composed by Maestro · <span class="bv-code">the working tree</span> · read now</p>
+<h1 class="mv-headline-text">3 found needing you in the part that was read. One piece of work is running. One loop has no tick receipts.</h1>
+<div class="mv-pills">
+<span class="mv-pill" data-tone="attention" data-pill="needs you" data-partial="true">
+<span class="mv-pill-value">3</span> needs you<span class="mv-pill-partial">, partial read</span>
+</span>
+<span class="mv-pill" data-tone="success" data-pill="running" data-partial="false">
+<span class="mv-pill-value">1</span> running</span>
+<span class="mv-pill" data-tone="info" data-pill="open asks" data-partial="true">
+<span class="mv-pill-value">3</span> open asks<span class="mv-pill-partial">, partial read</span>
+</span>
+<span class="mv-pill" data-tone="danger" data-pill="silent loops" data-partial="false">
+<span class="mv-pill-value">1</span> silent loops</span>
+<span class="mv-pill" data-tone="neutral" data-pill="landing" data-partial="false">
+<span class="mv-pill-value mv-unavailable">unavailable</span> landing</span>
+</div>
+</header>
+<section class="mv-card bv-card" data-block="today-decision" data-type="top-decision" data-state="partial">
+<header class="mv-head">
+<h2 class="mv-title">Top decision</h2>
+</header>
+<div class="mv-top" data-ask="demo-arc.yaml#merge-now">
+<p class="mv-row-meta bv-meta">
+<span class="mv-badge" data-tone="warning">decision</span> demo · <span class="bv-code">demo-arc.yaml</span> · <span data-tone="attention">blocking</span>
+</p>
+<p class="mv-ask-title">Merge the demo PR now, or hold for review?</p>
+<p class="mv-row-meta bv-meta">asked 22 d ago by demo-arc</p>
+<p class="mv-note bv-meta">Answer it in Paseo's Maestro plugin. Maestro answers nothing in this phase.</p>
+</div>
+<details class="mv-errors">
+<summary data-tone="warning">Partial: 2 sources could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">.control/asks/broken.yaml</span>: outside the YAML subset Maestro reads exactly: what this reader's YAML parser refuses (while parsing a flow sequence, expected ',' or ']' at byte 12 line 2 column 1)</li>
+<li>
+<span class="bv-code">.control/asks/alt-key.yaml#2</span>: entry is not a mapping</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/asks</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="today-running" data-type="running" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Running now</h2>
+<span class="mv-count">1</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row" data-work="today-run">
+<span class="mv-row-title">Round-3 fixes</span>
+<span class="mv-row-meta bv-meta">
+<span class="mv-chip bv-code">frontier · opus · high</span> claude · mac-studio · budget 48%</span>
+</li>
+</ul>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<fixture>/work</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="today-nodes" data-type="nodes" data-state="unavailable">
+<header class="mv-head">
+<h2 class="mv-title">Nodes</h2>
+<span class="mv-count mv-unavailable">unavailable</span>
+</header>
+<p class="mv-note" data-tone="danger">Could not be read. This is not the same as none.</p>
+<details class="mv-errors">
+<summary data-tone="warning">1 source could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">nodes</span>: Maestro reads no node census yet; host adapters bring one (BRO-3276)</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">nodes</span>
+</p>
+</section>
+</div>
+<aside class="mv-rail">
+<section class="mv-card bv-card" data-block="health-plan" data-type="plan" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Plan</h2>
+<span class="mv-count">1</span>
+</header>
+<div class="mv-plan" data-plan="2026-10-20-demo.graph.yaml">
+<p class="mv-row-title">
+<span class="bv-code">2026-10-20-demo.graph.yaml</span> · BRO-1 · 2 nodes</p>
+<ul class="mv-plan-nodes">
+<li class="mv-node bv-code" data-node="spec" title="">spec <span class="bv-meta">BRO-2</span>
+</li>
+<li class="mv-node bv-code" data-node="build" title="spec">build <span class="bv-meta">BRO-3</span>
+</li>
+</ul>
+</div>
+<p class="mv-note bv-meta" data-tone="warning">Node state is unavailable: it lives in Linear, which Maestro does not read yet.</p>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:docs/plans</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="health-loops" data-type="heartbeats" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Loop heartbeats</h2>
+<span class="mv-count">2</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row mv-beat" data-loop="demo-tick" data-beat="ok">
+<span class="mv-beat-head">
+<span class="mv-row-title bv-code">demo-tick</span>
+<span class="mv-beat-state" data-tone="success">ok</span>
+</span>
+<span class="mv-beats" aria-label="last 4 ticks">
+<span class="mv-beat-tick" data-outcome="ok" title="2026-10-01T00:00:00Z">
+</span>
+<span class="mv-beat-tick" data-outcome="open" title="2026-10-01T02:00:00Z">
+</span>
+<span class="mv-beat-tick" data-outcome="partial" title="2026-10-23T10:59:00Z">
+</span>
+<span class="mv-beat-tick" data-outcome="ok" title="2026-10-23T11:30:00Z">
+</span>
+</span>
+</li>
+<li class="mv-row mv-beat" data-loop="silent" data-beat="no receipts">
+<span class="mv-beat-head">
+<span class="mv-row-title bv-code">silent</span>
+<span class="mv-beat-state" data-tone="danger">no receipts</span>
+</span>
+</li>
+</ul>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.broomva/loops + fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="health-economy" data-type="economy" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Economy</h2>
+</header>
+<p class="mv-row-meta bv-meta">mode <span class="bv-code" data-mode="normal">normal</span>
+</p>
+<div class="mv-account" data-account="main">
+<p class="mv-row-title">main · active</p>
+<div class="mv-meter">
+<span class="mv-meter-head">
+<span class="bv-meta">5 h</span>
+<span class="mv-meter-value">82%</span>
+</span>
+<span class="mv-meter-track">
+<span class="mv-meter-fill" data-high="true" style="width: 82%">
+</span>
+</span>
+</div>
+<div class="mv-meter">
+<span class="mv-meter-head">
+<span class="bv-meta">7 d</span>
+<span class="mv-meter-value">64%</span>
+</span>
+<span class="mv-meter-track">
+<span class="mv-meter-fill" data-high="false" style="width: 64%">
+</span>
+</span>
+</div>
+</div>
+<div class="mv-account" data-account="spare">
+<p class="mv-row-title">spare</p>
+<div class="mv-meter">
+<span class="mv-meter-head">
+<span class="bv-meta">5 h</span>
+<span class="mv-meter-value">5%</span>
+</span>
+<span class="mv-meter-track">
+<span class="mv-meter-fill" data-high="false" style="width: 5%">
+</span>
+</span>
+</div>
+<div class="mv-meter">
+<span class="mv-meter-head">
+<span class="bv-meta">7 d</span>
+<span class="mv-meter-value">20%</span>
+</span>
+<span class="mv-meter-track">
+<span class="mv-meter-fill" data-high="false" style="width: 20%">
+</span>
+</span>
+</div>
+</div>
+<p class="mv-note bv-meta" data-gate="open">Launch gate: open · headroom (window_average)</p>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<usage>
+</span>
+</p>
+</section>
+<section class="mv-card bv-card" data-block="health-receipts" data-type="receipts" data-state="ok">
+<header class="mv-head">
+<h2 class="mv-title">Receipts, last hour</h2>
+<span class="mv-count">3</span>
+</header>
+<ul class="mv-list">
+<li class="mv-row mv-receipt" data-receipt="ok">
+<span class="mv-row-meta">
+<span class="bv-code">11:40</span> <span class="mv-row-title">demo-tick tick ended</span> · ok</span>
+<p class="mv-row-body">worked every</p>
+</li>
+<li class="mv-row mv-receipt" data-receipt="started">
+<span class="mv-row-meta">
+<span class="bv-code">11:30</span> <span class="mv-row-title">demo-tick tick started</span>
+</span>
+</li>
+<li class="mv-row mv-receipt" data-receipt="partial">
+<span class="mv-row-meta">
+<span class="bv-code">11:05</span> <span class="mv-row-title">demo-tick tick ended</span> · partial</span>
+<p class="mv-row-body">one tier skipped</p>
+</li>
+</ul>
+<p class="mv-source bv-meta">
+<span class="bv-code">fs:<fixture>/broomva-home/ledger/loops/ticks.jsonl</span>
+</p>
+</section>
+</aside>
+</div>
+<footer class="mv-foot bv-meta">Read from <span class="bv-code">worktree</span>
+</footer>
+</div>
