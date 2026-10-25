@@ -361,10 +361,12 @@ fn ok_needs_a_closed_tick_and_absence_needs_the_whole_ledger() {
     add_loop(m.path(), "resting", "desired: paused\n");
     add_loop(m.path(), "drifty", "");
     add_loop(m.path(), "failing", "");
+    add_loop(m.path(), "busy", "");
     add_ticks(
         m.path(),
         &(tick("D1", "drifty", "2026-10-23T10:00:00Z", None)
-            + &tick("F1", "failing", "2026-10-23T11:00:00Z", Some(("2026-10-23T11:10:00Z", "failed")))),
+            + &tick("F1", "failing", "2026-10-23T11:00:00Z", Some(("2026-10-23T11:10:00Z", "failed")))
+            + &tick("O1", "busy", "2026-10-23T11:45:00Z", None)),
     );
     let r = render(&worktree(m.path(), false), "health");
     assert_eq!(beat_of(&r.html, "demo-tick"), "ok");
@@ -372,6 +374,7 @@ fn ok_needs_a_closed_tick_and_absence_needs_the_whole_ledger() {
     assert_eq!(beat_of(&r.html, "resting"), "paused");
     assert_eq!(beat_of(&r.html, "drifty"), "drift", "an open tick past its limit");
     assert_eq!(beat_of(&r.html, "failing"), "last tick failed");
+    assert_eq!(beat_of(&r.html, "busy"), "not known", "a tick still open, inside its limit, is not proven ok");
     assert_eq!(beat_of(&r.html, "silent"), "no receipts");
 }
 
