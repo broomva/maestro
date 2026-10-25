@@ -1,0 +1,509 @@
+---
+source: crates/view/tests/decisions.rs
+expression: "portable(&r.html, m.path())"
+---
+<div class="mv-screen">
+<section class="mv-card bv-card" data-block="s" data-type="decisions" data-state="partial">
+<header class="mv-head">
+<h2 class="mv-title">Decisions</h2>
+</header>
+<p class="mv-sub bv-meta">at least 7 open</p>
+<div class="mv-inbox">
+<input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-all" value="all">
+<input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-decisions" value="decisions" checked>
+<input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-authority" value="authority">
+<input class="mv-tab-input" type="radio" name="mv-tabs-0" id="mv-tab-0-ideas" value="ideas">
+<nav class="mv-tabs" aria-label="Decision kinds">
+<label class="mv-tab" for="mv-tab-0-all" data-tab="all">All <span class="mv-tab-count">7+</span>
+</label>
+<label class="mv-tab" for="mv-tab-0-decisions" data-tab="decisions">Decisions <span class="mv-tab-count">4+</span>
+</label>
+<label class="mv-tab" for="mv-tab-0-authority" data-tab="authority">Authority <span class="mv-tab-count">1+</span>
+</label>
+<label class="mv-tab" for="mv-tab-0-ideas" data-tab="ideas">Ideas <span class="mv-tab-count">2+</span>
+</label>
+</nav>
+<div class="mv-banner" data-tone="info">
+<p class="mv-banner-title">Reading this checkout's working tree</p>
+<p class="bv-meta">Answers on maestro/answers are not read here. Paseo may hold answers in other checkouts, which this screen does not read.</p>
+</div>
+<div class="mv-groups">
+<section class="mv-group" data-tabs="all decisions ideas">
+<header class="mv-group-head bv-meta">
+<span class="mv-group-name">
+<bdi>demo</bdi>
+</span>
+<span class="mv-group-age" data-tab="all">22 d</span>
+<span class="mv-group-age" data-tab="decisions">22 d</span>
+<span class="mv-group-age" data-tab="ideas">22 d</span>
+</header>
+<ul class="mv-list">
+<li class="mv-irow" data-tab="decisions" data-ask="demo-arc.yaml#merge-now" data-blocking="true">
+<details>
+<summary>
+<span class="mv-irow-meta bv-meta">
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>demo-arc</bdi> · <span data-tone="attention">blocking</span>
+</span>
+<span class="mv-irow-title">Merge the demo PR now, or hold for review?</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Merge now</bdi>
+</span>
+</summary>
+<article class="mv-decision" data-ask="demo-arc.yaml#merge-now" data-hash="5b70dab7a7f0afa6" data-kind="decision">
+<p class="mv-dmeta bv-meta">
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>demo-arc.yaml</bdi> by <bdi>demo-arc</bdi>
+</p>
+<p class="mv-dtitle">Merge the demo PR now, or hold for review?</p>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>merge</bdi>
+</span>
+</p>
+<p class="mv-dbody">Merge the demo PR now?</p>
+<h3 class="mv-label bv-meta">Choose one</h3>
+<ol class="mv-dopts">
+<li class="mv-dopt" data-option="merge" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">Merge now</p>
+<p class="mv-dopt-text">Ships today.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="info">Recommended</span>
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+<li class="mv-dopt" data-option="hold" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Hold</p>
+<p class="mv-dopt-text">Nothing changes.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+<span class="mv-badge">Status quo</span>
+</p>
+</li>
+</ol>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
+<ul>
+<li>
+<span class="bv-code">read</span>: <bdi>the review ledger records a pass</bdi>
+</li>
+<li>
+<span class="bv-code">default</span>: <bdi>holding is the reversible default</bdi>
+</li>
+</ul>
+</section>
+<div class="mv-control mv-answerbar">
+<textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
+</textarea>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>merge-now</bdi>
+</span>.</p>
+</div>
+</article>
+</details>
+</li>
+<li class="mv-irow" data-tab="decisions" data-ask="alt-key.yaml#alt-blocking" data-blocking="true">
+<details>
+<summary>
+<span class="mv-irow-meta bv-meta">
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>alt-key</bdi> · <span data-tone="attention">blocking</span>
+</span>
+<span class="mv-irow-title">Held under the corpus's other spelling?</span>
+<span class="mv-irow-rec" data-tone="warning">Not offered here: whether it is answered, or answerable, is not known</span>
+</summary>
+<article class="mv-decision" data-ask="alt-key.yaml#alt-blocking" data-hash="7e423ddd550cb6e8" data-kind="decision">
+<p class="mv-dmeta bv-meta">
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>alt-key.yaml</bdi> by <bdi>alt-key</bdi>
+</p>
+<p class="mv-dtitle">Held under the corpus's other spelling?</p>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>alt</bdi>
+</span>
+</p>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
+<ul>
+<li>
+<span class="bv-code">read</span>: <bdi>x</bdi>
+</li>
+<li>
+<span class="bv-code">default</span>: <bdi>y</bdi>
+</li>
+</ul>
+</section>
+<p class="mv-callout" data-tone="warning">Maestro cannot tell for sure whether this ask is answered, or whether Paseo would take an answer to it. Paseo · Maestro · Decisions shows it.</p>
+</article>
+</details>
+</li>
+<li class="mv-irow" data-tab="ideas" data-ask="demo-arc.yaml#pick-name" data-blocking="false">
+<details>
+<summary>
+<span class="mv-irow-meta bv-meta">
+<span class="mv-chip" data-kind="idea">idea</span> <bdi>demo-arc</bdi>
+</span>
+<span class="mv-irow-title">Which name?</span>
+</summary>
+<article class="mv-decision" data-ask="demo-arc.yaml#pick-name" data-hash="70b46ca380a91c51" data-kind="idea">
+<p class="mv-dmeta bv-meta">
+<span class="mv-chip" data-kind="idea">idea</span> <bdi>demo-arc.yaml</bdi> by <bdi>demo-arc</bdi>
+</p>
+<p class="mv-dtitle">Which name?</p>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
+<ul>
+<li>
+<span class="bv-code">read</span>: <bdi>none found</bdi>
+</li>
+<li>
+<span class="bv-code">loop</span>: <bdi>asked the coordinator</bdi>
+</li>
+</ul>
+</section>
+<div class="mv-control mv-answerbar">
+<textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
+</textarea>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Initiatives shows whether it has been answered since, and is where to answer it.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>pick-name</bdi>
+</span>.</p>
+</div>
+</article>
+</details>
+</li>
+</ul>
+</section>
+<section class="mv-group" data-tabs="all decisions authority">
+<header class="mv-group-head bv-meta">
+<span class="mv-group-name">
+<bdi>maestro</bdi>
+</span>
+<span class="mv-group-age" data-tab="all">11 d</span>
+<span class="mv-group-age" data-tab="decisions">1 d</span>
+<span class="mv-group-age" data-tab="authority">11 d</span>
+</header>
+<ul class="mv-list">
+<li class="mv-irow" data-tab="decisions" data-ask="decisions.yaml#new-key" data-blocking="true">
+<details>
+<summary>
+<span class="mv-irow-meta bv-meta">
+<span class="mv-chip" data-kind="credential">credential</span> <bdi>fleet-closeout</bdi> · <span data-tone="attention">blocking</span>
+</span>
+<span class="mv-irow-title">Paste the &lt;b&gt;deploy&lt;/b&gt; key</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Paste it now</bdi>
+</span>
+</summary>
+<article class="mv-decision" data-ask="decisions.yaml#new-key" data-hash="b7d37ffe8758bf00" data-kind="credential">
+<p class="mv-dmeta bv-meta">
+<span class="mv-chip" data-kind="credential">credential</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-22T08:00:00Z</bdi> by <bdi>fleet-closeout</bdi>
+</p>
+<p class="mv-dtitle">Paste the &lt;b&gt;deploy&lt;/b&gt; key</p>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>deploy</bdi>
+</span>
+</p>
+<h3 class="mv-label bv-meta">Choose one</h3>
+<ol class="mv-dopts">
+<li class="mv-dopt" data-option="later" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Later</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+<li class="mv-dopt" data-option="paste" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">Paste it now</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="info">Recommended</span>
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+</ol>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
+<ul>
+<li>
+<span class="bv-code">read</span>: <bdi>keychain has none</bdi>
+</li>
+</ul>
+</section>
+<div class="mv-control mv-answerbar">
+<textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
+</textarea>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>new-key</bdi>
+</span>.</p>
+</div>
+</article>
+</details>
+</li>
+<li class="mv-irow" data-tab="authority" data-ask="decisions.yaml#merge-policy" data-blocking="false">
+<details>
+<summary>
+<span class="mv-irow-meta bv-meta">
+<span class="mv-chip" data-kind="authority">authority</span> <bdi>fleet-closeout</bdi>
+</span>
+<span class="mv-irow-title">May Maestro's answers-only PRs merge on their own once their gates pass?</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: <bdi>A person merges them</bdi>
+</span>
+</summary>
+<article class="mv-decision" data-ask="decisions.yaml#merge-policy" data-hash="ae8d1d0cd57f5f87" data-kind="authority">
+<p class="mv-dmeta bv-meta">
+<span class="mv-chip" data-kind="authority">authority</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-12</bdi> by <bdi>fleet-closeout</bdi>
+</p>
+<p class="mv-dtitle">May Maestro's answers-only PRs merge on their own once their gates pass?</p>
+<p class="mv-stakes">Each batch of your answers lands only when someone merges its PR.</p>
+<p class="mv-callout" data-tone="warning">No default: irreversible. It waits for you.</p>
+<h3 class="mv-label bv-meta">Choose one</h3>
+<ol class="mv-dopts">
+<li class="mv-dopt" data-option="person" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">A person merges them</p>
+<p class="mv-dopt-text">As now.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="info">Recommended</span>
+<span class="mv-badge" data-tone="success">Reversible</span>
+<span class="mv-badge">Status quo</span>
+</p>
+</li>
+<li class="mv-dopt" data-option="gates" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Gates merge them</p>
+<p class="mv-dopt-text">Answers land without a click.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="danger">Not reversible</span>
+</p>
+</li>
+</ol>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
+<ul>
+<li>
+<span class="bv-code">read</span>: <bdi>the merge policy</bdi>
+</li>
+<li>
+<span class="bv-code">preauth</span>: <bdi>no grant covers merges</bdi>
+</li>
+</ul>
+</section>
+<div class="mv-control mv-answerbar">
+<textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
+</textarea>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>merge-policy</bdi>
+</span>.</p>
+</div>
+</article>
+</details>
+</li>
+</ul>
+</section>
+<section class="mv-group" data-tabs="all decisions">
+<header class="mv-group-head bv-meta">
+<span class="mv-group-name">
+<bdi>fleet</bdi>
+</span>
+<span class="mv-group-age" data-tab="all">6 d</span>
+<span class="mv-group-age" data-tab="decisions">6 d</span>
+</header>
+<ul class="mv-list">
+<li class="mv-irow" data-tab="decisions" data-ask="decisions.yaml#fleet-cost-1" data-blocking="true">
+<details>
+<summary>
+<span class="mv-irow-meta bv-meta">
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>claude:coordinator</bdi> · <bdi>cost</bdi> · <span data-tone="attention">blocking</span>
+</span>
+<span class="mv-irow-title">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</span>
+<span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Rotate long orchestrators by handoff</bdi>
+</span>
+</summary>
+<article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
+<p class="mv-dmeta bv-meta">
+<span class="mv-chip" data-kind="decision">decision</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
+</p>
+<p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
+<p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
+<p class="mv-callout" data-tone="warning">If you don't answer: <bdi>wait: nothing changes and spend continues</bdi>
+</p>
+<p class="mv-gates bv-meta">Blocks <span class="bv-code">
+<bdi>fleet-cost</bdi>
+</span>
+</p>
+<p class="mv-dbody">Long sessions drive the fleet's cost: about 19% of sessions over 400K context carry about 87% of it. Rotating long orchestrators by handoff caps the biggest spenders and leaves workers alone.</p>
+<p class="mv-dbody">Which context-cost policy should the fleet run?</p>
+<p class="mv-dbody mv-why">Why you: <bdi>It trades quality on long workers for spend, which is your call.</bdi>
+</p>
+<h3 class="mv-label bv-meta">Choose one</h3>
+<ol class="mv-dopts">
+<li class="mv-dopt" data-option="rotate" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">Rotate long orchestrators by handoff</p>
+<p class="mv-dopt-text">Orchestrators roll over at a set context size; workers are untouched.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="info">Recommended</span>
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+<dl class="mv-cells">
+<div class="mv-cell">
+<dt class="bv-meta">Cost</dt>
+<dd>Saves on long orchestrators only</dd>
+</div>
+<div class="mv-cell">
+<dt class="bv-meta">Risk</dt>
+<dd>Workers untouched</dd>
+</div>
+<div class="mv-cell">
+<dt class="bv-meta">Undo</dt>
+<dd>Stop rotating</dd>
+</div>
+</dl>
+</li>
+<li class="mv-dopt" data-option="both" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Both: rotate, plus 300K compaction</p>
+<p class="mv-dopt-text">Lower cost and some quality risk on long workers.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+<dl class="mv-cells">
+<div class="mv-cell">
+<dt class="bv-meta">Cost</dt>
+<dd>Saves more</dd>
+</div>
+<div class="mv-cell">
+<dt class="bv-meta">Risk</dt>
+<dd>Some quality risk on long workers</dd>
+</div>
+<div class="mv-cell">
+<dt class="bv-meta">Undo</dt>
+<dd>Turn compaction off</dd>
+</div>
+</dl>
+</li>
+<li class="mv-dopt" data-option="wait" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Re-measure in a week</p>
+<p class="mv-dopt-text">No change.</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+<span class="mv-badge">Status quo</span>
+</p>
+</li>
+</ol>
+<h3 class="mv-label bv-meta">Tradeoffs</h3>
+<ul class="mv-free">
+<li>
+<p class="mv-dopt-label">Measuring first</p>
+<dl class="mv-cells">
+<div class="mv-cell">
+<dt class="bv-meta">Time</dt>
+<dd>One week</dd>
+</div>
+</dl>
+</li>
+</ul>
+<h3 class="mv-label bv-meta">Sources</h3>
+<ul class="mv-sources">
+<li class="mv-source-chip" data-kind="pr">
+<a href="https://github.com/broomva/workspace/pull/983" target="_blank" rel="noopener noreferrer">Cost-levers study #983</a>
+</li>
+<li class="mv-source-chip" data-kind="ticket">
+<a href="https://linear.app/broomva/issue/BRO-3001" target="_blank" rel="noopener noreferrer">BRO-3001</a>
+</li>
+<li class="mv-source-chip" data-kind="session">
+<span class="bv-code">session 2fb204ca</span>
+</li>
+</ul>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
+<ul>
+<li>
+<span class="bv-code">read</span>: <bdi>ws#983 and the fleet-cost memory</bdi>
+</li>
+<li>
+<span class="bv-code">reroute</span>: <bdi>no standing grant covers it</bdi>
+</li>
+</ul>
+</section>
+<div class="mv-control mv-answerbar">
+<textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
+</textarea>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Decisions shows whether it has been answered since, and is where to answer it.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>fleet-cost-1</bdi>
+</span>.</p>
+</div>
+</article>
+</details>
+</li>
+</ul>
+</section>
+<section class="mv-group" data-tabs="all ideas">
+<header class="mv-group-head bv-meta">
+<span class="mv-group-name">
+<bdi>research</bdi>
+</span>
+<span class="mv-group-age" data-tab="all">3 d</span>
+<span class="mv-group-age" data-tab="ideas">3 d</span>
+</header>
+<ul class="mv-list">
+<li class="mv-irow" data-tab="ideas" data-ask="decisions.yaml#jev-idea" data-blocking="false">
+<details>
+<summary>
+<span class="mv-irow-meta bv-meta">
+<span class="mv-chip" data-kind="idea">idea</span> <bdi>9f3c2a1b</bdi>
+</span>
+<span class="mv-irow-title">Run the Jev-vs-/kg retrieval experiment?</span>
+</summary>
+<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="4e0b3b5d6873501f" data-kind="idea">
+<p class="mv-dmeta bv-meta">
+<span class="mv-chip" data-kind="idea">idea</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-20T00:00:00Z</bdi> by <bdi>9f3c2a1b</bdi>
+</p>
+<p class="mv-dtitle">Run the Jev-vs-/kg retrieval experiment?</p>
+<h3 class="mv-label bv-meta">Choose one</h3>
+<ol class="mv-dopts">
+<li class="mv-dopt" data-option="park" data-recommended="false" data-chosen="false">
+<p class="mv-dopt-label">Park it</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+<li class="mv-dopt" data-option="develop" data-recommended="true" data-chosen="false">
+<p class="mv-dopt-label">Develop it</p>
+<p class="mv-chips">
+<span class="mv-badge" data-tone="info">Recommended</span>
+<span class="mv-badge" data-tone="success">Reversible</span>
+</p>
+</li>
+</ol>
+<section class="mv-fold mv-tried">
+<h3 class="mv-fold-title">What the agent tried first</h3>
+<ul>
+<li>
+<span class="bv-code">loop</span>: <bdi>filed by the idea triage</bdi>
+</li>
+</ul>
+</section>
+<div class="mv-control mv-answerbar">
+<textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
+</textarea>
+<p class="mv-answer-cta">Open at <span class="bv-code">worktree</span>. Paseo · Maestro · Initiatives shows whether it has been answered since, and is where to answer it.</p>
+<p class="mv-answer-why bv-meta">Paseo's Maestro plugin still writes every answer, so this screen only reads. Find it there as <span class="bv-code">
+<bdi>jev-idea</bdi>
+</span>.</p>
+</div>
+</article>
+</details>
+</li>
+</ul>
+</section>
+</div>
+</div>
+<details class="mv-errors">
+<summary data-tone="warning">Partial: 2 sources could not be read</summary>
+<ul>
+<li>
+<span class="bv-code">.control/asks/broken.yaml</span>: outside the YAML subset Maestro reads exactly: what this reader's YAML parser refuses (while parsing a flow sequence, expected ',' or ']' at byte 12 line 2 column 1)</li>
+<li>
+<span class="bv-code">.control/asks/alt-key.yaml#2</span>: entry is not a mapping</li>
+</ul>
+</details>
+<p class="mv-source bv-meta">
+<span class="bv-code">worktree:.control/asks</span>
+</p>
+</section>
+<footer class="mv-foot bv-meta">Read from <span class="bv-code">worktree</span>
+</footer>
+</div>

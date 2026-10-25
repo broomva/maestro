@@ -1,0 +1,4 @@
+{"actor":"agent:aaaa1111","cause":null,"data":{},"id":"T10","prev":"sha256:9","refs":{},"stream":"loops/ticks","subject":"loop:demo-tick","ts":"2026-10-23T10:59:00Z","type":"loop.tick.started","v":1}
+{"actor":"agent:aaaa1111","cause":"T10","data":{"outcome":"partial","summary":"one tier skipped"},"id":"T11","prev":"sha256:10","refs":{},"stream":"loops/ticks","subject":"loop:demo-tick","ts":"2026-10-23T11:05:00Z","type":"loop.tick.ended","v":1}
+{"actor":"agent:aaaa1111","cause":null,"data":{},"id":"T12","prev":"sha256:11","refs":{},"stream":"loops/ticks","subject":"loop:demo-tick","ts":"2026-10-23T11:30:00Z","type":"loop.tick.started","v":1}
+{"actor":"agent:aaaa1111","cause":"T12","data":{"outcome":"ok","summary":"worked every"},"id":"T13","prev":"sha256:12","refs":{},"stream":"loops/ticks","subject":"loop:demo-tick","ts":"2026-10-23T11:40:00Z","type":"loop.tick.ended","v":1}

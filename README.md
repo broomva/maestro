@@ -240,7 +240,8 @@ read, that count becomes a lower bound and the error is reported under `worktree
 Maestro decides every value on it:
 
 - `maestro_ui_catalog` lists the block types (`stack`, `snapshot`, `needs`, `asks`, `ask`, `work`,
-  `loops`, `initiatives`, `fleet`) and their props. Props are handles and filters only (a ledger
+  `loops`, `initiatives`, `fleet`, and the Decisions screens `decisions` and `decision`) and their
+  props. The Decisions screens read only: Paseo's Maestro plugin still writes every answer. Props are handles and filters only (a ledger
   name, an ask id, a project, a state, a limit); no block carries text, numbers or markup.
 - `maestro_ui_render { root, blocks }` validates the spec, places what it can and reports every drop
   with its reason (an unknown type, a prop the type does not take, a cycle, a missing or unreachable
@@ -259,7 +260,16 @@ Maestro decides every value on it:
   sha256. The page's Content-Security-Policy allows no fetch and no script but that bridge, by its
   hash, so markup in a forged tool result runs nothing (the e2e checks it). There is no WebAssembly:
   T3's CSP blocks it.
-- `scripts/view-e2e.sh [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
+- `today` is the Today screen (design page 10): a headline composed from one snapshot that names the
+  commit read and its age, count pills (needs you, running, open asks, silent loops, landing), the
+  top decision in queue order, work running now with the tier, model, thinking, harness, node and
+  budget its frontmatter carries, and Nodes (unavailable until host adapters read a node census).
+  Beside it, `health` (also a block on its own): the plan graphs (`docs/plans/*.graph.yaml`) whose
+  ticket a live initiative links, with node state marked unavailable (it lives in Linear, which
+  Maestro does not read yet); each loop's heartbeat (ok, drift, review overdue, no receipts, or not
+  known when the ticks ledger did not read clean) with its last 24 ticks; the economy from core's
+  capacity over the usage rows in `MAESTRO_USAGE`; and the last hour's tick receipts.
+- `scripts/e2e.sh [view|decisions|today] [DIR]` runs the App in Playwright WebKit through a real MCP Apps host
   (the ext-apps `AppBridge`) against `maestro serve --http`: on the real ledgers at `origin/main`,
   and on a scratch copy of the fixture that it edits to prove the poll; it also sends a forged result
   whose inline handler must not run. It writes screenshots at 390
@@ -299,6 +309,7 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 | `MAESTRO_PASEO_ASK_LOCKS` | `~/.local/state/control-asks/locks` (the plugin's ask-ledger lock root) |
 | `MAESTRO_ASK_LEDGER` | `<workspace>/scripts/ask_ledger.py` (the writer `ask file` runs: `ask_ledger.py file`) |
 | `MAESTRO_SESSION` | none: the session agent requests name |
+| `MAESTRO_USAGE` | unset: a file holding `provider_manager.py --json usage` output, which the economy reads; unset, the economy is unavailable |
 
 Inside the workspace, each name is read from `.broomva/<name>` when the tree has it and from
 `.control/<name>` otherwise, on disk and at a git revision alike; a tree holding both is a read

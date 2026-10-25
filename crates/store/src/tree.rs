@@ -264,8 +264,31 @@ impl Tree {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// The committer date of the commit read, or `None` for the working tree.
+    pub fn committed_at(&self) -> Result<Option<jiff::Timestamp>, TreeError> {
+        let Some(commit) = self.commit_to_read()? else { return Ok(None) };
+        let out = self.git(&["show", "-s", "--format=%cI", commit])?;
+        out.trim().parse::<jiff::Timestamp>().map(Some).map_err(|e| TreeError::Git {
+            args: format!("show -s --format=%cI {commit}"),
+            stderr: format!("not a date: {e}"),
+        })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Whether the repo holds the full ref `name`, by `show-ref --exists` (git >= 2.43): 2 is
+    /// absent. Anything else is there, or an error: a broken ref (1), a git without the flag, no
+    /// repo. A broken ref is never read as absent: it may stand over a packed one.
+    pub fn has_ref(&self, name: &str) -> Result<bool, String> {
+        let output =
+            git_command(&self.root).args(["show-ref", "--exists", name]).output().map_err(|e| e.to_string())?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(2) => Ok(false),
+            _ => Err(format!("`{name}` does not read: {}", String::from_utf8_lossy(&output.stderr).trim())),
+        }
     }
 }
 

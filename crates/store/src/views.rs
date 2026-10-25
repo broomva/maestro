@@ -4,7 +4,7 @@
 //! hooks) computes the same counts from the same inputs.
 
 use crate::{LedgerFile, Store, TickTail};
-use maestro_core::ask::{AskRef, AskState};
+use maestro_core::ask::{Ask, AskRef, AskState};
 use maestro_core::context::{AskBrief, ContextPacket, ContextScope, InitiativeBrief, LoopBrief};
 use maestro_core::fleet::FleetSummary;
 use maestro_core::initiative::Initiative;
@@ -184,58 +184,212 @@ pub struct AskCounts {
     pub open_blocking: usize,
     pub answered: usize,
     pub archived: usize,
-    /// Open on the read revision but answered in the working tree: waiting to land.
-    pub unlanded: usize,
+    /// Open on the read revision but answered in the working tree or on `maestro/answers`:
+    /// waiting to land, as the plugin's batch counts them. `None` when it is not known: a read
+    /// came back in part or not at all (unread is not none), or the store reads the working
+    /// tree itself (nothing lands onto it, so no count is made).
+    pub unlanded: Option<usize>,
 }
 
-/// Asks open at the store's git revision but answered in the workspace working tree.
-/// Empty when the store already reads the working tree. The section's errors are the
-/// working tree's own read failures: an unreadable local ledger hides answers waiting
-/// to land, so the count is then a lower bound, and `data` is `None` when nothing local was readable.
-pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<AskRef>> {
-    if store.tree.source == crate::TreeSource::WorkingTree {
-        return Section::ok("worktree", Vec::new());
+/// The branch Paseo's Maestro plugin lands owner answers on before their batch PR merges
+/// (spec row R2). An answer there is waiting to land as much as one in the working tree.
+pub const ANSWERS_BRANCH: &str = "maestro/answers";
+
+/// Answered asks by ledger and the plugin's key: `u:<uid>`, else `i:<id>` for an ask without a
+/// uid (`answers-landing.ts`), so a uid and a uid-less id that share their text never match.
+type Answered = BTreeSet<(String, String)>;
+
+fn key(ask: &Ask) -> String {
+    match &ask.uid {
+        Some(uid) => format!("u:{uid}"),
+        None => format!("i:{}", ask.id),
     }
-    // No local asks directory holds no local answers: nothing waits, and nothing is unread.
-    // Anything else in its place (a file, a dangling link) is unread, and the read reports it.
-    let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree);
-    let rel = match local.rel(crate::ASKS) {
-        Ok(rel) => rel,
-        Err(reason) => {
-            let at = local.tree.label(crate::ASKS);
-            return Section { source: at.clone(), data: None, errors: vec![SourceError { at, reason }] };
-        }
+}
+
+/// An ask open at the read revision whose answer waits to land: its ledger and the plugin's key.
+/// Match it with [`Waiting::is`], never by handle: a uid and a uid-less id may share their text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    pub ledger: String,
+    key: String,
+}
+
+impl Waiting {
+    /// Whether this is `ask` in `ledger`.
+    pub fn is(&self, ledger: &str, ask: &Ask) -> bool {
+        self.ledger == ledger && self.key == key(ask)
+    }
+}
+
+/// Whether a read error at `at` may hide `ledger`'s asks or answers: every error but one that
+/// names a different ledger file (`<source>:<asks>/<file>` or `…/<file>#<entry>`).
+pub fn may_hide(at: &str, ledger: &str) -> bool {
+    let path = at.split('#').next().unwrap_or(at);
+    match path.rsplit_once('/') {
+        Some((_, name)) if name.ends_with(".yaml") || name.ends_with(".yml") => name == ledger,
+        _ => true,
+    }
+}
+
+/// The plugin's `ambiguity()`: a uid twice, or an id twice among asks without a uid. Paseo
+/// refuses an answer to such a handle.
+pub fn ambiguous(lf: &LedgerFile, ask: &Ask) -> bool {
+    let same = |a: &&Ask| match &ask.uid {
+        Some(uid) => a.uid.as_ref() == Some(uid),
+        None => a.uid.is_none() && a.id == ask.id,
     };
-    let local_dir = store.paths.workspace.join(&rel);
-    if std::fs::symlink_metadata(&local_dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
-        return Section::ok(format!("worktree:{rel}"), Vec::new());
+    lf.ledger.asks.iter().filter(same).count() > 1
+}
+
+/// Whether `ask` in `lf`, read at the tree in `asks`, has an answer waiting to land: the one
+/// place this is decided, for every screen and tool. `None` when it is not known: a read that
+/// may hide this ledger's entries or answers failed (an entry that did not read may share its
+/// handle), or its handle names two asks.
+pub fn waits(
+    asks: &Section<Vec<LedgerFile>>,
+    unlanded: &Section<Vec<Waiting>>,
+    lf: &LedgerFile,
+    ask: &Ask,
+) -> Option<bool> {
+    if asks.errors.iter().any(|e| e.at != asks.source && may_hide(&e.at, &lf.file)) {
+        return None;
     }
-    let local = local.asks();
-    let errors: Vec<SourceError> = local
+    let refs = unlanded.data.as_ref()?;
+    if unlanded.errors.iter().any(|e| may_hide(&e.at, &lf.file)) || ambiguous(lf, ask) {
+        return None;
+    }
+    Some(refs.iter().any(|r| r.is(&lf.file, ask)))
+}
+
+/// The asks in `asks` whose state passes `closed`, by ledger and key.
+fn closed_in(asks: &[LedgerFile], closed: impl Fn(AskState) -> bool) -> Answered {
+    asks.iter()
+        .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
+        .filter(|(_, a)| closed(a.state()))
+        .map(|(lf, a)| (lf.file.clone(), key(a)))
+        .collect()
+}
+
+/// Where [`ANSWERS_BRANCH`] is read: this clone's own branch, and origin's as this clone last
+/// fetched it (the plugin merges origin's batch in before landing, `answers-landing.ts`). Origin
+/// itself is never asked: an answer pushed there since the last fetch is not seen.
+/// Each is `(ref, label)`; a read error there is labelled `<label>:`.
+pub const ANSWERS_REFS: [(&str, &str); 2] =
+    [("refs/heads/maestro/answers", ANSWERS_BRANCH), ("refs/remotes/origin/maestro/answers", "origin/maestro/answers")];
+
+/// How screens and the CLI name what [`ANSWERS_REFS`] read.
+pub const ANSWERS_READ: &str = "maestro/answers (this clone's, or origin's as last fetched)";
+
+/// Answers on [`ANSWERS_BRANCH`]: the union over [`ANSWERS_REFS`]. A ref that is not there holds
+/// none; one that exists but does not read at all makes the whole `None` with its errors: its
+/// answers are unknown. Errors are labelled with the branch, so they never read as the tree read's.
+fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
+    let mut union = Some(Answered::new());
+    let mut errors = Vec::new();
+    for (name, label) in ANSWERS_REFS {
+        let (read, errs) = answered_at_ref(store, name, label);
+        errors.extend(errs);
+        match (&mut union, read) {
+            (Some(union), Some(at_ref)) => union.extend(at_ref),
+            _ => union = None,
+        }
+    }
+    (union, errors)
+}
+
+/// Answers at one of [`ANSWERS_REFS`].
+fn answered_at_ref(store: &Store, name: &str, label: &str) -> (Option<Answered>, Vec<SourceError>) {
+    let branch = Store::new(store.paths.clone(), crate::TreeSource::GitRev(name.to_string()));
+    if branch.tree.unresolved.is_some() {
+        // Only a ref that is not there holds no answers; one that does not resolve is unread.
+        return match branch.tree.has_ref(name) {
+            Ok(false) => (Some(Answered::new()), Vec::new()),
+            Ok(true) => {
+                let reason = branch.tree.unresolved.clone().unwrap_or_default();
+                (None, vec![SourceError { at: format!("{label}:{name}"), reason }])
+            }
+            Err(reason) => (None, vec![SourceError { at: format!("{label}:{name}"), reason }]),
+        };
+    }
+    let read = branch.asks();
+    let mut errors: Vec<SourceError> = read
         .errors
         .iter()
         .map(|e| SourceError {
-            at: if e.at.starts_with("worktree:") { e.at.clone() } else { format!("worktree:{}", e.at) },
+            at: if e.at.starts_with("git:") { e.at.clone() } else { format!("{label}:{}", e.at) },
             reason: e.reason.clone(),
         })
         .collect();
-    let source = local.source;
-    let Some(local) = local.data else { return Section { source, data: None, errors } };
-    let answered_here: BTreeSet<(String, String)> = local
-        .iter()
-        .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        .filter(|(_, a)| a.state() != AskState::Open)
-        .map(|(lf, a)| (lf.file.clone(), a.handle().to_string()))
-        .collect();
-    let refs = at_rev
-        .iter()
-        .flat_map(|lf| lf.ledger.asks.iter().map(move |a| (lf, a)))
-        .filter(|(lf, a)| {
-            a.state() == AskState::Open && answered_here.contains(&(lf.file.clone(), a.handle().to_string()))
-        })
-        .map(|(lf, a)| AskRef { ledger: lf.file.clone(), id: a.handle().to_string() })
-        .collect();
-    Section::partial(source, refs, errors)
+    match read.data {
+        // The plugin's `unlandedAnswers`: any entry answered or otherwise closed on the branch.
+        Some(asks) => (Some(closed_in(&asks, |s| s != AskState::Open)), errors),
+        None => {
+            if errors.is_empty() {
+                errors.push(SourceError { at: read.source, reason: "unread".into() });
+            }
+            (None, errors)
+        }
+    }
+}
+
+/// Asks open at the store's git revision but answered in the workspace working tree or on
+/// [`ANSWERS_BRANCH`]. Empty when the store already reads the working tree. The section's
+/// errors are those two reads' failures: an unreadable ledger there may hide answers waiting to
+/// land, so the rows are then the ones seen, and `data` is `None` when either read failed whole.
+pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
+    if store.reads_worktree() {
+        return Section::ok("worktree", Vec::new());
+    }
+    // `None` once a read failed whole: what waits to land is then unknown, never none.
+    let (mut answered, mut errors) = answered_on_branch(store);
+    // The plugin's `unlandedAnswers`: an answer waits when the first ask at the read tree with its
+    // key is open. One answer is one wait, however many asks share its key.
+    let waiting = |answered: &Answered| -> Vec<Waiting> {
+        let mut first = std::collections::BTreeMap::new();
+        for lf in at_rev {
+            for a in &lf.ledger.asks {
+                first.entry((lf.file.clone(), key(a))).or_insert_with(|| a.state());
+            }
+        }
+        answered
+            .iter()
+            // Open there, or not held there at all: such an answer still waits (the plugin).
+            .filter(|k| first.get(*k).is_none_or(|s| *s == AskState::Open))
+            .map(|(ledger, key)| Waiting { ledger: ledger.clone(), key: key.clone() })
+            .collect()
+    };
+    // No local asks directory holds no local answers: nothing waits there, and nothing is unread.
+    // Anything else in its place (a file, a dangling link) is unread, and the read reports it.
+    let local = Store::new(store.paths.clone(), crate::TreeSource::WorkingTree);
+    let (source, local) = match local.rel(crate::ASKS) {
+        Err(reason) => {
+            let at = local.tree.label(crate::ASKS);
+            errors.push(SourceError { at: at.clone(), reason });
+            (at, None)
+        }
+        Ok(rel) => {
+            let local_dir = store.paths.workspace.join(&rel);
+            if std::fs::symlink_metadata(&local_dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+                (format!("worktree:{rel}"), Some(Answered::new()))
+            } else {
+                let read = local.asks();
+                errors.extend(read.errors.iter().map(|e| SourceError {
+                    at: if e.at.starts_with("worktree:") { e.at.clone() } else { format!("worktree:{}", e.at) },
+                    reason: e.reason.clone(),
+                }));
+                // Answered, not archived: an ask archived in the working tree is not an answer.
+                (read.source, read.data.map(|d| closed_in(&d, |s| s == AskState::Answered)))
+            }
+        }
+    };
+    match (&mut answered, local) {
+        (Some(all), Some(here)) => all.extend(here),
+        _ => answered = None,
+    }
+    match answered {
+        Some(all) => Section::partial(source, waiting(&all), errors),
+        None => Section { source, data: None, errors },
+    }
 }
 
 pub fn ask_counts(asks: &[LedgerFile]) -> AskCounts {
@@ -322,11 +476,16 @@ pub struct Snapshot {
     pub fleet: Section<Vec<FleetSummary>>,
 }
 
-/// Ask counts, with the working tree's read errors joined in: they make the unlanded count a lower bound.
+/// Ask counts, with the working tree's read errors joined in: with any read error the unlanded count is not known.
 fn asks_with_unlanded(store: &Store, asks: &Section<Vec<LedgerFile>>) -> Section<AskCounts> {
+    let whole_tree = asks.errors.is_empty();
     let mut section = asks.as_ref().map(|a| {
         let waiting = unlanded(store, a);
-        (AskCounts { unlanded: waiting.data.as_ref().map_or(0, Vec::len), ..ask_counts(a) }, waiting.errors)
+        // The plugin's batch count, known only when every read was whole: an entry that did not
+        // read may hold an answer, or shadow one by its key. Never a bound that may be false.
+        let whole = whole_tree && waiting.errors.is_empty();
+        let count = waiting.data.as_ref().map(Vec::len).filter(|_| whole && !store.reads_worktree());
+        (AskCounts { unlanded: count, ..ask_counts(a) }, waiting.errors)
     });
     let local_errors = section.data.as_mut().map(|(_, e)| std::mem::take(e)).unwrap_or_default();
     section.errors.extend(local_errors);
@@ -518,6 +677,20 @@ pub fn context(store: &Store, mut scope: ContextScope) -> ContextPacket {
 }
 
 /// Work items with a canonical state, or all of them.
+/// The economy as core's `capacity` computes it from the usage rows read now, with no samples
+/// and no balancer state: a stale active account then fails closed, as `maestro economy capacity`
+/// does without `--state`. Unread rows leave it unread; rows core refuses make it unavailable.
+pub fn economy(usage: &Section<Vec<serde_json::Value>>, at: jiff::Timestamp) -> Section<serde_json::Value> {
+    let Some(rows) = &usage.data else {
+        return Section { source: usage.source.clone(), data: None, errors: usage.errors.clone() };
+    };
+    let gate = maestro_core::economy::Gate::default();
+    match maestro_core::economy::capacity(rows, &[], at.as_microsecond(), &gate) {
+        Ok(v) => Section::partial(usage.source.clone(), v, usage.errors.clone()),
+        Err(e) => Section::unavailable(usage.source.clone(), e.to_string()),
+    }
+}
+
 pub fn work_by_state(work: &[WorkItem], state: Option<WorkState>) -> Vec<&WorkItem> {
     work.iter().filter(|w| state.is_none_or(|s| w.work_state == s)).collect()
 }

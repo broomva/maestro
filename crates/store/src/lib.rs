@@ -21,6 +21,7 @@ use maestro_core::fleet::{FleetReport, FleetSummary};
 use maestro_core::grant::Preauth;
 use maestro_core::initiative::Initiative;
 use maestro_core::loops::LoopSpec;
+use maestro_core::plan::PlanGraph;
 use maestro_core::tick::{LedgerEvent, Tick, pair_ticks};
 use maestro_core::work::{Flag, FlagKind, OrchState, WorkFrontmatter, WorkItem, WorkState};
 use maestro_core::{Section, SourceError};
@@ -45,6 +46,8 @@ pub const ASKS: &str = "asks";
 pub const INITIATIVES: &str = "initiatives";
 pub const PREAUTH: &str = "preauth";
 pub const LOOPS: &str = "loops";
+/// Plan graphs, a workspace folder the registry does not name (plans are not control state).
+pub const PLANS: &str = "docs/plans";
 /// The plugin's `LEDGER_LIMIT`: a ledger over this size is refused, not cut.
 pub const LEDGER_LIMIT: usize = 1024 * 1024;
 /// The plugin's `STREAM_TAIL` (`server/loops.ts`): an envelope stream is judged on its last
@@ -89,6 +92,11 @@ impl Store {
         }
         let tree = Tree::resolved(paths.workspace.clone(), source);
         Self { paths, tree, layout: OnceLock::new() }
+    }
+
+    /// Whether this store reads the working tree itself, not a git revision.
+    pub fn reads_worktree(&self) -> bool {
+        self.tree.source == TreeSource::WorkingTree
     }
 
     /// The workspace-relative path the registry gives `name` in this store's tree: `.broomva/<path>`
@@ -236,6 +244,36 @@ impl Store {
 
     pub fn loops(&self) -> Section<Vec<LoopSpec>> {
         self.yaml_dir(LOOPS)
+    }
+
+    /// Plan graphs (`docs/plans/*.graph.yaml`) at the tree read, with their file names.
+    pub fn plans(&self) -> Section<Vec<(String, PlanGraph)>> {
+        self.yaml_docs_with(PLANS, &[".graph.yaml"], |t| {
+            serde_yaml::from_str::<PlanGraph>(t).map(|g| (g, Vec::new())).map_err(|e| e.to_string())
+        })
+    }
+
+    /// The usage rows in the file [`Paths::usage`] names: a JSON list, as
+    /// `provider_manager.py --json usage` prints it. Unset, unreadable or not a list is unread.
+    pub fn usage(&self) -> Section<Vec<serde_json::Value>> {
+        let Some(path) = &self.paths.usage else {
+            return Section::unavailable("env:MAESTRO_USAGE", "no usage file is set");
+        };
+        let label = format!("fs:{}", path.display());
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => return Section::unavailable(label, e.to_string()),
+        };
+        match maestro_core::schema::parse_json(&text) {
+            Ok(serde_json::Value::Array(rows)) => Section::ok(label, rows),
+            Ok(_) => Section::unavailable(label, "it is not a list of usage rows"),
+            Err(e) => Section::unavailable(label, e),
+        }
+    }
+
+    /// When the commit read was made (its committer date); `None` for the working tree.
+    pub fn committed_at(&self) -> Result<Option<jiff::Timestamp>, String> {
+        self.tree.committed_at().map_err(|e| e.to_string())
     }
 
     pub fn preauth(&self) -> Section<Preauth> {

@@ -12,9 +12,33 @@ let spec: unknown = null;
 let revision: string | null = null;
 let timer: ReturnType<typeof setTimeout> | undefined;
 
+// What the owner chose on screen, which a swap must keep: the tab checked in each radio group
+// and the inbox rows opened, by block and ask. Markup from Rust carries no such state.
+function held() {
+  const tabs = [...root.querySelectorAll<HTMLInputElement>("input[type=radio]:checked")].map((i) => [i.name, i.value]);
+  const open = [...root.querySelectorAll<HTMLElement>(".mv-irow[data-ask]")]
+    .filter((li) => li.querySelector(":scope > details")?.hasAttribute("open"))
+    .map((li) => `${li.closest("[data-block]")?.getAttribute("data-block")}\u0000${li.dataset.ask}`);
+  return { tabs, open: new Set(open) };
+}
+
+function restore(state: ReturnType<typeof held>) {
+  for (const [name, value] of state.tabs) {
+    for (const input of root.querySelectorAll<HTMLInputElement>("input[type=radio]")) {
+      if (input.name === name && input.value === value) input.checked = true;
+    }
+  }
+  for (const li of root.querySelectorAll<HTMLElement>(".mv-irow[data-ask]")) {
+    const key = `${li.closest("[data-block]")?.getAttribute("data-block")}\u0000${li.dataset.ask}`;
+    if (state.open.has(key)) li.querySelector(":scope > details")?.setAttribute("open", "");
+  }
+}
+
 function swap(html: string) {
   const apply = () => {
+    const state = held();
     root.innerHTML = html;
+    restore(state);
   };
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
   type Transition = { ready: Promise<void>; finished: Promise<void>; updateCallbackDone: Promise<void> };

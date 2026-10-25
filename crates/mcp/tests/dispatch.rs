@@ -171,3 +171,67 @@ fn an_ask_in_an_unreadable_ledger_is_unreadable_not_missing() {
     // A clean ledger's miss is still a plain miss.
     assert!(call(&s, "maestro_ask_get", json!({ "ledger": "demo-arc.yaml", "id": "gone" })).is_err());
 }
+
+/// Main holds `x` twice: once as a uid-less id, once as a uid. `maestro/answers` answers only the
+/// uid. The plugin keys them `i:x` and `u:x`, so only the uid's row waits to land.
+#[test]
+fn waiting_to_land_is_the_plugins_key_not_the_handle_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let asks = ws.join(".control/asks");
+    std::fs::create_dir_all(&asks).unwrap();
+    let open = "asks:\n  - id: x\n    ask: by id?\n  - id: y\n    uid: x\n    ask: by uid?\n";
+    std::fs::write(asks.join("z.yaml"), open).unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "open"]);
+    git(&ws, &["checkout", "-q", "-b", "maestro/answers"]);
+    let answered = open.replacen("    ask: by uid?\n", "    ask: by uid?\n    answer: yes\n", 1);
+    assert_ne!(answered, open);
+    std::fs::write(asks.join("z.yaml"), answered).unwrap();
+    git(&ws, &["commit", "-q", "-am", "answer"]);
+    git(&ws, &["checkout", "-q", "main"]);
+
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    // Rows come in ledger order, and `id` is the handle: the uid-less `x`, then uid `x`.
+    let rows = |source: TreeSource| {
+        let v = call(&Store::new(paths.clone(), source), "maestro_asks_list", json!({})).unwrap();
+        v["asks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["id"].clone(), r["waiting_to_land"].clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(TreeSource::GitRev("main".into())), vec![(json!("x"), json!(false)), (json!("x"), json!(true))]);
+    // Reading the working tree itself, nothing lands onto it: no row claims either way.
+    assert_eq!(rows(TreeSource::WorkingTree), vec![(json!("x"), json!(null)), (json!("x"), json!(null))]);
+}
+
+/// A ledger that does not read on `maestro/answers` may hide its asks' answers: their rows say
+/// null, not false, and the error is in the response. Another ledger's rows are unaffected.
+#[test]
+fn waiting_to_land_is_null_where_a_read_may_hide_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    let asks = ws.join(".control/asks");
+    std::fs::create_dir_all(&asks).unwrap();
+    std::fs::write(asks.join("a.yaml"), "asks:\n  - id: p\n    ask: one?\n").unwrap();
+    std::fs::write(asks.join("b.yaml"), "asks:\n  - id: q\n    ask: two?\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "open"]);
+    git(&ws, &["checkout", "-q", "-b", "maestro/answers"]);
+    std::fs::write(asks.join("a.yaml"), "asks: [unclosed\n").unwrap();
+    git(&ws, &["commit", "-q", "-am", "broken"]);
+    git(&ws, &["checkout", "-q", "main"]);
+
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    let v = call(&Store::new(paths, TreeSource::GitRev("main".into())), "maestro_asks_list", json!({})).unwrap();
+    let rows: Vec<_> =
+        v["asks"].as_array().unwrap().iter().map(|r| (r["ledger"].clone(), r["waiting_to_land"].clone())).collect();
+    assert_eq!(rows, vec![(json!("a.yaml"), json!(null)), (json!("b.yaml"), json!(false))], "{v}");
+    assert!(v.to_string().contains("maestro/answers:"), "{v}");
+}
