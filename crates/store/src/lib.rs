@@ -89,6 +89,11 @@ impl Store {
         Self { paths, tree, layout: OnceLock::new() }
     }
 
+    /// Whether this store reads the working tree itself, not a git revision.
+    pub fn reads_worktree(&self) -> bool {
+        self.tree.source == TreeSource::WorkingTree
+    }
+
     /// The workspace-relative path the registry gives `name` in this store's tree: `.broomva/<path>`
     /// when the tree has it, `.control/<path>` otherwise (on disk, or in the git revision read).
     /// A tree holding both is an error, as is one the registry refuses (a symlinked `.control`):

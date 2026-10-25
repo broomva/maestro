@@ -1,0 +1,90 @@
+# The Decisions screens' fixture: copied next to the fixture machine's ledgers by tests/decisions.rs.
+arc: fleet-closeout
+ticket: BRO-0002
+opened: 2026-10-13T09:00Z
+asks:
+  - id: context-cost
+    uid: fleet-cost-1
+    origin: { agent_id: "claude:coordinator", provider: claude }
+    asked_at: "2026-10-17T12:00:00Z"
+    class: decision
+    project: fleet
+    topics: [cost]
+    headline: "Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?"
+    stakes: "devteam ran out twice this week; context length is the lever."
+    why_you: "It trades quality on long workers for spend, which is your call."
+    summary: >-
+      Long sessions drive the fleet's cost: about 19% of sessions over 400K context carry about 87% of it.
+      Rotating long orchestrators by handoff caps the biggest spenders and leaves workers alone.
+    ask: "Which context-cost policy should the fleet run?"
+    blocking: true
+    preanswerable: false
+    default: "wait: nothing changes and spend continues"
+    gates: [fleet-cost]
+    exhausted:
+      - "read: ws#983 and the fleet-cost memory"
+      - reroute: no standing grant covers it
+    options:
+      - { id: rotate, label: "Rotate long orchestrators by handoff", consequence: "Orchestrators roll over at a set context size; workers are untouched.", reversible: true, recommended: true }
+      - { id: both, label: "Both: rotate, plus 300K compaction", consequence: "Lower cost and some quality risk on long workers.", reversible: true }
+      - { id: wait, label: "Re-measure in a week", consequence: "No change.", reversible: true, status_quo: true }
+    tradeoffs:
+      - { option: rotate, cost: "Saves on long orchestrators only", risk: "Workers untouched", reversibility: "Stop rotating" }
+      - { option: both, cost: "Saves more", risk: "Some quality risk on long workers", reversibility: "Turn compaction off" }
+      - { label: "Measuring first", time: "One week" }
+    sources:
+      - { kind: pr, ref: "broomva/workspace#983", label: "Cost-levers study #983" }
+      - { kind: ticket, ref: BRO-3001 }
+      - { kind: session, ref: 2fb204ca }
+      - { kind: url, ref: "javascript:alert(1)", label: "not a link" }
+  - id: merge-policy
+    class: authority
+    project: maestro
+    asked_at: "2026-10-12"
+    headline: "May Maestro's answers-only PRs merge on their own once their gates pass?"
+    stakes: "Each batch of your answers lands only when someone merges its PR."
+    blocking: false
+    preanswerable: false
+    no_default_because: irreversible
+    exhausted: ["read: the merge policy", "preauth: no grant covers merges"]
+    options:
+      - { id: person, label: "A person merges them", consequence: "As now.", reversible: true, recommended: true, status_quo: true }
+      - { id: gates, label: "Gates merge them", consequence: "Answers land without a click.", reversible: false }
+  - id: new-key
+    class: credential
+    project: maestro
+    asked_at: "2026-10-22T08:00:00Z"
+    headline: "Paste the <b>deploy</b> key"
+    blocking: true
+    preanswerable: false
+    gates: [deploy]
+    exhausted: ["read: keychain has none"]
+    options:
+      - { id: later, label: "Later", reversible: true }
+      - { id: paste, label: "Paste it now", reversible: true, recommended: true }
+  - id: jev-idea
+    origin: { agent_id: "9f3c2a1b-0b7b-42cd-b9e1-4b95e7be50bb" }
+    class: idea
+    project: research
+    asked_at: "2026-10-20T00:00:00Z"
+    headline: "Run the Jev-vs-/kg retrieval experiment?"
+    blocking: false
+    preanswerable: true
+    exhausted: ["loop: filed by the idea triage"]
+    options:
+      - { id: park, label: "Park it", reversible: true }
+      - { id: develop, label: "Develop it", reversible: true, recommended: true }
+  - id: done-before
+    class: decision
+    project: fleet
+    headline: "Rotate the Tuesday loop?"
+    default: "keep the loop as it is"
+    blocking: false
+    preanswerable: true
+    exhausted: ["read: x"]
+    options:
+      - { id: rotate-it, label: "Rotate it", reversible: true }
+    answer_option: "rotate-it"
+    answered_at: "2026-10-14T00:00:00Z"
+    answered_by: owner
+    status: resolved

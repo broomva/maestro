@@ -230,10 +230,10 @@ fn the_catalog_lists_every_type_with_a_props_schema() {
         .map(|b| b["type"].as_str().unwrap())
         .collect();
     assert_eq!(parents, ["stack"]);
-    // Every listed type validates with empty props, except the ask, which needs its handle.
+    // Every listed type validates with empty props, except the ask and the decision, which need their handle.
     for name in catalog::type_names() {
         let r = validate(&json!({ "root": "b", "blocks": { "b": { "type": name } } }));
-        assert_eq!(r.is_ok(), name != "ask", "{name}");
+        assert_eq!(r.is_ok(), !matches!(name, "ask" | "decision"), "{name}");
     }
     let v = validate(&json!({ "root": "b", "blocks": { "b": { "type": "work", "props": { "state": "Needs you" } } } }))
         .unwrap();
