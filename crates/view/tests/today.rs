@@ -158,8 +158,16 @@ fn the_counts_are_the_snapshots() {
     let rows = r.html.matches(r#"<li class="mv-row" data-work="#).count();
     assert_eq!(rows, 1);
     assert_eq!(pill(&r.html, "running"), "1 running");
-    assert_eq!(pill(&r.html, "needs you"), format!("{} needs you", snap.needs.data.as_ref().unwrap().len()));
-    assert_eq!(pill(&r.html, "open asks"), format!("{} open asks", snap.asks.data.as_ref().unwrap().open));
+    // The fixture's asks read in part (broken.yaml), so both counts say so.
+    assert!(!snap.needs.errors.is_empty() && !snap.asks.errors.is_empty());
+    assert_eq!(
+        pill(&r.html, "needs you"),
+        format!("{} needs you, partial read", snap.needs.data.as_ref().unwrap().len())
+    );
+    assert_eq!(
+        pill(&r.html, "open asks"),
+        format!("{} open asks, partial read", snap.asks.data.as_ref().unwrap().open)
+    );
     assert_eq!(pill(&r.html, "silent loops"), "1 silent loops", "the fixture's `silent` loop has no receipts");
 }
 
@@ -175,7 +183,7 @@ fn the_headline_names_the_commit_and_its_age() {
     let commit = store.tree.commit.clone().unwrap();
     let r = render(&store, "today");
     let line = text_of(&r.html, "mv-composed");
-    assert_eq!(line, format!("Composed by Maestro · main@{} · 2 min ago", &commit[..7]));
+    assert_eq!(line, format!("Composed by Maestro · main@{} · committed 2 min ago", &commit[..7]));
     assert!(r.html.contains(&format!(r#"data-commit="{commit}""#)));
 
     // The working tree has no commit: it says so, and claims no age.
@@ -311,4 +319,200 @@ fn the_snapshot_tiles_count_by_presentation_state() {
     let label = r.html.find("mv-tile-label bv-meta\">Running").unwrap();
     let value = r.html[..label].rfind(r#"<span class="mv-tile-value">"#).unwrap();
     assert_eq!(&r.html[value..label], r#"<span class="mv-tile-value">1</span><span class=""#);
+}
+
+/// A loop spec in the scratch workspace, and ticks appended to its ledger.
+fn add_loop(root: &Path, id: &str, extra: &str) {
+    let spec = format!(
+        "id: {id}\ntitle: {id}\npurpose: test\nowner: coordinator\nscope: broomva\nsubstrate: {{kind: launchd, ref: x}}\ncadence: hourly\nreview_by: '2099-01-01'\n{extra}"
+    );
+    std::fs::write(root.join(format!("workspace/.broomva/loops/{id}.yaml")), spec).unwrap();
+}
+
+fn add_ticks(root: &Path, lines: &str) {
+    let ticks = root.join("broomva-home/ledger/loops/ticks.jsonl");
+    let mut text = std::fs::read_to_string(&ticks).unwrap();
+    text.push_str(lines);
+    std::fs::write(&ticks, text).unwrap();
+}
+
+fn tick(id: &str, loop_id: &str, ts: &str, end: Option<(&str, &str)>) -> String {
+    let start = format!(
+        r#"{{"actor":"a","cause":null,"data":{{}},"id":"{id}","prev":null,"refs":{{}},"stream":"loops/ticks","subject":"loop:{loop_id}","ts":"{ts}","type":"loop.tick.started","v":1}}"#
+    );
+    match end {
+        None => format!("{start}\n"),
+        Some((at, outcome)) => format!(
+            "{start}\n{{\"actor\":\"a\",\"cause\":\"{id}\",\"data\":{{\"outcome\":\"{outcome}\"}},\"id\":\"{id}e\",\"prev\":null,\"refs\":{{}},\"stream\":\"loops/ticks\",\"subject\":\"loop:{loop_id}\",\"ts\":\"{at}\",\"type\":\"loop.tick.ended\",\"v\":1}}\n"
+        ),
+    }
+}
+
+fn beat_of(html: &str, loop_id: &str) -> String {
+    let at = html.find(&format!(r#"data-loop="{loop_id}" data-beat=""#)).unwrap_or_else(|| panic!("no loop {loop_id}"));
+    let rest = &html[at + format!(r#"data-loop="{loop_id}" data-beat=""#).len()..];
+    rest[..rest.find('"').unwrap()].to_string()
+}
+
+#[test]
+fn ok_needs_a_closed_tick_and_absence_needs_the_whole_ledger() {
+    let m = machine();
+    add_loop(m.path(), "never", "");
+    add_loop(m.path(), "resting", "desired: paused\n");
+    add_loop(m.path(), "drifty", "");
+    add_loop(m.path(), "failing", "");
+    add_ticks(
+        m.path(),
+        &(tick("D1", "drifty", "2026-10-23T10:00:00Z", None)
+            + &tick("F1", "failing", "2026-10-23T11:00:00Z", Some(("2026-10-23T11:10:00Z", "failed")))),
+    );
+    let r = render(&worktree(m.path(), false), "health");
+    assert_eq!(beat_of(&r.html, "demo-tick"), "ok");
+    assert_eq!(beat_of(&r.html, "never"), "no ticks recorded", "no tick read is not ok");
+    assert_eq!(beat_of(&r.html, "resting"), "paused");
+    assert_eq!(beat_of(&r.html, "drifty"), "drift", "an open tick past its limit");
+    assert_eq!(beat_of(&r.html, "failing"), "last tick failed");
+    assert_eq!(beat_of(&r.html, "silent"), "no receipts");
+}
+
+#[test]
+fn a_ledger_read_in_part_proves_no_absence() {
+    // A bad line may be the receipt the silent loop is missing.
+    let m = machine();
+    add_ticks(m.path(), "{\"subject\":\"loop:silent\", truncated\n");
+    let r = render(&worktree(m.path(), false), "today");
+    assert_eq!(pill(&r.html, "silent loops"), "unavailable silent loops");
+    // Its review date has passed (the registry alone proves that), but not "no receipts".
+    assert_eq!(beat_of(&r.html, "silent"), "review overdue");
+    assert_eq!(beat_of(&r.html, "demo-tick"), "not known");
+    assert!(r.html.contains("The ticks ledger was read in part"));
+
+    // A ledger past the tail is read in part too, every line valid.
+    let m = machine();
+    let filler: String = (0..9_000)
+        .map(|i| tick(&format!("P{i}"), "filler", "2026-10-22T00:00:00Z", Some(("2026-10-22T00:01:00Z", "ok"))))
+        .collect();
+    assert!(filler.len() > maestro_store::STREAM_TAIL);
+    let ticks = m.path().join("broomva-home/ledger/loops/ticks.jsonl");
+    let text = std::fs::read_to_string(&ticks).unwrap();
+    std::fs::write(&ticks, filler + &text).unwrap();
+    let r = render(&worktree(m.path(), false), "today");
+    assert_eq!(pill(&r.html, "silent loops"), "unavailable silent loops");
+    assert_eq!(beat_of(&r.html, "silent"), "review overdue");
+    assert_eq!(beat_of(&r.html, "demo-tick"), "not known");
+
+    // Unread: it says so.
+    let m = machine();
+    std::fs::remove_file(m.path().join("broomva-home/ledger/loops/ticks.jsonl")).unwrap();
+    let r = render(&worktree(m.path(), false), "health");
+    assert!(r.html.contains("The ticks ledger could not be read"));
+    assert!(!r.html.contains(r#"data-beat="ok""#));
+}
+
+#[test]
+fn a_receipt_after_the_clock_is_not_in_the_last_hour() {
+    let m = machine();
+    add_ticks(m.path(), &tick("Z1", "demo-tick", "2026-10-23T12:30:00Z", None));
+    let r = render(&worktree(m.path(), false), "health");
+    let card = &r.html[r.html.find(r#"data-type="receipts""#).unwrap()..];
+    assert!(!card[..card.find("</section>").unwrap()].contains("12:30"));
+}
+
+#[test]
+fn usage_rows_core_refuses_are_unavailable() {
+    let m = machine();
+    let bad = m.path().join("usage.json");
+    std::fs::write(&bad, r#"[{"email": "main@x.io", "fiveHourUtil": "lots", "isActive": true}]"#).unwrap();
+    let mut p = Paths::under(m.path().to_path_buf());
+    p.usage = Some(bad);
+    let r = render(&Store::new(p, TreeSource::WorkingTree), "health");
+    assert!(r.html.contains(r#"data-type="economy" data-state="unavailable""#), "{}", r.html);
+
+    // A stale active account is read, and the card says its numbers may be old.
+    let stale = m.path().join("stale.json");
+    std::fs::write(&stale, r#"[{"email": "main@x.io", "fiveHourUtil": null, "sevenDayUtil": null, "isActive": true, "isRateLimited": false, "stale": true}]"#).unwrap();
+    let mut p = Paths::under(m.path().to_path_buf());
+    p.usage = Some(stale);
+    let r = render(&Store::new(p, TreeSource::WorkingTree), "health");
+    assert!(r.html.contains(r#"data-known="false""#), "{}", r.html);
+}
+
+#[test]
+fn the_top_decision_is_not_one_already_answered() {
+    let m = machine();
+    let ws = m.path().join("workspace");
+    git(&ws, &[], &["init", "-q", "-b", "main"]);
+    git(&ws, &[], &["add", "."]);
+    git(&ws, &[], &["commit", "-q", "-m", "seed"]);
+    let store = Store::new(paths(m.path(), false), TreeSource::GitRev("main".into()));
+    let r = render(&store, "today");
+    assert!(text_of(&r.html, "mv-top").contains("Merge the demo PR now"));
+
+    // Answered in the working tree: it waits to land, so the next open ask is the top.
+    let file = ws.join(".control/asks/demo-arc.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let answered = text.replacen(
+        "    liveness: {kind: pr-open, ref: \"demo/repo#1\"}\n",
+        "    liveness: {kind: pr-open, ref: \"demo/repo#1\"}\n    answer_option: merge\n    answered_at: \"2026-10-23T11:00:00Z\"\n    status: resolved\n",
+        1,
+    );
+    assert_ne!(text, answered);
+    std::fs::write(&file, answered).unwrap();
+    let r = render(&store, "today");
+    let top = text_of(&r.html, "mv-top");
+    assert!(!top.contains("Merge the demo PR now"), "{top}");
+}
+
+#[test]
+fn partial_reads_say_so_and_claim_no_none() {
+    // Every ask ledger and the owner step unreadable, the running item too.
+    let m = machine();
+    for f in std::fs::read_dir(m.path().join("workspace/.control/asks")).unwrap() {
+        std::fs::write(f.unwrap().path(), "not: [valid").unwrap();
+    }
+    std::fs::write(m.path().join("work/held-for-you/_work.md"), "---\nnot: [valid\n---\n").unwrap();
+    std::fs::write(m.path().join("work/today-run/_work.md"), "---\nnot: [valid\n---\n").unwrap();
+    let r = render(&worktree(m.path(), false), "today");
+    let h = text_of(&r.html, "mv-headline-text");
+    assert!(!h.contains("Nothing needs you") && !h.contains("No work is running"), "{h}");
+    assert!(h.contains("found needing you in the part that was read"), "{h}");
+    assert!(h.contains("running in the part that was read"), "{h}");
+    assert!(r.html.contains(r#"data-pill="open asks" data-partial="true""#));
+    assert_eq!(pill(&r.html, "open asks"), "0 open asks, partial read");
+    for card in ["top-decision", "running"] {
+        let at = r.html.find(&format!(r#"data-type="{card}""#)).unwrap();
+        let body = &r.html[at..at + r.html[at..].find("</section>").unwrap()];
+        assert!(body.contains("None in the part that was read."), "{card}: {body}");
+    }
+
+    // The live initiative unreadable: the plan it links may be the one missing.
+    let m = machine();
+    std::fs::write(m.path().join("workspace/.control/initiatives/today-demo.yaml"), "not: [valid").unwrap();
+    let r = render(&worktree(m.path(), false), "health");
+    let at = r.html.find(r#"data-type="plan""#).unwrap();
+    assert!(r.html[at..].starts_with(r#"data-type="plan" data-state="partial""#));
+    assert!(r.html[at..at + r.html[at..].find("</section>").unwrap()].contains("None in the part that was read."));
+}
+
+#[test]
+fn a_cut_tail_is_a_partial_read_on_every_tick_card() {
+    let m = machine();
+    let filler: String = (0..9_000)
+        .map(|i| tick(&format!("P{i}"), "filler", "2026-10-22T00:00:00Z", Some(("2026-10-22T00:01:00Z", "ok"))))
+        .collect();
+    let ticks = m.path().join("broomva-home/ledger/loops/ticks.jsonl");
+    // The hour's only receipts sit before the tail.
+    let buried = tick("B1", "demo-tick", "2026-10-23T11:50:00Z", Some(("2026-10-23T11:51:00Z", "failed")));
+    let text = std::fs::read_to_string(&ticks).unwrap();
+    let text: String = text.lines().filter(|l| !l.contains("2026-10-23")).map(|l| format!("{l}\n")).collect();
+    std::fs::write(&ticks, buried + &text + &filler).unwrap();
+    let r = render(&worktree(m.path(), false), "health");
+    assert!(r.html.contains(r#"data-type="heartbeats" data-state="partial""#));
+    assert!(r.html.contains(r#"data-type="receipts" data-state="partial""#));
+    let at = r.html.find(r#"data-type="receipts""#).unwrap();
+    let card = &r.html[at..at + r.html[at..].find("</section>").unwrap()];
+    assert!(card.contains("None in the part that was read."), "{card}");
+    assert!(!card.contains("mv-count"), "no count from part of the ledger: {card}");
+    assert!(card.contains("only the ledger's last"), "{card}");
+    assert_eq!(beat_of(&r.html, "demo-tick"), "not known");
 }

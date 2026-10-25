@@ -538,21 +538,36 @@ mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 # Today and the health rail (BRO-3270).
 td=crates/view/src/screens/today.rs
 hl=crates/view/src/screens/health.rs
-mutate $td '    (whole && cx.reads.ticks.errors.is_empty())' '    (whole)'
 mutate $td 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, Some(WorkState::Running)).len())' 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, None).len())'
-mutate $td '        None => "What needs you could not be read.".to_string(),' '        None => "Nothing needs you.".to_string(),'
+mutate $td '        Count { n: None, .. } => "What needs you could not be read.".to_string(),' '        Count { n: None, .. } => "Nothing needs you.".to_string(),'
 mutate $td '                None => span class="mv-pill-value mv-unavailable" { "unavailable" },' '                None => span class="mv-pill-value" { "0" },'
-mutate $hl '    } else if ledger_clean {' '    } else if true {'
-mutate $hl '    if row.notices.iter().any(|n| n.kind == NoticeKind::NoTickReceipts) {' '    if false {'
+mutate $td '.find(|e| e.landing != Landing::Waiting)' '.find(|_| true)'
+mutate $hl '    t.data.is_some() && t.errors.is_empty()' '    t.data.is_some()'
+mutate $hl '        && !d.whole()' '        && false'
+mutate $hl '    let count = (section.data.is_some() && !partial).then_some(list.len());' '    let count = section.data.as_ref().map(|_| list.len());'
+mutate $td '        Count { n, partial: n.is_some() && !section.errors.is_empty() }' '        Count { n, partial: false }'
+mutate $td '    empty(if partial {' '    empty(if false {'
+mutate $td '        Count { n: Some(n), partial: true } => format!("{n} found needing you {PART}."),' '        Count { n: Some(_), partial: true } if false => String::new(),'
+mutate $hl '    if !row.drift.is_empty() {' '    if false {'
+mutate $hl '    } else if known && has(NoticeKind::NoTickReceipts) {' '    } else if has(NoticeKind::NoTickReceipts) {'
+mutate $hl '    } else if !known {' '    } else if false {'
+mutate $hl '    } else if row.desired == Desired::Paused {' '    } else if false {'
+mutate $hl '            None => Beat::NoTicks,' '            None => Beat::Ok,'
+mutate $hl '=> Beat::LastFailed,' '=> Beat::Ok,'
+mutate $hl '            Some(t) if t.is_closed() => Beat::Ok,' '            Some(_) => Beat::Ok,'
 mutate $hl '(from..=cx.at.as_second())' '(i64::MIN..=cx.at.as_second())'
+mutate $hl '(from..=cx.at.as_second())' '(from..=i64::MAX)'
+mutate $hl '            @if !known {' '            @if false {'
 mutate $hl '                .filter(|i| i.status.is_live())' ''
 mutate $hl '        _ => None,
     };
     Section { source: plans.source.clone(), data, errors }' '        _ => Some(Vec::new()),
     };
     Section { source: plans.source.clone(), data, errors }'
+mutate $hl '@if cap.get("known") == Some(&Value::Bool(false)) {' '@if false {'
 mutate crates/view/src/render.rs '    let running = by(maestro_core::work::WorkState::Running);' '    let running = s.work.data.as_ref().map(|w| w.get("Running").copied().unwrap_or(0));'
 mutate crates/store/src/lib.rs '            Ok(_) => Section::unavailable(label, "it is not a list of usage rows"),' '            Ok(_) => Section::ok(label, Vec::new()),'
+mutate crates/store/src/views.rs '        Err(e) => Section::unavailable(usage.source.clone(), e.to_string()),' '        Err(_) => Section::ok(usage.source.clone(), serde_json::json!({})),'
 mutate crates/store/src/tree.rs 'out.trim().parse::<jiff::Timestamp>().map(Some)' 'out.trim().parse::<jiff::Timestamp>().map(|_| None)'
 
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"

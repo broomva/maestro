@@ -3,10 +3,11 @@
 //! "unavailable" when that read failed.
 
 use crate::render::{Ctx, card, empty};
-use maestro_core::Section;
-use maestro_core::loops::NoticeKind;
+use maestro_core::loops::{Desired, NoticeKind};
 use maestro_core::plan::PlanGraph;
 use maestro_core::tick::{Tick, TickOutcome};
+use maestro_core::{Section, SourceError};
+use maestro_store::STREAM_TAIL;
 use maestro_store::views::LoopRow;
 use maud::{Markup, html};
 use serde_json::Value;
@@ -56,7 +57,7 @@ fn plan(cx: &Ctx) -> Markup {
     let section = active_plans(cx);
     let list = section.data.clone().unwrap_or_default();
     let body = html! {
-        @if list.is_empty() { (empty("No plan graph is linked to a live initiative.")) } @else {
+        @if list.is_empty() { (super::today::none(!section.errors.is_empty(), "No plan graph is linked to a live initiative.")) } @else {
             @for (file, g) in &list {
                 div class="mv-plan" data-plan=(file) {
                     p class="mv-row-title" {
@@ -84,11 +85,18 @@ fn plan(cx: &Ctx) -> Markup {
 /// One loop's heartbeat, from its row and the ticks ledger read with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Beat {
+    /// Its last tick read is closed and did not fail.
     Ok,
     Drift,
     ReviewOverdue,
     NoReceipts,
-    /// The ticks ledger was not read whole and clean, so nothing about this loop's ticks is known.
+    /// Its last tick read ended failed or partial.
+    LastFailed,
+    /// Desired paused, nothing wrong proven: no tick is expected.
+    Paused,
+    /// The whole ledger was read and holds no tick for it; its contract names no receipts.
+    NoTicks,
+    /// The ticks ledger was not read whole and clean, so what it does not show is not known.
     Unknown,
 }
 
@@ -99,6 +107,9 @@ impl Beat {
             Beat::Drift => "drift",
             Beat::ReviewOverdue => "review overdue",
             Beat::NoReceipts => "no receipts",
+            Beat::LastFailed => "last tick failed",
+            Beat::Paused => "paused",
+            Beat::NoTicks => "no ticks recorded",
             Beat::Unknown => "not known",
         }
     }
@@ -106,26 +117,62 @@ impl Beat {
     fn tone(self) -> &'static str {
         match self {
             Beat::Ok => "success",
-            Beat::Drift | Beat::ReviewOverdue => "warning",
+            Beat::Drift | Beat::ReviewOverdue | Beat::LastFailed => "warning",
             Beat::NoReceipts => "danger",
-            Beat::Unknown => "neutral",
+            Beat::Paused | Beat::NoTicks | Beat::Unknown => "neutral",
         }
     }
 }
 
-/// Drift and missing receipts are proven by the row; "ok" needs the ledger read clean, since a
-/// line that did not parse may be this loop's failed tick.
-pub(crate) fn beat(row: &LoopRow, ledger_clean: bool) -> Beat {
-    if row.notices.iter().any(|n| n.kind == NoticeKind::NoTickReceipts) {
-        Beat::NoReceipts
-    } else if !row.drift.is_empty() {
+/// Whether the ticks ledger was read whole and clean: only then does a tick it does not show
+/// mean the loop wrote none. The silent-loops count and every heartbeat use this one test.
+pub(crate) fn ticks_known(cx: &Ctx) -> bool {
+    let t = ticks_read(cx);
+    t.data.is_some() && t.errors.is_empty()
+}
+
+/// The ticks as read, with a tail that is not the whole ledger named as an error: the ticks
+/// before it were not read, so a card built on it says partial, not ok.
+pub(crate) fn ticks_read<'a>(cx: &'a Ctx<'_>) -> Section<&'a maestro_store::TickTail> {
+    let t = &cx.reads.ticks;
+    let mut s = t.as_ref();
+    if let Some(d) = &t.data
+        && !d.whole()
+    {
+        s.errors.push(SourceError {
+            at: t.source.clone(),
+            reason: format!(
+                "only the ledger's last {} bytes are read; ticks before byte {} are not",
+                STREAM_TAIL, d.from
+            ),
+        });
+    }
+    s
+}
+
+/// What a loop's row and its ticks prove. A tick seen (drift) or the registry alone (review
+/// overdue) proves itself; an absence (no receipts, no ticks) needs the ledger known; "ok" needs
+/// a last tick seen that closed and did not fail.
+pub(crate) fn beat(row: &LoopRow, known: bool) -> Beat {
+    let has = |k: NoticeKind| row.notices.iter().any(|n| n.kind == k);
+    if !row.drift.is_empty() {
         Beat::Drift
-    } else if row.notices.iter().any(|n| n.kind == NoticeKind::ReviewOverdue) {
+    } else if known && has(NoticeKind::NoTickReceipts) {
+        Beat::NoReceipts
+    } else if has(NoticeKind::ReviewOverdue) {
         Beat::ReviewOverdue
-    } else if ledger_clean {
-        Beat::Ok
-    } else {
+    } else if !known {
         Beat::Unknown
+    } else if row.desired == Desired::Paused {
+        Beat::Paused
+    } else {
+        match &row.last_tick {
+            None => Beat::NoTicks,
+            Some(t) if matches!(t.outcome, Some(TickOutcome::Failed | TickOutcome::Partial)) => Beat::LastFailed,
+            Some(t) if t.is_closed() => Beat::Ok,
+            // Open but not yet unclosed (that would be drift): running now, not proven ok.
+            Some(_) => Beat::Unknown,
+        }
     }
 }
 
@@ -141,15 +188,15 @@ fn outcome(t: &Tick) -> &'static str {
 
 fn heartbeats(cx: &Ctx) -> Markup {
     let section = &cx.snap.loops;
-    let ticks = &cx.reads.ticks;
-    let clean = ticks.data.is_some() && ticks.errors.is_empty();
+    let ticks = ticks_read(cx);
+    let known = ticks.data.is_some() && ticks.errors.is_empty();
     let all: &[Tick] = ticks.data.as_ref().map_or(&[], |t| t.ticks.as_slice());
     let rows: Vec<&LoopRow> = section.data.iter().flatten().collect();
     let body = html! {
-        @if rows.is_empty() { (empty("No loops.")) } @else {
+        @if rows.is_empty() { (super::today::none(!section.errors.is_empty(), "No loops.")) } @else {
             ul class="mv-list" {
                 @for r in &rows {
-                    @let b = beat(r, clean);
+                    @let b = beat(r, known);
                     @let mine: Vec<&Tick> = all.iter().filter(|t| t.loop_id == r.id).collect();
                     li class="mv-row mv-beat" data-loop=(r.id) data-beat=(b.label()) {
                         span class="mv-beat-head" {
@@ -166,8 +213,11 @@ fn heartbeats(cx: &Ctx) -> Markup {
                     }
                 }
             }
-            @if ticks.data.is_none() {
-                p class="mv-note" data-tone="warning" { "The ticks ledger could not be read: no heartbeat is shown as ok." }
+            @if !known {
+                p class="mv-note" data-tone="warning" {
+                    @if cx.reads.ticks.data.is_none() { "The ticks ledger could not be read" } @else { "The ticks ledger was read in part" }
+                    ": a missing tick is not known, so no loop is shown as ok or silent."
+                }
             }
         }
     };
@@ -222,6 +272,11 @@ fn economy(cx: &Ctx) -> Markup {
                         (bar("7 d", pct(a.get("7d"))))
                     }
                 }
+                @if cap.get("known") == Some(&Value::Bool(false)) {
+                    p class="mv-note" data-tone="warning" data-known="false" {
+                        "Some account's usage is stale or could not be read: these numbers may be old, and the gate counts it closed."
+                    }
+                }
                 p class="mv-note bv-meta" data-gate=(held.map_or("unknown", |h| if h { "held" } else { "open" })) {
                     @match held {
                         Some(true) => { "Launch gate: held" },
@@ -238,7 +293,8 @@ fn economy(cx: &Ctx) -> Markup {
 
 /// Ticks that started or ended within the hour before the render's clock, newest first.
 fn receipts(cx: &Ctx) -> Markup {
-    let section = &cx.reads.ticks;
+    let section = ticks_read(cx);
+    let partial = !section.errors.is_empty();
     let from = cx.at.as_second() - 3_600;
     let within =
         |ts: &str| ts.parse::<jiff::Timestamp>().ok().filter(|t| (from..=cx.at.as_second()).contains(&t.as_second()));
@@ -253,7 +309,7 @@ fn receipts(cx: &Ctx) -> Markup {
     }
     list.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.loop_id.cmp(&b.1.loop_id)));
     let body = html! {
-        @if list.is_empty() { (empty("No tick receipt in the last hour.")) } @else {
+        @if list.is_empty() { (super::today::none(partial, "No tick receipt in the last hour.")) } @else {
             ul class="mv-list" {
                 @for (at, t, what) in list.iter().take(RECEIPTS) {
                     li class="mv-row mv-receipt" data-receipt=(what) {
@@ -266,7 +322,10 @@ fn receipts(cx: &Ctx) -> Markup {
                     }
                 }
             }
+            @if list.len() > RECEIPTS { p class="mv-more bv-meta" { (list.len() - RECEIPTS) " more not shown" } }
         }
     };
-    card("health-receipts", "receipts", "Receipts, last hour", section, section.data.as_ref().map(|_| list.len()), body)
+    // A count only from the whole ledger: from part of it, the hour may hold more.
+    let count = (section.data.is_some() && !partial).then_some(list.len());
+    card("health-receipts", "receipts", "Receipts, last hour", &section, count, body)
 }

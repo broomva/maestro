@@ -9,15 +9,15 @@ expression: "portable(&r.html, empty.path())"
 <p class="mv-composed bv-meta">Composed by Maestro · <span class="bv-code">the working tree</span> · read now</p>
 <h1 class="mv-headline-text">What needs you could not be read. Running work could not be read. Whether a loop has gone silent is not known.</h1>
 <div class="mv-pills">
-<span class="mv-pill" data-tone="neutral" data-pill="needs you">
+<span class="mv-pill" data-tone="neutral" data-pill="needs you" data-partial="false">
 <span class="mv-pill-value mv-unavailable">unavailable</span> needs you</span>
-<span class="mv-pill" data-tone="neutral" data-pill="running">
+<span class="mv-pill" data-tone="neutral" data-pill="running" data-partial="false">
 <span class="mv-pill-value mv-unavailable">unavailable</span> running</span>
-<span class="mv-pill" data-tone="neutral" data-pill="open asks">
+<span class="mv-pill" data-tone="neutral" data-pill="open asks" data-partial="false">
 <span class="mv-pill-value mv-unavailable">unavailable</span> open asks</span>
-<span class="mv-pill" data-tone="neutral" data-pill="silent loops">
+<span class="mv-pill" data-tone="neutral" data-pill="silent loops" data-partial="false">
 <span class="mv-pill-value mv-unavailable">unavailable</span> silent loops</span>
-<span class="mv-pill" data-tone="neutral" data-pill="landing">
+<span class="mv-pill" data-tone="neutral" data-pill="landing" data-partial="false">
 <span class="mv-pill-value mv-unavailable">unavailable</span> landing</span>
 </div>
 </header>

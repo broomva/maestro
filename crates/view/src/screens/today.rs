@@ -2,36 +2,55 @@
 //! counts, the top decision, work running now and nodes, beside the health rail.
 //!
 //! Every count here is the snapshot's, so the headline, the pills and the cards agree. A count
-//! whose section was not read says "unavailable" in words, in the headline as in the pills.
+//! whose section was not read says "unavailable" in words, in the headline as in the pills. A
+//! count from a section read in part says so ("in the part that was read") and claims nothing
+//! about what was not read: no "nothing", no "every", no bound.
 
 use super::{Landing, age, asker, kind, queue};
 use crate::render::{Ctx, card, empty};
 use maestro_core::Section;
-use maestro_core::loops::NoticeKind;
 use maestro_core::work::{WorkItem, WorkState};
 use maestro_store::TreeSource;
 use maud::{Markup, html};
 
+/// One count: `None` when its section was not read; `partial` when it was read in part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Count {
+    pub n: Option<usize>,
+    pub partial: bool,
+}
+
+impl Count {
+    fn of<T>(section: &Section<T>, n: Option<usize>) -> Self {
+        Count { n, partial: n.is_some() && !section.errors.is_empty() }
+    }
+}
+
 /// The counts the headline and the pills are made of, all from one snapshot.
 pub(crate) struct Counts {
-    pub needs: Option<usize>,
-    pub running: Option<usize>,
-    pub open: Option<usize>,
-    pub silent: Option<usize>,
-    pub landing: Option<usize>,
+    pub needs: Count,
+    pub running: Count,
+    pub open: Count,
+    pub silent: Count,
+    pub landing: Count,
 }
 
 impl Counts {
     pub fn of(cx: &Ctx) -> Self {
         let s = &cx.snap;
         Counts {
-            needs: s.needs.data.as_ref().map(Vec::len),
-            running: running_count(cx),
-            open: s.asks.data.as_ref().map(|a| a.open),
-            silent: silent_loops(cx),
-            landing: s.asks.data.as_ref().and_then(|a| a.unlanded),
+            needs: Count::of(&s.needs, s.needs.data.as_ref().map(Vec::len)),
+            running: Count::of(&cx.reads.work, running_count(cx)),
+            open: Count::of(&s.asks, s.asks.data.as_ref().map(|a| a.open)),
+            silent: Count::of(&s.loops, silent_loops(cx)),
+            landing: Count::of(&s.asks, s.asks.data.as_ref().and_then(|a| a.unlanded)),
         }
     }
+}
+
+/// What an empty list says: "none" only when the whole source was read.
+pub(crate) fn none(partial: bool, whole: &str) -> Markup {
+    empty(if partial { "None in the part that was read." } else { whole })
 }
 
 /// Work in the Running state, from the work read every card uses. Not the snapshot's work
@@ -40,13 +59,13 @@ pub(crate) fn running_count(cx: &Ctx) -> Option<usize> {
     cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, Some(WorkState::Running)).len())
 }
 
-/// Loops the ticks ledger, read whole, proves silent: their contract names tick receipts and the
-/// ledger holds none. A partial or unread ledger proves nothing, so the count is then not known.
+/// Loops the ticks ledger, read whole and clean, proves silent: their contract names tick
+/// receipts and the ledger holds none. Otherwise the count is not known. The heartbeats card
+/// uses the same test ([`super::health::ticks_known`]), so the pill and the card agree.
 fn silent_loops(cx: &Ctx) -> Option<usize> {
     let rows = cx.snap.loops.data.as_ref()?;
-    let whole = cx.reads.ticks.data.as_ref().is_some_and(maestro_store::TickTail::whole);
-    (whole && cx.reads.ticks.errors.is_empty())
-        .then(|| rows.iter().filter(|r| r.notices.iter().any(|n| n.kind == NoticeKind::NoTickReceipts)).count())
+    super::health::ticks_known(cx)
+        .then(|| rows.iter().filter(|r| super::health::beat(r, true) == super::health::Beat::NoReceipts).count())
 }
 
 pub(crate) fn today(cx: &Ctx, id: &str) -> Markup {
@@ -95,7 +114,9 @@ fn read_from(cx: &Ctx) -> String {
 /// How old the commit read is. The working tree has no commit, so it is "read now".
 fn read_age(cx: &Ctx) -> String {
     match cx.committed() {
-        Ok(Some(t)) => ago(*t, cx.at).unwrap_or_else(|| "committed after this read's clock".into()),
+        Ok(Some(t)) => {
+            ago(*t, cx.at).map_or_else(|| "committed after this read's clock".into(), |a| format!("committed {a}"))
+        }
         Ok(None) => "read now".into(),
         Err(_) => "age not known".into(),
     }
@@ -114,36 +135,41 @@ pub(crate) fn ago(from: jiff::Timestamp, at: jiff::Timestamp) -> Option<String> 
 }
 
 fn sentence(c: &Counts) -> String {
+    const PART: &str = "in the part that was read";
     let mut parts = Vec::new();
     parts.push(match c.needs {
-        Some(0) => "Nothing needs you.".to_string(),
-        Some(1) => "One thing needs you.".to_string(),
-        Some(n) => format!("{n} things need you."),
-        None => "What needs you could not be read.".to_string(),
+        Count { n: None, .. } => "What needs you could not be read.".to_string(),
+        Count { n: Some(n), partial: true } => format!("{n} found needing you {PART}."),
+        Count { n: Some(0), .. } => "Nothing needs you.".to_string(),
+        Count { n: Some(1), .. } => "One thing needs you.".to_string(),
+        Count { n: Some(n), .. } => format!("{n} things need you."),
     });
     parts.push(match c.running {
-        Some(0) => "No work is running.".to_string(),
-        Some(1) => "One piece of work is running.".to_string(),
-        Some(n) => format!("{n} pieces of work are running."),
-        None => "Running work could not be read.".to_string(),
+        Count { n: None, .. } => "Running work could not be read.".to_string(),
+        Count { n: Some(n), partial: true } => format!("{n} running {PART}."),
+        Count { n: Some(0), .. } => "No work is running.".to_string(),
+        Count { n: Some(1), .. } => "One piece of work is running.".to_string(),
+        Count { n: Some(n), .. } => format!("{n} pieces of work are running."),
     });
     parts.push(match c.silent {
-        Some(0) => "Every loop that names tick receipts has some.".to_string(),
-        Some(1) => "One loop has no tick receipts.".to_string(),
-        Some(n) => format!("{n} loops have no tick receipts."),
-        None => "Whether a loop has gone silent is not known.".to_string(),
+        Count { n: None, .. } => "Whether a loop has gone silent is not known.".to_string(),
+        Count { n: Some(n), partial: true } => format!("{n} loops without tick receipts {PART}."),
+        Count { n: Some(0), .. } => "Every loop that names tick receipts has some.".to_string(),
+        Count { n: Some(1), .. } => "One loop has no tick receipts.".to_string(),
+        Count { n: Some(n), .. } => format!("{n} loops have no tick receipts."),
     });
     parts.join(" ")
 }
 
-fn pill(label: &str, value: Option<usize>, tone: &str) -> Markup {
+fn pill(label: &str, c: Count, tone: &str) -> Markup {
     html! {
-        span class="mv-pill" data-tone=(if value.unwrap_or(0) > 0 { tone } else { "neutral" }) data-pill=(label) {
-            @match value {
+        span class="mv-pill" data-tone=(if c.n.unwrap_or(0) > 0 { tone } else { "neutral" }) data-pill=(label) data-partial=(c.partial) {
+            @match c.n {
                 Some(n) => span class="mv-pill-value" { (n) },
                 None => span class="mv-pill-value mv-unavailable" { "unavailable" },
             }
             " " (label)
+            @if c.partial { span class="mv-pill-partial" { ", partial read" } }
         }
     }
 }
@@ -152,9 +178,10 @@ fn pill(label: &str, value: Option<usize>, tone: &str) -> Markup {
 fn top_decision(cx: &Ctx) -> Markup {
     let section = super::joined(cx, None);
     let groups = queue(cx, None);
-    let top = groups.first().and_then(|g| g.rows.first());
+    // An ask already answered and waiting to land is not the next decision: skip it.
+    let top = groups.iter().flat_map(|g| g.rows.iter()).find(|e| e.landing != Landing::Waiting);
     let body = match top {
-        None => empty("No open ask."),
+        None => none(!section.errors.is_empty(), "No open ask waits on an answer."),
         Some(e) => html! {
             div class="mv-top" data-ask=(e.handle()) {
                 p class="mv-row-meta bv-meta" {
@@ -166,7 +193,6 @@ fn top_decision(cx: &Ctx) -> Markup {
                 @if let Some(why) = &e.ask.why_you { p class="mv-ask-why" { (why) } }
                 p class="mv-row-meta bv-meta" {
                     @if let Some(a) = e.asked().and_then(|t| age(t, cx.at)) { "asked " (a) @if a != "today" { " ago" } " by " (asker(e.lf, e.ask)) } @else { "asked by " (asker(e.lf, e.ask)) }
-                    @if e.landing == Landing::Waiting { " · " span data-tone="info" { "answered, waiting to land" } }
                 }
                 p class="mv-note bv-meta" { "Answer it in Paseo's Maestro plugin. Maestro answers nothing in this phase." }
             }
@@ -191,7 +217,7 @@ fn running(cx: &Ctx) -> Markup {
     let list: Vec<&WorkItem> =
         maestro_store::views::work_by_state(section.data.as_deref().unwrap_or_default(), Some(WorkState::Running));
     let body = html! {
-        @if list.is_empty() { (empty("No work is running.")) } @else {
+        @if list.is_empty() { (none(!section.errors.is_empty(), "No work is running.")) } @else {
             ul class="mv-list" {
                 @for w in &list {
                     @let (routing, place, budget) = chips(w);
@@ -236,10 +262,24 @@ mod tests {
 
     #[test]
     fn an_unread_count_is_said_in_words() {
-        let c = Counts { needs: None, running: Some(0), open: None, silent: None, landing: None };
+        let unread = Count { n: None, partial: false };
+        let whole0 = Count { n: Some(0), partial: false };
+        let c = Counts { needs: unread, running: whole0, open: unread, silent: unread, landing: unread };
         let s = sentence(&c);
         assert!(s.contains("could not be read"), "{s}");
         assert!(s.contains("is not known"), "{s}");
         assert!(!s.contains("Nothing needs you"), "{s}");
+    }
+
+    #[test]
+    fn a_partial_zero_claims_nothing_about_the_rest() {
+        let part0 = Count { n: Some(0), partial: true };
+        let c = Counts { needs: part0, running: part0, open: part0, silent: part0, landing: part0 };
+        let s = sentence(&c);
+        assert_eq!(
+            s,
+            "0 found needing you in the part that was read. 0 running in the part that was read. \
+             0 loops without tick receipts in the part that was read."
+        );
     }
 }

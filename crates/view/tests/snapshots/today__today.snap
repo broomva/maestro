@@ -7,17 +7,19 @@ expression: "portable(&r.html, m.path())"
 <div class="mv-today-main">
 <header class="mv-headline">
 <p class="mv-composed bv-meta">Composed by Maestro · <span class="bv-code">the working tree</span> · read now</p>
-<h1 class="mv-headline-text">3 things need you. One piece of work is running. One loop has no tick receipts.</h1>
+<h1 class="mv-headline-text">3 found needing you in the part that was read. One piece of work is running. One loop has no tick receipts.</h1>
 <div class="mv-pills">
-<span class="mv-pill" data-tone="attention" data-pill="needs you">
-<span class="mv-pill-value">3</span> needs you</span>
-<span class="mv-pill" data-tone="success" data-pill="running">
+<span class="mv-pill" data-tone="attention" data-pill="needs you" data-partial="true">
+<span class="mv-pill-value">3</span> needs you<span class="mv-pill-partial">, partial read</span>
+</span>
+<span class="mv-pill" data-tone="success" data-pill="running" data-partial="false">
 <span class="mv-pill-value">1</span> running</span>
-<span class="mv-pill" data-tone="info" data-pill="open asks">
-<span class="mv-pill-value">3</span> open asks</span>
-<span class="mv-pill" data-tone="danger" data-pill="silent loops">
+<span class="mv-pill" data-tone="info" data-pill="open asks" data-partial="true">
+<span class="mv-pill-value">3</span> open asks<span class="mv-pill-partial">, partial read</span>
+</span>
+<span class="mv-pill" data-tone="danger" data-pill="silent loops" data-partial="false">
 <span class="mv-pill-value">1</span> silent loops</span>
-<span class="mv-pill" data-tone="neutral" data-pill="landing">
+<span class="mv-pill" data-tone="neutral" data-pill="landing" data-partial="false">
 <span class="mv-pill-value mv-unavailable">unavailable</span> landing</span>
 </div>
 </header>
