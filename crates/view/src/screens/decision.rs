@@ -221,7 +221,7 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
             }
         } @else if state == AskState::Open && landing == Landing::Waiting {
             p class="mv-callout" data-tone="success" {
-                "Answered in this checkout or on maestro/answers; not yet on " span class="bv-code" { (cx.snap.tree) } "."
+                "Answered in this checkout or on " (maestro_store::views::ANSWERS_READ) "; not yet on " span class="bv-code" { (cx.snap.tree) } "."
             }
         } @else if state == AskState::Answered {
             p class="mv-callout" data-tone="success" {

@@ -580,3 +580,81 @@ fn a_ledger_that_is_not_utf8_is_refused_by_name_in_both_modes() {
         assert!(reason.starts_with(maestro_store::yaml::OUTSIDE), "{source}: labelled outside the subset: {reason}");
     }
 }
+
+/// A workspace at `main` holding open asks `a` and `b`, read at `main`, with `answer(ws, id)`
+/// committing an answer to `id` on a detached commit and returning its sha. The working tree
+/// stays at `main`, so only refs hold answers.
+fn origin_fixture() -> (tempfile::TempDir, PathBuf, Store) {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::write(ws.join(".control/asks/a.yaml"), "asks:\n  - id: a\n  - id: b\n").unwrap();
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-q", "-m", "seed"]);
+    let mut paths = Paths::under(tmp.path());
+    paths.workspace = ws.clone();
+    let s = Store::new(paths, TreeSource::GitRev("main".into()));
+    (tmp, ws, s)
+}
+
+fn answer(ws: &Path, id: &str) -> String {
+    let file = ws.join(".control/asks/a.yaml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let from = format!("  - id: {id}\n");
+    assert_eq!(text.matches(&from).count(), 1);
+    let to = format!("{from}    answer: \"x\"\n    answered_at: \"2026-10-03T00:00:00Z\"\n    status: resolved\n");
+    git(ws, &["checkout", "-q", "--detach"]);
+    std::fs::write(&file, text.replace(&from, &to)).unwrap();
+    git(ws, &["commit", "-q", "-am", &format!("answer {id}")]);
+    let out = Command::new("git").arg("-C").arg(ws).args(["rev-parse", "HEAD"]).output().unwrap();
+    git(ws, &["checkout", "-q", "main"]);
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn waiting_ids(s: &Store) -> Vec<String> {
+    let asks = s.asks();
+    let lf = asks.data.as_ref().unwrap().iter().find(|l| l.file == "a.yaml").unwrap().clone();
+    let w = views::unlanded(s, asks.data.as_deref().unwrap());
+    assert!(w.errors.is_empty(), "{:?}", w.errors);
+    let w = w.data.unwrap();
+    lf.ledger.asks.iter().filter(|a| w.iter().any(|x| x.is("a.yaml", a))).map(|a| a.id.clone()).collect()
+}
+
+#[test]
+fn an_answer_only_on_origins_branch_waits() {
+    // Another clone pushed it; this clone fetched it but has no local maestro/answers.
+    let (_tmp, ws, s) = origin_fixture();
+    let sha = answer(&ws, "a");
+    git(&ws, &["update-ref", "refs/remotes/origin/maestro/answers", &sha]);
+    assert_eq!(waiting_ids(&s), ["a"]);
+    assert_eq!(views::snapshot(&s).asks.data.unwrap().unlanded, Some(1));
+}
+
+#[test]
+fn local_and_origin_answers_are_one_union() {
+    let (_tmp, ws, s) = origin_fixture();
+    let a = answer(&ws, "a");
+    let b = answer(&ws, "b");
+    git(&ws, &["update-ref", "refs/heads/maestro/answers", &a]);
+    git(&ws, &["update-ref", "refs/remotes/origin/maestro/answers", &b]);
+    assert_eq!(waiting_ids(&s), ["a", "b"]);
+    // The same answer on both refs is one wait.
+    git(&ws, &["update-ref", "refs/remotes/origin/maestro/answers", &a]);
+    assert_eq!(waiting_ids(&s), ["a"]);
+}
+
+#[test]
+fn an_unreadable_origin_branch_makes_the_count_unknown() {
+    let (_tmp, ws, s) = origin_fixture();
+    let a = answer(&ws, "a");
+    git(&ws, &["update-ref", "refs/heads/maestro/answers", &a]);
+    let dir = ws.join(".git/refs/remotes/origin/maestro");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("answers"), format!("{}\n", "1".repeat(40))).unwrap();
+    let asks = s.asks();
+    let w = views::unlanded(&s, asks.data.as_deref().unwrap());
+    assert_eq!(w.data, None, "an origin ref that does not resolve is unread, never none");
+    assert!(w.errors.iter().any(|e| e.at.starts_with("origin/maestro/answers:")), "{:?}", w.errors);
+    assert_eq!(views::snapshot(&s).asks.data.unwrap().unlanded, None);
+}

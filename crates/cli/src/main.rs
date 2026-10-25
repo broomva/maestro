@@ -484,9 +484,13 @@ fn human_snapshot(v: &Value) {
     let landing = if v["tree"] == "worktree" {
         String::new()
     } else if a["unlanded"].is_null() {
-        ", answered in this checkout or on maestro/answers: not known".into()
+        format!(", answered in this checkout or on {}: not known", maestro_store::views::ANSWERS_READ)
     } else {
-        format!(", {} answered in this checkout or on maestro/answers, not yet landed", a["unlanded"])
+        format!(
+            ", {} answered in this checkout or on {}, not yet landed",
+            a["unlanded"],
+            maestro_store::views::ANSWERS_READ
+        )
     };
     section(
         "asks",

@@ -270,21 +270,45 @@ fn closed_in(asks: &[LedgerFile], closed: impl Fn(AskState) -> bool) -> Answered
         .collect()
 }
 
-/// Answers on [`ANSWERS_BRANCH`]. A workspace without the branch holds none there; a branch
-/// that exists but does not read at all is `None` with its errors: its answers are unknown.
-/// Its errors are labelled with the branch, so they never read as the tree read's.
+/// Where [`ANSWERS_BRANCH`] is read: this clone's own branch, and origin's as this clone last
+/// fetched it (the plugin merges origin's batch in before landing, `answers-landing.ts`). Origin
+/// itself is never asked: an answer pushed there since the last fetch is not seen.
+/// Each is `(ref, label)`; a read error there is labelled `<label>:`.
+pub const ANSWERS_REFS: [(&str, &str); 2] =
+    [("refs/heads/maestro/answers", ANSWERS_BRANCH), ("refs/remotes/origin/maestro/answers", "origin/maestro/answers")];
+
+/// How screens and the CLI name what [`ANSWERS_REFS`] read.
+pub const ANSWERS_READ: &str = "maestro/answers (this clone's, or origin's as last fetched)";
+
+/// Answers on [`ANSWERS_BRANCH`]: the union over [`ANSWERS_REFS`]. A ref that is not there holds
+/// none; one that exists but does not read at all makes the whole `None` with its errors: its
+/// answers are unknown. Errors are labelled with the branch, so they never read as the tree read's.
 fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
-    let name = format!("refs/heads/{ANSWERS_BRANCH}");
-    let branch = Store::new(store.paths.clone(), crate::TreeSource::GitRev(name.clone()));
+    let mut union = Some(Answered::new());
+    let mut errors = Vec::new();
+    for (name, label) in ANSWERS_REFS {
+        let (read, errs) = answered_at_ref(store, name, label);
+        errors.extend(errs);
+        match (&mut union, read) {
+            (Some(union), Some(at_ref)) => union.extend(at_ref),
+            _ => union = None,
+        }
+    }
+    (union, errors)
+}
+
+/// Answers at one of [`ANSWERS_REFS`].
+fn answered_at_ref(store: &Store, name: &str, label: &str) -> (Option<Answered>, Vec<SourceError>) {
+    let branch = Store::new(store.paths.clone(), crate::TreeSource::GitRev(name.to_string()));
     if branch.tree.unresolved.is_some() {
         // Only a ref that is not there holds no answers; one that does not resolve is unread.
-        return match branch.tree.has_ref(&name) {
+        return match branch.tree.has_ref(name) {
             Ok(false) => (Some(Answered::new()), Vec::new()),
             Ok(true) => {
                 let reason = branch.tree.unresolved.clone().unwrap_or_default();
-                (None, vec![SourceError { at: format!("{ANSWERS_BRANCH}:{name}"), reason }])
+                (None, vec![SourceError { at: format!("{label}:{name}"), reason }])
             }
-            Err(reason) => (None, vec![SourceError { at: format!("{ANSWERS_BRANCH}:{name}"), reason }]),
+            Err(reason) => (None, vec![SourceError { at: format!("{label}:{name}"), reason }]),
         };
     }
     let read = branch.asks();
@@ -292,7 +316,7 @@ fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
         .errors
         .iter()
         .map(|e| SourceError {
-            at: if e.at.starts_with("git:") { e.at.clone() } else { format!("{ANSWERS_BRANCH}:{}", e.at) },
+            at: if e.at.starts_with("git:") { e.at.clone() } else { format!("{label}:{}", e.at) },
             reason: e.reason.clone(),
         })
         .collect();

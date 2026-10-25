@@ -104,7 +104,7 @@ fn banner(cx: &Ctx, waiting: usize, partial: bool, filtered: bool) -> Markup {
         } @else {
             div class="mv-banner" data-tone="info" {
                 p class="mv-banner-title" {
-                    (at_least(waiting, partial)) " answered in this checkout or on maestro/answers, not yet on " span class="bv-code" { (cx.snap.tree) }
+                    (at_least(waiting, partial)) " answered in this checkout or on " (maestro_store::views::ANSWERS_READ) ", not yet on " span class="bv-code" { (cx.snap.tree) }
                 }
                 p class="bv-meta" {
                     @if filtered { "Counted for the whole checkout, not this project alone. " }
