@@ -111,6 +111,9 @@ enum Command {
     /// What each surface may do, and the standing invariants.
     Authority,
     /// This node, and the known surfaces and harnesses with their capabilities.
+    ///
+    /// A capability says what the surface or harness can do, not what Maestro does with it:
+    /// Maestro launches and sends nothing until its host adapters land (BRO-3276).
     Hosts,
     /// Self-checks: is the vendored path reader the one bstack generates from its registry?
     Doctor {
@@ -382,7 +385,7 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
         "maestro_needs_list" => {
             print_errors(&v);
             let Some(list) = v["data"].as_array().cloned() else {
-                println!("Needs you: unknown (the ask ledgers could not be read)");
+                println!("Needs you: {}", unavailable(&errors_of(&v)));
                 return Ok(());
             };
             let bound = if v["errors"].as_array().is_some_and(|e| !e.is_empty()) { "at least " } else { "" };
@@ -394,15 +397,16 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
         "maestro_asks_list" => {
             print_errors(&v);
             if v["readable"].as_bool() == Some(false) {
-                println!("asks: unreadable ({})", s(&v["source"]));
+                println!("asks: {}", unavailable(&errors_of(&v)));
                 return Ok(());
             }
             let list = v["asks"].as_array().cloned().unwrap_or_default();
             let total = v["total"].as_u64().unwrap_or(list.len() as u64);
+            let from = partial(&errors_of(&v));
             if v["truncated"].as_bool() == Some(true) {
-                println!("{} of {total} asks (raise --limit for the rest)", list.len());
+                println!("{} of {total} asks{from} (raise --limit for the rest)", list.len());
             } else {
-                println!("{total} ask{}", if total == 1 { "" } else { "s" });
+                println!("{total} ask{}{from}", if total == 1 { "" } else { "s" });
             }
             for a in &list {
                 let flag = if a["blocking"].as_bool() == Some(true) { "blocking " } else { "" };
@@ -412,6 +416,10 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
         "maestro_ask_get" => println!("{}", serde_json::to_string_pretty(&v)?),
         "maestro_work_list" => {
             print_errors(&v);
+            if v["readable"].as_bool() == Some(false) {
+                println!("work: {}", unavailable(&errors_of(&v)));
+                return Ok(());
+            }
             for w in v["items"].as_array().into_iter().flatten() {
                 println!("  {:<10} {}  {}", s(&w["work_state"]), s(&w["slug"]), s(&w["title"]));
             }
@@ -462,14 +470,18 @@ fn read(cli: &Cli, store: &Store) -> Result<()> {
 
 fn human_snapshot(v: &Value) {
     println!("Maestro snapshot  {}  tree {}", s(&v["generated_at"]), s(&v["tree"]));
+    // Unread is not empty (BRO-3322): an unread section prints why, never its counts, and a
+    // partial one says its counts come from a partial read, and why. It claims no bound: some
+    // counts (loop drift, notices) are derived from what a read did not find.
     let section = |name: &str, line: String| {
         let sec = &v[name];
-        let mark = if sec["data"].is_null() {
-            "unreadable"
-        } else if sec["errors"].as_array().is_some_and(|e| !e.is_empty()) {
-            "partial"
+        let errors = sec["errors"].as_array().cloned().unwrap_or_default();
+        let (mark, line) = if sec["data"].is_null() {
+            ("unreadable", unavailable(&errors))
+        } else if !errors.is_empty() {
+            ("partial", format!("{line}{}", partial(&errors)))
         } else {
-            "ok"
+            ("ok", line)
         };
         println!("  {name:<12} {mark:<11} {line}");
     };
@@ -504,6 +516,31 @@ fn human_snapshot(v: &Value) {
     let fleet_line =
         fleet.iter().map(|f| format!("{} tick {}", s(&f["scope"]), f["tick"])).collect::<Vec<_>>().join(", ");
     section("fleet", fleet_line);
+}
+
+/// `unavailable (<first reason>)`, naming how many more there are.
+fn unavailable(errors: &[Value]) -> String {
+    if errors.is_empty() { "unavailable".to_string() } else { format!("unavailable ({})", reasons(errors)) }
+}
+
+/// The first read error, where and why, and how many more there are.
+fn reasons(errors: &[Value]) -> String {
+    let one = |e: &Value| format!("{}: {}", s(&e["at"]), s(&e["reason"]));
+    match errors {
+        [] => String::new(),
+        [e] => one(e),
+        [e, rest @ ..] => format!("{}; and {} more, use --json", one(e), rest.len()),
+    }
+}
+
+/// `, from a partial read (<where>: <why>)`, or nothing for a whole read.
+fn partial(errors: &[Value]) -> String {
+    if errors.is_empty() { String::new() } else { format!(", from a partial read ({})", reasons(errors)) }
+}
+
+/// A command's read errors, from its JSON.
+fn errors_of(v: &Value) -> Vec<Value> {
+    v["errors"].as_array().cloned().unwrap_or_default()
 }
 
 fn context(cli: &Cli, store: &Store) -> Result<String> {
@@ -583,6 +620,7 @@ fn hosts(as_json: bool) {
             println!("  {:<12} {}", s(&r[key]), true_keys(&r["capabilities"]));
         }
     }
+    println!("These are what each surface and harness can do. Maestro launches and sends nothing yet (BRO-3276).");
 }
 
 /// This machine: `MAESTRO_NODE` (a stable node ID), else `tailscale status`, else unknown.
