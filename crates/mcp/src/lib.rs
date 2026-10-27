@@ -2,16 +2,18 @@
 //! Served on stdio ([`serve_stdio`]) and over Streamable HTTP ([`http`]), both through
 //! [`MaestroServer`], which dispatches through [`call`] as the CLI does.
 //!
-//! Every tool here has [`Authority::Read`]. Owner actions are not exposed: a
-//! model-visible tool is not proof of the owner, and the BRO-3186 contract
-//! forbids a second writer to the ask and work ledgers. When an authenticated
-//! owner path exists, owner verbs join this surface behind it.
+//! Tools have [`Authority::Read`] or [`Authority::AgentRequest`] (BRO-3267): an agent may
+//! file a validated ask and record a request, and nothing it requests starts anything (A8).
+//! Owner actions are not exposed: a model-visible tool is not proof of the owner. Every
+//! MCP caller is [`Principal::Unverified`] until a surface adapter verifies sessions
+//! (BRO-3268), so its requests are recorded as unverified and, but for an ask, held.
 
 use maestro_core::ask::AskState;
-use maestro_core::authority::Authority;
+use maestro_core::authority::{Authority, Principal};
 use maestro_core::context::ContextScope;
+use maestro_core::request::RequestKind;
 use maestro_core::work::WorkState;
-use maestro_store::{Store, views};
+use maestro_store::{Store, requests, views};
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
@@ -22,7 +24,7 @@ use rmcp::model::{
 };
 use rmcp::service::{RequestContext, RoleServer};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::future::Future;
 use std::sync::Arc;
@@ -35,6 +37,10 @@ pub struct ToolSpec {
     pub title: &'static str,
     pub description: &'static str,
     pub authority: Authority,
+    /// The agent request a tool makes; `None` for a read.
+    pub request: Option<RequestKind>,
+    /// What the tool may change: `read` for reads; for a request, the one place it writes.
+    pub scope: &'static str,
     /// Where the tool shows in an MCP Apps host.
     pub ui: Ui,
     schema: fn() -> Value,
@@ -142,12 +148,69 @@ pub struct ContextArgs {
     pub max_needs: Option<usize>,
 }
 
+/// Every agent request names the session making it.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AskFileArgs {
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c` or `paseo:-/ae7d9f21`.
+    pub session: String,
+    /// Ledger file name in the asks folder, e.g. `bro-3261-maestro-production.yaml`. It must exist: a ledger is opened with its arc in a workspace change.
+    pub ledger: String,
+    /// The ask, as ask_ledger.py's schema and the decision layer (`.control/asks/DECISION-LAYER.md`)
+    /// want it: `id`, `ask`, `class`, `gates`, `exhausted`, `blocking`, `preanswerable`, `default`,
+    /// `headline`, `stakes`, `why_you`, `options`, `tradeoffs`, `sources`. Never an answer, a status
+    /// or an origin: Maestro writes `asked_at` (when absent) and `origin`.
+    pub ask: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct WorkQueueArgs {
+    pub session: String,
+    pub title: String,
+    /// What the work is and how its done is checked.
+    pub brief: String,
+    pub project: Option<String>,
+    pub initiative: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ActionRequestArgs {
+    pub session: String,
+    /// The one exact action, e.g. a command line or a permission.
+    pub action: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SessionCloseArgs {
+    pub session: String,
+    /// The evidence the session's work is finished: PRs, merge SHAs, checks run.
+    pub receipt: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct HandbackArgs {
+    pub session: String,
+    pub summary: String,
+    /// What the next owner of the work should do first.
+    pub next: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct EscalateArgs {
+    pub session: String,
+    /// Why the owner's attention is needed now.
+    pub reason: String,
+}
+
 pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "maestro_snapshot",
         title: "Snapshot",
         description: "Counts across the control plane: needs, asks, work by state, loops with drift, live initiatives, fleet. Every section names its source and any read errors; a section with data null was not readable, which is not the same as empty.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<NoArgs>,
     },
@@ -156,6 +219,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Needs you",
         description: "Holds on the owner: open blocking asks, and queued work only the owner may start. Work paused on a permission prompt is live surface state and joins when a surface adapter reports it. This list is the Needs you count; nothing else is. data null means the asks could not be read: the count is unknown, not zero.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<NeedsArgs>,
     },
@@ -164,6 +229,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Asks",
         description: "Asks from .control/asks, filtered by state, project and blocking. Read before filing a new ask so you never duplicate one.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<AsksArgs>,
     },
@@ -172,6 +239,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Ask",
         description: "One ask in full, with its entry hash: the Paseo plugin's entryHash over the raw entry, which its answer path rechecks. Any change to the entry, an answer included, changes the hash.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<AskGetArgs>,
     },
@@ -180,6 +249,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Work",
         description: "Work items with their canonical state (Queued, Running, Stuck, Needs you, Done, Standing), labelled as the Paseo plugin labels them. Work at the gate is labelled Needs you with finished: true; it is not a need unless it appears in maestro_needs_list.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<WorkArgs>,
     },
@@ -188,6 +259,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Loops",
         description: "Standing loops from .broomva/loops joined with their tick receipts. drift holds plugin drift classes the ticks ledger proves (tick_unclosed); notices holds Maestro's own signals (review_overdue, no_tick_receipts). Substrate drift needs surface adapters and is not claimed. Ticks are read from the ledger's tail, as the plugin reads it (its STREAM_TAIL: the last 2,097,152 UTF-16 units, from the first whole line); ticks_recorded counts those, and no_tick_receipts is raised only when the tail is the whole ledger.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<LoopsArgs>,
     },
@@ -196,6 +269,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Initiatives",
         description: "Initiatives from .control/initiatives: intent, status, driver and next action. Live ones by default.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<InitiativesArgs>,
     },
@@ -204,6 +279,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Fleet",
         description: "The latest fleet-reconcile report per scope, condensed. The fleet skill acts; Maestro only reads.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<NoArgs>,
     },
@@ -212,14 +289,78 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Context",
         description: "The governance context for a session: holds in its scope, its initiative, loops needing attention, unread sources and standing rules, as markdown plus structured data.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<ContextArgs>,
+    },
+    ToolSpec {
+        name: "maestro_ask_file",
+        title: "File an ask",
+        description: "File one ask into a ledger in the asks folder, through the workspace's writer of record (ask_ledger.py file), which holds the ledger's lock. Read maestro_asks_list first so you never duplicate one. Nothing is written unless the ledger reads back as its asks plus exactly this one with no new validator error. Until sessions are verified your origin is recorded as unverified, and answers are not routed back into your session.",
+        authority: Authority::AgentRequest,
+        request: Some(RequestKind::AskFile),
+        scope: "asks: appends one ask to one ledger",
+        ui: Ui::None,
+        schema: schema_of::<AskFileArgs>,
+    },
+    ToolSpec {
+        name: "maestro_work_queue",
+        title: "Queue work",
+        description: "Queue work for the owner to dispatch. It is recorded and held: nothing starts until the owner dispatches it (A8).",
+        authority: Authority::AgentRequest,
+        request: Some(RequestKind::WorkQueue),
+        scope: "requests journal: appends one held request",
+        ui: Ui::None,
+        schema: schema_of::<WorkQueueArgs>,
+    },
+    ToolSpec {
+        name: "maestro_action_request",
+        title: "Request an action",
+        description: "Request one exact action the owner must allow, such as a command or a permission. It is recorded and held for the owner's decision; nothing runs.",
+        authority: Authority::AgentRequest,
+        request: Some(RequestKind::ActionRequest),
+        scope: "requests journal: appends one held request",
+        ui: Ui::None,
+        schema: schema_of::<ActionRequestArgs>,
+    },
+    ToolSpec {
+        name: "maestro_session_close",
+        title: "Close with a receipt",
+        description: "Record that your session's work is finished, with the receipt that shows it. It closes nothing by itself: work reaches Done only through gates, checks or the owner (A1).",
+        authority: Authority::AgentRequest,
+        request: Some(RequestKind::SessionClose),
+        scope: "requests journal: appends one request",
+        ui: Ui::None,
+        schema: schema_of::<SessionCloseArgs>,
+    },
+    ToolSpec {
+        name: "maestro_handback",
+        title: "Hand back",
+        description: "Hand your work back to the owner with a summary and the first next step. Recorded for the owner.",
+        authority: Authority::AgentRequest,
+        request: Some(RequestKind::Handback),
+        scope: "requests journal: appends one request",
+        ui: Ui::None,
+        schema: schema_of::<HandbackArgs>,
+    },
+    ToolSpec {
+        name: "maestro_escalate",
+        title: "Escalate",
+        description: "Escalate to the owner: something needs their attention now. Recorded for the owner.",
+        authority: Authority::AgentRequest,
+        request: Some(RequestKind::Escalate),
+        scope: "requests journal: appends one request",
+        ui: Ui::None,
+        schema: schema_of::<EscalateArgs>,
     },
     ToolSpec {
         name: "maestro_ui_catalog",
         title: "UI catalog",
         description: "The block types maestro_ui_render accepts, with their props. Blocks carry types and ledger handles only; Maestro reads every value shown.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::None,
         schema: schema_of::<NoArgs>,
     },
@@ -228,6 +369,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Show in Maestro",
         description: "Render a screen from catalog blocks: { root, blocks: { id: { type, props?, children? } } }. Maestro validates the spec, reads every value from the ledgers at call time, and reports each dropped block with its reason. In an MCP Apps host the result opens Maestro's App, which keeps it current; format snapshot returns a standalone HTML document instead.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::Opens,
         schema: schema_of::<UiRenderArgs>,
     },
@@ -236,6 +379,8 @@ pub const TOOLS: &[ToolSpec] = &[
         title: "Refresh view",
         description: "For Maestro's App: render a placed spec again and return html only when its revision changed.",
         authority: Authority::Read,
+        request: None,
+        scope: "read",
         ui: Ui::AppOnly,
         schema: schema_of::<UiPollArgs>,
     },
@@ -437,7 +582,88 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
             let markdown = packet.render_markdown(a.max_needs.unwrap_or(8));
             Ok(json!({ "markdown": markdown, "packet": packet }))
         }
-        other => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
+        other => match request_of(other) {
+            Some(kind) => agent_request(store, kind, args),
+            None => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
+        },
+    }
+}
+
+fn request_of(tool: &str) -> Option<RequestKind> {
+    TOOLS.iter().find(|t| t.name == tool).and_then(|t| t.request)
+}
+
+fn session_of(text: &str) -> Result<maestro_core::session::SessionRef, McpError> {
+    text.parse().map_err(|e: String| McpError::invalid_params(format!("`session`: {e}"), None))
+}
+
+/// One agent request from an unverified caller (every caller until BRO-3268): an ask is filed,
+/// anything else recorded and held. Each is journalled with its disposition.
+pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Value, McpError> {
+    let caller = Principal::Unverified;
+    let session_text = args.get("session").and_then(Value::as_str).unwrap_or_default().to_string();
+    let payload = match kind {
+        RequestKind::AskFile => {
+            let a: AskFileArgs = parse(args.clone())?;
+            let session = session_of(&a.session)?;
+            // Writes go to the working tree, never to a git revision.
+            requests::compose_ask(&a.ask).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);
+            let rel = disk.rel(maestro_store::ASKS).map_err(|e| McpError::invalid_params(e, None))?;
+            let dir = disk.paths.workspace.join(rel);
+            let filed =
+                requests::file_ask(&disk.paths, &dir, &a.ledger, &a.ask, &session, &caller).map_err(file_error)?;
+            let mut record =
+                requests::new_record(kind, session, &caller, json!({ "ledger": a.ledger, "id": filed.id }));
+            record.result = Some(json!({ "ledger": filed.ledger, "id": filed.id }));
+            // The ask is written, so the request failed only if its journal line was not: say both.
+            if let Err(e) = requests::record(&disk.paths, &record) {
+                return Err(unjournalled(&filed.ledger, &filed.id, &e));
+            }
+            return Ok(json!({ "request": record, "validator": filed.validator }));
+        }
+        RequestKind::WorkQueue => json!(parse::<WorkQueueArgs>(args)?),
+        RequestKind::ActionRequest => json!(parse::<ActionRequestArgs>(args)?),
+        RequestKind::SessionClose => json!(parse::<SessionCloseArgs>(args)?),
+        RequestKind::Handback => json!(parse::<HandbackArgs>(args)?),
+        RequestKind::Escalate => json!(parse::<EscalateArgs>(args)?),
+    };
+    let session = session_of(&session_text)?;
+    let record = requests::new_record(kind, session, &caller, payload);
+    requests::record(&store.paths, &record).map_err(file_error)?;
+    Ok(json!({ "request": record, "journal": requests::journal(&store.paths) }))
+}
+
+/// An ask filed whose journal line was not written. Never busy, even when the journal's lock was:
+/// the ask is in the ledger, so a retry is refused as a duplicate.
+pub fn unjournalled(ledger: &std::path::Path, id: &str, e: &requests::FileError) -> McpError {
+    McpError::internal_error(
+        format!(
+            "filed `{id}` in {}, but its requests journal line was not written: {}. The ask stands; filing it again is refused as a duplicate.",
+            ledger.display(),
+            // The lock's own words say "try again", which is wrong here: name only the holder.
+            match e {
+                requests::FileError::Lock(maestro_store::locks::LockError::Busy { holder, .. }) =>
+                    format!("another writer held the journal's lock ({holder}) for the whole wait"),
+                other => other.to_string().trim_end_matches('.').to_string(),
+            }
+        ),
+        Some(json!({ "filed": { "ledger": ledger, "id": id } })),
+    )
+}
+
+fn is_busy(e: &requests::FileError) -> bool {
+    matches!(e, requests::FileError::Lock(maestro_store::locks::LockError::Busy { .. }))
+}
+
+/// A refusal is the caller's to fix; a busy lock is to retry (`busy: true`; the CLI exits 75).
+fn file_error(e: requests::FileError) -> McpError {
+    match e {
+        requests::FileError::Refused(m) => McpError::invalid_params(m, None),
+        other => {
+            let busy = is_busy(&other);
+            McpError::internal_error(other.to_string(), busy.then(|| json!({ "busy": true })))
+        }
     }
 }
 
@@ -501,7 +727,7 @@ impl MaestroServer {
                         ToolAnnotations::with_title(spec.title)
                             .read_only(spec.authority == Authority::Read)
                             .destructive(false)
-                            .idempotent(true)
+                            .idempotent(spec.authority == Authority::Read)
                             .open_world(false),
                     );
                 match ui_meta(spec.ui) {
@@ -561,8 +787,10 @@ impl ServerHandler for MaestroServer {
         info.instructions = Some(
             "Maestro reports the governance state of the workspace: what needs the owner, open asks, \
              work states, loop health, initiatives and the fleet. Call maestro_context at the start of \
-             substantive work and before filing an ask. All tools are read-only; answering asks, \
-             approving work and dispatch are owner actions taken in the owner's app."
+             substantive work and before filing an ask. Agent tools file an ask (maestro_ask_file) or \
+             record a request for the owner (queue work, request an action, close with a receipt, hand \
+             back, escalate); none of them starts anything. Answering asks, approving work and dispatch \
+             are owner actions taken in the owner's app."
                 .to_string(),
         );
         info

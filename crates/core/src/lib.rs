@@ -23,6 +23,7 @@ pub mod parity;
 pub mod plan;
 pub mod py;
 mod py_printable;
+pub mod request;
 pub mod schema;
 pub mod section;
 pub mod session;

@@ -171,7 +171,9 @@ async fn every_tool_scenario_is_identical_over_stdio_and_http() {
             _ => json!({}),
         };
         let got = agree(&t, &store, spec.name, args).await;
-        assert_eq!(got["isError"], false, "{}", spec.name);
+        // An agent request with no arguments is refused before it writes: the fixture stays as it is.
+        let read = spec.authority == maestro_core::authority::Authority::Read;
+        assert_eq!(got["isError"], !read, "{}", spec.name);
     }
     // no_owner_verb_is_reachable
     for verb in OwnerVerb::ALL {

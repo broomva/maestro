@@ -21,6 +21,8 @@ pub struct Paths {
     pub broomva_home: PathBuf,
     /// fleet-reconcile state, one directory per scope (`MAESTRO_FLEET_STATE`).
     pub fleet_state: PathBuf,
+    /// The ask ledgers' §5.5 lock root, shared with the Paseo plugin ([`crate::locks::ask_lock_root`]).
+    pub ask_locks: PathBuf,
     /// A file holding `provider_manager.py --json usage` (`MAESTRO_USAGE`). Nothing writes one
     /// where Maestro reads by default yet, so unset is the usual case: the economy is then unread.
     pub usage: Option<PathBuf>,
@@ -79,7 +81,14 @@ impl Paths {
             Some(w) => w,
             None => registry::workspace_root()?,
         };
-        Ok(Self { workspace, work_root, broomva_home, fleet_state, usage: env_path("MAESTRO_USAGE") })
+        Ok(Self {
+            workspace,
+            work_root,
+            broomva_home,
+            fleet_state,
+            ask_locks: crate::locks::ask_lock_root(),
+            usage: env_path("MAESTRO_USAGE"),
+        })
     }
 
     /// All paths under one root, laid out like a real machine. Used by tests and fixtures.
@@ -90,6 +99,7 @@ impl Paths {
             work_root: root.join("work"),
             broomva_home: root.join("broomva-home"),
             fleet_state: root.join("fleet-reconcile"),
+            ask_locks: root.join("control-asks/locks"),
             usage: None,
         }
     }
