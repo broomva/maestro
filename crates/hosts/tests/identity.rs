@@ -640,6 +640,82 @@ conn.commit()
         .verify(&CallerClaim::t3(Some("mcp:any-thread"), Some(wt_dir.to_string_lossy().into_owned())))
         .unwrap_err();
     assert_eq!(broken_err.reason, RefusalReason::RegistryDisconnected);
+
+    // Legacy projection_threads SQLite table:
+    // (a) When both created_at and session_id are absent, SurfaceRegistry with bridge_secret/generations_file
+    //     fails closed (InvalidToken) because no trustworthy incarnation marker is available.
+    // (b) When session_id (or created_at) is present, replacing the session under the same thread_id,
+    //     worktree_path, and provider_name (even with created_at = NULL) bumps generation across restart
+    //     and refuses the old credential with IdReused!
+    let legacy_db = root.join("legacy-statev2.sqlite");
+    let legacy_init_sql = r#"
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.executescript("""
+CREATE TABLE projection_threads (
+  thread_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  worktree_path TEXT,
+  archived_at TEXT,
+  deleted_at TEXT,
+  settled_at TEXT
+);
+CREATE TABLE projection_thread_sessions (
+  thread_id TEXT PRIMARY KEY,
+  provider_name TEXT,
+  status TEXT,
+  session_id TEXT
+);
+""")
+conn.execute("INSERT INTO projection_threads VALUES ('mcp:legacy-no-inc', 'proj-1', ?, NULL, NULL, NULL)", (sys.argv[2],))
+conn.execute("INSERT INTO projection_thread_sessions VALUES ('mcp:legacy-no-inc', 'codex', 'running', NULL)")
+conn.execute("INSERT INTO projection_threads VALUES ('mcp:legacy-1', 'proj-1', ?, NULL, NULL, NULL)", (sys.argv[2],))
+conn.execute("INSERT INTO projection_thread_sessions VALUES ('mcp:legacy-1', 'codex', 'running', 'sess-v1')")
+conn.commit()
+"#;
+    assert!(
+        Command::new("python3").arg("-c").arg(legacy_init_sql).arg(&legacy_db).arg(&wt_dir).status().unwrap().success()
+    );
+    let legacy_gen_file = root.join("legacy-generations.json");
+    let node_ok: NodeId = "nuc-node-1".parse().unwrap();
+    let legacy_reg_1 = SurfaceRegistry::new(None, Some(T3Registry::new(&legacy_db)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("legacy-secret")
+        .with_generations_file(&legacy_gen_file);
+    let peer = PeerCredentials { pid: std::process::id(), uid: 1000 };
+    let no_inc_legacy_claim = CallerClaim::t3(Some("mcp:legacy-no-inc"), Some(wt_dir.to_string_lossy().into_owned()))
+        .with_node(node_ok.clone())
+        .with_peer(peer);
+    assert_eq!(
+        legacy_reg_1.verify_caller_at(&no_inc_legacy_claim, 1_000).unwrap_err().reason,
+        RefusalReason::InvalidToken
+    );
+
+    let legacy_claim = CallerClaim::t3(Some("mcp:legacy-1"), Some(wt_dir.to_string_lossy().into_owned()))
+        .with_node(node_ok.clone())
+        .with_peer(peer);
+    let legacy_v1 = legacy_reg_1.verify_session(&legacy_claim, Some(1_000)).unwrap();
+    let legacy_cred = legacy_reg_1.issue_bridge_credential(&legacy_v1, node_ok.clone(), 1_000, 61_000).unwrap();
+
+    // Replace the session in projection_thread_sessions under the same thread_id, worktree_path, and provider_name (absent created_at)
+    let legacy_replace_sql = r#"
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE projection_thread_sessions SET session_id = 'sess-v2' WHERE thread_id = 'mcp:legacy-1'")
+conn.commit()
+"#;
+    assert!(Command::new("python3").arg("-c").arg(legacy_replace_sql).arg(&legacy_db).status().unwrap().success());
+    let legacy_reg_restarted = SurfaceRegistry::new(None, Some(T3Registry::new(&legacy_db)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("legacy-secret")
+        .with_generations_file(&legacy_gen_file);
+    let legacy_authed = CallerClaim::t3(Some("mcp:legacy-1"), Some(wt_dir.to_string_lossy().into_owned()))
+        .with_node(node_ok)
+        .with_credential(legacy_cred);
+    assert_eq!(
+        legacy_reg_restarted.verify_caller_at(&legacy_authed, 30_000).unwrap_err().reason,
+        RefusalReason::IdReused
+    );
 }
 
 #[test]
@@ -817,14 +893,123 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
         let ro_dir = root.join("ro-gen-dir");
         fs::create_dir_all(&ro_dir).unwrap();
         fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        // Root ignores directory mode bits; the check is meaningful only when writes are actually denied.
+        let writes_denied = fs::write(ro_dir.join(".probe"), b"").is_err();
         let ro_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
             .with_expected_node(node_ok.clone())
             .with_bridge_secret("bridge-secret-key")
             .with_generations_file(ro_dir.join("generations.json"));
         let ro_res = ro_reg.verify_caller_at(&peer_claim, 30_000);
         fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(ro_res.unwrap_err().reason, RefusalReason::RegistryDisconnected);
+        if writes_denied {
+            assert_eq!(ro_res.unwrap_err().reason, RefusalReason::RegistryDisconnected);
+        }
     }
+    // Deterministic unwritable path (regular file used as parent directory) fails closed even under root
+    let file_blocker = root.join("not-a-directory");
+    fs::write(&file_blocker, "blocker").unwrap();
+    let blocker_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("bridge-secret-key")
+        .with_generations_file(file_blocker.join("generations.json"));
+    assert_eq!(
+        blocker_reg.verify_caller_at(&peer_claim, 30_000).unwrap_err().reason,
+        RefusalReason::RegistryDisconnected
+    );
+
+    // Abandoned lock directory from a killed/dead PID is reclaimed immediately without blocking
+    let lock_dir = root.join("generations.json.lock.d");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(
+        lock_dir.join("pid"),
+        "4194303 1
+",
+    )
+    .unwrap();
+    fs::write(
+        lock_dir.join("token"),
+        "dead-holder-token
+",
+    )
+    .unwrap();
+    let after_reclaim = restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap();
+    assert_eq!(after_reclaim, 6);
+
+    // A live holder's lock is never reclaimed while the process is alive
+    fs::create_dir_all(&lock_dir).unwrap();
+    let mut live_holder = Command::new("sleep").arg("30").spawn().unwrap();
+    let ps_out = Command::new("/bin/ps").args(["-o", "etime=", "-p", &live_holder.id().to_string()]).output().unwrap();
+    assert!(ps_out.status.success());
+    let now_secs = (maestro_hosts::current_time_ms() as f64 / 1000.0).round() as i64;
+    let pid_line = format!(
+        "{} {now_secs}
+",
+        live_holder.id()
+    );
+    fs::write(lock_dir.join("pid"), &pid_line).unwrap();
+    fs::write(
+        lock_dir.join("token"),
+        "live-holder-token
+",
+    )
+    .unwrap();
+    let busy_res = restarted_registry.try_bump_generation(&Surface::T3, thread_id);
+    live_holder.kill().unwrap();
+    live_holder.wait().unwrap();
+    assert!(matches!(busy_res, Err(SessionError::RegistryDisconnected { .. })));
+    assert_eq!(
+        fs::read_to_string(lock_dir.join("token")).unwrap(),
+        "live-holder-token
+"
+    );
+    // Once the holder is dead, the next call reclaims the lock and succeeds
+    let after_kill = restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap();
+    assert_eq!(after_kill, 7);
+
+    // Lost / deleted generations.json ledger refuses previously issued credentials (both before and after re-initialization)
+    let v_latest = restarted_registry.verify_session(&peer_claim, Some(1_000)).unwrap();
+    let cred_before_loss =
+        restarted_registry.issue_bridge_credential(&v_latest, node_ok.clone(), 1_000, 61_000).unwrap();
+    fs::remove_file(&gen_file).unwrap();
+    let reg_after_loss = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("bridge-secret-key")
+        .with_generations_file(&gen_file);
+    let claim_before_loss = unsigned_claim.clone().with_credential(cred_before_loss);
+    assert_eq!(
+        reg_after_loss.verify_caller_at(&claim_before_loss, 30_000).unwrap_err().reason,
+        RefusalReason::RegistryDisconnected
+    );
+    // Even if a fresh peer verification re-initializes generations.json (with a new random ledger_id),
+    // the credential issued before the ledger was lost is rejected!
+    let _ = reg_after_loss.verify_session(&peer_claim, Some(1_000)).unwrap();
+    assert_eq!(
+        reg_after_loss.verify_caller_at(&claim_before_loss, 30_000).unwrap_err().reason,
+        RefusalReason::InvalidToken
+    );
+
+    // T3 record without created_at or run_id incarnation marker fails closed when bridge_secret/generations_file is active
+    let no_inc_json = root.join("no-inc-threads.json");
+    fs::write(
+        &no_inc_json,
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": thread_id,
+                "cwd": wt_dir.to_string_lossy(),
+                "environment_id": "env-nuc",
+                "node": "nuc-node-1",
+                "provider": "gemini-vertex",
+                "status": "running",
+                "pending_permissions": []
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let no_inc_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&no_inc_json)), None)
+        .with_expected_node(node_ok)
+        .with_bridge_secret("bridge-secret-key");
+    assert_eq!(no_inc_reg.verify_caller_at(&peer_claim, 30_000).unwrap_err().reason, RefusalReason::InvalidToken);
 
     // 5. Disconnected registry fails closed -> RegistryDisconnected
     let disconnected_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json).with_disconnected(true)), None);
@@ -1089,6 +1274,84 @@ decisions: []
     assert!(bad_cred_err.message.contains("`credential`"));
 
     // - T3 verified session persists verified environment ("env-nuc") and refuses mismatched environment
+    // Paseo record containing BOTH startedAt and createdAt deserializes cleanly and prefers startedAt,
+    // and replacing a Paseo session under the same ID with absent timestamps (different persistence.sessionId)
+    // bumps generation across restart and refuses the old credential with IdReused!
+    let dual_id = "agent-dual-ts-11111111";
+    let dual_folder = paseo_dir.join(folder_of(&cwd));
+    fs::create_dir_all(&dual_folder).unwrap();
+    let dual_path = dual_folder.join(format!("{dual_id}.json"));
+    fs::write(
+        &dual_path,
+        serde_json::to_string_pretty(&json!({
+            "id": dual_id,
+            "provider": "claude",
+            "cwd": cwd.to_string_lossy(),
+            "createdAt": "2026-10-09T15:00:00.000Z",
+            "startedAt": "2026-10-09T15:05:00.000Z",
+            "lastStatus": "running",
+            "pendingPermissions": [
+                { "id": "req-dual-1", "name": "Bash", "input": { "command": "echo dual" } }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let paseo_only = PaseoRegistry::new(&paseo_dir);
+    let dual_found = paseo_only.find(dual_id).expect("Paseo record with both startedAt and createdAt must parse");
+    assert_eq!(dual_found.started_at.as_deref(), Some("2026-10-09T15:05:00.000Z"));
+
+    // Paseo same-metadata ID reuse across restart with absent timestamps (distinguished by persistence.sessionId):
+    let reuse_paseo_id = "agent-reuse-paseo-1111";
+    let reuse_paseo_path = dual_folder.join(format!("{reuse_paseo_id}.json"));
+    let paseo_gen_file = root.join("paseo-generations.json");
+    fs::write(
+        &reuse_paseo_path,
+        serde_json::to_string_pretty(&json!({
+            "id": reuse_paseo_id,
+            "provider": "claude",
+            "cwd": cwd.to_string_lossy(),
+            "lastStatus": "running",
+            "persistence": { "sessionId": "handle-v1" },
+            "pendingPermissions": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let paseo_reg_1 = SurfaceRegistry::new(Some(PaseoRegistry::new(&paseo_dir)), None, None)
+        .with_expected_node(node.clone())
+        .with_bridge_secret("mcp-bridge-secret")
+        .with_generations_file(&paseo_gen_file);
+    let paseo_v1 = paseo_reg_1
+        .verify_caller(
+            &CallerClaim::paseo(Some(reuse_paseo_id), Some(cwd.to_string_lossy().into_owned()))
+                .with_node(node.clone())
+                .with_peer(peer),
+        )
+        .unwrap();
+    let paseo_cred_1 = paseo_reg_1.issue_bridge_credential(&paseo_v1, node.clone(), now - 5_000, now + 60_000).unwrap();
+    fs::write(
+        &reuse_paseo_path,
+        serde_json::to_string_pretty(&json!({
+            "id": reuse_paseo_id,
+            "provider": "claude",
+            "cwd": cwd.to_string_lossy(),
+            "lastStatus": "running",
+            "persistence": { "sessionId": "handle-v2" },
+            "pendingPermissions": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let paseo_reg_restarted = SurfaceRegistry::new(Some(PaseoRegistry::new(&paseo_dir)), None, None)
+        .with_expected_node(node.clone())
+        .with_bridge_secret("mcp-bridge-secret")
+        .with_generations_file(&paseo_gen_file);
+    let paseo_reuse_claim = CallerClaim::paseo(Some(reuse_paseo_id), Some(cwd.to_string_lossy().into_owned()))
+        .with_node(node.clone())
+        .with_credential(paseo_cred_1);
+    assert_eq!(paseo_reg_restarted.verify_caller(&paseo_reuse_claim).unwrap_err().reason, RefusalReason::IdReused);
+
     let t3_json = root.join("t3-env-threads.json");
     fs::write(
         &t3_json,
@@ -1098,6 +1361,7 @@ decisions: []
                 "cwd": cwd.to_string_lossy(),
                 "environment_id": "env-nuc",
                 "provider": "codex",
+                "created_at": "2026-10-25T00:00:00Z",
                 "status": "running",
                 "pending_permissions": []
             }

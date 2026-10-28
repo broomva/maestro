@@ -31,12 +31,13 @@ use maestro_core::need::Need;
 use paseo::{check_peer, is_safe_id, short_id};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -48,16 +49,137 @@ struct GenerationEntry {
     incarnation: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct GenerationLedger {
+    #[serde(default)]
+    ledger_id: String,
+    #[serde(default)]
+    entries: HashMap<String, GenerationEntry>,
+}
+
 static SHARED_GENERATIONS: OnceLock<Mutex<HashMap<String, GenerationEntry>>> = OnceLock::new();
+static HELD_LOCKS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn shared_generations() -> &'static Mutex<HashMap<String, GenerationEntry>> {
     SHARED_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn held_locks() -> &'static Mutex<HashSet<PathBuf>> {
+    HELD_LOCKS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn set_lock_held(dir: &Path, on: bool) {
+    if let Ok(mut set) = held_locks().lock() {
+        if on {
+            set.insert(dir.to_path_buf());
+        } else {
+            set.remove(dir);
+        }
+    }
+}
+
+fn is_lock_held_here(dir: &Path) -> bool {
+    held_locks().lock().map(|s| s.contains(dir)).unwrap_or(false)
+}
+
 /// Current wall-clock timestamp in milliseconds since the Unix epoch.
 pub fn current_time_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)).unwrap_or(0)
+}
+
+fn now_secs_f64() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    if let Ok(mut f) = File::open("/dev/urandom")
+        && f.read_exact(&mut buf).is_ok()
+    {
+        return buf.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let fallback = format!("{}:{}:{seq}", std::process::id(), current_time_ms());
+    hex_sha256(fallback.as_bytes())[..bytes * 2].to_string()
+}
+
+fn etime_seconds(etime: &str) -> Option<u64> {
+    let etime = etime.trim();
+    let (days, rest) = match etime.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, etime),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let num =
+        |s: &str| (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u64>().ok()).flatten();
+    let (h, m, s) = match parts.as_slice() {
+        [m, s] => (0, num(m)?, num(s)?),
+        [h, m, s] => (num(h)?, num(m)?, num(s)?),
+        _ => return None,
+    };
+    Some(((days * 24 + h) * 60 + m) * 60 + s)
+}
+
+enum PsState {
+    Unknown,
+    Gone,
+    Running(Option<i64>),
+}
+
+fn query_ps(pid: u32) -> PsState {
+    let Ok(out) = Command::new("/bin/ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return PsState::Unknown;
+    };
+    if !out.status.success() || out.stdout.iter().all(u8::is_ascii_whitespace) {
+        return PsState::Gone;
+    }
+    PsState::Running(
+        etime_seconds(&String::from_utf8_lossy(&out.stdout)).map(|e| (now_secs_f64() - e as f64).round() as i64),
+    )
+}
+
+/// Process start timestamp in whole seconds since Unix epoch for the current process.
+pub fn own_process_started_secs() -> i64 {
+    static OWN: OnceLock<i64> = OnceLock::new();
+    if let Some(s) = OWN.get() {
+        return *s;
+    }
+    match query_ps(std::process::id()) {
+        PsState::Running(Some(s)) => *OWN.get_or_init(|| s),
+        _ => {
+            static FIRST: OnceLock<i64> = OnceLock::new();
+            *FIRST.get_or_init(|| now_secs_f64().round() as i64)
+        }
+    }
+}
+
+fn parse_pid_file(text: &str) -> Option<(u32, Option<i64>)> {
+    let mut words = text.split_whitespace();
+    let pid: u32 = words.next()?.parse().ok().filter(|p| *p > 0)?;
+    let start = words.next().and_then(|s| s.parse::<f64>().ok()).filter(|s| s.is_finite()).map(|s| s as i64);
+    Some((pid, start))
+}
+
+fn holder_alive(pid_text: &str) -> bool {
+    let Some((pid, start)) = parse_pid_file(pid_text) else {
+        return false;
+    };
+    match (query_ps(pid), start) {
+        (PsState::Gone, _) => false,
+        (PsState::Running(Some(actual)), Some(s)) => (actual - s).abs() <= 2,
+        _ => true,
+    }
+}
+
+fn path_age(path: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(SystemTime::now().duration_since(modified).unwrap_or_default())
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -95,46 +217,156 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 }
 
 struct LockGuard {
-    path: PathBuf,
+    dir: PathBuf,
+    token: String,
+}
+
+impl LockGuard {
+    fn still_ours(&self) -> bool {
+        std::fs::read_to_string(self.dir.join("token")).is_ok_and(|t| t.trim() == self.token)
+    }
 }
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        set_lock_held(&self.dir, false);
+        if !self.still_ours() {
+            return;
+        }
+        let _ = std::fs::remove_file(self.dir.join("token"));
+        let _ = std::fs::remove_file(self.dir.join("pid"));
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
+fn lock_dir_stale(dir: &Path, canonical_dir: &Path) -> Option<bool> {
+    let age = path_age(dir)?;
+    let pid_text = std::fs::read_to_string(dir.join("pid")).ok();
+    if let Some((pid, start)) = pid_text.as_deref().and_then(parse_pid_file)
+        && pid == std::process::id()
+        && start.is_some_and(|s| (s - own_process_started_secs()).abs() <= 2)
+        && !is_lock_held_here(canonical_dir)
+    {
+        return Some(true);
+    }
+    match &pid_text {
+        None => Some(age >= Duration::from_secs(2)),
+        Some(text) => Some(!holder_alive(text)),
+    }
+}
+
+fn reclaim_stale_lock(dir: &Path) {
+    let reclaim_mutex = PathBuf::from(format!("{}.reclaim.d", dir.display()));
+    if let Err(e) = std::fs::create_dir(&reclaim_mutex) {
+        if e.kind() == std::io::ErrorKind::AlreadyExists
+            && path_age(&reclaim_mutex).is_some_and(|a| a >= Duration::from_secs(10))
+        {
+            let _ = std::fs::remove_dir_all(&reclaim_mutex);
+        }
+        return;
+    }
+    if lock_dir_stale(dir, dir) == Some(true) {
+        let aside = PathBuf::from(format!("{}.stale-{}", dir.display(), random_hex(4)));
+        if std::fs::rename(dir, &aside).is_ok()
+            && (lock_dir_stale(&aside, dir).unwrap_or(true) || std::fs::rename(&aside, dir).is_err())
+        {
+            let _ = std::fs::remove_dir_all(&aside);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&reclaim_mutex);
+}
+
 fn acquire_generation_lock(path: &Path, surface: &Surface) -> Result<LockGuard, SessionError> {
-    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    // Also clean up any legacy `<path>.lock` regular file left by a dead process
+    let legacy_file = PathBuf::from(format!("{}.lock", path.display()));
+    if legacy_file.is_file()
+        && let Ok(text) = std::fs::read_to_string(&legacy_file)
+        && !holder_alive(&text)
+    {
+        let _ = std::fs::remove_file(&legacy_file);
+    }
+
+    let lock_dir = PathBuf::from(format!("{}.lock.d", path.display()));
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
-            Ok(mut file) => {
-                let _ = writeln!(file, "{}", std::process::id());
-                return Ok(LockGuard { path: lock_path });
+        match std::fs::create_dir(&lock_dir) {
+            Ok(()) => {
+                set_lock_held(&lock_dir, true);
+                let token = random_hex(16);
+                let written = (|| -> std::io::Result<()> {
+                    let mut pf =
+                        OpenOptions::new().write(true).create(true).truncate(true).open(lock_dir.join("pid"))?;
+                    writeln!(pf, "{} {}", std::process::id(), own_process_started_secs())?;
+                    let mut tf =
+                        OpenOptions::new().write(true).create(true).truncate(true).open(lock_dir.join("token"))?;
+                    writeln!(tf, "{token}")?;
+                    Ok(())
+                })();
+                return match written {
+                    Ok(()) => Ok(LockGuard { dir: lock_dir, token }),
+                    Err(e) => {
+                        set_lock_held(&lock_dir, false);
+                        let _ = std::fs::remove_dir_all(&lock_dir);
+                        Err(SessionError::RegistryDisconnected {
+                            surface: surface.clone(),
+                            detail: format!("generation lock {} could not be initialized: {e}", lock_dir.display()),
+                        })
+                    }
+                };
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(5));
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {
+                    reclaim_stale_lock(&lock_dir);
+                    continue;
+                }
+                if Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                return Err(SessionError::RegistryDisconnected {
+                    surface: surface.clone(),
+                    detail: format!("generation lock {} held by active writer past timeout", lock_dir.display()),
+                });
             }
             Err(e) => {
                 return Err(SessionError::RegistryDisconnected {
                     surface: surface.clone(),
-                    detail: format!("generation lock {} could not be acquired: {e}", lock_path.display()),
+                    detail: format!("generation lock {} could not be acquired: {e}", lock_dir.display()),
                 });
             }
         }
     }
 }
 
-fn load_generations_map(path: &Path, surface: &Surface) -> Result<HashMap<String, GenerationEntry>, SessionError> {
+fn load_generations_ledger(
+    path: &Path,
+    surface: &Surface,
+    require_existing: bool,
+) -> Result<(GenerationLedger, bool), SessionError> {
     match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str::<HashMap<String, GenerationEntry>>(&text).map_err(|e| {
-            SessionError::RegistryDisconnected {
-                surface: surface.clone(),
-                detail: format!("generation ledger {} is corrupt: {e}", path.display()),
+        Ok(text) => {
+            if let Ok(ledger) = serde_json::from_str::<GenerationLedger>(&text)
+                && !ledger.ledger_id.is_empty()
+            {
+                return Ok((ledger, false));
             }
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+            if let Ok(legacy_map) = serde_json::from_str::<HashMap<String, GenerationEntry>>(&text) {
+                return Ok((GenerationLedger { ledger_id: random_hex(16), entries: legacy_map }, true));
+            }
+            Err(SessionError::RegistryDisconnected {
+                surface: surface.clone(),
+                detail: format!("generation ledger {} is corrupt", path.display()),
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if require_existing {
+                return Err(SessionError::RegistryDisconnected {
+                    surface: surface.clone(),
+                    detail: format!("generation ledger {} is missing for presented credential", path.display()),
+                });
+            }
+            Ok((GenerationLedger { ledger_id: random_hex(16), entries: HashMap::new() }, true))
+        }
         Err(e) => Err(SessionError::RegistryDisconnected {
             surface: surface.clone(),
             detail: format!("generation ledger {} could not be read: {e}", path.display()),
@@ -142,14 +374,21 @@ fn load_generations_map(path: &Path, surface: &Surface) -> Result<HashMap<String
     }
 }
 
-fn store_generations_map(
+fn store_generations_ledger(
     path: &Path,
     surface: &Surface,
-    map: &HashMap<String, GenerationEntry>,
+    lock: &LockGuard,
+    ledger: &GenerationLedger,
 ) -> Result<(), SessionError> {
+    if !lock.still_ours() {
+        return Err(SessionError::RegistryDisconnected {
+            surface: surface.clone(),
+            detail: format!("generation lock {} was lost before commit", lock.dir.display()),
+        });
+    }
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_path = PathBuf::from(format!("{}.tmp.{}.{seq}", path.display(), std::process::id()));
-    let encoded = serde_json::to_vec(map).map_err(|e| SessionError::RegistryDisconnected {
+    let encoded = serde_json::to_vec(ledger).map_err(|e| SessionError::RegistryDisconnected {
         surface: surface.clone(),
         detail: format!("generation ledger serialize failed: {e}"),
     })?;
@@ -158,6 +397,12 @@ fn store_generations_map(
         f.write_all(&encoded)?;
         f.sync_all()?;
         drop(f);
+        if !lock.still_ours() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "generation lock token changed before rename",
+            ));
+        }
         std::fs::rename(&tmp_path, path)
     })();
     if let Err(e) = write_res {
@@ -346,12 +591,21 @@ pub struct SurfaceRegistry {
     expected_node: Option<NodeId>,
     bridge_secret: Option<Vec<u8>>,
     generations_file: Option<PathBuf>,
-    generations: Mutex<HashMap<String, GenerationEntry>>,
+    generations: Mutex<GenerationLedger>,
 }
 
 impl SurfaceRegistry {
     pub fn new(paseo: Option<PaseoRegistry>, t3: Option<T3Registry>, direct: Option<DirectRegistry>) -> Self {
-        Self { paseo, t3, direct, ..Self::default() }
+        Self {
+            paseo,
+            t3,
+            direct,
+            generations: Mutex::new(GenerationLedger {
+                ledger_id: "in-memory-default".to_string(),
+                entries: HashMap::new(),
+            }),
+            ..Self::default()
+        }
     }
 
     /// Construct a `SurfaceRegistry` from environment variables (`MAESTRO_PASEO_AGENTS_DIR`,
@@ -417,21 +671,22 @@ impl SurfaceRegistry {
         }
     }
 
-    /// Synchronize and return the authoritative generation for `(surface, session_id)` and its
+    /// Synchronize and return `(ledger_id, generation)` for `(surface, session_id)` and its
     /// observed `incarnation`. Fails closed (`RegistryDisconnected`) if `generations_file` is
-    /// configured and unreadable, corrupt, or unwritable.
+    /// configured and unreadable, corrupt, missing when `require_existing` is true, or unwritable.
     fn sync_generation(
         &self,
         surface: &Surface,
         session_id: &str,
         incarnation: Option<&str>,
-    ) -> Result<u64, SessionError> {
+        require_existing: bool,
+    ) -> Result<(String, u64), SessionError> {
         let key = format!("{}:{session_id}", surface.as_str());
         if let Some(path) = &self.generations_file {
-            let _lock = acquire_generation_lock(path, surface)?;
-            let mut map = load_generations_map(path, surface)?;
-            let mut dirty = false;
-            let entry = map.entry(key.clone()).or_insert_with(|| {
+            let lock = acquire_generation_lock(path, surface)?;
+            let (mut ledger, created_or_migrated) = load_generations_ledger(path, surface, require_existing)?;
+            let mut dirty = created_or_migrated;
+            let entry = ledger.entries.entry(key.clone()).or_insert_with(|| {
                 dirty = true;
                 GenerationEntry::default()
             });
@@ -451,16 +706,23 @@ impl SurfaceRegistry {
             }
             let gen_val = entry.generation;
             let cloned_entry = entry.clone();
+            let ledger_id = ledger.ledger_id.clone();
             if dirty {
-                store_generations_map(path, surface, &map)?;
+                store_generations_ledger(path, surface, &lock, &ledger)?;
             }
-            self.generations.lock().unwrap().insert(key.clone(), cloned_entry.clone());
+            let mut local = self.generations.lock().unwrap();
+            local.ledger_id = ledger_id.clone();
+            local.entries.insert(key.clone(), cloned_entry.clone());
             shared_generations().lock().unwrap().insert(key, cloned_entry);
-            return Ok(gen_val);
+            return Ok((ledger_id, gen_val));
         }
 
         let mut local = self.generations.lock().unwrap();
-        let entry = local.entry(key).or_default();
+        if local.ledger_id.is_empty() {
+            local.ledger_id = "in-memory-default".to_string();
+        }
+        let ledger_id = local.ledger_id.clone();
+        let entry = local.entries.entry(key).or_default();
         if let Some(inc) = incarnation {
             match entry.incarnation.as_deref() {
                 Some(prev) if prev != inc => {
@@ -473,38 +735,40 @@ impl SurfaceRegistry {
                 _ => {}
             }
         }
-        Ok(entry.generation)
+        Ok((ledger_id, entry.generation))
     }
 
     /// Current generation counter for `(surface, session_id)`.
     pub fn generation_of(&self, surface: &Surface, session_id: &str) -> u64 {
         let key = format!("{}:{session_id}", surface.as_str());
         if let Some(path) = &self.generations_file
-            && let Ok(map) = load_generations_map(path, surface)
-            && let Some(entry) = map.get(&key)
+            && let Ok((ledger, _)) = load_generations_ledger(path, surface, false)
+            && let Some(entry) = ledger.entries.get(&key)
         {
             return entry.generation;
         }
-        self.generations.lock().unwrap().get(&key).map(|e| e.generation).unwrap_or(0)
+        self.generations.lock().unwrap().entries.get(&key).map(|e| e.generation).unwrap_or(0)
     }
 
     /// Fallible explicit generation bump that fails closed if `generations_file` cannot be read or written.
     pub fn try_bump_generation(&self, surface: &Surface, session_id: &str) -> Result<u64, SessionError> {
         let key = format!("{}:{session_id}", surface.as_str());
         if let Some(path) = &self.generations_file {
-            let _lock = acquire_generation_lock(path, surface)?;
-            let mut map = load_generations_map(path, surface)?;
-            let entry = map.entry(key.clone()).or_default();
+            let lock = acquire_generation_lock(path, surface)?;
+            let (mut ledger, _) = load_generations_ledger(path, surface, false)?;
+            let entry = ledger.entries.entry(key.clone()).or_default();
             entry.generation += 1;
             let next = entry.generation;
             let cloned = entry.clone();
-            store_generations_map(path, surface, &map)?;
-            self.generations.lock().unwrap().insert(key.clone(), cloned.clone());
+            store_generations_ledger(path, surface, &lock, &ledger)?;
+            let mut local = self.generations.lock().unwrap();
+            local.ledger_id = ledger.ledger_id;
+            local.entries.insert(key.clone(), cloned.clone());
             shared_generations().lock().unwrap().insert(key, cloned);
             return Ok(next);
         }
         let mut local = self.generations.lock().unwrap();
-        let entry = local.entry(key.clone()).or_default();
+        let entry = local.entries.entry(key.clone()).or_default();
         entry.generation += 1;
         let next = entry.generation;
         shared_generations().lock().unwrap().insert(key, entry.clone());
@@ -517,14 +781,16 @@ impl SurfaceRegistry {
         self.try_bump_generation(surface, session_id).unwrap_or_else(|_| {
             let key = format!("{}:{session_id}", surface.as_str());
             let mut local = self.generations.lock().unwrap();
-            let entry = local.entry(key).or_default();
+            let entry = local.entries.entry(key).or_default();
             entry.generation += 1;
             entry.generation
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sign_tuple(
         secret: &[u8],
+        ledger_id: &str,
         session: &SessionRef,
         node: &NodeId,
         cwd: &str,
@@ -533,6 +799,8 @@ impl SurfaceRegistry {
         generation: u64,
     ) -> String {
         let mut msg = Vec::new();
+        msg.extend_from_slice(ledger_id.as_bytes());
+        msg.push(0);
         msg.extend_from_slice(session.to_string().as_bytes());
         msg.push(0);
         msg.extend_from_slice(node.as_str().as_bytes());
@@ -564,6 +832,12 @@ impl SurfaceRegistry {
                 "Bridge secret is not configured on this host.",
             )));
         };
+        if verified.incarnation().is_none() {
+            return Err(SessionError::Refused(IdentityRefusal::new(
+                RefusalReason::InvalidToken,
+                "Session record lacks an authoritative incarnation marker.",
+            )));
+        }
         let Some(ttl) = expires_at_ms.checked_sub(issued_at_ms) else {
             return Err(SessionError::StaleCredential {
                 session_id: verified.agent_id().to_string(),
@@ -581,10 +855,11 @@ impl SurfaceRegistry {
         {
             return Err(SessionError::WrongNode { expected: want_node.clone(), actual: node });
         }
-        let generation =
-            self.sync_generation(&verified.session().surface, verified.agent_id(), verified.incarnation())?;
+        let (ledger_id, generation) =
+            self.sync_generation(&verified.session().surface, verified.agent_id(), verified.incarnation(), false)?;
         let signature = Self::sign_tuple(
             secret,
+            &ledger_id,
             verified.session(),
             &node,
             verified.cwd(),
@@ -621,12 +896,12 @@ impl SurfaceRegistry {
             )));
         }
         if let Some(cred) = &claim.credential {
-            let Some(secret) = self.bridge_secret.as_deref() else {
+            if self.bridge_secret.is_none() {
                 return Err(SessionError::Refused(IdentityRefusal::new(
                     RefusalReason::InvalidToken,
                     "Bridge secret is not configured on this host.",
                 )));
-            };
+            }
             if cred.session.surface != claim.surface {
                 return Err(SessionError::Refused(IdentityRefusal::new(
                     RefusalReason::CrossSurface,
@@ -672,8 +947,28 @@ impl SurfaceRegistry {
                     reason: format!("now={effective_now_ms} outside [{}, {})", cred.issued_at_ms, cred.expires_at_ms),
                 });
             }
+        }
+
+        let verified = self.verify_surface(claim)?;
+        if (self.bridge_secret.is_some() || claim.credential.is_some() || self.generations_file.is_some())
+            && verified.incarnation().is_none()
+        {
+            return Err(SessionError::Refused(IdentityRefusal::new(
+                RefusalReason::InvalidToken,
+                "Session record lacks an authoritative incarnation marker.",
+            )));
+        }
+        let (ledger_id, current_gen) = self.sync_generation(
+            &claim.surface,
+            verified.agent_id(),
+            verified.incarnation(),
+            claim.credential.is_some(),
+        )?;
+        if let Some(cred) = &claim.credential {
+            let secret = self.bridge_secret.as_deref().unwrap();
             let expected_sig = Self::sign_tuple(
                 secret,
+                &ledger_id,
                 &cred.session,
                 &cred.node,
                 &cred.cwd,
@@ -687,20 +982,6 @@ impl SurfaceRegistry {
                     "Bridge credential signature is invalid.",
                 )));
             }
-        }
-
-        let verified = self.verify_surface(claim)?;
-        let current_gen = self.sync_generation(&claim.surface, verified.agent_id(), verified.incarnation())?;
-        if let Some(presented_gen) = claim.generation
-            && presented_gen != current_gen
-        {
-            return Err(SessionError::IdReused {
-                session_id: verified.agent_id().to_string(),
-                expected_generation: current_gen,
-                presented_generation: presented_gen,
-            });
-        }
-        if let Some(cred) = &claim.credential {
             if cred.generation != current_gen {
                 return Err(SessionError::IdReused {
                     session_id: cred.session.id.clone(),
@@ -714,6 +995,15 @@ impl SurfaceRegistry {
                     "Bridge credential folder does not match registered session folder.",
                 )));
             }
+        }
+        if let Some(presented_gen) = claim.generation
+            && presented_gen != current_gen
+        {
+            return Err(SessionError::IdReused {
+                session_id: verified.agent_id().to_string(),
+                expected_generation: current_gen,
+                presented_generation: presented_gen,
+            });
         }
         let node = claim
             .credential

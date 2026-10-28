@@ -622,6 +622,7 @@ mutate $mcp 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if t
 mutate $mcp 'if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {' 'if false {'
 mutate $mcp 'if packet.scope.project.is_none() && packet.scope.initiative.is_none() {' 'if true {'
 mutate $hlb 'if effective_now_ms < cred.issued_at_ms || effective_now_ms >= cred.expires_at_ms {' 'if false {'
+mutate $hlb 'if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {' 'if false {'
 
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }

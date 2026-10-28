@@ -43,6 +43,8 @@ pub struct T3Thread {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
@@ -83,14 +85,20 @@ impl T3Thread {
         })
     }
 
-    pub fn incarnation(&self) -> String {
-        format!(
-            "t3:{}:{}:{}:{}",
+    pub fn incarnation(&self) -> Option<String> {
+        let created = self.created_at.as_deref().filter(|s| !s.is_empty());
+        let run = self.run_id.as_deref().filter(|s| !s.is_empty());
+        if created.is_none() && run.is_none() {
+            return None;
+        }
+        Some(format!(
+            "t3:{}:{}:{}:{}:{}",
             self.cwd,
             self.environment_id.as_deref().unwrap_or("-"),
             self.provider.as_deref().unwrap_or("-"),
-            self.created_at.as_deref().unwrap_or("-"),
-        )
+            created.unwrap_or("-"),
+            run.unwrap_or("-"),
+        ))
     }
 }
 
@@ -106,6 +114,8 @@ struct RawT3Thread {
     provider: Option<String>,
     #[serde(default, alias = "createdAt")]
     created_at: Option<String>,
+    #[serde(default, alias = "runId", alias = "session_id", alias = "sessionId")]
+    run_id: Option<String>,
     #[serde(default)]
     archived_at: Option<String>,
     #[serde(default)]
@@ -162,13 +172,16 @@ def main():
         if not isinstance(cwd, str) or not cwd:
             return None
         run_status = payload.get("status")
+        latest_run_id = None
         if "orchestration_v2_projection_runs" in tables:
             r = conn.execute(
-                "SELECT status FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1",
+                "SELECT run_id, status FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1",
                 (row["thread_id"],),
             ).fetchone()
-            if r and r["status"]:
-                run_status = r["status"]
+            if r:
+                if r["status"]:
+                    run_status = r["status"]
+                latest_run_id = r["run_id"]
         settled_at = payload.get("settledAt")
         unsettled_at = payload.get("unsettledAt")
         if settled_at and unsettled_at and unsettled_at > settled_at:
@@ -205,7 +218,8 @@ def main():
                         "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
                         "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
                     })
-        created_at = row["created_at"] if "created_at" in row.keys() else payload.get("createdAt")
+        created_at = row["created_at"] if "created_at" in row.keys() and row["created_at"] else payload.get("createdAt")
+        run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")
         return {
             "id": row["thread_id"],
             "cwd": cwd,
@@ -213,6 +227,7 @@ def main():
             "node": payload.get("node") if isinstance(payload.get("node"), str) else None,
             "provider": row["default_provider"],
             "created_at": created_at,
+            "run_id": run_marker if isinstance(run_marker, str) and run_marker else None,
             "archived_at": row["archived_at"] or payload.get("archivedAt"),
             "deleted_at": row["deleted_at"] or payload.get("deletedAt"),
             "settled_at": settled_at,
@@ -225,7 +240,7 @@ def main():
         out = []
         if "orchestration_v2_projection_threads" in tables:
             for row in conn.execute(
-                "SELECT thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
+                "SELECT rowid AS _rowid, thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
                 "FROM orchestration_v2_projection_threads ORDER BY updated_at DESC"
             ):
                 built = build_thread(row)
@@ -236,7 +251,7 @@ def main():
 
     if "orchestration_v2_projection_threads" in tables:
         row = conn.execute(
-            "SELECT thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
+            "SELECT rowid AS _rowid, thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
             "FROM orchestration_v2_projection_threads WHERE thread_id = ?",
             (target_id,),
         ).fetchone()
@@ -247,8 +262,10 @@ def main():
                 sys.exit(0)
 
     if "projection_threads" in tables:
+        pcols = {r["name"] for r in conn.execute("PRAGMA table_info(projection_threads)")}
+        created_sel = "created_at" if "created_at" in pcols else "NULL AS created_at"
         prow = conn.execute(
-            "SELECT thread_id, project_id, worktree_path, archived_at, deleted_at, settled_at "
+            f"SELECT rowid AS _rowid, thread_id, project_id, worktree_path, {created_sel}, archived_at, deleted_at, settled_at "
             "FROM projection_threads WHERE thread_id = ?",
             (target_id,),
         ).fetchone()
@@ -263,14 +280,18 @@ def main():
                     cwd = proj["workspace_root"]
             provider = None
             status = None
+            session_id = None
             if "projection_thread_sessions" in tables:
+                scols = {r["name"] for r in conn.execute("PRAGMA table_info(projection_thread_sessions)")}
+                sid_sel = "session_id" if "session_id" in scols else ("run_id AS session_id" if "run_id" in scols else "NULL AS session_id")
                 srow = conn.execute(
-                    "SELECT provider_name, status FROM projection_thread_sessions WHERE thread_id = ?",
+                    f"SELECT provider_name, status, {sid_sel} FROM projection_thread_sessions WHERE thread_id = ?",
                     (target_id,),
                 ).fetchone()
                 if srow:
                     provider = srow["provider_name"]
                     status = srow["status"]
+                    session_id = srow["session_id"]
             if cwd:
                 print(json.dumps({
                     "id": prow["thread_id"],
@@ -278,7 +299,8 @@ def main():
                     "environment_id": env_id,
                     "node": None,
                     "provider": provider,
-                    "created_at": None,
+                    "created_at": prow["created_at"],
+                    "run_id": session_id if isinstance(session_id, str) and session_id else None,
                     "archived_at": prow["archived_at"],
                     "deleted_at": prow["deleted_at"],
                     "settled_at": prow["settled_at"],
@@ -416,6 +438,7 @@ impl T3Registry {
             node: raw.node,
             provider: raw.provider,
             created_at: raw.created_at,
+            run_id: raw.run_id,
             archived_at: raw.archived_at,
             deleted_at: raw.deleted_at,
             settled_at: raw.settled_at,
@@ -590,13 +613,16 @@ impl T3Registry {
         }
         let harness = thread.harness();
         let incarnation = thread.incarnation();
-        Ok(VerifiedSession::new(
+        let mut verified = VerifiedSession::new(
             SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
             thread.cwd,
             harness,
             thread.parent_id,
             thread.pending_permissions,
-        )
-        .with_incarnation(incarnation))
+        );
+        if let Some(inc) = incarnation {
+            verified = verified.with_incarnation(inc);
+        }
+        Ok(verified)
     }
 }

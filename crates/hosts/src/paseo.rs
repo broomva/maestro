@@ -60,6 +60,10 @@ pub struct PaseoAgent {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
 }
@@ -74,6 +78,30 @@ impl PaseoAgent {
             SessionLiveness::Live
         }
     }
+
+    pub fn incarnation(&self) -> Option<String> {
+        let started = self.started_at.as_deref().filter(|s| !s.is_empty());
+        let handle = self.handle_id.as_deref().filter(|s| !s.is_empty());
+        if started.is_none() && self.pid.is_none() && handle.is_none() {
+            return None;
+        }
+        Some(format!(
+            "paseo:{}:{}:{}:{}:{}:{}",
+            self.cwd,
+            self.provider.as_deref().unwrap_or("-"),
+            self.parent.as_deref().unwrap_or("-"),
+            started.unwrap_or("-"),
+            self.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+            handle.unwrap_or("-"),
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPersistence {
+    #[serde(default, alias = "session_id")]
+    session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -89,8 +117,14 @@ struct RawRegistryFile {
     labels: Option<Value>,
     #[serde(default)]
     provider: Option<String>,
-    #[serde(default, alias = "started_at", alias = "createdAt", alias = "created_at")]
+    #[serde(default, alias = "started_at")]
     started_at: Option<String>,
+    #[serde(default, alias = "created_at")]
+    created_at: Option<String>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    persistence: Option<RawPersistence>,
     #[serde(default)]
     pending_permissions: Option<Vec<Value>>,
 }
@@ -219,7 +253,9 @@ impl PaseoRegistry {
             status: parsed.last_status,
             parent,
             provider: parsed.provider,
-            started_at: parsed.started_at,
+            started_at: parsed.started_at.or(parsed.created_at),
+            pid: parsed.pid,
+            handle_id: parsed.persistence.and_then(|p| p.session_id),
             pending_permissions,
         })
     }
@@ -279,21 +315,18 @@ impl PaseoRegistry {
             ));
         }
         let harness = agent.provider.as_deref().map(|p| p.parse::<Harness>().unwrap());
-        let incarnation = format!(
-            "paseo:{}:{}:{}:{}",
-            agent.cwd,
-            agent.provider.as_deref().unwrap_or("-"),
-            agent.parent.as_deref().unwrap_or("-"),
-            agent.started_at.as_deref().unwrap_or("-"),
-        );
-        Ok(VerifiedSession::new(
+        let incarnation = agent.incarnation();
+        let mut verified = VerifiedSession::new(
             SessionRef { surface: Surface::Paseo, environment: None, id: agent.id },
             agent.cwd,
             harness,
             agent.parent,
             agent.pending_permissions,
-        )
-        .with_incarnation(incarnation))
+        );
+        if let Some(inc) = incarnation {
+            verified = verified.with_incarnation(inc);
+        }
+        Ok(verified)
     }
 
     /// Whether `child` is a live session `parent` directly started (`Callers.started`).
