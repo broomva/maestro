@@ -212,6 +212,225 @@ pub fn harness_capabilities(harness: &Harness) -> HarnessCapabilities {
     }
 }
 
+/// Peer credentials read from a local socket where the platform provides them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerCredentials {
+    pub pid: u32,
+    pub uid: u32,
+}
+
+/// What a caller claims about the session it is speaking from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallerClaim {
+    pub surface: Surface,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerCredentials>,
+}
+
+impl CallerClaim {
+    pub fn paseo(session_id: Option<impl Into<String>>, cwd: Option<impl Into<String>>) -> Self {
+        Self {
+            surface: Surface::Paseo,
+            session_id: session_id.map(Into::into),
+            cwd: cwd.map(Into::into),
+            token: None,
+            peer: None,
+        }
+    }
+
+    pub fn t3(session_id: Option<impl Into<String>>, cwd: Option<impl Into<String>>) -> Self {
+        Self {
+            surface: Surface::T3,
+            session_id: session_id.map(Into::into),
+            cwd: cwd.map(Into::into),
+            token: None,
+            peer: None,
+        }
+    }
+
+    pub fn direct(
+        session_id: Option<impl Into<String>>,
+        cwd: Option<impl Into<String>>,
+        token: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            surface: Surface::Direct,
+            session_id: session_id.map(Into::into),
+            cwd: cwd.map(Into::into),
+            token: token.map(Into::into),
+            peer: None,
+        }
+    }
+
+    pub fn with_peer(mut self, peer: PeerCredentials) -> Self {
+        self.peer = Some(peer);
+        self
+    }
+}
+
+/// Whether a registered session is live or has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLiveness {
+    Live,
+    Archived,
+    Closed,
+    Settled,
+}
+
+impl SessionLiveness {
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Live)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Archived => "archived",
+            Self::Closed => "closed",
+            Self::Settled => "settled",
+        }
+    }
+}
+
+/// A live permission prompt held by a session on its surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionPrompt {
+    pub request_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl PermissionPrompt {
+    /// Turn a live permission prompt into a [`crate::need::Need`] for the owner.
+    pub fn to_need(&self, session: &SessionRef, project: Option<String>, since: Option<String>) -> crate::need::Need {
+        let title = match &self.detail {
+            Some(detail) if !detail.is_empty() => format!("{}: {detail}", self.title),
+            _ => self.title.clone(),
+        };
+        crate::need::Need {
+            kind: crate::need::NeedKind::Approval,
+            source: crate::need::NeedSource::Approvals,
+            key: format!("approval:{session}#{}", self.request_id),
+            title,
+            since,
+            ask: None,
+            project,
+            unblocks: vec![session.to_string()],
+        }
+    }
+}
+
+/// A session that a surface registry has verified as live and matching its folder and credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedSession {
+    session: SessionRef,
+    cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    harness: Option<Harness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_permissions: Vec<PermissionPrompt>,
+}
+
+impl VerifiedSession {
+    /// Construct a verified session record. Intended for surface adapters in `maestro-hosts`.
+    pub fn new(
+        session: SessionRef,
+        cwd: impl Into<String>,
+        harness: Option<Harness>,
+        parent_id: Option<String>,
+        pending_permissions: Vec<PermissionPrompt>,
+    ) -> Self {
+        Self { session, cwd: cwd.into(), harness, parent_id, pending_permissions }
+    }
+
+    pub fn session(&self) -> &SessionRef {
+        &self.session
+    }
+
+    pub fn agent_id(&self) -> &str {
+        &self.session.id
+    }
+
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    pub fn harness(&self) -> Option<&Harness> {
+        self.harness.as_ref()
+    }
+
+    pub fn parent_id(&self) -> Option<&str> {
+        self.parent_id.as_deref()
+    }
+
+    pub fn pending_permissions(&self) -> &[PermissionPrompt] {
+        &self.pending_permissions
+    }
+
+    pub fn principal(&self) -> crate::authority::Principal {
+        crate::authority::Principal::Agent { session: self.session.clone() }
+    }
+
+    pub fn into_principal(self) -> crate::authority::Principal {
+        crate::authority::Principal::Agent { session: self.session }
+    }
+
+    /// Convert all live permission prompts on this session into [`crate::need::Need`] items.
+    pub fn needs(&self, project: Option<&str>, since: Option<&str>) -> Vec<crate::need::Need> {
+        self.pending_permissions
+            .iter()
+            .map(|prompt| prompt.to_need(&self.session, project.map(str::to_string), since.map(str::to_string)))
+            .collect()
+    }
+}
+
+/// Why a surface registry refused a caller claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalReason {
+    MissingSessionId,
+    MissingCwd,
+    RelativeCwd,
+    NotFound,
+    NotLive,
+    OutsideCwd,
+    CrossSurface,
+    PeerMismatch,
+    InvalidToken,
+    UnsupportedSurface,
+}
+
+/// A refused caller identity check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityRefusal {
+    pub reason: RefusalReason,
+    pub message: String,
+}
+
+impl IdentityRefusal {
+    pub fn new(reason: RefusalReason, message: impl Into<String>) -> Self {
+        Self { reason, message: message.into() }
+    }
+}
+
+impl fmt::Display for IdentityRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for IdentityRefusal {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

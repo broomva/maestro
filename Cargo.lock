@@ -949,6 +949,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "maestro-hosts"
+version = "0.1.0"
+dependencies = [
+ "maestro-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "maestro-mcp"
 version = "0.1.0"
 dependencies = [

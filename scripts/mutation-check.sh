@@ -599,6 +599,24 @@ mutate crates/store/src/lib.rs '            Ok(_) => Section::unavailable(label,
 mutate crates/store/src/views.rs '        Err(e) => Section::unavailable(usage.source.clone(), e.to_string()),' '        Err(_) => Section::ok(usage.source.clone(), serde_json::json!({})),'
 mutate crates/store/src/tree.rs 'out.trim().parse::<jiff::Timestamp>().map(Some)' 'out.trim().parse::<jiff::Timestamp>().map(|_| None)'
 
+
+# Host identity: Paseo, T3, Direct, symlinks, prefix boundary, cross-surface spoofs and permission needs (BRO-3268).
+hp=crates/hosts/src/paseo.rs
+ht=crates/hosts/src/t3.rs
+hlb=crates/hosts/src/lib.rs
+mutate $hp 'if parsed.id != expected_id {' 'if false {'
+mutate $hp 'if !is_safe_id(id) {' 'if false {'
+mutate $hp 'if !liveness.is_live() {' 'if false {'
+mutate $hp 'if !within(Path::new(cwd), Path::new(&agent.cwd)) {' 'if false {'
+mutate $hp 'std::fs::canonicalize(&normalized).unwrap_or(normalized)' 'normalized'
+mutate $hp 'inside.starts_with(&outside)' 'inside.to_string_lossy().starts_with(&*outside.to_string_lossy())'
+mutate $hp '&& cred.uid != want_uid' '&& false'
+mutate $hlb 'if in_t3 && !in_paseo {' 'if false {'
+mutate $hlb 'if in_paseo && !in_t3 {' 'if false {'
+mutate $hlb 'if token != session.token {' 'if false {'
+mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
+mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
+
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
