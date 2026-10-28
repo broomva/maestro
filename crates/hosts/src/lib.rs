@@ -24,21 +24,37 @@ pub use t3::{T3Registry, T3Thread};
 use maestro_core::need::Need;
 use paseo::{check_peer, is_safe_id, short_id};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use std::sync::Mutex;
 
 /// A registered [`Surface::Direct`] session and its per-launch token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectSession {
     pub id: String,
     pub cwd: String,
+    #[serde(default, skip_serializing)]
     pub token: String,
     pub liveness: SessionLiveness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<Harness>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
+}
+
+impl fmt::Debug for DirectSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectSession")
+            .field("id", &self.id)
+            .field("cwd", &self.cwd)
+            .field("token", &"<redacted>")
+            .field("liveness", &self.liveness)
+            .field("harness", &self.harness)
+            .field("pending_permissions", &self.pending_permissions)
+            .finish()
+    }
 }
 
 /// Registry of per-launch tokens issued for [`Surface::Direct`] sessions.
@@ -92,26 +108,24 @@ impl DirectRegistry {
                 format!("The shell's folder must be an absolute path, not {cwd}."),
             ));
         }
-        let Some(session) = self.find(id) else {
-            return Err(IdentityRefusal::new(RefusalReason::NotFound, format!("No Direct session has the id {id}.")));
+        let session = match (self.find(id), claim.token.as_deref().filter(|t| !t.is_empty())) {
+            (Some(s), Some(t))
+                if !s.token.is_empty() && Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes()) =>
+            {
+                s
+            }
+            _ => {
+                return Err(IdentityRefusal::new(
+                    RefusalReason::InvalidToken,
+                    "Direct session id or launch token is invalid.",
+                ));
+            }
         };
         if !session.liveness.is_live() {
             let short = short_id(id);
             return Err(IdentityRefusal::new(
                 RefusalReason::NotLive,
                 format!("Session {short} is {}, not live.", session.liveness.as_str()),
-            ));
-        }
-        let Some(token) = claim.token.as_deref().filter(|t| !t.is_empty()) else {
-            return Err(IdentityRefusal::new(
-                RefusalReason::InvalidToken,
-                "Direct session requires its per-launch token.",
-            ));
-        };
-        if token != session.token {
-            return Err(IdentityRefusal::new(
-                RefusalReason::InvalidToken,
-                "Direct session launch token does not match.",
             ));
         }
         if !within(Path::new(cwd), Path::new(&session.cwd)) {

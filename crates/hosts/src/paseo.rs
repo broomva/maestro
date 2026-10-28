@@ -12,7 +12,9 @@ use maestro_core::session::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
@@ -82,11 +84,11 @@ struct RawRegistryFile {
     #[serde(default)]
     last_status: Option<String>,
     #[serde(default)]
-    labels: Option<HashMap<String, String>>,
+    labels: Option<Value>,
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
-    pending_permissions: Option<Vec<PermissionLike>>,
+    pending_permissions: Option<Vec<Value>>,
 }
 
 /// Paseo's on-disk session registry (`~/.paseo/agents/<folder>/<id>.json`).
@@ -142,15 +144,20 @@ impl PaseoRegistry {
         if parsed.id != expected_id {
             return None;
         }
-        let parent = parsed.labels.as_ref().and_then(|labels| labels.get(PARENT_AGENT_LABEL)).cloned();
+        let parent = parsed
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(PARENT_AGENT_LABEL))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let pending_permissions = parsed
             .pending_permissions
             .unwrap_or_default()
             .into_iter()
-            .enumerate()
-            .map(|(idx, raw)| {
+            .filter_map(|raw| serde_json::from_value::<PermissionLike>(raw).ok())
+            .map(|raw| {
                 let (title, detail) = describe_permission(&raw, Some(&parsed.cwd));
-                let request_id = raw.id.filter(|s| !s.is_empty()).unwrap_or_else(|| format!("perm-{}", idx + 1));
+                let request_id = permission_request_id(&raw, "perm");
                 PermissionPrompt { request_id, title, detail }
             })
             .collect();
@@ -375,4 +382,34 @@ pub fn describe_permission(req: &PermissionLike, cwd: Option<&str>) -> (String, 
     }
     let detail = input_field(req.input.as_ref(), &["url", "query"]);
     (title, detail)
+}
+
+/// Derive a stable request id for a permission prompt, using the source `id` when present
+/// and otherwise hashing the prompt's full fields (`name`, `title`, `description`, `input`).
+pub fn permission_request_id(raw: &PermissionLike, prefix: &str) -> String {
+    if let Some(id) = raw.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return id.to_string();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(raw.name.as_bytes());
+    hasher.update([0]);
+    if let Some(title) = &raw.title {
+        hasher.update(title.as_bytes());
+    }
+    hasher.update([0]);
+    if let Some(desc) = &raw.description {
+        hasher.update(desc.as_bytes());
+    }
+    hasher.update([0]);
+    if let Some(input) = &raw.input
+        && let Ok(bytes) = serde_json::to_vec(input)
+    {
+        hasher.update(&bytes);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(16);
+    for b in &digest[..8] {
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    format!("{prefix}-{hex}")
 }

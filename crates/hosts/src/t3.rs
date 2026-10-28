@@ -6,7 +6,7 @@
 //! to verify a T3 thread's existence, liveness, working directory (`worktreePath` or
 //! project `workspace_root`), environment id, and pending permission prompts.
 
-use crate::paseo::{PermissionLike, check_peer, describe_permission, short_id, within};
+use crate::paseo::{PermissionLike, check_peer, describe_permission, permission_request_id, short_id, within};
 use maestro_core::session::{
     CallerClaim, Harness, IdentityRefusal, PermissionPrompt, RefusalReason, SessionLiveness, SessionRef, Surface,
     VerifiedSession,
@@ -98,7 +98,7 @@ struct RawT3Thread {
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
-    pending_permissions: Option<Vec<PermissionLike>>,
+    pending_permissions: Option<Vec<serde_json::Value>>,
 }
 
 /// T3 thread registry reader (`statev2.sqlite` or JSON snapshot).
@@ -262,10 +262,10 @@ impl T3Registry {
             .pending_permissions
             .unwrap_or_default()
             .into_iter()
-            .enumerate()
-            .map(|(idx, p)| {
+            .filter_map(|val| serde_json::from_value::<PermissionLike>(val).ok())
+            .map(|p| {
                 let (title, detail) = describe_permission(&p, Some(&raw.cwd));
-                let request_id = p.id.filter(|s| !s.is_empty()).unwrap_or_else(|| format!("t3-perm-{}", idx + 1));
+                let request_id = permission_request_id(&p, "t3-perm");
                 PermissionPrompt { request_id, title, detail }
             })
             .collect();
@@ -295,7 +295,7 @@ impl T3Registry {
         }
         if let Some(db_file) = self.sqlite_path() {
             let out = Command::new("python3")
-                .arg("-P")
+                .arg("-I")
                 .arg("-c")
                 .arg(SQLITE_READER_PY)
                 .arg(&db_file)

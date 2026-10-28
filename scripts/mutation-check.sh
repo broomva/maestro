@@ -613,7 +613,7 @@ mutate $hp 'inside.starts_with(&outside)' 'inside.to_string_lossy().starts_with(
 mutate $hp '&& cred.uid != want_uid' '&& false'
 mutate $hlb 'if in_t3 && !in_paseo {' 'if false {'
 mutate $hlb 'if in_paseo && !in_t3 {' 'if false {'
-mutate $hlb 'if token != session.token {' 'if false {'
+mutate $hlb 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())' 'true'
 mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
 mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
 

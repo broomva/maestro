@@ -37,7 +37,7 @@ for arg in "$@"; do
   esac
 done
 
-for tool in cargo python3 git; do
+for tool in cargo python3 git sha256sum timeout; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "missing required runner: $tool" >&2
     exit 1
@@ -142,8 +142,13 @@ if [ "$run_goldens" -eq 1 ]; then
     echo "ct guard: zero tests discovered in maestro-hosts --test identity" >&2
     exit 1
   fi
-  test_out="$(cargo test -p maestro-hosts --test identity --locked 2>&1)"
+  test_code=0
+  test_out="$(cargo test -p maestro-hosts --test identity --locked 2>&1)" || test_code=$?
   printf '%s\n' "$test_out"
+  if [ "$test_code" -ne 0 ]; then
+    echo "ct guard: maestro-hosts --test identity failed (exit $test_code)" >&2
+    exit 1
+  fi
   if ! printf '%s\n' "$test_out" | grep -q 'test result: ok[.][ ]*[1-9][0-9]* passed; 0 failed'; then
     echo "ct guard: no passing test summary in maestro-hosts --test identity" >&2
     exit 1
@@ -247,7 +252,7 @@ PY
   check_mutant "$hp" '&& cred.uid != want_uid' '&& false'
   check_mutant "$hlb" 'if in_t3 && !in_paseo {' 'if false {'
   check_mutant "$hlb" 'if in_paseo && !in_t3 {' 'if false {'
-  check_mutant "$hlb" 'if token != session.token {' 'if false {'
+  check_mutant "$hlb" 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())' 'true'
   check_mutant "$ht" '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
   check_mutant "$session" '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
 

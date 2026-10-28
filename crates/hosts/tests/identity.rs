@@ -490,15 +490,8 @@ conn.execute(
 )
 conn.commit()
 "#;
-    let status = Command::new("python3")
-        .arg("-P")
-        .arg("-c")
-        .arg(init_sql)
-        .arg(&db_path)
-        .arg(&wt_dir)
-        .arg(&proj_root)
-        .status()
-        .unwrap();
+    let status =
+        Command::new("python3").arg("-c").arg(init_sql).arg(&db_path).arg(&wt_dir).arg(&proj_root).status().unwrap();
     assert!(status.success());
 
     let t3 = T3Registry::new(&root);
@@ -579,6 +572,47 @@ fn live_permission_prompts_become_needs_on_paseo_and_t3() {
     assert_eq!(needs[0].unblocks, vec![format!("paseo:-/{id}")]);
     assert_eq!(needs[0].title, "Run a command: gh pr merge 933");
     assert_eq!(needs[1].title, "Write a file: src/lib.rs");
+
+    // Malformed prompt entries are skipped without breaking verification, and
+    // prompts without an explicit id get a stable content-hashed key independent of queue index.
+    let id2 = "agent-perm-22222222";
+    write_paseo_record(
+        &paseo_dir,
+        id2,
+        &cwd,
+        None,
+        Some("running"),
+        None,
+        None,
+        json!([
+            { "not_a_permission": 123 },
+            { "name": "Bash", "input": { "command": "git status" } },
+            { "name": "Bash", "input": { "command": "git diff" } }
+        ]),
+    );
+    let verified2 =
+        registry.verify_caller(&CallerClaim::paseo(Some(id2), Some(cwd.to_string_lossy().into_owned()))).unwrap();
+    let needs_two = registry.needs_for(&verified2, Some("maestro"), None);
+    assert_eq!(needs_two.len(), 2);
+    let second_key_before = needs_two[1].key.clone();
+
+    write_paseo_record(
+        &paseo_dir,
+        id2,
+        &cwd,
+        None,
+        Some("running"),
+        None,
+        None,
+        json!([
+            { "name": "Bash", "input": { "command": "git diff" } }
+        ]),
+    );
+    let verified2_after =
+        registry.verify_caller(&CallerClaim::paseo(Some(id2), Some(cwd.to_string_lossy().into_owned()))).unwrap();
+    let needs_after = registry.needs_for(&verified2_after, Some("maestro"), None);
+    assert_eq!(needs_after.len(), 1);
+    assert_eq!(needs_after[0].key, second_key_before);
 }
 
 #[test]
@@ -669,6 +703,21 @@ fn direct_sessions_and_peer_credentials_are_verified() {
         .unwrap();
     assert_eq!(ok.session().to_string(), "direct:-/direct-1");
     assert_eq!(ok.harness(), Some(&Harness::ClaudeCode));
+
+    // DirectSession Debug and Serialize never leak the launch token
+    let sample = DirectSession {
+        id: "direct-1".to_string(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        token: "tok-secret-123".to_string(),
+        liveness: SessionLiveness::Live,
+        harness: Some(Harness::ClaudeCode),
+        pending_permissions: vec![],
+    };
+    let dbg_str = format!("{sample:?}");
+    assert!(dbg_str.contains("<redacted>"));
+    assert!(!dbg_str.contains("tok-secret-123"));
+    let ser_str = serde_json::to_string(&sample).unwrap();
+    assert!(!ser_str.contains("tok-secret-123"));
 
     assert!(within(&cwd, &cwd));
     assert!(!within(&outside, &cwd));
