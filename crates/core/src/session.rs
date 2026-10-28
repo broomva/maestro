@@ -273,7 +273,7 @@ pub struct BridgeCredential {
     pub issued_at_ms: i64,
     pub expires_at_ms: i64,
     pub generation: u64,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub signature: String,
 }
 

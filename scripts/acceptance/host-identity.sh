@@ -285,6 +285,7 @@ PY
   check_mutant "$ht" 'if self.disconnected {' 'if false {'
   check_mutant "$ht" '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
   check_mutant "$session" '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
+  check_mutant crates/mcp/src/lib.rs 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if true {'
 
   rm -rf "$copy"
   echo "mutation  $killed/$total killed"
@@ -322,8 +323,8 @@ if [ "$run_selftest" -eq 1 ]; then
   "golden_sha256": "$golden_digest",
   "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 14,
-  "mutants_total": 14,
+  "mutants_killed": 15,
+  "mutants_total": 15,
   "noop_survived": true,
   "fresh_seconds": 5
 }
@@ -342,8 +343,8 @@ EOF
   "golden_sha256": "$golden_digest",
   "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 14,
-  "mutants_total": 14,
+  "mutants_killed": 15,
+  "mutants_total": 15,
   "noop_survived": true,
   "fresh_seconds": 7200
 }
@@ -396,8 +397,8 @@ EOF
   "golden_sha256": "$golden_digest",
   "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 14,
-  "mutants_total": 14,
+  "mutants_killed": 15,
+  "mutants_total": 15,
   "noop_survived": true,
   "fresh_seconds": 5
 }

@@ -657,9 +657,11 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
     let node_ok: NodeId = "nuc-node-1".parse().unwrap();
     let node_wrong: NodeId = "mac-studio-2".parse().unwrap();
 
+    let gen_file = root.join("generations.json");
     let registry = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
         .with_expected_node(node_ok.clone())
-        .with_bridge_secret("bridge-secret-key");
+        .with_bridge_secret("bridge-secret-key")
+        .with_generations_file(&gen_file);
 
     let base_claim =
         CallerClaim::t3(Some(thread_id), Some(wt_dir.to_string_lossy().into_owned())).with_node(node_ok.clone());
@@ -672,6 +674,39 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
     // Issue a valid short-lived bridge credential (valid for [1_000, 61_000))
     let cred = registry.issue_bridge_credential(&verified, node_ok.clone(), 1_000, 61_000).unwrap();
     assert!(format!("{cred:?}").contains("<redacted>"));
+    let wire = serde_json::to_string(&cred).unwrap();
+    assert!(wire.contains(&cred.signature), "wire JSON must include signature");
+    let decoded: maestro_hosts::BridgeCredential = serde_json::from_str(&wire).unwrap();
+    assert_eq!(decoded.signature, cred.signature);
+
+    // Without a configured bridge_secret, both issuance and credential verification fail closed
+    let secretless =
+        SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None).with_expected_node(node_ok.clone());
+    assert!(secretless.issue_bridge_credential(&verified, node_ok.clone(), 1_000, 61_000).is_err());
+    assert_eq!(
+        secretless.verify_caller_at(&base_claim.clone().with_credential(cred.clone()), 30_000).unwrap_err().reason,
+        RefusalReason::InvalidToken
+    );
+
+    // When expected_node differs from thread.node, verification fails closed even if claim.node matches expected_node or is omitted
+    let mismatched_expected_t3 = T3Registry::new(&t3_json).with_expected_node(node_wrong.clone());
+    assert_eq!(
+        mismatched_expected_t3
+            .verify(
+                &CallerClaim::t3(Some(thread_id), Some(wt_dir.to_string_lossy().into_owned()))
+                    .with_node(node_wrong.clone())
+            )
+            .unwrap_err()
+            .reason,
+        RefusalReason::WrongNode
+    );
+    assert_eq!(
+        mismatched_expected_t3
+            .verify(&CallerClaim::t3(Some(thread_id), Some(wt_dir.to_string_lossy().into_owned())))
+            .unwrap_err()
+            .reason,
+        RefusalReason::WrongNode
+    );
 
     let authed_claim = base_claim.clone().with_credential(cred.clone());
     assert!(registry.verify_caller_at(&authed_claim, 30_000).is_ok());
@@ -691,7 +726,7 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
     assert_eq!(registry.verify_caller_at(&authed_claim, 61_000).unwrap_err().reason, RefusalReason::StaleCredential);
     assert_eq!(registry.verify_caller_at(&authed_claim, 500).unwrap_err().reason, RefusalReason::StaleCredential);
     assert!(matches!(
-        registry.issue_bridge_credential(&verified, node_ok, 0, 3_600_001),
+        registry.issue_bridge_credential(&verified, node_ok.clone(), 0, 3_600_001),
         Err(SessionError::StaleCredential { .. })
     ));
 
@@ -703,10 +738,16 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
         RefusalReason::InvalidToken
     );
 
-    // 4. ID reuse: bumping generation invalidates earlier credential -> IdReused
+    // 4. ID reuse: bumping generation invalidates earlier credential across fresh registries sharing generations_file -> IdReused
     let new_gen = registry.bump_generation(&Surface::T3, thread_id);
     assert_eq!(new_gen, 1);
     assert_eq!(registry.verify_caller_at(&authed_claim, 30_000).unwrap_err().reason, RefusalReason::IdReused);
+    let reloaded_registry = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("bridge-secret-key")
+        .with_generations_file(&gen_file);
+    assert_eq!(reloaded_registry.generation_of(&Surface::T3, thread_id), 1);
+    assert_eq!(reloaded_registry.verify_caller_at(&authed_claim, 30_000).unwrap_err().reason, RefusalReason::IdReused);
 
     // 5. Disconnected registry fails closed -> RegistryDisconnected
     let disconnected_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json).with_disconnected(true)), None);
@@ -806,23 +847,37 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
 
     // End-to-end MCP call_with_hosts and agent_request_with_hosts verification
     let ws = root.join("ws");
-    fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    fs::create_dir_all(ws.join("workspace/.control/asks")).unwrap();
     fs::write(
-        ws.join(".control/asks/sample.yaml"),
+        ws.join("workspace/.control/asks/sample.yaml"),
         "schema_version: 1\narc: test\nopened: '2026-10-25T00:00:00Z'\ntz: UTC\nlanes: []\nasks: []\ndecisions: []\n",
     )
     .unwrap();
     let store = Store::new(Paths::under(&ws), TreeSource::WorkingTree);
 
-    // 1. maestro_needs_list through call_with_hosts includes live permission prompts from registry
+    // 1. maestro_needs_list through call_with_hosts includes live permission prompts when unfiltered,
+    // excludes them when filtering for an unrelated project B, and preserves null when asks are unreadable.
     let mcp_needs = call_with_hosts(&store, &registry, "maestro_needs_list", json!({})).unwrap();
     let need_items = mcp_needs["data"].as_array().unwrap();
     assert!(
         need_items.iter().any(|n| n["key"] == format!("approval:paseo:-/{id}#req-7c1")),
         "maestro_needs_list missing live permission prompt: {mcp_needs}"
     );
+    let filtered_b =
+        call_with_hosts(&store, &registry, "maestro_needs_list", json!({ "project": "project-b" })).unwrap();
+    let filtered_items = filtered_b["data"].as_array().unwrap();
+    assert!(
+        !filtered_items.iter().any(|n| n["key"] == format!("approval:paseo:-/{id}#req-7c1")),
+        "project-b filter must exclude live prompt from session in project-a: {filtered_b}"
+    );
+    let unread_ws = root.join("unread-ws");
+    fs::create_dir_all(&unread_ws).unwrap();
+    let unread_store = Store::new(Paths::under(&unread_ws), TreeSource::WorkingTree);
+    let unread_needs = call_with_hosts(&unread_store, &registry, "maestro_needs_list", json!({})).unwrap();
+    assert!(unread_needs["data"].is_null(), "unreadable asks section must keep data: null");
 
-    // 2. Verified caller via agent_request_with_hosts gets verified: true and Disposition::Recorded on Handback
+    // 2. Verified caller via agent_request_with_hosts gets verified: true, Disposition::Recorded,
+    // and persists the verified SessionRef (including T3 environment); malformed credential fails invalid_params.
     let handback_ok = agent_request_with_hosts(
         &store,
         &registry,
@@ -836,6 +891,63 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
     .unwrap();
     assert_eq!(handback_ok["request"]["verified"], json!(true));
     assert_eq!(handback_ok["request"]["disposition"], json!(Disposition::Recorded));
+
+    let bad_cred_err = agent_request_with_hosts(
+        &store,
+        &registry,
+        RequestKind::Handback,
+        json!({
+            "session": format!("paseo:-/{id}"),
+            "cwd": cwd.to_string_lossy(),
+            "credential": "not-an-object",
+            "summary": "malformed credential must fail"
+        }),
+    )
+    .unwrap_err();
+    assert!(bad_cred_err.message.contains("`credential`"));
+
+    let t3_json = root.join("t3-env-threads.json");
+    fs::write(
+        &t3_json,
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": "mcp:t3-env-1",
+                "cwd": cwd.to_string_lossy(),
+                "environment_id": "env-nuc",
+                "provider": "codex",
+                "status": "running",
+                "pending_permissions": []
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let t3_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None);
+    let t3_handback = agent_request_with_hosts(
+        &store,
+        &t3_reg,
+        RequestKind::Handback,
+        json!({
+            "session": "t3:-/mcp:t3-env-1",
+            "cwd": cwd.to_string_lossy(),
+            "summary": "verified t3 environment persisted"
+        }),
+    )
+    .unwrap();
+    assert_eq!(t3_handback["request"]["session"]["environment"], json!("env-nuc"));
+
+    let env_mismatch_err = agent_request_with_hosts(
+        &store,
+        &t3_reg,
+        RequestKind::Handback,
+        json!({
+            "session": "t3:wrong-env/mcp:t3-env-1",
+            "cwd": cwd.to_string_lossy(),
+            "summary": "mismatched environment must fail"
+        }),
+    )
+    .unwrap_err();
+    assert!(env_mismatch_err.message.contains("does not match verified session"));
 
     // 3. Forged caller (outside cwd or unknown id) is refused with zero new journal entries
     let journal_path = maestro_store::requests::journal(&store.paths);

@@ -173,7 +173,7 @@ mutate $http ', local.ip().to_string()];' '];'
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,
 # sigterm_right_after_the_readiness_line_is_a_clean_stop: under this harness's load the race closes.)
 mutate $cli 'let mut term = signal(SignalKind::terminate())?;' 'let mut term = signal(SignalKind::user_defined1())?;'
-mutate $mcp 'Self { paths: Arc::new(store.paths), source: store.tree.source }' 'Self { paths: Arc::new(store.paths), source: store.tree.commit.clone().map_or(store.tree.source, maestro_store::TreeSource::GitRev) }'
+mutate $mcp 'source: store.tree.source,' 'source: store.tree.commit.clone().map_or(store.tree.source, maestro_store::TreeSource::GitRev),'
 mutate $http 'None => Ok(Self::loopback()),' 'None => Self::named("100.64.0.1:7171".parse().unwrap()),'
 mutate $http 'SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)' 'SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT)'
 
@@ -618,6 +618,7 @@ mutate $hlb 'if cred.generation != current_gen {' 'if false {'
 mutate $ht 'if self.disconnected {' 'if false {'
 mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
 mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
+mutate $mcp 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if true {'
 
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }

@@ -9,8 +9,9 @@
 //! - [`DirectRegistry`] verifies bare processes against per-launch tokens issued at
 //!   dispatch;
 //! - [`SurfaceRegistry`] routes by surface, verifies node and short-lived tuple-bound
-//!   [`BridgeCredential`] bindings, tracks session generations to refuse ID reuse,
-//!   refuses cross-surface spoofing, and projects live permission prompts into [`Need`]s.
+//!   [`BridgeCredential`] bindings with HMAC-SHA256, tracks persistent session generations
+//!   to refuse ID reuse, refuses cross-surface spoofing, and projects live permission
+//!   prompts into [`Need`]s.
 
 pub mod paseo;
 pub mod t3;
@@ -34,9 +35,38 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-const DEFAULT_BRIDGE_SECRET: &[u8] = b"maestro-host-bridge-v1-default-key";
+static SHARED_GENERATIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+fn shared_generations() -> &'static Mutex<HashMap<String, u64>> {
+    SHARED_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        let hashed = Sha256::digest(key);
+        key_block[..32].copy_from_slice(&hashed);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
+}
 
 /// A registered [`Surface::Direct`] session and its per-launch token.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +99,7 @@ impl fmt::Debug for DirectSession {
 #[derive(Debug, Default)]
 pub struct DirectRegistry {
     sessions: Mutex<HashMap<String, DirectSession>>,
+    file_path: Option<PathBuf>,
     expected_uid: Option<u32>,
 }
 
@@ -77,20 +108,51 @@ impl DirectRegistry {
         Self::default()
     }
 
+    pub fn from_file(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let mut sessions = HashMap::new();
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
+        {
+            for s in rows {
+                sessions.insert(s.id.clone(), s);
+            }
+        }
+        Self { sessions: Mutex::new(sessions), file_path: Some(path), expected_uid: None }
+    }
+
     pub fn with_expected_uid(mut self, uid: u32) -> Self {
         self.expected_uid = Some(uid);
         self
     }
 
-    pub fn register(&self, session: DirectSession) {
-        self.sessions.lock().unwrap().insert(session.id.clone(), session);
+    /// Register or re-issue a Direct session; returns `true` when an existing session ID was replaced.
+    pub fn register(&self, session: DirectSession) -> bool {
+        let id = session.id.clone();
+        let replaced = self.sessions.lock().unwrap().insert(id.clone(), session).is_some();
+        if replaced {
+            let key = format!("direct:{id}");
+            let mut map = shared_generations().lock().unwrap();
+            let next = map.get(&key).copied().unwrap_or(0) + 1;
+            map.insert(key, next);
+        }
+        replaced
     }
 
     pub fn find(&self, id: &str) -> Option<DirectSession> {
         if !is_safe_id(id) {
             return None;
         }
-        self.sessions.lock().unwrap().get(id).cloned()
+        if let Some(found) = self.sessions.lock().unwrap().get(id).cloned() {
+            return Some(found);
+        }
+        if let Some(path) = &self.file_path
+            && let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
+        {
+            return rows.into_iter().find(|s| s.id == id);
+        }
+        None
     }
 
     pub fn list_live_sessions(&self) -> Vec<DirectSession> {
@@ -164,27 +226,15 @@ impl DirectRegistry {
 }
 
 /// Combined read-only surface registry across Paseo, T3, and Direct.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SurfaceRegistry {
     pub paseo: Option<PaseoRegistry>,
     pub t3: Option<T3Registry>,
     pub direct: Option<DirectRegistry>,
     expected_node: Option<NodeId>,
-    bridge_secret: Vec<u8>,
+    bridge_secret: Option<Vec<u8>>,
+    generations_file: Option<PathBuf>,
     generations: Mutex<HashMap<String, u64>>,
-}
-
-impl Default for SurfaceRegistry {
-    fn default() -> Self {
-        Self {
-            paseo: None,
-            t3: None,
-            direct: None,
-            expected_node: None,
-            bridge_secret: DEFAULT_BRIDGE_SECRET.to_vec(),
-            generations: Mutex::new(HashMap::new()),
-        }
-    }
 }
 
 impl SurfaceRegistry {
@@ -193,7 +243,8 @@ impl SurfaceRegistry {
     }
 
     /// Construct a `SurfaceRegistry` from environment variables (`MAESTRO_PASEO_AGENTS_DIR`,
-    /// `MAESTRO_T3_HOME`, `MAESTRO_NODE`, `MAESTRO_BRIDGE_SECRET`).
+    /// `MAESTRO_T3_HOME`, `MAESTRO_DIRECT_REGISTRY`, `MAESTRO_GENERATIONS_FILE`,
+    /// `MAESTRO_NODE`, `MAESTRO_BRIDGE_SECRET`).
     pub fn from_env() -> Self {
         let paseo = std::env::var("MAESTRO_PASEO_AGENTS_DIR")
             .ok()
@@ -201,7 +252,14 @@ impl SurfaceRegistry {
             .map(|p| PaseoRegistry::new(PathBuf::from(p)));
         let t3 =
             std::env::var("MAESTRO_T3_HOME").ok().filter(|s| !s.is_empty()).map(|p| T3Registry::new(PathBuf::from(p)));
-        let mut reg = Self::new(paseo, t3, None);
+        let direct =
+            std::env::var("MAESTRO_DIRECT_REGISTRY").ok().filter(|s| !s.is_empty()).map(DirectRegistry::from_file);
+        let mut reg = Self::new(paseo, t3, direct);
+        if let Ok(gen_file) = std::env::var("MAESTRO_GENERATIONS_FILE")
+            && !gen_file.is_empty()
+        {
+            reg = reg.with_generations_file(PathBuf::from(gen_file));
+        }
         if let Ok(node_raw) = std::env::var("MAESTRO_NODE")
             && let Ok(node) = node_raw.trim().parse::<NodeId>()
         {
@@ -224,7 +282,19 @@ impl SurfaceRegistry {
     }
 
     pub fn with_bridge_secret(mut self, secret: impl Into<Vec<u8>>) -> Self {
-        self.bridge_secret = secret.into();
+        let bytes = secret.into();
+        self.bridge_secret = (!bytes.is_empty()).then_some(bytes);
+        self
+    }
+
+    pub fn with_generations_file(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(map) = serde_json::from_str::<HashMap<String, u64>>(&text)
+        {
+            *self.generations.lock().unwrap() = map;
+        }
+        self.generations_file = Some(path);
         self
     }
 
@@ -237,24 +307,46 @@ impl SurfaceRegistry {
         }
     }
 
+    /// Register or re-issue a Direct session on this registry, bumping its generation if the ID was reused.
+    pub fn register_direct(&self, session: DirectSession) -> u64 {
+        let id = session.id.clone();
+        let replaced = self.direct.as_ref().is_some_and(|direct| direct.register(session));
+        if replaced { self.bump_generation(&Surface::Direct, &id) } else { self.generation_of(&Surface::Direct, &id) }
+    }
+
     /// Current generation counter for `(surface, session_id)`.
     pub fn generation_of(&self, surface: &Surface, session_id: &str) -> u64 {
         let key = format!("{}:{session_id}", surface.as_str());
-        self.generations.lock().unwrap().get(&key).copied().unwrap_or(0)
+        if let Some(path) = &self.generations_file
+            && let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(map) = serde_json::from_str::<HashMap<String, u64>>(&text)
+            && let Some(val) = map.get(&key).copied()
+        {
+            return val;
+        }
+        let local = self.generations.lock().unwrap().get(&key).copied().unwrap_or(0);
+        let shared = shared_generations().lock().unwrap().get(&key).copied().unwrap_or(0);
+        local.max(shared)
     }
 
     /// Increment the generation counter when a session ID is re-issued or restarted,
     /// invalidating any earlier [`BridgeCredential`] for that ID.
     pub fn bump_generation(&self, surface: &Surface, session_id: &str) -> u64 {
         let key = format!("{}:{session_id}", surface.as_str());
-        let mut map = self.generations.lock().unwrap();
-        let next = map.get(&key).copied().unwrap_or(0) + 1;
-        map.insert(key, next);
+        let next = self.generation_of(surface, session_id) + 1;
+        self.generations.lock().unwrap().insert(key.clone(), next);
+        shared_generations().lock().unwrap().insert(key, next);
+        if let Some(path) = &self.generations_file {
+            let snapshot = self.generations.lock().unwrap().clone();
+            if let Ok(encoded) = serde_json::to_string(&snapshot) {
+                let _ = std::fs::write(path, encoded);
+            }
+        }
         next
     }
 
     fn sign_tuple(
-        &self,
+        secret: &[u8],
         session: &SessionRef,
         node: &NodeId,
         cwd: &str,
@@ -262,21 +354,19 @@ impl SurfaceRegistry {
         expires_at_ms: i64,
         generation: u64,
     ) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.bridge_secret);
-        hasher.update([0]);
-        hasher.update(session.to_string().as_bytes());
-        hasher.update([0]);
-        hasher.update(node.as_str().as_bytes());
-        hasher.update([0]);
-        hasher.update(cwd.as_bytes());
-        hasher.update([0]);
-        hasher.update(issued_at_ms.to_be_bytes());
-        hasher.update(expires_at_ms.to_be_bytes());
-        hasher.update(generation.to_be_bytes());
-        let digest = hasher.finalize();
+        let mut msg = Vec::new();
+        msg.extend_from_slice(session.to_string().as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(node.as_str().as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(cwd.as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(&issued_at_ms.to_be_bytes());
+        msg.extend_from_slice(&expires_at_ms.to_be_bytes());
+        msg.extend_from_slice(&generation.to_be_bytes());
+        let mac = hmac_sha256(secret, &msg);
         let mut hex = String::with_capacity(64);
-        for b in digest {
+        for b in mac {
             let _ = write!(&mut hex, "{b:02x}");
         }
         hex
@@ -290,6 +380,12 @@ impl SurfaceRegistry {
         issued_at_ms: i64,
         expires_at_ms: i64,
     ) -> Result<BridgeCredential, SessionError> {
+        let Some(secret) = self.bridge_secret.as_deref() else {
+            return Err(SessionError::Refused(IdentityRefusal::new(
+                RefusalReason::InvalidToken,
+                "Bridge secret is not configured on this host.",
+            )));
+        };
         let Some(ttl) = expires_at_ms.checked_sub(issued_at_ms) else {
             return Err(SessionError::StaleCredential {
                 session_id: verified.agent_id().to_string(),
@@ -308,8 +404,15 @@ impl SurfaceRegistry {
             return Err(SessionError::WrongNode { expected: want_node.clone(), actual: node });
         }
         let generation = self.generation_of(&verified.session().surface, verified.agent_id());
-        let signature =
-            self.sign_tuple(verified.session(), &node, verified.cwd(), issued_at_ms, expires_at_ms, generation);
+        let signature = Self::sign_tuple(
+            secret,
+            verified.session(),
+            &node,
+            verified.cwd(),
+            issued_at_ms,
+            expires_at_ms,
+            generation,
+        );
         Ok(BridgeCredential {
             session: verified.session().clone(),
             node,
@@ -339,6 +442,12 @@ impl SurfaceRegistry {
             });
         }
         if let Some(cred) = &claim.credential {
+            let Some(secret) = self.bridge_secret.as_deref() else {
+                return Err(SessionError::Refused(IdentityRefusal::new(
+                    RefusalReason::InvalidToken,
+                    "Bridge secret is not configured on this host.",
+                )));
+            };
             if cred.session.surface != claim.surface {
                 return Err(SessionError::Refused(IdentityRefusal::new(
                     RefusalReason::CrossSurface,
@@ -392,7 +501,8 @@ impl SurfaceRegistry {
                     reason: format!("now={now} outside [{}, {})", cred.issued_at_ms, cred.expires_at_ms),
                 });
             }
-            let expected_sig = self.sign_tuple(
+            let expected_sig = Self::sign_tuple(
+                secret,
                 &cred.session,
                 &cred.node,
                 &cred.cwd,

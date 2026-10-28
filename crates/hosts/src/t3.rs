@@ -533,13 +533,16 @@ impl T3Registry {
         let Some(thread) = self.lookup(thread_id)? else {
             return Err(IdentityRefusal::new(RefusalReason::NotFound, format!("No T3 thread has the id {thread_id}.")));
         };
-        if let (Some(want), Some(actual)) = (self.expected_node.as_ref().or(thread.node.as_ref()), claim.node.as_ref())
-            && want != actual
-        {
-            return Err(IdentityRefusal::new(
-                RefusalReason::WrongNode,
-                format!("Thread {thread_id} is bound to node {want}, not {actual}."),
-            ));
+        let presented = claim.node.as_ref().or(self.expected_node.as_ref());
+        for (want, actual) in [(thread.node.as_ref(), presented), (self.expected_node.as_ref(), claim.node.as_ref())] {
+            if let (Some(want), Some(actual)) = (want, actual)
+                && want != actual
+            {
+                return Err(IdentityRefusal::new(
+                    RefusalReason::WrongNode,
+                    format!("Thread {thread_id} is bound to node {want}, not {actual}."),
+                ));
+            }
         }
         let liveness = thread.liveness();
         if !liveness.is_live() {
