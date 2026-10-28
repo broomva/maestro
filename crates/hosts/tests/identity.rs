@@ -624,6 +624,22 @@ conn.commit()
         .unwrap();
     assert_eq!(v_after.pending_permissions().len(), 1);
     assert_eq!(v_after.pending_permissions()[0].request_id, second_id_before);
+
+    // Absent thread in valid SQLite database returns NotFound (exit code 3), whereas a broken SQLite
+    // schema that fails during query execution returns RegistryDisconnected (exit code 2), never NotFound.
+    let absent_err = t3
+        .verify(&CallerClaim::t3(Some("mcp:does-not-exist"), Some(wt_dir.to_string_lossy().into_owned())))
+        .unwrap_err();
+    assert_eq!(absent_err.reason, RefusalReason::NotFound);
+
+    let broken_db = root.join("broken.sqlite");
+    let broken_sql = r#"import sqlite3, sys; c=sqlite3.connect(sys.argv[1]); c.execute("CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT)"); c.commit()"#;
+    assert!(Command::new("python3").arg("-c").arg(broken_sql).arg(&broken_db).status().unwrap().success());
+    let broken_t3 = T3Registry::new(&broken_db);
+    let broken_err = broken_t3
+        .verify(&CallerClaim::t3(Some("mcp:any-thread"), Some(wt_dir.to_string_lossy().into_owned())))
+        .unwrap_err();
+    assert_eq!(broken_err.reason, RefusalReason::RegistryDisconnected);
 }
 
 #[test]
@@ -644,6 +660,7 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
                 "environment_id": "env-nuc",
                 "node": "nuc-node-1",
                 "provider": "gemini-vertex",
+                "created_at": "2026-10-25T00:00:00Z",
                 "status": "running",
                 "pending_permissions": [
                     { "id": "perm-1", "name": "Bash", "input": { "command": "git status" } }
@@ -663,11 +680,16 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
         .with_bridge_secret("bridge-secret-key")
         .with_generations_file(&gen_file);
 
-    let base_claim =
+    let unsigned_claim =
         CallerClaim::t3(Some(thread_id), Some(wt_dir.to_string_lossy().into_owned())).with_node(node_ok.clone());
 
-    let verified = registry.verify_session(&base_claim, Some(1_000)).unwrap();
-    let snap1 = registry.snapshot_session(&base_claim, Some(1_000)).unwrap();
+    // When bridge_secret is configured, an unsigned claim with no transport peer is refused -> InvalidToken
+    assert_eq!(registry.verify_caller_at(&unsigned_claim, 1_000).unwrap_err().reason, RefusalReason::InvalidToken);
+
+    // Local transport-peer-authenticated claim succeeds and can be issued a signed BridgeCredential
+    let peer_claim = unsigned_claim.clone().with_peer(PeerCredentials { pid: std::process::id(), uid: 1000 });
+    let verified = registry.verify_session(&peer_claim, Some(1_000)).unwrap();
+    let snap1 = registry.snapshot_session(&peer_claim, Some(1_000)).unwrap();
     assert_eq!(snap1.node.as_ref(), Some(&node_ok));
     assert_eq!(snap1.generation, 0);
 
@@ -684,7 +706,7 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
         SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None).with_expected_node(node_ok.clone());
     assert!(secretless.issue_bridge_credential(&verified, node_ok.clone(), 1_000, 61_000).is_err());
     assert_eq!(
-        secretless.verify_caller_at(&base_claim.clone().with_credential(cred.clone()), 30_000).unwrap_err().reason,
+        secretless.verify_caller_at(&unsigned_claim.clone().with_credential(cred.clone()), 30_000).unwrap_err().reason,
         RefusalReason::InvalidToken
     );
 
@@ -708,7 +730,7 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
         RefusalReason::WrongNode
     );
 
-    let authed_claim = base_claim.clone().with_credential(cred.clone());
+    let authed_claim = unsigned_claim.clone().with_credential(cred.clone());
     assert!(registry.verify_caller_at(&authed_claim, 30_000).is_ok());
 
     // 1. Wrong node on claim or credential -> WrongNode
@@ -718,7 +740,7 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
     let mut wrong_node_cred = cred.clone();
     wrong_node_cred.node = node_wrong;
     assert_eq!(
-        registry.verify_caller_at(&base_claim.clone().with_credential(wrong_node_cred), 30_000).unwrap_err().reason,
+        registry.verify_caller_at(&unsigned_claim.clone().with_credential(wrong_node_cred), 30_000).unwrap_err().reason,
         RefusalReason::WrongNode
     );
 
@@ -734,24 +756,79 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
     let mut forged = cred.clone();
     forged.signature = "00".repeat(32);
     assert_eq!(
-        registry.verify_caller_at(&base_claim.clone().with_credential(forged), 30_000).unwrap_err().reason,
+        registry.verify_caller_at(&unsigned_claim.clone().with_credential(forged), 30_000).unwrap_err().reason,
         RefusalReason::InvalidToken
     );
 
-    // 4. ID reuse: bumping generation invalidates earlier credential across fresh registries sharing generations_file -> IdReused
-    let new_gen = registry.bump_generation(&Surface::T3, thread_id);
-    assert_eq!(new_gen, 1);
-    assert_eq!(registry.verify_caller_at(&authed_claim, 30_000).unwrap_err().reason, RefusalReason::IdReused);
-    let reloaded_registry = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+    // 4. Automatic incarnation-bound ID reuse detection across registry replacement + restart:
+    // Replace the session in T3 under the SAME thread_id with a newer created_at incarnation,
+    // construct a fresh SurfaceRegistry sharing gen_file (simulating restart without manual bump_generation),
+    // and verify that presenting the old generation-0 credential fails closed with IdReused!
+    fs::write(
+        &t3_json,
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": thread_id,
+                "cwd": wt_dir.to_string_lossy(),
+                "environment_id": "env-nuc",
+                "node": "nuc-node-1",
+                "provider": "gemini-vertex",
+                "created_at": "2026-10-25T00:05:00Z",
+                "status": "running",
+                "pending_permissions": []
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let restarted_registry = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
         .with_expected_node(node_ok.clone())
         .with_bridge_secret("bridge-secret-key")
         .with_generations_file(&gen_file);
-    assert_eq!(reloaded_registry.generation_of(&Surface::T3, thread_id), 1);
-    assert_eq!(reloaded_registry.verify_caller_at(&authed_claim, 30_000).unwrap_err().reason, RefusalReason::IdReused);
+    assert_eq!(restarted_registry.verify_caller_at(&authed_claim, 30_000).unwrap_err().reason, RefusalReason::IdReused);
+    assert_eq!(restarted_registry.generation_of(&Surface::T3, thread_id), 1);
+
+    // Concurrent generation bumps across threads are serialized and exact
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap();
+            });
+        }
+    });
+    assert_eq!(restarted_registry.generation_of(&Surface::T3, thread_id), 5);
+
+    // Corrupt generation ledger fails closed -> RegistryDisconnected (never falls back to 0)
+    let corrupt_gen = root.join("corrupt-generations.json");
+    fs::write(&corrupt_gen, "{not-valid-json").unwrap();
+    let corrupt_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("bridge-secret-key")
+        .with_generations_file(&corrupt_gen);
+    assert_eq!(
+        corrupt_reg.verify_caller_at(&peer_claim, 30_000).unwrap_err().reason,
+        RefusalReason::RegistryDisconnected
+    );
+
+    // Unwritable generation storage fails closed -> RegistryDisconnected
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let ro_dir = root.join("ro-gen-dir");
+        fs::create_dir_all(&ro_dir).unwrap();
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let ro_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+            .with_expected_node(node_ok.clone())
+            .with_bridge_secret("bridge-secret-key")
+            .with_generations_file(ro_dir.join("generations.json"));
+        let ro_res = ro_reg.verify_caller_at(&peer_claim, 30_000);
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(ro_res.unwrap_err().reason, RefusalReason::RegistryDisconnected);
+    }
 
     // 5. Disconnected registry fails closed -> RegistryDisconnected
     let disconnected_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json).with_disconnected(true)), None);
-    assert_eq!(disconnected_reg.verify_caller(&base_claim).unwrap_err().reason, RefusalReason::RegistryDisconnected);
+    assert_eq!(disconnected_reg.verify_caller(&peer_claim).unwrap_err().reason, RefusalReason::RegistryDisconnected);
 
     let updates = SurfaceRegistry::diff_snapshots(None, Some(&snap1));
     assert_eq!(updates, vec![SessionUpdate::Snapshot { snapshot: Box::new(snap1.clone()) }]);
@@ -792,9 +869,18 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
         ]),
     );
 
-    let registry = SurfaceRegistry::new(Some(PaseoRegistry::new(&paseo_dir)), None, None);
-    let verified =
-        registry.verify_caller(&CallerClaim::paseo(Some(id), Some(cwd.to_string_lossy().into_owned()))).unwrap();
+    let node: NodeId = "nuc-node-1".parse().unwrap();
+    let registry = SurfaceRegistry::new(Some(PaseoRegistry::new(&paseo_dir)), None, None)
+        .with_expected_node(node.clone())
+        .with_bridge_secret("mcp-bridge-secret");
+    let peer = PeerCredentials { pid: std::process::id(), uid: 1000 };
+    let verified = registry
+        .verify_caller(
+            &CallerClaim::paseo(Some(id), Some(cwd.to_string_lossy().into_owned()))
+                .with_node(node.clone())
+                .with_peer(peer),
+        )
+        .unwrap();
     let needs = registry.needs_for(&verified, Some("maestro"), Some("2026-10-25T12:00:00Z"));
     assert_eq!(needs.len(), 2);
     assert_eq!(needs[0].kind, NeedKind::Approval);
@@ -821,8 +907,13 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
             { "name": "Bash", "input": { "command": "git diff" } }
         ]),
     );
-    let verified2 =
-        registry.verify_caller(&CallerClaim::paseo(Some(id2), Some(cwd.to_string_lossy().into_owned()))).unwrap();
+    let verified2 = registry
+        .verify_caller(
+            &CallerClaim::paseo(Some(id2), Some(cwd.to_string_lossy().into_owned()))
+                .with_node(node.clone())
+                .with_peer(peer),
+        )
+        .unwrap();
     let needs_two = registry.needs_for(&verified2, Some("maestro"), None);
     assert_eq!(needs_two.len(), 2);
     let second_key_before = needs_two[1].key.clone();
@@ -839,8 +930,13 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
             { "name": "Bash", "input": { "command": "git diff" } }
         ]),
     );
-    let verified2_after =
-        registry.verify_caller(&CallerClaim::paseo(Some(id2), Some(cwd.to_string_lossy().into_owned()))).unwrap();
+    let verified2_after = registry
+        .verify_caller(
+            &CallerClaim::paseo(Some(id2), Some(cwd.to_string_lossy().into_owned()))
+                .with_node(node.clone())
+                .with_peer(peer),
+        )
+        .unwrap();
     let needs_after = registry.needs_for(&verified2_after, Some("maestro"), None);
     assert_eq!(needs_after.len(), 1);
     assert_eq!(needs_after[0].key, second_key_before);
@@ -850,13 +946,20 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
     fs::create_dir_all(ws.join("workspace/.control/asks")).unwrap();
     fs::write(
         ws.join("workspace/.control/asks/sample.yaml"),
-        "schema_version: 1\narc: test\nopened: '2026-10-25T00:00:00Z'\ntz: UTC\nlanes: []\nasks: []\ndecisions: []\n",
+        "schema_version: 1
+arc: test
+opened: '2026-10-25T00:00:00Z'
+tz: UTC
+lanes: []
+asks: []
+decisions: []
+",
     )
     .unwrap();
     let store = Store::new(Paths::under(&ws), TreeSource::WorkingTree);
 
-    // 1. maestro_needs_list through call_with_hosts includes live permission prompts when unfiltered,
-    // excludes them when filtering for an unrelated project B, and preserves null when asks are unreadable.
+    // 1. maestro_needs_list & maestro_context include live permission prompts when unscoped,
+    // exclude them from both packet and markdown when scoped to project-b, and preserve null when asks are unreadable.
     let mcp_needs = call_with_hosts(&store, &registry, "maestro_needs_list", json!({})).unwrap();
     let need_items = mcp_needs["data"].as_array().unwrap();
     assert!(
@@ -870,14 +973,56 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
         !filtered_items.iter().any(|n| n["key"] == format!("approval:paseo:-/{id}#req-7c1")),
         "project-b filter must exclude live prompt from session in project-a: {filtered_b}"
     );
+    let ctx_unscoped = call_with_hosts(&store, &registry, "maestro_context", json!({})).unwrap();
+    assert!(
+        ctx_unscoped["packet"]["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["key"] == format!("approval:paseo:-/{id}#req-7c1")),
+        "unscoped maestro_context should include live permission prompt"
+    );
+    assert!(ctx_unscoped["markdown"].as_str().unwrap().contains("gh pr merge 933"));
+
+    let ctx_scoped_b =
+        call_with_hosts(&store, &registry, "maestro_context", json!({ "project": "project-b" })).unwrap();
+    assert!(
+        !ctx_scoped_b["packet"]["needs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["key"] == format!("approval:paseo:-/{id}#req-7c1")),
+        "project-scoped maestro_context packet must exclude unscoped live prompt"
+    );
+    assert!(
+        !ctx_scoped_b["markdown"].as_str().unwrap().contains("gh pr merge 933"),
+        "project-scoped maestro_context markdown must not leak live prompt command detail"
+    );
+
     let unread_ws = root.join("unread-ws");
     fs::create_dir_all(&unread_ws).unwrap();
     let unread_store = Store::new(Paths::under(&unread_ws), TreeSource::WorkingTree);
     let unread_needs = call_with_hosts(&unread_store, &registry, "maestro_needs_list", json!({})).unwrap();
     assert!(unread_needs["data"].is_null(), "unreadable asks section must keep data: null");
 
-    // 2. Verified caller via agent_request_with_hosts gets verified: true, Disposition::Recorded,
-    // and persists the verified SessionRef (including T3 environment); malformed credential fails invalid_params.
+    // 2. MCP agent_request_with_hosts requires a valid fresh signed BridgeCredential (or Direct token):
+    // - Bare {session, cwd} without credential is refused (InvalidToken)
+    let unsigned_mcp_err = agent_request_with_hosts(
+        &store,
+        &registry,
+        RequestKind::Handback,
+        json!({
+            "session": format!("paseo:-/{id}"),
+            "cwd": cwd.to_string_lossy(),
+            "summary": "unsigned tuple must be refused"
+        }),
+    )
+    .unwrap_err();
+    assert!(unsigned_mcp_err.message.contains("authenticated bridge credential or launch token is required"));
+
+    // - Valid fresh credential spanning current_time_ms() is accepted -> verified: true, Disposition::Recorded
+    let now = maestro_hosts::current_time_ms();
+    let valid_cred = registry.issue_bridge_credential(&verified, node.clone(), now - 5_000, now + 60_000).unwrap();
     let handback_ok = agent_request_with_hosts(
         &store,
         &registry,
@@ -885,6 +1030,8 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
         json!({
             "session": format!("paseo:-/{id}"),
             "cwd": cwd.to_string_lossy(),
+            "node": node.as_str(),
+            "credential": valid_cred,
             "summary": "completed host-identity verification"
         }),
     )
@@ -892,6 +1039,41 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
     assert_eq!(handback_ok["request"]["verified"], json!(true));
     assert_eq!(handback_ok["request"]["disposition"], json!(Disposition::Recorded));
 
+    // - Expired credential on the normal MCP path (verify_caller with real clock) is refused -> StaleCredential
+    let expired_cred = registry.issue_bridge_credential(&verified, node.clone(), now - 60_000, now - 1).unwrap();
+    let expired_mcp_err = agent_request_with_hosts(
+        &store,
+        &registry,
+        RequestKind::Handback,
+        json!({
+            "session": format!("paseo:-/{id}"),
+            "cwd": cwd.to_string_lossy(),
+            "node": node.as_str(),
+            "credential": expired_cred,
+            "summary": "expired credential must be refused"
+        }),
+    )
+    .unwrap_err();
+    assert!(expired_mcp_err.message.contains("StaleCredential"));
+
+    // - Future credential on the normal MCP path is refused -> StaleCredential
+    let future_cred = registry.issue_bridge_credential(&verified, node.clone(), now + 30_000, now + 90_000).unwrap();
+    let future_mcp_err = agent_request_with_hosts(
+        &store,
+        &registry,
+        RequestKind::Handback,
+        json!({
+            "session": format!("paseo:-/{id}"),
+            "cwd": cwd.to_string_lossy(),
+            "node": node.as_str(),
+            "credential": future_cred,
+            "summary": "future credential must be refused"
+        }),
+    )
+    .unwrap_err();
+    assert!(future_mcp_err.message.contains("StaleCredential"));
+
+    // - Malformed credential fails invalid_params
     let bad_cred_err = agent_request_with_hosts(
         &store,
         &registry,
@@ -906,6 +1088,7 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
     .unwrap_err();
     assert!(bad_cred_err.message.contains("`credential`"));
 
+    // - T3 verified session persists verified environment ("env-nuc") and refuses mismatched environment
     let t3_json = root.join("t3-env-threads.json");
     fs::write(
         &t3_json,
@@ -922,7 +1105,17 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
         .unwrap(),
     )
     .unwrap();
-    let t3_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None);
+    let t3_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+        .with_expected_node(node.clone())
+        .with_bridge_secret("mcp-bridge-secret");
+    let t3_verified = t3_reg
+        .verify_caller(
+            &CallerClaim::t3(Some("mcp:t3-env-1"), Some(cwd.to_string_lossy().into_owned()))
+                .with_node(node.clone())
+                .with_peer(peer),
+        )
+        .unwrap();
+    let t3_cred = t3_reg.issue_bridge_credential(&t3_verified, node.clone(), now - 5_000, now + 60_000).unwrap();
     let t3_handback = agent_request_with_hosts(
         &store,
         &t3_reg,
@@ -930,6 +1123,8 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
         json!({
             "session": "t3:-/mcp:t3-env-1",
             "cwd": cwd.to_string_lossy(),
+            "node": node.as_str(),
+            "credential": t3_cred.clone(),
             "summary": "verified t3 environment persisted"
         }),
     )
@@ -943,13 +1138,15 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
         json!({
             "session": "t3:wrong-env/mcp:t3-env-1",
             "cwd": cwd.to_string_lossy(),
+            "node": node.as_str(),
+            "credential": t3_cred,
             "summary": "mismatched environment must fail"
         }),
     )
     .unwrap_err();
     assert!(env_mismatch_err.message.contains("does not match verified session"));
 
-    // 3. Forged caller (outside cwd or unknown id) is refused with zero new journal entries
+    // 3. Forged / outside-cwd caller via agent_request_with_hosts is refused and writes nothing
     let journal_path = maestro_store::requests::journal(&store.paths);
     let lines_before = fs::read_to_string(&journal_path).unwrap().lines().count();
     let forged_err = agent_request_with_hosts(
@@ -959,7 +1156,9 @@ fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
         json!({
             "session": format!("paseo:-/{id}"),
             "cwd": outside_cwd.to_string_lossy(),
-            "summary": "spoofed handback from outside folder"
+            "node": node.as_str(),
+            "credential": valid_cred,
+            "summary": "forged handback"
         }),
     )
     .unwrap_err();

@@ -41,6 +41,8 @@ pub struct T3Thread {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
@@ -80,6 +82,16 @@ impl T3Thread {
             other => Harness::Other(other.to_string()),
         })
     }
+
+    pub fn incarnation(&self) -> String {
+        format!(
+            "t3:{}:{}:{}:{}",
+            self.cwd,
+            self.environment_id.as_deref().unwrap_or("-"),
+            self.provider.as_deref().unwrap_or("-"),
+            self.created_at.as_deref().unwrap_or("-"),
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -92,6 +104,8 @@ struct RawT3Thread {
     node: Option<NodeId>,
     #[serde(default)]
     provider: Option<String>,
+    #[serde(default, alias = "createdAt")]
+    created_at: Option<String>,
     #[serde(default)]
     archived_at: Option<String>,
     #[serde(default)]
@@ -118,163 +132,171 @@ pub struct T3Registry {
 const SQLITE_READER_PY: &str = r#"
 import json, pathlib, sqlite3, sys
 
-mode = sys.argv[1]
-db_path = pathlib.Path(sys.argv[2])
-target_id = sys.argv[3] if len(sys.argv) > 3 else ""
+def main():
+    mode = sys.argv[1]
+    db_path = pathlib.Path(sys.argv[2])
+    target_id = sys.argv[3] if len(sys.argv) > 3 else ""
 
-env_file = db_path.parent / "environment-id"
-env_id = env_file.read_text().strip() if env_file.is_file() else None
+    env_file = db_path.parent / "environment-id"
+    env_id = env_file.read_text().strip() if env_file.is_file() else None
 
-try:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-except Exception as exc:
-    sys.stderr.write(f"sqlite_error: {exc}\n")
-    sys.exit(2)
 
-def build_thread(row):
-    try:
-        payload = json.loads(row["payload_json"] or "{}")
-    except Exception:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    cwd = payload.get("worktreePath")
-    if not cwd and "projection_projects" in tables:
-        proj = conn.execute(
-            "SELECT workspace_root FROM projection_projects WHERE project_id = ?",
-            (row["project_id"],),
-        ).fetchone()
-        if proj:
-            cwd = proj["workspace_root"]
-    if not isinstance(cwd, str) or not cwd:
-        return None
-    run_status = payload.get("status")
-    if "orchestration_v2_projection_runs" in tables:
-        r = conn.execute(
-            "SELECT status FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1",
-            (row["thread_id"],),
-        ).fetchone()
-        if r and r["status"]:
-            run_status = r["status"]
-    settled_at = payload.get("settledAt")
-    unsettled_at = payload.get("unsettledAt")
-    if settled_at and unsettled_at and unsettled_at > settled_at:
-        settled_at = None
-    parent_id = None
-    lineage = payload.get("lineage") or payload.get("forkedFrom")
-    if isinstance(lineage, dict):
-        parent_id = lineage.get("parentThreadId") or lineage.get("threadId")
-    perms = []
-    if "orchestration_v2_projection_runtime_requests" in tables:
-        for req in conn.execute(
-            "SELECT runtime_request_id, kind, status, payload_json "
-            "FROM orchestration_v2_projection_runtime_requests "
-            "WHERE thread_id = ? AND status = 'pending' ORDER BY created_at ASC",
-            (row["thread_id"],),
-        ):
-            if req["kind"] in ("approval", "permission", "tool_approval"):
-                try:
-                    rp = json.loads(req["payload_json"] or "{}")
-                except Exception:
-                    continue
-                if not isinstance(rp, dict):
-                    continue
-                name = rp.get("toolName") or rp.get("name") or req["kind"]
-                if not isinstance(name, str) or not name.strip():
-                    continue
-                req_id = req["runtime_request_id"]
-                if not isinstance(req_id, str) or not req_id.strip():
-                    req_id = rp.get("id") if isinstance(rp.get("id"), str) else None
-                perms.append({
-                    "id": req_id,
-                    "name": name,
-                    "title": rp.get("title") if isinstance(rp.get("title"), str) else None,
-                    "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
-                    "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
-                })
-    return {
-        "id": row["thread_id"],
-        "cwd": cwd,
-        "environment_id": env_id,
-        "node": payload.get("node") if isinstance(payload.get("node"), str) else None,
-        "provider": row["default_provider"],
-        "archived_at": row["archived_at"] or payload.get("archivedAt"),
-        "deleted_at": row["deleted_at"] or payload.get("deletedAt"),
-        "settled_at": settled_at,
-        "status": run_status,
-        "parent_id": parent_id,
-        "pending_permissions": perms,
-    }
-
-if mode == "list":
-    out = []
-    if "orchestration_v2_projection_threads" in tables:
-        for row in conn.execute(
-            "SELECT thread_id, project_id, default_provider, archived_at, deleted_at, payload_json "
-            "FROM orchestration_v2_projection_threads ORDER BY updated_at DESC"
-        ):
-            built = build_thread(row)
-            if built is not None:
-                out.append(built)
-    print(json.dumps(out))
-    sys.exit(0)
-
-if "orchestration_v2_projection_threads" in tables:
-    row = conn.execute(
-        "SELECT thread_id, project_id, default_provider, archived_at, deleted_at, payload_json "
-        "FROM orchestration_v2_projection_threads WHERE thread_id = ?",
-        (target_id,),
-    ).fetchone()
-    if row is not None:
-        built = build_thread(row)
-        if built is not None:
-            print(json.dumps(built))
-            sys.exit(0)
-
-if "projection_threads" in tables:
-    prow = conn.execute(
-        "SELECT thread_id, project_id, worktree_path, archived_at, deleted_at, settled_at "
-        "FROM projection_threads WHERE thread_id = ?",
-        (target_id,),
-    ).fetchone()
-    if prow is not None:
-        cwd = prow["worktree_path"]
+    def build_thread(row):
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        cwd = payload.get("worktreePath")
         if not cwd and "projection_projects" in tables:
             proj = conn.execute(
                 "SELECT workspace_root FROM projection_projects WHERE project_id = ?",
-                (prow["project_id"],),
+                (row["project_id"],),
             ).fetchone()
             if proj:
                 cwd = proj["workspace_root"]
-        provider = None
-        status = None
-        if "projection_thread_sessions" in tables:
-            srow = conn.execute(
-                "SELECT provider_name, status FROM projection_thread_sessions WHERE thread_id = ?",
-                (target_id,),
+        if not isinstance(cwd, str) or not cwd:
+            return None
+        run_status = payload.get("status")
+        if "orchestration_v2_projection_runs" in tables:
+            r = conn.execute(
+                "SELECT status FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1",
+                (row["thread_id"],),
             ).fetchone()
-            if srow:
-                provider = srow["provider_name"]
-                status = srow["status"]
-        if cwd:
-            print(json.dumps({
-                "id": prow["thread_id"],
-                "cwd": cwd,
-                "environment_id": env_id,
-                "node": None,
-                "provider": provider,
-                "archived_at": prow["archived_at"],
-                "deleted_at": prow["deleted_at"],
-                "settled_at": prow["settled_at"],
-                "status": status,
-                "parent_id": None,
-                "pending_permissions": [],
-            }))
-            sys.exit(0)
+            if r and r["status"]:
+                run_status = r["status"]
+        settled_at = payload.get("settledAt")
+        unsettled_at = payload.get("unsettledAt")
+        if settled_at and unsettled_at and unsettled_at > settled_at:
+            settled_at = None
+        parent_id = None
+        lineage = payload.get("lineage") or payload.get("forkedFrom")
+        if isinstance(lineage, dict):
+            parent_id = lineage.get("parentThreadId") or lineage.get("threadId")
+        perms = []
+        if "orchestration_v2_projection_runtime_requests" in tables:
+            for req in conn.execute(
+                "SELECT runtime_request_id, kind, status, payload_json "
+                "FROM orchestration_v2_projection_runtime_requests "
+                "WHERE thread_id = ? AND status = 'pending' ORDER BY created_at ASC",
+                (row["thread_id"],),
+            ):
+                if req["kind"] in ("approval", "permission", "tool_approval"):
+                    try:
+                        rp = json.loads(req["payload_json"] or "{}")
+                    except Exception:
+                        continue
+                    if not isinstance(rp, dict):
+                        continue
+                    name = rp.get("toolName") or rp.get("name") or req["kind"]
+                    if not isinstance(name, str) or not name.strip():
+                        continue
+                    req_id = req["runtime_request_id"]
+                    if not isinstance(req_id, str) or not req_id.strip():
+                        req_id = rp.get("id") if isinstance(rp.get("id"), str) else None
+                    perms.append({
+                        "id": req_id,
+                        "name": name,
+                        "title": rp.get("title") if isinstance(rp.get("title"), str) else None,
+                        "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
+                        "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
+                    })
+        created_at = row["created_at"] if "created_at" in row.keys() else payload.get("createdAt")
+        return {
+            "id": row["thread_id"],
+            "cwd": cwd,
+            "environment_id": env_id,
+            "node": payload.get("node") if isinstance(payload.get("node"), str) else None,
+            "provider": row["default_provider"],
+            "created_at": created_at,
+            "archived_at": row["archived_at"] or payload.get("archivedAt"),
+            "deleted_at": row["deleted_at"] or payload.get("deletedAt"),
+            "settled_at": settled_at,
+            "status": run_status,
+            "parent_id": parent_id,
+            "pending_permissions": perms,
+        }
 
-sys.exit(1)
+    if mode == "list":
+        out = []
+        if "orchestration_v2_projection_threads" in tables:
+            for row in conn.execute(
+                "SELECT thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
+                "FROM orchestration_v2_projection_threads ORDER BY updated_at DESC"
+            ):
+                built = build_thread(row)
+                if built is not None:
+                    out.append(built)
+        print(json.dumps(out))
+        sys.exit(0)
+
+    if "orchestration_v2_projection_threads" in tables:
+        row = conn.execute(
+            "SELECT thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
+            "FROM orchestration_v2_projection_threads WHERE thread_id = ?",
+            (target_id,),
+        ).fetchone()
+        if row is not None:
+            built = build_thread(row)
+            if built is not None:
+                print(json.dumps(built))
+                sys.exit(0)
+
+    if "projection_threads" in tables:
+        prow = conn.execute(
+            "SELECT thread_id, project_id, worktree_path, archived_at, deleted_at, settled_at "
+            "FROM projection_threads WHERE thread_id = ?",
+            (target_id,),
+        ).fetchone()
+        if prow is not None:
+            cwd = prow["worktree_path"]
+            if not cwd and "projection_projects" in tables:
+                proj = conn.execute(
+                    "SELECT workspace_root FROM projection_projects WHERE project_id = ?",
+                    (prow["project_id"],),
+                ).fetchone()
+                if proj:
+                    cwd = proj["workspace_root"]
+            provider = None
+            status = None
+            if "projection_thread_sessions" in tables:
+                srow = conn.execute(
+                    "SELECT provider_name, status FROM projection_thread_sessions WHERE thread_id = ?",
+                    (target_id,),
+                ).fetchone()
+                if srow:
+                    provider = srow["provider_name"]
+                    status = srow["status"]
+            if cwd:
+                print(json.dumps({
+                    "id": prow["thread_id"],
+                    "cwd": cwd,
+                    "environment_id": env_id,
+                    "node": None,
+                    "provider": provider,
+                    "created_at": None,
+                    "archived_at": prow["archived_at"],
+                    "deleted_at": prow["deleted_at"],
+                    "settled_at": prow["settled_at"],
+                    "status": status,
+                    "parent_id": None,
+                    "pending_permissions": [],
+                }))
+                sys.exit(0)
+
+    sys.exit(3)
+
+try:
+    main()
+except SystemExit:
+    raise
+except Exception as exc:
+    sys.stderr.write(f"sqlite_error: {exc}\n")
+    sys.exit(2)
 "#;
 
 impl T3Registry {
@@ -393,6 +415,7 @@ impl T3Registry {
             environment_id: raw.environment_id,
             node: raw.node,
             provider: raw.provider,
+            created_at: raw.created_at,
             archived_at: raw.archived_at,
             deleted_at: raw.deleted_at,
             settled_at: raw.settled_at,
@@ -403,9 +426,6 @@ impl T3Registry {
     }
 
     fn lookup(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {
-        if self.disconnected {
-            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
-        }
         if !is_safe_t3_id(id) {
             return Ok(None);
         }
@@ -452,7 +472,7 @@ impl T3Registry {
                     }
                     return Ok(Some(Self::from_raw(raw)));
                 }
-                Some(1) => return Ok(None),
+                Some(3) => return Ok(None),
                 _ => {
                     return Err(IdentityRefusal::new(
                         RefusalReason::RegistryDisconnected,
@@ -469,6 +489,9 @@ impl T3Registry {
 
     /// Look up `id` in T3's thread registry (`statev2.sqlite` or `threads.json`).
     pub fn find(&self, id: &str) -> Option<T3Thread> {
+        if !self.is_connected() {
+            return None;
+        }
         self.lookup(id).ok().flatten()
     }
 
@@ -510,6 +533,9 @@ impl T3Registry {
                 RefusalReason::CrossSurface,
                 format!("Surface `{}` cannot be verified by the T3 registry.", claim.surface.as_str()),
             ));
+        }
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
         }
         check_peer(self.expected_uid, claim.peer)?;
         let Some(thread_id) = claim.session_id.as_deref().filter(|s| !s.is_empty()) else {
@@ -563,7 +589,7 @@ impl T3Registry {
             ));
         }
         let harness = thread.harness();
-        let node = thread.node.or_else(|| self.expected_node.clone());
+        let incarnation = thread.incarnation();
         Ok(VerifiedSession::new(
             SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
             thread.cwd,
@@ -571,6 +597,6 @@ impl T3Registry {
             thread.parent_id,
             thread.pending_permissions,
         )
-        .with_node_and_generation(node, 0))
+        .with_incarnation(incarnation))
     }
 }

@@ -473,6 +473,8 @@ pub struct VerifiedSession {
     parent_id: Option<String>,
     #[serde(default)]
     generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incarnation: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_permissions: Vec<PermissionPrompt>,
 }
@@ -486,7 +488,25 @@ impl VerifiedSession {
         parent_id: Option<String>,
         pending_permissions: Vec<PermissionPrompt>,
     ) -> Self {
-        Self { session, cwd: cwd.into(), node: None, harness, parent_id, generation: 0, pending_permissions }
+        Self {
+            session,
+            cwd: cwd.into(),
+            node: None,
+            harness,
+            parent_id,
+            generation: 0,
+            incarnation: None,
+            pending_permissions,
+        }
+    }
+
+    pub fn with_incarnation(mut self, incarnation: impl Into<String>) -> Self {
+        self.incarnation = Some(incarnation.into());
+        self
+    }
+
+    pub fn incarnation(&self) -> Option<&str> {
+        self.incarnation.as_deref()
     }
 
     pub fn with_node_and_generation(mut self, node: Option<NodeId>, generation: u64) -> Self {

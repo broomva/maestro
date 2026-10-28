@@ -58,6 +58,8 @@ pub struct PaseoAgent {
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
 }
@@ -87,6 +89,8 @@ struct RawRegistryFile {
     labels: Option<Value>,
     #[serde(default)]
     provider: Option<String>,
+    #[serde(default, alias = "started_at", alias = "createdAt", alias = "created_at")]
+    started_at: Option<String>,
     #[serde(default)]
     pending_permissions: Option<Vec<Value>>,
 }
@@ -215,6 +219,7 @@ impl PaseoRegistry {
             status: parsed.last_status,
             parent,
             provider: parsed.provider,
+            started_at: parsed.started_at,
             pending_permissions,
         })
     }
@@ -274,13 +279,21 @@ impl PaseoRegistry {
             ));
         }
         let harness = agent.provider.as_deref().map(|p| p.parse::<Harness>().unwrap());
+        let incarnation = format!(
+            "paseo:{}:{}:{}:{}",
+            agent.cwd,
+            agent.provider.as_deref().unwrap_or("-"),
+            agent.parent.as_deref().unwrap_or("-"),
+            agent.started_at.as_deref().unwrap_or("-"),
+        );
         Ok(VerifiedSession::new(
             SessionRef { surface: Surface::Paseo, environment: None, id: agent.id },
             agent.cwd,
             harness,
             agent.parent,
             agent.pending_permissions,
-        ))
+        )
+        .with_incarnation(incarnation))
     }
 
     /// Whether `child` is a live session `parent` directly started (`Callers.started`).

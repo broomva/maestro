@@ -422,8 +422,9 @@ pub fn call_with_hosts(
             let snap = views::snapshot(store);
             let mut section = snap.needs;
             if let Some(list) = section.data.as_mut() {
-                list.extend(hosts.live_permission_needs(None, None));
-                if let Some(p) = a.project.as_deref() {
+                if a.project.is_none() {
+                    list.extend(hosts.live_permission_needs(None, None));
+                } else if let Some(p) = a.project.as_deref() {
                     list.retain(|n| n.project.as_deref() == Some(p));
                 }
             }
@@ -599,9 +600,11 @@ pub fn call_with_hosts(
             let a: ContextArgs = parse(args)?;
             let mut packet =
                 views::context(store, ContextScope { cwd: a.cwd, project: a.project, initiative: a.initiative });
-            let live_needs = hosts.live_permission_needs(None, None);
-            if !live_needs.is_empty() {
-                packet.needs.extend(live_needs);
+            if packet.scope.project.is_none() && packet.scope.initiative.is_none() {
+                let live_needs = hosts.live_permission_needs(None, None);
+                if !live_needs.is_empty() {
+                    packet.needs.extend(live_needs);
+                }
             }
             let markdown = packet.render_markdown(a.max_needs.unwrap_or(8));
             Ok(json!({ "markdown": markdown, "packet": packet }))
@@ -658,6 +661,12 @@ fn resolve_caller(
     let caller = Principal::Unverified;
     if !hosts.has_surface(&session.surface) && !has_claim_meta {
         return Ok((session.clone(), caller));
+    }
+    if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {
+        return Err(McpError::invalid_params(
+            "caller identity refused (InvalidToken): authenticated bridge credential or launch token is required",
+            Some(json!({ "reason": "invalid_token", "refused": true })),
+        ));
     }
     let mut claim = maestro_hosts::CallerClaim {
         surface: session.surface.clone(),

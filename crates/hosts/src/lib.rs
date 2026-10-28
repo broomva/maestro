@@ -9,9 +9,9 @@
 //! - [`DirectRegistry`] verifies bare processes against per-launch tokens issued at
 //!   dispatch;
 //! - [`SurfaceRegistry`] routes by surface, verifies node and short-lived tuple-bound
-//!   [`BridgeCredential`] bindings with HMAC-SHA256, tracks persistent session generations
-//!   to refuse ID reuse, refuses cross-surface spoofing, and projects live permission
-//!   prompts into [`Need`]s.
+//!   [`BridgeCredential`] bindings with HMAC-SHA256, tracks persistent incarnation-bound
+//!   session generations to refuse ID reuse, refuses cross-surface spoofing, and projects
+//!   live permission prompts into [`Need`]s.
 
 pub mod paseo;
 pub mod t3;
@@ -34,13 +34,39 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write as _;
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-static SHARED_GENERATIONS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct GenerationEntry {
+    generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    incarnation: Option<String>,
+}
 
-fn shared_generations() -> &'static Mutex<HashMap<String, u64>> {
+static SHARED_GENERATIONS: OnceLock<Mutex<HashMap<String, GenerationEntry>>> = OnceLock::new();
+static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn shared_generations() -> &'static Mutex<HashMap<String, GenerationEntry>> {
     SHARED_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Current wall-clock timestamp in milliseconds since the Unix epoch.
+pub fn current_time_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)).unwrap_or(0)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    hex
 }
 
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
@@ -66,6 +92,82 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     outer.update(opad);
     outer.update(inner_hash);
     outer.finalize().into()
+}
+
+struct LockGuard {
+    path: PathBuf,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_generation_lock(path: &Path, surface: &Surface) -> Result<LockGuard, SessionError> {
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            Ok(mut file) => {
+                let _ = writeln!(file, "{}", std::process::id());
+                return Ok(LockGuard { path: lock_path });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => {
+                return Err(SessionError::RegistryDisconnected {
+                    surface: surface.clone(),
+                    detail: format!("generation lock {} could not be acquired: {e}", lock_path.display()),
+                });
+            }
+        }
+    }
+}
+
+fn load_generations_map(path: &Path, surface: &Surface) -> Result<HashMap<String, GenerationEntry>, SessionError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<HashMap<String, GenerationEntry>>(&text).map_err(|e| {
+            SessionError::RegistryDisconnected {
+                surface: surface.clone(),
+                detail: format!("generation ledger {} is corrupt: {e}", path.display()),
+            }
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(e) => Err(SessionError::RegistryDisconnected {
+            surface: surface.clone(),
+            detail: format!("generation ledger {} could not be read: {e}", path.display()),
+        }),
+    }
+}
+
+fn store_generations_map(
+    path: &Path,
+    surface: &Surface,
+    map: &HashMap<String, GenerationEntry>,
+) -> Result<(), SessionError> {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = PathBuf::from(format!("{}.tmp.{}.{seq}", path.display(), std::process::id()));
+    let encoded = serde_json::to_vec(map).map_err(|e| SessionError::RegistryDisconnected {
+        surface: surface.clone(),
+        detail: format!("generation ledger serialize failed: {e}"),
+    })?;
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = File::create(&tmp_path)?;
+        f.write_all(&encoded)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_path, path)
+    })();
+    if let Err(e) = write_res {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(SessionError::RegistryDisconnected {
+            surface: surface.clone(),
+            detail: format!("generation ledger {} could not be persisted: {e}", path.display()),
+        });
+    }
+    Ok(())
 }
 
 /// A registered [`Surface::Direct`] session and its per-launch token.
@@ -129,13 +231,15 @@ impl DirectRegistry {
     /// Register or re-issue a Direct session; returns `true` when an existing session ID was replaced.
     pub fn register(&self, session: DirectSession) -> bool {
         let id = session.id.clone();
+        let inc = format!("direct:{}:{}", session.cwd, hex_sha256(session.token.as_bytes()));
         let replaced = self.sessions.lock().unwrap().insert(id.clone(), session).is_some();
-        if replaced {
-            let key = format!("direct:{id}");
-            let mut map = shared_generations().lock().unwrap();
-            let next = map.get(&key).copied().unwrap_or(0) + 1;
-            map.insert(key, next);
+        let key = format!("direct:{id}");
+        let mut map = shared_generations().lock().unwrap();
+        let entry = map.entry(key).or_default();
+        if replaced || (entry.incarnation.is_some() && entry.incarnation.as_deref() != Some(inc.as_str())) {
+            entry.generation += 1;
         }
+        entry.incarnation = Some(inc);
         replaced
     }
 
@@ -143,21 +247,27 @@ impl DirectRegistry {
         if !is_safe_id(id) {
             return None;
         }
-        if let Some(found) = self.sessions.lock().unwrap().get(id).cloned() {
+        if let Some(path) = &self.file_path
+            && let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
+            && let Some(found) = rows.into_iter().find(|s| s.id == id)
+        {
             return Some(found);
         }
+        self.sessions.lock().unwrap().get(id).cloned()
+    }
+
+    pub fn list_live_sessions(&self) -> Vec<DirectSession> {
+        let mut combined: HashMap<String, DirectSession> = self.sessions.lock().unwrap().clone();
         if let Some(path) = &self.file_path
             && let Ok(text) = std::fs::read_to_string(path)
             && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
         {
-            return rows.into_iter().find(|s| s.id == id);
+            for s in rows {
+                combined.insert(s.id.clone(), s);
+            }
         }
-        None
-    }
-
-    pub fn list_live_sessions(&self) -> Vec<DirectSession> {
-        let map = self.sessions.lock().unwrap();
-        let mut out: Vec<DirectSession> = map.values().filter(|s| s.liveness.is_live()).cloned().collect();
+        let mut out: Vec<DirectSession> = combined.into_values().filter(|s| s.liveness.is_live()).collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
     }
@@ -215,13 +325,15 @@ impl DirectRegistry {
                 ),
             ));
         }
+        let incarnation = format!("direct:{}:{}", session.cwd, hex_sha256(session.token.as_bytes()));
         Ok(VerifiedSession::new(
             SessionRef { surface: Surface::Direct, environment: None, id: session.id },
             session.cwd,
             session.harness,
             None,
             session.pending_permissions,
-        ))
+        )
+        .with_incarnation(incarnation))
     }
 }
 
@@ -234,7 +346,7 @@ pub struct SurfaceRegistry {
     expected_node: Option<NodeId>,
     bridge_secret: Option<Vec<u8>>,
     generations_file: Option<PathBuf>,
-    generations: Mutex<HashMap<String, u64>>,
+    generations: Mutex<HashMap<String, GenerationEntry>>,
 }
 
 impl SurfaceRegistry {
@@ -287,14 +399,12 @@ impl SurfaceRegistry {
         self
     }
 
+    pub fn has_bridge_secret(&self) -> bool {
+        self.bridge_secret.is_some()
+    }
+
     pub fn with_generations_file(mut self, path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(map) = serde_json::from_str::<HashMap<String, u64>>(&text)
-        {
-            *self.generations.lock().unwrap() = map;
-        }
-        self.generations_file = Some(path);
+        self.generations_file = Some(path.into());
         self
     }
 
@@ -307,42 +417,110 @@ impl SurfaceRegistry {
         }
     }
 
-    /// Register or re-issue a Direct session on this registry, bumping its generation if the ID was reused.
-    pub fn register_direct(&self, session: DirectSession) -> u64 {
-        let id = session.id.clone();
-        let replaced = self.direct.as_ref().is_some_and(|direct| direct.register(session));
-        if replaced { self.bump_generation(&Surface::Direct, &id) } else { self.generation_of(&Surface::Direct, &id) }
+    /// Synchronize and return the authoritative generation for `(surface, session_id)` and its
+    /// observed `incarnation`. Fails closed (`RegistryDisconnected`) if `generations_file` is
+    /// configured and unreadable, corrupt, or unwritable.
+    fn sync_generation(
+        &self,
+        surface: &Surface,
+        session_id: &str,
+        incarnation: Option<&str>,
+    ) -> Result<u64, SessionError> {
+        let key = format!("{}:{session_id}", surface.as_str());
+        if let Some(path) = &self.generations_file {
+            let _lock = acquire_generation_lock(path, surface)?;
+            let mut map = load_generations_map(path, surface)?;
+            let mut dirty = false;
+            let entry = map.entry(key.clone()).or_insert_with(|| {
+                dirty = true;
+                GenerationEntry::default()
+            });
+            if let Some(inc) = incarnation {
+                match entry.incarnation.as_deref() {
+                    Some(prev) if prev != inc => {
+                        entry.generation += 1;
+                        entry.incarnation = Some(inc.to_string());
+                        dirty = true;
+                    }
+                    None => {
+                        entry.incarnation = Some(inc.to_string());
+                        dirty = true;
+                    }
+                    _ => {}
+                }
+            }
+            let gen_val = entry.generation;
+            let cloned_entry = entry.clone();
+            if dirty {
+                store_generations_map(path, surface, &map)?;
+            }
+            self.generations.lock().unwrap().insert(key.clone(), cloned_entry.clone());
+            shared_generations().lock().unwrap().insert(key, cloned_entry);
+            return Ok(gen_val);
+        }
+
+        let mut local = self.generations.lock().unwrap();
+        let entry = local.entry(key).or_default();
+        if let Some(inc) = incarnation {
+            match entry.incarnation.as_deref() {
+                Some(prev) if prev != inc => {
+                    entry.generation += 1;
+                    entry.incarnation = Some(inc.to_string());
+                }
+                None => {
+                    entry.incarnation = Some(inc.to_string());
+                }
+                _ => {}
+            }
+        }
+        Ok(entry.generation)
     }
 
     /// Current generation counter for `(surface, session_id)`.
     pub fn generation_of(&self, surface: &Surface, session_id: &str) -> u64 {
         let key = format!("{}:{session_id}", surface.as_str());
         if let Some(path) = &self.generations_file
-            && let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(map) = serde_json::from_str::<HashMap<String, u64>>(&text)
-            && let Some(val) = map.get(&key).copied()
+            && let Ok(map) = load_generations_map(path, surface)
+            && let Some(entry) = map.get(&key)
         {
-            return val;
+            return entry.generation;
         }
-        let local = self.generations.lock().unwrap().get(&key).copied().unwrap_or(0);
-        let shared = shared_generations().lock().unwrap().get(&key).copied().unwrap_or(0);
-        local.max(shared)
+        self.generations.lock().unwrap().get(&key).map(|e| e.generation).unwrap_or(0)
+    }
+
+    /// Fallible explicit generation bump that fails closed if `generations_file` cannot be read or written.
+    pub fn try_bump_generation(&self, surface: &Surface, session_id: &str) -> Result<u64, SessionError> {
+        let key = format!("{}:{session_id}", surface.as_str());
+        if let Some(path) = &self.generations_file {
+            let _lock = acquire_generation_lock(path, surface)?;
+            let mut map = load_generations_map(path, surface)?;
+            let entry = map.entry(key.clone()).or_default();
+            entry.generation += 1;
+            let next = entry.generation;
+            let cloned = entry.clone();
+            store_generations_map(path, surface, &map)?;
+            self.generations.lock().unwrap().insert(key.clone(), cloned.clone());
+            shared_generations().lock().unwrap().insert(key, cloned);
+            return Ok(next);
+        }
+        let mut local = self.generations.lock().unwrap();
+        let entry = local.entry(key.clone()).or_default();
+        entry.generation += 1;
+        let next = entry.generation;
+        shared_generations().lock().unwrap().insert(key, entry.clone());
+        Ok(next)
     }
 
     /// Increment the generation counter when a session ID is re-issued or restarted,
     /// invalidating any earlier [`BridgeCredential`] for that ID.
     pub fn bump_generation(&self, surface: &Surface, session_id: &str) -> u64 {
-        let key = format!("{}:{session_id}", surface.as_str());
-        let next = self.generation_of(surface, session_id) + 1;
-        self.generations.lock().unwrap().insert(key.clone(), next);
-        shared_generations().lock().unwrap().insert(key, next);
-        if let Some(path) = &self.generations_file {
-            let snapshot = self.generations.lock().unwrap().clone();
-            if let Ok(encoded) = serde_json::to_string(&snapshot) {
-                let _ = std::fs::write(path, encoded);
-            }
-        }
-        next
+        self.try_bump_generation(surface, session_id).unwrap_or_else(|_| {
+            let key = format!("{}:{session_id}", surface.as_str());
+            let mut local = self.generations.lock().unwrap();
+            let entry = local.entry(key).or_default();
+            entry.generation += 1;
+            entry.generation
+        })
     }
 
     fn sign_tuple(
@@ -403,7 +581,8 @@ impl SurfaceRegistry {
         {
             return Err(SessionError::WrongNode { expected: want_node.clone(), actual: node });
         }
-        let generation = self.generation_of(&verified.session().surface, verified.agent_id());
+        let generation =
+            self.sync_generation(&verified.session().surface, verified.agent_id(), verified.incarnation())?;
         let signature = Self::sign_tuple(
             secret,
             verified.session(),
@@ -431,15 +610,15 @@ impl SurfaceRegistry {
         {
             return Err(SessionError::WrongNode { expected: want_node.clone(), actual: actual_node.clone() });
         }
-        let current_gen = claim.session_id.as_deref().map(|id| self.generation_of(&claim.surface, id)).unwrap_or(0);
-        if let Some(presented_gen) = claim.generation
-            && presented_gen != current_gen
+        if self.bridge_secret.is_some()
+            && claim.surface != Surface::Direct
+            && claim.credential.is_none()
+            && claim.peer.is_none()
         {
-            return Err(SessionError::IdReused {
-                session_id: claim.session_id.clone().unwrap_or_default(),
-                expected_generation: current_gen,
-                presented_generation: presented_gen,
-            });
+            return Err(SessionError::Refused(IdentityRefusal::new(
+                RefusalReason::InvalidToken,
+                "Unsigned session claim refused: a signed bridge credential or transport peer is required.",
+            )));
         }
         if let Some(cred) = &claim.credential {
             let Some(secret) = self.bridge_secret.as_deref() else {
@@ -474,13 +653,6 @@ impl SurfaceRegistry {
             {
                 return Err(SessionError::WrongNode { expected: cred.node.clone(), actual: claim_node.clone() });
             }
-            if cred.generation != current_gen {
-                return Err(SessionError::IdReused {
-                    session_id: cred.session.id.clone(),
-                    expected_generation: current_gen,
-                    presented_generation: cred.generation,
-                });
-            }
             let Some(ttl) = cred.expires_at_ms.checked_sub(cred.issued_at_ms) else {
                 return Err(SessionError::StaleCredential {
                     session_id: cred.session.id.clone(),
@@ -493,12 +665,11 @@ impl SurfaceRegistry {
                     reason: "lifetime outside 1..=3600000 ms".to_string(),
                 });
             }
-            if let Some(now) = now_ms
-                && (now < cred.issued_at_ms || now >= cred.expires_at_ms)
-            {
+            let effective_now_ms = now_ms.unwrap_or_else(current_time_ms);
+            if effective_now_ms < cred.issued_at_ms || effective_now_ms >= cred.expires_at_ms {
                 return Err(SessionError::StaleCredential {
                     session_id: cred.session.id.clone(),
-                    reason: format!("now={now} outside [{}, {})", cred.issued_at_ms, cred.expires_at_ms),
+                    reason: format!("now={effective_now_ms} outside [{}, {})", cred.issued_at_ms, cred.expires_at_ms),
                 });
             }
             let expected_sig = Self::sign_tuple(
@@ -519,13 +690,30 @@ impl SurfaceRegistry {
         }
 
         let verified = self.verify_surface(claim)?;
-        if let Some(cred) = &claim.credential
-            && !within(Path::new(&cred.cwd), Path::new(verified.cwd()))
+        let current_gen = self.sync_generation(&claim.surface, verified.agent_id(), verified.incarnation())?;
+        if let Some(presented_gen) = claim.generation
+            && presented_gen != current_gen
         {
-            return Err(SessionError::Refused(IdentityRefusal::new(
-                RefusalReason::OutsideCwd,
-                "Bridge credential folder does not match registered session folder.",
-            )));
+            return Err(SessionError::IdReused {
+                session_id: verified.agent_id().to_string(),
+                expected_generation: current_gen,
+                presented_generation: presented_gen,
+            });
+        }
+        if let Some(cred) = &claim.credential {
+            if cred.generation != current_gen {
+                return Err(SessionError::IdReused {
+                    session_id: cred.session.id.clone(),
+                    expected_generation: current_gen,
+                    presented_generation: cred.generation,
+                });
+            }
+            if !within(Path::new(&cred.cwd), Path::new(verified.cwd())) {
+                return Err(SessionError::Refused(IdentityRefusal::new(
+                    RefusalReason::OutsideCwd,
+                    "Bridge credential folder does not match registered session folder.",
+                )));
+            }
         }
         let node = claim
             .credential
@@ -594,8 +782,8 @@ impl SurfaceRegistry {
         }
     }
 
-    /// Verify a caller claim against its surface registry, refusing cross-surface spoofing,
-    /// wrong node, stale credential, ID reuse, or disconnected registries.
+    /// Verify a caller claim against its surface registry using the current system clock,
+    /// refusing cross-surface spoofing, wrong node, stale credential, ID reuse, or disconnected registries.
     pub fn verify_caller(&self, claim: &CallerClaim) -> Result<VerifiedSession, IdentityRefusal> {
         self.verify_session(claim, None).map_err(SessionError::into_refusal)
     }

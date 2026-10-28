@@ -17,4 +17,5 @@ step scripts/parity-check.sh
 step scripts/lock-parity.sh
 step scripts/tail-bench.sh
 step scripts/bridge-check.sh
+step scripts/acceptance/host-identity.sh --goldens --mutants --selftest
 echo "== ci green"
