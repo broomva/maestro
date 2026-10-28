@@ -953,6 +953,8 @@ name = "maestro-hosts"
 version = "0.1.0"
 dependencies = [
  "maestro-core",
+ "maestro-mcp",
+ "maestro-store",
  "serde",
  "serde_json",
  "sha2",
@@ -966,6 +968,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "maestro-core",
+ "maestro-hosts",
  "maestro-store",
  "maestro-view",
  "rmcp",

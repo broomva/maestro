@@ -8,10 +8,11 @@
 
 use crate::paseo::{PermissionLike, check_peer, describe_permission, permission_request_id, short_id, within};
 use maestro_core::session::{
-    CallerClaim, Harness, IdentityRefusal, PermissionPrompt, RefusalReason, SessionLiveness, SessionRef, Surface,
-    VerifiedSession,
+    BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, RefusalReason,
+    SessionLiveness, SessionRef, Surface, VerifiedSession,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -35,6 +36,8 @@ pub struct T3Thread {
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,6 +89,8 @@ struct RawT3Thread {
     #[serde(default)]
     environment_id: Option<String>,
     #[serde(default)]
+    node: Option<NodeId>,
+    #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
     archived_at: Option<String>,
@@ -98,7 +103,7 @@ struct RawT3Thread {
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
-    pending_permissions: Option<Vec<serde_json::Value>>,
+    pending_permissions: Option<Vec<Value>>,
 }
 
 /// T3 thread registry reader (`statev2.sqlite` or JSON snapshot).
@@ -106,30 +111,35 @@ struct RawT3Thread {
 pub struct T3Registry {
     root: PathBuf,
     expected_uid: Option<u32>,
+    expected_node: Option<NodeId>,
+    disconnected: bool,
 }
 
 const SQLITE_READER_PY: &str = r#"
 import json, pathlib, sqlite3, sys
 
-db_path = pathlib.Path(sys.argv[1])
-thread_id = sys.argv[2]
+mode = sys.argv[1]
+db_path = pathlib.Path(sys.argv[2])
+target_id = sys.argv[3] if len(sys.argv) > 3 else ""
+
 env_file = db_path.parent / "environment-id"
 env_id = env_file.read_text().strip() if env_file.is_file() else None
 
-conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-conn.row_factory = sqlite3.Row
-tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+except Exception as exc:
+    sys.stderr.write(f"sqlite_error: {exc}\n")
+    sys.exit(2)
 
-row = None
-if "orchestration_v2_projection_threads" in tables:
-    row = conn.execute(
-        "SELECT thread_id, project_id, default_provider, archived_at, deleted_at, payload_json "
-        "FROM orchestration_v2_projection_threads WHERE thread_id = ?",
-        (thread_id,),
-    ).fetchone()
-
-if row is not None:
-    payload = json.loads(row["payload_json"] or "{}")
+def build_thread(row):
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
     cwd = payload.get("worktreePath")
     if not cwd and "projection_projects" in tables:
         proj = conn.execute(
@@ -138,11 +148,13 @@ if row is not None:
         ).fetchone()
         if proj:
             cwd = proj["workspace_root"]
+    if not isinstance(cwd, str) or not cwd:
+        return None
     run_status = payload.get("status")
     if "orchestration_v2_projection_runs" in tables:
         r = conn.execute(
             "SELECT status FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1",
-            (thread_id,),
+            (row["thread_id"],),
         ).fetchone()
         if r and r["status"]:
             run_status = r["status"]
@@ -160,37 +172,72 @@ if row is not None:
             "SELECT runtime_request_id, kind, status, payload_json "
             "FROM orchestration_v2_projection_runtime_requests "
             "WHERE thread_id = ? AND status = 'pending' ORDER BY created_at ASC",
-            (thread_id,),
+            (row["thread_id"],),
         ):
             if req["kind"] in ("approval", "permission", "tool_approval"):
-                rp = json.loads(req["payload_json"] or "{}")
+                try:
+                    rp = json.loads(req["payload_json"] or "{}")
+                except Exception:
+                    continue
+                if not isinstance(rp, dict):
+                    continue
+                name = rp.get("toolName") or rp.get("name") or req["kind"]
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                req_id = req["runtime_request_id"]
+                if not isinstance(req_id, str) or not req_id.strip():
+                    req_id = rp.get("id") if isinstance(rp.get("id"), str) else None
                 perms.append({
-                    "id": req["runtime_request_id"],
-                    "name": rp.get("toolName") or rp.get("name") or req["kind"],
-                    "title": rp.get("title"),
-                    "description": rp.get("description"),
+                    "id": req_id,
+                    "name": name,
+                    "title": rp.get("title") if isinstance(rp.get("title"), str) else None,
+                    "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
                     "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
                 })
-    if cwd:
-        print(json.dumps({
-            "id": row["thread_id"],
-            "cwd": cwd,
-            "environment_id": env_id,
-            "provider": row["default_provider"],
-            "archived_at": row["archived_at"] or payload.get("archivedAt"),
-            "deleted_at": row["deleted_at"] or payload.get("deletedAt"),
-            "settled_at": settled_at,
-            "status": run_status,
-            "parent_id": parent_id,
-            "pending_permissions": perms,
-        }))
-        sys.exit(0)
+    return {
+        "id": row["thread_id"],
+        "cwd": cwd,
+        "environment_id": env_id,
+        "node": payload.get("node") if isinstance(payload.get("node"), str) else None,
+        "provider": row["default_provider"],
+        "archived_at": row["archived_at"] or payload.get("archivedAt"),
+        "deleted_at": row["deleted_at"] or payload.get("deletedAt"),
+        "settled_at": settled_at,
+        "status": run_status,
+        "parent_id": parent_id,
+        "pending_permissions": perms,
+    }
+
+if mode == "list":
+    out = []
+    if "orchestration_v2_projection_threads" in tables:
+        for row in conn.execute(
+            "SELECT thread_id, project_id, default_provider, archived_at, deleted_at, payload_json "
+            "FROM orchestration_v2_projection_threads ORDER BY updated_at DESC"
+        ):
+            built = build_thread(row)
+            if built is not None:
+                out.append(built)
+    print(json.dumps(out))
+    sys.exit(0)
+
+if "orchestration_v2_projection_threads" in tables:
+    row = conn.execute(
+        "SELECT thread_id, project_id, default_provider, archived_at, deleted_at, payload_json "
+        "FROM orchestration_v2_projection_threads WHERE thread_id = ?",
+        (target_id,),
+    ).fetchone()
+    if row is not None:
+        built = build_thread(row)
+        if built is not None:
+            print(json.dumps(built))
+            sys.exit(0)
 
 if "projection_threads" in tables:
     prow = conn.execute(
         "SELECT thread_id, project_id, worktree_path, archived_at, deleted_at, settled_at "
         "FROM projection_threads WHERE thread_id = ?",
-        (thread_id,),
+        (target_id,),
     ).fetchone()
     if prow is not None:
         cwd = prow["worktree_path"]
@@ -206,7 +253,7 @@ if "projection_threads" in tables:
         if "projection_thread_sessions" in tables:
             srow = conn.execute(
                 "SELECT provider_name, status FROM projection_thread_sessions WHERE thread_id = ?",
-                (thread_id,),
+                (target_id,),
             ).fetchone()
             if srow:
                 provider = srow["provider_name"]
@@ -216,6 +263,7 @@ if "projection_threads" in tables:
                 "id": prow["thread_id"],
                 "cwd": cwd,
                 "environment_id": env_id,
+                "node": None,
                 "provider": provider,
                 "archived_at": prow["archived_at"],
                 "deleted_at": prow["deleted_at"],
@@ -231,7 +279,7 @@ sys.exit(1)
 
 impl T3Registry {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into(), expected_uid: None }
+        Self { root: root.into(), expected_uid: None, expected_node: None, disconnected: false }
     }
 
     pub fn with_expected_uid(mut self, uid: u32) -> Self {
@@ -239,8 +287,78 @@ impl T3Registry {
         self
     }
 
+    pub fn with_expected_node(mut self, node: NodeId) -> Self {
+        self.expected_node = Some(node);
+        self
+    }
+
+    pub fn with_disconnected(mut self, disconnected: bool) -> Self {
+        self.disconnected = disconnected;
+        self
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn is_connected(&self) -> bool {
+        !self.disconnected && (self.json_path().is_some() || self.sqlite_path().is_some())
+    }
+
+    /// Discover T3 runtime version, transport, environment id, and connection state.
+    pub fn discover(&self) -> BridgeDiscovery {
+        let userdata = if self.root.join("userdata").is_dir() {
+            self.root.join("userdata")
+        } else if self.sqlite_path().and_then(|p| p.parent().map(Path::to_path_buf)).is_some() {
+            self.sqlite_path().unwrap().parent().unwrap().to_path_buf()
+        } else {
+            self.root.clone()
+        };
+
+        let env_id = std::fs::read_to_string(userdata.join("environment-id"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let runtime_json = std::fs::read_to_string(userdata.join("server-runtime.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        let service_json = std::fs::read_to_string(self.root.join("runtime/service-state.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+
+        let version = runtime_json
+            .as_ref()
+            .and_then(|v| v.get("serverVersion"))
+            .and_then(Value::as_str)
+            .or_else(|| service_json.as_ref().and_then(|v| v.get("activeVersion")).and_then(Value::as_str))
+            .unwrap_or("0.1.3")
+            .to_string();
+
+        let endpoint = std::env::var("T3_ACP_MCP_ENDPOINT").ok().filter(|s| !s.is_empty()).or_else(|| {
+            runtime_json
+                .as_ref()
+                .and_then(|v| v.get("origin"))
+                .and_then(Value::as_str)
+                .map(|origin| format!("{}/mcp", origin.trim_end_matches('/')))
+        });
+
+        let transport = if endpoint.is_some() && self.sqlite_path().is_some() {
+            BridgeTransport::T3McpBridge
+        } else if self.sqlite_path().is_some() {
+            BridgeTransport::T3SqliteReadonly
+        } else {
+            BridgeTransport::T3JsonSnapshot
+        };
+
+        BridgeDiscovery {
+            transport,
+            version,
+            endpoint,
+            environment_id: env_id,
+            node: self.expected_node.clone(),
+            connected: self.is_connected(),
+        }
     }
 
     fn sqlite_path(&self) -> Option<PathBuf> {
@@ -273,6 +391,7 @@ impl T3Registry {
             id: raw.id,
             cwd: raw.cwd,
             environment_id: raw.environment_id,
+            node: raw.node,
             provider: raw.provider,
             archived_at: raw.archived_at,
             deleted_at: raw.deleted_at,
@@ -283,35 +402,105 @@ impl T3Registry {
         }
     }
 
-    /// Look up `id` in T3's thread registry (`statev2.sqlite` or `threads.json`).
-    pub fn find(&self, id: &str) -> Option<T3Thread> {
+    fn lookup(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
         if !is_safe_t3_id(id) {
-            return None;
+            return Ok(None);
         }
         if let Some(json_file) = self.json_path() {
-            let text = std::fs::read_to_string(json_file).ok()?;
-            let rows: Vec<RawT3Thread> = serde_json::from_str(&text).ok()?;
-            return rows.into_iter().find(|raw| raw.id == id).map(Self::from_raw);
+            let text = std::fs::read_to_string(json_file).map_err(|e| {
+                IdentityRefusal::new(
+                    RefusalReason::RegistryDisconnected,
+                    format!("T3 JSON registry could not be read: {e}."),
+                )
+            })?;
+            let rows: Vec<RawT3Thread> = serde_json::from_str(&text).map_err(|e| {
+                IdentityRefusal::new(
+                    RefusalReason::RegistryDisconnected,
+                    format!("T3 JSON registry is malformed: {e}."),
+                )
+            })?;
+            return Ok(rows.into_iter().find(|raw| raw.id == id).map(Self::from_raw));
         }
         if let Some(db_file) = self.sqlite_path() {
             let out = Command::new("python3")
                 .arg("-I")
                 .arg("-c")
                 .arg(SQLITE_READER_PY)
+                .arg("get")
                 .arg(&db_file)
                 .arg(id)
                 .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
+                .map_err(|e| {
+                    IdentityRefusal::new(
+                        RefusalReason::RegistryDisconnected,
+                        format!("T3 SQLite reader failed to launch: {e}."),
+                    )
+                })?;
+            match out.status.code() {
+                Some(0) => {
+                    let raw: RawT3Thread = serde_json::from_slice(&out.stdout).map_err(|e| {
+                        IdentityRefusal::new(
+                            RefusalReason::RegistryDisconnected,
+                            format!("T3 SQLite reader returned invalid JSON: {e}."),
+                        )
+                    })?;
+                    if raw.id != id {
+                        return Ok(None);
+                    }
+                    return Ok(Some(Self::from_raw(raw)));
+                }
+                Some(1) => return Ok(None),
+                _ => {
+                    return Err(IdentityRefusal::new(
+                        RefusalReason::RegistryDisconnected,
+                        format!("T3 SQLite database is unreadable: {}", String::from_utf8_lossy(&out.stderr).trim()),
+                    ));
+                }
             }
-            let raw: RawT3Thread = serde_json::from_slice(&out.stdout).ok()?;
-            if raw.id != id {
-                return None;
-            }
-            return Some(Self::from_raw(raw));
         }
-        None
+        Err(IdentityRefusal::new(
+            RefusalReason::RegistryDisconnected,
+            format!("No T3 registry database or snapshot at {}.", self.root.display()),
+        ))
+    }
+
+    /// Look up `id` in T3's thread registry (`statev2.sqlite` or `threads.json`).
+    pub fn find(&self, id: &str) -> Option<T3Thread> {
+        self.lookup(id).ok().flatten()
+    }
+
+    /// Enumerate all live T3 threads in the registry.
+    pub fn list_live_threads(&self) -> Vec<T3Thread> {
+        if !self.is_connected() {
+            return Vec::new();
+        }
+        if let Some(json_file) = self.json_path() {
+            let Ok(text) = std::fs::read_to_string(json_file) else {
+                return Vec::new();
+            };
+            let Ok(rows) = serde_json::from_str::<Vec<RawT3Thread>>(&text) else {
+                return Vec::new();
+            };
+            return rows.into_iter().map(Self::from_raw).filter(|t| t.liveness().is_live()).collect();
+        }
+        if let Some(db_file) = self.sqlite_path() {
+            let Ok(out) =
+                Command::new("python3").arg("-I").arg("-c").arg(SQLITE_READER_PY).arg("list").arg(&db_file).output()
+            else {
+                return Vec::new();
+            };
+            if !out.status.success() {
+                return Vec::new();
+            }
+            let Ok(rows) = serde_json::from_slice::<Vec<RawT3Thread>>(&out.stdout) else {
+                return Vec::new();
+            };
+            return rows.into_iter().map(Self::from_raw).filter(|t| t.liveness().is_live()).collect();
+        }
+        Vec::new()
     }
 
     /// Verify a caller claim against T3's thread registry.
@@ -341,9 +530,17 @@ impl T3Registry {
                 format!("The shell's folder must be an absolute path, not {cwd}."),
             ));
         }
-        let Some(thread) = self.find(thread_id) else {
+        let Some(thread) = self.lookup(thread_id)? else {
             return Err(IdentityRefusal::new(RefusalReason::NotFound, format!("No T3 thread has the id {thread_id}.")));
         };
+        if let (Some(want), Some(actual)) = (self.expected_node.as_ref().or(thread.node.as_ref()), claim.node.as_ref())
+            && want != actual
+        {
+            return Err(IdentityRefusal::new(
+                RefusalReason::WrongNode,
+                format!("Thread {thread_id} is bound to node {want}, not {actual}."),
+            ));
+        }
         let liveness = thread.liveness();
         if !liveness.is_live() {
             let short = short_id(thread_id);
@@ -363,12 +560,14 @@ impl T3Registry {
             ));
         }
         let harness = thread.harness();
+        let node = thread.node.or_else(|| self.expected_node.clone());
         Ok(VerifiedSession::new(
             SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
             thread.cwd,
             harness,
             thread.parent_id,
             thread.pending_permissions,
-        ))
+        )
+        .with_node_and_generation(node, 0))
     }
 }

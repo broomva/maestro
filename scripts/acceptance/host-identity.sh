@@ -37,20 +37,21 @@ for arg in "$@"; do
   esac
 done
 
-for tool in cargo python3 git sha256sum timeout; do
+for tool in cargo python3 git bun sha256sum timeout; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "missing required runner: $tool" >&2
     exit 1
   fi
 done
 
-if [ ! -s fixtures/hosts/callers-golden.json ] || [ ! -s fixtures/parity/plugin-rev ]; then
-  echo "missing or empty host-identity golden fixtures" >&2
+if [ ! -s fixtures/hosts/callers-golden.json ] || [ ! -s fixtures/parity/plugin-rev ] || [ ! -s scripts/hosts-golden.ts ]; then
+  echo "missing or empty host-identity golden fixtures or generator" >&2
   exit 1
 fi
 
 head_sha="$(git rev-parse HEAD)"
 plugin_rev="$(tr -d '[:space:]' < fixtures/parity/plugin-rev)"
+[[ "$plugin_rev" =~ ^[0-9a-f]{40}$ ]] || { echo "plugin-rev must be a 40-hex commit, got '$plugin_rev'" >&2; exit 1; }
 golden_digest="$(sha256sum fixtures/hosts/callers-golden.json | awk '{print $1}')"
 case_count="$(python3 -c 'import json; d=json.load(open("fixtures/hosts/callers-golden.json")); print(len(d["verify"]) + len(d["started"]) + len(d["permissions"]))')"
 if [ "$case_count" -le 0 ]; then
@@ -110,7 +111,7 @@ if not isinstance(data["tests_passed"], int) or data["tests_passed"] <= 0:
     sys.exit(1)
 if data["tests_failed"] != 0:
     sys.exit(1)
-if not isinstance(data["mutants_total"], int) or data["mutants_total"] < 12:
+if not isinstance(data["mutants_total"], int) or data["mutants_total"] < 14:
     sys.exit(1)
 if data["mutants_killed"] != data["mutants_total"]:
     sys.exit(1)
@@ -123,19 +124,45 @@ PY
 
 if [ "$run_goldens" -eq 1 ]; then
   echo "== acceptance: goldens (head=$head_sha plugin_rev=$plugin_rev cases=$case_count digest=$golden_digest)"
-  paseo_dir="${MAESTRO_PASEO_DIR:-${HOME}/broomva/apps/maestro-paseo}"
-  if [ -d "$paseo_dir/.git" ] && command -v bun >/dev/null 2>&1; then
-    have_rev="$(git -C "$paseo_dir" rev-parse HEAD)"
-    if [ "$have_rev" = "$plugin_rev" ] && [ -d "$paseo_dir/node_modules" ]; then
-      tmp_ts="$paseo_dir/.hosts-golden-check-$$.ts"
-      trap 'rm -f "$tmp_ts"' EXIT
-      cp "$ROOT/scripts/hosts-golden.ts" "$tmp_ts"
-      fresh_golden="$(cd "$paseo_dir" && bun "$tmp_ts")"
-      rm -f "$tmp_ts"
-      diff -u <(printf '%s\n' "$fresh_golden") fixtures/hosts/callers-golden.json
-      echo "golden    matches server/callers.ts + server/permissions.ts @ ${plugin_rev:0:12}"
+  work_golden="$(mktemp -d "${TMPDIR:-/tmp}/maestro-host-golden.XXXXXX")"
+  driver=""
+  cleanup_golden() {
+    rm -rf "$work_golden" "${driver:-}"
+  }
+  trap cleanup_golden EXIT
+
+  if [ -n "${MAESTRO_PASEO_DIR:-}" ]; then
+    plugin="$MAESTRO_PASEO_DIR"
+    if ! have_rev="$(git -C "$plugin" rev-parse HEAD 2>/dev/null)"; then
+      echo "goldens failed: MAESTRO_PASEO_DIR ($plugin) is not a git repository" >&2
+      exit 1
     fi
+    if [ "$have_rev" != "$plugin_rev" ]; then
+      echo "goldens failed: MAESTRO_PASEO_DIR ($plugin) is at $have_rev, expected $plugin_rev" >&2
+      exit 1
+    fi
+    if [ ! -d "$plugin/node_modules" ]; then
+      ( cd "$plugin" && bun install --frozen-lockfile >"$work_golden/install.log" 2>&1 ) || { cat "$work_golden/install.log" >&2; exit 1; }
+    fi
+    driver="$plugin/.hosts-golden-check-$$.ts"
+  elif [ -e "${HOME}/broomva/apps/maestro-paseo/.git" ] && [ "$(git -C "${HOME}/broomva/apps/maestro-paseo" rev-parse HEAD 2>/dev/null || true)" = "$plugin_rev" ] && [ -d "${HOME}/broomva/apps/maestro-paseo/node_modules" ]; then
+    plugin="${HOME}/broomva/apps/maestro-paseo"
+    driver="$plugin/.hosts-golden-check-$$.ts"
+  else
+    url="${MAESTRO_PASEO_URL:-https://github.com/broomva/maestro-paseo}"
+    plugin="$work_golden/plugin"
+    git init -q "$plugin"
+    git -C "$plugin" fetch -q --depth 1 "$url" "$plugin_rev"
+    git -C "$plugin" checkout -q FETCH_HEAD
+    ( cd "$plugin" && bun install --frozen-lockfile >"$work_golden/install.log" 2>&1 ) || { cat "$work_golden/install.log" >&2; exit 1; }
+    driver="$plugin/.hosts-golden-check.ts"
   fi
+
+  cp "$ROOT/scripts/hosts-golden.ts" "$driver"
+  fresh_golden="$(cd "$plugin" && bun "$driver")"
+  rm -f "$driver"
+  diff -u <(printf '%s\n' "$fresh_golden") fixtures/hosts/callers-golden.json
+  echo "golden    matches server/callers.ts + server/permissions.ts @ ${plugin_rev:0:12}"
 
   listed="$(cargo test -p maestro-hosts --test identity --locked -- --list 2>&1)"
   if ! printf '%s\n' "$listed" | grep -q ': test$'; then
@@ -153,6 +180,7 @@ if [ "$run_goldens" -eq 1 ]; then
     echo "ct guard: no passing test summary in maestro-hosts --test identity" >&2
     exit 1
   fi
+  rm -rf "$work_golden"
   echo "== goldens green"
 fi
 
@@ -244,15 +272,17 @@ PY
   session=crates/core/src/session.rs
 
   check_mutant "$hp" 'if parsed.id != expected_id {' 'if false {'
-  check_mutant "$hp" 'if !is_safe_id(id) {' 'if false {'
+  check_mutant "$hp" 'if self.disconnected || !is_safe_id(id) {' 'if false {'
   check_mutant "$hp" 'if !liveness.is_live() {' 'if false {'
   check_mutant "$hp" 'if !within(Path::new(cwd), Path::new(&agent.cwd)) {' 'if false {'
-  check_mutant "$hp" 'std::fs::canonicalize(&normalized).unwrap_or(normalized)' 'normalized'
+  check_mutant "$hp" 'if let Ok(canon) = std::fs::canonicalize(path) {' 'if let Ok(canon) = std::fs::canonicalize(lexical_normalize(path)) {'
   check_mutant "$hp" 'inside.starts_with(&outside)' 'inside.to_string_lossy().starts_with(&*outside.to_string_lossy())'
   check_mutant "$hp" '&& cred.uid != want_uid' '&& false'
   check_mutant "$hlb" 'if in_t3 && !in_paseo {' 'if false {'
   check_mutant "$hlb" 'if in_paseo && !in_t3 {' 'if false {'
   check_mutant "$hlb" 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())' 'true'
+  check_mutant "$hlb" 'if cred.generation != current_gen {' 'if false {'
+  check_mutant "$ht" 'if self.disconnected {' 'if false {'
   check_mutant "$ht" '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
   check_mutant "$session" '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
 
@@ -290,10 +320,10 @@ if [ "$run_selftest" -eq 1 ]; then
   "plugin_rev": "$plugin_rev",
   "case_count": $case_count,
   "golden_sha256": "$golden_digest",
-  "tests_passed": 5,
+  "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 12,
-  "mutants_total": 12,
+  "mutants_killed": 14,
+  "mutants_total": 14,
   "noop_survived": true,
   "fresh_seconds": 5
 }
@@ -310,10 +340,10 @@ EOF
   "plugin_rev": "$plugin_rev",
   "case_count": $case_count,
   "golden_sha256": "$golden_digest",
-  "tests_passed": 5,
+  "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 12,
-  "mutants_total": 12,
+  "mutants_killed": 14,
+  "mutants_total": 14,
   "noop_survived": true,
   "fresh_seconds": 7200
 }
@@ -330,10 +360,10 @@ EOF
   "plugin_rev": "$plugin_rev",
   "case_count": $case_count,
   "golden_sha256": "$golden_digest",
-  "tests_passed": 5,
+  "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 11,
-  "mutants_total": 12,
+  "mutants_killed": 13,
+  "mutants_total": 14,
   "noop_survived": true,
   "fresh_seconds": 5
 }
@@ -343,21 +373,36 @@ EOF
     exit 1
   fi
 
-  # 6. Complete valid control must pass
+  # 6. Missing MAESTRO_PASEO_DIR on --goldens must fail closed
+  if MAESTRO_PASEO_DIR="$tmp_dir/missing-plugin" bash "$0" --goldens >/dev/null 2>&1; then
+    echo "selftest failed: --goldens accepted missing MAESTRO_PASEO_DIR" >&2
+    exit 1
+  fi
+
+  # 7. Wrong-SHA MAESTRO_PASEO_DIR on --goldens must fail closed
+  git init -q "$tmp_dir/wrong-rev-plugin"
+  git -C "$tmp_dir/wrong-rev-plugin" -c user.name=test -c user.email=test@localhost commit --allow-empty -qm init
+  if MAESTRO_PASEO_DIR="$tmp_dir/wrong-rev-plugin" bash "$0" --goldens >/dev/null 2>&1; then
+    echo "selftest failed: --goldens accepted wrong-SHA MAESTRO_PASEO_DIR" >&2
+    exit 1
+  fi
+
+  # 8. Complete valid control must pass
   cat > "$tmp_dir/valid.json" <<EOF
 {
   "head_sha": "$head_sha",
   "plugin_rev": "$plugin_rev",
   "case_count": $case_count,
   "golden_sha256": "$golden_digest",
-  "tests_passed": 5,
+  "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 12,
-  "mutants_total": 12,
+  "mutants_killed": 14,
+  "mutants_total": 14,
   "noop_survived": true,
   "fresh_seconds": 5
 }
 EOF
   verify_evidence_manifest "$tmp_dir/valid.json" "$head_sha" "$plugin_rev" "$case_count" "$golden_digest"
+  rm -rf "$tmp_dir"
   echo "== selftest green"
 fi

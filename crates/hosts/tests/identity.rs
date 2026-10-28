@@ -1,12 +1,16 @@
-//! Host identity integration, golden-parity, spoof-refusal and permission-need tests (BRO-3268).
+//! Host identity integration, golden-parity, spoof-refusal, bridge-credential,
+//! MCP wiring, and permission-need tests (BRO-3268).
 
 use maestro_core::authority::Principal;
 use maestro_core::need::NeedKind;
+use maestro_core::request::{Disposition, RequestKind};
 use maestro_hosts::{
-    CallerClaim, DirectRegistry, DirectSession, Harness, PARENT_AGENT_LABEL, PaseoRegistry, PeerCredentials,
-    PermissionLike, PermissionPrompt, RefusalReason, SessionLiveness, SurfaceRegistry, T3Registry, describe_permission,
-    within,
+    BridgeTransport, CallerClaim, DirectRegistry, DirectSession, Harness, NodeId, PARENT_AGENT_LABEL, PaseoRegistry,
+    PeerCredentials, PermissionLike, PermissionPrompt, RefusalReason, SessionError, SessionLiveness, SessionUpdate,
+    Surface, SurfaceRegistry, T3Registry, describe_permission, verified_identity, within,
 };
+use maestro_mcp::{agent_request_with_hosts, call_with_hosts};
+use maestro_store::{Paths, Store, TreeSource};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
@@ -292,7 +296,7 @@ fn paseo_caller_and_permission_decisions_match_plugin_golden() {
 }
 
 #[test]
-fn four_of_four_spoof_cases_are_refused() {
+fn four_of_four_spoof_cases_and_symlink_dotdot_are_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let root = fs::canonicalize(tmp.path()).unwrap();
     let paseo_dir = root.join("paseo-agents");
@@ -301,9 +305,14 @@ fn four_of_four_spoof_cases_are_refused() {
     let sibling_cwd = root.join("work/session-ab");
     let archived_cwd = root.join("work/archived");
     let t3_cwd = root.join("work/t3-thread");
-    for d in [&paseo_dir, &session_cwd, &sibling_cwd, &archived_cwd, &t3_cwd] {
+    let outside_deep = root.join("outside/deep");
+    for d in [&paseo_dir, &session_cwd, &sibling_cwd, &archived_cwd, &t3_cwd, &outside_deep] {
         fs::create_dir_all(d).unwrap();
     }
+
+    // Symlink inside session_cwd pointing outside to outside/deep
+    let escape_link = session_cwd.join("link");
+    symlink(&outside_deep, &escape_link).unwrap();
 
     let live_paseo_id = "paseo-live-11111111";
     let ended_paseo_id = "paseo-ended-22222222";
@@ -355,7 +364,7 @@ fn four_of_four_spoof_cases_are_refused() {
         .verify_caller(&CallerClaim::paseo(Some(live_paseo_id), Some(session_cwd.to_string_lossy().into_owned())))
         .unwrap();
     assert_eq!(ok_paseo.session().to_string(), format!("paseo:-/{live_paseo_id}"));
-    assert_eq!(ok_paseo.principal(), Principal::Agent { session: ok_paseo.session().clone() });
+    assert_eq!(verified_identity(&ok_paseo), Principal::Agent { session: ok_paseo.session().clone() });
 
     let ok_t3 = registry
         .verify_caller(&CallerClaim::t3(Some(live_t3_id), Some(t3_cwd.to_string_lossy().into_owned())))
@@ -369,11 +378,22 @@ fn four_of_four_spoof_cases_are_refused() {
         .unwrap_err();
     assert_eq!(spoof_id.reason, RefusalReason::NotFound);
 
-    // Spoof 2: cwd outside the session's folder (including sibling prefix /work/session-ab)
+    // Spoof 2a: cwd outside the session's folder (sibling prefix /work/session-ab)
     let spoof_cwd = registry
         .verify_caller(&CallerClaim::paseo(Some(live_paseo_id), Some(sibling_cwd.to_string_lossy().into_owned())))
         .unwrap_err();
     assert_eq!(spoof_cwd.reason, RefusalReason::OutsideCwd);
+
+    // Spoof 2b: symlink + `..` traversal (`session_cwd/link/..` -> `outside`) MUST be refused!
+    let symlink_dotdot_cwd = format!("{}/..", escape_link.to_string_lossy());
+    assert!(!within(Path::new(&symlink_dotdot_cwd), &session_cwd));
+    let spoof_symlink_dotdot =
+        registry.verify_caller(&CallerClaim::paseo(Some(live_paseo_id), Some(symlink_dotdot_cwd))).unwrap_err();
+    assert_eq!(spoof_symlink_dotdot.reason, RefusalReason::OutsideCwd);
+
+    // Spoof 2c: symlink + missing child + `..` (`session_cwd/link/missing/..`) MUST fail closed!
+    let symlink_missing_dotdot = format!("{}/missing/..", escape_link.to_string_lossy());
+    assert!(!within(Path::new(&symlink_missing_dotdot), &session_cwd));
 
     // Spoof 3: ended session
     let spoof_ended = registry
@@ -399,12 +419,17 @@ fn four_of_four_spoof_cases_are_refused() {
 }
 
 #[test]
-fn t3_thread_lookup_verifies_sqlite_and_json_registries() {
+fn t3_thread_lookup_verifies_sqlite_and_json_registries_and_resilience() {
     let tmp = tempfile::tempdir().unwrap();
     let root = fs::canonicalize(tmp.path()).unwrap();
     let userdata = root.join("userdata");
     fs::create_dir_all(&userdata).unwrap();
     fs::write(userdata.join("environment-id"), "8c5e81ab-e50f-49b4-a7e9-ba471308fac9\n").unwrap();
+    fs::write(
+        userdata.join("server-runtime.json"),
+        r#"{"version":1,"pid":1171473,"host":"100.112.149.32","port":3773,"origin":"http://100.112.149.32:3773","serverVersion":"0.1.3"}"#,
+    )
+    .unwrap();
 
     let wt_dir = root.join("worktrees/bro-3268");
     let proj_root = root.join("projects/maestro");
@@ -476,6 +501,13 @@ conn.execute(
 conn.execute(
     "INSERT INTO orchestration_v2_projection_runs VALUES ('run-1', 'mcp:thread-wt', 1, 'claudeAgent', NULL, 'running', '2026-10-25T00:00:00Z', NULL, '{}')",
 )
+# One malformed runtime request row + one non-dict row + one valid pending approval row
+conn.execute(
+    "INSERT INTO orchestration_v2_projection_runtime_requests VALUES ('req-bad-json', 'mcp:thread-wt', 'node-0', NULL, 'approval', 'pending', '2026-10-25T00:00:30Z', NULL, '{')",
+)
+conn.execute(
+    "INSERT INTO orchestration_v2_projection_runtime_requests VALUES ('req-bad-type', 'mcp:thread-wt', 'node-0', NULL, 'approval', 'pending', '2026-10-25T00:00:40Z', NULL, '123')",
+)
 conn.execute(
     "INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?, 'mcp:thread-wt', 'node-1', NULL, 'approval', 'pending', '2026-10-25T00:01:00Z', NULL, ?)",
     ("req-t3-1", json.dumps({"toolName": "Bash", "input": {"command": "git push origin main"}})),
@@ -495,8 +527,13 @@ conn.commit()
     assert!(status.success());
 
     let t3 = T3Registry::new(&root);
+    let discovery = t3.discover();
+    assert!(discovery.connected);
+    assert_eq!(discovery.version, "0.1.3");
+    assert_eq!(discovery.environment_id.as_deref(), Some("8c5e81ab-e50f-49b4-a7e9-ba471308fac9"));
+    assert!(matches!(discovery.transport, BridgeTransport::T3McpBridge | BridgeTransport::T3SqliteReadonly));
 
-    // Worktree thread resolves to worktreePath and carries environment-id + pending permission prompt
+    // Worktree thread resolves to worktreePath, skips malformed request rows, and keeps valid approval
     let verified_wt =
         t3.verify(&CallerClaim::t3(Some("mcp:thread-wt"), Some(wt_dir.to_string_lossy().into_owned()))).unwrap();
     assert_eq!(verified_wt.session().to_string(), "t3:8c5e81ab-e50f-49b4-a7e9-ba471308fac9/mcp:thread-wt");
@@ -510,6 +547,13 @@ conn.commit()
             detail: Some("git push origin main".to_string()),
         }
     );
+
+    // Pending-prompt freshness: once req-t3-1 is resolved in SQLite, re-verifying/snapshotting drops the prompt
+    let resolve_sql = r#"import sqlite3, sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE orchestration_v2_projection_runtime_requests SET status='resolved' WHERE runtime_request_id='req-t3-1'"); c.commit()"#;
+    assert!(Command::new("python3").arg("-c").arg(resolve_sql).arg(&db_path).status().unwrap().success());
+    let refreshed_wt =
+        t3.verify(&CallerClaim::t3(Some("mcp:thread-wt"), Some(wt_dir.to_string_lossy().into_owned()))).unwrap();
+    assert!(refreshed_wt.pending_permissions().is_empty());
 
     // Root-checkout thread falls back to projection_projects.workspace_root
     let verified_root =
@@ -528,15 +572,161 @@ conn.commit()
     let sibling_err =
         t3.verify(&CallerClaim::t3(Some("mcp:thread-wt"), Some(other_dir.to_string_lossy().into_owned()))).unwrap_err();
     assert_eq!(sibling_err.reason, RefusalReason::OutsideCwd);
+
+    // T3 JSON registry: malformed permission entry skipped + ID-less prompt gets content-hashed t3-perm-<hash> stable across reordering
+    let t3_json_path = root.join("t3-perms-threads.json");
+    fs::write(
+        &t3_json_path,
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": "mcp:thread-json-perms",
+                "cwd": wt_dir.to_string_lossy(),
+                "environment_id": "env-1",
+                "provider": "codex",
+                "status": "running",
+                "pending_permissions": [
+                    { "bad_entry_missing_name": 42 },
+                    { "name": "Bash", "input": { "command": "cargo check" } },
+                    { "name": "Bash", "input": { "command": "cargo test" } }
+                ]
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let t3_json_reg = T3Registry::new(&t3_json_path);
+    let v_before = t3_json_reg
+        .verify(&CallerClaim::t3(Some("mcp:thread-json-perms"), Some(wt_dir.to_string_lossy().into_owned())))
+        .unwrap();
+    assert_eq!(v_before.pending_permissions().len(), 2);
+    let second_id_before = v_before.pending_permissions()[1].request_id.clone();
+    assert!(second_id_before.starts_with("t3-perm-"));
+
+    fs::write(
+        &t3_json_path,
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": "mcp:thread-json-perms",
+                "cwd": wt_dir.to_string_lossy(),
+                "environment_id": "env-1",
+                "provider": "codex",
+                "status": "running",
+                "pending_permissions": [
+                    { "name": "Bash", "input": { "command": "cargo test" } }
+                ]
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let v_after = t3_json_reg
+        .verify(&CallerClaim::t3(Some("mcp:thread-json-perms"), Some(wt_dir.to_string_lossy().into_owned())))
+        .unwrap();
+    assert_eq!(v_after.pending_permissions().len(), 1);
+    assert_eq!(v_after.pending_permissions()[0].request_id, second_id_before);
 }
 
 #[test]
-fn live_permission_prompts_become_needs_on_paseo_and_t3() {
+fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let t3_json = root.join("threads.json");
+    let wt_dir = root.join("work/t3-1");
+    fs::create_dir_all(&wt_dir).unwrap();
+
+    let thread_id = "mcp:bridge-thread-1";
+    fs::write(
+        &t3_json,
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": thread_id,
+                "cwd": wt_dir.to_string_lossy(),
+                "environment_id": "env-nuc",
+                "node": "nuc-node-1",
+                "provider": "gemini-vertex",
+                "status": "running",
+                "pending_permissions": [
+                    { "id": "perm-1", "name": "Bash", "input": { "command": "git status" } }
+                ]
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let node_ok: NodeId = "nuc-node-1".parse().unwrap();
+    let node_wrong: NodeId = "mac-studio-2".parse().unwrap();
+
+    let registry = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("bridge-secret-key");
+
+    let base_claim =
+        CallerClaim::t3(Some(thread_id), Some(wt_dir.to_string_lossy().into_owned())).with_node(node_ok.clone());
+
+    let verified = registry.verify_session(&base_claim, Some(1_000)).unwrap();
+    let snap1 = registry.snapshot_session(&base_claim, Some(1_000)).unwrap();
+    assert_eq!(snap1.node.as_ref(), Some(&node_ok));
+    assert_eq!(snap1.generation, 0);
+
+    // Issue a valid short-lived bridge credential (valid for [1_000, 61_000))
+    let cred = registry.issue_bridge_credential(&verified, node_ok.clone(), 1_000, 61_000).unwrap();
+    assert!(format!("{cred:?}").contains("<redacted>"));
+
+    let authed_claim = base_claim.clone().with_credential(cred.clone());
+    assert!(registry.verify_caller_at(&authed_claim, 30_000).is_ok());
+
+    // 1. Wrong node on claim or credential -> WrongNode
+    let wrong_node_claim =
+        CallerClaim::t3(Some(thread_id), Some(wt_dir.to_string_lossy().into_owned())).with_node(node_wrong.clone());
+    assert_eq!(registry.verify_caller(&wrong_node_claim).unwrap_err().reason, RefusalReason::WrongNode);
+    let mut wrong_node_cred = cred.clone();
+    wrong_node_cred.node = node_wrong;
+    assert_eq!(
+        registry.verify_caller_at(&base_claim.clone().with_credential(wrong_node_cred), 30_000).unwrap_err().reason,
+        RefusalReason::WrongNode
+    );
+
+    // 2. Stale / expired / future / >1h bridge credential -> StaleCredential
+    assert_eq!(registry.verify_caller_at(&authed_claim, 61_000).unwrap_err().reason, RefusalReason::StaleCredential);
+    assert_eq!(registry.verify_caller_at(&authed_claim, 500).unwrap_err().reason, RefusalReason::StaleCredential);
+    assert!(matches!(
+        registry.issue_bridge_credential(&verified, node_ok, 0, 3_600_001),
+        Err(SessionError::StaleCredential { .. })
+    ));
+
+    // 3. Forged signature on credential -> InvalidToken
+    let mut forged = cred.clone();
+    forged.signature = "00".repeat(32);
+    assert_eq!(
+        registry.verify_caller_at(&base_claim.clone().with_credential(forged), 30_000).unwrap_err().reason,
+        RefusalReason::InvalidToken
+    );
+
+    // 4. ID reuse: bumping generation invalidates earlier credential -> IdReused
+    let new_gen = registry.bump_generation(&Surface::T3, thread_id);
+    assert_eq!(new_gen, 1);
+    assert_eq!(registry.verify_caller_at(&authed_claim, 30_000).unwrap_err().reason, RefusalReason::IdReused);
+
+    // 5. Disconnected registry fails closed -> RegistryDisconnected
+    let disconnected_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json).with_disconnected(true)), None);
+    assert_eq!(disconnected_reg.verify_caller(&base_claim).unwrap_err().reason, RefusalReason::RegistryDisconnected);
+
+    let updates = SurfaceRegistry::diff_snapshots(None, Some(&snap1));
+    assert_eq!(updates, vec![SessionUpdate::Snapshot { snapshot: Box::new(snap1.clone()) }]);
+    let ended_updates = SurfaceRegistry::diff_snapshots(Some(&snap1), None);
+    assert_eq!(ended_updates, vec![SessionUpdate::Ended { session: snap1.session }]);
+}
+
+#[test]
+fn live_permission_prompts_and_mcp_agent_requests_use_verified_host_identity() {
     let tmp = tempfile::tempdir().unwrap();
     let root = fs::canonicalize(tmp.path()).unwrap();
     let paseo_dir = root.join("paseo-agents");
     let cwd = root.join("work/arc-1");
+    let outside_cwd = root.join("work/other");
     fs::create_dir_all(&cwd).unwrap();
+    fs::create_dir_all(&outside_cwd).unwrap();
 
     let id = "agent-perm-11111111";
     write_paseo_record(
@@ -613,6 +803,57 @@ fn live_permission_prompts_become_needs_on_paseo_and_t3() {
     let needs_after = registry.needs_for(&verified2_after, Some("maestro"), None);
     assert_eq!(needs_after.len(), 1);
     assert_eq!(needs_after[0].key, second_key_before);
+
+    // End-to-end MCP call_with_hosts and agent_request_with_hosts verification
+    let ws = root.join("ws");
+    fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    fs::write(
+        ws.join(".control/asks/sample.yaml"),
+        "schema_version: 1\narc: test\nopened: '2026-10-25T00:00:00Z'\ntz: UTC\nlanes: []\nasks: []\ndecisions: []\n",
+    )
+    .unwrap();
+    let store = Store::new(Paths::under(&ws), TreeSource::WorkingTree);
+
+    // 1. maestro_needs_list through call_with_hosts includes live permission prompts from registry
+    let mcp_needs = call_with_hosts(&store, &registry, "maestro_needs_list", json!({})).unwrap();
+    let need_items = mcp_needs["data"].as_array().unwrap();
+    assert!(
+        need_items.iter().any(|n| n["key"] == format!("approval:paseo:-/{id}#req-7c1")),
+        "maestro_needs_list missing live permission prompt: {mcp_needs}"
+    );
+
+    // 2. Verified caller via agent_request_with_hosts gets verified: true and Disposition::Recorded on Handback
+    let handback_ok = agent_request_with_hosts(
+        &store,
+        &registry,
+        RequestKind::Handback,
+        json!({
+            "session": format!("paseo:-/{id}"),
+            "cwd": cwd.to_string_lossy(),
+            "summary": "completed host-identity verification"
+        }),
+    )
+    .unwrap();
+    assert_eq!(handback_ok["request"]["verified"], json!(true));
+    assert_eq!(handback_ok["request"]["disposition"], json!(Disposition::Recorded));
+
+    // 3. Forged caller (outside cwd or unknown id) is refused with zero new journal entries
+    let journal_path = maestro_store::requests::journal(&store.paths);
+    let lines_before = fs::read_to_string(&journal_path).unwrap().lines().count();
+    let forged_err = agent_request_with_hosts(
+        &store,
+        &registry,
+        RequestKind::Handback,
+        json!({
+            "session": format!("paseo:-/{id}"),
+            "cwd": outside_cwd.to_string_lossy(),
+            "summary": "spoofed handback from outside folder"
+        }),
+    )
+    .unwrap_err();
+    assert!(forged_err.message.contains("caller identity refused"));
+    let lines_after = fs::read_to_string(&journal_path).unwrap().lines().count();
+    assert_eq!(lines_before, lines_after, "forged request must write zero journal lines");
 }
 
 #[test]

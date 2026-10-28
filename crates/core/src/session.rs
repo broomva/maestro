@@ -212,11 +212,83 @@ pub fn harness_capabilities(harness: &Harness) -> HarnessCapabilities {
     }
 }
 
+impl NodeId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for NodeId {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err("node id cannot be empty".into());
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+}
+
+/// Longest lifetime of a tuple-bound bridge credential, in milliseconds (1 hour).
+pub const MAX_BRIDGE_CREDENTIAL_TTL_MS: i64 = 3_600_000;
+
 /// Peer credentials read from a local socket where the platform provides them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerCredentials {
     pub pid: u32,
     pub uid: u32,
+}
+
+/// How Maestro discovered or connected to a surface's session registry/bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeTransport {
+    T3McpBridge,
+    T3SqliteReadonly,
+    T3JsonSnapshot,
+    PaseoAgentRegistry,
+    DirectLaunchLease,
+}
+
+/// Discovered surface transport, runtime version, and connection state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeDiscovery {
+    pub transport: BridgeTransport,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeId>,
+    pub connected: bool,
+}
+
+/// Short-lived credential bound to `(session, node, cwd, issued_at_ms, expires_at_ms, generation)`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BridgeCredential {
+    pub session: SessionRef,
+    pub node: NodeId,
+    pub cwd: String,
+    pub issued_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub generation: u64,
+    #[serde(default, skip_serializing)]
+    pub signature: String,
+}
+
+impl fmt::Debug for BridgeCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BridgeCredential")
+            .field("session", &self.session)
+            .field("node", &self.node)
+            .field("cwd", &self.cwd)
+            .field("issued_at_ms", &self.issued_at_ms)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .field("generation", &self.generation)
+            .field("signature", &"<redacted>")
+            .finish()
+    }
 }
 
 /// What a caller claims about the session it is speaking from.
@@ -231,6 +303,12 @@ pub struct CallerClaim {
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<PeerCredentials>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<BridgeCredential>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
 }
 
 impl CallerClaim {
@@ -241,6 +319,9 @@ impl CallerClaim {
             cwd: cwd.map(Into::into),
             token: None,
             peer: None,
+            node: None,
+            credential: None,
+            generation: None,
         }
     }
 
@@ -251,6 +332,9 @@ impl CallerClaim {
             cwd: cwd.map(Into::into),
             token: None,
             peer: None,
+            node: None,
+            credential: None,
+            generation: None,
         }
     }
 
@@ -265,11 +349,29 @@ impl CallerClaim {
             cwd: cwd.map(Into::into),
             token: token.map(Into::into),
             peer: None,
+            node: None,
+            credential: None,
+            generation: None,
         }
     }
 
     pub fn with_peer(mut self, peer: PeerCredentials) -> Self {
         self.peer = Some(peer);
+        self
+    }
+
+    pub fn with_node(mut self, node: NodeId) -> Self {
+        self.node = Some(node);
+        self
+    }
+
+    pub fn with_credential(mut self, credential: BridgeCredential) -> Self {
+        self.credential = Some(credential);
+        self
+    }
+
+    pub fn with_generation(mut self, generation: u64) -> Self {
+        self.generation = Some(generation);
         self
     }
 }
@@ -328,15 +430,49 @@ impl PermissionPrompt {
     }
 }
 
+/// Point-in-time registry snapshot of a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    pub session: SessionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeId>,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<Harness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub liveness: SessionLiveness,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_permissions: Vec<PermissionPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<BridgeDiscovery>,
+}
+
+/// State transition observed between two registry reads of a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionUpdate {
+    Snapshot { snapshot: Box<SessionSnapshot> },
+    LivenessChanged { session: SessionRef, liveness: SessionLiveness },
+    PermissionsChanged { session: SessionRef, pending_permissions: Vec<PermissionPrompt> },
+    BridgeStateChanged { surface: Surface, connected: bool, version: Option<String> },
+    Ended { session: SessionRef },
+}
+
 /// A session that a surface registry has verified as live and matching its folder and credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedSession {
     session: SessionRef,
     cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    node: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     harness: Option<Harness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_id: Option<String>,
+    #[serde(default)]
+    generation: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_permissions: Vec<PermissionPrompt>,
 }
@@ -350,7 +486,13 @@ impl VerifiedSession {
         parent_id: Option<String>,
         pending_permissions: Vec<PermissionPrompt>,
     ) -> Self {
-        Self { session, cwd: cwd.into(), harness, parent_id, pending_permissions }
+        Self { session, cwd: cwd.into(), node: None, harness, parent_id, generation: 0, pending_permissions }
+    }
+
+    pub fn with_node_and_generation(mut self, node: Option<NodeId>, generation: u64) -> Self {
+        self.node = node;
+        self.generation = generation;
+        self
     }
 
     pub fn session(&self) -> &SessionRef {
@@ -363,6 +505,14 @@ impl VerifiedSession {
 
     pub fn cwd(&self) -> &str {
         &self.cwd
+    }
+
+    pub fn node(&self) -> Option<&NodeId> {
+        self.node.as_ref()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn harness(&self) -> Option<&Harness> {
@@ -381,8 +531,26 @@ impl VerifiedSession {
         crate::authority::Principal::Agent { session: self.session.clone() }
     }
 
+    pub fn verified_identity(&self) -> crate::authority::Principal {
+        self.principal()
+    }
+
     pub fn into_principal(self) -> crate::authority::Principal {
         crate::authority::Principal::Agent { session: self.session }
+    }
+
+    pub fn snapshot(&self, discovery: Option<BridgeDiscovery>) -> SessionSnapshot {
+        SessionSnapshot {
+            session: self.session.clone(),
+            node: self.node.clone(),
+            cwd: self.cwd.clone(),
+            harness: self.harness.clone(),
+            parent_id: self.parent_id.clone(),
+            liveness: SessionLiveness::Live,
+            generation: self.generation,
+            pending_permissions: self.pending_permissions.clone(),
+            discovery,
+        }
     }
 
     /// Convert all live permission prompts on this session into [`crate::need::Need`] items.
@@ -392,6 +560,11 @@ impl VerifiedSession {
             .map(|prompt| prompt.to_need(&self.session, project.map(str::to_string), since.map(str::to_string)))
             .collect()
     }
+}
+
+/// Promote a verified session into a [`crate::authority::Principal::Agent`].
+pub fn verified_identity(verified: &VerifiedSession) -> crate::authority::Principal {
+    verified.verified_identity()
 }
 
 /// Why a surface registry refused a caller claim.
@@ -407,6 +580,10 @@ pub enum RefusalReason {
     CrossSurface,
     PeerMismatch,
     InvalidToken,
+    WrongNode,
+    StaleCredential,
+    IdReused,
+    RegistryDisconnected,
     UnsupportedSurface,
 }
 
@@ -430,6 +607,67 @@ impl fmt::Display for IdentityRefusal {
 }
 
 impl std::error::Error for IdentityRefusal {}
+
+/// Typed error returned by session verification and bridge operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionError {
+    Refused(IdentityRefusal),
+    WrongNode { expected: NodeId, actual: NodeId },
+    StaleCredential { session_id: String, reason: String },
+    IdReused { session_id: String, expected_generation: u64, presented_generation: u64 },
+    RegistryDisconnected { surface: Surface, detail: String },
+}
+
+impl SessionError {
+    pub fn into_refusal(self) -> IdentityRefusal {
+        match self {
+            Self::Refused(r) => r,
+            Self::WrongNode { expected, actual } => IdentityRefusal::new(
+                RefusalReason::WrongNode,
+                format!("Session is bound to node {expected}, not {actual}."),
+            ),
+            Self::StaleCredential { session_id, reason } => IdentityRefusal::new(
+                RefusalReason::StaleCredential,
+                format!("Bridge credential for {session_id} is stale: {reason}."),
+            ),
+            Self::IdReused { session_id, expected_generation, presented_generation } => IdentityRefusal::new(
+                RefusalReason::IdReused,
+                format!(
+                    "Session id {session_id} was reused (generation {expected_generation}, credential presented {presented_generation})."
+                ),
+            ),
+            Self::RegistryDisconnected { surface, detail } => IdentityRefusal::new(
+                RefusalReason::RegistryDisconnected,
+                format!("Surface `{}` registry is disconnected: {detail}.", surface.as_str()),
+            ),
+        }
+    }
+
+    pub fn reason(&self) -> RefusalReason {
+        match self {
+            Self::Refused(r) => r.reason,
+            Self::WrongNode { .. } => RefusalReason::WrongNode,
+            Self::StaleCredential { .. } => RefusalReason::StaleCredential,
+            Self::IdReused { .. } => RefusalReason::IdReused,
+            Self::RegistryDisconnected { .. } => RefusalReason::RegistryDisconnected,
+        }
+    }
+}
+
+impl From<IdentityRefusal> for SessionError {
+    fn from(value: IdentityRefusal) -> Self {
+        Self::Refused(value)
+    }
+}
+
+impl fmt::Display for SessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.clone().into_refusal())
+    }
+}
+
+impl std::error::Error for SessionError {}
 
 #[cfg(test)]
 mod tests {

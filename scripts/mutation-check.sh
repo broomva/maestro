@@ -600,20 +600,22 @@ mutate crates/store/src/views.rs '        Err(e) => Section::unavailable(usage.s
 mutate crates/store/src/tree.rs 'out.trim().parse::<jiff::Timestamp>().map(Some)' 'out.trim().parse::<jiff::Timestamp>().map(|_| None)'
 
 
-# Host identity: Paseo, T3, Direct, symlinks, prefix boundary, cross-surface spoofs and permission needs (BRO-3268).
+# Host identity: Paseo, T3, Direct, symlinks, prefix boundary, cross-surface spoofs, bridge credentials, disconnect and permission needs (BRO-3268).
 hp=crates/hosts/src/paseo.rs
 ht=crates/hosts/src/t3.rs
 hlb=crates/hosts/src/lib.rs
 mutate $hp 'if parsed.id != expected_id {' 'if false {'
-mutate $hp 'if !is_safe_id(id) {' 'if false {'
+mutate $hp 'if self.disconnected || !is_safe_id(id) {' 'if false {'
 mutate $hp 'if !liveness.is_live() {' 'if false {'
 mutate $hp 'if !within(Path::new(cwd), Path::new(&agent.cwd)) {' 'if false {'
-mutate $hp 'std::fs::canonicalize(&normalized).unwrap_or(normalized)' 'normalized'
+mutate $hp 'if let Ok(canon) = std::fs::canonicalize(path) {' 'if let Ok(canon) = std::fs::canonicalize(lexical_normalize(path)) {'
 mutate $hp 'inside.starts_with(&outside)' 'inside.to_string_lossy().starts_with(&*outside.to_string_lossy())'
 mutate $hp '&& cred.uid != want_uid' '&& false'
 mutate $hlb 'if in_t3 && !in_paseo {' 'if false {'
 mutate $hlb 'if in_paseo && !in_t3 {' 'if false {'
 mutate $hlb 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())' 'true'
+mutate $hlb 'if cred.generation != current_gen {' 'if false {'
+mutate $ht 'if self.disconnected {' 'if false {'
 mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
 mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
 

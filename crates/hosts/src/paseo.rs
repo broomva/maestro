@@ -97,16 +97,26 @@ pub struct PaseoRegistry {
     dir: PathBuf,
     found: Mutex<HashMap<String, PathBuf>>,
     expected_uid: Option<u32>,
+    disconnected: bool,
 }
 
 impl PaseoRegistry {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), found: Mutex::new(HashMap::new()), expected_uid: None }
+        Self { dir: dir.into(), found: Mutex::new(HashMap::new()), expected_uid: None, disconnected: false }
     }
 
     pub fn with_expected_uid(mut self, uid: u32) -> Self {
         self.expected_uid = Some(uid);
         self
+    }
+
+    pub fn with_disconnected(mut self, disconnected: bool) -> Self {
+        self.disconnected = disconnected;
+        self
+    }
+
+    pub fn is_connected(&self) -> bool {
+        !self.disconnected && self.dir.is_dir()
     }
 
     pub fn dir(&self) -> &Path {
@@ -115,7 +125,7 @@ impl PaseoRegistry {
 
     /// Look up `id` in the Paseo registry (`Callers.find`).
     pub fn find(&self, id: &str) -> Option<PaseoAgent> {
-        if !is_safe_id(id) {
+        if self.disconnected || !is_safe_id(id) {
             return None;
         }
         let known = self.found.lock().unwrap().get(id).cloned();
@@ -136,6 +146,43 @@ impl PaseoRegistry {
             }
         }
         None
+    }
+
+    /// Enumerate all live Paseo agents in the registry.
+    pub fn list_live_agents(&self) -> Vec<PaseoAgent> {
+        if self.disconnected {
+            return Vec::new();
+        }
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut folders: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        folders.sort();
+        let mut out = Vec::new();
+        for folder in folders {
+            let Ok(files) = std::fs::read_dir(&folder) else {
+                continue;
+            };
+            let mut paths: Vec<PathBuf> = files.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            paths.sort();
+            for path in paths {
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                if !is_safe_id(stem) {
+                    continue;
+                }
+                if let Some(agent) = Self::read_file(&path, stem)
+                    && agent.liveness().is_live()
+                {
+                    out.push(agent);
+                }
+            }
+        }
+        out
     }
 
     fn read_file(path: &Path, expected_id: &str) -> Option<PaseoAgent> {
@@ -179,6 +226,9 @@ impl PaseoRegistry {
                 RefusalReason::CrossSurface,
                 format!("Surface `{}` cannot be verified by the Paseo registry.", claim.surface.as_str()),
             ));
+        }
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "Paseo registry is disconnected."));
         }
         check_peer(self.expected_uid, claim.peer)?;
         let Some(agent_id) = claim.session_id.as_deref().filter(|s| !s.is_empty()) else {
@@ -266,10 +316,40 @@ pub(crate) fn short_id(id: &str) -> &str {
     &id[..end]
 }
 
-/// Resolve a path on disk (`realpath`), falling back to a lexically normalized path when absent.
-pub fn resolve_real(path: &Path) -> PathBuf {
-    let normalized = lexical_normalize(path);
-    std::fs::canonicalize(&normalized).unwrap_or(normalized)
+/// Resolve a path on disk (`realpath`) BEFORE any lexical fallback.
+///
+/// If `path` exists on disk, `std::fs::canonicalize` resolves symlinks and `..` in true
+/// filesystem order (so `allowed/link/..` where `link -> outside/deep` resolves to `outside`).
+/// If `path` has a non-existent suffix, every component after the longest existing ancestor
+/// must be a normal component (`Component::Normal`): any `..` after a missing segment or
+/// broken symlink returns `None` (fail closed).
+pub fn resolve_real(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return Some(canon);
+    }
+    let mut cur = path;
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        let file_name = cur.file_name()?;
+        if std::fs::symlink_metadata(cur).is_ok() {
+            return None;
+        }
+        let comps: Vec<Component<'_>> = Path::new(file_name).components().collect();
+        if comps.len() != 1 || !matches!(comps[0], Component::Normal(_)) {
+            return None;
+        }
+        tail.push(file_name);
+        cur = cur.parent()?;
+        if let Ok(mut base) = std::fs::canonicalize(cur) {
+            for part in tail.into_iter().rev() {
+                base.push(part);
+            }
+            return Some(base);
+        }
+    }
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -287,10 +367,12 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 }
 
 /// Whether `inner` is `outer` or inside it by whole path segments (`server/callers.ts` `within`).
-/// `/work/ab` is not inside `/work/a`.
+/// `/work/ab` is not inside `/work/a`, and `allowed/link/..` where `link -> outside/deep` is
+/// resolved through the filesystem (`outside`) and refused.
 pub fn within(inner: &Path, outer: &Path) -> bool {
-    let inside = resolve_real(inner);
-    let outside = resolve_real(outer);
+    let (Some(inside), Some(outside)) = (resolve_real(inner), resolve_real(outer)) else {
+        return false;
+    };
     inside.starts_with(&outside)
 }
 
