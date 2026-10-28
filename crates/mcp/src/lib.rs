@@ -648,8 +648,9 @@ fn resolve_caller(
             std::env::var("MAESTRO_BRIDGE_CREDENTIAL").ok().and_then(|raw| serde_json::from_str(&raw).ok())
         });
     let has_claim_meta = arg_cwd.is_some() || arg_token.is_some() || arg_node.is_some() || arg_cred.is_some();
+    let caller = Principal::Unverified;
     if !hosts.has_surface(&session.surface) && !has_claim_meta {
-        return Ok(Principal::Unverified);
+        return Ok(caller);
     }
     let mut claim = maestro_hosts::CallerClaim {
         surface: session.surface.clone(),
