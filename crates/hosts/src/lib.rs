@@ -264,25 +264,43 @@ pub fn lock_dir_stale(dir: &Path, canonical_dir: &Path) -> Option<bool> {
     }
 }
 
-fn reclaim_stale_lock(dir: &Path) {
+fn reclaim_stale_lock(dir: &Path, surface: &Surface) -> Result<(), SessionError> {
     let reclaim_mutex = PathBuf::from(format!("{}.reclaim.d", dir.display()));
-    if let Err(e) = std::fs::create_dir(&reclaim_mutex) {
-        if e.kind() == std::io::ErrorKind::AlreadyExists
-            && path_age(&reclaim_mutex).is_some_and(|a| a >= Duration::from_secs(10))
-        {
-            let _ = std::fs::remove_dir_all(&reclaim_mutex);
-        }
-        return;
-    }
-    if lock_dir_stale(dir, dir) == Some(true) {
-        let aside = PathBuf::from(format!("{}.stale-{}", dir.display(), random_hex(4)));
-        if std::fs::rename(dir, &aside).is_ok()
-            && (lock_dir_stale(&aside, dir).unwrap_or(true) || std::fs::rename(&aside, dir).is_err())
-        {
-            let _ = std::fs::remove_dir_all(&aside);
+    if reclaim_mutex.exists() {
+        let cleanup = if reclaim_mutex.is_dir() {
+            std::fs::remove_dir_all(&reclaim_mutex)
+        } else {
+            std::fs::remove_file(&reclaim_mutex)
+        };
+        if let Err(e) = cleanup {
+            return Err(SessionError::RegistryDisconnected {
+                surface: surface.clone(),
+                detail: format!("stale generation reclaim mutex {} could not be cleared: {e}", reclaim_mutex.display()),
+            });
         }
     }
-    let _ = std::fs::remove_dir_all(&reclaim_mutex);
+    let aside = PathBuf::from(format!("{}.stale-{}", dir.display(), random_hex(4)));
+    std::fs::rename(dir, &aside).map_err(|e| SessionError::RegistryDisconnected {
+        surface: surface.clone(),
+        detail: format!("stale generation lock {} could not be moved aside: {e}", dir.display()),
+    })?;
+    if !lock_dir_stale(&aside, dir).unwrap_or(true) {
+        let _ = std::fs::rename(&aside, dir);
+        return Err(SessionError::RegistryDisconnected {
+            surface: surface.clone(),
+            detail: format!("generation lock {} became active during reclaim", dir.display()),
+        });
+    }
+    let _ = std::fs::remove_file(aside.join("pid"));
+    let _ = std::fs::remove_file(aside.join("token"));
+    if let Err(e) = std::fs::remove_dir(&aside) {
+        let _ = std::fs::rename(&aside, dir);
+        return Err(SessionError::RegistryDisconnected {
+            surface: surface.clone(),
+            detail: format!("stale generation lock {} could not be removed: {e}", dir.display()),
+        });
+    }
+    Ok(())
 }
 
 fn write_synced_file(target: &Path, content: &[u8]) -> std::io::Result<()> {
@@ -316,18 +334,21 @@ fn acquire_generation_lock(path: &Path, surface: &Surface) -> Result<LockGuard, 
         }
         if lock_dir.exists() {
             if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {
-                reclaim_stale_lock(&lock_dir);
-                continue;
+                if let Err(err) = reclaim_stale_lock(&lock_dir, surface) {
+                    let _ = flock_file.unlock();
+                    return Err(err);
+                }
+            } else {
+                let _ = flock_file.unlock();
+                if Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                return Err(SessionError::RegistryDisconnected {
+                    surface: surface.clone(),
+                    detail: format!("generation lock {} held by active writer past timeout", lock_dir.display()),
+                });
             }
-            let _ = flock_file.unlock();
-            if Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-            return Err(SessionError::RegistryDisconnected {
-                surface: surface.clone(),
-                detail: format!("generation lock {} held by active writer past timeout", lock_dir.display()),
-            });
         }
 
         // Populate `pid` and `token` inside a private staging directory BEFORE publishing `lock_dir`
@@ -358,7 +379,15 @@ fn acquire_generation_lock(path: &Path, surface: &Surface) -> Result<LockGuard, 
             }
             Err(e) if matches!(e.kind(), std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty) => {
                 let _ = std::fs::remove_dir_all(&stage_dir);
-                continue;
+                let _ = flock_file.unlock();
+                if Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                return Err(SessionError::RegistryDisconnected {
+                    surface: surface.clone(),
+                    detail: format!("generation lock {} could not be acquired before timeout: {e}", lock_dir.display()),
+                });
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&stage_dir);

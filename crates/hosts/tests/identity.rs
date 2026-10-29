@@ -933,12 +933,33 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
     );
     fs::remove_dir_all(&lock_dir).unwrap();
 
-    // Abandoned lock directory from a killed/dead PID is reclaimed immediately without blocking
+    // Abandoned lock directory from a killed/dead PID + pre-existing `.lock.d.reclaim.d` is reclaimed
+    // immediately without waiting 10s or spinning!
+    let reclaim_dir = root.join("generations.json.lock.d.reclaim.d");
     fs::create_dir_all(&lock_dir).unwrap();
+    fs::create_dir_all(&reclaim_dir).unwrap();
     fs::write(lock_dir.join("pid"), "4194303 1\n").unwrap();
     fs::write(lock_dir.join("token"), "dead-holder-token\n").unwrap();
+    let t0 = std::time::Instant::now();
     let after_reclaim = restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap();
     assert_eq!(after_reclaim, 6);
+    assert!(t0.elapsed() < std::time::Duration::from_millis(500), "reclaim with pre-existing .reclaim.d must not spin");
+    assert!(!reclaim_dir.exists(), "pre-existing .reclaim.d must be cleared");
+
+    // Failed-reclaim case: if a stale `.lock.d` cannot be removed (e.g. contains an unexpected extra entry
+    // so `remove_dir` fails with ENOTEMPTY), `acquire_generation_lock` fails fast with RegistryDisconnected
+    // without spinning and releases the OS `.flock`!
+    fs::create_dir_all(lock_dir.join("unexpected-subdir")).unwrap();
+    fs::write(lock_dir.join("pid"), "4194303 1\n").unwrap();
+    fs::write(lock_dir.join("token"), "dead-holder-token\n").unwrap();
+    let t_fail = std::time::Instant::now();
+    let fail_reclaim_err = restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap_err();
+    assert!(matches!(fail_reclaim_err, SessionError::RegistryDisconnected { .. }));
+    assert!(t_fail.elapsed() < std::time::Duration::from_millis(500), "failed reclaim must fail fast without spinning");
+    let flock_check = fs::OpenOptions::new().read(true).write(true).open(root.join("generations.json.flock")).unwrap();
+    assert!(flock_check.try_lock().is_ok(), "OS flock must be released when reclaim fails");
+    flock_check.unlock().unwrap();
+    fs::remove_dir_all(&lock_dir).unwrap();
 
     // A live child process holding the OS flock + lock.d blocks contenders while alive,
     // and when killed with SIGKILL (`kill()`), the OS kernel releases the flock and the next
