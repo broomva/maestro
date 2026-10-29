@@ -128,20 +128,25 @@ enum PsState {
 }
 
 fn query_ps(pid: u32) -> PsState {
-    let Ok(out) = Command::new("/bin/ps")
-        .args(["-o", "etime=", "-p", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
+    if Path::new("/proc/self").exists() && !Path::new(&format!("/proc/{pid}")).exists() {
+        return PsState::Gone;
+    }
+    let Ok(out) = Command::new("/bin/ps").args(["-o", "etime=", "-p", &pid.to_string()]).stdin(Stdio::null()).output()
     else {
         return PsState::Unknown;
     };
-    if !out.status.success() || out.stdout.iter().all(u8::is_ascii_whitespace) {
+    if out.status.success() {
+        if out.stdout.iter().all(u8::is_ascii_whitespace) {
+            return PsState::Gone;
+        }
+        return PsState::Running(
+            etime_seconds(&String::from_utf8_lossy(&out.stdout)).map(|e| (now_secs_f64() - e as f64).round() as i64),
+        );
+    }
+    if out.status.code() == Some(1) && out.stdout.iter().all(u8::is_ascii_whitespace) && out.stderr.is_empty() {
         return PsState::Gone;
     }
-    PsState::Running(
-        etime_seconds(&String::from_utf8_lossy(&out.stdout)).map(|e| (now_secs_f64() - e as f64).round() as i64),
-    )
+    PsState::Unknown
 }
 
 /// Process start timestamp in whole seconds since Unix epoch for the current process.
@@ -217,6 +222,7 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 }
 
 struct LockGuard {
+    flock_file: File,
     dir: PathBuf,
     token: String,
 }
@@ -230,18 +236,21 @@ impl LockGuard {
 impl Drop for LockGuard {
     fn drop(&mut self) {
         set_lock_held(&self.dir, false);
-        if !self.still_ours() {
-            return;
+        if self.still_ours() {
+            let _ = std::fs::remove_file(self.dir.join("token"));
+            let _ = std::fs::remove_file(self.dir.join("pid"));
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
-        let _ = std::fs::remove_file(self.dir.join("token"));
-        let _ = std::fs::remove_file(self.dir.join("pid"));
-        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = self.flock_file.unlock();
     }
 }
 
-fn lock_dir_stale(dir: &Path, canonical_dir: &Path) -> Option<bool> {
+/// Whether `dir` is an abandoned lock directory whose holder is confirmed dead.
+/// Missing or empty `pid` files are treated as still initializing until 2 seconds have elapsed,
+/// so a concurrent contender can never reclaim a freshly created lock directory during initialization.
+pub fn lock_dir_stale(dir: &Path, canonical_dir: &Path) -> Option<bool> {
     let age = path_age(dir)?;
-    let pid_text = std::fs::read_to_string(dir.join("pid")).ok();
+    let pid_text = std::fs::read_to_string(dir.join("pid")).ok().filter(|s| !s.trim().is_empty());
     if let Some((pid, start)) = pid_text.as_deref().and_then(parse_pid_file)
         && pid == std::process::id()
         && start.is_some_and(|s| (s - own_process_started_secs()).abs() <= 2)
@@ -276,62 +285,87 @@ fn reclaim_stale_lock(dir: &Path) {
     let _ = std::fs::remove_dir_all(&reclaim_mutex);
 }
 
+fn write_synced_file(target: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut f = OpenOptions::new().write(true).create_new(true).open(target)?;
+    f.write_all(content)?;
+    f.sync_all()
+}
+
 fn acquire_generation_lock(path: &Path, surface: &Surface) -> Result<LockGuard, SessionError> {
-    // Also clean up any legacy `<path>.lock` regular file left by a dead process
-    let legacy_file = PathBuf::from(format!("{}.lock", path.display()));
-    if legacy_file.is_file()
-        && let Ok(text) = std::fs::read_to_string(&legacy_file)
-        && !holder_alive(&text)
-    {
-        let _ = std::fs::remove_file(&legacy_file);
-    }
+    let flock_path = PathBuf::from(format!("{}.flock", path.display()));
+    let flock_file =
+        OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&flock_path).map_err(|e| {
+            SessionError::RegistryDisconnected {
+                surface: surface.clone(),
+                detail: format!("generation lock {} could not be opened: {e}", flock_path.display()),
+            }
+        })?;
 
     let lock_dir = PathBuf::from(format!("{}.lock.d", path.display()));
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        match std::fs::create_dir(&lock_dir) {
+        if flock_file.try_lock().is_err() {
+            if Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            return Err(SessionError::RegistryDisconnected {
+                surface: surface.clone(),
+                detail: format!("generation flock {} held by active writer past timeout", flock_path.display()),
+            });
+        }
+        if lock_dir.exists() {
+            if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {
+                reclaim_stale_lock(&lock_dir);
+                continue;
+            }
+            let _ = flock_file.unlock();
+            if Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            return Err(SessionError::RegistryDisconnected {
+                surface: surface.clone(),
+                detail: format!("generation lock {} held by active writer past timeout", lock_dir.display()),
+            });
+        }
+
+        // Populate `pid` and `token` inside a private staging directory BEFORE publishing `lock_dir`
+        // via `rename`, so no contender can ever observe `lock_dir` with a missing or empty `pid` file.
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let stage_dir = PathBuf::from(format!("{}.stage.{}.{seq}", lock_dir.display(), std::process::id()));
+        let token = random_hex(16);
+        let pid_line = format!(
+            "{} {}
+",
+            std::process::id(),
+            own_process_started_secs()
+        );
+        let token_line = format!(
+            "{token}
+"
+        );
+        let staged = (|| -> std::io::Result<()> {
+            std::fs::create_dir(&stage_dir)?;
+            write_synced_file(&stage_dir.join("token"), token_line.as_bytes())?;
+            write_synced_file(&stage_dir.join("pid"), pid_line.as_bytes())?;
+            std::fs::rename(&stage_dir, &lock_dir)
+        })();
+        match staged {
             Ok(()) => {
                 set_lock_held(&lock_dir, true);
-                let token = random_hex(16);
-                let written = (|| -> std::io::Result<()> {
-                    let mut pf =
-                        OpenOptions::new().write(true).create(true).truncate(true).open(lock_dir.join("pid"))?;
-                    writeln!(pf, "{} {}", std::process::id(), own_process_started_secs())?;
-                    let mut tf =
-                        OpenOptions::new().write(true).create(true).truncate(true).open(lock_dir.join("token"))?;
-                    writeln!(tf, "{token}")?;
-                    Ok(())
-                })();
-                return match written {
-                    Ok(()) => Ok(LockGuard { dir: lock_dir, token }),
-                    Err(e) => {
-                        set_lock_held(&lock_dir, false);
-                        let _ = std::fs::remove_dir_all(&lock_dir);
-                        Err(SessionError::RegistryDisconnected {
-                            surface: surface.clone(),
-                            detail: format!("generation lock {} could not be initialized: {e}", lock_dir.display()),
-                        })
-                    }
-                };
+                return Ok(LockGuard { flock_file, dir: lock_dir, token });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {
-                    reclaim_stale_lock(&lock_dir);
-                    continue;
-                }
-                if Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
-                return Err(SessionError::RegistryDisconnected {
-                    surface: surface.clone(),
-                    detail: format!("generation lock {} held by active writer past timeout", lock_dir.display()),
-                });
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty) => {
+                let _ = std::fs::remove_dir_all(&stage_dir);
+                continue;
             }
             Err(e) => {
+                let _ = std::fs::remove_dir_all(&stage_dir);
+                let _ = flock_file.unlock();
                 return Err(SessionError::RegistryDisconnected {
                     surface: surface.clone(),
-                    detail: format!("generation lock {} could not be acquired: {e}", lock_dir.display()),
+                    detail: format!("generation lock {} could not be initialized: {e}", lock_dir.display()),
                 });
             }
         }
@@ -791,6 +825,7 @@ impl SurfaceRegistry {
     fn sign_tuple(
         secret: &[u8],
         ledger_id: &str,
+        incarnation: &str,
         session: &SessionRef,
         node: &NodeId,
         cwd: &str,
@@ -800,6 +835,8 @@ impl SurfaceRegistry {
     ) -> String {
         let mut msg = Vec::new();
         msg.extend_from_slice(ledger_id.as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(incarnation.as_bytes());
         msg.push(0);
         msg.extend_from_slice(session.to_string().as_bytes());
         msg.push(0);
@@ -832,12 +869,12 @@ impl SurfaceRegistry {
                 "Bridge secret is not configured on this host.",
             )));
         };
-        if verified.incarnation().is_none() {
+        let Some(incarnation) = verified.incarnation() else {
             return Err(SessionError::Refused(IdentityRefusal::new(
                 RefusalReason::InvalidToken,
                 "Session record lacks an authoritative incarnation marker.",
             )));
-        }
+        };
         let Some(ttl) = expires_at_ms.checked_sub(issued_at_ms) else {
             return Err(SessionError::StaleCredential {
                 session_id: verified.agent_id().to_string(),
@@ -856,10 +893,11 @@ impl SurfaceRegistry {
             return Err(SessionError::WrongNode { expected: want_node.clone(), actual: node });
         }
         let (ledger_id, generation) =
-            self.sync_generation(&verified.session().surface, verified.agent_id(), verified.incarnation(), false)?;
+            self.sync_generation(&verified.session().surface, verified.agent_id(), Some(incarnation), false)?;
         let signature = Self::sign_tuple(
             secret,
             &ledger_id,
+            incarnation,
             verified.session(),
             &node,
             verified.cwd(),
@@ -950,25 +988,27 @@ impl SurfaceRegistry {
         }
 
         let verified = self.verify_surface(claim)?;
-        if (self.bridge_secret.is_some() || claim.credential.is_some() || self.generations_file.is_some())
-            && verified.incarnation().is_none()
-        {
+        let Some(incarnation) = verified.incarnation() else {
             return Err(SessionError::Refused(IdentityRefusal::new(
                 RefusalReason::InvalidToken,
                 "Session record lacks an authoritative incarnation marker.",
             )));
-        }
-        let (ledger_id, current_gen) = self.sync_generation(
-            &claim.surface,
-            verified.agent_id(),
-            verified.incarnation(),
-            claim.credential.is_some(),
-        )?;
+        };
+        let (ledger_id, current_gen) =
+            self.sync_generation(&claim.surface, verified.agent_id(), Some(incarnation), claim.credential.is_some())?;
         if let Some(cred) = &claim.credential {
+            if cred.generation != current_gen {
+                return Err(SessionError::IdReused {
+                    session_id: cred.session.id.clone(),
+                    expected_generation: current_gen,
+                    presented_generation: cred.generation,
+                });
+            }
             let secret = self.bridge_secret.as_deref().unwrap();
             let expected_sig = Self::sign_tuple(
                 secret,
                 &ledger_id,
+                incarnation,
                 &cred.session,
                 &cred.node,
                 &cred.cwd,
@@ -981,13 +1021,6 @@ impl SurfaceRegistry {
                     RefusalReason::InvalidToken,
                     "Bridge credential signature is invalid.",
                 )));
-            }
-            if cred.generation != current_gen {
-                return Err(SessionError::IdReused {
-                    session_id: cred.session.id.clone(),
-                    expected_generation: current_gen,
-                    presented_generation: cred.generation,
-                });
             }
             if !within(Path::new(&cred.cwd), Path::new(verified.cwd())) {
                 return Err(SessionError::Refused(IdentityRefusal::new(

@@ -611,18 +611,20 @@ impl T3Registry {
                 ),
             ));
         }
+        let Some(incarnation) = thread.incarnation() else {
+            return Err(IdentityRefusal::new(
+                RefusalReason::InvalidToken,
+                format!("Thread {thread_id} lacks an authoritative incarnation marker."),
+            ));
+        };
         let harness = thread.harness();
-        let incarnation = thread.incarnation();
-        let mut verified = VerifiedSession::new(
+        Ok(VerifiedSession::new(
             SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
             thread.cwd,
             harness,
             thread.parent_id,
             thread.pending_permissions,
-        );
-        if let Some(inc) = incarnation {
-            verified = verified.with_incarnation(inc);
-        }
-        Ok(verified)
+        )
+        .with_incarnation(incarnation))
     }
 }

@@ -82,7 +82,7 @@ impl PaseoAgent {
     pub fn incarnation(&self) -> Option<String> {
         let started = self.started_at.as_deref().filter(|s| !s.is_empty());
         let handle = self.handle_id.as_deref().filter(|s| !s.is_empty());
-        if started.is_none() && self.pid.is_none() && handle.is_none() {
+        if started.is_none() && handle.is_none() {
             return None;
         }
         Some(format!(
@@ -314,19 +314,21 @@ impl PaseoRegistry {
                 ),
             ));
         }
+        let Some(incarnation) = agent.incarnation() else {
+            return Err(IdentityRefusal::new(
+                RefusalReason::InvalidToken,
+                format!("Session {} lacks an authoritative incarnation marker.", agent.id),
+            ));
+        };
         let harness = agent.provider.as_deref().map(|p| p.parse::<Harness>().unwrap());
-        let incarnation = agent.incarnation();
-        let mut verified = VerifiedSession::new(
+        Ok(VerifiedSession::new(
             SessionRef { surface: Surface::Paseo, environment: None, id: agent.id },
             agent.cwd,
             harness,
             agent.parent,
             agent.pending_permissions,
-        );
-        if let Some(inc) = incarnation {
-            verified = verified.with_incarnation(inc);
-        }
-        Ok(verified)
+        )
+        .with_incarnation(incarnation))
     }
 
     /// Whether `child` is a live session `parent` directly started (`Callers.started`).

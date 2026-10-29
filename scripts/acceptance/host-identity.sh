@@ -290,6 +290,7 @@ PY
   check_mutant crates/mcp/src/lib.rs 'if packet.scope.project.is_none() && packet.scope.initiative.is_none() {' 'if true {'
   check_mutant "$hlb" 'if effective_now_ms < cred.issued_at_ms || effective_now_ms >= cred.expires_at_ms {' 'if false {'
   check_mutant "$hlb" 'if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {' 'if false {'
+  check_mutant "$hlb" 'msg.extend_from_slice(incarnation.as_bytes());' ''
 
   rm -rf "$copy"
   echo "mutation  $killed/$total killed"
@@ -327,8 +328,8 @@ if [ "$run_selftest" -eq 1 ]; then
   "golden_sha256": "$golden_digest",
   "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 19,
-  "mutants_total": 19,
+  "mutants_killed": 20,
+  "mutants_total": 20,
   "noop_survived": true,
   "fresh_seconds": 5
 }
@@ -347,8 +348,8 @@ EOF
   "golden_sha256": "$golden_digest",
   "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 19,
-  "mutants_total": 19,
+  "mutants_killed": 20,
+  "mutants_total": 20,
   "noop_survived": true,
   "fresh_seconds": 7200
 }
@@ -401,8 +402,8 @@ EOF
   "golden_sha256": "$golden_digest",
   "tests_passed": 6,
   "tests_failed": 0,
-  "mutants_killed": 19,
-  "mutants_total": 19,
+  "mutants_killed": 20,
+  "mutants_total": 20,
   "noop_survived": true,
   "fresh_seconds": 5
 }

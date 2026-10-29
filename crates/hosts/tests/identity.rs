@@ -339,6 +339,7 @@ fn four_of_four_spoof_cases_and_symlink_dotdot_are_refused() {
                 "cwd": t3_cwd.to_string_lossy(),
                 "environment_id": "env-nuc",
                 "provider": "gemini-vertex",
+                "created_at": "2026-10-25T00:00:00Z",
                 "status": "running"
             },
             {
@@ -346,6 +347,7 @@ fn four_of_four_spoof_cases_and_symlink_dotdot_are_refused() {
                 "cwd": t3_cwd.to_string_lossy(),
                 "environment_id": "env-nuc",
                 "provider": "codex",
+                "created_at": "2026-10-25T00:00:00Z",
                 "status": "running"
             }
         ]))
@@ -583,6 +585,7 @@ conn.commit()
                 "cwd": wt_dir.to_string_lossy(),
                 "environment_id": "env-1",
                 "provider": "codex",
+                "created_at": "2026-10-25T00:00:00Z",
                 "status": "running",
                 "pending_permissions": [
                     { "bad_entry_missing_name": 42 },
@@ -610,6 +613,7 @@ conn.commit()
                 "cwd": wt_dir.to_string_lossy(),
                 "environment_id": "env-1",
                 "provider": "codex",
+                "created_at": "2026-10-25T00:00:00Z",
                 "status": "running",
                 "pending_permissions": [
                     { "name": "Bash", "input": { "command": "cargo test" } }
@@ -917,78 +921,153 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
         RefusalReason::RegistryDisconnected
     );
 
-    // Abandoned lock directory from a killed/dead PID is reclaimed immediately without blocking
+    // Initialization interleaving: a young lock directory with a missing or empty pid file
+    // is treated as still initializing (Some(false)), never dead/reclaimable!
     let lock_dir = root.join("generations.json.lock.d");
     fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(
-        lock_dir.join("pid"),
-        "4194303 1
-",
-    )
-    .unwrap();
-    fs::write(
-        lock_dir.join("token"),
-        "dead-holder-token
-",
-    )
-    .unwrap();
+    fs::write(lock_dir.join("pid"), "").unwrap();
+    assert_eq!(
+        maestro_hosts::lock_dir_stale(&lock_dir, &lock_dir),
+        Some(false),
+        "young lock directory with empty pid file must not be treated as dead during initialization"
+    );
+    fs::remove_dir_all(&lock_dir).unwrap();
+
+    // Abandoned lock directory from a killed/dead PID is reclaimed immediately without blocking
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("pid"), "4194303 1\n").unwrap();
+    fs::write(lock_dir.join("token"), "dead-holder-token\n").unwrap();
     let after_reclaim = restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap();
     assert_eq!(after_reclaim, 6);
 
-    // A live holder's lock is never reclaimed while the process is alive
-    fs::create_dir_all(&lock_dir).unwrap();
-    let mut live_holder = Command::new("sleep").arg("30").spawn().unwrap();
-    let ps_out = Command::new("/bin/ps").args(["-o", "etime=", "-p", &live_holder.id().to_string()]).output().unwrap();
-    assert!(ps_out.status.success());
-    let now_secs = (maestro_hosts::current_time_ms() as f64 / 1000.0).round() as i64;
-    let pid_line = format!(
-        "{} {now_secs}
-",
-        live_holder.id()
-    );
-    fs::write(lock_dir.join("pid"), &pid_line).unwrap();
-    fs::write(
-        lock_dir.join("token"),
-        "live-holder-token
-",
-    )
-    .unwrap();
+    // A live child process holding the OS flock + lock.d blocks contenders while alive,
+    // and when killed with SIGKILL (`kill()`), the OS kernel releases the flock and the next
+    // caller reclaims `.lock.d` immediately!
+    let flock_path = root.join("generations.json.flock");
+    let hold_py = r#"
+import fcntl, os, pathlib, sys, time
+flock_path = pathlib.Path(sys.argv[1])
+lock_dir = pathlib.Path(sys.argv[2])
+f = open(flock_path, "a+b")
+fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+lock_dir.mkdir(exist_ok=True)
+(lock_dir / "pid").write_text(f"{os.getpid()} {int(time.time())}\n")
+(lock_dir / "token").write_text("live-holder-token\n")
+sys.stdout.write("READY\n")
+sys.stdout.flush()
+time.sleep(30)
+"#;
+    let mut live_holder = Command::new("python3")
+        .arg("-c")
+        .arg(hold_py)
+        .arg(&flock_path)
+        .arg(&lock_dir)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::BufRead as _;
+        let mut reader = std::io::BufReader::new(live_holder.stdout.as_mut().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "READY");
+    }
     let busy_res = restarted_registry.try_bump_generation(&Surface::T3, thread_id);
+    assert!(matches!(busy_res, Err(SessionError::RegistryDisconnected { .. })));
+    assert_eq!(fs::read_to_string(lock_dir.join("token")).unwrap(), "live-holder-token\n");
+    // SIGKILL the live lock holder; the kernel releases the flock and the next call reclaims lock_dir
     live_holder.kill().unwrap();
     live_holder.wait().unwrap();
-    assert!(matches!(busy_res, Err(SessionError::RegistryDisconnected { .. })));
-    assert_eq!(
-        fs::read_to_string(lock_dir.join("token")).unwrap(),
-        "live-holder-token
-"
-    );
-    // Once the holder is dead, the next call reclaims the lock and succeeds
     let after_kill = restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap();
     assert_eq!(after_kill, 7);
 
-    // Lost / deleted generations.json ledger refuses previously issued credentials (both before and after re-initialization)
-    let v_latest = restarted_registry.verify_session(&peer_claim, Some(1_000)).unwrap();
-    let cred_before_loss =
-        restarted_registry.issue_bridge_credential(&v_latest, node_ok.clone(), 1_000, 61_000).unwrap();
-    fs::remove_file(&gen_file).unwrap();
+    // Lost / deleted generations.json ledger refuses previously issued credentials (both before and after re-initialization),
+    // even when the credential was issued at generation 0!
+    let loss_gen_file = root.join("loss-generations.json");
+    let reg_before_loss = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("bridge-secret-key")
+        .with_generations_file(&loss_gen_file);
+    let v_gen0 = reg_before_loss.verify_session(&peer_claim, Some(1_000)).unwrap();
+    let cred_before_loss = reg_before_loss.issue_bridge_credential(&v_gen0, node_ok.clone(), 1_000, 61_000).unwrap();
+    assert_eq!(cred_before_loss.generation, 0);
+    fs::remove_file(&loss_gen_file).unwrap();
     let reg_after_loss = SurfaceRegistry::new(None, Some(T3Registry::new(&t3_json)), None)
         .with_expected_node(node_ok.clone())
         .with_bridge_secret("bridge-secret-key")
-        .with_generations_file(&gen_file);
+        .with_generations_file(&loss_gen_file);
     let claim_before_loss = unsigned_claim.clone().with_credential(cred_before_loss);
     assert_eq!(
         reg_after_loss.verify_caller_at(&claim_before_loss, 30_000).unwrap_err().reason,
         RefusalReason::RegistryDisconnected
     );
-    // Even if a fresh peer verification re-initializes generations.json (with a new random ledger_id),
-    // the credential issued before the ledger was lost is rejected!
+    // Even if a fresh peer verification re-initializes loss-generations.json at generation 0 (with a new random ledger_id),
+    // the generation-0 credential issued before the ledger was lost is rejected with InvalidToken!
     let _ = reg_after_loss.verify_session(&peer_claim, Some(1_000)).unwrap();
     assert_eq!(
         reg_after_loss.verify_caller_at(&claim_before_loss, 30_000).unwrap_err().reason,
         RefusalReason::InvalidToken
     );
 
-    // T3 record without created_at or run_id incarnation marker fails closed when bridge_secret/generations_file is active
+    // Regression for PRRT_kwDOVO-UF86xOZDu / P20 MAJOR 1:
+    // Without MAESTRO_GENERATIONS_FILE (in-memory generation ledger), issue a credential at generation 0,
+    // replace the session under the same ID with a new incarnation, and rebuild a fresh SurfaceRegistry
+    // without generations_file. Because `sign_tuple` binds the session incarnation, the rebuilt registry
+    // refuses the old credential with RefusalReason::InvalidToken!
+    let stateless_json = root.join("stateless-threads.json");
+    fs::write(
+        &stateless_json,
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": thread_id,
+                "cwd": wt_dir.to_string_lossy(),
+                "environment_id": "env-nuc",
+                "node": "nuc-node-1",
+                "provider": "gemini-vertex",
+                "created_at": "2026-10-25T01:00:00Z",
+                "status": "running",
+                "pending_permissions": []
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let stateless_reg_1 = SurfaceRegistry::new(None, Some(T3Registry::new(&stateless_json)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("stateless-bridge-secret");
+    let stateless_v1 = stateless_reg_1.verify_session(&peer_claim, Some(1_000)).unwrap();
+    let stateless_cred =
+        stateless_reg_1.issue_bridge_credential(&stateless_v1, node_ok.clone(), 1_000, 61_000).unwrap();
+    assert_eq!(stateless_cred.generation, 0);
+    // Reuse the same thread_id with a new created_at incarnation and rebuild SurfaceRegistry without generations_file
+    fs::write(
+        &stateless_json,
+        serde_json::to_string_pretty(&json!([
+            {
+                "id": thread_id,
+                "cwd": wt_dir.to_string_lossy(),
+                "environment_id": "env-nuc",
+                "node": "nuc-node-1",
+                "provider": "gemini-vertex",
+                "created_at": "2026-10-25T02:00:00Z",
+                "status": "running",
+                "pending_permissions": []
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let stateless_reg_rebuilt = SurfaceRegistry::new(None, Some(T3Registry::new(&stateless_json)), None)
+        .with_expected_node(node_ok.clone())
+        .with_bridge_secret("stateless-bridge-secret");
+    let stateless_claim = unsigned_claim.clone().with_credential(stateless_cred);
+    assert_eq!(
+        stateless_reg_rebuilt.verify_caller_at(&stateless_claim, 30_000).unwrap_err().reason,
+        RefusalReason::InvalidToken
+    );
+
+    // T3 record without created_at or run_id incarnation marker fails closed unconditionally
+    // (even when neither bridge_secret nor generations_file is configured)
     let no_inc_json = root.join("no-inc-threads.json");
     fs::write(
         &no_inc_json,
@@ -1006,9 +1085,7 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
         .unwrap(),
     )
     .unwrap();
-    let no_inc_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&no_inc_json)), None)
-        .with_expected_node(node_ok)
-        .with_bridge_secret("bridge-secret-key");
+    let no_inc_reg = SurfaceRegistry::new(None, Some(T3Registry::new(&no_inc_json)), None).with_expected_node(node_ok);
     assert_eq!(no_inc_reg.verify_caller_at(&peer_claim, 30_000).unwrap_err().reason, RefusalReason::InvalidToken);
 
     // 5. Disconnected registry fails closed -> RegistryDisconnected
