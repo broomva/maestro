@@ -14,6 +14,7 @@ maestro-core = { path = "crates/core" }
 maestro-store = { path = "crates/store" }
 maestro-mcp = { path = "crates/mcp" }
 maestro-view = { path = "crates/view" }
+maestro-hosts = { path = "crates/hosts" }
 anyhow = "1"
 jiff = "0.2"
 clap = { version = "4.6", features = ["derive", "env"] }

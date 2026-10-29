@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 maestro-core.workspace = true
+maestro-hosts.workspace = true
 maestro-store.workspace = true
 maestro-view.workspace = true
 rmcp.workspace = true

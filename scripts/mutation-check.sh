@@ -173,7 +173,7 @@ mutate $http ', local.ip().to_string()];' '];'
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,
 # sigterm_right_after_the_readiness_line_is_a_clean_stop: under this harness's load the race closes.)
 mutate $cli 'let mut term = signal(SignalKind::terminate())?;' 'let mut term = signal(SignalKind::user_defined1())?;'
-mutate $mcp 'Self { paths: Arc::new(store.paths), source: store.tree.source }' 'Self { paths: Arc::new(store.paths), source: store.tree.commit.clone().map_or(store.tree.source, maestro_store::TreeSource::GitRev) }'
+mutate $mcp 'source: store.tree.source,' 'source: store.tree.commit.clone().map_or(store.tree.source, maestro_store::TreeSource::GitRev),'
 mutate $http 'None => Ok(Self::loopback()),' 'None => Self::named("100.64.0.1:7171".parse().unwrap()),'
 mutate $http 'SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)' 'SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT)'
 
@@ -598,6 +598,32 @@ mutate crates/view/src/render.rs '    let running = by(maestro_core::work::WorkS
 mutate crates/store/src/lib.rs '            Ok(_) => Section::unavailable(label, "it is not a list of usage rows"),' '            Ok(_) => Section::ok(label, Vec::new()),'
 mutate crates/store/src/views.rs '        Err(e) => Section::unavailable(usage.source.clone(), e.to_string()),' '        Err(_) => Section::ok(usage.source.clone(), serde_json::json!({})),'
 mutate crates/store/src/tree.rs 'out.trim().parse::<jiff::Timestamp>().map(Some)' 'out.trim().parse::<jiff::Timestamp>().map(|_| None)'
+
+
+# Host identity: Paseo, T3, Direct, symlinks, prefix boundary, cross-surface spoofs, bridge credentials, disconnect and permission needs (BRO-3268).
+hp=crates/hosts/src/paseo.rs
+ht=crates/hosts/src/t3.rs
+hlb=crates/hosts/src/lib.rs
+mutate $hp 'if parsed.id != expected_id {' 'if false {'
+mutate $hp 'if self.disconnected || !is_safe_id(id) {' 'if false {'
+mutate $hp 'if !liveness.is_live() {' 'if false {'
+mutate $hp 'if !within(Path::new(cwd), Path::new(&agent.cwd)) {' 'if false {'
+mutate $hp 'if let Ok(canon) = std::fs::canonicalize(path) {' 'if let Ok(canon) = std::fs::canonicalize(lexical_normalize(path)) {'
+mutate $hp 'inside.starts_with(&outside)' 'inside.to_string_lossy().starts_with(&*outside.to_string_lossy())'
+mutate $hp '&& cred.uid != want_uid' '&& false'
+mutate $hlb 'if in_t3 && !in_paseo {' 'if false {'
+mutate $hlb 'if in_paseo && !in_t3 {' 'if false {'
+mutate $hlb 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())' 'true'
+mutate $hlb 'if cred.generation != current_gen {' 'if false {'
+mutate $ht 'if self.disconnected {' 'if false {'
+mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
+mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
+mutate $mcp 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if true {'
+mutate $mcp 'if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {' 'if false {'
+mutate $mcp 'if packet.scope.project.is_none() && packet.scope.initiative.is_none() {' 'if true {'
+mutate $hlb 'if effective_now_ms < cred.issued_at_ms || effective_now_ms >= cred.expires_at_ms {' 'if false {'
+mutate $hlb 'if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {' 'if false {'
+mutate $hlb 'msg.extend_from_slice(incarnation.as_bytes());' ''
 
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }

@@ -395,17 +395,38 @@ fn parse_work_state(label: &str) -> Result<WorkState, McpError> {
         .map_err(|_| McpError::invalid_params(format!("unknown state `{label}`"), None))
 }
 
-/// Run one tool. Pure dispatch over the store, so tests need no transport.
+/// Run one tool using host registries from the environment when configured.
 pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
+    let hosts = maestro_hosts::SurfaceRegistry::from_env();
+    call_with_hosts(store, &hosts, name, args)
+}
+
+/// Run one tool against an explicit [`maestro_hosts::SurfaceRegistry`].
+pub fn call_with_hosts(
+    store: &Store,
+    hosts: &maestro_hosts::SurfaceRegistry,
+    name: &str,
+    args: Value,
+) -> Result<Value, McpError> {
     let args = if args.is_null() { json!({}) } else { args };
     match name {
-        "maestro_snapshot" => Ok(json!(views::snapshot(store))),
+        "maestro_snapshot" => {
+            let mut snap = views::snapshot(store);
+            if let Some(list) = snap.needs.data.as_mut() {
+                list.extend(hosts.live_permission_needs(None, None));
+            }
+            Ok(json!(snap))
+        }
         "maestro_needs_list" => {
             let a: NeedsArgs = parse(args)?;
             let snap = views::snapshot(store);
             let mut section = snap.needs;
-            if let (Some(p), Some(list)) = (a.project.as_deref(), section.data.as_mut()) {
-                list.retain(|n| n.project.as_deref() == Some(p));
+            if let Some(list) = section.data.as_mut() {
+                if a.project.is_none() {
+                    list.extend(hosts.live_permission_needs(None, None));
+                } else if let Some(p) = a.project.as_deref() {
+                    list.retain(|n| n.project.as_deref() == Some(p));
+                }
             }
             Ok(json!(section))
         }
@@ -577,13 +598,19 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
         }
         "maestro_context" => {
             let a: ContextArgs = parse(args)?;
-            let packet =
+            let mut packet =
                 views::context(store, ContextScope { cwd: a.cwd, project: a.project, initiative: a.initiative });
+            if packet.scope.project.is_none() && packet.scope.initiative.is_none() {
+                let live_needs = hosts.live_permission_needs(None, None);
+                if !live_needs.is_empty() {
+                    packet.needs.extend(live_needs);
+                }
+            }
             let markdown = packet.render_markdown(a.max_needs.unwrap_or(8));
             Ok(json!({ "markdown": markdown, "packet": packet }))
         }
         other => match request_of(other) {
-            Some(kind) => agent_request(store, kind, args),
+            Some(kind) => agent_request_with_hosts(store, hosts, kind, args),
             None => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
         },
     }
@@ -597,15 +624,115 @@ fn session_of(text: &str) -> Result<maestro_core::session::SessionRef, McpError>
     text.parse().map_err(|e: String| McpError::invalid_params(format!("`session`: {e}"), None))
 }
 
-/// One agent request from an unverified caller (every caller until BRO-3268): an ask is filed,
-/// anything else recorded and held. Each is journalled with its disposition.
-pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Value, McpError> {
+fn resolve_caller(
+    hosts: &maestro_hosts::SurfaceRegistry,
+    session: &maestro_core::session::SessionRef,
+    args: &Value,
+) -> Result<(maestro_core::session::SessionRef, Principal), McpError> {
+    let arg_cwd = args
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| std::env::var("MAESTRO_CALLER_CWD").ok().filter(|s| !s.is_empty()));
+    let arg_token = args
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| std::env::var("MAESTRO_DIRECT_TOKEN").ok().filter(|s| !s.is_empty()));
+    let arg_node = args
+        .get("node")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| std::env::var("MAESTRO_CALLER_NODE").ok().filter(|s| !s.is_empty()));
+    let arg_cred: Option<maestro_hosts::BridgeCredential> = match args.get("credential") {
+        Some(v) => Some(
+            serde_json::from_value(v.clone())
+                .map_err(|e| McpError::invalid_params(format!("`credential`: {e}"), None))?,
+        ),
+        None => match std::env::var("MAESTRO_BRIDGE_CREDENTIAL").ok().filter(|s| !s.is_empty()) {
+            Some(raw) => Some(
+                serde_json::from_str(&raw)
+                    .map_err(|e| McpError::invalid_params(format!("MAESTRO_BRIDGE_CREDENTIAL: {e}"), None))?,
+            ),
+            None => None,
+        },
+    };
+    let has_claim_meta = arg_cwd.is_some() || arg_token.is_some() || arg_node.is_some() || arg_cred.is_some();
     let caller = Principal::Unverified;
+    if !hosts.has_surface(&session.surface) && !has_claim_meta {
+        return Ok((session.clone(), caller));
+    }
+    if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {
+        return Err(McpError::invalid_params(
+            "caller identity refused (InvalidToken): authenticated bridge credential or launch token is required",
+            Some(json!({ "reason": "invalid_token", "refused": true })),
+        ));
+    }
+    let mut claim = maestro_hosts::CallerClaim {
+        surface: session.surface.clone(),
+        session_id: Some(session.id.clone()),
+        cwd: arg_cwd,
+        token: arg_token,
+        peer: None,
+        node: None,
+        credential: arg_cred,
+        generation: None,
+    };
+    if let Some(raw_node) = arg_node {
+        let parsed = raw_node
+            .parse::<maestro_hosts::NodeId>()
+            .map_err(|e| McpError::invalid_params(format!("`node`: {e}"), None))?;
+        claim = claim.with_node(parsed);
+    }
+    let verified = hosts.verify_caller(&claim).map_err(|refusal| {
+        McpError::invalid_params(
+            format!("caller identity refused ({:?}): {}", refusal.reason, refusal.message),
+            Some(json!({ "reason": refusal.reason, "refused": true })),
+        )
+    })?;
+    if session.environment.is_some() && session.environment != verified.session().environment {
+        return Err(McpError::invalid_params(
+            format!(
+                "caller session environment `{}` does not match verified session `{}`",
+                session,
+                verified.session()
+            ),
+            Some(json!({ "reason": "environment_mismatch", "refused": true })),
+        ));
+    }
+    let verified_session = verified.session().clone();
+    Ok((verified_session, maestro_hosts::verified_identity(&verified)))
+}
+
+fn strip_auth_fields(mut args: Value) -> Value {
+    if let Some(obj) = args.as_object_mut() {
+        for key in ["cwd", "token", "node", "credential"] {
+            obj.remove(key);
+        }
+    }
+    args
+}
+
+/// One agent request using host registries from the environment when configured.
+pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Value, McpError> {
+    let hosts = maestro_hosts::SurfaceRegistry::from_env();
+    agent_request_with_hosts(store, &hosts, kind, args)
+}
+
+/// One agent request verified against `hosts` when a surface registry or caller claim is present.
+pub fn agent_request_with_hosts(
+    store: &Store,
+    hosts: &maestro_hosts::SurfaceRegistry,
+    kind: RequestKind,
+    args: Value,
+) -> Result<Value, McpError> {
     let session_text = args.get("session").and_then(Value::as_str).unwrap_or_default().to_string();
+    let clean_args = strip_auth_fields(args.clone());
     let payload = match kind {
         RequestKind::AskFile => {
-            let a: AskFileArgs = parse(args.clone())?;
-            let session = session_of(&a.session)?;
+            let a: AskFileArgs = parse(clean_args)?;
+            let parsed_session = session_of(&a.session)?;
+            let (session, caller) = resolve_caller(hosts, &parsed_session, &args)?;
             // Writes go to the working tree, never to a git revision.
             requests::compose_ask(&a.ask).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
             let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);
@@ -622,20 +749,19 @@ pub fn agent_request(store: &Store, kind: RequestKind, args: Value) -> Result<Va
             }
             return Ok(json!({ "request": record, "validator": filed.validator }));
         }
-        RequestKind::WorkQueue => json!(parse::<WorkQueueArgs>(args)?),
-        RequestKind::ActionRequest => json!(parse::<ActionRequestArgs>(args)?),
-        RequestKind::SessionClose => json!(parse::<SessionCloseArgs>(args)?),
-        RequestKind::Handback => json!(parse::<HandbackArgs>(args)?),
-        RequestKind::Escalate => json!(parse::<EscalateArgs>(args)?),
+        RequestKind::WorkQueue => json!(parse::<WorkQueueArgs>(clean_args)?),
+        RequestKind::ActionRequest => json!(parse::<ActionRequestArgs>(clean_args)?),
+        RequestKind::SessionClose => json!(parse::<SessionCloseArgs>(clean_args)?),
+        RequestKind::Handback => json!(parse::<HandbackArgs>(clean_args)?),
+        RequestKind::Escalate => json!(parse::<EscalateArgs>(clean_args)?),
     };
-    let session = session_of(&session_text)?;
+    let parsed_session = session_of(&session_text)?;
+    let (session, caller) = resolve_caller(hosts, &parsed_session, &args)?;
     let record = requests::new_record(kind, session, &caller, payload);
     requests::record(&store.paths, &record).map_err(file_error)?;
     Ok(json!({ "request": record, "journal": requests::journal(&store.paths) }))
 }
 
-/// An ask filed whose journal line was not written. Never busy, even when the journal's lock was:
-/// the ask is in the ledger, so a retry is refused as a duplicate.
 pub fn unjournalled(ledger: &std::path::Path, id: &str, e: &requests::FileError) -> McpError {
     McpError::internal_error(
         format!(
@@ -699,11 +825,25 @@ pub const RESOURCES: &[(&str, &str, &str)] = &[
 pub struct MaestroServer {
     paths: Arc<maestro_store::Paths>,
     source: maestro_store::TreeSource,
+    hosts: Arc<maestro_hosts::SurfaceRegistry>,
 }
 
 impl MaestroServer {
     pub fn new(store: Store) -> Self {
-        Self { paths: Arc::new(store.paths), source: store.tree.source }
+        Self {
+            paths: Arc::new(store.paths),
+            source: store.tree.source,
+            hosts: Arc::new(maestro_hosts::SurfaceRegistry::from_env()),
+        }
+    }
+
+    pub fn with_hosts(mut self, hosts: maestro_hosts::SurfaceRegistry) -> Self {
+        self.hosts = Arc::new(hosts);
+        self
+    }
+
+    pub fn hosts(&self) -> &maestro_hosts::SurfaceRegistry {
+        &self.hosts
     }
 
     /// The store one request reads: resolved now, consistent within the request.
@@ -711,9 +851,9 @@ impl MaestroServer {
         Store::new((*self.paths).clone(), self.source.clone())
     }
 
-    /// Run one tool against a store resolved for this call.
+    /// Run one tool against a store resolved for this call and this server's retained `SurfaceRegistry`.
     pub fn call(&self, name: &str, args: Value) -> Result<Value, McpError> {
-        call(&self.store(), name, args)
+        call_with_hosts(&self.store(), &self.hosts, name, args)
     }
 
     pub fn tools() -> Vec<Tool> {
