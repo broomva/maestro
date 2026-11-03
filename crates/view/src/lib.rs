@@ -6,9 +6,10 @@
 //! every value from the Store it is given. The MCP layer builds that Store per call.
 
 pub mod catalog;
+pub mod handoff;
 pub mod page;
 pub mod render;
 mod screens;
 
 pub use catalog::{Drop, Validated, catalog, validate};
-pub use render::{Rendered, render, render_at};
+pub use render::{Rendered, render, render_at, render_with};

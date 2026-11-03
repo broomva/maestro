@@ -174,3 +174,49 @@ async fn a_missing_ask_is_not_found_but_an_unread_ledger_still_renders() {
     assert_page(&r, "unread ledger", "/decisions");
     cancel.cancel();
 }
+
+/// A server whose decisions draft answers in `thread`, as `MAESTRO_ANSWER_THREAD` would set it.
+async fn start_with_thread(thread: &str) -> (SocketAddr, CancellationToken) {
+    let cancel = CancellationToken::new();
+    let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let thread = maestro_view::handoff::AnswerThread::parse(thread).unwrap();
+    let router = maestro_mcp::web::router_with(maestro_mcp::MaestroServer::new(fixture()), addr, Some(thread));
+    let stop = cancel.clone();
+    tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(stop.cancelled_owned()).await });
+    (addr, cancel)
+}
+
+#[tokio::test]
+async fn an_open_decision_drafts_each_answer_in_the_t3_thread() {
+    let (addr, cancel) = start_with_thread("env-1/mcp:abc").await;
+    let host = addr.to_string();
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &host, &[]).await;
+    assert_page(&r, "handoff", "/decisions");
+    assert!(r.body.contains(r#"data-handoff="t3""#), "no handoff");
+    for option in ["merge", "hold"] {
+        assert!(r.body.contains(&format!(r#"data-option="{option}""#)), "{option}");
+        // The exact answer, as the owner reads it before sending.
+        assert!(r.body.contains(&format!("answer_option: &quot;{option}&quot;")), "{option}: exact answer");
+    }
+    assert!(r.body.contains(r#"href="t3code://threads/env-1/mcp:abc?prompt=Owner%20answer%20for%20Maestro%20ask%20demo-arc.yaml%23merge-now"#));
+    assert!(r.body.contains(r#"href="https://app.t3.codes/env-1/mcp:abc?prompt=Owner%20answer"#));
+    // Answered and idea asks get no handoff; nothing on the page writes.
+    for done in ["/decisions/demo-arc.yaml/old-one", "/decisions/demo-arc.yaml/pick-name"] {
+        let r = send(addr, "GET", done, &host, &[]).await;
+        assert_page(&r, done, "/decisions");
+        assert!(!r.body.contains("data-handoff"), "{done}");
+    }
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn without_an_answer_thread_the_decision_stays_read_only() {
+    // `http::serve` reads `MAESTRO_ANSWER_THREAD`, which no test sets.
+    assert!(std::env::var(maestro_mcp::web::ANSWER_THREAD_ENV).is_err());
+    let (addr, cancel) = start(fixture()).await;
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &addr.to_string(), &[]).await;
+    assert_page(&r, "no thread", "/decisions");
+    assert!(!r.body.contains("data-handoff") && !r.body.contains("t3code://"));
+    cancel.cancel();
+}

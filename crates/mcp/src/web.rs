@@ -15,6 +15,7 @@ use axum::http::uri::Authority;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
+use maestro_view::handoff::AnswerThread;
 use maestro_view::page;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -24,12 +25,30 @@ use std::sync::Arc;
 struct Web {
     server: MaestroServer,
     hosts: Arc<Vec<String>>,
+    answer_thread: Option<Arc<AnswerThread>>,
 }
 
-/// The web routes for a listener bound at `local`.
+/// The environment variable naming the T3 thread answers are drafted in (BRO-3590).
+pub const ANSWER_THREAD_ENV: &str = "MAESTRO_ANSWER_THREAD";
+
+/// The answer thread `MAESTRO_ANSWER_THREAD` names. Unset is `None`; a value that does not parse
+/// is `None` too, said once on stderr, so the pages stay read-only rather than link anywhere else.
+pub fn answer_thread_from_env() -> Option<AnswerThread> {
+    let value = std::env::var(ANSWER_THREAD_ENV).ok()?;
+    AnswerThread::parse(&value)
+        .map_err(|e| eprintln!("maestro: ignoring {ANSWER_THREAD_ENV}: {e}; decisions offer no T3 handoff"))
+        .ok()
+}
+
+/// The web routes for a listener bound at `local`, answering through the thread the environment names.
 pub fn router(server: MaestroServer, local: SocketAddr) -> Router {
+    router_with(server, local, answer_thread_from_env())
+}
+
+/// The web routes, with open decisions offering the T3 handoff to `answer_thread` when one is given.
+pub fn router_with(server: MaestroServer, local: SocketAddr, answer_thread: Option<AnswerThread>) -> Router {
     let hosts = vec!["localhost".to_string(), "127.0.0.1".to_string(), "[::1]".to_string(), host_name(local)];
-    let web = Web { server, hosts: Arc::new(hosts) };
+    let web = Web { server, hosts: Arc::new(hosts), answer_thread: answer_thread.map(Arc::new) };
     Router::new()
         .route("/", get(root))
         .route("/decisions", get(decisions))
@@ -125,6 +144,7 @@ async fn page_of(
         Err(e) => return (StatusCode::NOT_FOUND, format!("no such page: {e}\n")).into_response(),
     };
     let server = web.server.clone();
+    let thread = web.answer_thread.clone();
     let rendered = tokio::task::spawn_blocking(move || {
         let store = server.store();
         // A readable ledger with no such ask is no page; an unread one still renders as unavailable.
@@ -133,7 +153,8 @@ async fn page_of(
         {
             return None;
         }
-        Some(maestro_view::render::render(&store, &validated))
+        let at = maestro_store::views::now();
+        Some(maestro_view::render::render_with(&store, &validated, at, thread.as_deref()))
     })
     .await;
     match rendered {

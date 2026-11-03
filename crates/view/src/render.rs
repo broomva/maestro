@@ -37,6 +37,8 @@ pub(crate) struct Ctx<'a> {
     pub(crate) snap: Snapshot,
     /// The render's clock: ages on the decisions screens are measured from it.
     pub(crate) at: jiff::Timestamp,
+    /// Where an open decision's answers are drafted (BRO-3590); `None` keeps the read-only bar.
+    pub(crate) answer_thread: Option<crate::handoff::AnswerThread>,
     /// Asks answered in the working tree or on maestro/answers but open at the read tree, read once per render
     /// and only by a block that shows them.
     unlanded: std::cell::OnceCell<Section<Vec<views::Waiting>>>,
@@ -85,6 +87,16 @@ pub fn render(store: &Store, v: &Validated) -> Rendered {
 
 /// Render as of `at` (loop notices depend on the clock); tests pin it.
 pub fn render_at(store: &Store, v: &Validated, at: jiff::Timestamp) -> Rendered {
+    render_with(store, v, at, None)
+}
+
+/// Render as of `at`, with open decisions offering the T3 answer handoff to `answer_thread`.
+pub fn render_with(
+    store: &Store,
+    v: &Validated,
+    at: jiff::Timestamp,
+    answer_thread: Option<&crate::handoff::AnswerThread>,
+) -> Rendered {
     let reads = Reads::of(store);
     let snap = views::snapshot_of(store, &reads, at);
     let cx = Ctx {
@@ -92,6 +104,7 @@ pub fn render_at(store: &Store, v: &Validated, at: jiff::Timestamp) -> Rendered 
         reads,
         snap,
         at,
+        answer_thread: answer_thread.cloned(),
         unlanded: std::cell::OnceCell::new(),
         ids: std::cell::Cell::new(0),
         plans: std::cell::OnceCell::new(),
