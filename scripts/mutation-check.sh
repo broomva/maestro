@@ -180,9 +180,9 @@ mutate $web "let host = host.strip_suffix('.').unwrap_or(host);" "let host = hos
 mutate $web '    if uri.scheme().is_some() || uri.authority().is_some() {' '    if false {'
 mutate $web '    let (Some(host), None) = (values.next(), values.next()) else { return false };' '    let Some(host) = values.next() else { return false };'
 mutate $web '    section.data.is_some() && matches.is_empty() && unread.is_empty()' '    section.data.is_some() && matches.is_empty()'
-mutate $web '            && absent(&store, ledger, id)' '            && false
+mutate $web '            && absent(&store, ledger, id)' '            && false'
 mutate $web '    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::WEB_CSP));' '    let _ = page::WEB_CSP;'
-mutate $web '    if !admitted(headers, &web.hosts) {
+mutate $web '    if !admitted(uri, headers, &web.hosts) {
         return refused();
     }
     let spec' '    let spec'
