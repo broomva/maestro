@@ -144,3 +144,33 @@ async fn no_page_takes_a_write_and_unknown_paths_are_not_found() {
     assert_eq!(send(addr, "GET", &format!("/decisions/{long}/a"), &host, &[]).await.status, 404);
     cancel.cancel();
 }
+
+#[tokio::test]
+async fn an_absolute_target_or_a_second_host_is_refused() {
+    let (addr, cancel) = start(fixture()).await;
+    let host = addr.to_string();
+    // Routed by its path, an absolute-form target would pass a Host check it never named.
+    let r = send(addr, "GET", "http://evil.example/decisions", &host, &[]).await;
+    assert_eq!(r.status, 403, "absolute-form target");
+    let r = send(addr, "GET", "/decisions", &host, &[("Host", "evil.example")]).await;
+    assert!(r.status == 403 || r.status == 400, "two Host headers: {}", r.status);
+    assert!(!r.body.contains("mv-screen"));
+    for bad in ["localhost:not-a-port", "user@localhost"] {
+        assert_eq!(send(addr, "GET", "/decisions", bad, &[]).await.status, 403, "{bad}");
+    }
+    assert_eq!(send(addr, "GET", "/decisions", "localhost.", &[]).await.status, 200, "a fully qualified loopback name");
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_missing_ask_is_not_found_but_an_unread_ledger_still_renders() {
+    let (addr, cancel) = start(fixture()).await;
+    let host = addr.to_string();
+    // The ledger read in full and holds no such ask.
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/gone", &host, &[]).await;
+    assert_eq!(r.status, 404, "{}", r.body);
+    // A ledger that did not parse may hold it: that is unavailable, rendered, never "not found".
+    let r = send(addr, "GET", "/decisions/broken.yaml/anything", &host, &[]).await;
+    assert_page(&r, "unread ledger", "/decisions");
+    cancel.cancel();
+}

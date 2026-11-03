@@ -11,7 +11,8 @@
 use crate::MaestroServer;
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::uri::Authority;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use maestro_view::page;
@@ -47,14 +48,29 @@ fn host_name(local: SocketAddr) -> String {
     }
 }
 
-/// Whether a request may be served: its `Host` names an allowed name (any port), and a
-/// browser did not send it from another site.
-fn admitted(headers: &HeaderMap, hosts: &[String]) -> bool {
-    let Some(host) = headers.get(header::HOST).and_then(|h| h.to_str().ok()) else { return false };
-    let name = match host.rfind(':') {
-        Some(at) if !host[at..].contains(']') => &host[..at],
-        _ => host,
-    };
+/// The name one `Host` value gives: a well-formed authority with no userinfo and, if it has a
+/// port, a numeric one; one trailing dot of a fully qualified name dropped. `None` otherwise.
+fn host_of(value: &str) -> Option<&str> {
+    let auth: Authority = value.parse().ok()?;
+    if value.contains('@') || (auth.as_str() != auth.host() && auth.port_u16().is_none()) {
+        return None;
+    }
+    let host = auth.host();
+    let host = host.strip_suffix('.').unwrap_or(host);
+    // `auth` borrows nothing: return the same span of `value`.
+    value.get(..host.len()).filter(|h| h.eq_ignore_ascii_case(host))
+}
+
+/// Whether a request may be served: an origin-form target (a browser never sends another to
+/// an origin server), exactly one `Host` naming an allowed name on any port, and no browser
+/// marking it as sent from another site.
+fn admitted(uri: &Uri, headers: &HeaderMap, hosts: &[String]) -> bool {
+    if uri.scheme().is_some() || uri.authority().is_some() {
+        return false;
+    }
+    let mut values = headers.get_all(header::HOST).iter();
+    let (Some(host), None) = (values.next(), values.next()) else { return false };
+    let Some(name) = host.to_str().ok().and_then(host_of) else { return false };
     if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {
         return false;
     }
@@ -79,9 +95,25 @@ fn with_headers(mut res: Response, content_type: &'static str) -> Response {
     res
 }
 
+/// Whether the asks were read in full and none is `ledger#id`: the "no such ask" of
+/// `maestro_ask_get`, from the same lookup.
+fn absent(store: &maestro_store::Store, ledger: &str, id: &str) -> bool {
+    let section = store.asks();
+    let (matches, unread) = crate::ask_matches(store, &section, ledger, id);
+    section.data.is_some() && matches.is_empty() && unread.is_empty()
+}
+
 /// Render one block as a page, read from a store resolved for this request.
-async fn page_of(web: &Web, headers: &HeaderMap, block: Value, title: &'static str, current: &'static str) -> Response {
-    if !admitted(headers, &web.hosts) {
+async fn page_of(
+    web: &Web,
+    uri: &Uri,
+    headers: &HeaderMap,
+    block: Value,
+    ask: Option<(String, String)>,
+    title: &'static str,
+    current: &'static str,
+) -> Response {
+    if !admitted(uri, headers, &web.hosts) {
         return refused();
     }
     let spec = json!({ "root": "page", "blocks": { "page": block } });
@@ -90,39 +122,55 @@ async fn page_of(web: &Web, headers: &HeaderMap, block: Value, title: &'static s
         Err(e) => return (StatusCode::NOT_FOUND, format!("no such page: {e}\n")).into_response(),
     };
     let server = web.server.clone();
-    let rendered = tokio::task::spawn_blocking(move || maestro_view::render::render(&server.store(), &validated)).await;
+    let rendered = tokio::task::spawn_blocking(move || {
+        let store = server.store();
+        // A readable ledger with no such ask is no page; an unread one still renders as unavailable.
+        if let Some((ledger, id)) = &ask
+            && absent(&store, ledger, id)
+        {
+            return None;
+        }
+        Some(maestro_view::render::render(&store, &validated))
+    })
+    .await;
     match rendered {
-        Ok(r) => with_headers(page::web(&r.html, title, current).into_response(), "text/html; charset=utf-8"),
+        Ok(Some(r)) => with_headers(page::web(&r.html, title, current).into_response(), "text/html; charset=utf-8"),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such ask\n").into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "the render did not finish\n").into_response(),
     }
 }
 
-async fn root(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if !admitted(&headers, &web.hosts) {
+async fn root(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    if !admitted(&uri, &headers, &web.hosts) {
         return refused();
     }
     Redirect::to("/decisions").into_response()
 }
 
-async fn decisions(State(web): State<Web>, headers: HeaderMap) -> Response {
-    page_of(&web, &headers, json!({ "type": "decisions" }), "Decisions", "/decisions").await
+async fn decisions(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    page_of(&web, &uri, &headers, json!({ "type": "decisions" }), None, "Decisions", "/decisions").await
 }
 
-async fn decision(State(web): State<Web>, headers: HeaderMap, Path((ledger, id)): Path<(String, String)>) -> Response {
+async fn decision(
+    State(web): State<Web>,
+    uri: Uri,
+    headers: HeaderMap,
+    Path((ledger, id)): Path<(String, String)>,
+) -> Response {
     let block = json!({ "type": "decision", "props": { "ledger": ledger, "id": id } });
-    page_of(&web, &headers, block, "Decision", "/decisions").await
+    page_of(&web, &uri, &headers, block, Some((ledger, id)), "Decision", "/decisions").await
 }
 
-async fn today(State(web): State<Web>, headers: HeaderMap) -> Response {
-    page_of(&web, &headers, json!({ "type": "today" }), "Today", "/today").await
+async fn today(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    page_of(&web, &uri, &headers, json!({ "type": "today" }), None, "Today", "/today").await
 }
 
-async fn health(State(web): State<Web>, headers: HeaderMap) -> Response {
-    page_of(&web, &headers, json!({ "type": "health" }), "Health", "/health").await
+async fn health(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    page_of(&web, &uri, &headers, json!({ "type": "health" }), None, "Health", "/health").await
 }
 
-async fn manifest(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if !admitted(&headers, &web.hosts) {
+async fn manifest(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    if !admitted(&uri, &headers, &web.hosts) {
         return refused();
     }
     with_headers(page::web_manifest().into_response(), "application/manifest+json")
@@ -131,6 +179,10 @@ async fn manifest(State(web): State<Web>, headers: HeaderMap) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn admitted(headers: &HeaderMap, hosts: &[String]) -> bool {
+        super::admitted(&Uri::from_static("/decisions"), headers, hosts)
+    }
 
     fn headers(host: &str, site: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -147,13 +199,36 @@ mod tests {
 
     #[test]
     fn a_host_must_name_an_allowed_address_on_any_port() {
-        for host in ["localhost", "127.0.0.1:7171", "[::1]", "[::1]:7171", "100.112.149.32:7171", "LOCALHOST:1"] {
+        for host in ["localhost", "localhost.:7171", "127.0.0.1:7171", "[::1]", "[::1]:7171", "100.112.149.32:7171", "LOCALHOST:1"] {
             assert!(admitted(&headers(host, None), &allowed()), "{host}");
         }
-        for host in ["evil.example", "evil.example:7171", "127.0.0.2:7171", "[::2]:7171", "100.112.149.33"] {
+        for host in [
+            "evil.example",
+            "evil.example.:7171",
+            "evil.example:7171",
+            "127.0.0.2:7171",
+            "[::2]:7171",
+            "100.112.149.33",
+            "localhost:not-a-port",
+            "localhost:",
+            "user@localhost:7171",
+            "localhost..",
+        ] {
             assert!(!admitted(&headers(host, None), &allowed()), "{host}");
         }
         assert!(!admitted(&HeaderMap::new(), &allowed()), "no Host");
+        let mut two = headers("localhost:7171", None);
+        two.append(header::HOST, HeaderValue::from_static("evil.example"));
+        assert!(!admitted(&two, &allowed()), "two Host headers");
+    }
+
+    #[test]
+    fn an_absolute_form_target_is_refused_whatever_its_host() {
+        let h = headers("127.0.0.1:7171", None);
+        assert!(super::admitted(&Uri::from_static("/today"), &h, &allowed()));
+        for target in ["http://evil.example/decisions", "http://127.0.0.1:7171/decisions"] {
+            assert!(!super::admitted(&Uri::from_static(target), &h, &allowed()), "{target}");
+        }
     }
 
     #[test]

@@ -175,7 +175,12 @@ web=crates/mcp/src/web.rs
 page=crates/view/src/page.rs
 mutate $web 'if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {' 'if false {'
 mutate $web 'Some(site) => site == "same-origin" || site == "none",' 'Some(_) => true,'
-mutate $web "Some(at) if !host[at..].contains(']') => &host[..at]," "Some(at) => &host[..at],"
+mutate $web "    if value.contains('@') || (auth.as_str() != auth.host() && auth.port_u16().is_none()) {" "    if false {"
+mutate $web "let host = host.strip_suffix('.').unwrap_or(host);" "let host = host;"
+mutate $web '    if uri.scheme().is_some() || uri.authority().is_some() {' '    if false {'
+mutate $web '    let (Some(host), None) = (values.next(), values.next()) else { return false };' '    let Some(host) = values.next() else { return false };'
+mutate $web '    section.data.is_some() && matches.is_empty() && unread.is_empty()' '    section.data.is_some() && matches.is_empty()'
+mutate $web '            && absent(&store, ledger, id)' '            && false
 mutate $web '    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::WEB_CSP));' '    let _ = page::WEB_CSP;'
 mutate $web '    if !admitted(headers, &web.hosts) {
         return refused();
