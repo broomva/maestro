@@ -17,13 +17,14 @@ jobs:
     name: mutants (${{ strategy.job-index }}/${{ strategy.job-total }})
     # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
     runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
-    # Each shard runs a quarter of the mutants against the whole suite (about 250 by BRO-3203:
-    # 70-90 min serial). Add shards by growing the list; the split follows it.
+    # Each shard runs a sixth of the mutants against the whole suite. Four shards reached 51-59
+    # min of the 60 by 2026-10-29 and two timed out once BRO-3588 added 13, so there are six.
+    # Add shards by growing the list; the split follows it.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
     env:
       CARGO_TERM_COLOR: always
       # Derived from the matrix, so the shards always cover every mutant.
