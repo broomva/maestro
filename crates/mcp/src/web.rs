@@ -199,7 +199,15 @@ mod tests {
 
     #[test]
     fn a_host_must_name_an_allowed_address_on_any_port() {
-        for host in ["localhost", "localhost.:7171", "127.0.0.1:7171", "[::1]", "[::1]:7171", "100.112.149.32:7171", "LOCALHOST:1"] {
+        for host in [
+            "localhost",
+            "localhost.:7171",
+            "127.0.0.1:7171",
+            "[::1]",
+            "[::1]:7171",
+            "100.112.149.32:7171",
+            "LOCALHOST:1",
+        ] {
             assert!(admitted(&headers(host, None), &allowed()), "{host}");
         }
         for host in [
