@@ -175,7 +175,7 @@ web=crates/mcp/src/web.rs
 page=crates/view/src/page.rs
 mutate $web 'if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {' 'if false {'
 mutate $web 'Some(site) => site == "same-origin" || site == "none",' 'Some(_) => true,'
-mutate $web 'Some(at) if !host[at..].contains(']') => &host[..at],' 'Some(at) => &host[..at],'
+mutate $web "Some(at) if !host[at..].contains(']') => &host[..at]," "Some(at) => &host[..at],"
 mutate $web '    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::WEB_CSP));' '    let _ = page::WEB_CSP;'
 mutate $web '    if !admitted(headers, &web.hosts) {
         return refused();
