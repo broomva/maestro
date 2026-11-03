@@ -30,6 +30,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 pub mod http;
+pub mod web;
 
 /// One tool: its name, what it may do, and its argument type.
 pub struct ToolSpec {

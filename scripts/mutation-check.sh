@@ -170,6 +170,18 @@ mutate $http '        .enforce_origin_validation()' '        .disable_allowed_or
 mutate $http 'tokio::time::sleep(SHUTDOWN_GRACE).await;' 'std::future::pending::<()>().await;'
 mutate $http '.with_json_response(true)' '.with_json_response(false)'
 mutate $http ', local.ip().to_string()];' '];'
+# Web pages (BRO-3588): only the bound host, no cross-site request, the policy on every page.
+web=crates/mcp/src/web.rs
+page=crates/view/src/page.rs
+mutate $web 'if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {' 'if false {'
+mutate $web 'Some(site) => site == "same-origin" || site == "none",' 'Some(_) => true,'
+mutate $web 'Some(at) if !host[at..].contains(']') => &host[..at],' 'Some(at) => &host[..at],'
+mutate $web '    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::WEB_CSP));' '    let _ = page::WEB_CSP;'
+mutate $web '    if !admitted(headers, &web.hosts) {
+        return refused();
+    }
+    let spec' '    let spec'
+mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,
 # sigterm_right_after_the_readiness_line_is_a_clean_stop: under this harness's load the race closes.)
 mutate $cli 'let mut term = signal(SignalKind::terminate())?;' 'let mut term = signal(SignalKind::user_defined1())?;'
