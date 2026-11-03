@@ -88,10 +88,21 @@ mod tests {
 
     #[test]
     fn a_thread_is_an_environment_and_a_thread_of_safe_characters() {
-        let t = AnswerThread::parse("030f399c-549a-4f0e-8f56-4c18c8b48e51/mcp:8f6597dc-f92e-49ad-9d5e-bfd7cc614f2f").unwrap();
+        let t = AnswerThread::parse("030f399c-549a-4f0e-8f56-4c18c8b48e51/mcp:8f6597dc-f92e-49ad-9d5e-bfd7cc614f2f")
+            .unwrap();
         assert_eq!(t.thread(), "mcp:8f6597dc-f92e-49ad-9d5e-bfd7cc614f2f");
-        for bad in ["", "env", "/t", "e/", "e/t/x", "e/t?x=1", "e/t#x", "e /t", "javascript:x/t%2F", &format!("e/{}", "t".repeat(101))]
-        {
+        for bad in [
+            "",
+            "env",
+            "/t",
+            "e/",
+            "e/t/x",
+            "e/t?x=1",
+            "e/t#x",
+            "e /t",
+            "javascript:x/t%2F",
+            &format!("e/{}", "t".repeat(101)),
+        ] {
             assert!(AnswerThread::parse(bad).is_err(), "{bad:?}");
         }
     }
