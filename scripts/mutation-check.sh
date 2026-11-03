@@ -174,7 +174,8 @@ mutate $http ', local.ip().to_string()];' '];'
 web=crates/mcp/src/web.rs
 page=crates/view/src/page.rs
 mutate $web 'if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {' 'if false {'
-mutate $web 'Some(site) => site == "same-origin" || site == "none",' 'Some(_) => true,'
+mutate $web '        (Some(site), None) => matches!(site.to_str(), Ok("same-origin" | "none")),' '        (Some(_), None) => true,'
+mutate $web '        (Some(_), Some(_)) => false,' '        (Some(_), Some(_)) => true,'
 mutate $web "    if value.contains('@') || (auth.as_str() != auth.host() && auth.port_u16().is_none()) {" "    if false {"
 mutate $web "let host = host.strip_suffix('.').unwrap_or(host);" "let host = host;"
 mutate $web '    if uri.scheme().is_some() || uri.authority().is_some() {' '    if false {'

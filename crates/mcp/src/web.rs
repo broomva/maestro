@@ -74,9 +74,12 @@ fn admitted(uri: &Uri, headers: &HeaderMap, hosts: &[String]) -> bool {
     if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {
         return false;
     }
-    match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
-        None => true,
-        Some(site) => site == "same-origin" || site == "none",
+    // Fails closed: a second value, or one that is not text, is refused like another site.
+    let mut sites = headers.get_all("sec-fetch-site").iter();
+    match (sites.next(), sites.next()) {
+        (None, _) => true,
+        (Some(site), None) => matches!(site.to_str(), Ok("same-origin" | "none")),
+        (Some(_), Some(_)) => false,
     }
 }
 
@@ -247,6 +250,12 @@ mod tests {
         for site in ["cross-site", "same-site", ""] {
             assert!(!admitted(&headers("localhost:7171", Some(site)), &allowed()), "{site}");
         }
+        let mut two = headers("localhost:7171", Some("same-origin"));
+        two.append("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        assert!(!admitted(&two, &allowed()), "two Sec-Fetch-Site values");
+        let mut opaque = headers("localhost:7171", None);
+        opaque.insert("sec-fetch-site", HeaderValue::from_bytes(b"same-origin\xff").unwrap());
+        assert!(!admitted(&opaque, &allowed()), "a value that is not text");
     }
 
     #[test]
