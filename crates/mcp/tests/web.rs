@@ -68,7 +68,10 @@ fn assert_page(r: &Reply, what: &str, current: &str) {
     assert_eq!(r.header("cache-control"), Some("no-store"), "{what}");
     assert!(r.body.contains(r#"<main id="maestro-root" data-web="true">"#), "{what}: no root");
     assert!(r.body.contains(r#"class="mv-screen""#), "{what}: no rendered screen");
-    assert!(r.body.contains(&format!(r#"href="{current}" aria-current="page""#)), "{what}: nav does not mark {current}");
+    assert!(
+        r.body.contains(&format!(r#"href="{current}" aria-current="page""#)),
+        "{what}: nav does not mark {current}"
+    );
     // Read-only and script-free: no script, no form, nothing that posts.
     for banned in ["<script", "<form", "formaction", "onclick"] {
         assert!(!r.body.contains(banned), "{what}: carries {banned}");
@@ -113,7 +116,8 @@ async fn the_root_redirects_to_decisions_and_the_manifest_starts_there() {
 async fn a_foreign_host_or_a_cross_site_request_is_refused() {
     let (addr, cancel) = start(fixture()).await;
     let host = addr.to_string();
-    for path in ["/", "/decisions", "/today", "/health", "/manifest.webmanifest", "/decisions/demo-arc.yaml/merge-now"] {
+    for path in ["/", "/decisions", "/today", "/health", "/manifest.webmanifest", "/decisions/demo-arc.yaml/merge-now"]
+    {
         let r = send(addr, "GET", path, "evil.example", &[]).await;
         assert_eq!(r.status, 403, "{path} with a foreign Host");
         let r = send(addr, "GET", path, &host, &[("Sec-Fetch-Site", "cross-site")]).await;
