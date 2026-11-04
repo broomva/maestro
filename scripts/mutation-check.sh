@@ -191,6 +191,10 @@ mutate $web '    if !admitted(uri, headers, &web.hosts) {
 handoff=crates/view/src/handoff.rs
 mutate $handoff "s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))" 's.bytes().all(|_| true)'
 mutate $handoff "        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {" '        if true {'
+mutate $handoff '        let ok = |s: &str| ok(s) && s != "." && s != "..";' '        let ok = |s: &str| ok(s);'
+mutate $handoff '    (text.encode_utf16().count() <= MAX_PROMPT).then_some(text)' '    Some(text)'
+mutate $handoff '    let json = |v: &str| serde_json::Value::from(v).to_string();' '    let json = |v: &str| format!("\"{v}\"");'
+mutate $web '    AnswerThread::parse(value?)' '    AnswerThread::parse(value.unwrap_or("e/t"))'
 mutate $web 'render_with(&store, &validated, at, thread.as_deref())' 'render_with(&store, &validated, at, None)'
 mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,

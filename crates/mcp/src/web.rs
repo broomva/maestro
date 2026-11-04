@@ -34,8 +34,12 @@ pub const ANSWER_THREAD_ENV: &str = "MAESTRO_ANSWER_THREAD";
 /// The answer thread `MAESTRO_ANSWER_THREAD` names. Unset is `None`; a value that does not parse
 /// is `None` too, said once on stderr, so the pages stay read-only rather than link anywhere else.
 pub fn answer_thread_from_env() -> Option<AnswerThread> {
-    let value = std::env::var(ANSWER_THREAD_ENV).ok()?;
-    AnswerThread::parse(&value)
+    answer_thread_from(std::env::var(ANSWER_THREAD_ENV).ok().as_deref())
+}
+
+/// What a `MAESTRO_ANSWER_THREAD` value configures; the pure half of [`answer_thread_from_env`].
+pub fn answer_thread_from(value: Option<&str>) -> Option<AnswerThread> {
+    AnswerThread::parse(value?)
         .map_err(|e| eprintln!("maestro: ignoring {ANSWER_THREAD_ENV}: {e}; decisions offer no T3 handoff"))
         .ok()
 }
@@ -277,6 +281,15 @@ mod tests {
         let mut opaque = headers("localhost:7171", None);
         opaque.insert("sec-fetch-site", HeaderValue::from_bytes(b"same-origin\xff").unwrap());
         assert!(!admitted(&opaque, &allowed()), "a value that is not text");
+    }
+
+    #[test]
+    fn the_answer_thread_is_configured_only_by_a_valid_value() {
+        assert_eq!(answer_thread_from(None), None);
+        assert_eq!(answer_thread_from(Some("env/mcp:abc")), AnswerThread::parse("env/mcp:abc").ok());
+        for bad in ["", "env", "./mcp:abc", "env/..", "env/t?x"] {
+            assert_eq!(answer_thread_from(Some(bad)), None, "{bad:?}");
+        }
     }
 
     #[test]

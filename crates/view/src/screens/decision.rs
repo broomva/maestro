@@ -207,23 +207,32 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
 /// The T3 answer handoff (BRO-3590): each option's exact answer, and links that open `t` with it
 /// as a draft. Nothing here answers: the owner sends the draft and the agent there files it.
 fn handoff(cx: &Ctx, lf: &LedgerFile, a: &Ask, t: &crate::handoff::AnswerThread) -> Markup {
+    // The folder the asks were read from, so the answer lands in the ledger Maestro read.
+    let dir = cx.store.rel(maestro_store::ASKS);
     html! {
         div class="mv-control mv-answerbar" data-handoff="t3" {
             p class="mv-answer-cta" {
                 "Open at " span class="bv-code" { (cx.snap.tree) } ". To answer, open an option in T3 thread "
                 span class="bv-code" { (t.thread()) } ": it arrives as a draft for you to read and send, and the agent there files it."
             }
-            ul class="mv-list mv-handoff" {
-                @for o in &a.options {
-                    @let prompt = crate::handoff::prompt(lf, a, o, t, &cx.snap.tree);
-                    li class="mv-handoff-option" data-option=(o.id) {
-                        span class="bv-code" { (o.id) } " " bdi { (o.label) }
-                        @if o.recommended { " · " span data-tone="success" { "Recommended" } }
-                        " · " a href=(t.app_link(&prompt)) { "Open in T3" }
-                        " · " a href=(t.web_link(&prompt)) target="_blank" rel="noopener noreferrer" { "T3 on the web" }
-                        details { summary class="bv-meta" { "The exact answer" } pre class="bv-code mv-handoff-prompt" { (prompt) } }
+            @match &dir {
+                Err(e) => p class="mv-note" data-tone="warning" { "The asks folder could not be resolved, so no answer can be drafted: " (e) },
+                Ok(dir) => ul class="mv-list mv-handoff" {
+                    @for o in &a.options {
+                        li class="mv-handoff-option" data-option=(o.id) {
+                            span class="bv-code" { (o.id) } " " bdi { (o.label) }
+                            @if o.recommended { " · " span data-tone="success" { "Recommended" } }
+                            @match crate::handoff::prompt(dir, lf, a, o, t, &cx.snap.tree) {
+                                Some(prompt) => {
+                                    " · " a href=(t.app_link(&prompt)) { "Open in T3" }
+                                    " · " a href=(t.web_link(&prompt)) target="_blank" rel="noopener noreferrer" { "T3 on the web" }
+                                    details { summary class="bv-meta" { "The exact answer" } pre class="bv-code mv-handoff-prompt" { (prompt) } }
+                                }
+                                None => " · " span data-tone="warning" { "Too long for a T3 link: answer it in the thread by hand." },
+                            }
+                        }
                     }
-                }
+                },
             }
             p class="mv-answer-why bv-meta" { "Maestro writes no answer: the ask ledger's own path does." }
         }

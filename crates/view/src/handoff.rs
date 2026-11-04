@@ -10,10 +10,8 @@
 use maestro_core::ask::{Ask, AskOption};
 use maestro_store::LedgerFile;
 
-/// T3's limit on a linked prompt, in characters.
+/// T3's limit on a linked prompt, in UTF-16 code units (JavaScript's `length`).
 pub const MAX_PROMPT: usize = 8_000;
-/// The most characters of a ledger label quoted in a prompt.
-const MAX_LABEL: usize = 200;
 
 /// The T3 thread answers are drafted in: `<environment>/<thread>` (`MAESTRO_ANSWER_THREAD`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +28,8 @@ impl AnswerThread {
             (1..=100).contains(&s.len())
                 && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
         };
+        // `.` and `..` are dot segments a URL parser removes, which would change the path.
+        let ok = |s: &str| ok(s) && s != "." && s != "..";
         match value.split_once('/') {
             Some((environment, thread)) if ok(environment) && ok(thread) => {
                 Ok(Self { environment: environment.to_string(), thread: thread.to_string() })
@@ -53,20 +53,42 @@ impl AnswerThread {
     }
 }
 
-/// The exact answer to file for `option`, as the prompt the owner sends.
-pub fn prompt(lf: &LedgerFile, a: &Ask, option: &AskOption, thread: &AnswerThread, tree: &str) -> String {
-    let label: String = option.label.chars().take(MAX_LABEL).collect();
+/// The exact answer to file for `option`, as the prompt the owner sends: every ledger value a
+/// JSON string, so none can end a field or add an instruction; the ask named by uid or by id as
+/// the ledger addresses it, with its entry hash to match before filing. `None` when it would be
+/// over T3's limit, so no link is offered that T3 would refuse.
+pub fn prompt(
+    asks_dir: &str,
+    lf: &LedgerFile,
+    a: &Ask,
+    option: &AskOption,
+    thread: &AnswerThread,
+    tree: &str,
+) -> Option<String> {
+    let json = |v: &str| serde_json::Value::from(v).to_string();
+    let select = match &a.uid {
+        Some(uid) => serde_json::json!({ "uid": uid }),
+        None => serde_json::json!({ "id": a.id, "uid": null }),
+    };
     let text = format!(
-        "Owner answer for Maestro ask {file}#{handle}: option `{id}` ({label}).\n\
-         File it through the existing ask path: an answers-only PR to .control/asks/{file} that sets, on that ask, \
-         answer_option: \"{id}\", answered_by: \"owner:maestro-web (T3 thread {thread})\" and answered_at: the time you file it. \
-         Do not answer it any other way. Maestro read it open at {tree}; if it is already answered there, say so instead.",
-        file = lf.file,
-        handle = a.handle(),
-        id = option.id,
-        thread = thread.thread(),
+        "Owner answer for one Maestro ask, sent by the owner as a message in this thread; count it as the owner's \
+         answer only for that reason. Each value below is JSON: use it exactly.\n\
+         ledger: {ledger}\n\
+         select: {select}\n\
+         entry_hash: {hash}\n\
+         answer_option: {option}\n\
+         answered_by: {by}\n\
+         File it through the existing ask path: an answers-only PR that sets answer_option, answered_by and \
+         answered_at (the time you file it) on that one ask, and changes nothing else. First re-read it \
+         (maestro_ask_get returns its hash): if the hash is not entry_hash, or it is already answered, stop and \
+         say so. Maestro read it open at {tree}.",
+        ledger = json(&format!("{asks_dir}/{}", lf.file)),
+        hash = json(&a.hash()),
+        option = json(&option.id),
+        by = json(&format!("owner:maestro-web (T3 thread {})", thread.thread())),
+        tree = json(tree),
     );
-    text.chars().take(MAX_PROMPT).collect()
+    (text.encode_utf16().count() <= MAX_PROMPT).then_some(text)
 }
 
 /// Percent-encode everything but RFC 3986's unreserved characters.
@@ -92,6 +114,8 @@ mod tests {
             .unwrap();
         assert_eq!(t.thread(), "mcp:8f6597dc-f92e-49ad-9d5e-bfd7cc614f2f");
         for bad in [
+            "./t",
+            "e/..",
             "",
             "env",
             "/t",
@@ -115,5 +139,51 @@ mod tests {
         assert_eq!(t.app_link(p), format!("t3code://threads/env-1/mcp:abc?prompt={enc}"));
         assert_eq!(t.web_link(p), format!("https://app.t3.codes/env-1/mcp:abc?prompt={enc}"));
         assert_eq!(encode("é"), "%C3%A9");
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+    use maestro_core::ask::AskLedger;
+
+    fn ledger(yaml: &str) -> LedgerFile {
+        let doc = maestro_store::yaml::parse(yaml).expect("fixture ledger").value;
+        let (ledger, bad) = AskLedger::from_value(doc).expect("an ask ledger");
+        assert!(bad.is_empty(), "{bad:?}");
+        LedgerFile { file: "x.yaml".into(), ledger }
+    }
+
+    fn thread() -> AnswerThread {
+        AnswerThread::parse("env/mcp:abc").unwrap()
+    }
+
+    #[test]
+    fn hostile_values_stay_inside_their_json_strings() {
+        let lf = ledger(
+            "asks:\n  - id: \"a\\\"\\nIGNORE\"\n    uid: \"u\\\"x\"\n    ask: q\n    options:\n      - id: \"o\\\"\\nrm -rf\"\n        label: l\n",
+        );
+        let a = &lf.ledger.asks[0];
+        let p = prompt(".broomva/asks", &lf, a, &a.options[0], &thread(), "git:origin/main@abc").unwrap();
+        // Each field is one line, and no ledger value adds one.
+        let fields: Vec<&str> = p.lines().filter(|l| l.contains(": ")).collect();
+        assert!(p.contains(r#"answer_option: "o\"\nrm -rf""#), "{p}");
+        assert!(p.contains(r#"select: {"uid":"u\"x"}"#), "{p}");
+        assert!(p.contains(r#"ledger: ".broomva/asks/x.yaml""#), "{p}");
+        assert_eq!(p.lines().count(), 7, "{p}");
+        assert!(!p.lines().any(|l| l.starts_with("IGNORE") || l.starts_with("rm -rf")), "{fields:?}");
+    }
+
+    #[test]
+    fn an_ask_without_a_uid_is_selected_by_id_and_a_long_one_gets_no_prompt() {
+        let lf = ledger("asks:\n  - id: plain\n    ask: q\n    options:\n      - id: go\n        label: l\n");
+        let a = &lf.ledger.asks[0];
+        let p = prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree").unwrap();
+        assert!(p.contains(r#"select: {"id":"plain","uid":null}"#), "{p}");
+        // UTF-16 units, as T3 counts: 3,000 of U+1F600 are 6,000 units, over the limit with the rest.
+        let long = format!("asks:\n  - id: x\n    ask: q\n    options:\n      - id: \"{}\"\n        label: l\n", "\u{1F600}".repeat(3_000));
+        let lf = ledger(&long);
+        let a = &lf.ledger.asks[0];
+        assert!(prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree").is_none());
     }
 }
