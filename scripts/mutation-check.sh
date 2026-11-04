@@ -187,6 +187,22 @@ mutate $web '    if !admitted(uri, headers, &web.hosts) {
         return refused();
     }
     let spec' '    let spec'
+# T3 answer handoff (BRO-3590): a safe thread, an encoded prompt, the thread reaching the render.
+handoff=crates/view/src/handoff.rs
+mutate $handoff "s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))" 's.bytes().all(|_| true)'
+mutate $handoff "        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {" '        if true {'
+mutate $handoff '        let ok = |s: &str| ok(s) && s != "." && s != "..";' '        let ok = |s: &str| ok(s);'
+mutate $handoff '    prompt.encode_utf16().count() <= MAX_PROMPT' '    prompt.encode_utf16().count() <= usize::MAX'
+mutate $handoff '    let json = |v: &serde_json::Value| ascii_json(&v.to_string());' '    let json = |v: &serde_json::Value| v.to_string();'
+mutate $handoff '        if c.is_ascii() && !c.is_ascii_control() {' '        if true {'
+mutate $handoff '        Some(uid) => serde_json::json!({ "uid": uid }),' '        Some(_) => serde_json::json!({ "id": a.id, "uid": null }),'
+mutate $web '    AnswerThread::parse(value?)' '    AnswerThread::parse(value.unwrap_or("e/t"))'
+decision=crates/view/src/screens/decision.rs
+mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| !a.options.is_empty())'
+mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| a.class != Some(AskClass::Idea))'
+mutate $decision '        @if landing == Landing::Unknown {' '        @if false {'
+mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
+mutate $web 'render_with(&store, &validated, at, thread.as_deref())' 'render_with(&store, &validated, at, None)'
 mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,
 # sigterm_right_after_the_readiness_line_is_a_clean_stop: under this harness's load the race closes.)

@@ -195,7 +195,7 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                     span class="bv-code" { bdi { (lf.file) "#" (a.handle()) } } " names more than one ask in its ledger, and Paseo refuses an answer to an ambiguous handle. The ledger must give each its own uid."
                 }
             } @else {
-                (outcome(cx, a, state, landing))
+                (outcome(cx, lf, a, state, landing))
             }
         }
     }
@@ -204,11 +204,46 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
 /// Where the answer stands, or where to give it. Phase 1 writes nothing: the plugin is the one writer.
 /// Where Paseo's plugin shows an ask and takes its answer: ideas under Initiatives (with
 /// develop, park or kill only), every other ask under Decisions.
+/// The T3 answer handoff (BRO-3590): each option's exact answer, and links that open `t` with it
+/// as a draft. Nothing here answers: the owner sends the draft and the agent there files it.
+fn handoff(cx: &Ctx, lf: &LedgerFile, a: &Ask, t: &crate::handoff::AnswerThread) -> Markup {
+    // The folder the asks were read from, so the answer lands in the ledger Maestro read.
+    let dir = cx.store.rel(maestro_store::ASKS);
+    html! {
+        div class="mv-control mv-answerbar" data-handoff="t3" {
+            p class="mv-answer-cta" {
+                "Open at " span class="bv-code" { (cx.snap.tree) } ". To answer, open an option in T3 thread "
+                span class="bv-code" { (t.thread()) } ": it arrives as a draft for you to read and send, and the agent there files it."
+            }
+            @match &dir {
+                Err(e) => p class="mv-note" data-tone="warning" { "The asks folder could not be resolved, so no answer can be drafted: " (e) },
+                Ok(dir) => ul class="mv-list mv-handoff" {
+                    @for o in &a.options {
+                        li class="mv-handoff-option" data-option=(o.id) {
+                            span class="bv-code" { (o.id) } " " bdi { (o.label) }
+                            @if o.recommended { " · " span data-tone="success" { "Recommended" } }
+                            @let prompt = crate::handoff::prompt(dir, lf, a, o, t, &cx.snap.tree);
+                            @if crate::handoff::fits(&prompt) {
+                                " · " a href=(t.app_link(&prompt)) { "Open in T3" }
+                                " · " a href=(t.web_link(&prompt)) target="_blank" rel="noopener noreferrer" { "T3 on the web" }
+                            } @else {
+                                " · " span data-tone="warning" { "Too long for a T3 link: paste the exact answer into the thread." }
+                            }
+                            details { summary class="bv-meta" { "The exact answer" } pre class="bv-code mv-handoff-prompt" { (prompt) } }
+                        }
+                    }
+                },
+            }
+            p class="mv-answer-why bv-meta" { "Maestro writes no answer: the ask ledger's own path does." }
+        }
+    }
+}
+
 fn place(a: &Ask) -> &'static str {
     if a.class == Some(AskClass::Idea) { "Paseo · Maestro · Initiatives" } else { "Paseo · Maestro · Decisions" }
 }
 
-fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
+fn outcome(cx: &Ctx, lf: &LedgerFile, a: &Ask, state: AskState, landing: Landing) -> Markup {
     let given =
         a.answer_option.as_deref().and_then(|id| a.options.iter().find(|o| o.id == id)).map(|o| o.label.as_str());
     html! {
@@ -232,6 +267,8 @@ fn outcome(cx: &Ctx, a: &Ask, state: AskState, landing: Landing) -> Markup {
             }
         } @else if state == AskState::Archived {
             p class="mv-callout" { "Archived" @if let Some(s) = &a.status { ": " bdi { (s) } } "." }
+        } @else if let Some(t) = cx.answer_thread.as_ref().filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty()) {
+            (handoff(cx, lf, a, t))
         } @else {
             div class="mv-control mv-answerbar" {
                 textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)" {}
