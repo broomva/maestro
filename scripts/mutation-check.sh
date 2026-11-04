@@ -195,6 +195,7 @@ mutate $handoff '        let ok = |s: &str| ok(s) && s != "." && s != "..";' '  
 mutate $handoff '    (text.encode_utf16().count() <= MAX_PROMPT).then_some(text)' '    Some(text)'
 mutate $handoff '    let json = |v: &serde_json::Value| ascii_json(&v.to_string());' '    let json = |v: &serde_json::Value| v.to_string();'
 mutate $handoff '        if c.is_ascii() && !c.is_ascii_control() {' '        if true {'
+mutate $handoff '        Some(uid) => serde_json::json!({ "uid": uid }),' '        Some(_) => serde_json::json!({ "id": a.id, "uid": null }),'
 mutate $web '    AnswerThread::parse(value?)' '    AnswerThread::parse(value.unwrap_or("e/t"))'
 decision=crates/view/src/screens/decision.rs
 mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| !a.options.is_empty())'
