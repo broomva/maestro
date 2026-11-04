@@ -170,6 +170,24 @@ mutate $http '        .enforce_origin_validation()' '        .disable_allowed_or
 mutate $http 'tokio::time::sleep(SHUTDOWN_GRACE).await;' 'std::future::pending::<()>().await;'
 mutate $http '.with_json_response(true)' '.with_json_response(false)'
 mutate $http ', local.ip().to_string()];' '];'
+# Web pages (BRO-3588): only the bound host, no cross-site request, the policy on every page.
+web=crates/mcp/src/web.rs
+page=crates/view/src/page.rs
+mutate $web 'if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {' 'if false {'
+mutate $web '        (Some(site), None) => matches!(site.to_str(), Ok("same-origin" | "none")),' '        (Some(_), None) => true,'
+mutate $web '        (Some(_), Some(_)) => false,' '        (Some(_), Some(_)) => true,'
+mutate $web "    if value.contains('@') || (auth.as_str() != auth.host() && auth.port_u16().is_none()) {" "    if false {"
+mutate $web "let host = host.strip_suffix('.').unwrap_or(host);" "let host = host;"
+mutate $web '    if uri.scheme().is_some() || uri.authority().is_some() {' '    if false {'
+mutate $web '    let (Some(host), None) = (values.next(), values.next()) else { return false };' '    let Some(host) = values.next() else { return false };'
+mutate $web '    section.data.is_some() && matches.is_empty() && unread.is_empty()' '    section.data.is_some() && matches.is_empty()'
+mutate $web '            && absent(&store, ledger, id)' '            && false'
+mutate $web '    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::WEB_CSP));' '    let _ = page::WEB_CSP;'
+mutate $web '    if !admitted(uri, headers, &web.hosts) {
+        return refused();
+    }
+    let spec' '    let spec'
+mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,
 # sigterm_right_after_the_readiness_line_is_a_clean_stop: under this harness's load the race closes.)
 mutate $cli 'let mut term = signal(SignalKind::terminate())?;' 'let mut term = signal(SignalKind::user_defined1())?;'

@@ -30,6 +30,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 pub mod http;
+pub mod web;
 
 /// One tool: its name, what it may do, and its argument type.
 pub struct ToolSpec {
@@ -395,6 +396,38 @@ fn parse_work_state(label: &str) -> Result<WorkState, McpError> {
         .map_err(|_| McpError::invalid_params(format!("unknown state `{label}`"), None))
 }
 
+/// The asks `ledger#id` names in `section`, and the read errors that may hide one. A uid names
+/// one ask; a bare id names one only when no other uid-less ask shares it. A ledger that did not
+/// parse, or an entry in it that did not, may be the one asked for: that is "unreadable", which
+/// is not the same as "no such ask". Errors name the folder the registry chose; an unresolved one
+/// names no file.
+pub(crate) fn ask_matches<'a>(
+    store: &Store,
+    section: &'a maestro_core::Section<Vec<maestro_store::LedgerFile>>,
+    ledger: &str,
+    id: &str,
+) -> (Vec<&'a maestro_core::ask::Ask>, Vec<maestro_core::SourceError>) {
+    let matches = section
+        .data
+        .iter()
+        .flatten()
+        .filter(|lf| lf.file == ledger)
+        .flat_map(|lf| lf.ledger.asks.iter())
+        .filter(|ask| ask.uid.as_deref() == Some(id) || (ask.uid.is_none() && ask.id == id))
+        .collect();
+    let file_at = match store.rel(maestro_store::ASKS) {
+        Ok(dir) => format!("{dir}/{ledger}"),
+        Err(_) => section.source.clone(),
+    };
+    let unread = section
+        .errors
+        .iter()
+        .filter(|e| e.at == file_at || e.at.starts_with(&format!("{file_at}#")) || e.at == section.source)
+        .cloned()
+        .collect();
+    (matches, unread)
+}
+
 /// Run one tool using host registries from the environment when configured.
 pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
     let hosts = maestro_hosts::SurfaceRegistry::from_env();
@@ -488,28 +521,7 @@ pub fn call_with_hosts(
         "maestro_ask_get" => {
             let a: AskGetArgs = parse(args)?;
             let section = store.asks();
-            // A uid names one ask; a bare id names one only when no other uid-less ask shares it.
-            let matches: Vec<_> = section
-                .data
-                .iter()
-                .flatten()
-                .filter(|lf| lf.file == a.ledger)
-                .flat_map(|lf| lf.ledger.asks.iter())
-                .filter(|ask| ask.uid.as_deref() == Some(&a.id) || (ask.uid.is_none() && ask.id == a.id))
-                .collect();
-            // A ledger that did not parse, or an entry in it that did not, may be the one asked for:
-            // that is "unreadable", which is not the same as "no such ask".
-            // Errors name the folder the registry chose; an unresolved one names no file.
-            let file_at = match store.rel(maestro_store::ASKS) {
-                Ok(dir) => format!("{dir}/{}", a.ledger),
-                Err(_) => section.source.clone(),
-            };
-            let unread: Vec<_> = section
-                .errors
-                .iter()
-                .filter(|e| e.at == file_at || e.at.starts_with(&format!("{file_at}#")) || e.at == section.source)
-                .cloned()
-                .collect();
+            let (matches, unread) = ask_matches(store, &section, &a.ledger, &a.id);
             match matches.as_slice() {
                 [ask] => Ok(
                     json!({ "source": section.source, "state": ask.state(), "hash": ask.hash(), "ask": ask, "row": ask.row }),

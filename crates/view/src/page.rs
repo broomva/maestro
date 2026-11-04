@@ -92,6 +92,52 @@ pub fn app() -> String {
     .into_string()
 }
 
+/// The web pages' policy (BRO-3588): the snapshot's, and no form may post, no page may frame
+/// them, and only the same origin's manifest may load.
+pub const WEB_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; manifest-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+
+/// The navigation bar's styles, only on the web pages, so the App's stylesheet is unchanged.
+const WEB_CSS: &str = ".mv-web-nav { padding: var(--bv-space-3); }\n.mv-web-nav .mv-tab { color: inherit; text-decoration: none; }\n.mv-web-nav .mv-tab[aria-current=\"page\"] { background: var(--foreground); color: var(--background); border-color: var(--foreground); }";
+
+/// One place in the web pages' navigation: its path and its label.
+pub const WEB_NAV: [(&str, &str); 3] = [("/decisions", "Decisions"), ("/today", "Today"), ("/health", "Health")];
+
+/// One render as a web page for a browser (BRO-3588): no script, a navigation bar with `current`
+/// marked, and the manifest a phone installs it from. Read-only: answering is not offered here.
+pub fn web(fragment: &str, title: &str, current: &str) -> String {
+    html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                (head(&format!("{title} · Maestro"), WEB_CSP))
+                link rel="manifest" href="/manifest.webmanifest";
+                style { (PreEscaped(WEB_CSS)) }
+            }
+            body {
+                nav class="mv-tabs mv-web-nav" aria-label="Maestro" {
+                    @for (path, label) in WEB_NAV {
+                        a class="mv-tab" href=(path) aria-current=[(path == current).then_some("page")] { (label) }
+                    }
+                }
+                main id="maestro-root" data-web="true" { (PreEscaped(fragment)) }
+            }
+        }
+    }
+    .into_string()
+}
+
+/// The web app manifest: a name and the start page, no icons a browser would fetch.
+pub fn web_manifest() -> String {
+    serde_json::json!({
+        "name": "Maestro",
+        "short_name": "Maestro",
+        "start_url": "/decisions",
+        "scope": "/",
+        "display": "standalone",
+    })
+    .to_string()
+}
+
 /// One render as a standalone document with no script: what a host without MCP Apps shows
 /// (T3's `html_render` in Claude threads). It does not update; its footer names the tree read.
 pub fn snapshot(fragment: &str, theme: Option<&str>) -> String {
