@@ -212,7 +212,7 @@ mod prompt_tests {
         let p = prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree");
         assert!(p.contains(r#"select: {"id":"plain","uid":null}"#), "{p}");
         assert!(fits(&p), "a short prompt fits");
-        // UTF-16 units, as T3 counts: 4,000 of U+1F600 are 4,000 chars but 8,000 units, over with the rest.
+        // 4,000 of U+1F600 escape to 48,000 ASCII characters: past T3's limit, so no link, but the text stays.
         let long = format!(
             "asks:\n  - id: x\n    ask: q\n    options:\n      - id: \"{}\"\n        label: l\n",
             "\u{1F600}".repeat(4_000)

@@ -192,7 +192,7 @@ handoff=crates/view/src/handoff.rs
 mutate $handoff "s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))" 's.bytes().all(|_| true)'
 mutate $handoff "        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {" '        if true {'
 mutate $handoff '        let ok = |s: &str| ok(s) && s != "." && s != "..";' '        let ok = |s: &str| ok(s);'
-mutate $handoff '    prompt.encode_utf16().count() <= MAX_PROMPT' '    prompt.chars().count() <= MAX_PROMPT'
+mutate $handoff '    prompt.encode_utf16().count() <= MAX_PROMPT' '    prompt.encode_utf16().count() <= usize::MAX'
 mutate $handoff '    let json = |v: &serde_json::Value| ascii_json(&v.to_string());' '    let json = |v: &serde_json::Value| v.to_string();'
 mutate $handoff '        if c.is_ascii() && !c.is_ascii_control() {' '        if true {'
 mutate $handoff '        Some(uid) => serde_json::json!({ "uid": uid }),' '        Some(_) => serde_json::json!({ "id": a.id, "uid": null }),'
