@@ -976,7 +976,8 @@ fn the_t3_handoff_shows_only_on_an_open_ask_whose_landing_is_known() {
     // An idea, even with options, is answered under Initiatives; an ask with no options has no answer to draft.
     let idea = ASK.replace("class: decision", "class: idea");
     let bare = ASK.split("    options:").next().unwrap().to_string() + "    options: []\n";
-    std::fs::write(asks.join("kinds.yaml"), format!("asks:\n  - id: an-idea\n{idea}  - id: no-options\n{bare}")).unwrap();
+    std::fs::write(asks.join("kinds.yaml"), format!("asks:\n  - id: an-idea\n{idea}  - id: no-options\n{bare}"))
+        .unwrap();
     for id in ["an-idea", "no-options"] {
         let html = with_handoff(&store, "kinds.yaml", id);
         assert!(html.contains("mv-answerbar") && !html.contains("data-handoff"), "{id}: {html}");
