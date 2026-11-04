@@ -197,6 +197,8 @@ mutate $handoff '    let json = |v: &serde_json::Value| ascii_json(&v.to_string(
 mutate $handoff '        if c.is_ascii() && !c.is_ascii_control() {' '        if true {'
 mutate $web '    AnswerThread::parse(value?)' '    AnswerThread::parse(value.unwrap_or("e/t"))'
 decision=crates/view/src/screens/decision.rs
+mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| !a.options.is_empty())'
+mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| a.class != Some(AskClass::Idea))'
 mutate $decision '        @if landing == Landing::Unknown {' '        @if false {'
 mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
 mutate $web 'render_with(&store, &validated, at, thread.as_deref())' 'render_with(&store, &validated, at, None)'
