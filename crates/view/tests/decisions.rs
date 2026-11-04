@@ -959,7 +959,11 @@ const ASK: &str = "    ask: q\n    class: decision\n    gates: [merge]\n    bloc
 fn the_t3_handoff_shows_only_on_an_open_ask_whose_landing_is_known() {
     let m = machine();
     let asks = m.path().join("workspace/.control/asks");
-    std::fs::write(asks.join("handoff.yaml"), format!("asks:\n  - id: open-one\n{ASK}  - id: gone\n    status: archived\n{ASK}")).unwrap();
+    std::fs::write(
+        asks.join("handoff.yaml"),
+        format!("asks:\n  - id: open-one\n{ASK}  - id: gone\n    status: archived\n{ASK}"),
+    )
+    .unwrap();
     // An entry that does not read may share a sibling's handle: the sibling's landing is unknown.
     std::fs::write(asks.join("unread.yaml"), format!("asks:\n  - just a string\n  - id: hidden\n{ASK}")).unwrap();
     let store = worktree(m.path());
