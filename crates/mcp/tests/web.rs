@@ -199,7 +199,9 @@ async fn an_open_decision_drafts_each_answer_in_the_t3_thread() {
         // The exact answer, as the owner reads it before sending.
         assert!(r.body.contains(&format!("answer_option: &quot;{option}&quot;")), "{option}: exact answer");
     }
-    assert!(r.body.contains(r#"href="t3code://threads/env-1/mcp:abc?prompt=Owner%20answer%20for%20one%20Maestro%20ask"#));
+    assert!(
+        r.body.contains(r#"href="t3code://threads/env-1/mcp:abc?prompt=Owner%20answer%20for%20one%20Maestro%20ask"#)
+    );
     // The ledger Maestro read, and the ask as that ledger addresses it.
     assert!(r.body.contains("ledger: &quot;.control/asks/demo-arc.yaml&quot;"), "ledger path");
     assert!(r.body.contains(r#"select: {&quot;id&quot;:&quot;merge-now&quot;,&quot;uid&quot;:null}"#), "selector");
