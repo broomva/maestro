@@ -203,7 +203,8 @@ async fn an_open_decision_drafts_each_answer_in_the_t3_thread() {
         r.body.contains(r#"href="t3code://threads/env-1/mcp:abc?prompt=Owner%20answer%20for%20one%20Maestro%20ask"#)
     );
     // The ledger Maestro read, and the ask as that ledger addresses it.
-    assert!(r.body.contains("ledger: &quot;.control/asks/demo-arc.yaml&quot;"), "ledger path");
+    assert!(r.body.contains("path: &quot;.control/asks/demo-arc.yaml&quot;"), "ledger path");
+    assert!(r.body.contains(r#"maestro_ask_get: {&quot;id&quot;:&quot;merge-now&quot;,&quot;ledger&quot;:&quot;demo-arc.yaml&quot;}"#), "re-read args");
     assert!(r.body.contains(r#"select: {&quot;id&quot;:&quot;merge-now&quot;,&quot;uid&quot;:null}"#), "selector");
     assert!(r.body.contains(r#"href="https://app.t3.codes/env-1/mcp:abc?prompt=Owner%20answer"#));
     // Answered and idea asks get no handoff; nothing on the page writes.

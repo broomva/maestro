@@ -195,6 +195,10 @@ mutate $handoff '        let ok = |s: &str| ok(s) && s != "." && s != "..";' '  
 mutate $handoff '    (text.encode_utf16().count() <= MAX_PROMPT).then_some(text)' '    Some(text)'
 mutate $handoff '    let json = |v: &str| serde_json::Value::from(v).to_string();' '    let json = |v: &str| format!("\"{v}\"");'
 mutate $web '    AnswerThread::parse(value?)' '    AnswerThread::parse(value.unwrap_or("e/t"))'
+decision=crates/view/src/screens/decision.rs
+mutate $decision '        @if landing == Landing::Unknown {' '        @if false {'
+mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
+mutate $handoff "    json.replace('\\u{2028}', \"\\\\u2028\").replace('\\u{2029}', \"\\\\u2029\")" '    json'
 mutate $web 'render_with(&store, &validated, at, thread.as_deref())' 'render_with(&store, &validated, at, None)'
 mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,

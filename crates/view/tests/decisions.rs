@@ -2,7 +2,7 @@
 //! ledger with every ask field they show (`tests/fixtures/decisions.yaml`).
 
 use maestro_store::{Paths, Store, TreeSource};
-use maestro_view::{Rendered, render_at, validate};
+use maestro_view::{Rendered, render_at, render_with, validate};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -945,4 +945,28 @@ fn an_answer_to_an_ask_the_tree_does_not_hold_is_counted_for_the_checkout_never_
         );
         assert!(html.contains("Counted for the whole checkout, not this project alone."), "{html}");
     }
+}
+
+/// One decision rendered with the T3 answer handoff configured (BRO-3590).
+fn with_handoff(store: &Store, ledger: &str, id: &str) -> String {
+    let t = maestro_view::handoff::AnswerThread::parse("env/mcp:t").unwrap();
+    render_with(store, &validate(&detail(ledger, id)).unwrap(), at(), Some(&t)).html
+}
+
+const ASK: &str = "    ask: q\n    class: decision\n    gates: [merge]\n    blocking: false\n    preanswerable: true\n    exhausted: [\"read: x\", \"default: y\"]\n    options:\n      - id: a\n        label: A\n";
+
+#[test]
+fn the_t3_handoff_shows_only_on_an_open_ask_whose_landing_is_known() {
+    let m = machine();
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::write(asks.join("handoff.yaml"), format!("asks:\n  - id: open-one\n{ASK}  - id: gone\n    status: archived\n{ASK}")).unwrap();
+    // An entry that does not read may share a sibling's handle: the sibling's landing is unknown.
+    std::fs::write(asks.join("unread.yaml"), format!("asks:\n  - just a string\n  - id: hidden\n{ASK}")).unwrap();
+    let store = worktree(m.path());
+    let open = with_handoff(&store, "handoff.yaml", "open-one");
+    assert!(open.contains(r#"data-handoff="t3""#), "{open}");
+    let gone = with_handoff(&store, "handoff.yaml", "gone");
+    assert!(gone.contains("Archived") && !gone.contains("data-handoff"), "{gone}");
+    let unknown = with_handoff(&store, "unread.yaml", "hidden");
+    assert!(unknown.contains("cannot tell for sure") && !unknown.contains("data-handoff"), "{unknown}");
 }
