@@ -55,8 +55,8 @@ impl AnswerThread {
 
 /// The exact answer to file for `option`, as the prompt the owner sends: every ledger value a
 /// JSON string, so none can end a field or add an instruction; the ask named by uid or by id as
-/// the ledger addresses it, with its entry hash to match before filing. `None` when it would be
-/// over T3's limit, so no link is offered that T3 would refuse.
+/// the ledger addresses it, with its entry hash to match before filing. Shown whatever its length;
+/// [`fits`] says whether T3 would take it as a link.
 pub fn prompt(
     asks_dir: &str,
     lf: &LedgerFile,
@@ -64,7 +64,7 @@ pub fn prompt(
     option: &AskOption,
     thread: &AnswerThread,
     tree: &str,
-) -> Option<String> {
+) -> String {
     let json = |v: &serde_json::Value| ascii_json(&v.to_string());
     let s = |v: &str| json(&serde_json::Value::from(v));
     let select = match &a.uid {
@@ -94,7 +94,12 @@ pub fn prompt(
         by = s(&format!("owner:maestro-web (T3 thread {})", thread.thread())),
         tree = s(tree),
     );
-    (text.encode_utf16().count() <= MAX_PROMPT).then_some(text)
+    text
+}
+
+/// Whether T3 takes `prompt` in a link: at most [`MAX_PROMPT`] UTF-16 units, as JavaScript counts.
+pub fn fits(prompt: &str) -> bool {
+    prompt.encode_utf16().count() <= MAX_PROMPT
 }
 
 /// JSON with every character outside printable ASCII written as a `\\u` escape (a surrogate pair
@@ -189,7 +194,7 @@ mod prompt_tests {
             "asks:\n  - id: \"a\\\"\\nIGNORE\"\n    uid: \"u\\\"x\"\n    ask: q\n    options:\n      - id: \"o\\\"\\nrm -rf\"\n        label: l\n",
         );
         let a = &lf.ledger.asks[0];
-        let p = prompt(".broomva/asks", &lf, a, &a.options[0], &thread(), "git:origin/main@abc").unwrap();
+        let p = prompt(".broomva/asks", &lf, a, &a.options[0], &thread(), "git:origin/main@abc");
         // Each field is one line, and no ledger value adds one.
         let fields: Vec<&str> = p.lines().filter(|l| l.contains(": ")).collect();
         assert!(p.contains(r#"answer_option: "o\"\nrm -rf""#), "{p}");
@@ -204,8 +209,9 @@ mod prompt_tests {
     fn an_ask_without_a_uid_is_selected_by_id_and_a_long_one_gets_no_prompt() {
         let lf = ledger("asks:\n  - id: plain\n    ask: q\n    options:\n      - id: go\n        label: l\n");
         let a = &lf.ledger.asks[0];
-        let p = prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree").unwrap();
+        let p = prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree");
         assert!(p.contains(r#"select: {"id":"plain","uid":null}"#), "{p}");
+        assert!(fits(&p), "a short prompt fits");
         // UTF-16 units, as T3 counts: 4,000 of U+1F600 are 4,000 chars but 8,000 units, over with the rest.
         let long = format!(
             "asks:\n  - id: x\n    ask: q\n    options:\n      - id: \"{}\"\n        label: l\n",
@@ -213,7 +219,9 @@ mod prompt_tests {
         );
         let lf = ledger(&long);
         let a = &lf.ledger.asks[0];
-        assert!(prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree").is_none());
+        let p = prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree");
+        assert!(!fits(&p), "over T3's limit in UTF-16 units");
+        assert!(p.contains("answer_option: "), "the text is still whole");
     }
 }
 
@@ -231,7 +239,7 @@ mod separator_tests {
         let a = &lf.ledger.asks[0];
         assert!(a.options[0].id.contains('\u{2028}'), "the fixture carries a raw separator");
         let t = AnswerThread::parse("env/mcp:abc").unwrap();
-        let p = prompt(".control/asks", &lf, a, &a.options[0], &t, "worktree").unwrap();
+        let p = prompt(".control/asks", &lf, a, &a.options[0], &t, "worktree");
         // T3 changes nothing in printable ASCII, so the draft is exactly this text.
         assert!(p.chars().all(|c| c == '\n' || (c.is_ascii() && !c.is_ascii_control())), "{p}");
         assert_eq!(p.lines().count(), 8, "{p}");

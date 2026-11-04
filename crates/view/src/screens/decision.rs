@@ -222,14 +222,14 @@ fn handoff(cx: &Ctx, lf: &LedgerFile, a: &Ask, t: &crate::handoff::AnswerThread)
                         li class="mv-handoff-option" data-option=(o.id) {
                             span class="bv-code" { (o.id) } " " bdi { (o.label) }
                             @if o.recommended { " · " span data-tone="success" { "Recommended" } }
-                            @match crate::handoff::prompt(dir, lf, a, o, t, &cx.snap.tree) {
-                                Some(prompt) => {
-                                    " · " a href=(t.app_link(&prompt)) { "Open in T3" }
-                                    " · " a href=(t.web_link(&prompt)) target="_blank" rel="noopener noreferrer" { "T3 on the web" }
-                                    details { summary class="bv-meta" { "The exact answer" } pre class="bv-code mv-handoff-prompt" { (prompt) } }
-                                }
-                                None => { " · " span data-tone="warning" { "Too long for a T3 link: answer it in the thread by hand." } }
+                            @let prompt = crate::handoff::prompt(dir, lf, a, o, t, &cx.snap.tree);
+                            @if crate::handoff::fits(&prompt) {
+                                " · " a href=(t.app_link(&prompt)) { "Open in T3" }
+                                " · " a href=(t.web_link(&prompt)) target="_blank" rel="noopener noreferrer" { "T3 on the web" }
+                            } @else {
+                                " · " span data-tone="warning" { "Too long for a T3 link: paste the exact answer into the thread." }
                             }
+                            details { summary class="bv-meta" { "The exact answer" } pre class="bv-code mv-handoff-prompt" { (prompt) } }
                         }
                     }
                 },
