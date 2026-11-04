@@ -223,9 +223,12 @@ async fn an_open_decision_drafts_each_answer_in_the_t3_thread() {
 
 #[tokio::test]
 async fn without_an_answer_thread_the_decision_stays_read_only() {
-    // `http::serve` reads `MAESTRO_ANSWER_THREAD`, which no test sets.
-    assert!(std::env::var(maestro_mcp::web::ANSWER_THREAD_ENV).is_err());
-    let (addr, cancel) = start(fixture()).await;
+    let cancel = CancellationToken::new();
+    let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = maestro_mcp::web::router_with(maestro_mcp::MaestroServer::new(fixture()), addr, None);
+    let stop = cancel.clone();
+    tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(stop.cancelled_owned()).await });
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &addr.to_string(), &[]).await;
     assert_page(&r, "no thread", "/decisions");
     assert!(!r.body.contains("data-handoff") && !r.body.contains("t3code://"));
