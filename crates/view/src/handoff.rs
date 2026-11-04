@@ -180,8 +180,11 @@ mod prompt_tests {
         let a = &lf.ledger.asks[0];
         let p = prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree").unwrap();
         assert!(p.contains(r#"select: {"id":"plain","uid":null}"#), "{p}");
-        // UTF-16 units, as T3 counts: 3,000 of U+1F600 are 6,000 units, over the limit with the rest.
-        let long = format!("asks:\n  - id: x\n    ask: q\n    options:\n      - id: \"{}\"\n        label: l\n", "\u{1F600}".repeat(3_000));
+        // UTF-16 units, as T3 counts: 4,000 of U+1F600 are 4,000 chars but 8,000 units, over with the rest.
+        let long = format!(
+            "asks:\n  - id: x\n    ask: q\n    options:\n      - id: \"{}\"\n        label: l\n",
+            "\u{1F600}".repeat(4_000)
+        );
         let lf = ledger(&long);
         let a = &lf.ledger.asks[0];
         assert!(prompt(".control/asks", &lf, a, &a.options[0], &thread(), "worktree").is_none());

@@ -228,7 +228,7 @@ fn handoff(cx: &Ctx, lf: &LedgerFile, a: &Ask, t: &crate::handoff::AnswerThread)
                                     " · " a href=(t.web_link(&prompt)) target="_blank" rel="noopener noreferrer" { "T3 on the web" }
                                     details { summary class="bv-meta" { "The exact answer" } pre class="bv-code mv-handoff-prompt" { (prompt) } }
                                 }
-                                None => " · " span data-tone="warning" { "Too long for a T3 link: answer it in the thread by hand." },
+                                None => { " · " span data-tone="warning" { "Too long for a T3 link: answer it in the thread by hand." } }
                             }
                         }
                     }
