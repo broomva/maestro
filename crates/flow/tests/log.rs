@@ -131,17 +131,154 @@ fn a_torn_tail_reads_as_unread_and_blocks_appends_until_truncated() {
     assert_eq!(std::fs::read(&path).unwrap(), whole);
     assert_eq!(ledger.lock().unwrap().append(&fi, 3, event("Tick", 3)).unwrap().event.seq, 4);
 
-    // Whole but failing its hash.
+    // A whole last event that does not chain is a broken chain, not a torn tail: truncation
+    // refuses it rather than "repair" it.
     let whole = std::fs::read(&path).unwrap();
     let bad = serde_json::json!({"seq": 5, "prev_event": "sha256:00", "at": "2026-11-07T00:00:00Z", "kind": "Tick", "body": {}});
     append_raw(&path, &format!("{bad}\n"));
+    let damaged = std::fs::read(&path).unwrap();
+    assert_eq!(code(reader.lock().unwrap().log(&fi)), "chain_broken");
+    assert_eq!(code(ledger.lock().unwrap().append(&fi, 4, event("Tick", 4))), "chain_broken");
+    assert_eq!(code(operator::truncate_torn_tail(&mut ledger, &fi)), "chain_broken");
+    assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    std::fs::write(&path, &whole).unwrap();
+
+    // A whole last line that does not parse is what a crash leaves: torn.
+    append_raw(&path, "{\"seq\":5,garbage\n");
     assert_eq!(code(reader.lock().unwrap().log(&fi)), "torn_tail");
     assert_eq!(code(ledger.lock().unwrap().append(&fi, 4, event("Tick", 4))), "torn_tail");
-    operator::truncate_torn_tail(&mut ledger, &fi).unwrap();
+    assert_eq!(operator::truncate_torn_tail(&mut ledger, &fi).unwrap(), 17);
     assert_eq!(std::fs::read(&path).unwrap(), whole);
     assert_eq!(ledger.lock().unwrap().append(&fi, 4, event("Tick", 4)).unwrap().event.seq, 5);
     assert_eq!(reader.lock().unwrap().log(&fi).unwrap().seq(), 5);
     assert_eq!(code(operator::truncate_torn_tail(&mut ledger, &fi)), "operator_refused");
+
+    // A corrupt line before a good last one: broken, and truncation keeps both.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let corrupt = text.replacen("{\"seq\":4", "{\"seq\":4,", 1);
+    std::fs::write(&path, &corrupt).unwrap();
+    assert_eq!(code(reader.lock().unwrap().log(&fi)), "chain_broken");
+    assert_eq!(code(operator::truncate_torn_tail(&mut ledger, &fi)), "chain_broken");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
+}
+
+/// The stored `seq` is checked, not only counted: a line numbered out of turn, chained correctly,
+/// breaks the log.
+#[test]
+fn a_line_numbered_out_of_turn_breaks_the_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    let line = |seq: u64, prev: Option<String>| {
+        serde_json::json!({"seq": seq, "prev_event": prev, "at": "2026-11-07T00:00:00Z", "kind": "Tick", "body": {}})
+            .to_string()
+    };
+    let l1 = line(1, None);
+    let l2 = line(5, Some(sha(&l1)));
+    let l3 = line(3, Some(sha(&l2)));
+    std::fs::create_dir(root.join("instances/fi_seq")).unwrap();
+    std::fs::write(root.join("instances/fi_seq/events.jsonl"), format!("{l1}\n{l2}\n{l3}\n")).unwrap();
+    let read = Reader::new(&root, quick()).unwrap().lock().unwrap().log(&id("fi_seq"));
+    assert!(matches!(read, Err(FlowError::ChainBroken { line: 2, .. })), "{read:?}");
+}
+
+/// No path under the root is followed out of it: a linked instance directory, a linked log and
+/// a linked `instances/` are each refused, and nothing outside the root is written or made.
+#[cfg(unix)]
+#[test]
+fn symbolic_links_under_the_root_are_refused() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("events.jsonl"), "x").unwrap();
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
+    let instances = root.join("instances");
+
+    symlink(&outside, instances.join("fi_dir")).unwrap();
+    std::fs::create_dir(instances.join("fi_file")).unwrap();
+    symlink(outside.join("events.jsonl"), instances.join("fi_file/events.jsonl")).unwrap();
+    std::fs::create_dir(instances.join("fi_dangling")).unwrap();
+    symlink(outside.join("new.jsonl"), instances.join("fi_dangling/events.jsonl")).unwrap();
+    let before = snapshot(&outside);
+    {
+        let mut guard = ledger.lock().unwrap();
+        for (name, seq) in [("fi_dir", 0), ("fi_file", 0), ("fi_file", 1), ("fi_dangling", 0)] {
+            assert_eq!(code(guard.append(&id(name), seq, event("Started", 0))), "symlink", "{name} at {seq}");
+        }
+    }
+    let reader = Reader::new(&root, quick()).unwrap();
+    for name in ["fi_dir", "fi_file", "fi_dangling"] {
+        assert_eq!(code(reader.lock().unwrap().log(&id(name))), "symlink", "{name}");
+    }
+    assert_eq!(snapshot(&outside), before, "a write went through a link");
+
+    // `instances/` itself replaced by a link to a copy.
+    std::fs::rename(&instances, root.join("instances-real")).unwrap();
+    symlink(root.join("instances-real"), &instances).unwrap();
+    assert_eq!(code(ledger.lock().unwrap().append(&id("fi_a"), 1, event("Tick", 1))), "symlink");
+    assert_eq!(code(reader.lock().unwrap().log(&id("fi_a"))), "symlink");
+}
+
+/// Every row of the projection is a function of its log alone, so the cache kept up write by
+/// write equals a rebuild from scratch: after appends, a torn tail, an unreadable log, a retire
+/// and a truncation. A rebuild never drops an instance it cannot read; it records it.
+#[test]
+fn the_incremental_projection_equals_a_rebuild() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let db = root.join("projection.sqlite");
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    for (name, kind) in [("fi_a", "Started"), ("fi_a", "Claimed"), ("fi_b", "Started"), ("fi_c", "Started")] {
+        append_at_head(&mut ledger, &id(name), event(kind, 0)).unwrap();
+    }
+    append_at_head(&mut ledger, &id("fi_d"), event("Started", 0)).unwrap();
+    let reader = Reader::new(&root, Options::default()).unwrap();
+    let dump = |reader: &Reader| reader.lock().unwrap().projection_dump().unwrap().unwrap();
+    // Compares the cache as kept with a rebuild, then puts the kept one back.
+    let same_as_rebuild = |ledger: &mut Ledger, step: &str| {
+        let kept = dump(&reader);
+        let saved = std::fs::read(&db).unwrap();
+        std::fs::remove_file(&db).unwrap();
+        operator::rebuild_projection(ledger).unwrap();
+        assert_eq!(kept, dump(&reader), "after {step}");
+        std::fs::write(&db, saved).unwrap();
+        kept
+    };
+    same_as_rebuild(&mut ledger, "appends");
+
+    append_raw(&root.join("instances/fi_b/events.jsonl"), "{\"seq\":2,");
+    append_at_head(&mut ledger, &id("fi_a"), event("Tick", 1)).unwrap();
+    let kept = same_as_rebuild(&mut ledger, "a torn tail");
+    let row = kept.instances.iter().find(|r| r.0 == "fi_b").unwrap();
+    assert_eq!((row.1.as_str(), row.2), ("torn_tail", 1));
+
+    operator::retire(&mut ledger, &id("fi_c")).unwrap();
+    let kept = same_as_rebuild(&mut ledger, "a retire");
+    assert!(kept.instances.iter().all(|r| r.0 != "fi_c"));
+    assert!(kept.kind_counts.iter().all(|r| r.0 != "fi_c"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let log = root.join("instances/fi_d/events.jsonl");
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads anything; the unreadable case only means something where permissions hold.
+        if std::fs::read(&log).is_err() {
+            append_at_head(&mut ledger, &id("fi_a"), event("Tick", 2)).unwrap();
+            let kept = same_as_rebuild(&mut ledger, "an unreadable log");
+            let row = kept.instances.iter().find(|r| r.0 == "fi_d").unwrap();
+            assert_eq!((row.1.as_str(), row.2), ("unreadable", 0));
+        }
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    operator::truncate_torn_tail(&mut ledger, &id("fi_b")).unwrap();
+    let kept = same_as_rebuild(&mut ledger, "a truncation");
+    let row = kept.instances.iter().find(|r| r.0 == "fi_b").unwrap();
+    assert_eq!((row.1.as_str(), row.2), ("ok", 1));
 }
 
 #[test]
@@ -169,7 +306,7 @@ fn the_projection_replays_exactly_and_the_log_wins() {
     std::fs::remove_file(&db).unwrap();
     append_at_head(&mut ledger, &a, event("Heartbeat", 0)).unwrap();
     let after = dump();
-    assert!(after.instances.iter().any(|(i, _, _)| i == "fi_b"), "{after:?}");
+    assert!(after.instances.iter().any(|r| r.0 == "fi_b"), "{after:?}");
     operator::rebuild_projection(&mut ledger).unwrap();
     assert_eq!(dump(), after);
 

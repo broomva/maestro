@@ -54,6 +54,9 @@ pub enum FlowError {
     /// No such instance, and the caller did not ask to create one (expected sequence 0).
     #[error("There is no instance {instance}.")]
     UnknownInstance { instance: String },
+    /// A path under the root is a symbolic link. Nothing under the root is followed out of it.
+    #[error("{path} is a symbolic link, so nothing was read or written through it.")]
+    Symlink { path: PathBuf },
     /// An id, host or event kind that is not allowed.
     #[error("{what} {value:?} is not allowed: {reason}.")]
     Invalid { what: &'static str, value: String, reason: &'static str },
@@ -88,6 +91,7 @@ impl FlowError {
             FlowError::ChainBroken { .. } => "chain_broken",
             FlowError::Retired { .. } => "retired",
             FlowError::UnknownInstance { .. } => "unknown_instance",
+            FlowError::Symlink { .. } => "symlink",
             FlowError::Invalid { .. } => "invalid",
             FlowError::OperatorRefused(_) => "operator_refused",
             FlowError::Projection(_) => "projection",

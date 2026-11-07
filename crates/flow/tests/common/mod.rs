@@ -81,13 +81,54 @@ pub fn names(dir: &Path) -> Vec<String> {
 
 /// Spawns this test binary again as a child running `spec` (fields joined by U+001F).
 pub fn spawn_child(spec: &[&str]) -> Child {
-    Command::new(std::env::current_exe().unwrap())
-        .args(["child_process_entry", "--exact", "--nocapture", "--test-threads=1"])
+    spawn_child_pausing(spec, None)
+}
+
+/// As [`spawn_child`], with the child pausing at `pause` (see [`Pause`]).
+pub fn spawn_child_pausing(spec: &[&str], pause: Option<&Pause>) -> Child {
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.args(["child_process_entry", "--exact", "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, spec.join("\u{1f}"))
+        .env_remove(maestro_flow::hooks::PAUSE_ENV)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::null());
+    if let Some(p) = pause {
+        cmd.env(maestro_flow::hooks::PAUSE_ENV, format!("{}@{}", p.point, p.dir.path().display()));
+    }
+    cmd.spawn().unwrap()
+}
+
+/// A pause point a child holds open (`maestro_flow::hooks`): the child writes `reached` there and
+/// waits for `go`.
+pub struct Pause {
+    pub point: &'static str,
+    pub dir: tempfile::TempDir,
+}
+
+impl Pause {
+    pub fn at(point: &'static str) -> Pause {
+        Pause { point, dir: tempfile::tempdir().unwrap() }
+    }
+
+    /// Waits until the child is holding the window open.
+    pub fn reached(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self.dir.path().join("reached").exists() {
+            assert!(Instant::now() < deadline, "the child never reached {}", self.point);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    pub fn go(&self) {
+        std::fs::write(self.dir.path().join("go"), "").unwrap();
+    }
+}
+
+/// Replaces `path` with a copy of itself: same bytes, another inode.
+pub fn replace_with_copy(path: &Path) {
+    let tmp = path.with_extension("copy");
+    std::fs::copy(path, &tmp).unwrap();
+    std::fs::rename(&tmp, path).unwrap();
 }
 
 /// The child's `FLOW_RESULT` line: `ok` or a refusal code.
@@ -104,6 +145,9 @@ pub fn child_result(child: Child) -> String {
 ///
 /// - `genesis <root> <host> <go file>`: waits for the go file, then opens the ledger.
 /// - `append <root> <host> <instance> <count> <lock wait ms>`: appends `count` events at the head.
+/// - `open <root> <host>`: opens the ledger.
+/// - `read <root>`: takes the read lock and lists the instances.
+/// - `fresh <root> <host>`: `operator::create_fresh_ledger`.
 pub fn child_main() {
     let Ok(spec) = std::env::var(CHILD_ENV) else { return };
     let parts: Vec<&str> = spec.split('\u{1f}').collect();
@@ -124,6 +168,13 @@ pub fn child_main() {
             }
             Ok(())
         })(),
+        ["open", root, name] => Ledger::open(Path::new(root), &host(name), Options::default()).map(|_| ()),
+        ["read", root] => maestro_flow::Reader::new(Path::new(root), Options::default())
+            .and_then(|r| r.lock().and_then(|g| g.instances()))
+            .map(|_| ()),
+        ["fresh", root, name] => {
+            maestro_flow::operator::create_fresh_ledger(Path::new(root), &host(name), &Options::default()).map(|_| ())
+        }
         _ => panic!("unknown child spec {spec:?}"),
     };
     println!("FLOW_RESULT {}", code(result));

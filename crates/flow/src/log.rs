@@ -2,10 +2,10 @@
 //!
 //! Line `n` carries `seq: n` and `prev_event`, the `sha256:<hex>` of line `n - 1`'s exact bytes
 //! (without its newline); line 1 carries `prev_event: null`. A log verifies when every line
-//! parses, its `seq` follows the one before and its `prev_event` matches. When only the last
-//! line fails (cut short by a crash, or failing its hash) the tail is torn: the log reads as
-//! unread and appends wait for an operator truncation. A failure before the last line is a
-//! broken chain.
+//! parses, its `seq` follows the one before and its `prev_event` matches. When the last line is
+//! cut short or does not parse (what a crash mid-write leaves) the tail is torn: the log reads as
+//! unread and appends wait for an operator truncation. Any other failure, including a whole last
+//! event with the wrong `seq` or `prev_event`, is a broken chain.
 
 use crate::error::{FlowError, Result};
 use crate::ids::InstanceId;
@@ -100,7 +100,19 @@ pub fn verify(instance: &InstanceId, bytes: &[u8]) -> Result<Log> {
     verify_prefix(instance, bytes).map_err(|(e, _)| e)
 }
 
+/// Why a line failed.
+enum Fault {
+    /// Cut short, or not an event at all: what a crash mid-write leaves.
+    Unparsed(String),
+    /// A whole event that does not follow the line before.
+    Unchained(String),
+}
+
 /// As [`verify`], with the verified prefix on failure.
+///
+/// Only the last line can be torn, and only by being cut short (no newline) or by not parsing.
+/// A whole event with the wrong `seq` or `prev_event` is a broken chain wherever it is, which an
+/// operator truncation never "repairs".
 pub(crate) fn verify_prefix(instance: &InstanceId, bytes: &[u8]) -> Result<Log, (FlowError, Prefix)> {
     let mut events: Vec<Event> = Vec::new();
     let mut last_hash: Option<String> = None;
@@ -112,31 +124,27 @@ pub(crate) fn verify_prefix(instance: &InstanceId, bytes: &[u8]) -> Result<Log, 
             None => (rest, false),
         };
         let next = offset + line.len() + usize::from(complete);
-        let failure = if !complete {
-            Some("the last line has no newline".to_string())
+        let checked = if complete {
+            check_line(line, events.len() as u64 + 1, last_hash.as_deref())
         } else {
-            check_line(line, events.len() as u64 + 1, last_hash.as_deref()).err()
+            Err(Fault::Unparsed("the last line has no newline".to_string()))
         };
-        if let Some(detail) = failure {
-            let prefix = Prefix { seq: events.len() as u64, len: offset as u64 };
-            let error = if next == bytes.len() {
-                FlowError::TornTail { instance: instance.to_string(), verified_seq: prefix.seq, detail }
-            } else {
-                FlowError::ChainBroken { instance: instance.to_string(), line: prefix.seq + 1, detail }
-            };
-            return Err((error, prefix));
-        }
-        // The check above parsed it; parse again only to keep the event.
-        let event: Event = serde_json::from_slice(line).map_err(|e| {
-            (
-                FlowError::ChainBroken {
-                    instance: instance.to_string(),
-                    line: events.len() as u64 + 1,
-                    detail: e.to_string(),
-                },
-                Prefix { seq: events.len() as u64, len: offset as u64 },
-            )
-        })?;
+        let event = match checked {
+            Ok(event) => event,
+            Err(fault) => {
+                let prefix = Prefix { seq: events.len() as u64, len: offset as u64 };
+                let last = next == bytes.len();
+                let error = match fault {
+                    Fault::Unparsed(detail) if last => {
+                        FlowError::TornTail { instance: instance.to_string(), verified_seq: prefix.seq, detail }
+                    }
+                    Fault::Unparsed(detail) | Fault::Unchained(detail) => {
+                        FlowError::ChainBroken { instance: instance.to_string(), line: prefix.seq + 1, detail }
+                    }
+                };
+                return Err((error, prefix));
+            }
+        };
         last_hash = Some(line_hash(line));
         events.push(event);
         offset = next;
@@ -144,15 +152,15 @@ pub(crate) fn verify_prefix(instance: &InstanceId, bytes: &[u8]) -> Result<Log, 
     Ok(Log { instance: instance.clone(), events, last_hash })
 }
 
-fn check_line(line: &[u8], want_seq: u64, want_prev: Option<&str>) -> Result<(), String> {
-    let event: Event = serde_json::from_slice(line).map_err(|e| format!("not an event: {e}"))?;
+fn check_line(line: &[u8], want_seq: u64, want_prev: Option<&str>) -> Result<Event, Fault> {
+    let event: Event = serde_json::from_slice(line).map_err(|e| Fault::Unparsed(format!("not an event: {e}")))?;
     if event.seq != want_seq {
-        return Err(format!("seq {} where {want_seq} was due", event.seq));
+        return Err(Fault::Unchained(format!("seq {} where {want_seq} was due", event.seq)));
     }
     if event.prev_event.as_deref() != want_prev {
-        return Err("prev_event does not match the line before".to_string());
+        return Err(Fault::Unchained("prev_event does not match the line before".to_string()));
     }
-    Ok(())
+    Ok(event)
 }
 
 /// The line to append after `log`, newline included.
