@@ -38,11 +38,27 @@ fn every_tool_is_a_read_or_an_agent_request() {
             // flow ledger (docs/adrs/2026-11-06-flow-ledger.md).
             Authority::AgentWrite => {
                 assert!(spec.request.is_none(), "{} is a flow write but makes a request", spec.name);
-                assert!(spec.scope.starts_with(".broomva/flows"), "{} writes outside the flow ledger", spec.name);
+                assert!(within_flow_ledger(spec.scope), "{} writes outside the flow ledger", spec.name);
             }
         }
     }
     assert_eq!(MaestroServer::tools().len(), TOOLS.len());
+}
+
+/// The flow ledger's scope: its root `.broomva/flows` or a path below it, never a sibling
+/// (`.broomva/flows-other`) and never a path that climbs out (`..`).
+fn within_flow_ledger(scope: &str) -> bool {
+    (scope == ".broomva/flows" || scope.starts_with(".broomva/flows/")) && !scope.split('/').any(|p| p == "..")
+}
+
+#[test]
+fn a_flow_write_scope_is_the_flow_ledger_and_nothing_beside_it() {
+    for ok in [".broomva/flows", ".broomva/flows/", ".broomva/flows/fi_01/events.jsonl"] {
+        assert!(within_flow_ledger(ok), "{ok}");
+    }
+    for bad in [".broomva/flows-other", ".broomva/flowsx", ".broomva/flows/../asks", ".broomva/asks", "read", ""] {
+        assert!(!within_flow_ledger(bad), "{bad}");
+    }
 }
 
 #[test]

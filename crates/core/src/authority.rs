@@ -3,9 +3,10 @@
 //! 1. Reads: scoped observations for coordinators and dashboards.
 //! 2. Agent requests: queue gated work, file a validated ask, request one held action.
 //! 3. Owner actions: answer, allow or deny, dispatch, send back, review, undo.
-//! 4. Agent writes: a verified agent session writing its own flow ledger
-//!    (`docs/adrs/2026-11-06-flow-ledger.md`). Unlike a request, the write takes effect,
-//!    so only a verified agent may make one, and only to a ledger it owns.
+//! 4. Agent writes: a verified agent session writing the flow ledger
+//!    (`docs/adrs/2026-11-06-flow-ledger.md`). Unlike a request, the write takes effect, so
+//!    only a verified agent holds this class. Which instances it may write is decided by
+//!    `crates/flow` from the instance's owner, not here.
 //!
 //! A model-visible tool is never proof of the owner. An owner action needs a
 //! principal the server can verify; a client-supplied `actor: human` is not one.
