@@ -9,15 +9,17 @@ Tracking: BRO-3624 (phase 1 of the flow kernel), BRO-3622 (spec), BRO-3426 (idea
 The flow kernel spec lives in the private **broomva/workspace** repository, not in this one. It is
 `docs/specs/2026-11-06-flow-kernel.md` at commit `4fbc54ca3` (PR broomva/workspace#1229). To
 read it with access:
-`gh api repos/broomva/workspace/contents/docs/specs/2026-11-06-flow-kernel.md?ref=4fbc54ca3 --jq .content | base64 -d`.
-This ADR depends on three statements in it, quoted here so it can be reviewed without that access:
+`gh api 'repos/broomva/workspace/contents/docs/specs/2026-11-06-flow-kernel.md?ref=4fbc54ca3' --jq .content | base64 -d`.
+This ADR depends on three statements in it. They are quoted exactly below (markdown emphasis
+removed) so the ADR can be reviewed without that access:
 
 - Non-goals: "No distributed execution in phase 1. A single host with file locks. Instances
   shared across the Mac and the NUC wait for a shared substrate."
 - Storage: "Each instance has `events.jsonl` (append-only, hash-chained through `prev_event`) and
-  a SQLite projection … There is no daemon."
+  a SQLite projection, kept under the flows root (see the Maestro boundary below)." and "There is
+  no daemon."
 - Decision D1: "The kernel is a Rust crate in the Maestro workspace (`crates/flow`), exposed
-  through Maestro's existing CLI and MCP server."
+  through Maestro's existing CLI and MCP server"
 
 The spec adds a pull-based flow kernel. Agents from any harness call it to learn which step
 of a flow is ready (`next`), take it (`claim`), finish it (`complete`) or pick a declared branch
@@ -58,13 +60,11 @@ current writer to transfer from and no cut-over to stage.
      - Otherwise the platform machine ID: `IOPlatformUUID` on macOS, `/etc/machine-id` on Linux.
      - `HOST` records which source was used. A host whose identity cannot be read can read flows
        but not write them.
-   - **Moving the ledger to another host** (for example, the SSD moving from the Mac to the NUC)
-     is an explicit, audited rebind. It is never automatic:
-     - It is run with `maestro flow rebind-host` on the new host, by a verified principal.
-     - It refuses while any instance has a live lease, so it never strands an in-flight claim.
-     - It appends a `HostRebound` event with the old and new identity to every open instance,
-       then rewrites `HOST`. Until it runs, every write on the new host is refused with
-       `foreign_host`, and reads keep working.
+   - **Moving to another host is not a phase 1 operation.** Phase 1 has no rebind. The ledger
+     moves only when no instance is open, by archiving the old root (renaming
+     `.broomva/flows/` aside), after which the new host starts a fresh root with its own `HOST`.
+     That is an operator step outside the kernel, with nothing for a concurrent writer to race.
+     Live migration waits for the shared substrate or the lease (next item).
    - **Later:** when a shared substrate or the phase 2 lease in `crates/ledger` exists, the flow
      family moves under it and the host binding is lifted. That move is a change to one call
      site, not a change of writer.
@@ -88,11 +88,18 @@ current writer to transfer from and no cut-over to stage.
    before any flow write is enabled there. Until it exists, `maestro flow` writes from the CLI
    are refused, and only verified MCP surfaces can drive flows. Ownership works as follows:
    - **The instance is owned by the session that started it.** Only that session may `claim`.
-   - **A claim token is the capability for one node.** The owner may hand it to a performer, such
-     as a subagent. `complete`, `choose` and `heartbeat` are accepted from any verified session
-     that presents a live token, and from no one without one.
-   - **No cross-agent writes.** A verified session that neither owns the instance nor holds a
-     token for it cannot write to it.
+   - **A claim is bound to the verified session that made it.** Only that session may
+     `complete`, `choose` or `heartbeat` the claim. The claim token is a handle that names the
+     claim, not a capability: on its own it grants nothing, so passing it to another session
+     gives that session no write.
+   - **Performers report through the claimant.** A subagent that does the work returns its result
+     to the session holding the claim, and that session calls `complete`. This matches the pull
+     model, in which the driving session talks to the kernel.
+   - **Tokens are never readable.** The log and the SQLite projection store only a hash of each
+     token, and `next`, `status` and replay never return a token. A token appears once, in the
+     `claim` response to its claimant.
+   - **No cross-agent writes.** A verified session that did not start the instance cannot claim
+     in it, and a session that did not make a claim cannot act on it.
 5. **No owner verb.** The flow verbs (`start`, `next`, `claim`, `complete`, `choose`, `status`,
    `heartbeat`) act on an agent's own flow instance. None of them answers, approves, dispatches,
    reviews or decides for the owner. Their names pass the owner-word checks in
@@ -148,16 +155,16 @@ current writer to transfer from and no cut-over to stage.
 
 ## Verification
 
-Each command below must pass, and each guard test must fail when its guard is removed, per
-`scripts/ci.sh`'s mutation check.
+Each command below must pass. Each guard test must fail when its guard is removed, proved by a
+line in `scripts/mutation-check.sh`, as `AGENTS.md` requires.
 
 ```bash
 cargo test -p maestro-flow --test single_writer     # a second concurrent writer (separate process) is serialized or refused
 cargo test -p maestro-flow --test host_binding      # a write from a host other than .broomva/flows/HOST is refused (foreign_host)
 cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/
 cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
-cargo test -p maestro-flow --test cross_session     # a verified session without ownership or a token cannot write another's instance
-cargo test -p maestro-flow --test host_rebind       # rebind refuses while a lease is live; after it, the new host writes and HostRebound is logged
+cargo test -p maestro-flow --test cross_session     # another verified session cannot claim in, or act on a claim of, an instance it did not start
+cargo test -p maestro-flow --test token_handle      # a token passed to another session grants nothing; no token appears in the log, projection or status
 cargo test -p maestro-mcp --test flow_principal     # MCP: unverified flow writes refused; verified T3 and Paseo writes succeed
 cargo test -p maestro --test flow_principal         # CLI: writes refused until the Direct path verifies; a verified Direct write succeeds
 cargo test -p maestro-flow --test ask_recovery      # after a failed-but-written ask, the flow records the recovered ID and never re-files
