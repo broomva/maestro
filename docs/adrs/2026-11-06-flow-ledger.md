@@ -1,7 +1,8 @@
 # ADR: The flow ledger, a new ledger family with one writer from birth (BRO-3624)
 
 Date: 2026-11-06
-Status: accepted (owner, 2026-11-06, as a decision-only ADR; see Review history)
+Status: accepted (owner, 2026-11-06 and 2026-11-07, as a decision-only ADR; see Review history
+and Owner input)
 Tracking: BRO-3624 (phase 1 of the flow kernel), BRO-3622 (spec), BRO-3426 (ideal agentic stack)
 
 ## Context
@@ -57,21 +58,40 @@ mechanisms are deliberately not specified here. See Review history for why.
    shared substrate or the lease.
 4. **No other ledger gains a writer.** The flow crate never writes the asks, initiatives, loops or
    work ledgers. A human step files its ask through the existing agent path (`maestro_ask_file`,
-   validated by `scripts/ask_ledger.py`) and resolves by reading the owner's answer.
+   validated by `scripts/ask_ledger.py`) and resolves by reading the owner's answer. The same
+   question is also relayed into the T3 thread driving the flow, so the owner can answer where
+   they are working. Either way, the answer is recorded only through the owner path (Maestro
+   decisions, or the T3 answer handoff that writes through it), never by an agent.
 5. **Who may write.** A flow write takes effect, unlike a held agent request (BRO-3186). So every
    write verb (`start`, `claim`, `complete`, `choose`, `heartbeat`) requires a verified agent
    session (`VerifiedSession`, via `resolve_caller`), and an unverified caller may only read
    (`next`, `status`). An instance is owned by the verified session that started it. A claim is
    bound to the session that made it.
-6. **Ownership survives turns and refuses replacements.** Ownership is keyed on the
+6. **Ownership survives turns; replacements need your approval.** Ownership is keyed on the
    `SessionRef` plus an owner marker that stays fixed for the life of the session and changes
    when the session is replaced. The registries' existing `incarnation` does not qualify: it
    changes on every T3 turn (provider, latest `run_id`) and every Paseo restart (`pid`). Phase 1
    adds the marker in `crates/hosts`. A session with no marker can read but not write.
+   A replacement session cannot write an instance it does not own. It may continue that
+   instance only through **owner-approved adoption**:
+   - **The request:** the new session files a Maestro ask naming the instance, the old and new
+     owner, and the progress so far.
+   - **On your approval:** the kernel appends an `Adopted` event, after reading the answer from
+     the answers ledger, never from the agent. Completed steps stand, in-flight claims expire
+     through their leases, and the new owner continues from the next ready step.
+   - **Without approval:** nothing changes.
+
+   **Retiring** an abandoned instance works the same way. An agent may propose it through a
+   Maestro ask, and the kernel retires the instance (log preserved, never reopened) only after
+   your approval. Adoption and retirement change who owns a flow, so they are owner decisions,
+   applied by the kernel. They are never agent verbs.
 7. **No owner verb.** The flow verbs act on an agent's own instances. None answers, approves,
    dispatches, reviews or decides for the owner, and their names pass the owner-word checks in
    `crates/mcp/tests/authority.rs` and `crates/cli/tests/requests.rs`. Hence `choose`, not
-   `decide`. Flow writes are a new agent-surface class, so the authority suites gain explicit
+   `decide`. The agent-callable operations that carry out an approved adoption or retirement only
+   present the approved ask's ID, and the kernel checks the answer before acting. Their names must
+   pass the same owner-word checks (`archive` is on the lists, so retirement needs another name).
+   Flow writes are a new agent-surface class, so the authority suites gain explicit
    cases for them rather than being weakened.
 8. **Maestro still does not act on the fleet.** `next` returns a launch hint. The flow crate never
    spawns a session or sends agent mail.
@@ -109,3 +129,16 @@ ask filing and linking. Each fix to a prose mechanism produced the next round's 
 therefore accepted this decision-only form on 2026-11-06 (AskUserQuestion) and moved every
 mechanism, with the findings that motivated it, into BRO-3624 as required tests. The review
 ledgers are archived at `~/.config/broomva/cross-review-archive/maestro21-flow-ledger-adr/`.
+
+## Owner input (2026-11-07, AskUserQuestion)
+
+| Decision | Owner's answer |
+|---|---|
+| Where the ledger lives | Workspace `.broomva/flows/` |
+| Who may write | Verified sessions only; unverified callers read only |
+| Ownership after a replacement | Owner-approved adoption through a Maestro ask, resuming at the last completed step |
+| Storage | The append-only log is truth; SQLite is a rebuildable cache |
+| Machines | Single host for phase 1 |
+| Human steps | Maestro asks, also relayed into the driving T3 thread; answers only through the owner path |
+| Retiring an abandoned instance | Through an owner-approved Maestro ask; the log is kept |
+
