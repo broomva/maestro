@@ -475,6 +475,8 @@ pub struct VerifiedSession {
     generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incarnation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_marker: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_permissions: Vec<PermissionPrompt>,
 }
@@ -496,6 +498,7 @@ impl VerifiedSession {
             parent_id,
             generation: 0,
             incarnation: None,
+            owner_marker: None,
             pending_permissions,
         }
     }
@@ -507,6 +510,19 @@ impl VerifiedSession {
 
     pub fn incarnation(&self) -> Option<&str> {
         self.incarnation.as_deref()
+    }
+
+    pub fn with_owner_marker(mut self, marker: impl Into<String>) -> Self {
+        self.owner_marker = Some(marker.into());
+        self
+    }
+
+    /// The owner marker: fixed for the life of the session, new when it is replaced. Unlike
+    /// `incarnation`, it survives turns, provider switches and restarts. Ownership is always keyed
+    /// on (`SessionRef`, marker) together, never on the marker alone (Direct sessions that share a
+    /// token share a marker). `None` when the surface cannot supply every part.
+    pub fn owner_marker(&self) -> Option<&str> {
+        self.owner_marker.as_deref()
     }
 
     pub fn with_node_and_generation(mut self, node: Option<NodeId>, generation: u64) -> Self {

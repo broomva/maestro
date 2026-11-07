@@ -654,6 +654,17 @@ mutate $hlb 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())'
 mutate $hlb 'if cred.generation != current_gen {' 'if false {'
 mutate $ht 'if self.disconnected {' 'if false {'
 mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
+mutate $ht '            .filter(|s| !s.trim().is_empty())
+            .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));' '            .or(Some(""))
+            .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));'
+mutate $ht 'format!("t3-owner:{}:{created_at}", thread.id)' 'format!("t3-owner:{}:{}", thread.id, created_at.len() * 0)'
+mutate $hp '            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|handle_id|' '            .as_deref()
+            .or(Some(""))
+            .map(|handle_id|'
+mutate $hp 'format!("paseo-owner:{}:{handle_id}", agent.id)' 'format!("paseo-owner:{}:{handle_id}:{:?}", agent.id, agent.pid)'
+mutate $hlb 'format!("direct-owner:{}", hex_sha256(session.token.as_bytes()))' 'format!("direct-owner:{}:{}", session.cwd, hex_sha256(session.token.as_bytes()))'
 mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
 mutate $mcp 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if true {'
 mutate $mcp 'if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {' 'if false {'

@@ -618,13 +618,24 @@ impl T3Registry {
             ));
         };
         let harness = thread.harness();
-        Ok(VerifiedSession::new(
+        // Owner marker (ADR flow-ledger decision 6): fixed across turns and provider switches,
+        // new when the thread is recreated. The environment lives in the SessionRef, not here.
+        let owner_marker = thread
+            .created_at
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));
+        let verified = VerifiedSession::new(
             SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
             thread.cwd,
             harness,
             thread.parent_id,
             thread.pending_permissions,
         )
-        .with_incarnation(incarnation))
+        .with_incarnation(incarnation);
+        Ok(match owner_marker {
+            Some(marker) => verified.with_owner_marker(marker),
+            None => verified,
+        })
     }
 }

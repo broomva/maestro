@@ -634,6 +634,7 @@ impl DirectRegistry {
             ));
         }
         let incarnation = format!("direct:{}:{}", session.cwd, hex_sha256(session.token.as_bytes()));
+        let owner_marker = format!("direct-owner:{}", hex_sha256(session.token.as_bytes()));
         Ok(VerifiedSession::new(
             SessionRef { surface: Surface::Direct, environment: None, id: session.id },
             session.cwd,
@@ -641,7 +642,8 @@ impl DirectRegistry {
             None,
             session.pending_permissions,
         )
-        .with_incarnation(incarnation))
+        .with_incarnation(incarnation)
+        .with_owner_marker(owner_marker))
     }
 }
 
