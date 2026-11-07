@@ -47,9 +47,15 @@ current writer to transfer from and no cut-over to stage.
    (`maestro_flow_*`) both call into that crate, not into their own write paths.
    - **Within a host:** the CLI and the MCP server are separate processes. Every write takes an
      exclusive lock on `.broomva/flows.lock`, a sibling of the flows root and never inside it, for
-     the whole check-and-append. After taking it, a writer that has seen this root before refuses with `root_moved` if the
-     root is gone, instead of recreating it. It
-     then re-checks the instance log's sequence number. A writer whose expected sequence number
+     the whole check-and-append. The lock file also carries the ledger's **epoch**, and the root
+     holds a matching `.broomva/flows/EPOCH`. After taking the lock, a writer acts only if:
+     - the lock's epoch equals the root's `EPOCH`; or
+     - the lock file is empty, meaning no ledger has ever existed here. Only then may the kernel
+       create the root, writing a fresh epoch to both the lock and `EPOCH`.
+
+     Anything else is refused with `root_moved`, and the writer creates nothing: a `moved` epoch
+     in the lock, a missing root under a non-empty lock, or a root whose `EPOCH` differs. The
+     writer then re-checks the instance log's sequence number. A writer whose expected sequence number
      is stale is refused with `stale_sequence`. Concurrent writers are therefore serialized by the
      lock, and a writer acting on an outdated view is refused. That is the one concurrency rule,
      and the tests check exactly it.
@@ -70,13 +76,17 @@ current writer to transfer from and no cut-over to stage.
    - **Retiring an abandoned instance** (for example, one whose owner can no longer write it) is
      an operator step, not a model-visible verb. While holding the exclusive `flows.lock`, the
      operator renames `.broomva/flows/<instance>/` to `.broomva/flows/retired/<instance>/`. The log
-     is kept unchanged, and the kernel never reads or writes under `retired/`.
+     is kept unchanged, and the kernel never reads or writes under `retired/`. Instance IDs are
+     minted fresh by the kernel. A write naming an ID that exists under `retired/` is refused
+     (`retired`), and the kernel never recreates `.broomva/flows/<instance>/` for it.
    - **Moving to another host is not a phase 1 operation.** Phase 1 has no rebind. The ledger
      moves only once every instance is finished or retired. While holding the exclusive
-     `flows.lock`, the operator renames `.broomva/flows/` aside. Because the lock lives outside
-     the renamed root, a writer waiting on it wakes to find the root gone and refuses
-     (`root_moved`) rather than recreating it. The new host then starts a fresh root with its own
-     `HOST`. Live migration waits for the shared substrate or the lease (next item).
+     `flows.lock`, the operator renames `.broomva/flows/` aside and sets the lock's epoch to
+     `moved`. From then on every writer, waiting or new, refuses with `root_moved` and creates
+     nothing, because the lock is no longer empty. Starting the ledger on the new host is
+     another operator step under the lock: install a fresh epoch in the lock, then create the
+     root with the same `EPOCH` and the new `HOST`. Live migration waits for the shared substrate
+     or the lease (next item).
    - **Later:** when a shared substrate or the phase 2 lease in `crates/ledger` exists, the flow
      family moves under it and the host binding is lifted. That move is a change to one call
      site, not a change of writer.
@@ -88,16 +98,23 @@ current writer to transfer from and no cut-over to stage.
    its requests journal line fails). A retry is then refused as a duplicate. The ask's ID is
    chosen by the caller before filing (`crates/store/src/requests.rs`), and that failure carries
    it back in the error's data as `filed.id` (`crates/mcp/src/lib.rs`, `unjournalled`). So the
-   flow writes the chosen ID to the instance log *before* filing. Every outcome is then resolved
-   by that ID:
-   - **Success:** the ask is linked.
-   - **An "ask stands" error, any other error, a crash, or a lost response:** the flow confirms
-     the ID against the working tree. `file_ask` writes the working tree, and Maestro's default
-     store follows `origin/main`, so the confirmation must read the same working-tree store, not
-     a default `maestro_ask_get`. If the ask is there, it is linked. If not, the flow files again
-     *with the same ID*. The ask ledger refuses a duplicate ID, so a refusal means an in-flight or
-     earlier filing landed: the flow confirms again and links it. It never files under a new ID,
-     and it never searches `maestro_asks_list`, which is paged and filtered. The flows lock is never
+   flow mints an ask ID that is not already an `id` or a `uid` in the working-tree ledger. It
+   writes that ID, and a hash of the body it will submit, to the instance log *before* filing.
+   The ask is linked only when a working-tree row has exactly that `id` and that body. Each
+   outcome:
+   - **Success:** confirm the row, then link it.
+   - **An "ask stands" error, a crash, or a lost response:** confirm against the working tree.
+     `file_ask` writes the working tree, and Maestro's default store follows `origin/main`, so the
+     confirmation reads the working-tree store, not a default `maestro_ask_get`. If the matching
+     row is there, link it.
+   - **No matching row:** the flow may file again with the same ID and body. It never files under
+     a new ID.
+   - **Busy (exit 75):** the ledger lock is held, possibly by an in-flight filing of this same ask.
+     Nothing is linked. The step stays `waiting`, and the next attempt confirms first.
+   - **Any other refusal, including a duplicate-ID refusal without a matching row:** nothing is
+     linked. The step fails visibly with `ask_refused` and the ledger's reason. A refusal never
+     counts as success.
+   The flow never searches `maestro_asks_list`, which is paged and filtered. The flows lock is never
    held while filing: logging the ID and linking the ask are separate short writes, so a slow
    ask filing (up to its 30-second lock wait) cannot block other flow writers.
 4. **Who may write.** In the BRO-3186 contract, agent requests are recorded for review and do not
@@ -145,8 +162,15 @@ current writer to transfer from and no cut-over to stage.
      - **T3:** the thread ID plus the thread's `created_at`;
      - **Paseo:** the agent ID plus `handle_id` (`persistence.sessionId`), which changes on
        replacement (handle-v1 to handle-v2 in `identity.rs`);
-     - **Direct:** the session ID plus the hash of its token, as the Direct incarnation already
-       uses.
+     - **Direct:** `sha256(token)`, the same hash the Direct incarnation uses
+       (`direct:{cwd}:{sha256(token)}` in `crates/hosts/src/lib.rs`). `cwd` is left out on
+       purpose, so moving the directory is not a new owner. The session ID is already the
+       `SessionRef`.
+
+     A marker exists only when every part is present. A T3 thread whose `created_at` is NULL
+     (the legacy `projection_threads` path), or a Paseo agent with no `persistence.sessionId`,
+     has *no* marker. Such a session is never treated as a marker made of the visible ID
+     alone.
 
      The owner of an instance and the holder of a claim are recorded as `SessionRef` plus owner
      marker. A caller whose verified session yields no owner marker is refused on every write
@@ -167,7 +191,8 @@ current writer to transfer from and no cut-over to stage.
    but only for the caller's own flow. So phase 1 adds a classification for agent writes to the
    flow ledger, still on the agent surface of the BRO-3186 contract and never an owner action.
    Those two tests get explicit cases for it: a flow write may change only
-   `.broomva/flows/<instance>/`, `.broomva/flows.lock`, and `HOST` (only when it is first created),
+   `.broomva/flows/<instance>/`, `.broomva/flows.lock`, and `HOST` and `EPOCH` (only when the
+   ledger is first created),
    and never the requests journal. They are extended, not weakened.
    `crates/mcp/tests/dispatch.rs` does not check names. It checks that no `OwnerVerb` tool is
    reachable, and that annotations match authority (reads read-only, writes not idempotent). The
@@ -227,21 +252,21 @@ line in `scripts/mutation-check.sh`, as `AGENTS.md` requires.
 
 ```bash
 cargo test -p maestro-flow --test single_writer     # two processes writing at once are serialized by the root lock; a write with a stale sequence number is refused
-cargo test -p maestro-flow --test archive           # a writer waiting on flows.lock during a root rename refuses with root_moved; a retired instance is never read or written
+cargo test -p maestro-flow --test archive           # after an archive (epoch `moved`) a waiting writer and a brand-new writer both refuse root_moved and create nothing; a recreated root with a different EPOCH is refused; a write naming a retired ID is refused and no live dir is created
 cargo test -p maestro-flow --test host_binding      # two first writers race on an empty root: one HOST is created; the other host is refused (foreign_host); later foreign writes refused
-cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/
+cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/ and the sibling .broomva/flows.lock
 cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
 cargo test -p maestro-flow --test cross_session     # another verified session cannot claim in, or act on a claim of, an instance it did not start
-cargo test -p maestro-hosts --test owner_marker     # T3 marker stable across turns and provider switches; Paseo marker changes on handle replacement; Direct marker changes with the token
+cargo test -p maestro-hosts --test owner_marker     # T3 marker stable across turns and provider switches; Paseo marker changes on handle replacement; Direct marker changes with the token, not the cwd; legacy T3 row with NULL created_at and Paseo without persistence.sessionId yield no marker
 cargo test -p maestro-flow --test resumption        # a restarted process cannot use its old claim; after lease expiry the same SessionRef and owner marker claims the next attempt; a different SessionRef cannot write the old instance
 cargo test -p maestro-flow --test owner_marker      # every write verb refused without a marker; a replacement (new marker, same SessionRef) is refused claim/complete/choose/heartbeat on the old instance but may start a new one
 cargo test -p maestro-flow --test token_handle      # a token passed to another session grants nothing; no token appears in the log, projection or status
 cargo test -p maestro-mcp --test flow_principal     # MCP: unverified flow writes refused; verified T3 and Paseo writes succeed
 cargo test -p maestro --test flow_principal         # CLI: writes refused until the Direct path verifies; a verified Direct write succeeds
-cargo test -p maestro-flow --test ask_recovery      # chosen ID logged before filing; after success, error, crash or lost response, the working-tree check links it; a re-file reuses the ID and a duplicate refusal links it; never a new ID
+cargo test -p maestro-flow --test ask_recovery      # minted ID collides with no id or uid; links only a working-tree row with that id and body; exit 75 and every other refusal (incl. duplicate with no matching row) link nothing
 cargo test -p maestro-flow --test projection        # deleting the SQLite projection and replaying reproduces it
 cargo test -p maestro-flow --test torn_tail         # a torn last line reads as unread and blocks appends; after truncation to the last verified line the next write appends
-cargo test -p maestro-mcp --test authority          # owner words pass unchanged; flow writes touch only their instance dir, flows.lock and a first HOST; reads write nothing
+cargo test -p maestro-mcp --test authority          # owner words pass unchanged; flow writes touch only their instance dir, flows.lock and a first HOST and EPOCH; reads write nothing
 cargo test -p maestro-mcp --test dispatch           # no OwnerVerb reachable; flow tool annotations match their authority
 cargo test -p maestro --test requests               # owner-word list passes with the `maestro flow` subcommands
 ```

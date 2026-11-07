@@ -10,7 +10,8 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
 - **One writer per ledger.** Maestro is read-only in phase 0. Do not add a write path to
   the asks or initiatives folders (`.broomva/`, legacy `.control/`), `.broomva/loops`, the work root or the loops ledger
   without the phase that transfers ownership. A second writer is the defect the BRO-3186 contract
-  forbids. The one exception is the flow ledger (`.broomva/flows/`), a new family with no prior
+  forbids. The one exception is the flow ledger (`.broomva/flows/` and its sibling lock
+  `.broomva/flows.lock`), a new family with no prior
   writer. `crates/flow` is its only writer, and nothing else writes there
   (`docs/adrs/2026-11-06-flow-ledger.md`).
 - **No owner verb on a model-visible surface** until an authenticated owner path exists.
