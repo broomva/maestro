@@ -97,6 +97,9 @@ mutate $ask '(None, None) => a.encode_utf16().cmp(b.encode_utf16()),' '(None, No
 # Authority: only the owner takes owner actions; unverified callers only read.
 mutate $auth '(Principal::Owner { .. }, Authority::OwnerAction) => true,' '(_, Authority::OwnerAction) => true,'
 mutate $auth '(Principal::Agent { .. } | Principal::Owner { .. }, Authority::AgentRequest) => true,' '(_, Authority::AgentRequest) => true,'
+# Flow writes: only a verified agent session; neither unverified callers nor the owner principal.
+mutate $auth '(Principal::Agent { .. }, Authority::AgentWrite) => true,' '(_, Authority::AgentWrite) => true,'
+mutate $auth '(Principal::Agent { .. }, Authority::AgentWrite) => true,' '(Principal::Agent { .. } | Principal::Owner { .. }, Authority::AgentWrite) => true,'
 # Views: needs are open blocking asks; loop drift is only what is provable.
 mutate $views 'if ask.state() != AskState::Open || !ask.blocking {' 'if ask.state() != AskState::Open {'
 mutate $views 'TICK_CLOSE_SECS.max(2 * median(&mut lengths))' 'TICK_CLOSE_SECS'
