@@ -105,17 +105,26 @@ current writer to transfer from and no cut-over to stage.
      cannot re-present the claim. The claim is recovered only by lease expiry: the token becomes
      void (`lease_expired`), the node is released, and the owning `SessionRef` may claim it again
      as the next attempt.
-   - **Ownership is keyed on the verified incarnation, not just the visible session.**
-     `Principal::Agent` carries only the `SessionRef`, and
+   - **Invariant: a flow write requires a `SessionRef` plus an authoritative, verified
+     incarnation.** `Principal::Agent` carries only the `SessionRef`, and
      `VerifiedSession::principal` (`crates/core/src/session.rs`) drops the registry's
-     `incarnation` and `generation`. A replacement session can reuse the same visible ID
-     (`crates/hosts/tests/identity.rs` shows Paseo doing so with a new `persistence.sessionId`).
-     So the flow crate records each instance's owner, and each claim's claimant, as the
-     `SessionRef` plus the `incarnation`, or the `generation` when no incarnation is reported.
-     These values are read from the `VerifiedSession`, not from the principal. A caller whose
-     incarnation or generation differs from the recorded one is a different owner and cannot
-     write, even under the same `SessionRef`. A restart that yields a new incarnation therefore
-     loses ownership, and the work restarts as a new instance. Phase 1 has no transfer, adoption or orphan detection. `status` reports each open
+     incarnation. A replacement can also reuse the visible ID
+     (`crates/hosts/tests/identity.rs`, the Paseo case). So the owner of an instance, and the
+     holder of a claim, is recorded as the `SessionRef` plus the `incarnation` that the surface
+     registry verified, read from the `VerifiedSession`. Two cases are refused:
+     - a caller whose verified session reports no incarnation, since nothing then distinguishes
+       a replacement;
+     - a caller whose incarnation differs from the recorded one, even under the same
+       `SessionRef`.
+
+     There is no fallback to `generation`, because nothing guarantees what it means when a
+     session is replaced. A restart that yields a new incarnation loses ownership, and the work
+     restarts as a new instance. A surface that reports no incarnation can read flows but cannot
+     drive them.
+     Every surface registry sets one today: T3 (`crates/hosts/src/t3.rs`), Paseo
+     (`crates/hosts/src/paseo.rs`) and Direct (`crates/hosts/src/lib.rs`). Maestro's bridge
+     credentials already refuse a session that "lacks an authoritative incarnation marker", so
+     this follows an existing rule. Phase 1 has no transfer, adoption or orphan detection. `status` reports each open
      instance's last event time, so a stalled instance is visible.
 5. **No owner verb.** The flow verbs (`start`, `next`, `claim`, `complete`, `choose`, `status`,
    `heartbeat`) act on an agent's own flow instance. None of them answers, approves, dispatches,
@@ -154,7 +163,8 @@ current writer to transfer from and no cut-over to stage.
   concurrent writer must be refused, and no flow verb may write outside `.broomva/flows/`.
 - The flow ledger needs backup the same way the workspace tree does. It lives in the workspace, so
   Time Machine and git hygiene cover it. Phase 1 does not commit instance logs to git.
-- A harness can write flows only where the surface registry can verify its session. Today that
+- A harness can write flows only where the surface registry verifies its session *and* reports
+  an incarnation. Today that
   is T3, Paseo and Direct. A harness session the registry cannot verify can read flows but not
   drive them. The spec's live capability test (phase 1 acceptance, check 4) records which
   harnesses that leaves out.
@@ -182,7 +192,7 @@ cargo test -p maestro-flow --test write_scope       # no flow verb writes outsid
 cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
 cargo test -p maestro-flow --test cross_session     # another verified session cannot claim in, or act on a claim of, an instance it did not start
 cargo test -p maestro-flow --test resumption        # a restarted process cannot use its old claim; after lease expiry the same SessionRef and incarnation claims the next attempt; a different SessionRef cannot write the old instance
-cargo test -p maestro-flow --test incarnation       # a replacement with the same SessionRef but a new incarnation (or generation) cannot claim, complete or choose in the old instance
+cargo test -p maestro-flow --test incarnation       # refused: a verified session with no incarnation; a same-SessionRef replacement with a new incarnation (claim, complete, choose)
 cargo test -p maestro-flow --test token_handle      # a token passed to another session grants nothing; no token appears in the log, projection or status
 cargo test -p maestro-mcp --test flow_principal     # MCP: unverified flow writes refused; verified T3 and Paseo writes succeed
 cargo test -p maestro --test flow_principal         # CLI: writes refused until the Direct path verifies; a verified Direct write succeeds
