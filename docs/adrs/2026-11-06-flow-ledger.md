@@ -105,11 +105,17 @@ current writer to transfer from and no cut-over to stage.
      cannot re-present the claim. The claim is recovered only by lease expiry: the token becomes
      void (`lease_expired`), the node is released, and the owning `SessionRef` may claim it again
      as the next attempt.
-   - **Ownership assumes nothing about a surface's identity across restarts.** If a restarted
-     session comes back under the same verified `SessionRef`, it still owns its instances and can
-     claim again once its old lease has expired. If its surface gives it a different `SessionRef`,
-     the old instances accept no further writes from it, and the work restarts as a new
-     instance. Phase 1 has no transfer, adoption or orphan detection. `status` reports each open
+   - **Ownership is keyed on the verified incarnation, not just the visible session.**
+     `Principal::Agent` carries only the `SessionRef`, and
+     `VerifiedSession::principal` (`crates/core/src/session.rs`) drops the registry's
+     `incarnation` and `generation`. A replacement session can reuse the same visible ID
+     (`crates/hosts/tests/identity.rs` shows Paseo doing so with a new `persistence.sessionId`).
+     So the flow crate records each instance's owner, and each claim's claimant, as the
+     `SessionRef` plus the `incarnation`, or the `generation` when no incarnation is reported.
+     These values are read from the `VerifiedSession`, not from the principal. A caller whose
+     incarnation or generation differs from the recorded one is a different owner and cannot
+     write, even under the same `SessionRef`. A restart that yields a new incarnation therefore
+     loses ownership, and the work restarts as a new instance. Phase 1 has no transfer, adoption or orphan detection. `status` reports each open
      instance's last event time, so a stalled instance is visible.
 5. **No owner verb.** The flow verbs (`start`, `next`, `claim`, `complete`, `choose`, `status`,
    `heartbeat`) act on an agent's own flow instance. None of them answers, approves, dispatches,
@@ -175,7 +181,8 @@ cargo test -p maestro-flow --test host_binding      # a write from a host other 
 cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/
 cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
 cargo test -p maestro-flow --test cross_session     # another verified session cannot claim in, or act on a claim of, an instance it did not start
-cargo test -p maestro-flow --test resumption        # a restarted process cannot use its old claim; after lease expiry the same SessionRef claims the next attempt; a different SessionRef cannot write the old instance
+cargo test -p maestro-flow --test resumption        # a restarted process cannot use its old claim; after lease expiry the same SessionRef and incarnation claims the next attempt; a different SessionRef cannot write the old instance
+cargo test -p maestro-flow --test incarnation       # a replacement with the same SessionRef but a new incarnation (or generation) cannot claim, complete or choose in the old instance
 cargo test -p maestro-flow --test token_handle      # a token passed to another session grants nothing; no token appears in the log, projection or status
 cargo test -p maestro-mcp --test flow_principal     # MCP: unverified flow writes refused; verified T3 and Paseo writes succeed
 cargo test -p maestro --test flow_principal         # CLI: writes refused until the Direct path verifies; a verified Direct write succeeds
