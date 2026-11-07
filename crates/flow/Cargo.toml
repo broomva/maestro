@@ -17,7 +17,13 @@ rusqlite.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[features]
+# Test-only pause points (`hooks`). Off by default, so a normal build has none; the crate's own
+# tests turn it on through the self dev-dependency below.
+test-hooks = []
+
 [dev-dependencies]
+maestro-flow = { path = ".", features = ["test-hooks"] }
 tempfile.workspace = true
 
 [lints]

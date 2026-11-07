@@ -674,15 +674,15 @@ mutate $hlb 'if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {' 'if false 
 mutate $hlb 'msg.extend_from_slice(incarnation.as_bytes());' ''
 
 # Flow ledger storage (BRO-3633, BRO-3624 items 1, 2, 3 and 8): one lock and one sequence rule,
-# identity checked at the lock and again at every write, path confinement, archive and recovery,
-# retire, the hash-chained log and the projection.
+# identity checked at the lock and again at every write, path confinement, genesis, archive and
+# recovery, retire, the hash-chained log and the projection.
 fl=crates/flow/src
 # Item 1: one exclusive lock, readers shared, released on drop, one sequence rule.
 mutate $fl/lock.rs 'Mode::Exclusive => file.try_lock(),' 'Mode::Exclusive => file.try_lock_shared(),'
 mutate $fl/lock.rs 'Mode::Shared => file.try_lock_shared(),' 'Mode::Shared => Ok(()),'
 mutate $fl/ledger.rs 'let _ = self.ledger.lock_file.unlock();' 'let _ = &self.ledger;'
 mutate $fl/ledger.rs 'if expected_seq != log.seq() {' 'if false {'
-# The root directory's own lock keeps a second writer out when the lock file is replaced (A1).
+# The root directory's own lock keeps a second writer out when the lock file is replaced.
 mutate $fl/lock.rs '    take(&dir, mode, wait, root)?;' ''
 mutate $fl/ledger.rs '        if !lock::same_file(&ledger.lock_file, &ledger.layout.lock)? {
             return Err(FlowError::LockLost {
@@ -695,7 +695,7 @@ mutate $fl/ledger.rs '        if !lock::same_file(&ledger.lock_file, &ledger.lay
 mutate $fl/ledger.rs 'if owner != host.as_str() {' 'if false {'
 mutate $fl/ledger.rs '        && found != expected' '        && false'
 mutate $fl/ledger.rs 'if !lock::same_file(&self.lock_file, &self.layout.lock)? {' 'if false {'
-mutate $fl/ledger.rs '            check_identity(state, &self.layout, &self.host, Some(&self.epoch))?;' ''
+mutate $fl/ledger.rs '            check_identity(layout::inspect(&self.layout)?, &self.layout, &self.host, Some(&self.epoch))?;' ''
 mutate $fl/ledger.rs '    if std::fs::symlink_metadata(&layout.root).is_ok() {
         return match open_lock_file(layout) {' '    if false {
         return match open_lock_file(layout) {'
@@ -703,24 +703,31 @@ mutate $fl/layout.rs '        None => Err(FlowError::LockLost {
             lock: layout.lock.clone(),
             detail: format!("the lock is {} beside a live root", if lock.is_some() { "empty" } else { "missing" }),
         }),' '        None => Ok(State::Live { host, epoch }),'
-mutate $fl/operator.rs 'if is_epoch(&content) && std::fs::symlink_metadata(&stage).is_ok() {' 'if false {'
-# A racing loser waits on the lock through the winner's genesis window (B1).
+mutate $fl/layout.rs '    real_dir(&layout.root)?;' ''
+# Genesis: the lock says it is unfinished until the root is in place; a loser waits on it.
+mutate $fl/ledger.rs 'file.write_all(format!("{GENESIS}{epoch}\n").as_bytes())' 'file.write_all(format!("{epoch}\n").as_bytes())'
+mutate $fl/layout.rs 'if let Some(epoch) = lock.as_deref().and_then(|t| t.strip_prefix(GENESIS)) {' 'if let Some(epoch) = None::<&str> {'
 mutate $fl/ledger.rs '        lock::take(&file, Mode::Shared, options.lock_wait, &layout.lock)?;' ''
-# Every write re-checks the root it was given and makes nothing above its instance (A2).
+mutate $fl/operator.rs '                write_lock(&file, &layout.lock, epoch)?;
+                return Ok(Recovered::FinishedGenesis' '                return Ok(Recovered::FinishedGenesis'
+mutate $fl/operator.rs '            std::fs::remove_file(&layout.lock).map_err(FlowError::io(&layout.lock))?;
+            sync_dir(&layout.parent);
+            return Ok(Recovered::ClearedGenesis);' '            sync_dir(&layout.parent);
+            return Ok(Recovered::ClearedGenesis);'
+# Every write re-checks the root it was given and makes nothing above its instance.
+mutate $fl/lock.rs '    match std::fs::symlink_metadata(root) {' '    match std::fs::metadata(root) {'
 mutate $fl/ledger.rs 'if lock::root_id(&ledger.layout.root)? != ledger.root_id {' 'if false {'
 mutate $fl/ledger.rs '            Some(found) if found == ledger.epoch => Ok(()),' '            Some(_) => Ok(()),'
 mutate $fl/ledger.rs '        check_kind(&event.kind)?;
         self.verify()?;' '        check_kind(&event.kind)?;'
 mutate $fl/ledger.rs '                std::fs::create_dir(&dir).map_err(FlowError::io(&dir))?;' '                std::fs::create_dir_all(&dir).map_err(FlowError::io(&dir))?;'
-# No link under the root is followed (A3).
+# No link under the root is followed: logs, directories, retired/, the projection and its journal.
 mutate $fl/layout.rs '        Ok(m) if m.file_type().is_symlink() => Err(FlowError::Symlink { path: path.to_path_buf() }),' ''
 mutate $fl/layout.rs '        opts.custom_flags(libc::O_NOFOLLOW);' '        opts.custom_flags(0);'
-# A genesis that crashed before linking is refused, one in flight is not (A4).
-mutate $fl/ledger.rs '    if !layout::orphan_stages(layout)?.is_empty() {
-        return Err(FlowError::GenesisIncomplete {' '    if false {
-        return Err(FlowError::GenesisIncomplete {'
-mutate $fl/layout.rs '            Ok(f) => matches!(f.try_lock_shared(), Err(std::fs::TryLockError::WouldBlock)),' '            Ok(_) => false,'
-# Identity checks while opening, for writers, readers and the operator (B3).
+mutate $fl/operator.rs '    if !real_dir(&retired)? {' '    if false {'
+mutate $fl/projection.rs 'Ok(Connection::open_with_flags(db_path(layout)?, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)?)' 'Ok(Connection::open_with_flags(db_path(layout)?, flags)?)'
+mutate $fl/projection.rs 'match Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW) {' 'match Connection::open_with_flags(&path, flags) {'
+# Identity checks while opening, for writers, readers and the operator.
 mutate $fl/ledger.rs '            if !lock::same_file(&file, &layout.lock)? {
                 return Err(FlowError::LockLost {
                     lock: layout.lock.clone(),
@@ -740,23 +747,25 @@ mutate $fl/operator.rs '        if in_place()? {
         }
         let epoch = random_epoch()?;' '        let epoch = random_epoch()?;'
 mutate $fl/operator.rs '    let out = if lock::same_file(file, &layout.lock)? {' '    let out = if true {'
-# Restoring a lost lock waits for a guard still held through the deleted one (B5).
-mutate $fl/operator.rs '        let held_root = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;' '        let held_root = std::fs::File::open(&layout.root).map_err(FlowError::io(&layout.root))?;'
-# An archived ledger is never restarted by a writer (B6).
+# Restoring a lost lock waits for a guard still held through the deleted one.
+mutate $fl/operator.rs '        let held_root = lock::lock_root(&layout.root, Mode::Exclusive, options.lock_wait)?;' '        let held_root = std::fs::File::open(&layout.root).map_err(FlowError::io(&layout.root))?;'
+# An archived ledger is never restarted by a writer; an archive checks its destination first.
 mutate $fl/ledger.rs '    if layout::exists(&layout.archived_marker())? {
         return Err(FlowError::RootMoved { root: layout.root.clone() });
     }
-    if !layout::orphan_stages(layout)?.is_empty() {' '    if !layout::orphan_stages(layout)?.is_empty() {'
+    Ok(None)' '    Ok(None)'
+mutate $fl/operator.rs '    let Ok(parent) = std::fs::canonicalize(parent) else {' '    let Ok(parent) = Ok::<_, std::io::Error>(parent.to_path_buf()) else {'
+mutate $fl/operator.rs '    if layout::exists(dest)? {' '    if false {'
+mutate $fl/operator.rs '    if parent.starts_with(' '    if false && parent.starts_with('
 # Item 3: retire.
 mutate $fl/ledger.rs '        Ok(_) => Err(FlowError::Retired { instance: id.to_string() }),' '        Ok(_) => Ok(()),'
-# Item 8: the chain, torn tail against broken chain (B2), reads write nothing, the projection.
+# Item 8: the chain, torn tail (no newline only) against broken chain, reads write nothing, the projection.
 mutate $fl/log.rs 'prev_event: log.last_hash.clone(),' 'prev_event: None,'
 mutate $fl/log.rs 'if event.prev_event.as_deref() != want_prev {' 'if false {'
 mutate $fl/log.rs 'if event.seq != want_seq {' 'if false {'
-mutate $fl/log.rs '                    Fault::Unparsed(detail) if last => {' '                    Fault::Unparsed(detail) | Fault::Unchained(detail) if last => {'
-mutate $fl/log.rs '                    Fault::Unparsed(detail) if last => {' '                    Fault::Unparsed(detail) if false => {'
+mutate $fl/log.rs '(FlowError::ChainBroken { instance: instance.to_string(), line: prefix.seq + 1, detail }, prefix.clone())' '(FlowError::TornTail { instance: instance.to_string(), verified_seq: prefix.seq, detail }, prefix.clone())'
 mutate $fl/operator.rs 'file.set_len(prefix.len)' 'file.set_len(bytes.len() as u64)'
-mutate $fl/projection.rs 'OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX' 'OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE'
+mutate $fl/projection.rs 'let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;' 'let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE;'
 mutate $fl/projection.rs '    if !current(&conn, epoch)? {
         return rebuild_with(&mut conn, layout, epoch);
     }

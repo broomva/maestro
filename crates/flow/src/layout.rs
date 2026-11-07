@@ -3,7 +3,7 @@
 
 use crate::error::{FlowError, Result};
 use crate::ids::{HostId, InstanceId};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
@@ -48,12 +48,6 @@ impl Layout {
         self.parent.join(format!(".{}.genesis-{epoch}", self.name))
     }
 
-    /// The genesis's own lock file for `epoch`, held by the genesis from before its stage exists
-    /// until its root is in place, then linked as the lock.
-    pub(crate) fn lock_stage(&self, epoch: &str) -> PathBuf {
-        self.parent.join(format!(".{}.lock.genesis-{epoch}", self.name))
-    }
-
     /// Left beside the root by `operator::archive`: a ledger was here, so no writer starts another.
     pub(crate) fn archived_marker(&self) -> PathBuf {
         self.parent.join(format!("{}.archived", self.name))
@@ -69,10 +63,6 @@ impl Layout {
 
     pub(crate) fn retired_dir(&self, id: &InstanceId) -> PathBuf {
         self.root.join(RETIRED).join(id.as_str())
-    }
-
-    pub(crate) fn projection(&self) -> PathBuf {
-        self.root.join(PROJECTION)
     }
 }
 
@@ -131,37 +121,14 @@ pub(crate) fn is_epoch(text: &str) -> bool {
     text.len() == 32 && text.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-/// Stages left by a genesis that crashed before linking its lock. A genesis in flight holds its
-/// lock stage locked from before its stage exists, so a stage whose lock stage is missing or
-/// unlocked is an orphan. Writes nothing (taking and dropping a file lock changes no file).
-pub(crate) fn orphan_stages(layout: &Layout) -> Result<Vec<PathBuf>> {
-    let prefix = format!(".{}.genesis-", layout.name);
-    let entries = match std::fs::read_dir(&layout.parent) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(FlowError::io(&layout.parent)(e)),
-    };
-    let mut out = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(FlowError::io(&layout.parent))?;
-        let name = entry.file_name();
-        let Some(epoch) = name.to_str().and_then(|n| n.strip_prefix(&prefix)) else { continue };
-        let in_flight = match File::open(layout.lock_stage(epoch)) {
-            Ok(f) => matches!(f.try_lock_shared(), Err(std::fs::TryLockError::WouldBlock)),
-            Err(_) => false,
-        };
-        if !in_flight {
-            out.push(entry.path());
-        }
-    }
-    out.sort();
-    Ok(out)
-}
+/// What a lock holds while the genesis that made it runs: `genesis <epoch>`. Once the root is
+/// in place the lock holds just the epoch, so only a crash leaves this behind.
+pub(crate) const GENESIS: &str = "genesis ";
 
 /// What the lock file and the root say, read without writing anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum State {
-    /// No lock, no root, no archive marker and no orphan stage: only here may a genesis run.
+    /// No lock and no root: only here may a genesis run.
     Empty,
     /// A whole ledger: the lock names the root's epoch.
     Live { host: String, epoch: String },
@@ -171,38 +138,23 @@ pub(crate) enum State {
 /// refusal naming its recovery. Writes nothing.
 pub(crate) fn inspect(layout: &Layout) -> Result<State> {
     let lock = read_small(&layout.lock)?;
-    let root = exists(&layout.root)?;
-    let lock_epoch = lock.as_deref().filter(|t| !t.is_empty());
-    if let Some(e) = lock_epoch
-        && !is_epoch(e)
-    {
-        return Err(FlowError::LockLost { lock: layout.lock.clone(), detail: "it does not hold an epoch".into() });
+    if let Some(epoch) = lock.as_deref().and_then(|t| t.strip_prefix(GENESIS)) {
+        return Err(FlowError::GenesisIncomplete { detail: format!("the genesis of epoch {epoch} did not finish") });
     }
-    if !root {
-        return match (lock.is_some(), lock_epoch) {
-            (false, _) if exists(&layout.archived_marker())? => Err(FlowError::RootMoved { root: layout.root.clone() }),
-            (false, _) if !orphan_stages(layout)?.is_empty() => Err(FlowError::GenesisIncomplete {
-                detail: "a genesis stopped before linking its lock and left its stage".to_string(),
-            }),
-            (false, _) => Ok(State::Empty),
-            (true, Some(e)) if exists(&layout.stage(e))? => Err(FlowError::GenesisIncomplete {
-                detail: format!("the lock names epoch {e} and its staged root was never moved into place"),
-            }),
-            (true, Some(_)) => Err(FlowError::RootMoved { root: layout.root.clone() }),
-            (true, None) => {
-                Err(FlowError::GenesisIncomplete { detail: "the lock is empty and there is no root".to_string() })
-            }
+    if !exists(&layout.root)? {
+        return match lock.as_deref() {
+            None => Ok(State::Empty),
+            Some("") => Err(FlowError::LockLost { lock: layout.lock.clone(), detail: "the lock is empty".into() }),
+            Some(_) => Err(FlowError::RootMoved { root: layout.root.clone() }),
         };
     }
-    if !real_dir(&layout.root)? {
-        return Err(FlowError::RootMoved { root: layout.root.clone() });
-    }
+    real_dir(&layout.root)?;
     let host = read_small(&layout.root.join(HOST_FILE))?.filter(|h| HostId::new(h.as_str()).is_ok());
     let epoch = read_small(&layout.root.join(EPOCH_FILE))?.filter(|e| is_epoch(e));
     let (Some(host), Some(epoch)) = (host, epoch) else {
         return Err(FlowError::LedgerDamaged { detail: "the root's HOST or EPOCH is missing or unreadable".into() });
     };
-    match lock_epoch {
+    match lock.as_deref().filter(|t| !t.is_empty()) {
         None => Err(FlowError::LockLost {
             lock: layout.lock.clone(),
             detail: format!("the lock is {} beside a live root", if lock.is_some() { "empty" } else { "missing" }),

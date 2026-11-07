@@ -47,6 +47,25 @@ fn retiring_waits_for_the_lock() {
     operator::retire(&mut ledger, &fi).unwrap();
 }
 
+/// A `retired/` replaced by a link would move an instance out of the root: refused, and the
+/// instance stays where it was.
+#[cfg(unix)]
+#[test]
+fn retiring_through_a_linked_retired_dir_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let fi = id("fi_a");
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    append_at_head(&mut ledger, &fi, event("Started", 0)).unwrap();
+    std::fs::remove_dir(root.join("retired")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("retired")).unwrap();
+    assert_eq!(code(operator::retire(&mut ledger, &fi)), "symlink");
+    assert!(root.join("instances/fi_a/events.jsonl").exists());
+    assert!(names(&outside).is_empty());
+}
+
 /// The kernel stats `retired/<id>` and never opens anything inside it: with the retired log and
 /// its directory unreadable, every write and read still refuses cleanly with `retired`.
 #[cfg(unix)]

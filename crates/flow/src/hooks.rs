@@ -1,5 +1,6 @@
-//! Test-only pause points. Not an interface: the tests use them to hold a race window open so
-//! that a guard which only matters inside that window can be proved by a failing test.
+//! Test-only pause points, compiled only with the `test-hooks` feature (off by default). The
+//! tests use them to hold a race window open so that a guard which only matters inside that
+//! window can be proved by a failing test.
 //!
 //! When `MAESTRO_FLOW_TEST_PAUSE` is `<point>@<dir>`, the process writes `<dir>/reached` on
 //! reaching `<point>` and waits (up to 30 s) for `<dir>/go`. Unset, every pause is a no-op. The

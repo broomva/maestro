@@ -12,13 +12,14 @@
 //! for another epoch or schema, is rebuilt whole. Readers open it read-only and only compare; the
 //! log wins any disagreement.
 
-use crate::error::Result;
+use crate::error::{FlowError, Result};
 use crate::ids::InstanceId;
-use crate::layout::Layout;
+use crate::layout::{Layout, PROJECTION};
 use crate::ledger::{list_instances, read_log};
 use crate::log::{self, InstanceSummary};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 const SCHEMA_VERSION: &str = "2";
 const SCHEMA: &str = "
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS kind_counts (
 );
 ";
 
-/// Every row of the projection, sorted: two equal dumps are the same projection.
+/// Every row of the projection, sorted: two equal dumps are the same projection. For tests.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionDump {
     pub meta: Vec<(String, String)>,
@@ -90,17 +92,23 @@ pub(crate) fn analyze(layout: &Layout, id: &InstanceId) -> Row {
     Row { state, summary, stat }
 }
 
+/// The cache's path, with the links above the root resolved (the workspace itself may sit behind
+/// one): `SQLITE_OPEN_NOFOLLOW` refuses a link anywhere in the path it is given, so it then
+/// refuses only a link at `projection.sqlite` itself. SQLite opens the journal beside it
+/// without following a link of its own accord (see the projection link test).
+fn db_path(layout: &Layout) -> Result<PathBuf> {
+    Ok(std::fs::canonicalize(&layout.root).map_err(FlowError::io(&layout.root))?.join(PROJECTION))
+}
+
 fn open_rw(layout: &Layout) -> Result<Connection> {
-    let conn = Connection::open_with_flags(
-        layout.projection(),
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    Ok(conn)
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    Ok(Connection::open_with_flags(db_path(layout)?, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)?)
 }
 
 fn open_ro(layout: &Layout) -> Result<Option<Connection>> {
-    let path = layout.projection();
-    match Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX) {
+    let path = db_path(layout)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    match Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW) {
         Ok(conn) => Ok(Some(conn)),
         Err(_) if std::fs::symlink_metadata(&path).is_err() => Ok(None),
         Err(e) => Err(e.into()),

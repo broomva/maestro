@@ -131,24 +131,19 @@ fn a_torn_tail_reads_as_unread_and_blocks_appends_until_truncated() {
     assert_eq!(std::fs::read(&path).unwrap(), whole);
     assert_eq!(ledger.lock().unwrap().append(&fi, 3, event("Tick", 3)).unwrap().event.seq, 4);
 
-    // A whole last event that does not chain is a broken chain, not a torn tail: truncation
-    // refuses it rather than "repair" it.
+    // A whole last line, newline and all, is never what a crash leaves: whether it does not chain
+    // or does not parse, it is a broken chain, which truncation refuses rather than "repair".
     let whole = std::fs::read(&path).unwrap();
-    let bad = serde_json::json!({"seq": 5, "prev_event": "sha256:00", "at": "2026-11-07T00:00:00Z", "kind": "Tick", "body": {}});
-    append_raw(&path, &format!("{bad}\n"));
-    let damaged = std::fs::read(&path).unwrap();
-    assert_eq!(code(reader.lock().unwrap().log(&fi)), "chain_broken");
-    assert_eq!(code(ledger.lock().unwrap().append(&fi, 4, event("Tick", 4))), "chain_broken");
-    assert_eq!(code(operator::truncate_torn_tail(&mut ledger, &fi)), "chain_broken");
-    assert_eq!(std::fs::read(&path).unwrap(), damaged);
-    std::fs::write(&path, &whole).unwrap();
-
-    // A whole last line that does not parse is what a crash leaves: torn.
-    append_raw(&path, "{\"seq\":5,garbage\n");
-    assert_eq!(code(reader.lock().unwrap().log(&fi)), "torn_tail");
-    assert_eq!(code(ledger.lock().unwrap().append(&fi, 4, event("Tick", 4))), "torn_tail");
-    assert_eq!(operator::truncate_torn_tail(&mut ledger, &fi).unwrap(), 17);
-    assert_eq!(std::fs::read(&path).unwrap(), whole);
+    let unchained = serde_json::json!({"seq": 5, "prev_event": "sha256:00", "at": "2026-11-07T00:00:00Z", "kind": "Tick", "body": {}});
+    for bad in [format!("{unchained}\n"), "{\"seq\":5,garbage\n".to_string()] {
+        append_raw(&path, &bad);
+        let damaged = std::fs::read(&path).unwrap();
+        assert_eq!(code(reader.lock().unwrap().log(&fi)), "chain_broken", "{bad}");
+        assert_eq!(code(ledger.lock().unwrap().append(&fi, 4, event("Tick", 4))), "chain_broken", "{bad}");
+        assert_eq!(code(operator::truncate_torn_tail(&mut ledger, &fi)), "chain_broken", "{bad}");
+        assert_eq!(std::fs::read(&path).unwrap(), damaged, "{bad}");
+        std::fs::write(&path, &whole).unwrap();
+    }
     assert_eq!(ledger.lock().unwrap().append(&fi, 4, event("Tick", 4)).unwrap().event.seq, 5);
     assert_eq!(reader.lock().unwrap().log(&fi).unwrap().seq(), 5);
     assert_eq!(code(operator::truncate_torn_tail(&mut ledger, &fi)), "operator_refused");
@@ -220,6 +215,45 @@ fn symbolic_links_under_the_root_are_refused() {
     symlink(root.join("instances-real"), &instances).unwrap();
     assert_eq!(code(ledger.lock().unwrap().append(&id("fi_a"), 1, event("Tick", 1))), "symlink");
     assert_eq!(code(reader.lock().unwrap().log(&id("fi_a"))), "symlink");
+}
+
+/// The projection is never opened through a link, by a writer or a reader, and SQLite writes no
+/// journal through one: a link to an outside file leaves that file as it was, and one to an
+/// absent file makes nothing.
+#[cfg(unix)]
+#[test]
+fn the_projection_is_never_opened_through_a_link() {
+    use std::os::unix::fs::symlink;
+    for name in ["projection.sqlite", "projection.sqlite-journal"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = root_in(tmp.path());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+        append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
+        let db = root.join("projection.sqlite");
+        std::fs::copy(&db, outside.join("existing")).unwrap();
+        for target in ["existing", "absent"] {
+            let link = root.join(name);
+            let _ = std::fs::remove_file(&link);
+            if name == "projection.sqlite" {
+                std::fs::remove_file(&db).ok();
+            }
+            symlink(outside.join(target), &link).unwrap();
+            let before = snapshot(&outside);
+            let seq = ledger.lock().unwrap().log(&id("fi_a")).unwrap().seq();
+            let appended = ledger.lock().unwrap().append(&id("fi_a"), seq, event("Tick", seq)).unwrap();
+            assert!(matches!(appended.cache, maestro_flow::CacheWrite::Failed(_)), "{name} -> {target}");
+            let guard = Reader::new(&root, quick()).unwrap().lock().unwrap();
+            let cache = guard.summary(&id("fi_a")).unwrap().cache;
+            if name == "projection.sqlite" {
+                assert!(matches!(cache, CacheState::Unreadable(_)), "{name} -> {target}");
+                assert!(guard.projection_dump().is_err(), "{name} -> {target}");
+            }
+            drop(guard);
+            assert_eq!(snapshot(&outside), before, "{name} -> {target}: written through the link");
+        }
+    }
 }
 
 /// Every row of the projection is a function of its log alone, so the cache kept up write by

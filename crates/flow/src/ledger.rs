@@ -1,16 +1,15 @@
 //! Opening the ledger, writing to it under the exclusive lock, and reading it under the shared one.
 
 use crate::error::{FlowError, Result};
-use crate::hooks;
 use crate::ids::{HostId, InstanceId, check_kind};
 use crate::layout::{
-    self, EPOCH_FILE, HOST_FILE, INSTANCES, Layout, RETIRED, State, nofollow, open_error, read_small, real_dir,
+    self, EPOCH_FILE, GENESIS, HOST_FILE, INSTANCES, Layout, RETIRED, State, nofollow, open_error, read_small, real_dir,
 };
 use crate::lock::{self, FileId, Mode};
 use crate::log::{self, Event, InstanceSummary, Log, NewEvent};
 use crate::projection;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 use std::time::Duration;
 
@@ -102,7 +101,7 @@ fn open_lock_file(layout: &Layout) -> std::io::Result<File> {
 }
 
 /// Opens the lock file without creating it. `None` only on an empty tree: no lock, no root, no
-/// archive marker and no orphan stage, the one state a genesis may start from.
+/// archive marker, the one state a genesis may start from.
 pub(crate) fn open_lock(layout: &Layout) -> Result<Option<File>> {
     match open_lock_file(layout) {
         Ok(f) => return Ok(Some(f)),
@@ -122,71 +121,64 @@ pub(crate) fn open_lock(layout: &Layout) -> Result<Option<File>> {
             Err(e) => Err(open_error(&layout.lock, e)),
         };
     }
-    // No lock and no root: refused if a ledger was archived here or a genesis crashed here. A
-    // genesis in flight is not an orphan; this writer races it.
+    // No lock and no root: refused if a ledger was archived here.
     if layout::exists(&layout.archived_marker())? {
         return Err(FlowError::RootMoved { root: layout.root.clone() });
     }
-    if !layout::orphan_stages(layout)?.is_empty() {
-        return Err(FlowError::GenesisIncomplete {
-            detail: "a genesis stopped before linking its lock and left its stage".into(),
-        });
-    }
     Ok(None)
+}
+
+/// Overwrites the lock's content in place: the file, and so every holder's lock, stays the same.
+pub(crate) fn write_lock(file: &File, lock: &Path, content: &str) -> Result<()> {
+    let mut f = file;
+    let line = format!("{content}\n");
+    f.seek(SeekFrom::Start(0))
+        .and_then(|_| f.write_all(line.as_bytes()))
+        .and_then(|()| file.set_len(line.len() as u64))
+        .and_then(|()| file.sync_all())
+        .map_err(FlowError::io(lock))
 }
 
 /// Creates a ledger on an empty tree, bound to `host`. Returns the lock file, held exclusive,
 /// when this writer won; `None` when another first writer linked its lock first.
 ///
-/// The genesis takes its own lock stage first, so a stage beside it is known to be in flight.
-/// It builds the whole root at a stage path, then links the lock stage (already holding the
-/// epoch, and already locked) as the lock: a hard link fails when the lock exists, so exactly
-/// one first writer is elected. Only then is the root renamed into place. A crash at any point
-/// leaves a state that is refused `genesis_incomplete` until `operator::recover`.
+/// The lock is written and locked under a private name, then linked into place: a hard link
+/// fails when the lock exists, so exactly one first writer is elected. It says
+/// `genesis <epoch>` until [`finish_genesis`] has the root in place, so a crash at any point
+/// leaves a state refused `genesis_incomplete` until `operator::recover`.
 pub(crate) fn genesis(layout: &Layout, host: &HostId) -> Result<Option<File>> {
     std::fs::create_dir_all(&layout.parent).map_err(FlowError::io(&layout.parent))?;
     let epoch = random_epoch()?;
-    let lock_stage = layout.lock_stage(&epoch);
-    let stage = layout.stage(&epoch);
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&lock_stage)
-        .map_err(FlowError::io(&lock_stage))?;
-    // The stage goes first and the lock stage last, so a stage is never seen without its lock.
-    let cleanup = || {
-        let _ = std::fs::remove_dir_all(&stage);
-        let _ = std::fs::remove_file(&lock_stage);
-    };
-    let staged = (|| {
-        lock::take(&file, Mode::Exclusive, Duration::ZERO, &lock_stage)?;
-        file.write_all(format!("{epoch}\n").as_bytes())
+    let private = layout.parent.join(format!(".{}.lock.genesis-{epoch}", layout.name()));
+    let mut file =
+        OpenOptions::new().read(true).write(true).create_new(true).open(&private).map_err(FlowError::io(&private))?;
+    let linked = (|| {
+        lock::take(&file, Mode::Exclusive, Duration::ZERO, &private)?;
+        file.write_all(format!("{GENESIS}{epoch}\n").as_bytes())
             .and_then(|()| file.sync_all())
-            .map_err(FlowError::io(&lock_stage))?;
-        stage_root(layout, host, &epoch)
+            .map_err(FlowError::io(&private))?;
+        match std::fs::hard_link(&private, &layout.lock) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(FlowError::io(&layout.lock)(e)),
+        }
     })();
-    if let Err(e) = staged {
-        cleanup();
-        return Err(e);
+    let _ = std::fs::remove_file(&private);
+    if !linked? {
+        return Ok(None);
     }
-    match std::fs::hard_link(&lock_stage, &layout.lock) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            cleanup();
-            return Ok(None);
-        }
-        Err(e) => {
-            cleanup();
-            return Err(FlowError::io(&layout.lock)(e));
-        }
-    }
-    hooks::pause("genesis_linked");
-    let moved = std::fs::rename(&stage, &layout.root).map_err(FlowError::io(&layout.root));
-    let _ = std::fs::remove_file(&lock_stage);
-    sync_dir(&layout.parent);
-    moved?;
+    pause!("genesis_linked");
+    finish_genesis(layout, &file, host, &epoch)?;
     Ok(Some(file))
+}
+
+/// Builds the root for `epoch` at its stage, moves it into place, and only then makes the held
+/// lock name the epoch.
+pub(crate) fn finish_genesis(layout: &Layout, lock_file: &File, host: &HostId, epoch: &str) -> Result<()> {
+    let stage = stage_root(layout, host, epoch)?;
+    std::fs::rename(&stage, &layout.root).map_err(FlowError::io(&layout.root))?;
+    sync_dir(&layout.parent);
+    write_lock(lock_file, &layout.lock, epoch)
 }
 
 /// The one identity rule every writer passes under the lock: a live ledger, on this host, and
@@ -210,13 +202,13 @@ fn check_identity(state: State, layout: &Layout, host: &HostId, epoch: Option<&s
 
 impl Ledger {
     /// Opens the ledger at `root` for `host`. On an empty tree (no lock, no root, no archive
-    /// marker, no orphan stage) this is the genesis that binds the root to `host`; anywhere else
-    /// it only checks what is there.
+    /// marker) this is the genesis that binds the root to `host`; anywhere else it only checks
+    /// what is there.
     pub fn open(root: &Path, host: &HostId, options: Options) -> Result<Ledger> {
         let layout = Layout::new(root)?;
         let file = match open_lock(&layout)? {
             Some(f) => {
-                hooks::pause("lock_opened");
+                pause!("lock_opened");
                 f
             }
             None => match genesis(&layout, host)? {
@@ -263,15 +255,14 @@ impl Ledger {
     pub fn lock(&mut self) -> Result<WriteGuard<'_>> {
         lock::take(&self.lock_file, Mode::Exclusive, self.options.lock_wait, &self.layout.lock)?;
         let checked = (|| {
-            let state = layout::inspect(&self.layout)?;
+            check_identity(layout::inspect(&self.layout)?, &self.layout, &self.host, Some(&self.epoch))?;
             if !lock::same_file(&self.lock_file, &self.layout.lock)? {
                 return Err(FlowError::LockLost {
                     lock: self.layout.lock.clone(),
                     detail: "the lock file was deleted or replaced after this writer opened it".into(),
                 });
             }
-            check_identity(state, &self.layout, &self.host, Some(&self.epoch))?;
-            lock::lock_root(&self.layout.root, Some(self.root_id), Mode::Exclusive, self.options.lock_wait)
+            lock::lock_root(&self.layout.root, Mode::Exclusive, self.options.lock_wait)
         })();
         match checked {
             Ok(root_dir) => Ok(WriteGuard { ledger: self, root_dir }),
@@ -423,7 +414,7 @@ impl WriteGuard<'_> {
         let (stored, line) = log::next_line(&log, &event)?;
         let dir = layout.instance_dir(id);
         let path = layout.events(id);
-        hooks::pause("append_checked");
+        pause!("append_checked");
         let written = (|| {
             // Only the instance's own directory is ever made here, never the root or `instances/`.
             if !real_dir(&dir)? {
@@ -467,15 +458,15 @@ impl Reader {
         Ok(Reader { layout: Layout::new(root)?, options })
     }
 
-    /// Takes the shared lock (the lock file, then the root directory) and checks there is a
-    /// whole ledger to read.
+    /// Takes the shared lock and checks there is a whole ledger to read. Reads need no more: a
+    /// write in flight reads as a torn tail, never as a shorter log.
     pub fn lock(&self) -> Result<ReadGuard> {
         let layout = &self.layout;
         let file = match open_lock(layout)? {
             Some(f) => f,
             None => return Err(FlowError::NoLedger { root: layout.root.clone() }),
         };
-        hooks::pause("lock_opened");
+        pause!("lock_opened");
         lock::take(&file, Mode::Shared, self.options.lock_wait, &layout.lock)?;
         let checked = (|| {
             if !lock::same_file(&file, &layout.lock)? {
@@ -485,15 +476,12 @@ impl Reader {
                 });
             }
             match layout::inspect(layout)? {
-                State::Live { host, epoch } => {
-                    let root_dir = lock::lock_root(&layout.root, None, Mode::Shared, self.options.lock_wait)?;
-                    Ok((host, epoch, root_dir))
-                }
+                State::Live { host, epoch } => Ok((host, epoch)),
                 State::Empty => Err(FlowError::RootMoved { root: layout.root.clone() }),
             }
         })();
         match checked {
-            Ok((host, epoch, root_dir)) => Ok(ReadGuard { layout: layout.clone(), file, root_dir, host, epoch }),
+            Ok((host, epoch)) => Ok(ReadGuard { layout: layout.clone(), file, host, epoch }),
             Err(e) => {
                 let _ = file.unlock();
                 Err(e)
@@ -507,14 +495,12 @@ impl Reader {
 pub struct ReadGuard {
     layout: Layout,
     file: File,
-    root_dir: File,
     host: String,
     epoch: String,
 }
 
 impl Drop for ReadGuard {
     fn drop(&mut self) {
-        let _ = self.root_dir.unlock();
         let _ = self.file.unlock();
     }
 }
@@ -555,7 +541,8 @@ impl ReadGuard {
         load_log(&self.layout, id)
     }
 
-    /// Every row of the projection, read-only; `None` when there is no projection file.
+    /// Every row of the projection, read-only; `None` when there is no projection file. For tests.
+    #[doc(hidden)]
     pub fn projection_dump(&self) -> Result<Option<projection::ProjectionDump>> {
         projection::dump(&self.layout)
     }

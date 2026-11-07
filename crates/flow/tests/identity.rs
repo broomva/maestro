@@ -107,66 +107,54 @@ fn a_deleted_or_emptied_lock_never_re_epochs_a_live_root() {
     assert_eq!(code(old.lock()), "lock_lost");
 }
 
+/// A genesis's lock says `genesis <epoch>` until its root is in place: a crash at any point
+/// after the lock is linked is refused, then recovered forward (root in place) or cleared (not).
 #[test]
 fn a_crash_mid_genesis_is_refused_then_recovered() {
-    // Crash after the lock was linked, before the staged root moved into place.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = root_in(tmp.path());
-    let parent = tmp.path().join(".broomva");
-    let epoch = "0123456789abcdef0123456789abcdef";
-    let stage = parent.join(format!(".flows.genesis-{epoch}"));
-    std::fs::create_dir_all(stage.join("instances")).unwrap();
-    std::fs::create_dir_all(stage.join("retired")).unwrap();
-    std::fs::write(stage.join("HOST"), "mac\n").unwrap();
-    std::fs::write(stage.join("EPOCH"), format!("{epoch}\n")).unwrap();
-    std::fs::write(lock_of(tmp.path()), format!("{epoch}\n")).unwrap();
-    let before = snapshot(&parent);
-    assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "genesis_incomplete");
-    assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "genesis_incomplete");
-    assert_eq!(snapshot(&parent), before, "a refused writer changed the tree");
-    assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::FinishedGenesis { epoch: epoch.into() });
-    let mut ledger = Ledger::open(&root, &host("mac"), quick()).unwrap();
-    assert_eq!(ledger.epoch(), epoch);
-    append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
-
-    // An empty lock with no root: refused, and the recovery returns the tree to empty.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = root_in(tmp.path());
-    std::fs::create_dir_all(tmp.path().join(".broomva")).unwrap();
-    std::fs::write(lock_of(tmp.path()), "").unwrap();
-    assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "genesis_incomplete");
-    assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::ClearedEmptyLock);
-    Ledger::open(&root, &host("mac"), quick()).unwrap();
-
-    // A crash before the lock was linked leaves a stage whose lock stage nobody holds: refused
-    // too, until the recovery clears it.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = root_in(tmp.path());
-    let parent = tmp.path().join(".broomva");
-    let orphan = "ffffffffffffffffffffffffffffffff";
-    std::fs::create_dir_all(parent.join(format!(".flows.genesis-{orphan}"))).unwrap();
-    std::fs::write(parent.join(format!(".flows.lock.genesis-{orphan}")), format!("{orphan}\n")).unwrap();
-    let before = snapshot(&parent);
-    assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "genesis_incomplete");
-    assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "genesis_incomplete");
-    assert_eq!(snapshot(&parent), before, "a refused writer changed the tree");
-    assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::ClearedOrphanStages { count: 1 });
-    assert!(names(&parent).is_empty());
-    let fresh = Ledger::open(&root, &host("mac"), quick()).unwrap();
-    assert_ne!(fresh.epoch(), orphan);
-
-    // A stage whose genesis is still running (its lock stage held) is not an orphan: the writer
-    // races that genesis instead of refusing.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = root_in(tmp.path());
-    let parent = tmp.path().join(".broomva");
-    let running = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    std::fs::create_dir_all(parent.join(format!(".flows.genesis-{running}"))).unwrap();
-    let lock_stage = parent.join(format!(".flows.lock.genesis-{running}"));
-    std::fs::write(&lock_stage, format!("{running}\n")).unwrap();
-    let held = std::fs::File::open(&lock_stage).unwrap();
-    held.lock().unwrap();
-    Ledger::open(&root, &host("mac"), quick()).unwrap();
+    for root_in_place in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = root_in(tmp.path());
+        let parent = tmp.path().join(".broomva");
+        let lock = lock_of(tmp.path());
+        let epoch = if root_in_place {
+            // Crashed after moving its root in, before the lock named the epoch.
+            let epoch = "0123456789abcdef0123456789abcdef".to_string();
+            for dir in ["instances", "retired"] {
+                std::fs::create_dir_all(root.join(dir)).unwrap();
+            }
+            std::fs::write(root.join("HOST"), "mac\n").unwrap();
+            std::fs::write(root.join("EPOCH"), format!("{epoch}\n")).unwrap();
+            std::fs::write(&lock, format!("genesis {epoch}\n")).unwrap();
+            epoch
+        } else {
+            // A real genesis killed right after linking its lock.
+            let go = tmp.path().join("go");
+            std::fs::write(&go, "").unwrap();
+            let pause = Pause::at("genesis_linked");
+            let mut child =
+                spawn_child_pausing(&["genesis", root.to_str().unwrap(), "mac", go.to_str().unwrap()], Some(&pause));
+            pause.reached();
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let text = std::fs::read_to_string(&lock).unwrap();
+            text.trim().strip_prefix("genesis ").expect("the lock says the genesis did not finish").to_string()
+        };
+        let before = snapshot(&parent);
+        assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "genesis_incomplete");
+        assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "genesis_incomplete");
+        assert_eq!(snapshot(&parent), before, "a refused writer changed the tree");
+        let recovered = operator::recover(&root, &quick()).unwrap();
+        let mut ledger = Ledger::open(&root, &host("mac"), quick()).unwrap();
+        if root_in_place {
+            assert_eq!(recovered, Recovered::FinishedGenesis { epoch: epoch.clone() });
+            assert_eq!(ledger.epoch(), epoch);
+        } else {
+            assert_eq!(recovered, Recovered::ClearedGenesis);
+            assert_ne!(ledger.epoch(), epoch);
+        }
+        append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
+        assert_eq!(names(&parent), vec!["flows", "flows.lock"]);
+    }
 }
 
 #[test]
@@ -230,8 +218,27 @@ fn an_archived_ledger_refuses_every_writer_until_a_fresh_one() {
     let fresh = operator::create_fresh_ledger(&root, &host("nuc"), &quick()).unwrap();
     assert_eq!(names(&parent), vec!["flows", "flows.lock"]);
     assert_eq!(Ledger::open(&root, &host("nuc"), quick()).unwrap().epoch(), fresh);
-    assert_eq!(code(waiting.lock()), "lock_lost");
+    assert_eq!(code(waiting.lock()), "epoch_mismatch");
     assert_eq!(code(operator::archive(&root, &dest, &quick())), "operator_refused");
+}
+
+/// The destination is checked before anything is written: its parent must exist, it must not,
+/// and it must be outside the root.
+#[test]
+fn an_archive_checks_its_destination_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent = tmp.path().join(".broomva");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    std::fs::create_dir(tmp.path().join("taken")).unwrap();
+    let before = snapshot(tmp.path());
+    for dest in
+        [tmp.path().join("missing/archive"), tmp.path().join("taken"), root.join("inside"), root.join("instances/x")]
+    {
+        assert_eq!(code(operator::archive(&root, &dest, &quick())), "operator_refused", "{}", dest.display());
+    }
+    assert_eq!(snapshot(tmp.path()), before, "a refused archive wrote something");
+    assert_eq!(names(&parent), vec!["flows", "flows.lock"]);
 }
 
 #[test]
@@ -282,8 +289,9 @@ fn a_lock_file_replaced_under_a_guard_never_forks_the_log() {
     assert_eq!(log.events[1].body["n"], 2);
 }
 
-/// A guard held while the root is moved away, or replaced by a copy, or its epoch rewritten:
+/// A guard held while the root is moved away, replaced by a copy or a link, or its epoch rewritten:
 /// the next write refuses and recreates nothing.
+#[cfg(unix)]
 #[test]
 fn a_write_checks_the_root_it_was_given() {
     let tmp = tempfile::tempdir().unwrap();
@@ -309,6 +317,18 @@ fn a_write_checks_the_root_it_was_given() {
     drop(guard);
     std::fs::remove_dir_all(&root).unwrap();
     std::fs::rename(parent.join("flows-moved"), &root).unwrap();
+
+    // A link to the real root put in its place: `lstat` never takes the link for the root.
+    let mut guard = ledger.lock().unwrap();
+    std::fs::rename(&root, parent.join("flows-real")).unwrap();
+    std::os::unix::fs::symlink(parent.join("flows-real"), &root).unwrap();
+    assert_eq!(code(guard.append(&id("fi_new"), 0, event("Started", 0))), "root_moved");
+    assert!(!parent.join("flows-real/instances/fi_new").exists());
+    drop(guard);
+    assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "symlink");
+    assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "symlink");
+    std::fs::remove_file(&root).unwrap();
+    std::fs::rename(parent.join("flows-real"), &root).unwrap();
 
     // The same root with its epoch rewritten under the guard.
     let mut guard = ledger.lock().unwrap();
