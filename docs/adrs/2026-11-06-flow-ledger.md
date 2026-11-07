@@ -100,6 +100,18 @@ current writer to transfer from and no cut-over to stage.
      `claim` response to its claimant.
    - **No cross-agent writes.** A verified session that did not start the instance cannot claim
      in it, and a session that did not make a claim cannot act on it.
+   - **Ownership survives resumption.** "Session" here means the verified `SessionRef`
+     (`{surface, environment, id}`, such as `t3:<env>/<thread>`). That is the surface's session,
+     not a model process: a T3 thread or a Paseo agent keeps its `SessionRef` across process
+     restarts, `--resume` and provider switches. A resumed session therefore keeps its instances
+     and can re-present its live claims.
+   - **Lost claims recover through the lease.** If the claimant does not come back before its
+     lease expires, the token is void (`lease_expired`), the node is released, and the owning
+     session's next `claim` is the next attempt.
+   - **No ownership transfer in phase 1.** If the owning `SessionRef` itself is gone (archived or
+     deleted on its surface), the instance cannot be adopted. `status` reports it as `orphaned`,
+     and the work restarts as a new instance. Transfer would need an owner-authorized verb, which
+     this ADR does not add.
 5. **No owner verb.** The flow verbs (`start`, `next`, `claim`, `complete`, `choose`, `status`,
    `heartbeat`) act on an agent's own flow instance. None of them answers, approves, dispatches,
    reviews or decides for the owner. Their names pass the owner-word checks in
@@ -164,6 +176,7 @@ cargo test -p maestro-flow --test host_binding      # a write from a host other 
 cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/
 cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
 cargo test -p maestro-flow --test cross_session     # another verified session cannot claim in, or act on a claim of, an instance it did not start
+cargo test -p maestro-flow --test resumption        # same SessionRef after a process restart re-presents its claim and claims the next node; an expired lease releases the node; a gone owner yields `orphaned` and no other session can adopt it
 cargo test -p maestro-flow --test token_handle      # a token passed to another session grants nothing; no token appears in the log, projection or status
 cargo test -p maestro-mcp --test flow_principal     # MCP: unverified flow writes refused; verified T3 and Paseo writes succeed
 cargo test -p maestro --test flow_principal         # CLI: writes refused until the Direct path verifies; a verified Direct write succeeds
