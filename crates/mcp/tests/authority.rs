@@ -34,6 +34,12 @@ fn every_tool_is_a_read_or_an_agent_request() {
                 assert!(spec.scope != "read" && !spec.scope.is_empty(), "{} names no scope", spec.name);
             }
             Authority::OwnerAction => panic!("{} takes an owner action", spec.name),
+            // A flow write takes effect, so it is no held request, and it may write only the
+            // flow ledger (docs/adrs/2026-11-06-flow-ledger.md).
+            Authority::AgentWrite => {
+                assert!(spec.request.is_none(), "{} is a flow write but makes a request", spec.name);
+                assert!(spec.scope.starts_with(".broomva/flows"), "{} writes outside the flow ledger", spec.name);
+            }
         }
     }
     assert_eq!(MaestroServer::tools().len(), TOOLS.len());

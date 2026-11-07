@@ -4,6 +4,8 @@
 //!
 //! Tools have [`Authority::Read`] or [`Authority::AgentRequest`] (BRO-3267): an agent may
 //! file a validated ask and record a request, and nothing it requests starts anything (A8).
+//! [`Authority::AgentWrite`] is reserved for flow-ledger writes by a verified agent
+//! (BRO-3631); no tool carries it yet.
 //! Owner actions are not exposed: a model-visible tool is not proof of the owner. Every
 //! MCP caller is [`Principal::Unverified`] until a surface adapter verifies sessions
 //! (BRO-3268), so its requests are recorded as unverified and, but for an ask, held.
