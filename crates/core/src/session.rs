@@ -517,6 +517,10 @@ impl VerifiedSession {
         self
     }
 
+    /// The owner marker: fixed for the life of the session, new when it is replaced. Unlike
+    /// `incarnation`, it survives turns, provider switches and restarts. Ownership is always keyed
+    /// on (`SessionRef`, marker) together, never on the marker alone (Direct sessions that share a
+    /// token share a marker). `None` when the surface cannot supply every part.
     pub fn owner_marker(&self) -> Option<&str> {
         self.owner_marker.as_deref()
     }

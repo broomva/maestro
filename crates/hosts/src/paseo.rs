@@ -324,7 +324,7 @@ impl PaseoRegistry {
         let owner_marker = agent
             .handle_id
             .as_deref()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
             .map(|handle_id| format!("paseo-owner:{}:{handle_id}", agent.id));
         let verified = VerifiedSession::new(
             SessionRef { surface: Surface::Paseo, environment: None, id: agent.id },
