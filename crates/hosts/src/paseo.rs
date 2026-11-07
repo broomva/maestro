@@ -321,14 +321,23 @@ impl PaseoRegistry {
             ));
         };
         let harness = agent.provider.as_deref().map(|p| p.parse::<Harness>().unwrap());
-        Ok(VerifiedSession::new(
+        let owner_marker = agent
+            .handle_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|handle_id| format!("paseo-owner:{}:{handle_id}", agent.id));
+        let verified = VerifiedSession::new(
             SessionRef { surface: Surface::Paseo, environment: None, id: agent.id },
             agent.cwd,
             harness,
             agent.parent,
             agent.pending_permissions,
         )
-        .with_incarnation(incarnation))
+        .with_incarnation(incarnation);
+        Ok(match owner_marker {
+            Some(marker) => verified.with_owner_marker(marker),
+            None => verified,
+        })
     }
 
     /// Whether `child` is a live session `parent` directly started (`Callers.started`).

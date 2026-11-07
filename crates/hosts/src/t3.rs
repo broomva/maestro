@@ -618,13 +618,20 @@ impl T3Registry {
             ));
         };
         let harness = thread.harness();
-        Ok(VerifiedSession::new(
+        let owner_marker = thread.created_at.as_deref().filter(|s| !s.is_empty()).map(|created_at| {
+            format!("t3-owner:{}:{}:{created_at}", thread.environment_id.as_deref().unwrap_or("-"), thread.id)
+        });
+        let verified = VerifiedSession::new(
             SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
             thread.cwd,
             harness,
             thread.parent_id,
             thread.pending_permissions,
         )
-        .with_incarnation(incarnation))
+        .with_incarnation(incarnation);
+        Ok(match owner_marker {
+            Some(marker) => verified.with_owner_marker(marker),
+            None => verified,
+        })
     }
 }
