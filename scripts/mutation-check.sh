@@ -673,6 +673,40 @@ mutate $hlb 'if effective_now_ms < cred.issued_at_ms || effective_now_ms >= cred
 mutate $hlb 'if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {' 'if false {'
 mutate $hlb 'msg.extend_from_slice(incarnation.as_bytes());' ''
 
+# Flow ledger storage (BRO-3633, BRO-3624 items 1, 2, 3 and 8): one lock and one sequence rule,
+# host and epoch binding, retire, the hash-chained log and the projection.
+fl=crates/flow/src
+mutate $fl/lock.rs 'Mode::Exclusive => file.try_lock(),' 'Mode::Exclusive => file.try_lock_shared(),'
+mutate $fl/lock.rs 'Mode::Shared => file.try_lock_shared(),' 'Mode::Shared => Ok(()),'
+mutate $fl/ledger.rs 'let _ = self.ledger.lock_file.unlock();' 'let _ = &self.ledger;'
+mutate $fl/ledger.rs 'if expected_seq != log.seq() {' 'if false {'
+mutate $fl/ledger.rs 'if owner != host.as_str() {' 'if false {'
+mutate $fl/ledger.rs '        && found != expected' '        && false'
+mutate $fl/ledger.rs '        check_identity(layout::inspect(&ledger.layout)?, &ledger.layout, &ledger.host, Some(&ledger.epoch))?;' ''
+mutate $fl/ledger.rs 'if !lock::same_file(&ledger.lock_file, &ledger.layout.lock)? {' 'if false {'
+mutate $fl/ledger.rs '    if std::fs::symlink_metadata(&layout.root).is_ok() {
+        return match open() {' '    if false {
+        return match open() {'
+mutate $fl/layout.rs '        None => Err(FlowError::LockLost {
+            lock: layout.lock.clone(),
+            detail: format!("the lock is {} beside a live root", if lock.is_some() { "empty" } else { "missing" }),
+        }),' '        None => Ok(State::Live { host, epoch }),'
+mutate $fl/operator.rs 'if is_epoch(content) && std::fs::symlink_metadata(&stage).is_ok() {' 'if false {'
+mutate $fl/ledger.rs '        Ok(_) => Err(FlowError::Retired { instance: id.to_string() }),' '        Ok(_) => Ok(()),'
+mutate $fl/log.rs 'prev_event: log.last_hash.clone(),' 'prev_event: None,'
+mutate $fl/log.rs 'if event.prev_event.as_deref() != want_prev {' 'if false {'
+mutate $fl/log.rs 'let error = if next == bytes.len() {' 'let error = if false {'
+mutate $fl/operator.rs 'file.set_len(prefix.len)' 'file.set_len(bytes.len() as u64)'
+mutate $fl/projection.rs 'OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX' 'OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE'
+mutate $fl/projection.rs '    if !current(&conn, epoch)? {
+        return rebuild_with(&mut conn, layout, epoch);
+    }
+    let tx = conn.transaction()?;
+    write_summary(&tx, summary)?;' '    let tx = conn.transaction()?;
+    write_summary(&tx, summary)?;'
+mutate $fl/ledger.rs 'Ok(Summary { summary: from_log, cache })' 'Ok(Summary { summary: match &cache { CacheState::Disagrees(Some(c)) => c.clone(), _ => from_log }, cache })'
+mutate $fl/ids.rs "} else if !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '} else if false {'
+
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
