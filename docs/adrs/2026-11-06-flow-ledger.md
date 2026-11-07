@@ -6,8 +6,20 @@ Tracking: BRO-3624 (phase 1 of the flow kernel), BRO-3622 (spec), BRO-3426 (idea
 
 ## Context
 
-The workspace spec `docs/specs/2026-11-06-flow-kernel.md` (broomva/workspace#1229, merged
-`4fbc54ca3`) adds a pull-based flow kernel. Agents from any harness call it to learn which step
+The flow kernel spec lives in the private **broomva/workspace** repository, not in this one. It is
+`docs/specs/2026-11-06-flow-kernel.md` at commit `4fbc54ca3` (PR broomva/workspace#1229). To
+read it with access:
+`gh api repos/broomva/workspace/contents/docs/specs/2026-11-06-flow-kernel.md?ref=4fbc54ca3 --jq .content | base64 -d`.
+This ADR depends on three statements in it, quoted here so it can be reviewed without that access:
+
+- Non-goals: "No distributed execution in phase 1. A single host with file locks. Instances
+  shared across the Mac and the NUC wait for a shared substrate."
+- Storage: "Each instance has `events.jsonl` (append-only, hash-chained through `prev_event`) and
+  a SQLite projection … There is no daemon."
+- Decision D1: "The kernel is a Rust crate in the Maestro workspace (`crates/flow`), exposed
+  through Maestro's existing CLI and MCP server."
+
+The spec adds a pull-based flow kernel. Agents from any harness call it to learn which step
 of a flow is ready (`next`), take it (`claim`), finish it (`complete`) or pick a declared branch
 (`choose`). The kernel runs each step's verify command itself and records every transition in an
 append-only, hash-chained event log. The owner decided on 2026-11-06 that the kernel is a Rust
@@ -40,6 +52,19 @@ current writer to transfer from and no cut-over to stage.
      identity. Every later write compares it with the current host and refuses with
      `foreign_host` on a mismatch. A second host's checkout of the workspace is a different root
      and so a different ledger. That is allowed, because the two ledgers never share instances.
+   - **Host identity:**
+     - The T3 environment ID (`$T3CODE_HOME/userdata/environment-id`) when T3 is installed. It is
+       stable per machine: the Mac and the NUC have different ones.
+     - Otherwise the platform machine ID: `IOPlatformUUID` on macOS, `/etc/machine-id` on Linux.
+     - `HOST` records which source was used. A host whose identity cannot be read can read flows
+       but not write them.
+   - **Moving the ledger to another host** (for example, the SSD moving from the Mac to the NUC)
+     is an explicit, audited rebind. It is never automatic:
+     - It is run with `maestro flow rebind-host` on the new host, by a verified principal.
+     - It refuses while any instance has a live lease, so it never strands an in-flight claim.
+     - It appends a `HostRebound` event with the old and new identity to every open instance,
+       then rewrites `HOST`. Until it runs, every write on the new host is refused with
+       `foreign_host`, and reads keep working.
    - **Later:** when a shared substrate or the phase 2 lease in `crates/ledger` exists, the flow
      family moves under it and the host binding is lifted. That move is a change to one call
      site, not a change of writer.
@@ -55,7 +80,13 @@ current writer to transfer from and no cut-over to stage.
    take effect for an unverified caller. A flow write does take effect. So the write verbs
    (`start`, `claim`, `complete`, `choose`, `heartbeat`) require a verified agent principal
    (`Principal::Agent`, from the surface registry that `agent_request` already uses). An
-   `Unverified` caller can read (`next`, `status`) and nothing else. Ownership works as follows:
+   `Unverified` caller can read (`next`, `status`) and nothing else.
+   **This is a prerequisite that does not exist yet for every surface.** The MCP server can
+   produce `Principal::Agent` where a surface registry is configured (T3, Paseo). The CLI cannot:
+   today it routes every request as unverified (`crates/cli/src/main.rs`, "The caller is
+   unverified (BRO-3268)"). So phase 1 builds a verified path for the CLI (the `Direct` surface)
+   before any flow write is enabled there. Until it exists, `maestro flow` writes from the CLI
+   are refused, and only verified MCP surfaces can drive flows. Ownership works as follows:
    - **The instance is owned by the session that started it.** Only that session may `claim`.
    - **A claim token is the capability for one node.** The owner may hand it to a performer, such
      as a subagent. `complete`, `choose` and `heartbeat` are accepted from any verified session
@@ -126,6 +157,9 @@ cargo test -p maestro-flow --test host_binding      # a write from a host other 
 cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/
 cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
 cargo test -p maestro-flow --test cross_session     # a verified session without ownership or a token cannot write another's instance
+cargo test -p maestro-flow --test host_rebind       # rebind refuses while a lease is live; after it, the new host writes and HostRebound is logged
+cargo test -p maestro-mcp --test flow_principal     # MCP: unverified flow writes refused; verified T3 and Paseo writes succeed
+cargo test -p maestro --test flow_principal         # CLI: writes refused until the Direct path verifies; a verified Direct write succeeds
 cargo test -p maestro-flow --test ask_recovery      # after a failed-but-written ask, the flow records the recovered ID and never re-files
 cargo test -p maestro-flow --test projection        # deleting the SQLite projection and replaying reproduces it
 cargo test -p maestro-mcp --test authority          # owner words pass unchanged; flow writes touch only their instance dir; reads write nothing
