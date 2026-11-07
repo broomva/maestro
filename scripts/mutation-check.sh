@@ -652,9 +652,11 @@ mutate $hlb 'if cred.generation != current_gen {' 'if false {'
 mutate $ht 'if self.disconnected {' 'if false {'
 mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
 mutate $ht 'thread.created_at.as_deref().filter(|s| !s.is_empty())' 'Some(thread.id.as_str())'
-mutate $hp '.handle_id
-            .as_deref()
-            .filter(|s| !s.is_empty())' 'Some(agent.id.as_str())'
+mutate $hp '            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|handle_id|' '            .as_deref()
+            .or(Some(""))
+            .map(|handle_id|'
 mutate $hlb 'format!("direct-owner:{}", hex_sha256(session.token.as_bytes()))' 'format!("direct-owner:{}:{}", session.cwd, hex_sha256(session.token.as_bytes()))'
 mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
 mutate $mcp 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if true {'
