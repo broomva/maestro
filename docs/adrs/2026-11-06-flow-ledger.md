@@ -28,32 +28,49 @@ current writer to transfer from and no cut-over to stage.
 1. **A new ledger family: flows.** Its root is `.broomva/flows/` in the workspace, with one
    directory per instance holding `events.jsonl`. Nothing else in the workspace reads or writes it
    today.
-2. **One writer from birth.** The `maestro-flow` crate (`crates/flow`) is the only code that
-   appends to the flow ledger. The CLI (`maestro flow …`) and the MCP tools (`maestro_flow_*`)
-   both call into that crate, not into their own write paths. Until the phase 2 lease exists,
-   single-writer access is enforced by an exclusive file lock held for each append, plus
-   optimistic concurrency on the log's sequence number. When `crates/ledger` lands, the flow
-   family moves under its lease like every other family. That move is a refactor of one call
-   site, not a change of writer.
+2. **One writer from birth, on one host.** The `maestro-flow` crate (`crates/flow`) is the only
+   code that writes the flow ledger. The CLI (`maestro flow …`) and the MCP tools
+   (`maestro_flow_*`) both call into that crate, not into their own write paths.
+   - **Within a host:** the CLI and the MCP server are separate processes. Each write takes an
+     exclusive file lock on the instance and checks the log's sequence number before appending,
+     so concurrent writers serialize or are refused.
+   - **Across hosts:** a file lock does not serialize writers on two machines that reach the same
+     tree. Phase 1 is therefore single-host, matching the spec's non-goal ("no distributed
+     execution in phase 1"). The first write creates `.broomva/flows/HOST`, recording the host's
+     identity. Every later write compares it with the current host and refuses with
+     `foreign_host` on a mismatch. A second host's checkout of the workspace is a different root
+     and so a different ledger. That is allowed, because the two ledgers never share instances.
+   - **Later:** when a shared substrate or the phase 2 lease in `crates/ledger` exists, the flow
+     family moves under it and the host binding is lifted. That move is a change to one call
+     site, not a change of writer.
 3. **No other ledger gains a writer.** The flow crate never writes the asks, initiatives, loops or
    work ledgers. A human step in a flow files its ask through the existing agent path
    (`maestro ask file` / `maestro_ask_file`, validated by the workspace's `scripts/ask_ledger.py`)
    and resolves by *reading* the owner's answer. The answers writer stays whatever rev 2 names.
-4. **No owner verb.** The flow verbs (`start`, `next`, `claim`, `complete`, `choose`, `status`,
+4. **Who may write.** In the BRO-3186 contract, agent requests are recorded for review and do not
+   take effect for an unverified caller. A flow write does take effect. So the write verbs
+   (`start`, `claim`, `complete`, `choose`, `heartbeat`) require a verified agent principal
+   (`Principal::Agent`, from the surface registry that `agent_request` already uses). The claim
+   token is bound to that session. An `Unverified` caller can read (`next`, `status`) and nothing
+   else.
+5. **No owner verb.** The flow verbs (`start`, `next`, `claim`, `complete`, `choose`, `status`,
    `heartbeat`) act on an agent's own flow instance. None of them answers, approves, dispatches,
    reviews or decides for the owner. Their names pass the owner-word lists in
    `crates/mcp/tests/authority.rs` and `crates/cli/tests/requests.rs` unchanged. That is why the
-   branch verb is `choose`, since both lists refuse `decide`. `crates/mcp/tests/dispatch.rs` must
-   still find no `OwnerVerb` among them.
-5. **Maestro still does not act on the fleet.** `next` returns a launch hint (performer, skill,
+   branch verb is `choose`, since both lists refuse `decide`. `crates/mcp/tests/dispatch.rs` does
+   not check names. It checks that no `OwnerVerb` tool is reachable, and that each tool's
+   annotations match its authority (reads read-only, writes not idempotent). The flow tools must
+   pass it once registered.
+6. **Maestro still does not act on the fleet.** `next` returns a launch hint (performer, skill,
    routing) for whoever drives the flow. The flow crate never spawns a session or sends agent
    mail, which keeps "the fleet skill acts, Maestro reads".
-6. **Unread is not empty.** `flow status` and `flow next` report a log that cannot be read or does
+7. **Unread is not empty.** `flow status` and `flow next` report a log that cannot be read or does
    not verify (a broken hash chain, an unparseable line) as an error with its source, never as an
    empty or finished instance.
-7. **Storage is the log alone in phase 1.** State is derived by replaying `events.jsonl`. There
-   is no SQLite projection and no daemon. A projection is added only if replay becomes measurably
-   slow, and it is rebuilt from the log, never written independently.
+8. **The log is the source of truth.** `events.jsonl` is append-only and hash-chained. The SQLite
+   projection the spec names is a cache derived from the log. It is written only by the same
+   crate and can be deleted and rebuilt by replay at any time. A disagreement between the two is
+   resolved in favour of the log. There is no daemon.
 
 ## Consequences
 
@@ -63,6 +80,10 @@ current writer to transfer from and no cut-over to stage.
   concurrent writer must be refused, and no flow verb may write outside `.broomva/flows/`.
 - The flow ledger needs backup the same way the workspace tree does. It lives in the workspace, so
   Time Machine and git hygiene cover it. Phase 1 does not commit instance logs to git.
+- A harness can write flows only where the surface registry can verify its session. Today that
+  is T3, Paseo and Direct. A harness session the registry cannot verify can read flows but not
+  drive them. The spec's live capability test (phase 1 acceptance, check 4) records which
+  harnesses that leaves out.
 - Reversal is cheap until other flows depend on it. Deleting `crates/flow` and the directory
   removes the family completely, because nothing else reads it.
 
@@ -77,7 +98,16 @@ current writer to transfer from and no cut-over to stage.
 
 ## Verification
 
-- `cargo test -p maestro-flow`: a second writer is refused, and writes stay inside the flow root.
-  Each test is mutation-checked per `scripts/ci.sh`.
-- `crates/mcp/tests/authority.rs`, `crates/cli/tests/requests.rs` and `crates/mcp/tests/dispatch.rs`
-  pass unchanged with the new tools and subcommands registered.
+Each command below must pass, and each guard test must fail when its guard is removed, per
+`scripts/ci.sh`'s mutation check.
+
+```bash
+cargo test -p maestro-flow --test single_writer     # a second concurrent writer (separate process) is serialized or refused
+cargo test -p maestro-flow --test host_binding      # a write from a host other than .broomva/flows/HOST is refused (foreign_host)
+cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/
+cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
+cargo test -p maestro-flow --test projection        # deleting the SQLite projection and replaying reproduces it
+cargo test -p maestro-mcp --test authority          # owner-word list passes with the maestro_flow_* tools registered
+cargo test -p maestro-mcp --test dispatch           # no OwnerVerb reachable; flow tool annotations match their authority
+cargo test -p maestro --test requests               # owner-word list passes with the `maestro flow` subcommands
+```
