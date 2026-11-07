@@ -47,30 +47,49 @@ current writer to transfer from and no cut-over to stage.
    work ledgers. A human step in a flow files its ask through the existing agent path
    (`maestro ask file` / `maestro_ask_file`, validated by the workspace's `scripts/ask_ledger.py`)
    and resolves by *reading* the owner's answer. The answers writer stays whatever rev 2 names.
+   `maestro_ask_file` can report an error after the ask is already written (for example, when
+   its requests journal line fails). A retry is then refused as a duplicate. So the flow never
+   re-files: it recovers the ask's ID from `maestro_asks_list` and records it in the instance
+   log before any further step.
 4. **Who may write.** In the BRO-3186 contract, agent requests are recorded for review and do not
    take effect for an unverified caller. A flow write does take effect. So the write verbs
    (`start`, `claim`, `complete`, `choose`, `heartbeat`) require a verified agent principal
-   (`Principal::Agent`, from the surface registry that `agent_request` already uses). The claim
-   token is bound to that session. An `Unverified` caller can read (`next`, `status`) and nothing
-   else.
+   (`Principal::Agent`, from the surface registry that `agent_request` already uses). An
+   `Unverified` caller can read (`next`, `status`) and nothing else. Ownership works as follows:
+   - **The instance is owned by the session that started it.** Only that session may `claim`.
+   - **A claim token is the capability for one node.** The owner may hand it to a performer, such
+     as a subagent. `complete`, `choose` and `heartbeat` are accepted from any verified session
+     that presents a live token, and from no one without one.
+   - **No cross-agent writes.** A verified session that neither owns the instance nor holds a
+     token for it cannot write to it.
 5. **No owner verb.** The flow verbs (`start`, `next`, `claim`, `complete`, `choose`, `status`,
    `heartbeat`) act on an agent's own flow instance. None of them answers, approves, dispatches,
-   reviews or decides for the owner. Their names pass the owner-word lists in
+   reviews or decides for the owner. Their names pass the owner-word checks in
    `crates/mcp/tests/authority.rs` and `crates/cli/tests/requests.rs` unchanged. That is why the
-   branch verb is `choose`, since both lists refuse `decide`. `crates/mcp/tests/dispatch.rs` does
-   not check names. It checks that no `OwnerVerb` tool is reachable, and that each tool's
-   annotations match its authority (reads read-only, writes not idempotent). The flow tools must
-   pass it once registered.
-6. **Maestro still does not act on the fleet.** `next` returns a launch hint (performer, skill,
+   branch verb is `choose`, since both lists refuse `decide`.
+6. **Flow writes are a new kind of agent-surface tool, and the authority suites say so.** Today
+   every tool is a read or a held agent request (`every_tool_is_a_read_or_an_agent_request`). A
+   held request changes nothing but the requests journal
+   (`a_held_request_changes_nothing_but_the_journal`). A flow write is neither. It takes effect,
+   but only for the caller's own flow. So phase 1 adds a classification for agent writes to the
+   flow ledger, still on the agent surface of the BRO-3186 contract and never an owner action.
+   Those two tests get explicit cases for it: a flow write may change only
+   `.broomva/flows/<instance>/` and never the requests journal. They are extended, not weakened.
+   `crates/mcp/tests/dispatch.rs` does not check names. It checks that no `OwnerVerb` tool is
+   reachable, and that annotations match authority (reads read-only, writes not idempotent). The
+   flow tools are covered there too.
+7. **Maestro still does not act on the fleet.** `next` returns a launch hint (performer, skill,
    routing) for whoever drives the flow. The flow crate never spawns a session or sends agent
    mail, which keeps "the fleet skill acts, Maestro reads".
-7. **Unread is not empty.** `flow status` and `flow next` report a log that cannot be read or does
+8. **Unread is not empty.** `flow status` and `flow next` report a log that cannot be read or does
    not verify (a broken hash chain, an unparseable line) as an error with its source, never as an
    empty or finished instance.
-8. **The log is the source of truth.** `events.jsonl` is append-only and hash-chained. The SQLite
+9. **The log is the source of truth.** `events.jsonl` is append-only and hash-chained. The SQLite
    projection the spec names is a cache derived from the log. It is written only by the same
    crate and can be deleted and rebuilt by replay at any time. A disagreement between the two is
-   resolved in favour of the log. There is no daemon.
+   resolved in favour of the log. Only write verbs update the projection. `next` and `status`
+   write nothing, including the cache: if it is stale, they replay in memory. That keeps
+   `a_read_tool_writes_nothing` true. There is no daemon.
 
 ## Consequences
 
@@ -106,8 +125,10 @@ cargo test -p maestro-flow --test single_writer     # a second concurrent writer
 cargo test -p maestro-flow --test host_binding      # a write from a host other than .broomva/flows/HOST is refused (foreign_host)
 cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/
 cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
+cargo test -p maestro-flow --test cross_session     # a verified session without ownership or a token cannot write another's instance
+cargo test -p maestro-flow --test ask_recovery      # after a failed-but-written ask, the flow records the recovered ID and never re-files
 cargo test -p maestro-flow --test projection        # deleting the SQLite projection and replaying reproduces it
-cargo test -p maestro-mcp --test authority          # owner-word list passes with the maestro_flow_* tools registered
+cargo test -p maestro-mcp --test authority          # owner words pass unchanged; flow writes touch only their instance dir; reads write nothing
 cargo test -p maestro-mcp --test dispatch           # no OwnerVerb reachable; flow tool annotations match their authority
 cargo test -p maestro --test requests               # owner-word list passes with the `maestro flow` subcommands
 ```
