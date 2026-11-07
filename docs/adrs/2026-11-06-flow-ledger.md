@@ -45,14 +45,19 @@ current writer to transfer from and no cut-over to stage.
 2. **One writer from birth, on one host.** The `maestro-flow` crate (`crates/flow`) is the only
    code that writes the flow ledger. The CLI (`maestro flow …`) and the MCP tools
    (`maestro_flow_*`) both call into that crate, not into their own write paths.
-   - **Within a host:** the CLI and the MCP server are separate processes. Each write takes an
-     exclusive file lock on the instance and checks the log's sequence number before appending,
-     so concurrent writers serialize or are refused.
+   - **Within a host:** the CLI and the MCP server are separate processes. Every write takes an
+     exclusive lock on the flows root (`.broomva/flows/.lock`) for the whole check-and-append,
+     then re-checks the instance log's sequence number. A writer whose expected sequence number
+     is stale is refused with `stale_sequence`. Concurrent writers are therefore serialized by the
+     lock, and a writer acting on an outdated view is refused. That is the one concurrency rule,
+     and the tests check exactly it.
    - **Across hosts:** a file lock does not serialize writers on two machines that reach the same
      tree. Phase 1 is therefore single-host, matching the spec's non-goal ("no distributed
-     execution in phase 1"). The first write creates `.broomva/flows/HOST`, recording the host's
-     identity. Every later write compares it with the current host and refuses with
-     `foreign_host` on a mismatch. A second host's checkout of the workspace is a different root
+     execution in phase 1"). Under the root lock, the first write creates `.broomva/flows/HOST`
+     with an exclusive create (`create_new`). If two hosts race, exactly one creation succeeds,
+     and the other reads the winner's identity. Every write, the first included, compares `HOST`
+     with the current host before touching any instance, and refuses with `foreign_host` on a
+     mismatch. A second host's checkout of the workspace is a different root
      and so a different ledger. That is allowed, because the two ledgers never share instances.
    - **Host identity:**
      - The T3 environment ID (`$T3CODE_HOME/userdata/environment-id`) when T3 is installed. It is
@@ -73,20 +78,25 @@ current writer to transfer from and no cut-over to stage.
    (`maestro ask file` / `maestro_ask_file`, validated by the workspace's `scripts/ask_ledger.py`)
    and resolves by *reading* the owner's answer. The answers writer stays whatever rev 2 names.
    `maestro_ask_file` can report an error after the ask is already written (for example, when
-   its requests journal line fails). A retry is then refused as a duplicate. So the flow never
-   re-files: it recovers the ask's ID from `maestro_asks_list` and records it in the instance
-   log before any further step.
+   its requests journal line fails). A retry is then refused as a duplicate. The ask's ID is
+   chosen by the caller before filing (`crates/store/src/requests.rs`), and that failure carries
+   it back in the error's data as `filed.id` (`crates/mcp/src/lib.rs`, `unjournalled`). So the
+   flow writes the chosen ID to the instance log *before* filing, and on a failure that says the
+   ask stands, it confirms with `maestro_ask_get` on that ID. It never re-files, and it never
+   searches `maestro_asks_list`, which is paged and filtered.
 4. **Who may write.** In the BRO-3186 contract, agent requests are recorded for review and do not
    take effect for an unverified caller. A flow write does take effect. So the write verbs
    (`start`, `claim`, `complete`, `choose`, `heartbeat`) require a verified agent principal
    (`Principal::Agent`, from the surface registry that `agent_request` already uses). An
    `Unverified` caller can read (`next`, `status`) and nothing else.
    **This is a prerequisite that does not exist yet for every surface.** The MCP server can
-   produce `Principal::Agent` where a surface registry is configured (T3, Paseo). The CLI cannot:
-   today it routes every request as unverified (`crates/cli/src/main.rs`, "The caller is
-   unverified (BRO-3268)"). So phase 1 builds a verified path for the CLI (the `Direct` surface)
-   before any flow write is enabled there. Until it exists, `maestro flow` writes from the CLI
-   are refused, and only verified MCP surfaces can drive flows. Ownership works as follows:
+   produce `Principal::Agent` where a surface registry is configured (T3, Paseo).
+   `resolve_caller` (`crates/mcp/src/lib.rs`) also verifies a caller presenting
+   `MAESTRO_DIRECT_TOKEN` or `MAESTRO_BRIDGE_CREDENTIAL`. The CLI routes through it, but its
+   stock subcommands send no such claim, so they arrive unverified (`crates/cli/src/main.rs`,
+   "The caller is unverified (BRO-3268)"). Phase 1 makes every `maestro flow` write obtain a
+   `VerifiedSession` through that path (Direct, T3 or Paseo). A `maestro flow` write without one
+   is refused. Ownership works as follows:
    - **The instance is owned by the session that started it.** Only that session may `claim`.
    - **A claim is bound to the verified session that made it.** Only that session may
      `complete`, `choose` or `heartbeat` the claim. The claim token is a handle that names the
@@ -138,7 +148,8 @@ current writer to transfer from and no cut-over to stage.
    but only for the caller's own flow. So phase 1 adds a classification for agent writes to the
    flow ledger, still on the agent surface of the BRO-3186 contract and never an owner action.
    Those two tests get explicit cases for it: a flow write may change only
-   `.broomva/flows/<instance>/` and never the requests journal. They are extended, not weakened.
+   `.broomva/flows/<instance>/`, the root's `.lock`, and `HOST` (only when it is first created),
+   and never the requests journal. They are extended, not weakened.
    `crates/mcp/tests/dispatch.rs` does not check names. It checks that no `OwnerVerb` tool is
    reachable, and that annotations match authority (reads read-only, writes not idempotent). The
    flow tools are covered there too.
@@ -155,12 +166,20 @@ current writer to transfer from and no cut-over to stage.
    write nothing, including the cache: if it is stale, they replay in memory. That keeps
    `a_read_tool_writes_nothing` true. There is no daemon.
 
+   This narrows the spec's storage line ("Every CLI or MCP call takes a file lock, replays the
+   log incrementally and appends"). Reads take a *shared* lock on the flows root and append
+   nothing, and only write verbs take the exclusive lock and append. A reader therefore never
+   sees a half-written line from a live writer. A torn final line left by a crash is reported as
+   unread (decision 8) with its source, never as a failed or finished instance. The next write,
+   under the exclusive lock, refuses to append after it until it is inspected.
+
 ## Consequences
 
 - `AGENTS.md` changes its "one writer per ledger" rule to name this family and its writer. The
   read-only rule stays in force for every existing family until its cut-over.
 - The crate must ship with tests that fail when a guard is removed. In particular, a second
-  concurrent writer must be refused, and no flow verb may write outside `.broomva/flows/`.
+  concurrent writer is serialized by the root lock, a writer with a stale sequence number is
+  refused, and no flow verb writes outside `.broomva/flows/`.
 - The flow ledger needs backup the same way the workspace tree does. It lives in the workspace, so
   Time Machine and git hygiene cover it. Phase 1 does not commit instance logs to git.
 - A harness can write flows only where the surface registry verifies its session *and* reports
@@ -186,19 +205,20 @@ Each command below must pass. Each guard test must fail when its guard is remove
 line in `scripts/mutation-check.sh`, as `AGENTS.md` requires.
 
 ```bash
-cargo test -p maestro-flow --test single_writer     # a second concurrent writer (separate process) is serialized or refused
-cargo test -p maestro-flow --test host_binding      # a write from a host other than .broomva/flows/HOST is refused (foreign_host)
+cargo test -p maestro-flow --test single_writer     # two processes writing at once are serialized by the root lock; a write with a stale sequence number is refused
+cargo test -p maestro-flow --test host_binding      # two first writers race on an empty root: one HOST is created; the other host is refused (foreign_host); later foreign writes refused
 cargo test -p maestro-flow --test write_scope       # no flow verb writes outside .broomva/flows/
 cargo test -p maestro-flow --test principal         # an Unverified caller is refused every write verb, and can still read
 cargo test -p maestro-flow --test cross_session     # another verified session cannot claim in, or act on a claim of, an instance it did not start
 cargo test -p maestro-flow --test resumption        # a restarted process cannot use its old claim; after lease expiry the same SessionRef and incarnation claims the next attempt; a different SessionRef cannot write the old instance
-cargo test -p maestro-flow --test incarnation       # refused: a verified session with no incarnation; a same-SessionRef replacement with a new incarnation (claim, complete, choose)
+cargo test -p maestro-flow --test incarnation       # refused for every write verb (start, claim, complete, choose, heartbeat): a verified session with no incarnation; a same-SessionRef replacement with a new incarnation
 cargo test -p maestro-flow --test token_handle      # a token passed to another session grants nothing; no token appears in the log, projection or status
 cargo test -p maestro-mcp --test flow_principal     # MCP: unverified flow writes refused; verified T3 and Paseo writes succeed
 cargo test -p maestro --test flow_principal         # CLI: writes refused until the Direct path verifies; a verified Direct write succeeds
-cargo test -p maestro-flow --test ask_recovery      # after a failed-but-written ask, the flow records the recovered ID and never re-files
+cargo test -p maestro-flow --test ask_recovery      # the chosen ask ID is logged before filing; on an 'ask stands' error the flow confirms via maestro_ask_get and never re-files
 cargo test -p maestro-flow --test projection        # deleting the SQLite projection and replaying reproduces it
-cargo test -p maestro-mcp --test authority          # owner words pass unchanged; flow writes touch only their instance dir; reads write nothing
+cargo test -p maestro-flow --test torn_tail         # a crash-truncated last line makes status report unread, and the next write refuses to append after it
+cargo test -p maestro-mcp --test authority          # owner words pass unchanged; flow writes touch only their instance dir, .lock and a first HOST; reads write nothing
 cargo test -p maestro-mcp --test dispatch           # no OwnerVerb reachable; flow tool annotations match their authority
 cargo test -p maestro --test requests               # owner-word list passes with the `maestro flow` subcommands
 ```
