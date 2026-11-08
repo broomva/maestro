@@ -425,13 +425,9 @@ impl Reader {
                 State::Empty => Err(FlowError::RootMoved { root: layout.root.clone() }),
             }
         })();
-        match checked {
-            Ok((host, epoch, root)) => Ok(ReadGuard { layout: layout.clone(), root, file, host, epoch }),
-            Err(e) => {
-                let _ = file.unlock();
-                Err(e)
-            }
-        }
+        // On a refusal `file` is dropped, and closing it releases the lock.
+        let (host, epoch, root) = checked?;
+        Ok(ReadGuard { layout: layout.clone(), root, file, host, epoch })
     }
 }
 

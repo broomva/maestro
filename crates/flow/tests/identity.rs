@@ -1,5 +1,5 @@
-//! BRO-3624 item 2: host binding and ledger identity, checked when the lock is taken and again
-//! at every write.
+//! BRO-3624 item 2: host binding and ledger identity, checked when the lock is taken; every write
+//! then goes through the root directory the lock verified.
 
 mod common;
 
@@ -131,8 +131,8 @@ fn an_archived_ledger_refuses_every_writer_until_a_fresh_one() {
     assert_eq!(code(operator::archive(&root, &dest, &quick())), "operator_refused");
 }
 
-/// The destination is checked before anything is written: its parent must exist, it must not,
-/// and it must be outside the root.
+/// The destination is checked before anything is written: its parent must exist, it must be
+/// absent or empty, and it must be outside the root.
 #[test]
 fn an_archive_checks_its_destination_first() {
     let tmp = tempfile::tempdir().unwrap();
@@ -140,6 +140,7 @@ fn an_archive_checks_its_destination_first() {
     let parent = tmp.path().join(".broomva");
     drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
     std::fs::create_dir(tmp.path().join("taken")).unwrap();
+    std::fs::write(tmp.path().join("taken/kept"), "").unwrap();
     let before = snapshot(tmp.path());
     for dest in
         [tmp.path().join("missing/archive"), tmp.path().join("taken"), root.join("inside"), root.join("instances/x")]
@@ -387,4 +388,59 @@ fn a_stray_file_under_instances_is_not_an_instance() {
     std::fs::write(root.join("instances/notes"), "").unwrap();
     assert_eq!(ledger.lock().unwrap().instances().unwrap(), vec![id("fi_a")]);
     assert_eq!(Reader::new(&root, quick()).unwrap().lock().unwrap().instances().unwrap(), vec![id("fi_a")]);
+}
+
+/// `archive` takes the lock file exclusive, so it waits for readers as well as writers.
+#[test]
+fn an_archive_waits_for_readers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    let reading = Reader::new(&root, quick()).unwrap().lock().unwrap();
+    let before = snapshot(tmp.path());
+    assert_eq!(code(operator::archive(&root, &tmp.path().join("archive"), &quick())), "busy");
+    assert_eq!(snapshot(tmp.path()), before, "an archive went ahead under a reader");
+    drop(reading);
+}
+
+/// `archive` moves only a whole ledger: with the lock emptied beside the root it refuses
+/// `lock_lost` and writes nothing.
+#[test]
+fn an_archive_moves_only_a_whole_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    std::fs::write(lock_of(tmp.path()), "").unwrap();
+    let before = snapshot(tmp.path());
+    assert_eq!(code(operator::archive(&root, &tmp.path().join("archive"), &quick())), "lock_lost");
+    assert_eq!(snapshot(tmp.path()), before);
+}
+
+/// The states a crash mid-archive leaves: an empty destination it made is reused by the next
+/// archive; once the root moved and before its lock did, every writer and another archive refuse
+/// `root_moved` and write nothing.
+#[test]
+fn an_archive_after_a_crash_reuses_its_destination_or_refuses_root_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent = tmp.path().join(".broomva");
+    let dest = tmp.path().join("archive");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    std::fs::create_dir(&dest).unwrap();
+    operator::archive(&root, &dest, &quick()).unwrap();
+    assert_eq!(names(&dest), vec!["flows", "flows.lock"]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent2 = tmp.path().join(".broomva");
+    let dest = tmp.path().join("archive");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::rename(&root, dest.join("flows")).unwrap();
+    std::fs::write(parent2.join("flows.archived"), "").unwrap();
+    let before = snapshot(tmp.path());
+    assert_eq!(code(operator::archive(&root, &tmp.path().join("elsewhere"), &quick())), "root_moved");
+    assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "root_moved");
+    assert_eq!(snapshot(tmp.path()), before);
+    drop(parent);
 }

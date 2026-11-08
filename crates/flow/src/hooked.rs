@@ -226,3 +226,108 @@ fn an_archive_to_another_filesystem_writes_nothing() {
     assert_eq!(snapshot(tmp.path()), before);
     operator::archive(&root, &dest, &quick()).unwrap();
 }
+
+/// A writer that opened the root and is still waiting for its lock while the root is moved by
+/// hand, or archived through a replaced lock file: once it gets the lock it sees the path no
+/// longer names that directory and refuses `root_moved`, writing nothing.
+#[test]
+fn a_writer_queued_on_a_root_that_moves_refuses_root_moved() {
+    for how in ["moved", "archived"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = root_in(tmp.path());
+        let parent = tmp.path().join(".broomva");
+        let dest = tmp.path().join("archive");
+        let mut mac = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+        append_at_head(&mut mac, &id("fi_a"), event("Started", 0)).unwrap();
+        let pause = Pause::at("root_opened");
+        let child = spawn_child_pausing(&["append", root.to_str().unwrap(), "mac", "fi_a", "1", "5000"], Some(&pause));
+        pause.reached();
+        let moved = if how == "moved" {
+            std::fs::rename(&root, parent.join("flows-moved")).unwrap();
+            parent.join("flows-moved")
+        } else {
+            replace_with_copy(&lock_of(tmp.path()));
+            operator::archive(&root, &dest, &quick()).unwrap();
+            dest.join("flows")
+        };
+        pause.go();
+        assert_eq!(child_result(child), "root_moved", "{how}");
+        let log = std::fs::read_to_string(moved.join("instances/fi_a/events.jsonl")).unwrap();
+        assert_eq!(log.lines().count(), 1, "{how}: the queued writer wrote");
+    }
+}
+
+/// `archive` checks the lock file it locked is still the lock: one replaced between its open and
+/// its lock is refused `lock_lost`, and nothing moves.
+#[test]
+fn an_archive_refuses_a_lock_replaced_while_opening() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let dest = tmp.path().join("archive");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    let pause = Pause::at("lock_opened");
+    let child = spawn_child_pausing(&["archive", root.to_str().unwrap(), dest.to_str().unwrap()], Some(&pause));
+    pause.reached();
+    replace_with_copy(&lock_of(tmp.path()));
+    pause.go();
+    assert_eq!(child_result(child), "lock_lost");
+    assert!(root.exists() && !dest.exists());
+}
+
+/// `archive` moves the root by its path, so it re-checks the path still names the directory it
+/// locked: a directory put in its place meanwhile is refused `root_moved` and left alone.
+#[test]
+fn an_archive_refuses_a_root_replaced_after_its_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent = tmp.path().join(".broomva");
+    let dest = tmp.path().join("archive");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    let pause = Pause::at("archive_locked");
+    let child = spawn_child_pausing(&["archive", root.to_str().unwrap(), dest.to_str().unwrap()], Some(&pause));
+    pause.reached();
+    std::fs::rename(&root, parent.join("flows-real")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    pause.go();
+    assert_eq!(child_result(child), "root_moved");
+    assert!(names(&root).is_empty() && !dest.exists());
+    assert_eq!(names(&parent.join("flows-real")), vec!["EPOCH", "HOST", "instances", "retired"]);
+}
+
+/// A fresh ledger killed after its root went in and before its archive marker went: the marker
+/// sits beside a whole ledger, and `recover` removes it.
+#[test]
+fn recover_removes_a_marker_beside_a_whole_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent = tmp.path().join(".broomva");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    operator::archive(&root, &tmp.path().join("archive"), &quick()).unwrap();
+    let pause = Pause::at("root_in_place");
+    let mut child = spawn_child_pausing(&["fresh", root.to_str().unwrap(), "nuc"], Some(&pause));
+    pause.reached();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(names(&parent), vec!["flows", "flows.archived", "flows.lock"]);
+    assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::RemovedDebris { count: 1 });
+    assert_eq!(names(&parent), vec!["flows", "flows.lock"]);
+    Ledger::open(&root, &host("nuc"), quick()).unwrap();
+}
+
+/// SQLite opens the cache by path after the root check, and its journal by path when it writes: a
+/// root moved in between fails the write, reported as a skipped cache, never an updated one. The
+/// log wins either way.
+#[test]
+fn a_cache_written_while_the_root_moved_is_reported_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent = tmp.path().join(".broomva");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    let pause = Pause::at("projection_open");
+    let child = spawn_child_pausing(&["append-cache", root.to_str().unwrap(), "mac", "fi_a"], Some(&pause));
+    pause.reached();
+    std::fs::rename(&root, parent.join("flows-moved")).unwrap();
+    pause.go();
+    assert_eq!(child_result(child), "cache_failed");
+    assert!(parent.join("flows-moved/instances/fi_a/events.jsonl").exists());
+}

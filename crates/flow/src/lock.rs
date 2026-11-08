@@ -72,7 +72,13 @@ pub(crate) fn root_id(root: &Path) -> Result<FileId> {
 /// it.
 pub(crate) fn lock_root(root: &Path, expected: Option<FileId>, mode: Mode, wait: Duration) -> Result<Dir> {
     let dir = Dir::open_root(root)?;
+    pause!("root_opened");
     take(&dir.fd, mode, wait, root)?;
+    // The wait can be long: the path must still name the directory now locked, or a root moved
+    // (or archived) meanwhile would be written to.
+    if root_id(root)? != dir.id()? {
+        return Err(FlowError::RootMoved { root: root.to_path_buf() });
+    }
     if let Some(want) = expected
         && dir.id()? != want
     {

@@ -153,6 +153,11 @@ pub fn recover(root: &Path, options: &Options) -> Result<Recovered> {
             return Ok(Recovered::FinishedGenesis { epoch: epoch.to_string() });
         }
         layout::inspect(&layout)?;
+        // A crash after a new ledger's root went in, before its archive marker went, leaves the
+        // marker beside a whole ledger: it no longer means anything.
+        let marker = layout.archived_marker();
+        let debris = debris + usize::from(layout::exists(&marker)?);
+        let _ = std::fs::remove_file(&marker);
         if debris > 0 {
             return Ok(Recovered::RemovedDebris { count: debris });
         }
@@ -174,35 +179,58 @@ fn other_device(a: &Path, b: &Path) -> Result<bool> {
 /// refuses `root_moved` and creates nothing, until an operator makes a fresh ledger there with
 /// [`create_fresh_ledger`].
 ///
-/// `dest` must not exist, its parent must, it must be outside the root and on the root's
-/// filesystem; all are checked before anything is written. It then takes the lock file and the
-/// root directory's own lock, exclusive, as a writer does: the root directory's lock waits for
-/// any guard, even one held through a replaced lock file.
+/// It takes the lock file (waiting for writers and readers) and the root directory's own lock (as
+/// a writer does, so it waits for any guard, even one held through a replaced lock file), and
+/// moves only a whole ledger. `dest`'s parent must exist, `dest` must be absent or empty, outside
+/// the root and on the root's filesystem; all are checked before anything is written.
+///
+/// After a crash: before the root moved, the ledger is whole and an archive can simply run again
+/// (an empty `dest` it made is reused). After the root moved and before its lock did, the lock
+/// is left beside nothing and every writer, and another archive, refuses `root_moved`; the
+/// operator moves the lock into `dest` by hand, or deletes it, to finish.
 pub fn archive(root: &Path, dest: &Path, options: &Options) -> Result<()> {
     let layout = Layout::new(root)?;
     let Some(file) = open_lock(&layout)? else {
         return Err(FlowError::NoLedger { root: layout.root.clone() });
     };
-    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let Ok(parent) = std::fs::canonicalize(parent) else {
-        return Err(refused(format!("{}'s parent does not exist, so nothing was archived.", dest.display())));
-    };
-    if layout::exists(dest)? {
-        return Err(refused(format!("{} already exists, so nothing was archived.", dest.display())));
-    }
-    if parent.starts_with(std::fs::canonicalize(&layout.root).map_err(FlowError::io(&layout.root))?) {
-        return Err(refused(format!("{} is inside the root, so nothing was archived.", dest.display())));
-    }
-    if other_device(&parent, &layout.parent)? {
-        return Err(refused(format!("{} is on another filesystem, so nothing was archived.", dest.display())));
-    }
+    pause!("lock_opened");
     lock::take(&file, Mode::Exclusive, options.lock_wait, &layout.lock)?;
     let done = (|| {
+        if !lock::same_file(&file, &layout.lock)? {
+            return Err(FlowError::LockLost {
+                lock: layout.lock.clone(),
+                detail: "the lock file was replaced while the archive opened it".into(),
+            });
+        }
+        // Only a whole ledger moves; a root already moved away (a crash mid-archive included) is
+        // `root_moved` here, before the destination is looked at.
         let State::Live { epoch, .. } = layout::inspect(&layout)? else {
             return Err(FlowError::RootMoved { root: layout.root.clone() });
         };
-        let _held = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;
-        std::fs::create_dir(dest).map_err(FlowError::io(dest))?;
+        let parent = dest.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let Ok(parent) = std::fs::canonicalize(parent) else {
+            return Err(refused(format!("{}'s parent does not exist, so nothing was archived.", dest.display())));
+        };
+        // An empty destination is one a crashed archive made: it is used, not refused.
+        let reuse = std::fs::read_dir(dest).is_ok_and(|mut d| d.next().is_none());
+        if layout::exists(dest)? && !reuse {
+            return Err(refused(format!("{} already exists, so nothing was archived.", dest.display())));
+        }
+        if parent.starts_with(std::fs::canonicalize(&layout.root).map_err(FlowError::io(&layout.root))?) {
+            return Err(refused(format!("{} is inside the root, so nothing was archived.", dest.display())));
+        }
+        if other_device(&parent, &layout.parent)? {
+            return Err(refused(format!("{} is on another filesystem, so nothing was archived.", dest.display())));
+        }
+        let held = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;
+        pause!("archive_locked");
+        // The root is moved by its path, so the path must still name the directory locked above.
+        if lock::root_id(&layout.root)? != held.id()? {
+            return Err(FlowError::RootMoved { root: layout.root.clone() });
+        }
+        if !reuse {
+            std::fs::create_dir(dest).map_err(FlowError::io(dest))?;
+        }
         let marker = layout.archived_marker();
         std::fs::write(&marker, format!("{}\n{epoch}\n", dest.display())).map_err(FlowError::io(&marker))?;
         std::fs::rename(&layout.root, dest.join(layout.name())).map_err(FlowError::io(&layout.root))?;
@@ -233,18 +261,17 @@ pub fn create_fresh_ledger(root: &Path, host: &HostId, options: &Options) -> Res
     }
     pause!("fresh_checked");
     let finished = |epoch: String| {
+        pause!("root_in_place");
         let _ = std::fs::remove_file(&marker);
         sync_dir(&layout.parent);
         Ok(epoch)
     };
     let Some(file) = existing_lock(&layout)? else {
-        return match genesis(&layout, host)? {
-            Some(file) => {
-                let _ = file.unlock();
-                finished(root_epoch(&layout.root)?)
-            }
-            None => Err(refused("Another writer created the ledger meanwhile.")),
-        };
+        // With no lock and no root, only another fresh ledger can race this one: whichever loses
+        // is refused by the lock the other linked.
+        let file = genesis(&layout, host)?.ok_or_else(|| refused("Another fresh ledger was made meanwhile."))?;
+        let _ = file.unlock();
+        return finished(root_epoch(&layout.root)?);
     };
     // A root moved away by hand left its lock behind: a new lock replaces it.
     under_lock(&file, &layout, options, || {

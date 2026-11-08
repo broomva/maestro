@@ -158,9 +158,15 @@ fn rebuild_with(conn: &mut Connection, root: &Dir, epoch: &str) -> Result<()> {
 /// rows of instances no longer live are dropped. A cache missing or stale is rebuilt whole.
 pub(crate) fn sync(root: &Dir, layout: &Layout, epoch: &str, root_id: FileId) -> Result<()> {
     let mut conn = open_rw(layout, root_id)?;
-    if !current(&conn, epoch)? {
-        return rebuild_with(&mut conn, root, epoch);
-    }
+    pause!("projection_open");
+    // SQLite opened the cache by path after the check in `open_rw`, and makes its journal by path
+    // when it writes: a root moved meanwhile fails the write, which is reported as a skipped
+    // cache. Moved after the journal exists, the write lands in that root's own cache. The log
+    // wins either way.
+    if current(&conn, epoch)? { sync_with(&mut conn, root) } else { rebuild_with(&mut conn, root, epoch) }
+}
+
+fn sync_with(conn: &mut Connection, root: &Dir) -> Result<()> {
     let live = list_instances(root)?;
     let mut cached = BTreeMap::new();
     {

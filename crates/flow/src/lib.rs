@@ -43,14 +43,17 @@
 //!   lock when dropped, so a caller drops it before slow external work (filing an ask can wait
 //!   30 s on the ask ledger's lock) and comes back with the sequence number it saw.
 //! - **Writes go through the root's descriptor, never a path.** Taking the lock opens the root
-//!   directory and checks it is the very directory (device and inode) the writer opened, and the
-//!   epoch it opened. From then on every open, create, rename and stat under the root is relative
-//!   to that descriptor (`openat`, `mkdirat`, `renameat`, `statat`, in `at.rs`), with
-//!   `O_NOFOLLOW` and `AT_SYMLINK_NOFOLLOW`. A root moved or replaced by path while a guard is
-//!   held cannot redirect a write: it lands in the directory the guard verified, and the next
-//!   lock refuses `root_moved`. No symbolic link under the root is followed (`symlink`). The
-//!   projection is the one exception, since SQLite needs a path: it is written only while the
-//!   root's path still names the held directory, and it is a cache the log always beats.
+//!   directory, waits for its lock, then checks the path still names that directory and that it
+//!   is the very directory (device and inode) and epoch the writer opened, so a writer queued
+//!   while the root moved or was archived refuses `root_moved`. From then on every open, create,
+//!   rename and stat under the root is relative to that descriptor (`openat`, `mkdirat`,
+//!   `renameat`, `statat`, in `at.rs`), with `O_NOFOLLOW` and `AT_SYMLINK_NOFOLLOW`. A root moved
+//!   or replaced by path while a guard is held cannot redirect a write: it lands in the directory
+//!   the guard verified, and the guard's next `lock()` refuses `root_moved`. No symbolic link under
+//!   the root is followed (`symlink`). The projection is the one exception, since SQLite needs a
+//!   path: it is written only while the root's path still names the held directory, and a write
+//!   the root moved under fails (SQLite makes its journal by path) and is reported skipped. It is
+//!   a cache; the log always wins.
 //! - **Host binding and identity.** A genesis runs only on an empty tree: no lock, no root and no
 //!   archive marker. It builds the whole root at a stage, then links a lock written whole and
 //!   held under a private name as `flows.lock` (a hard link fails if a lock exists, so one first
@@ -59,11 +62,13 @@
 //!   live root is `lock_lost`, never a new epoch.
 //! - **A lock is never rewritten.** A new lock is written whole under a private name, synced, and
 //!   renamed over the old one; a crash before the rename leaves the old lock as it was.
-//! - **Archive and fresh ledgers are operator steps.** [`operator::archive`] takes the lock and
-//!   the root directory's lock as a writer does, then moves the root and its lock away together
-//!   and leaves `flows.archived`; every writer then refuses `root_moved` and creates nothing. A
-//!   new ledger there is [`operator::create_fresh_ledger`], never a writer's job. A root moved by
-//!   hand leaves its lock behind, which refuses `root_moved` too.
+//! - **Archive and fresh ledgers are operator steps.** [`operator::archive`] takes the lock file
+//!   exclusive (waiting for readers and writers) and the root directory's lock as a writer does,
+//!   moves only a whole ledger, re-checks the root's path just before moving it, then moves the
+//!   root and its lock away together and leaves `flows.archived`; every writer then refuses
+//!   `root_moved` and creates nothing. A new ledger there is [`operator::create_fresh_ledger`],
+//!   never a writer's job. A root moved by hand leaves its lock behind, which refuses `root_moved`
+//!   too.
 //! - **Crash recovery.** A crash after a genesis links its lock and before its stage moves in
 //!   leaves a lock naming a stage, refused `genesis_incomplete`; [`operator::recover`] moves the
 //!   stage in. A crash before the link leaves only a stage no lock names, which nothing reads.

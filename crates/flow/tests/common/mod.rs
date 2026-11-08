@@ -161,6 +161,7 @@ pub fn child_result(child: Child) -> String {
 ///
 /// - `genesis <root> <host> <go file>`: waits for the go file, then opens the ledger.
 /// - `append <root> <host> <instance> <count> <lock wait ms>`: appends `count` events at the head.
+/// - `append-cache <root> <host> <instance>`: creates the instance; prints what became of the cache.
 /// - `open <root> <host>`: opens the ledger.
 /// - `read <root>`: takes the read lock and lists the instances.
 /// - `archive <root> <dest>`: `operator::archive`.
@@ -186,6 +187,19 @@ pub fn child_main() {
             }
             Ok(())
         })(),
+        ["append-cache", root, name, instance] => {
+            let cache = Ledger::open(Path::new(root), &host(name), Options::default()).and_then(|mut ledger| {
+                let mut guard = ledger.lock()?;
+                Ok(guard.append(&id(instance), 0, NewEvent::new("Started", serde_json::json!({})))?.cache)
+            });
+            let out = match cache {
+                Ok(maestro_flow::CacheWrite::Updated) => "cache_updated".to_string(),
+                Ok(maestro_flow::CacheWrite::Failed(_)) => "cache_failed".to_string(),
+                Err(e) => e.code().to_string(),
+            };
+            println!("FLOW_RESULT {out}");
+            return;
+        }
         ["open", root, name] => Ledger::open(Path::new(root), &host(name), Options::default()).map(|_| ()),
         ["read", root] => maestro_flow::Reader::new(Path::new(root), Options::default())
             .and_then(|r| r.lock().and_then(|g| g.instances()))
