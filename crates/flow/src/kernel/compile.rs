@@ -8,6 +8,10 @@ use super::ir::{self, Case, Class, Exit, IR_VERSION, Input, Ir, Launch, Need, No
 use super::jq;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The most bytes of YAML a definition may have. Parsing is bounded by it, and with
+/// [`ir::MAX_IR`] it keeps a flow small enough to start.
+pub const MAX_SOURCE: usize = 256 << 10;
+
 /// A definition that compiled: its IR and the IR's content hash. Only [`compile`] makes one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledFlow {
@@ -100,6 +104,9 @@ fn seconds(at: &str, text: &str) -> Result<u64, CompileError> {
 
 /// Compiles a YAML definition to its IR.
 pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
+    if yaml.len() > MAX_SOURCE {
+        return Err(CompileError::invalid(format!("the definition is {} bytes, more than {MAX_SOURCE}", yaml.len())));
+    }
     let def: Definition = serde_yaml::from_str(yaml).map_err(|e| CompileError::invalid(e.to_string()))?;
     if def.uses.is_some() {
         return Err(CompileError::Unsupported { feature: "A trait (uses at the top level)".into() });
@@ -179,6 +186,10 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
     };
     ir::validate(&ir)?;
     check_guards(&ir)?;
+    let bytes = serde_json::to_vec(&ir).map(|b| b.len()).unwrap_or(usize::MAX);
+    if bytes > ir::MAX_IR {
+        return Err(CompileError::invalid(format!("the IR is {bytes} bytes, more than {}", ir::MAX_IR)));
+    }
     let hash = ir::content_hash(&ir)?;
     Ok(CompiledFlow { ir, hash })
 }
@@ -230,7 +241,13 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
     };
     Ok(Node {
         class,
-        needs: n.needs.iter().flat_map(need).collect(),
+        // A node needed twice (named again, or through a fork) is needed once.
+        needs: n.needs.iter().flat_map(need).fold(Vec::new(), |mut needs, x| {
+            if !needs.contains(&x) {
+                needs.push(x);
+            }
+            needs
+        }),
         switch: n.switch.map(|s| Case { on: s.on, value: s.case }),
         retry: n.retry.map(|r| r.attempts),
         cancel_after: n.cancel.map(|c| seconds(&format!("node {id} cancel.after"), &c.after)).transpose()?,

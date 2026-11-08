@@ -18,17 +18,33 @@ pub const IR_VERSION: u32 = 1;
 /// a replay's work bounded by the definition.
 pub const MAX_REPEAT: u32 = 1000;
 
-/// The most nodes a definition may declare.
-pub const MAX_NODES: usize = 512;
+// The size bounds below are set from the flows the kernel is for, with room to spare: the
+// verifier (4 nodes, depth 4, fan-in 2), a three-stratum review over five rounds (about a dozen
+// nodes) and the fleet tick (13 steps, fan-in at most 13). Replay's cost per event is bounded by
+// what one node reads, and its total by that times the events (`log::MAX_EVENTS`).
 
-/// The most nodes one node's evaluation may read: its needs, its switch, and the whole body of
-/// every repeat it waits on (needing it, or needing a node in its body from outside). Replay
-/// re-reads them for every receipt the node takes, so this bounds the work an event costs.
-pub const MAX_FAN_IN: usize = 64;
+/// The most nodes a definition may declare: about twice the largest real flow. With
+/// [`MAX_FAN_IN`] it bounds the work of re-evaluating a whole flow, which a log that keeps
+/// changing an observation everything depends on asks for at every other event.
+pub const MAX_NODES: usize = 64;
+
+/// The most distinct nodes one node's evaluation may read: its needs, its switch, and the whole
+/// body of every repeat it waits on (needing it, or needing a node in its body from outside),
+/// each counted once. Above the tick's 13.
+pub const MAX_FAN_IN: usize = 16;
 
 /// The longest chain of dependencies (needs, switches, repeat bodies) a definition may have,
-/// counted in nodes and repeats. Replay follows a chain by recursion, so this bounds its stack.
-pub const MAX_DEPTH: usize = 128;
+/// counted in nodes and repeats. Replay follows a chain by recursion, so this bounds its stack;
+/// a 13-step tick in sequence is 13 deep.
+pub const MAX_DEPTH: usize = 64;
+
+/// The most bytes a compiled IR may serialize to. `Started` carries the whole IR and the params
+/// ([`MAX_PARAMS`]) in one event line, which `log::MAX_LINE` (1 MiB) bounds, so anything that
+/// compiles can start.
+pub const MAX_IR: usize = 256 << 10;
+
+/// The most bytes of params `start` takes, serialized.
+pub const MAX_PARAMS: usize = 64 << 10;
 
 /// A repeat's iteration index for each repeat enclosing a node; `{}` outside any repeat.
 pub type Iteration = BTreeMap<String, u32>;
@@ -182,24 +198,28 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
     let repeat = |from: &str, name: &str| ir.repeats.get(name).ok_or_else(|| unknown(from, name));
     let param = |from: &str, name: &str| ir.params.contains_key(name).then_some(()).ok_or_else(|| unknown(from, name));
 
-    let body = |r: &str| ir.repeats.get(r).map_or(0, |r| r.body.len());
+    let body = |r: &str| ir.repeats.get(r).map(|r| r.body.iter().map(String::as_str)).into_iter().flatten();
     let member: BTreeMap<&str, &str> =
         ir.repeats.iter().flat_map(|(rid, r)| r.body.iter().map(move |b| (b.as_str(), rid.as_str()))).collect();
     for (id, n) in &ir.nodes {
-        let reads: usize = n
-            .needs
-            .iter()
-            .map(|need| match need {
-                Need::Node { node } => node.as_str(),
-                Need::Repeat { repeat } | Need::Exhausted { repeat } => repeat.as_str(),
-            })
-            .chain(n.switch.as_ref().map(|c| c.on.as_str()))
-            .map(|m| match member.get(m) {
-                Some(r) if member.get(id.as_str()) != Some(r) => 1 + body(r),
-                _ if ir.repeats.contains_key(m) => body(m),
-                _ => 1,
-            })
-            .sum();
+        let mut read: BTreeSet<&str> = BTreeSet::new();
+        let on = n.needs.iter().map(|need| match need {
+            Need::Node { node } => node.as_str(),
+            Need::Repeat { repeat } | Need::Exhausted { repeat } => repeat.as_str(),
+        });
+        for m in on.chain(n.switch.as_ref().map(|c| c.on.as_str())) {
+            match member.get(m) {
+                Some(r) if member.get(id.as_str()) != Some(r) => {
+                    read.insert(m);
+                    read.extend(body(r));
+                }
+                _ if ir.repeats.contains_key(m) => read.extend(body(m)),
+                _ => {
+                    read.insert(m);
+                }
+            }
+        }
+        let reads = read.len();
         if reads > MAX_FAN_IN {
             return Err(CompileError::invalid(format!("node {id} reads {reads} nodes, more than {MAX_FAN_IN}")));
         }

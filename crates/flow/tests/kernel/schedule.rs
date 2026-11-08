@@ -3,9 +3,7 @@
 //! will; a fixture receipt records the input digests `next` names for it, as `complete` will. The
 //! clock is passed in: no test sleeps.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use jiff::{SignedDuration, Timestamp};
 use maestro_flow::kernel::events::{Chosen, Completed, Guarded, KernelEvent, Refused, Started, VerifyRecord};
 use maestro_flow::kernel::ir::{IR_VERSION, MAX_DEPTH, Need, content_hash};
@@ -17,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const VERIFY: &str = include_str!("../flows/verify.yaml");
+const VERIFY: &str = include_str!("../../flows/verify.yaml");
 
 struct Fx {
     _tmp: tempfile::TempDir,
@@ -553,7 +551,8 @@ fn a_receipt_whose_inputs_changed_is_not_done() {
     assert_eq!(unmet(&s, "build"), vec![Reason::InputChanged { input: "probe".into() }]);
     assert_eq!(unmet(&s, "deploy"), vec![needs("build")]);
     assert_eq!(enabled(&f.next(&fi, t)), vec!["build"], "a stale receipt is redone");
-    f.complete(&fi, "build", &[], json!({ "artifact": 2 }));
+    // The same output as before: only its inputs are new, and that is enough.
+    f.complete(&fi, "build", &[], json!({ "artifact": 1 }));
     assert_eq!(state(&f.status(&fi, t), "deploy"), State::Ready);
 
     // An observation's value is part of its digest, even with no outputs; flipping back to the
@@ -986,14 +985,16 @@ fn an_event_stamped_with_something_that_is_not_a_time_is_malformed() {
 }
 
 #[test]
+#[ignore = "a measurement at the caps; run with --release --ignored"]
 fn a_log_at_the_event_cap_replays_inert_events_without_evaluating_them() {
     use maestro_flow::log::MAX_EVENTS;
-    // A's reproduction, at the cap: a 500-node repeat and heartbeats up to the event cap.
+    // A's reproduction, at the caps: the largest repeat a definition may hold, and heartbeats up
+    // to the event cap, written as the ledger writes them (one by one would take minutes).
     let mut yaml = String::from("flow: f\nversion: 1\nnodes:\n  outside: {class: pure, run: [x]}\n");
-    for i in 0..500 {
+    for i in 0..63 {
         yaml.push_str(&format!("  n{i}: {{class: pure, run: [x]}}\n"));
     }
-    let body: Vec<String> = (0..500).map(|i| format!("n{i}")).collect();
+    let body: Vec<String> = (0..63).map(|i| format!("n{i}")).collect();
     yaml.push_str(&format!("repeats:\n  r: {{max: 2, body: [{}]}}\n", body.join(", ")));
     let mut f = fx(&yaml);
     let fi = f.begin(json!({}));
@@ -1010,9 +1011,7 @@ fn a_log_at_the_event_cap_replays_inert_events_without_evaluating_them() {
         text.push('\n');
     }
     std::fs::write(&path, &text).unwrap();
-    let started = std::time::Instant::now();
     let s = f.status(&fi, Timestamp::now());
-    eprintln!("{MAX_EVENTS} events replayed in {:?}", started.elapsed());
     assert_eq!(s.seq, MAX_EVENTS);
     assert!(s.rejected.is_empty());
     assert_eq!(state(&s, "outside"), State::Ready);
@@ -1080,4 +1079,109 @@ repeats:
     let s = f.status(&fi, Timestamp::now());
     assert_eq!(unmet(&s, "w"), vec![Reason::InputChanged { input: "src".into() }]);
     assert_eq!(unmet(&s, "notify"), vec![Reason::RepeatRunning { repeat: "poll".into() }]);
+}
+
+#[test]
+fn a_flow_compiled_at_its_byte_bounds_starts_and_params_have_one_too() {
+    use maestro_flow::kernel::ir::{MAX_IR, MAX_PARAMS};
+    let one = |arg: usize| {
+        format!("flow: f\nversion: 1\nparams: [p?]\nnodes:\n  a: {{class: pure, run: [{}]}}\n", "x".repeat(arg))
+    };
+    let ir_len = |yaml: &str| serde_json::to_vec(compile(yaml).unwrap().ir()).unwrap().len();
+    let base = ir_len(&one(1)) - 1;
+    let mut f = fx(&one(MAX_IR - base));
+    assert_eq!(serde_json::to_vec(f.flow.ir()).unwrap().len(), MAX_IR);
+    // `{"p":"..."}` is 8 bytes around its string.
+    let params = |len: usize| json!({ "p": "x".repeat(len - 8) });
+    assert_eq!(serde_json::to_vec(&params(MAX_PARAMS)).unwrap().len(), MAX_PARAMS);
+    let begun = start(&mut f.ledger, &f.flow, params(MAX_PARAMS)).unwrap();
+    assert!(f.try_status(&begun.instance).is_ok(), "the largest IR with the largest params starts and reads");
+    let err = start(&mut f.ledger, &f.flow, params(MAX_PARAMS + 1)).unwrap_err();
+    assert_eq!(err.code(), "invalid_params");
+}
+
+/// Fills instance `fi`'s log, after its `Started`, with `events` up to the event cap, written as
+/// the ledger writes them (appending them one by one re-verifies the log each time).
+fn fill(f: &Fx, fi: &InstanceId, mut events: impl FnMut(u64) -> (String, Value)) {
+    let path = f.root.join("instances").join(fi.as_str()).join("events.jsonl");
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    let mut prev = maestro_flow::log::line_hash(text.trim_end().as_bytes());
+    for seq in 2..=maestro_flow::log::MAX_EVENTS {
+        let (kind, body) = events(seq);
+        let ev = json!({ "seq": seq, "prev_event": prev, "at": "2026-11-08T00:00:00Z", "kind": kind, "body": body });
+        let line = serde_json::to_string(&ev).unwrap();
+        prev = maestro_flow::log::line_hash(line.as_bytes());
+        text.push_str(&line);
+        text.push('\n');
+    }
+    std::fs::write(&path, &text).unwrap();
+}
+
+fn observed(node: &str, iteration: Value, exit: i32) -> (String, Value) {
+    let verify = json!({ "argv": ["x"], "exit": exit, "stdout_sha256": "s", "ran_at": "x" });
+    ("Completed".into(), json!({ "node": node, "iteration": iteration, "attempt": 1, "verify": verify }))
+}
+
+/// Dense layers under one clocked observation, at the caps: `head` (with `fresh_for`), then four
+/// layers of 15 nodes, each node of a layer needing every node above it (61 nodes, fan-in 15).
+fn layers(inside_repeat: bool) -> String {
+    let mut y = String::from(
+        "flow: f\nversion: 1\nnodes:\n  head: {class: observe, run: [x], fresh_for: 10m, exit_map: {0: a, 1: b}}\n",
+    );
+    let mut above = vec!["head".to_string()];
+    let mut all = vec!["head".to_string()];
+    for l in 0..4 {
+        let layer: Vec<String> = (0..15).map(|i| format!("l{l}n{i}")).collect();
+        for n in &layer {
+            y.push_str(&format!("  {n}: {{class: pure, run: [x], needs: [{}]}}\n", above.join(", ")));
+        }
+        all.extend(layer.iter().cloned());
+        above = layer;
+    }
+    if inside_repeat {
+        y.push_str(&format!("repeats:\n  r: {{max: 1000, body: [{}]}}\n", all.join(", ")));
+    }
+    y
+}
+
+fn measure(label: &str, f: &Fx, fi: &InstanceId) {
+    let reader = Reader::new(&f.root, Options::default()).unwrap();
+    let started = std::time::Instant::now();
+    let s = status(&reader.lock().unwrap(), fi, Timestamp::now()).unwrap();
+    eprintln!("WORST {label}: {} events, {} set aside, status in {:?}", s.seq, s.rejected.len(), started.elapsed());
+    assert_eq!(s.seq, maestro_flow::log::MAX_EVENTS);
+}
+
+#[test]
+#[ignore = "a measurement at the caps; run with --release --ignored"]
+fn worst_case_dense_layers_under_a_clocked_observation() {
+    // Every other event flips head's value (every core below must be redone), and the one between
+    // asks for a node of the last layer (whose evaluation reads everything above it).
+    let mut f = fx(&layers(false));
+    let fi = f.begin(json!({}));
+    fill(&f, &fi, |seq| match seq % 2 {
+        0 => observed("head", json!({}), (seq / 2 % 2) as i32),
+        _ => ("Completed".into(), json!({ "node": format!("l3n{}", seq % 15), "iteration": {}, "attempt": 1 })),
+    });
+    measure("dense layers, head flipping", &f, &fi);
+    // B's shape: only the bottom observation re-run, over and over.
+    let bottom = "l3n0: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: ok},";
+    let mut f = fx(&layers(false).replace("l3n0: {class: pure, run: [x],", bottom));
+    let fi = f.begin(json!({}));
+    fill(&f, &fi, |seq| if seq == 2 { observed("head", json!({}), 0) } else { observed("l3n0", json!({}), 0) });
+    measure("dense layers, bottom re-run", &f, &fi);
+}
+
+#[test]
+#[ignore = "a measurement at the caps; run with --release --ignored"]
+fn worst_case_largest_repeat_body_re_observed() {
+    // The same 61 nodes as one repeat body with no until. Re-observing head with a new value
+    // redoes every core of the body, and each event checks whether the iteration settled.
+    let mut f = fx(&layers(true));
+    let fi = f.begin(json!({}));
+    fill(&f, &fi, |seq| match seq % 2 {
+        0 => observed("head", json!({ "r": 0 }), (seq / 2 % 2) as i32),
+        _ => ("Completed".into(), json!({ "node": format!("l3n{}", seq % 15), "iteration": { "r": 0 }, "attempt": 1 })),
+    });
+    measure("repeat body, head flipping", &f, &fi);
 }

@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# The crate has no doc tests, and running rustdoc for none costs every mutant of the mutation
+# check (scripts/mutation-check.sh runs the whole suite per mutant) seconds for nothing.
+[lib]
+doctest = false
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

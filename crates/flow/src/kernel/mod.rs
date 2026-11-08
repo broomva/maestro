@@ -27,7 +27,7 @@ pub mod ir;
 mod jq;
 mod replay;
 
-pub use compile::{CompiledFlow, compile};
+pub use compile::{CompiledFlow, MAX_SOURCE, compile};
 pub use error::{CompileError, KernelError};
 pub use ir::{Ir, Iteration};
 pub use replay::{

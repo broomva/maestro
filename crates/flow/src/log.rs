@@ -19,9 +19,9 @@ pub const MAX_LINE: u64 = 1 << 20;
 pub const MAX_LOG: u64 = 64 << 20;
 
 /// The most events an instance's log may hold. Replay's work grows with the events, so this
-/// bounds a read: room for 100 nodes over 10 iterations with 20 writes each (claims, heartbeats,
-/// refusals, receipts), or a 512-node flow whose every node is written about forty times.
-pub const MAX_EVENTS: u64 = 20_000;
+/// bounds a read. The largest real flow writes under 5,400 (a review of three strata over five
+/// rounds, each node claimed, heartbeated and completed); this is about twice that.
+pub const MAX_EVENTS: u64 = 10_000;
 
 /// Refuses a line over [`MAX_LINE`], one that would take a log of `log_len` bytes over
 /// [`MAX_LOG`], or one more event on a log of `events` that holds [`MAX_EVENTS`] already.
@@ -132,6 +132,11 @@ pub fn verify(instance: &InstanceId, bytes: &[u8]) -> Result<Log> {
 /// line without its newline: that alone is a torn tail. Any whole line that fails, the last one
 /// included, is a broken chain, which an operator truncation never "repairs".
 pub(crate) fn verify_prefix(instance: &InstanceId, bytes: &[u8]) -> Result<Log, (FlowError, Prefix)> {
+    // Counted before any line is hashed or parsed, so a log over the cap costs one scan.
+    let lines = bytes.iter().filter(|b| **b == b'\n').count() as u64;
+    if lines > MAX_EVENTS {
+        return Err((FlowError::TooManyEvents { limit: MAX_EVENTS }, Prefix { seq: 0, len: 0 }));
+    }
     let mut events: Vec<Event> = Vec::new();
     let mut last_hash: Option<String> = None;
     let mut offset = 0usize;
@@ -149,9 +154,6 @@ pub(crate) fn verify_prefix(instance: &InstanceId, bytes: &[u8]) -> Result<Log, 
         let size = end as u64 + 1;
         if size > MAX_LINE {
             return Err((FlowError::TooLarge { what: "event line", size, limit: MAX_LINE }, prefix));
-        }
-        if prefix.seq >= MAX_EVENTS {
-            return Err((FlowError::TooManyEvents { limit: MAX_EVENTS }, prefix));
         }
         let event = check_line(line, prefix.seq + 1, last_hash.as_deref()).map_err(|detail| {
             (FlowError::ChainBroken { instance: instance.to_string(), line: prefix.seq + 1, detail }, prefix.clone())

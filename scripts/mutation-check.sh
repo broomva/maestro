@@ -857,14 +857,14 @@ mutate $fl/log.rs '    if line_len > MAX_LINE {' '    if line_len >= MAX_LINE {'
 mutate $fl/log.rs '    if line_len > MAX_LINE {' '    if false {'
 mutate $fl/log.rs '    if total > MAX_LOG {' '    if total >= MAX_LOG {'
 mutate $fl/log.rs '    if total > MAX_LOG {' '    if false {'
+mutate $fl/log.rs '    if events >= MAX_EVENTS {' '    if events > MAX_EVENTS {'
+mutate $fl/log.rs '    if events >= MAX_EVENTS {' '    if false {'
 mutate $fl/ledger.rs '        log::fits(line.len() as u64, existing_len, log.seq())?;' ''
 mutate $fl/at.rs '        if bytes.len() as u64 > limit {' '        if bytes.len() as u64 >= limit {'
 mutate $fl/at.rs '        if bytes.len() as u64 > limit {' '        if false {'
+mutate $fl/log.rs '    if lines > MAX_EVENTS {' '    if lines >= MAX_EVENTS {'
+mutate $fl/log.rs '    if lines > MAX_EVENTS {' '    if false {'
 mutate $fl/log.rs '        if size > MAX_LINE {' '        if false {'
-mutate $fl/log.rs '        if prefix.seq >= MAX_EVENTS {' '        if prefix.seq > MAX_EVENTS {'
-mutate $fl/log.rs '        if prefix.seq >= MAX_EVENTS {' '        if false {'
-mutate $fl/log.rs '    if events >= MAX_EVENTS {' '    if events > MAX_EVENTS {'
-mutate $fl/log.rs '    if events >= MAX_EVENTS {' '    if false {'
 
 # Flow kernel (BRO-3633 PR 3b1): definitions, the compiler, guard checks and the read-only scheduler.
 fk=crates/flow/src/kernel
@@ -885,8 +885,20 @@ mutate $fk/compile.rs '        if f.all.is_empty() {' '        if false {'
 mutate $fk/compile.rs '        if let Some(b) = f.all.iter().find(|b| !node_ids.contains(b.as_str())) {' '        if let Some(b) = f.all.iter().find(|_| false) {'
 mutate $fk/compile.rs '.into_iter().find(|f| !allowed.contains(f))' '.into_iter().find(|_| false)'
 mutate $fk/compile.rs '        Ok(s) if s > 0 => Ok(s),' '        Ok(s) => Ok(s),'
+mutate $fk/compile.rs '            if !needs.contains(&x) {' '            if true {'
+mutate $fk/compile.rs '    if yaml.len() > MAX_SOURCE {' '    if yaml.len() >= MAX_SOURCE {'
+mutate $fk/compile.rs '    if yaml.len() > MAX_SOURCE {' '    if false {'
+mutate $fk/compile.rs '    if bytes > ir::MAX_IR {' '    if bytes >= ir::MAX_IR {'
+mutate $fk/compile.rs '    if bytes > ir::MAX_IR {' '    if false {'
 mutate $fk/ir.rs '    if ir.ir_version != IR_VERSION {' '    if false {'
+mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if ir.nodes.len() >= MAX_NODES {'
 mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if false {'
+mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if reads >= MAX_FAN_IN {'
+mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if false {'
+mutate $fk/ir.rs '                    read.insert(m);
+                    read.extend(body(r));' '                    read.insert(m);'
+mutate $fk/ir.rs '                _ if ir.repeats.contains_key(m) => read.extend(body(m)),' '                _ if ir.repeats.contains_key(m) => {}'
+mutate $fk/ir.rs '        let reads = read.len();' '        let reads = n.needs.len();'
 mutate $fk/ir.rs '        if r.max == 0 || r.max > MAX_REPEAT {' '        if r.max > MAX_REPEAT {'
 mutate $fk/ir.rs '        if r.max == 0 || r.max > MAX_REPEAT {' '        if r.max == 0 {'
 mutate $fk/ir.rs '        if r.body.is_empty() {' '        if false {'
@@ -936,10 +948,13 @@ mutate $fk/jq.rs '        Tok::Word if BANNED_WORDS.contains(s) => Some(*s),' ' 
 mutate $fk/jq.rs "        Tok::Sym if s.starts_with('*') => Some(*s)," '        Tok::Sym if false => Some(*s),'
 mutate $fk/jq.rs '        Tok::Block(inner) => banned(inner),' '        Tok::Block(_) => None,'
 mutate $fk/jq.rs '            StrPart::Term(t) => banned(std::slice::from_ref(t)),' '            StrPart::Term(_) => None,'
-# start: params that do not fit are refused before anything is written; null is absent.
+# start: params that do not fit are refused before anything is written; null is absent; params
+# have a byte bound so a flow that compiles can always start.
 mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'
 mutate $fk/replay.rs '    if let Some(name) = given.keys().find(|k| !ir.params.contains_key(*k)) {' '    if let Some(name) = given.keys().find(|_| false) {'
 mutate $fk/replay.rs '    params.get(name).is_some_and(|v| !v.is_null())' '    params.get(name).is_some()'
+mutate $fk/replay.rs '    if bytes > ir::MAX_PARAMS {' '    if bytes >= ir::MAX_PARAMS {'
+mutate $fk/replay.rs '    if bytes > ir::MAX_PARAMS {' '    if false {'
 # The pin: a Started first, a pinned IR of this version that validates (without it a cyclic pin
 # recurses until the stack overflows), matches its hash and is the flow it names.
 mutate $fk/replay.rs '    if first.kind != Started::KIND {' '    if false {'
@@ -948,36 +963,43 @@ mutate $fk/replay.rs '    ir::validate(&started.ir)
 mutate $fk/replay.rs '    if ir::content_hash(&started.ir)? != started.ir_hash {' '    if false {'
 mutate $fk/replay.rs '    if started.flow != format!("{}@{}", started.ir.flow, started.ir.version) {' '    if false {'
 # Acceptance, in log order: kernel kinds only, a declared node, its current iteration, the right
-# class, a declared edge, an enabled node not already done, verdicts for a settled current
-# iteration of a repeat with an until.
+# class, a declared edge, an enabled node not already done at the event's own clock, verdicts
+# for a settled current iteration of a repeat with an until, once per body.
 mutate $fk/replay.rs '        if ![Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND].contains(&e.kind.as_str()) {' '        if false {'
-mutate $fk/replay.rs 'let Some(node) = self.ir.nodes.get(&subject.node) else {' 'let Some(node) = self.ir.nodes.get(&subject.node).or_else(|| self.ir.nodes.values().next()) else {'
-mutate $fk/replay.rs '        if self.current(&subject.node).as_ref() != Some(&subject.iteration) {' '        if false {'
-mutate $fk/replay.rs '                Phase::Exhausted(_) => None,' '                Phase::Exhausted(i) => Some(Iteration::from([(rid.to_string(), *i)])),'
+mutate $fk/replay.rs 'let Some((id, node)) = ir.nodes.get_key_value(&subject.node) else {' 'let Some((id, node)) = ir.nodes.get_key_value(&subject.node).or_else(|| ir.nodes.iter().next()) else {'
+mutate $fk/replay.rs 'let Some(i) = self.current(id).filter(|i| self.iteration(id, *i) == subject.iteration) else {' 'let Some(i) = self.current(id) else {'
+mutate $fk/replay.rs '                Phase::Exhausted(_) => None,' '                Phase::Exhausted(i) => Some(*i),'
 mutate $fk/replay.rs '                    Class::Choice { .. } => return Ok(Err("wrong_class")),' '                    Class::Choice { .. } => (None, None),'
 mutate $fk/replay.rs 'let Class::Choice { edges, .. } = &node.class else { return Ok(Err("wrong_class")) };' 'let Class::Choice { edges, .. } = &node.class else { return Ok(Ok(Change::Inert)) };'
 mutate $fk/replay.rs '                if !edges.contains_key(&c.edge) {' '                if false {'
 mutate $fk/replay.rs 'match exit.and_then(|x| exit_map.iter().find(|m| m.exit == x)) {' 'match exit.or(Some(0)).and_then(|x| exit_map.iter().find(|m| m.exit == x)) {'
 mutate $fk/replay.rs 'exit_map.iter().find(|m| m.exit == x)' 'exit_map.iter().find(|_| true)'
-mutate $fk/replay.rs '        if !now.enabled {' '        if false {'
-mutate $fk/replay.rs '        if now.state == State::Done && !matches!(node.class, Class::Observe { .. }) {' '        if false {'
-mutate $fk/replay.rs '        if now.state == State::Done && !matches!(node.class, Class::Observe { .. }) {' '        if now.state == State::Done {'
+mutate $fk/replay.rs '        if !core.enabled {' '        if false {'
+mutate $fk/replay.rs '        if eval.seen(key, &core).state == State::Done && !matches!(node.class, Class::Observe { .. }) {' '        if false {'
+mutate $fk/replay.rs '        if eval.seen(key, &core).state == State::Done && !matches!(node.class, Class::Observe { .. }) {' '        if eval.seen(key, &core).state == State::Done {'
+mutate $fk/replay.rs '        let mut eval = Eval::new(self, at);
+        let core = eval.node(id, i);' '        let mut eval = Eval::new(self, Timestamp::MAX);
+        let core = eval.node(id, i);'
 mutate $fk/replay.rs '        if r.until.is_none() {' '        if false {'
-mutate $fk/replay.rs '        if self.phases.get(g.repeat.as_str()) != Some(&Phase::At(g.iteration)) {' '        if false {'
-mutate $fk/replay.rs '        if !eval.settled(&g.repeat, g.iteration) {' '        if false {'
+mutate $fk/replay.rs '        if self.phases.get(rid) != Some(&Phase::At(g.iteration)) {' '        if false {'
+mutate $fk/replay.rs '        if !eval.settled(rid, g.iteration) {' '        if false {'
+mutate $fk/replay.rs '        if self.verdicts.get(&(rid, g.iteration)) == Some(&judged) {' '        if false {'
+mutate $fk/replay.rs 'e.at.parse().map_err(|_| malformed(log, e.seq, format!("{} is not a timestamp", e.at)))?;' 'e.at.parse().unwrap_or(Timestamp::UNIX_EPOCH);'
 # Repeats: a true verdict holds only for the body it judged; a false one moves the repeat on; it
-# exhausts at max; a body that never runs is unreachable; a node not taken settles its iteration.
+# exhausts at max; a body that never runs is unreachable; a node not taken settles its iteration;
+# a verdict is a change that can settle another repeat.
 mutate $fk/replay.rs '        if g.holds {' '        if true {'
+mutate $fk/replay.rs '            return Ok(self.guarded(g, at).map(|()| Change::State));' '            return Ok(self.guarded(g, at).map(|()| Change::Inert));'
 mutate $fk/replay.rs '                    && *judged == self.body_digest(rid, i)' '                    && true'
-mutate $fk/replay.rs '                (b.as_str(), e.digest.filter(|_| e.satisfies))' '                (b.as_str(), e.digest)'
+mutate $fk/replay.rs 'e.digest.as_deref().filter(|_| e.satisfies)' 'e.digest.as_deref()'
 mutate $fk/replay.rs '        if i.saturating_add(1) >= max { Phase::Exhausted(i) } else { Phase::At(i + 1) }' '        Phase::At(i + 1)'
 mutate $fk/replay.rs '        evals.iter().all(|e| e.dead || e.satisfies) && !evals.iter().all(|e| e.dead)' '        evals.iter().all(|e| e.satisfies) && !evals.iter().all(|e| e.dead)'
 mutate $fk/replay.rs '        evals.iter().all(|e| e.dead || e.satisfies) && !evals.iter().all(|e| e.dead)' '        evals.iter().all(|e| e.dead || e.satisfies)'
-mutate $fk/replay.rs 'if self.body(rid).iter().all(|b| self.node(b, &at).dead) {' 'if false {'
+mutate $fk/replay.rs 'if self.body(rid).iter().all(|b| self.node(b, i).dead) {' 'if false {'
 mutate $fk/replay.rs '                let awaiting_verdict = state == RepeatState::Running && eval.settled(rid, iteration);' '                let awaiting_verdict = state == RepeatState::Running;'
-mutate $fk/replay.rs '                    NodeEval::new(State::Exhausted, vec![Reason::RepeatExhausted { repeat: rid.to_string() }]),' '                    self.node(id, &Iteration::from([(rid.to_string(), i)])),'
+mutate $fk/replay.rs 'NodeStatus { state: State::Exhausted, class, iteration, unmet, inputs: BTreeMap::new() };' 'NodeStatus { state: State::Blocked, class, iteration, unmet, inputs: BTreeMap::new() };'
 mutate $fk/replay.rs '            Loop::Exhausted(_) => Dep::Dead(Reason::RepeatExhausted { repeat: rid.to_string() }),' '            Loop::Exhausted(_) => Dep::Waits(Reason::RepeatRunning { repeat: rid.to_string() }),'
-mutate $fk/replay.rs '            Loop::Done(i) => Dep::Eval(Box::new(self.node(m, &Iteration::from([(rid.to_string(), i)])))),' '            Loop::Done(_) => Dep::Waits(Reason::RepeatRunning { repeat: rid.to_string() }),'
+mutate $fk/replay.rs '            Loop::Done(j) => Dep::Eval(self.node(m, j)),' '            Loop::Done(_) => Dep::Waits(Reason::RepeatRunning { repeat: rid.to_string() }),'
 mutate $fk/compile.rs '            node.needs.push(Need::Exhausted { repeat: rid.clone() });' ''
 mutate $fk/replay.rs '                    Loop::Exhausted(_) => kill(&mut out, Reason::RepeatExhausted { repeat: r.clone() }),' '                    Loop::Exhausted(_) => push(&mut out, Reason::RepeatExhausted { repeat: r.clone() }),'
 mutate $fk/replay.rs '                    Loop::Done(_) => kill(&mut out, Reason::RepeatFinished { repeat: r.clone() }),' '                    Loop::Done(_) => push(&mut out, Reason::RepeatFinished { repeat: r.clone() }),'
@@ -985,58 +1007,60 @@ mutate $fk/replay.rs '                    Loop::Done(_) => kill(&mut out, Reason
 # transitively, is current and fresh.
 mutate $fk/compile.rs '            branches.iter().map(|b| Need::Node { node: b.clone() }).collect()' '            Vec::new()'
 mutate $fk/replay.rs '                } else if !e.satisfies {' '                } else if false {'
-mutate $fk/replay.rs '                    kill(out, Reason::Unreachable { node: m.to_string() });' '                    push(out, Reason::Unreachable { node: m.to_string() });'
-mutate $fk/replay.rs '                out.stale.extend(e.stale.iter().cloned());' ''
-mutate $fk/replay.rs '                            out.stale.extend(e.stale);' ''
-mutate $fk/replay.rs '                        out.consumed.insert(r.clone(), judged);' ''
+mutate $fk/replay.rs '                    out.dead = true;
+                    out.reasons.push(Reason::Unreachable { node: m.to_string() });' '                    out.reasons.push(Reason::Unreachable { node: m.to_string() });'
+mutate $fk/replay.rs '                out.observed.extend(e.observed.iter().copied());
+                // A node' '                // A node'
+mutate $fk/replay.rs '                            out.observed.extend(e.observed.iter().copied());' ''
+mutate $fk/replay.rs '                        out.consumed.insert(r.as_str(), judged);' ''
 mutate $fk/replay.rs '            && e.value.as_deref() != Some(case.value.as_str())' '            && false'
 mutate $fk/replay.rs '        if let Some(failure) = &r.failure {' '        if let Some(failure) = r.failure.as_ref().filter(|_| false) {'
-mutate $fk/replay.rs '            if r.inputs.get(input) != Some(d) {' '            if false {'
+mutate $fk/replay.rs '            if r.inputs.get(*input).map(String::as_str) != Some(&**d) {' '            if false {'
 mutate $fk/replay.rs '        out.satisfies = out.reasons.is_empty();' '        out.satisfies = true;'
-mutate $fk/replay.rs '            if age > secs(*f) || age.is_negative() {' '            if age >= secs(*f) || age.is_negative() {'
-mutate $fk/replay.rs '            if age > secs(*f) || age.is_negative() {' '            if age > secs(*f) {'
-mutate $fk/replay.rs '            if age > secs(*f) || age.is_negative() {' '            if age.is_negative() {'
-mutate $fk/replay.rs '                out.stale.insert(id.to_string());' ''
-mutate $fk/replay.rs '        out.reasons.extend(out.stale.iter().filter(|s| *s != id).map(|s| Reason::Stale { node: s.clone() }));' ''
-mutate $fk/replay.rs '        let digest = receipt_digest(outputs, value.as_deref());' '        let digest = receipt_digest(outputs, None);'
-mutate $fk/replay.rs '        let rerun = s.state == State::Stale && eval.node(&id, &s.iteration).stale.iter().all(|s| *s == id);' '        let rerun = s.state == State::Stale;'
-mutate $fk/replay.rs '        let rerun = s.state == State::Stale && eval.node(&id, &s.iteration).stale.iter().all(|s| *s == id);' '        let rerun = false;'
-mutate $fk/replay.rs '        if let Class::Human { ask } = &n.class {' '        if let Some(ask) = None::<&String> {'
-# Read-path bounds: inert and rejected events cost no evaluation; a node reads at most
-# MAX_FAN_IN nodes; evaluations and body digests that do not read the clock are kept across
-# events and dropped downstream of each change.
+mutate $fk/replay.rs '            out.observed.insert((id, i));' ''
+mutate $fk/replay.rs '        (age > secs(*f) || age.is_negative()).then_some(age)' '        (age >= secs(*f) || age.is_negative()).then_some(age)'
+mutate $fk/replay.rs '        (age > secs(*f) || age.is_negative()).then_some(age)' '        (age > secs(*f)).then_some(age)'
+mutate $fk/replay.rs '        (age > secs(*f) || age.is_negative()).then_some(age)' '        age.is_negative().then_some(age)'
+mutate $fk/replay.rs '                reasons.extend(stale.iter().filter(|s| *s != id).map(|s| Reason::Stale { node: s.clone() }));' ''
+mutate $fk/replay.rs '            Form::Open if !stale.is_empty() => {' '            Form::Open if false => {'
+mutate $fk/replay.rs '        let digest = Rc::from(receipt_digest(outputs, value.as_deref()));' '        let digest = Rc::from(receipt_digest(outputs, None));'
+mutate $fk/replay.rs 'let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));' 'let rerun = s.state == State::Stale;'
+mutate $fk/replay.rs 'let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));' 'let rerun = false;'
+mutate $fk/replay.rs '            Some(Class::Human { ask }) => {' '            Some(Class::Human { ask }) if false => {'
+mutate $fk/replay.rs '    SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))' '    SignedDuration::from_mins(i64::try_from(s / 60).unwrap_or(i64::MAX))'
+# Read-path bounds: inert and rejected events cost no evaluation; cores (evaluations without the
+# clock) are kept across events, dropped downstream of a receipt with new content, and all
+# dropped when a repeat moves or is judged; a re-run with the same result drops nothing.
 mutate $fk/replay.rs '                Ok(Change::Inert) => {}' '                Ok(Change::Inert) => fold.advance(at),'
-mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if reads >= MAX_FAN_IN {'
-mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if false {'
-mutate $fk/ir.rs '                Some(r) if member.get(id.as_str()) != Some(r) => 1 + body(r),' '                Some(r) if member.get(id.as_str()) != Some(r) => 1,'
-mutate $fk/ir.rs '                _ if ir.repeats.contains_key(m) => body(m),' '                _ if ir.repeats.contains_key(m) => 1,'
-mutate $fk/replay.rs '        self.invalidate(&key.0);' ''
-mutate $fk/replay.rs '            out.clocked = true;' ''
-mutate $fk/replay.rs '                out.stale.extend(e.stale.iter().cloned());
-                out.clocked |= e.clocked;' '                out.stale.extend(e.stale.iter().cloned());'
-mutate $fk/replay.rs '                            out.stale.extend(e.stale);
-                            out.clocked |= e.clocked;' '                            out.stale.extend(e.stale);'
+mutate $fk/replay.rs '        if !same {
+            self.invalidate(id);
+        }' ''
+mutate $fk/replay.rs '            old.digest == receipt.digest && old.failure == receipt.failure && old.inputs == receipt.inputs' '            old.digest == receipt.digest && old.failure == receipt.failure'
 mutate $fk/replay.rs '                    digests.retain(|(rid, _), _| rid != r);' ''
 mutate $fk/replay.rs '                    reads.extend(body(repeat).iter().map(String::as_str))' '                    let _ = repeat;'
+mutate $fk/replay.rs '                Need::Repeat { repeat } | Need::Exhausted { repeat } => {
+                    reads.extend(body(repeat).iter().map(String::as_str))
+                }' '                Need::Repeat { repeat } => reads.extend(body(repeat).iter().map(String::as_str)),
+                Need::Exhausted { .. } => {}'
 mutate $fk/replay.rs '                reads.extend(body(r).iter().map(String::as_str));' ''
-mutate $fk/replay.rs '        self.cache.borrow_mut().clear();
-        self.digests.borrow_mut().clear();' ''
-# A body's stale observations anywhere in it; a second verdict on a body already judged; event
-# timestamps; freshness to the second; acceptance at the event's own clock.
-mutate $fk/replay.rs '                        for b in self.body(r) {' '                        for b in self.body(r).iter().take(1) {'
-mutate $fk/replay.rs '        if self.verdicts.get(&(g.repeat.clone(), g.iteration)) == Some(&judged) {' '        if false {'
-mutate $fk/replay.rs 'e.at.parse().map_err(|_| malformed(log, e.seq, format!("{} is not a timestamp", e.at)))?;' 'e.at.parse().unwrap_or(Timestamp::UNIX_EPOCH);'
-mutate $fk/replay.rs '    SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))' '    SignedDuration::from_mins(i64::try_from(s / 60).unwrap_or(i64::MAX))'
-mutate $fk/replay.rs '        let now = Eval::new(self, at).node(&key.0, &key.1);' '        let now = Eval::new(self, Timestamp::MAX).node(&key.0, &key.1);'
+mutate $fk/replay.rs '        let mut reads: Vec<&str> = n.switch.iter().map(|c| c.on.as_str()).collect();' '        let mut reads: Vec<&str> = Vec::new();'
+mutate $fk/replay.rs '            self.forget();
+            self.verdicts.insert((rid, g.iteration), judged);' '            self.verdicts.insert((rid, g.iteration), judged);'
+mutate $fk/replay.rs '            self.forget();
+            self.phases.insert(rid, next);' '            self.phases.insert(rid, next);'
+mutate $fk/replay.rs '            self.forget();
+            self.phases.extend(moves);' '            self.phases.extend(moves);'
 # Positive controls: a replay that ran a command, judged a repeat from its guard, or was not a
 # function of the log and the clock fails the tests that say it never does.
 mutate $fk/replay.rs '        let fold = self.fold;
-        let Some(n) = fold.ir.nodes.get(id) else {' '        let fold = self.fold;
-        if let Some(Class::Pure { run }) = fold.ir.nodes.get(id).map(|n| &n.class) {
+        let ir: &'"'"'a Ir = fold.ir;
+        let Some(n) = ir.nodes.get(id) else {' '        let fold = self.fold;
+        let ir: &'"'"'a Ir = fold.ir;
+        if let Some(Class::Pure { run }) = ir.nodes.get(id).map(|n| &n.class) {
             let _ = std::process::Command::new(&run[0]).args(&run[1..]).status();
         }
-        let Some(n) = fold.ir.nodes.get(id) else {'
-mutate $fk/replay.rs '                if let Some(judged) = self.fold.verdicts.get(&(rid.to_string(), i))
+        let Some(n) = ir.nodes.get(id) else {'
+mutate $fk/replay.rs '                if let Some(judged) = self.fold.verdicts.get(&(rid, i))
                     && *judged == self.body_digest(rid, i)
                 {' '                if self.fold.ir.repeats.get(rid).and_then(|r| r.until.as_deref()).is_some_and(|g| super::jq::check(g).is_ok()) {'
 mutate $fk/replay.rs '            seq: log.seq(),

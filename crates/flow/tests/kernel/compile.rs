@@ -4,7 +4,7 @@
 use maestro_flow::kernel::compile;
 use maestro_flow::kernel::ir::{Class, MAX_FAN_IN, MAX_NODES, Need};
 
-const VERIFY: &str = include_str!("../flows/verify.yaml");
+const VERIFY: &str = include_str!("../../flows/verify.yaml");
 
 fn code(yaml: &str) -> String {
     match compile(yaml) {
@@ -332,6 +332,44 @@ fn a_node_reads_at_most_max_fan_in_nodes() {
         ));
         y
     };
-    assert_eq!(code(&outside(MAX_FAN_IN - 1)), "ok");
-    assert_eq!(code(&outside(MAX_FAN_IN)), "definition_invalid");
+    assert_eq!(code(&outside(MAX_FAN_IN)), "ok");
+    assert_eq!(code(&outside(MAX_FAN_IN + 1)), "definition_invalid");
+    // A body is counted once, however many of its nodes are read, and with the repeat itself.
+    let twelve: Vec<String> = (0..12).map(|i| format!("b{i}")).collect();
+    let mut y = String::from("flow: f\nversion: 1\nnodes:\n");
+    for b in &twelve {
+        y.push_str(&format!("  {b}: {{class: pure, run: [x]}}\n"));
+    }
+    y.push_str("  j: {class: pure, run: [x], needs: [b0, b1, b2, b3, b4, b5, r]}\n");
+    y.push_str(&format!("repeats:\n  r: {{max: 2, until: 'true', body: [{}]}}\n", twelve.join(", ")));
+    assert_eq!(code(&y), "ok", "12 reads, not 78");
+}
+
+#[test]
+fn a_definition_and_its_ir_are_small_enough_to_start() {
+    use maestro_flow::kernel::MAX_SOURCE;
+    use maestro_flow::kernel::ir::MAX_IR;
+    let one = |arg: usize| format!("flow: f\nversion: 1\nnodes:\n  a: {{class: pure, run: [{}]}}\n", "x".repeat(arg));
+    let ir_len = |yaml: &str| serde_json::to_vec(compile(yaml).unwrap().ir()).unwrap().len();
+    // The IR grows a byte per byte of the argument: find the argument that makes it exactly MAX_IR.
+    let base = ir_len(&one(1)) - 1;
+    let at_cap = one(MAX_IR - base);
+    assert_eq!(ir_len(&at_cap), MAX_IR);
+    assert!(at_cap.len() <= MAX_SOURCE, "the source is within its own bound");
+    assert_eq!(code(&one(MAX_IR - base + 1)), "definition_invalid", "a byte over the IR bound");
+    // The source bound, padded with a comment that the IR never sees.
+    let pad = |len: usize| {
+        let head = "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n#";
+        format!("{head}{}\n", "x".repeat(len - head.len() - 1))
+    };
+    assert_eq!(pad(MAX_SOURCE).len(), MAX_SOURCE);
+    assert_eq!(code(&pad(MAX_SOURCE)), "ok");
+    assert_eq!(code(&pad(MAX_SOURCE + 1)), "definition_invalid");
+}
+
+#[test]
+fn a_node_needed_twice_is_needed_once() {
+    let flow = compile("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n  b: {class: pure, run: [x]}\n  c: {class: pure, run: [x], needs: [a, a, both]}\nforks:\n  both: {all: [a, b]}\n").unwrap();
+    let needs = &flow.ir().nodes["c"].needs;
+    assert_eq!(needs, &vec![Need::Node { node: "a".into() }, Need::Node { node: "b".into() }]);
 }

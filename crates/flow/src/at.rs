@@ -139,3 +139,19 @@ impl Dir {
         let _ = self.fd.sync_all();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_takes_a_file_up_to_its_limit_and_refuses_a_byte_more() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("at"), [b'x'; 100]).unwrap();
+        std::fs::write(tmp.path().join("over"), [b'x'; 101]).unwrap();
+        let dir = Dir::open_root(tmp.path()).unwrap();
+        assert_eq!(dir.read("at", 100).unwrap().map(|b| b.len()), Some(100));
+        assert_eq!(dir.read("over", 100).unwrap_err().code(), "too_large");
+        assert_eq!(dir.read("missing", 100).unwrap(), None);
+    }
+}
