@@ -49,6 +49,23 @@
 //! record the `inputs` that `status` names. An `until` may read only the repeat's body nodes,
 //! since a verdict's digest covers only the body. Claims, leases, retry and cancel are the
 //! writers' to enforce.
+//!
+//! # Cost
+//!
+//! A read is bounded, not fast at every bound. The bounds are on nodes, fan-in and depth
+//! (`ir::MAX_NODES`, `ir::MAX_FAN_IN`, `ir::MAX_DEPTH`), events (`log::MAX_EVENTS`), line and log
+//! bytes (`log::MAX_LINE`, `log::MAX_LOG`), the definition's and the IR's bytes, and nesting
+//! (`log::MAX_NESTING`).
+//!
+//! - **Real flows** (the verifier, a five-round three-stratum review, a 13-step tick) replay in
+//!   milliseconds.
+//! - **Synthetic pathological flows** at the caps cost seconds. The worst measured in release is
+//!   about 3.6 s (fifteen roots of a dense observation graph under a repeat with no `until`), and
+//!   1.33 s for long ids with 6 KB outputs. The `#[ignore]` measurements in
+//!   `tests/kernel/schedule.rs` cover two shapes.
+//! - **Known cost drivers, for a follow-up:** a core's `observed` set is rebuilt per core; a
+//!   receipt with new content drops the whole cone downstream of its node; and a repeat with no
+//!   `until` re-evaluates its cone through `settled` at every event.
 
 use super::compile::CompiledFlow;
 use super::error::KernelError;
@@ -235,6 +252,11 @@ fn check_params(ir: &Ir, params: &Value) -> Result<(), KernelError> {
     let bytes = serde_json::to_vec(params).map(|b| b.len()).unwrap_or(usize::MAX);
     if bytes > ir::MAX_PARAMS {
         return Err(refuse(format!("params are {bytes} bytes, more than {}", ir::MAX_PARAMS)));
+    }
+    // `Started` carries the params one level inside its body, whose nesting the ledger bounds.
+    let depth = crate::log::nesting(params);
+    if depth >= crate::log::MAX_NESTING {
+        return Err(refuse(format!("params nest {depth} levels deep, more than {}", crate::log::MAX_NESTING - 1)));
     }
     if let Some(name) = ir.params.iter().find(|(name, required)| **required && !supplied(params, name)).map(|p| p.0) {
         return Err(refuse(format!("the required param {name} is missing")));

@@ -23,6 +23,37 @@ pub const MAX_LOG: u64 = 64 << 20;
 /// rounds, each node claimed, heartbeated and completed); this is about twice that.
 pub const MAX_EVENTS: u64 = 10_000;
 
+/// The deepest an event body may nest arrays and objects. A body sits one level inside its event
+/// line, and the reader (serde_json) refuses a line nested past 128 levels, so with this bound
+/// whatever an append takes, a read takes back.
+pub const MAX_NESTING: usize = 64;
+
+/// How deeply `value` nests arrays and objects: 0 for a scalar, 1 for `[]` or `{}`. Counted
+/// without recursion, so a value too deep to read is measured, not overflowed on.
+pub fn nesting(value: &serde_json::Value) -> usize {
+    let mut deepest = 0;
+    let mut todo = vec![(value, 1)];
+    while let Some((value, depth)) = todo.pop() {
+        let inner: Vec<&serde_json::Value> = match value {
+            serde_json::Value::Array(items) => items.iter().collect(),
+            serde_json::Value::Object(fields) => fields.values().collect(),
+            _ => continue,
+        };
+        deepest = deepest.max(depth);
+        todo.extend(inner.into_iter().map(|v| (v, depth + 1)));
+    }
+    deepest
+}
+
+/// Refuses an event body nested deeper than [`MAX_NESTING`].
+pub(crate) fn shallow(body: &serde_json::Value) -> Result<()> {
+    let depth = nesting(body);
+    if depth > MAX_NESTING {
+        return Err(FlowError::TooDeep { depth, limit: MAX_NESTING });
+    }
+    Ok(())
+}
+
 /// Refuses a line over [`MAX_LINE`], one that would take a log of `log_len` bytes over
 /// [`MAX_LOG`], or one more event on a log of `events` that holds [`MAX_EVENTS`] already.
 pub(crate) fn fits(line_len: u64, log_len: u64, events: u64) -> Result<()> {

@@ -865,6 +865,12 @@ mutate $fl/at.rs '        if bytes.len() as u64 > limit {' '        if false {'
 mutate $fl/log.rs '    if lines > MAX_EVENTS {' '    if lines >= MAX_EVENTS {'
 mutate $fl/log.rs '    if lines > MAX_EVENTS {' '    if false {'
 mutate $fl/log.rs '        if size > MAX_LINE {' '        if false {'
+# Nesting: an append refuses a body the reader could not read back; whatever it takes reads back.
+mutate $fl/log.rs '    if depth > MAX_NESTING {' '    if depth >= MAX_NESTING {'
+mutate $fl/log.rs '    if depth > MAX_NESTING {' '    if false {'
+mutate $fl/log.rs '        deepest = deepest.max(depth);' ''
+mutate $fl/log.rs '        todo.extend(inner.into_iter().map(|v| (v, depth + 1)));' '        todo.extend(inner.into_iter().map(|v| (v, depth)));'
+mutate $fl/ledger.rs '        log::shallow(&event.body)?;' ''
 
 # Flow kernel (BRO-3633 PR 3b1): definitions, the compiler, guard checks and the read-only scheduler.
 fk=crates/flow/src/kernel
@@ -956,6 +962,8 @@ mutate $fk/replay.rs '    if let Some(name) = given.keys().find(|k| !ir.params.c
 mutate $fk/replay.rs '    params.get(name).is_some_and(|v| !v.is_null())' '    params.get(name).is_some()'
 mutate $fk/replay.rs '    if bytes > ir::MAX_PARAMS {' '    if bytes >= ir::MAX_PARAMS {'
 mutate $fk/replay.rs '    if bytes > ir::MAX_PARAMS {' '    if false {'
+mutate $fk/replay.rs '    if depth >= crate::log::MAX_NESTING {' '    if depth > crate::log::MAX_NESTING {'
+mutate $fk/replay.rs '    if depth >= crate::log::MAX_NESTING {' '    if false {'
 # The pin: a Started first, a pinned IR of this version that validates (without it a cyclic pin
 # recurses until the stack overflows), matches its hash and is the flow it names.
 mutate $fk/replay.rs '    if first.kind != Started::KIND {' '    if false {'

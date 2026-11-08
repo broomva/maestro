@@ -407,3 +407,27 @@ fn a_log_over_its_event_count_or_with_an_over_long_line_is_refused_before_it_is_
     std::fs::write(&log, format!("{}\n", "x".repeat(MAX_LINE as usize))).unwrap();
     assert_eq!(code(reader.lock().unwrap().log(&fi)), "too_large");
 }
+
+/// `levels` arrays nested around a scalar.
+fn nested(levels: usize) -> serde_json::Value {
+    (0..levels).fold(serde_json::json!(1), |v, _| serde_json::json!([v]))
+}
+
+#[test]
+fn a_body_nested_past_its_bound_is_refused_and_one_at_the_bound_reads_back() {
+    use maestro_flow::log::{MAX_NESTING, nesting};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    assert_eq!(nesting(&nested(MAX_NESTING)), MAX_NESTING);
+    assert_eq!(nesting(&serde_json::json!({ "a": [1, { "b": [] }] })), 4);
+    let deep = maestro_flow::NewEvent::new("Started", nested(MAX_NESTING + 1));
+    assert_eq!(code(ledger.lock().unwrap().append(&id("fi_a"), 0, deep)), "too_deep");
+    assert!(ledger.lock().unwrap().instances().unwrap().is_empty(), "nothing was written");
+    // Whatever an append takes, a read takes back.
+    let at_bound = nested(MAX_NESTING);
+    let fi = id("fi_b");
+    append_at_head(&mut ledger, &fi, maestro_flow::NewEvent::new("Started", at_bound.clone())).unwrap();
+    let reader = Reader::new(&root, Options::default()).unwrap();
+    assert_eq!(reader.lock().unwrap().log(&fi).unwrap().events[0].body, at_bound);
+}

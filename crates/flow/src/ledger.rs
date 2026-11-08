@@ -361,6 +361,7 @@ impl WriteGuard<'_> {
     /// released the lock and came back is refused `stale_seq` if anything was appended meanwhile.
     pub fn append(&mut self, id: &InstanceId, expected_seq: u64, event: NewEvent) -> Result<Appended> {
         check_kind(&event.kind)?;
+        log::shallow(&event.body)?;
         refuse_retired(&self.root, id)?;
         let instances = instances(&self.root)?;
         let dir = instances.dir(id.as_str())?;

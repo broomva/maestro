@@ -1194,3 +1194,39 @@ fn worst_case_largest_repeat_body_re_observed() {
     });
     measure("repeat body, head flipping", &f, &fi);
 }
+
+fn nested(levels: usize) -> Value {
+    (0..levels).fold(json!(1), |v, _| json!([v]))
+}
+
+#[test]
+fn params_and_outputs_nested_too_deep_to_read_back_are_refused_before_anything_is_written() {
+    use maestro_flow::log::MAX_NESTING;
+    let mut f = fx("flow: f\nversion: 1\nparams: [p?]\nnodes:\n  a: {class: pure, run: [x]}\n");
+    // Codex's reproduction: 140 levels, under the byte bound, once made the instance unreadable.
+    // `{"p": ...}` adds a level, and `Started` one more around the params.
+    for levels in [140, MAX_NESTING - 1] {
+        let err = start(&mut f.ledger, &f.flow, json!({ "p": nested(levels) })).unwrap_err();
+        assert_eq!(err.code(), "invalid_params", "{levels} levels");
+    }
+    assert!(f.ledger.lock().unwrap().instances().unwrap().is_empty(), "nothing was appended");
+    // Params `MAX_NESTING - 1` deep put `Started`'s body exactly at the bound, and it reads back.
+    let fi = f.begin(json!({ "p": nested(MAX_NESTING - 2) }));
+    assert!(f.try_status(&fi).is_ok());
+    // A receipt's outputs are bounded by the same rule at append.
+    let c = Completed {
+        node: "a".into(),
+        iteration: iter(&[]),
+        attempt: 1,
+        inputs: Default::default(),
+        outputs: nested(MAX_NESTING),
+        verify: None,
+        performer: None,
+        tool_use_id: None,
+    };
+    let mut guard = f.ledger.lock().unwrap();
+    let seq = guard.log(&fi).unwrap().seq();
+    assert_eq!(guard.append(&fi, seq, c.to_event().unwrap()).unwrap_err().code(), "too_deep");
+    drop(guard);
+    assert_eq!(f.try_status(&fi).unwrap().seq, 1, "nothing was appended");
+}

@@ -64,6 +64,10 @@ pub enum FlowError {
     /// refused at append, and never read into memory.
     #[error("The {what} is {size} bytes, over its limit of {limit}, so it was not written or read.")]
     TooLarge { what: &'static str, size: u64, limit: u64 },
+    /// An event body nested deeper than [`crate::log::MAX_NESTING`]: refused at append, since the
+    /// reader could not read it back.
+    #[error("The event body nests {depth} levels deep, more than {limit}, so it was not written.")]
+    TooDeep { depth: usize, limit: usize },
     /// A log that holds [`crate::log::MAX_EVENTS`] events already, or more: refused at append,
     /// and never replayed.
     #[error("The log holds more than {limit} events, or would, so nothing was written or read.")]
@@ -103,6 +107,7 @@ impl FlowError {
             FlowError::Invalid { .. } => "invalid",
             FlowError::TooLarge { .. } => "too_large",
             FlowError::TooManyEvents { .. } => "too_many_events",
+            FlowError::TooDeep { .. } => "too_deep",
             FlowError::OperatorRefused(_) => "operator_refused",
             FlowError::Projection(_) => "projection",
             FlowError::Io { .. } => "io",
