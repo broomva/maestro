@@ -705,6 +705,14 @@ mutate $fl/layout.rs '        None => Err(FlowError::LockLost {
 mutate $fl/layout.rs '    text.len() == 32 && text.bytes()' '    text.bytes()'
 # Genesis: a loser waits on the winner's lock; a crash after the link is refused, then finished.
 mutate $fl/ledger.rs '        lock::take(&file, Mode::Shared, options.lock_wait, &layout.lock)?;' ''
+# A genesis re-checks, holding its linked lock, that nothing was archived or put in place
+# meanwhile, and takes its lock back if so.
+mutate $fl/ledger.rs '    if archived || layout::exists(&layout.root)? {' '    if layout::exists(&layout.root)? {'
+mutate $fl/ledger.rs '    if archived || layout::exists(&layout.root)? {' '    if archived {'
+mutate $fl/ledger.rs '        if lock::same_file(&file, &layout.lock)? {
+            let _ = std::fs::remove_file(&layout.lock);
+        }' ''
+mutate $fl/ledger.rs 'let archived = !after_archive && layout::exists(' 'let archived = layout::exists('
 mutate $fl/layout.rs '            (_, Some(e)) if exists(&layout.stage(e))? => Err(FlowError::GenesisIncomplete {' '            (_, Some(e)) if false && exists(&layout.stage(e))? => Err(FlowError::GenesisIncomplete {'
 mutate $fl/operator.rs '            std::fs::rename(layout.stage(epoch), &layout.root).map_err(FlowError::io(&layout.root))?;' ''
 mutate $fl/operator.rs '            let _ = std::fs::remove_file(layout.archived_marker());
@@ -752,6 +760,12 @@ mutate $fl/operator.rs '    let out = if lock::same_file(file, &layout.lock)? {'
 # only the exact debris shapes no process holds.
 mutate $fl/operator.rs '        let held_root = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;' '        let held_root = std::fs::File::open(&layout.root).map_err(FlowError::io(&layout.root))?;'
 mutate $fl/operator.rs '            if named.is_none() {' '            if false {'
+mutate $fl/operator.rs '        if layout::exists(&layout.lock)? {
+            return Err(refused("A lock appeared' '        if false {
+            return Err(refused("A lock appeared'
+mutate $fl/operator.rs '        clear_debris(&layout, None)?;' ''
+mutate $fl/projection.rs 'Ok(has_meta && get("epoch")?.as_deref() == Some(epoch))' 'Ok(has_meta)'
+mutate $fl/layout.rs ' && !b.is_ascii_uppercase()' ''
 mutate $fl/operator.rs '        let debris = clear_debris(&layout, named)?;' '        let debris = 0;'
 mutate $fl/operator.rs 'file.strip_prefix(&stage).filter(|e| is_epoch(e))' 'file.strip_prefix(&stage)'
 mutate $fl/operator.rs '            if meta.is_dir() && keep != Some(epoch) {' '            if keep != Some(epoch) {'
@@ -778,8 +792,11 @@ mutate $fl/operator.rs '        if in_place()? {
 # archive: destination checked first (parent, absent, outside the root, same filesystem), the
 # root directory's lock taken as a writer does, the destination made before the marker.
 mutate $fl/operator.rs '    let Ok(parent) = std::fs::canonicalize(parent) else {' '    let Ok(parent) = Ok::<_, std::io::Error>(parent.to_path_buf()) else {'
-mutate $fl/operator.rs 'if layout::exists(dest)? && !reuse {' 'if false {'
-mutate $fl/operator.rs 'let reuse = std::fs::read_dir(dest).is_ok_and(|mut d| d.next().is_none());' 'let reuse = false;'
+mutate $fl/operator.rs 'if existing.is_some() && !reuse {' 'if false {'
+mutate $fl/operator.rs '        let reuse = existing.as_ref().is_some_and(|m| m.file_type().is_dir())
+            && std::fs::read_dir(dest).is_ok_and(|mut d| d.next().is_none());' '        let reuse = false;'
+mutate $fl/operator.rs 'existing.as_ref().is_some_and(|m| m.file_type().is_dir())' 'existing.is_some()'
+mutate $fl/operator.rs '            && std::fs::read_dir(dest).is_ok_and(|mut d| d.next().is_none());' ';'
 mutate $fl/operator.rs '    lock::take(&file, Mode::Exclusive, options.lock_wait, &layout.lock)?;' ''
 mutate $fl/operator.rs '        if !lock::same_file(&file, &layout.lock)? {
             return Err(FlowError::LockLost {
@@ -791,7 +808,8 @@ mutate $fl/operator.rs '        if !lock::same_file(&file, &layout.lock)? {
 mutate $fl/operator.rs '        let State::Live { epoch, .. } = layout::inspect(&layout)? else {' '        let State::Live { epoch, .. } = layout::inspect(&layout).unwrap_or(State::Live { host: String::new(), epoch: String::new() }) else {'
 mutate $fl/operator.rs '        if lock::root_id(&layout.root)? != held.id()? {' '        if false {'
 mutate $fl/operator.rs '    if parent.starts_with(' '    if false && parent.starts_with('
-mutate $fl/operator.rs '    if other_device(&parent, &layout.parent)? {' '    if false {'
+mutate $fl/operator.rs 'if other_device(if reuse { dest } else { &parent }, &layout.parent)? {' 'if false {'
+mutate $fl/operator.rs 'if other_device(if reuse { dest } else { &parent }, &layout.parent)? {' 'if other_device(&parent, &layout.parent)? {'
 mutate $fl/operator.rs '        let held = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;' '        let held = crate::at::Dir::open_root(&layout.root)?;'
 mutate $fl/operator.rs '        if !reuse {
             std::fs::create_dir(dest).map_err(FlowError::io(dest))?;

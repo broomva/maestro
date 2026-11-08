@@ -212,18 +212,27 @@ fn a_crash_before_a_new_lock_is_renamed_in_leaves_the_old_one() {
 }
 
 /// An archive to another filesystem is refused before anything is written: a rename there would
-/// fail after the marker. The test forces the device comparison (`hooks::other_device`).
+/// fail after the marker. The test forces the device comparison for one path
+/// (`hooks::other_device`).
 #[test]
 fn an_archive_to_another_filesystem_writes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let root = root_in(tmp.path());
     drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
-    let before = snapshot(tmp.path());
     let dest = tmp.path().join("archive");
-    let child =
-        spawn_child_with(&["archive", root.to_str().unwrap(), dest.to_str().unwrap()], &[(OTHER_DEVICE_ENV, "1")]);
-    assert_eq!(child_result(child), "operator_refused");
-    assert_eq!(snapshot(tmp.path()), before);
+    // An absent `dest` is judged by its parent; an empty one being reused (a mount point, say)
+    // by itself.
+    let parent = std::fs::canonicalize(tmp.path()).unwrap();
+    for (other, existing) in [(parent.as_path(), false), (dest.as_path(), true)] {
+        if existing {
+            std::fs::create_dir(&dest).unwrap();
+        }
+        let before = snapshot(tmp.path());
+        let spec = ["archive", root.to_str().unwrap(), dest.to_str().unwrap()];
+        let child = spawn_child_with(&spec, &[(OTHER_DEVICE_ENV, other.to_str().unwrap())]);
+        assert_eq!(child_result(child), "operator_refused", "existing {existing}");
+        assert_eq!(snapshot(tmp.path()), before, "existing {existing}");
+    }
     operator::archive(&root, &dest, &quick()).unwrap();
 }
 
@@ -330,4 +339,54 @@ fn a_cache_written_while_the_root_moved_is_reported_skipped() {
     pause.go();
     assert_eq!(child_result(child), "cache_failed");
     assert!(parent.join("flows-moved/instances/fi_a/events.jsonl").exists());
+}
+
+/// A genesis paused between seeing an empty tree and linking its lock, while another writer makes
+/// a ledger there and the operator archives it, or a root is put in place with no lock: once
+/// linked it re-checks, takes its lock back and refuses `root_moved`, creating nothing.
+#[test]
+fn a_genesis_racing_an_archive_creates_nothing() {
+    for case in ["archived", "root"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = root_in(tmp.path());
+        let parent = tmp.path().join(".broomva");
+        let go = tmp.path().join("go");
+        std::fs::write(&go, "").unwrap();
+        let pause = Pause::at("before_genesis_link");
+        let spec = ["genesis", root.to_str().unwrap(), "late", go.to_str().unwrap()];
+        let child = spawn_child_pausing(&spec, Some(&pause));
+        pause.reached();
+        drop(Ledger::open(&root, &host("winner"), Options::default()).unwrap());
+        if case == "archived" {
+            operator::archive(&root, &tmp.path().join("archive"), &quick()).unwrap();
+        } else {
+            std::fs::remove_file(lock_of(tmp.path())).unwrap();
+        }
+        pause.go();
+        assert_eq!(child_result(child), "root_moved", "{case}");
+        let left = if case == "archived" { vec!["flows.archived"] } else { vec!["flows"] };
+        assert_eq!(names(&parent), left, "{case}");
+        if case == "root" {
+            assert_eq!(std::fs::read_to_string(root.join("HOST")).unwrap().trim(), "winner");
+        }
+    }
+}
+
+/// Two recoveries of a deleted lock: the one that waited on the root directory's lock finds the
+/// other already restored it, and changes nothing.
+#[test]
+fn a_recovery_that_waited_finds_the_lock_restored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let lock = lock_of(tmp.path());
+    let epoch = Ledger::open(&root, &host("mac"), Options::default()).unwrap().epoch().to_string();
+    std::fs::remove_file(&lock).unwrap();
+    let pause = Pause::at("root_opened");
+    let child = spawn_child_pausing(&["recover", root.to_str().unwrap()], Some(&pause));
+    pause.reached();
+    assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::RestoredLock { epoch: epoch.clone() });
+    let restored = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&lock).unwrap());
+    pause.go();
+    assert_eq!(child_result(child), "operator_refused");
+    assert_eq!(std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&lock).unwrap()), restored);
 }

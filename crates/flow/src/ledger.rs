@@ -144,8 +144,9 @@ pub(crate) fn open_lock(layout: &Layout) -> Result<Option<File>> {
 /// a private name, is linked into place: a hard link fails when the lock exists, so exactly one
 /// first writer is elected. Only then is the stage renamed into place. A crash between the two
 /// leaves a lock naming a stage, refused `genesis_incomplete` until `operator::recover` moves it
-/// in; a crash before the link leaves only an inert stage.
-pub(crate) fn genesis(layout: &Layout, host: &HostId) -> Result<Option<File>> {
+/// in; a crash before the link leaves only an inert stage. Only `operator::create_fresh_ledger`
+/// starts one beside an archive marker (`after_archive`).
+pub(crate) fn genesis(layout: &Layout, host: &HostId, after_archive: bool) -> Result<Option<File>> {
     std::fs::create_dir_all(&layout.parent).map_err(FlowError::io(&layout.parent))?;
     let epoch = random_epoch()?;
     let stage = stage_root(layout, host, &epoch)?;
@@ -161,6 +162,7 @@ pub(crate) fn genesis(layout: &Layout, host: &HostId) -> Result<Option<File>> {
         file.write_all(format!("{epoch}\n").as_bytes())
             .and_then(|()| file.sync_all())
             .map_err(FlowError::io(&private))?;
+        pause!("before_genesis_link");
         match std::fs::hard_link(&private, &layout.lock) {
             Ok(()) => Ok(Some(file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
@@ -172,6 +174,17 @@ pub(crate) fn genesis(layout: &Layout, host: &HostId) -> Result<Option<File>> {
         let _ = std::fs::remove_dir_all(&stage);
         return Ok(None);
     };
+    // Between seeing an empty tree and linking, a ledger may have been made here and archived, or
+    // a root put in place. Archiving needs the lock this genesis now holds, so this one check,
+    // made holding it, closes that window. Our lock is taken back, if it is still ours.
+    let archived = !after_archive && layout::exists(&layout.archived_marker())?;
+    if archived || layout::exists(&layout.root)? {
+        if lock::same_file(&file, &layout.lock)? {
+            let _ = std::fs::remove_file(&layout.lock);
+        }
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err(FlowError::RootMoved { root: layout.root.clone() });
+    }
     pause!("genesis_linked");
     std::fs::rename(&stage, &layout.root).map_err(FlowError::io(&layout.root))?;
     sync_dir(&layout.parent);
@@ -208,7 +221,7 @@ impl Ledger {
                 pause!("lock_opened");
                 f
             }
-            None => match genesis(&layout, host)? {
+            None => match genesis(&layout, host, false)? {
                 Some(f) => f,
                 None => open_lock(&layout)?.ok_or_else(|| FlowError::LockLost {
                     lock: layout.lock.clone(),

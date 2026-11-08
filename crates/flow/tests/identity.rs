@@ -58,7 +58,11 @@ fn a_deleted_or_emptied_lock_never_re_epochs_a_live_root() {
         assert!(!lock.exists());
         drop(guard);
     }
+    // Restoring a missing lock also sweeps crash debris.
+    let stage = tmp.path().join(".broomva/.flows.genesis-0123456789abcdef0123456789abcdef");
+    std::fs::create_dir(&stage).unwrap();
     assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::RestoredLock { epoch: epoch.clone() });
+    assert!(!stage.exists());
     let reopened = Ledger::open(&root, &host("mac"), quick()).unwrap();
     assert_eq!(reopened.epoch(), epoch);
     // A writer still holding the deleted lock file would lock a file nobody else locks: refused.
@@ -141,10 +145,17 @@ fn an_archive_checks_its_destination_first() {
     drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
     std::fs::create_dir(tmp.path().join("taken")).unwrap();
     std::fs::write(tmp.path().join("taken/kept"), "").unwrap();
+    // A link to an empty directory is not an empty directory: it is refused, never followed.
+    std::fs::create_dir(tmp.path().join("empty")).unwrap();
+    std::os::unix::fs::symlink(tmp.path().join("empty"), tmp.path().join("linked")).unwrap();
     let before = snapshot(tmp.path());
-    for dest in
-        [tmp.path().join("missing/archive"), tmp.path().join("taken"), root.join("inside"), root.join("instances/x")]
-    {
+    for dest in [
+        tmp.path().join("missing/archive"),
+        tmp.path().join("taken"),
+        tmp.path().join("linked"),
+        root.join("inside"),
+        root.join("instances/x"),
+    ] {
         assert_eq!(code(operator::archive(&root, &dest, &quick())), "operator_refused", "{}", dest.display());
     }
     assert_eq!(snapshot(tmp.path()), before, "a refused archive wrote something");
@@ -338,6 +349,10 @@ fn a_root_whose_epoch_is_not_32_hex_is_damaged() {
     std::fs::write(lock_of(tmp.path()), "0123456789abcdef\n").unwrap();
     assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "ledger_damaged");
     assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "ledger_damaged");
+    // 32 hex digits, lowercase only.
+    std::fs::write(root.join("EPOCH"), "0123456789ABCDEF0123456789ABCDEF\n").unwrap();
+    std::fs::write(lock_of(tmp.path()), "0123456789ABCDEF0123456789ABCDEF\n").unwrap();
+    assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "ledger_damaged");
 }
 
 /// `archive` takes the root directory's own lock, as a writer does: with a guard held through a
@@ -443,4 +458,20 @@ fn an_archive_after_a_crash_reuses_its_destination_or_refuses_root_moved() {
     assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "root_moved");
     assert_eq!(snapshot(tmp.path()), before);
     drop(parent);
+}
+
+/// A projection built for another epoch is rebuilt for this one, never kept as current.
+#[test]
+fn a_projection_from_another_epoch_is_rebuilt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut other = Ledger::open(&root_in(tmp.path()), &host("mac"), Options::default()).unwrap();
+    append_at_head(&mut other, &id("fi_other"), event("Started", 0)).unwrap();
+    let foreign = std::fs::read(root_in(tmp.path()).join("projection.sqlite")).unwrap();
+    let tmp2 = tempfile::tempdir().unwrap();
+    let root = root_in(tmp2.path());
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    std::fs::write(root.join("projection.sqlite"), foreign).unwrap();
+    append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
+    let dump = Reader::new(&root, quick()).unwrap().lock().unwrap().projection_dump().unwrap().unwrap();
+    assert_eq!(dump.meta, vec![("epoch".to_string(), ledger.epoch().to_string())]);
 }

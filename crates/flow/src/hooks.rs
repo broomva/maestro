@@ -30,7 +30,7 @@ pub(crate) fn pause(point: &str) {
     }
 }
 
-/// Whether a test asks `operator::archive` to treat its destination as on another filesystem.
-pub(crate) fn other_device() -> bool {
-    std::env::var_os("MAESTRO_FLOW_TEST_OTHER_DEVICE").is_some()
+/// Whether a test asks `operator::archive` to treat `path` as on another filesystem.
+pub(crate) fn other_device(path: &std::path::Path) -> bool {
+    std::env::var_os("MAESTRO_FLOW_TEST_OTHER_DEVICE").is_some_and(|v| std::path::Path::new(&v) == path)
 }

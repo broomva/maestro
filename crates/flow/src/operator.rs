@@ -129,6 +129,10 @@ pub fn recover(root: &Path, options: &Options) -> Result<Recovered> {
         let epoch = root_epoch(&layout.root)?;
         // A writer still holding a guard holds the root directory's lock: wait for it.
         let held_root = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;
+        // Another recovery may have restored the lock during the wait.
+        if layout::exists(&layout.lock)? {
+            return Err(refused("A lock appeared while this recovery waited, so it changed nothing."));
+        }
         clear_debris(&layout, None)?;
         install_lock(&layout, &epoch)?;
         drop(held_root);
@@ -170,7 +174,7 @@ fn other_device(a: &Path, b: &Path) -> Result<bool> {
     let dev = |p: &Path| std::fs::metadata(p).map(|m| file_id(&m).0).map_err(FlowError::io(p));
     let differ = dev(a)? != dev(b)?;
     #[cfg(test)]
-    let differ = differ || crate::hooks::other_device();
+    let differ = differ || crate::hooks::other_device(a);
     Ok(differ)
 }
 
@@ -211,15 +215,19 @@ pub fn archive(root: &Path, dest: &Path, options: &Options) -> Result<()> {
         let Ok(parent) = std::fs::canonicalize(parent) else {
             return Err(refused(format!("{}'s parent does not exist, so nothing was archived.", dest.display())));
         };
-        // An empty destination is one a crashed archive made: it is used, not refused.
-        let reuse = std::fs::read_dir(dest).is_ok_and(|mut d| d.next().is_none());
-        if layout::exists(dest)? && !reuse {
+        // `dest` itself is looked at, never followed: an empty real directory, as a crashed archive
+        // leaves, is reused; anything else there (a file, a link, a full directory) is refused.
+        let existing = std::fs::symlink_metadata(dest).ok();
+        let reuse = existing.as_ref().is_some_and(|m| m.file_type().is_dir())
+            && std::fs::read_dir(dest).is_ok_and(|mut d| d.next().is_none());
+        if existing.is_some() && !reuse {
             return Err(refused(format!("{} already exists, so nothing was archived.", dest.display())));
         }
         if parent.starts_with(std::fs::canonicalize(&layout.root).map_err(FlowError::io(&layout.root))?) {
             return Err(refused(format!("{} is inside the root, so nothing was archived.", dest.display())));
         }
-        if other_device(&parent, &layout.parent)? {
+        // A reused `dest` is compared itself, so a mount point there is caught.
+        if other_device(if reuse { dest } else { &parent }, &layout.parent)? {
             return Err(refused(format!("{} is on another filesystem, so nothing was archived.", dest.display())));
         }
         let held = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;
@@ -269,7 +277,7 @@ pub fn create_fresh_ledger(root: &Path, host: &HostId, options: &Options) -> Res
     let Some(file) = existing_lock(&layout)? else {
         // With no lock and no root, only another fresh ledger can race this one: whichever loses
         // is refused by the lock the other linked.
-        let file = genesis(&layout, host)?.ok_or_else(|| refused("Another fresh ledger was made meanwhile."))?;
+        let file = genesis(&layout, host, true)?.ok_or_else(|| refused("Another fresh ledger was made meanwhile."))?;
         let _ = file.unlock();
         return finished(root_epoch(&layout.root)?);
     };

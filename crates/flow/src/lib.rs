@@ -55,7 +55,8 @@
 //!   the root moved under fails (SQLite makes its journal by path) and is reported skipped. It is
 //!   a cache; the log always wins.
 //! - **Host binding and identity.** A genesis runs only on an empty tree: no lock, no root and no
-//!   archive marker. It builds the whole root at a stage, then links a lock written whole and
+//!   archive marker, checked again once its lock is linked (an archive needs that lock, so none
+//!   can slip in after). It builds the whole root at a stage, then links a lock written whole and
 //!   held under a private name as `flows.lock` (a hard link fails if a lock exists, so one first
 //!   writer is elected and the others wait on the lock, then see its `HOST` and refuse
 //!   `foreign_host`), then renames the stage into place. A missing, empty or partial lock beside a
@@ -72,9 +73,10 @@
 //! - **Crash recovery.** A crash after a genesis links its lock and before its stage moves in
 //!   leaves a lock naming a stage, refused `genesis_incomplete`; [`operator::recover`] moves the
 //!   stage in. A crash before the link leaves only a stage no lock names, which nothing reads.
-//!   `recover` also restores a missing or broken lock from the root's own epoch, after taking the
-//!   root directory's lock so no writer still holds a guard through the old one, and removes
-//!   crash debris of the exact shapes above that no process holds.
+//!   `recover` also restores the lock from the root's own epoch: a missing one after taking the
+//!   root directory's lock (so no writer still holds a guard through the deleted one) and
+//!   checking no lock appeared meanwhile, an empty or broken one under the lock file itself. It
+//!   removes crash debris of the exact shapes above that no process holds.
 //! - **Retire.** [`operator::retire`] moves `instances/<id>` to `retired/<id>` under the lock.
 //!   Any later write or read naming that id is refused `retired`; the kernel only stats
 //!   `retired/<id>` and never opens anything inside it.
