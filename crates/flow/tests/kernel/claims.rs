@@ -291,8 +291,9 @@ fn a_held_node_is_not_claimed_again_and_the_next_claim_after_expiry_takes_the_ne
     assert_eq!(f.last_body(&fi)["attempt"], 1, "a refusal keeps the attempt");
     let second = f.claim(&fi, "head", first.lease_until);
     assert_eq!(second.attempt, 2);
-    // The first token is void now, whatever its lease said.
-    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &first.token, second.lease_until - secs(1))), "lease_expired");
+    // The first token is void now, though its own lease has a second left: a later claim took
+    // the node.
+    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &first.token, first.lease_until - secs(1))), "lease_expired");
 }
 
 #[test]

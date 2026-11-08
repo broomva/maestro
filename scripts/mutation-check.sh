@@ -1209,9 +1209,10 @@ mutate $fx '    if over {
 mutate $fx '            Ok(n) if p.kept.len().saturating_add(n) > cap =>' '            Ok(n) if p.kept.len().saturating_add(n) >= cap =>'
 # The environment allowlist is exactly its five names.
 mutate $fx 'pub const ENV_ALLOW: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"];' 'pub const ENV_ALLOW: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "CARGO_PKG_NAME"];'
-# Pipes are read without blocking, to their end, for at most the grace once the command ended;
-# then they are closed, so a process that left the group holds nothing of the run.
-mutate $fx 'rustix::io::ioctl_fionbio(fd, true)' 'rustix::io::ioctl_fionbio(fd, false)'
+# Pipes are read to their end, for at most the grace once the command ended; then they are
+# closed, so a process that left the group holds nothing of the run. (Blocking pipes are not a
+# mutant here: the runner then blocks reading the silent stream of a flood, and a hung suite is
+# no verdict.)
 mutate $fx '            Ok(0) => p.fd = None,' '            Ok(0) => {}'
 mutate $fx 'pub const READ_GRACE: Duration = Duration::from_secs(1);' 'pub const READ_GRACE: Duration = Duration::from_secs(3600);'
 mutate $fx '        if left.is_zero() {' '        if false {'
