@@ -635,6 +635,7 @@ nodes:
   ci: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: green, 1: red}}
   land: {class: effect, reconcile: [x], needs: [poll]}
   notify: {class: work, verify: [x], needs: [poll]}
+  ack: {class: work, verify: [x], needs: [notify]}
 repeats:
   poll: {body: [ci], max: 5, until: '.nodes.ci.value == \"green\"'}
 ";
@@ -658,7 +659,8 @@ fn a_re_run_that_changes_a_finished_repeat_s_body_takes_its_verdict_back() {
     assert_eq!((s.repeats["poll"].state, state(&s, "notify")), (RepeatState::Done, State::Done));
 
     // Red: the verdict judged another body, so the repeat waits for a new one and nothing that
-    // needs it, done or not, stands.
+    // needs it, done or not, stands (ack's receipt evaluated notify first, so it was kept).
+    f.complete(&fi, "ack", &[], json!({}));
     f.observe(&fi, "ci", &[("poll", 0)], 1);
     let s = f.status(&fi, Timestamp::now());
     assert_eq!(s.repeats["poll"].state, RepeatState::Running);
@@ -910,6 +912,7 @@ nodes:
   w: {class: work, verify: [x]}
   ci: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: green}}
   land: {class: work, verify: [x], needs: [poll]}
+  after: {class: work, verify: [x], needs: [land]}
 repeats:
   poll: {body: [w, ci], max: 5, until: 'true'}
 ");
@@ -918,6 +921,8 @@ repeats:
     let t = f.observe(&fi, "ci", &[("poll", 0)], 0);
     f.verdict(&fi, "poll", 0, true);
     f.complete(&fi, "land", &[], json!({}));
+    // Taking after's receipt evaluates land at that event's clock; the read later must not reuse it.
+    f.complete(&fi, "after", &[], json!({}));
     assert_eq!(state(&f.status(&fi, t), "land"), State::Done);
     let s = f.status(&fi, t + mins(5));
     assert_eq!(unmet(&s, "land"), vec![Reason::Stale { node: "ci".into() }]);
@@ -1023,6 +1028,7 @@ nodes:
   ci: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: green, 1: red}}
   w: {class: work, verify: [x]}
   peek: {class: work, verify: [x], needs: [w]}
+  ack: {class: work, verify: [x], needs: [peek]}
 repeats:
   poll: {body: [ci, w], max: 5, until: 'true'}
 ");
@@ -1031,8 +1037,47 @@ repeats:
     f.complete(&fi, "w", &[("poll", 0)], json!({}));
     f.verdict(&fi, "poll", 0, true);
     f.complete(&fi, "peek", &[], json!({}));
+    f.complete(&fi, "ack", &[], json!({}));
     assert_eq!(state(&f.status(&fi, Timestamp::now()), "peek"), State::Done);
     // Only ci, w's sibling, changes; peek reads w through the repeat, which now waits on a verdict.
     f.observe(&fi, "ci", &[("poll", 0)], 1);
     assert_eq!(unmet(&f.status(&fi, Timestamp::now()), "peek"), vec![Reason::RepeatRunning { repeat: "poll".into() }]);
+}
+
+#[test]
+fn a_verdict_reaches_what_was_evaluated_before_it() {
+    let mut f = fx(POLL);
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "ci", &[("poll", 0)], 0);
+    // Set aside, but evaluated: notify waits on the repeat.
+    f.complete(&fi, "notify", &[], json!({}));
+    f.verdict(&fi, "poll", 0, true);
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!(rejected(&s), vec![rej("notify", "not_enabled")]);
+    assert_eq!(state(&s, "notify"), State::Ready);
+}
+
+#[test]
+fn a_body_that_changes_reaches_what_needs_its_repeat_with_no_clock_involved() {
+    let mut f = fx("flow: f
+version: 1
+params: [p?]
+nodes:
+  src: {class: observe, run: [x], inputs: [params.p], exit_map: {0: a, 1: b}}
+  w: {class: work, verify: [x], needs: [src]}
+  notify: {class: work, verify: [x], needs: [poll]}
+  ack: {class: work, verify: [x], needs: [notify]}
+repeats:
+  poll: {body: [w], max: 3, until: 'true'}
+");
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "src", &[], 0);
+    f.complete(&fi, "w", &[("poll", 0)], json!({}));
+    f.verdict(&fi, "poll", 0, true);
+    f.complete(&fi, "notify", &[], json!({}));
+    f.complete(&fi, "ack", &[], json!({}));
+    f.observe(&fi, "src", &[], 1);
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!(unmet(&s, "w"), vec![Reason::InputChanged { input: "src".into() }]);
+    assert_eq!(unmet(&s, "notify"), vec![Reason::RepeatRunning { repeat: "poll".into() }]);
 }
