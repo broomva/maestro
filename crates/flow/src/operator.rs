@@ -328,7 +328,7 @@ pub fn truncate_torn_tail(ledger: &mut Ledger, id: &InstanceId) -> Result<u64> {
     refuse_retired(root, id)?;
     let unknown = || FlowError::UnknownInstance { instance: id.to_string() };
     let dir = instances(root)?.dir(id.as_str())?.ok_or_else(unknown)?;
-    let bytes = dir.read(EVENTS)?.ok_or_else(unknown)?;
+    let bytes = dir.read(EVENTS, crate::log::MAX_LOG)?.ok_or_else(unknown)?;
     match log::verify_prefix(id, &bytes) {
         Ok(_) => Err(refused(format!("Instance {id}'s log verifies to its end, so nothing was truncated."))),
         Err((FlowError::TornTail { .. }, prefix)) => {

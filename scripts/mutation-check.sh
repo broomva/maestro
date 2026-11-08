@@ -33,6 +33,20 @@ git -C "$copy" add -A
 git -C "$copy" -c core.hooksPath=/dev/null -c user.name=mutation -c user.email=mutation@localhost commit -qm base
 cd "$copy"
 run_tests() { timeout "$limit" cargo test -q --workspace --locked; }
+# A mutant in crates/flow runs only maestro-flow's tests (BRO-3633, owner decision 2026-11-08:
+# the whole-workspace run per mutant no longer fit the CI shards). That is the same verdict only
+# while no other crate depends on maestro-flow, so the run refuses to start once one does.
+run_flow_tests() { timeout "$limit" cargo test -q -p maestro-flow --locked; }
+if ! dependents=$(cargo metadata -q --format-version 1 --no-deps --locked | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+print(" ".join(p["name"] for p in m["packages"]
+               if p["name"] != "maestro-flow" and any(d["name"] == "maestro-flow" for d in p["dependencies"])))'); then
+  echo "cannot read the workspace metadata"; exit 3
+fi
+if [ -n "$dependents" ]; then
+  echo "maestro-flow has dependents ($dependents): run its mutants against the whole workspace again"; exit 3
+fi
 
 # A mutant only counts as killed against a suite that passes unmutated.
 if ! run_tests >log 2>&1; then
@@ -57,7 +71,10 @@ if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; failed=1; return; fi
-  run_tests >log 2>&1
+  case $file in
+    crates/flow/*) run_flow_tests >log 2>&1 ;;
+    *) run_tests >log 2>&1 ;;
+  esac
   code=$?
   # Killed means a named test failed. A build error, a timeout, a crash or any other exit
   # proves nothing about the guard. `cargo test -q` lists failing tests, indented, after the
@@ -851,6 +868,230 @@ mutate $fl/ledger.rs 'Ok(Summary { summary: from_log, cache })' 'Ok(Summary { su
 mutate $fl/ids.rs "} else if !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '} else if false {'
 mutate $fl/operator.rs '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {
             let _ = std::fs::remove_file(&marker);' '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {'
+# Flow storage bounds (BRO-3633 PR 3b1): an event line, a log and an event count over their bounds
+# are refused at append, and when an existing log is read or verified.
+mutate $fl/log.rs '    if line_len > MAX_LINE {' '    if line_len >= MAX_LINE {'
+mutate $fl/log.rs '    if line_len > MAX_LINE {' '    if false {'
+mutate $fl/log.rs '    if total > MAX_LOG {' '    if total >= MAX_LOG {'
+mutate $fl/log.rs '    if total > MAX_LOG {' '    if false {'
+mutate $fl/log.rs '    if events >= MAX_EVENTS {' '    if events > MAX_EVENTS {'
+mutate $fl/log.rs '    if events >= MAX_EVENTS {' '    if false {'
+mutate $fl/ledger.rs '        log::fits(line.len() as u64, existing_len, log.seq())?;' ''
+mutate $fl/at.rs '        if bytes.len() as u64 > limit {' '        if bytes.len() as u64 >= limit {'
+mutate $fl/at.rs '        if bytes.len() as u64 > limit {' '        if false {'
+mutate $fl/log.rs '    if lines > MAX_EVENTS {' '    if lines >= MAX_EVENTS {'
+mutate $fl/log.rs '    if lines > MAX_EVENTS {' '    if false {'
+mutate $fl/log.rs '        if size > MAX_LINE {' '        if false {'
+# Nesting: an append refuses a body the reader could not read back; whatever it takes reads back.
+mutate $fl/log.rs '    if depth > MAX_NESTING {' '    if depth >= MAX_NESTING {'
+mutate $fl/log.rs '    if depth > MAX_NESTING {' '    if false {'
+mutate $fl/log.rs '        deepest = deepest.max(depth);' ''
+mutate $fl/log.rs '        todo.extend(inner.into_iter().map(|v| (v, depth + 1)));' '        todo.extend(inner.into_iter().map(|v| (v, depth)));'
+mutate $fl/ledger.rs '        log::shallow(&event.body)?;' ''
+
+# Flow kernel (BRO-3633 PR 3b1): definitions, the compiler, guard checks and the read-only scheduler.
+fk=crates/flow/src/kernel
+# Compile rejections: unknown references, loops without a bound, undeclared switch cases,
+# effects without reconcile, repeated or malformed ids, phase 2 reuse, class rules, size.
+mutate $fk/definition.rs '#[serde(deny_unknown_fields)]
+pub(crate) struct NodeDef {' 'pub(crate) struct NodeDef {'
+mutate $fk/compile.rs '        if !seen.insert(id) {' '        if false && !seen.insert(id) {'
+mutate $fk/compile.rs '    unique("param", params.iter().map(|(name, _)| *name))?;' ''
+mutate $fk/compile.rs '            unique("edge", edges.iter().map(|(e, _)| e.as_str()))?;' ''
+mutate $fk/compile.rs '                unique("exit_map", codes.iter().map(String::as_str))?;' ''
+mutate $fk/compile.rs '    if def.uses.is_some() {' '    if false {'
+mutate $fk/compile.rs '    if def.templates.is_some() {' '    if false {'
+mutate $fk/compile.rs '.find(|(_, n)| n.uses.is_some())' '.find(|_| false)'
+mutate $fk/compile.rs "    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '    if id.is_empty() {'
+mutate $fk/compile.rs '        plain("param", name)?;' ''
+mutate $fk/compile.rs '        if f.all.is_empty() {' '        if false {'
+mutate $fk/compile.rs '        if let Some(b) = f.all.iter().find(|b| !node_ids.contains(b.as_str())) {' '        if let Some(b) = f.all.iter().find(|_| false) {'
+mutate $fk/compile.rs '.into_iter().find(|f| !allowed.contains(f))' '.into_iter().find(|_| false)'
+mutate $fk/compile.rs '        Ok(s) if s > 0 => Ok(s),' '        Ok(s) => Ok(s),'
+mutate $fk/compile.rs '            if !needs.contains(&x) {' '            if true {'
+mutate $fk/compile.rs '    if yaml.len() > MAX_SOURCE {' '    if yaml.len() >= MAX_SOURCE {'
+mutate $fk/compile.rs '    if yaml.len() > MAX_SOURCE {' '    if false {'
+mutate $fk/compile.rs '    if bytes > ir::MAX_IR {' '    if bytes >= ir::MAX_IR {'
+mutate $fk/compile.rs '    if bytes > ir::MAX_IR {' '    if false {'
+mutate $fk/ir.rs '    if ir.ir_version != IR_VERSION {' '    if false {'
+mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if ir.nodes.len() >= MAX_NODES {'
+mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if false {'
+mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if reads >= MAX_FAN_IN {'
+mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if false {'
+mutate $fk/ir.rs '                    read.insert(m);
+                    read.extend(body(r));' '                    read.insert(m);'
+mutate $fk/ir.rs '                _ if ir.repeats.contains_key(m) => read.extend(body(m)),' '                _ if ir.repeats.contains_key(m) => {}'
+mutate $fk/ir.rs '        let reads = read.len();' '        let reads = n.needs.len();'
+mutate $fk/ir.rs '        if r.max == 0 || r.max > MAX_REPEAT {' '        if r.max > MAX_REPEAT {'
+mutate $fk/ir.rs '        if r.max == 0 || r.max > MAX_REPEAT {' '        if r.max == 0 {'
+mutate $fk/ir.rs '        if r.body.is_empty() {' '        if false {'
+mutate $fk/ir.rs '        for b in &r.body {
+            node(&from, b)?;' '        for b in &r.body {'
+mutate $fk/ir.rs 'if let Some(other) = membership.insert(b.as_str(), rid.as_str()) {' 'if let Some(other) = membership.insert(b.as_str(), rid.as_str()).filter(|_| false) {'
+mutate $fk/ir.rs '        if let Some(target) = &r.on_exhausted {
+            node(&from, target)?;' '        if let Some(target) = &r.on_exhausted {'
+mutate $fk/ir.rs '            if r.body.contains(target) {' '            if false {'
+mutate $fk/ir.rs '                Need::Node { node: m } => {
+                    node(&from, m)?;' '                Need::Node { node: m } => {
+                    let _ = m;'
+mutate $fk/ir.rs '        if n.retry == Some(0) {' '        if false {'
+mutate $fk/ir.rs '                Class::Choice { edges, .. } => edges.contains_key(&case.value),' '                Class::Choice { .. } => true,'
+mutate $fk/ir.rs '                Class::Observe { exit_map, .. } => exit_map.iter().any(|e| e.value == case.value),' '                Class::Observe { .. } => true,'
+mutate $fk/ir.rs '                _ => false,
+            };' '                _ => true,
+            };'
+mutate $fk/ir.rs '            if argv.is_empty() {' '            if false {'
+mutate $fk/ir.rs '                if fresh_for.is_none() && inputs.is_empty() {' '                if false {'
+mutate $fk/ir.rs '                if exit_map.is_empty() {' '                if false {'
+mutate $fk/ir.rs '                        Input::Param { name } => param(&from, name)?,' '                        Input::Param { .. } => {}'
+mutate $fk/ir.rs '                        Input::Node { node: m } => {
+                            node(&from, m)?;' '                        Input::Node { node: m } => {'
+mutate $fk/ir.rs '                            if !n.needs.contains(&Need::Node { node: m.clone() }) {' '                            if false {'
+mutate $fk/ir.rs '                if edges.is_empty() {' '                if false {'
+mutate $fk/ir.rs '                if reconcile.is_empty() {' '                if false {'
+mutate $fk/ir.rs '                if ask.trim().is_empty() {' '                if false {'
+# The topology: one pass refuses cycles (through needs, switches, repeat bodies, and a body node
+# needed from outside its repeat) and chains deeper than MAX_DEPTH. Without it a cyclic pin
+# recurses until the stack overflows.
+mutate $fk/ir.rs '    topology(ir)
+}' '    Ok(())
+}' 'stack overflow'
+mutate $fk/ir.rs '    if finished == deps.len() {' '    if true {' 'stack overflow'
+mutate $fk/ir.rs '        if d > MAX_DEPTH {' '        if false {'
+mutate $fk/ir.rs '                set.insert(format!("r:{repeat}"));' ''
+mutate $fk/ir.rs '                set.insert(format!("r:{r}"));' ''
+mutate $fk/ir.rs 'let on: Vec<&str> = on.chain(n.switch.as_ref().map(|c| c.on.as_str())).collect();' 'let on: Vec<&str> = on.collect();'
+mutate $fk/ir.rs '        deps.entry(format!("r:{rid}")).or_default().extend(r.body.iter().map(|b| format!("n:{b}")));' '        deps.entry(format!("r:{rid}")).or_default();'
+# Guards: checked at compile time, refused when they could recurse, run unbounded generators,
+# read the clock or environment, have an effect or repeat strings.
+mutate $fk/compile.rs '    check_guards(&ir)?;' ''
+mutate $fk/compile.rs '            check(format!("repeat {rid} until"), until)?;' '            let _ = until;'
+mutate $fk/compile.rs '                    check(format!("node {id} edge {edge}"), g)?;' '                    let _ = (edge, g);'
+mutate $fk/compile.rs '                    check(format!("node {id} precondition {i}"), g)?;' '                    let _ = (i, g);'
+mutate $fk/jq.rs '        Tok::Word if BANNED_WORDS.contains(s) => Some(*s),' '        Tok::Word if false => Some(*s),'
+mutate $fk/jq.rs "        Tok::Sym if s.starts_with('*') => Some(*s)," '        Tok::Sym if false => Some(*s),'
+mutate $fk/jq.rs '        Tok::Block(inner) => banned(inner),' '        Tok::Block(_) => None,'
+mutate $fk/jq.rs '            StrPart::Term(t) => banned(std::slice::from_ref(t)),' '            StrPart::Term(_) => None,'
+# start: params that do not fit are refused before anything is written; null is absent; params
+# have a byte bound so a flow that compiles can always start.
+mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'
+mutate $fk/replay.rs '    if let Some(name) = given.keys().find(|k| !ir.params.contains_key(*k)) {' '    if let Some(name) = given.keys().find(|_| false) {'
+mutate $fk/replay.rs '    params.get(name).is_some_and(|v| !v.is_null())' '    params.get(name).is_some()'
+mutate $fk/replay.rs '    if bytes > ir::MAX_PARAMS {' '    if bytes >= ir::MAX_PARAMS {'
+mutate $fk/replay.rs '    if bytes > ir::MAX_PARAMS {' '    if false {'
+mutate $fk/replay.rs '    if depth >= crate::log::MAX_NESTING {' '    if depth > crate::log::MAX_NESTING {'
+mutate $fk/replay.rs '    if depth >= crate::log::MAX_NESTING {' '    if false {'
+# The pin: a Started first, a pinned IR of this version that validates (without it a cyclic pin
+# recurses until the stack overflows), matches its hash and is the flow it names.
+mutate $fk/replay.rs '    if first.kind != Started::KIND {' '    if false {'
+mutate $fk/replay.rs '    ir::validate(&started.ir)
+        .map_err(|e| malformed(log, first.seq, format!("the pinned IR does not validate ({e})")))?;' '' 'stack overflow'
+mutate $fk/replay.rs '    if ir::content_hash(&started.ir)? != started.ir_hash {' '    if false {'
+mutate $fk/replay.rs '    if started.flow != format!("{}@{}", started.ir.flow, started.ir.version) {' '    if false {'
+# Acceptance, in log order: kernel kinds only, a declared node, its current iteration, the right
+# class, a declared edge, an enabled node not already done at the event's own clock, verdicts
+# for a settled current iteration of a repeat with an until, once per body.
+mutate $fk/replay.rs '        if ![Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND].contains(&e.kind.as_str()) {' '        if false {'
+mutate $fk/replay.rs 'let Some((id, node)) = ir.nodes.get_key_value(&subject.node) else {' 'let Some((id, node)) = ir.nodes.get_key_value(&subject.node).or_else(|| ir.nodes.iter().next()) else {'
+mutate $fk/replay.rs 'let Some(i) = self.current(id).filter(|i| self.iteration(id, *i) == subject.iteration) else {' 'let Some(i) = self.current(id) else {'
+mutate $fk/replay.rs '                Phase::Exhausted(_) => None,' '                Phase::Exhausted(i) => Some(*i),'
+mutate $fk/replay.rs '                    Class::Choice { .. } => return Ok(Err("wrong_class")),' '                    Class::Choice { .. } => (None, None),'
+mutate $fk/replay.rs 'let Class::Choice { edges, .. } = &node.class else { return Ok(Err("wrong_class")) };' 'let Class::Choice { edges, .. } = &node.class else { return Ok(Ok(Change::Inert)) };'
+mutate $fk/replay.rs '                if !edges.contains_key(&c.edge) {' '                if false {'
+mutate $fk/replay.rs 'match exit.and_then(|x| exit_map.iter().find(|m| m.exit == x)) {' 'match exit.or(Some(0)).and_then(|x| exit_map.iter().find(|m| m.exit == x)) {'
+mutate $fk/replay.rs 'exit_map.iter().find(|m| m.exit == x)' 'exit_map.iter().find(|_| true)'
+mutate $fk/replay.rs '        if !core.enabled {' '        if false {'
+mutate $fk/replay.rs '        if eval.seen(key, &core).state == State::Done && !matches!(node.class, Class::Observe { .. }) {' '        if false {'
+mutate $fk/replay.rs '        if eval.seen(key, &core).state == State::Done && !matches!(node.class, Class::Observe { .. }) {' '        if eval.seen(key, &core).state == State::Done {'
+mutate $fk/replay.rs '        let mut eval = Eval::new(self, at);
+        let core = eval.node(id, i);' '        let mut eval = Eval::new(self, Timestamp::MAX);
+        let core = eval.node(id, i);'
+mutate $fk/replay.rs '        if r.until.is_none() {' '        if false {'
+mutate $fk/replay.rs '        if self.phases.get(rid) != Some(&Phase::At(g.iteration)) {' '        if false {'
+mutate $fk/replay.rs '        if !eval.settled(rid, g.iteration) {' '        if false {'
+mutate $fk/replay.rs '        if self.verdicts.get(&(rid, g.iteration)) == Some(&judged) {' '        if false {'
+mutate $fk/replay.rs 'e.at.parse().map_err(|_| malformed(log, e.seq, format!("{} is not a timestamp", e.at)))?;' 'e.at.parse().unwrap_or(Timestamp::UNIX_EPOCH);'
+# Repeats: a true verdict holds only for the body it judged; a false one moves the repeat on; it
+# exhausts at max; a body that never runs is unreachable; a node not taken settles its iteration;
+# a verdict is a change that can settle another repeat.
+mutate $fk/replay.rs '        if g.holds {' '        if true {'
+mutate $fk/replay.rs '            return Ok(self.guarded(g, at).map(|()| Change::State));' '            return Ok(self.guarded(g, at).map(|()| Change::Inert));'
+mutate $fk/replay.rs '                    && *judged == self.body_digest(rid, i)' '                    && true'
+mutate $fk/replay.rs 'e.digest.as_deref().filter(|_| e.satisfies)' 'e.digest.as_deref()'
+mutate $fk/replay.rs '        if i.saturating_add(1) >= max { Phase::Exhausted(i) } else { Phase::At(i + 1) }' '        Phase::At(i + 1)'
+mutate $fk/replay.rs '        evals.iter().all(|e| e.dead || e.satisfies) && !evals.iter().all(|e| e.dead)' '        evals.iter().all(|e| e.satisfies) && !evals.iter().all(|e| e.dead)'
+mutate $fk/replay.rs '        evals.iter().all(|e| e.dead || e.satisfies) && !evals.iter().all(|e| e.dead)' '        evals.iter().all(|e| e.dead || e.satisfies)'
+mutate $fk/replay.rs 'if self.body(rid).iter().all(|b| self.node(b, i).dead) {' 'if false {'
+mutate $fk/replay.rs '                let awaiting_verdict = state == RepeatState::Running && eval.settled(rid, iteration);' '                let awaiting_verdict = state == RepeatState::Running;'
+mutate $fk/replay.rs 'NodeStatus { state: State::Exhausted, class, iteration, unmet, inputs: BTreeMap::new() };' 'NodeStatus { state: State::Blocked, class, iteration, unmet, inputs: BTreeMap::new() };'
+mutate $fk/replay.rs '            Loop::Exhausted(_) => Dep::Dead(Reason::RepeatExhausted { repeat: rid.to_string() }),' '            Loop::Exhausted(_) => Dep::Waits(Reason::RepeatRunning { repeat: rid.to_string() }),'
+mutate $fk/replay.rs '            Loop::Done(j) => Dep::Eval(self.node(m, j)),' '            Loop::Done(_) => Dep::Waits(Reason::RepeatRunning { repeat: rid.to_string() }),'
+mutate $fk/compile.rs '            node.needs.push(Need::Exhausted { repeat: rid.clone() });' ''
+mutate $fk/replay.rs '                    Loop::Exhausted(_) => kill(&mut out, Reason::RepeatExhausted { repeat: r.clone() }),' '                    Loop::Exhausted(_) => push(&mut out, Reason::RepeatExhausted { repeat: r.clone() }),'
+mutate $fk/replay.rs '                    Loop::Done(_) => kill(&mut out, Reason::RepeatFinished { repeat: r.clone() }),' '                    Loop::Done(_) => push(&mut out, Reason::RepeatFinished { repeat: r.clone() }),'
+# Needs, the fork join, switches, dead branches; receipts done only while what they consumed,
+# transitively, is current and fresh.
+mutate $fk/compile.rs '            branches.iter().map(|b| Need::Node { node: b.clone() }).collect()' '            Vec::new()'
+mutate $fk/replay.rs '                } else if !e.satisfies {' '                } else if false {'
+mutate $fk/replay.rs '                    out.dead = true;
+                    out.reasons.push(Reason::Unreachable { node: m.to_string() });' '                    out.reasons.push(Reason::Unreachable { node: m.to_string() });'
+mutate $fk/replay.rs '                out.observed.extend(e.observed.iter().copied());
+                // A node' '                // A node'
+mutate $fk/replay.rs '                            out.observed.extend(e.observed.iter().copied());' ''
+mutate $fk/replay.rs '                        out.consumed.insert(r.as_str(), judged);' ''
+mutate $fk/replay.rs '            && e.value.as_deref() != Some(case.value.as_str())' '            && false'
+mutate $fk/replay.rs '        if let Some(failure) = &r.failure {' '        if let Some(failure) = r.failure.as_ref().filter(|_| false) {'
+mutate $fk/replay.rs '            if r.inputs.get(*input).map(String::as_str) != Some(&**d) {' '            if false {'
+mutate $fk/replay.rs '        out.satisfies = out.reasons.is_empty();' '        out.satisfies = true;'
+mutate $fk/replay.rs '            out.observed.insert((id, i));' ''
+mutate $fk/replay.rs '        (age > secs(*f) || age.is_negative()).then_some(age)' '        (age >= secs(*f) || age.is_negative()).then_some(age)'
+mutate $fk/replay.rs '        (age > secs(*f) || age.is_negative()).then_some(age)' '        (age > secs(*f)).then_some(age)'
+mutate $fk/replay.rs '        (age > secs(*f) || age.is_negative()).then_some(age)' '        age.is_negative().then_some(age)'
+mutate $fk/replay.rs '                reasons.extend(stale.iter().filter(|s| *s != id).map(|s| Reason::Stale { node: s.clone() }));' ''
+mutate $fk/replay.rs '            Form::Open if !stale.is_empty() => {' '            Form::Open if false => {'
+mutate $fk/replay.rs '        let digest = Rc::from(receipt_digest(outputs, value.as_deref()));' '        let digest = Rc::from(receipt_digest(outputs, None));'
+mutate $fk/replay.rs 'let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));' 'let rerun = s.state == State::Stale;'
+mutate $fk/replay.rs 'let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));' 'let rerun = false;'
+mutate $fk/replay.rs '            Some(Class::Human { ask }) => {' '            Some(Class::Human { ask }) if false => {'
+mutate $fk/replay.rs '    SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))' '    SignedDuration::from_mins(i64::try_from(s / 60).unwrap_or(i64::MAX))'
+# Read-path bounds: inert and rejected events cost no evaluation; cores (evaluations without the
+# clock) are kept across events, dropped downstream of a receipt with new content, and all
+# dropped when a repeat moves or is judged; a re-run with the same result drops nothing.
+mutate $fk/replay.rs '                Ok(Change::Inert) => {}' '                Ok(Change::Inert) => fold.advance(at),'
+mutate $fk/replay.rs '        if !same {
+            self.invalidate(id);
+        }' ''
+mutate $fk/replay.rs '            old.digest == receipt.digest && old.failure == receipt.failure && old.inputs == receipt.inputs' '            old.digest == receipt.digest && old.failure == receipt.failure'
+mutate $fk/replay.rs '                    digests.retain(|(rid, _), _| rid != r);' ''
+mutate $fk/replay.rs '                    reads.extend(body(repeat).iter().map(String::as_str))' '                    let _ = repeat;'
+mutate $fk/replay.rs '                Need::Repeat { repeat } | Need::Exhausted { repeat } => {
+                    reads.extend(body(repeat).iter().map(String::as_str))
+                }' '                Need::Repeat { repeat } => reads.extend(body(repeat).iter().map(String::as_str)),
+                Need::Exhausted { .. } => {}'
+mutate $fk/replay.rs '                reads.extend(body(r).iter().map(String::as_str));' ''
+mutate $fk/replay.rs '        let mut reads: Vec<&str> = n.switch.iter().map(|c| c.on.as_str()).collect();' '        let mut reads: Vec<&str> = Vec::new();'
+mutate $fk/replay.rs '            self.forget();
+            self.verdicts.insert((rid, g.iteration), judged);' '            self.verdicts.insert((rid, g.iteration), judged);'
+mutate $fk/replay.rs '            self.forget();
+            self.phases.insert(rid, next);' '            self.phases.insert(rid, next);'
+mutate $fk/replay.rs '            self.forget();
+            self.phases.extend(moves);' '            self.phases.extend(moves);'
+# Positive controls: a replay that ran a command, judged a repeat from its guard, or was not a
+# function of the log and the clock fails the tests that say it never does.
+mutate $fk/replay.rs '        let fold = self.fold;
+        let ir: &'"'"'a Ir = fold.ir;
+        let Some(n) = ir.nodes.get(id) else {' '        let fold = self.fold;
+        let ir: &'"'"'a Ir = fold.ir;
+        if let Some(Class::Pure { run }) = ir.nodes.get(id).map(|n| &n.class) {
+            let _ = std::process::Command::new(&run[0]).args(&run[1..]).status();
+        }
+        let Some(n) = ir.nodes.get(id) else {'
+mutate $fk/replay.rs '                if let Some(judged) = self.fold.verdicts.get(&(rid, i))
+                    && *judged == self.body_digest(rid, i)
+                {' '                if self.fold.ir.repeats.get(rid).and_then(|r| r.until.as_deref()).is_some_and(|g| super::jq::check(g).is_ok()) {'
+mutate $fk/replay.rs '            seq: log.seq(),
+            nodes,' '            seq: jiff::Timestamp::now().as_nanosecond() as u64,
+            nodes,'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

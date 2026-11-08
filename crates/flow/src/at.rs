@@ -91,11 +91,15 @@ impl Dir {
         }
     }
 
-    /// The bytes of the file `name`; `None` when it does not exist.
-    pub(crate) fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        let Some(mut file) = self.file(name, OFlags::RDONLY)? else { return Ok(None) };
+    /// The bytes of the file `name`, which must be at most `limit` bytes; `None` when it does not
+    /// exist. No more than one byte past `limit` is ever read into memory.
+    pub(crate) fn read(&self, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
+        let Some(file) = self.file(name, OFlags::RDONLY)? else { return Ok(None) };
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(FlowError::io(self.path.join(name)))?;
+        file.take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(FlowError::io(self.path.join(name)))?;
+        if bytes.len() as u64 > limit {
+            return Err(FlowError::TooLarge { what: "log", size: bytes.len() as u64, limit });
+        }
         Ok(Some(bytes))
     }
 
@@ -133,5 +137,21 @@ impl Dir {
 
     pub(crate) fn sync(&self) {
         let _ = self.fd.sync_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_takes_a_file_up_to_its_limit_and_refuses_a_byte_more() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("at"), [b'x'; 100]).unwrap();
+        std::fs::write(tmp.path().join("over"), [b'x'; 101]).unwrap();
+        let dir = Dir::open_root(tmp.path()).unwrap();
+        assert_eq!(dir.read("at", 100).unwrap().map(|b| b.len()), Some(100));
+        assert_eq!(dir.read("over", 100).unwrap_err().code(), "too_large");
+        assert_eq!(dir.read("missing", 100).unwrap(), None);
     }
 }

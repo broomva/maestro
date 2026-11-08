@@ -90,6 +90,9 @@
 //!   read-only and only compare. The log wins every disagreement.
 //!
 //! Every refusal carries a stable code, [`FlowError::code`].
+//!
+//! The flow kernel built on this layer (definitions, the compiler and the scheduler) is
+//! [`kernel`].
 
 /// A pause point for the crate's own unit tests (`hooks`). Outside `cfg(test)` it expands to
 /// nothing, so no other build, binary or dependent crate can reach one.
@@ -109,6 +112,7 @@ mod hooked;
 #[cfg(test)]
 mod hooks;
 mod ids;
+pub mod kernel;
 mod layout;
 mod ledger;
 mod lock;

@@ -60,6 +60,18 @@ pub enum FlowError {
     /// An id, host or event kind that is not allowed.
     #[error("{what} {value:?} is not allowed: {reason}.")]
     Invalid { what: &'static str, value: String, reason: &'static str },
+    /// An event line or a log over its bound ([`crate::log::MAX_LINE`], [`crate::log::MAX_LOG`]):
+    /// refused at append, and never read into memory.
+    #[error("The {what} is {size} bytes, over its limit of {limit}, so it was not written or read.")]
+    TooLarge { what: &'static str, size: u64, limit: u64 },
+    /// An event body nested deeper than [`crate::log::MAX_NESTING`]: refused at append, since the
+    /// reader could not read it back.
+    #[error("The event body nests {depth} levels deep, more than {limit}, so it was not written.")]
+    TooDeep { depth: usize, limit: usize },
+    /// A log that holds [`crate::log::MAX_EVENTS`] events already, or more: refused at append,
+    /// and never replayed.
+    #[error("The log holds more than {limit} events, or would, so nothing was written or read.")]
+    TooManyEvents { limit: u64 },
     /// An operator function was asked to act on a state it does not handle.
     #[error("{0}")]
     OperatorRefused(String),
@@ -93,6 +105,9 @@ impl FlowError {
             FlowError::UnknownInstance { .. } => "unknown_instance",
             FlowError::Symlink { .. } => "symlink",
             FlowError::Invalid { .. } => "invalid",
+            FlowError::TooLarge { .. } => "too_large",
+            FlowError::TooManyEvents { .. } => "too_many_events",
+            FlowError::TooDeep { .. } => "too_deep",
             FlowError::OperatorRefused(_) => "operator_refused",
             FlowError::Projection(_) => "projection",
             FlowError::Io { .. } => "io",
