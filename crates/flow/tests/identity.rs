@@ -294,6 +294,30 @@ fn a_failed_archive_leaves_no_marker() {
     }
 }
 
+/// A move that fails after the marker is written (here, into a reused destination the root
+/// cannot be moved into) takes the marker back, and leaves the reused destination alone.
+#[test]
+fn a_failed_move_takes_the_archive_marker_back() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent = tmp.path().join(".broomva");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    let dest = tmp.path().join("archive");
+    std::fs::create_dir(&dest).unwrap();
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Root moves directories anywhere; the case only means something where permissions hold.
+    let refused = std::fs::create_dir(dest.join("probe")).is_err();
+    let result = code(operator::archive(&root, &dest, &quick()));
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if refused {
+        assert_eq!(result, "io");
+        assert_eq!(names(&parent), vec!["flows", "flows.lock"]);
+        assert!(dest.is_dir(), "a reused destination is not this call's to remove");
+        Ledger::open(&root, &host("mac"), quick()).unwrap();
+    }
+}
+
 /// `recover` removes what crashed geneses and recoveries leave beside the root, except a private
 /// lock file a process still holds (a genesis in flight).
 #[test]

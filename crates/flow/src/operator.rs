@@ -241,7 +241,15 @@ pub fn archive(root: &Path, dest: &Path, options: &Options) -> Result<()> {
         }
         let marker = layout.archived_marker();
         std::fs::write(&marker, format!("{}\n{epoch}\n", dest.display())).map_err(FlowError::io(&marker))?;
-        std::fs::rename(&layout.root, dest.join(layout.name())).map_err(FlowError::io(&layout.root))?;
+        // Until the root moves, the ledger is still live here: a failed move takes the marker
+        // back, and the destination too when this call made it.
+        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {
+            let _ = std::fs::remove_file(&marker);
+            if !reuse {
+                let _ = std::fs::remove_dir(dest);
+            }
+            return Err(FlowError::io(&layout.root)(e));
+        }
         std::fs::rename(&layout.lock, dest.join(format!("{}.lock", layout.name())))
             .map_err(FlowError::io(&layout.lock))?;
         sync_dir(dest);

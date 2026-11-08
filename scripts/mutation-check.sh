@@ -849,6 +849,8 @@ mutate $fl/projection.rs '    for id in &ids {
     }'
 mutate $fl/ledger.rs 'Ok(Summary { summary: from_log, cache })' 'Ok(Summary { summary: match &cache { CacheState::Disagrees(Some(c)) => c.clone(), _ => from_log }, cache })'
 mutate $fl/ids.rs "} else if !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '} else if false {'
+mutate $fl/operator.rs '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {
+            let _ = std::fs::remove_file(&marker);' '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
