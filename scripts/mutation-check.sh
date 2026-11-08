@@ -33,6 +33,20 @@ git -C "$copy" add -A
 git -C "$copy" -c core.hooksPath=/dev/null -c user.name=mutation -c user.email=mutation@localhost commit -qm base
 cd "$copy"
 run_tests() { timeout "$limit" cargo test -q --workspace --locked; }
+# A mutant in crates/flow runs only maestro-flow's tests (BRO-3633, owner decision 2026-11-08:
+# the whole-workspace run per mutant no longer fit the CI shards). That is the same verdict only
+# while no other crate depends on maestro-flow, so the run refuses to start once one does.
+run_flow_tests() { timeout "$limit" cargo test -q -p maestro-flow --locked; }
+if ! dependents=$(cargo metadata -q --format-version 1 --no-deps --locked | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+print(" ".join(p["name"] for p in m["packages"]
+               if p["name"] != "maestro-flow" and any(d["name"] == "maestro-flow" for d in p["dependencies"])))'); then
+  echo "cannot read the workspace metadata"; exit 3
+fi
+if [ -n "$dependents" ]; then
+  echo "maestro-flow has dependents ($dependents): run its mutants against the whole workspace again"; exit 3
+fi
 
 # A mutant only counts as killed against a suite that passes unmutated.
 if ! run_tests >log 2>&1; then
@@ -57,7 +71,10 @@ if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; failed=1; return; fi
-  run_tests >log 2>&1
+  case $file in
+    crates/flow/*) run_flow_tests >log 2>&1 ;;
+    *) run_tests >log 2>&1 ;;
+  esac
   code=$?
   # Killed means a named test failed. A build error, a timeout, a crash or any other exit
   # proves nothing about the guard. `cargo test -q` lists failing tests, indented, after the
