@@ -91,9 +91,14 @@ impl Dir {
         }
     }
 
-    /// The bytes of the file `name`; `None` when it does not exist.
-    pub(crate) fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
+    /// The bytes of the file `name`, which must be at most `limit` bytes; `None` when it does not
+    /// exist. The size is checked before anything is read (writers are excluded meanwhile).
+    pub(crate) fn read(&self, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
         let Some(mut file) = self.file(name, OFlags::RDONLY)? else { return Ok(None) };
+        let size = file.metadata().map_err(FlowError::io(self.path.join(name)))?.len();
+        if size > limit {
+            return Err(FlowError::TooLarge { what: "log", size, limit });
+        }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(FlowError::io(self.path.join(name)))?;
         Ok(Some(bytes))

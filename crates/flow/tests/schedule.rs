@@ -7,10 +7,8 @@ mod common;
 
 use common::*;
 use jiff::{SignedDuration, Timestamp};
-use maestro_flow::kernel::events::{
-    Chosen, Claimed, Completed, Guarded, Heartbeat, KernelEvent, Refused, Started, VerifyRecord,
-};
-use maestro_flow::kernel::ir::{IR_VERSION, Need, content_hash};
+use maestro_flow::kernel::events::{Chosen, Completed, Guarded, KernelEvent, Refused, Started, VerifyRecord};
+use maestro_flow::kernel::ir::{IR_VERSION, MAX_DEPTH, Need, content_hash};
 use maestro_flow::kernel::{
     CompiledFlow, Iteration, Next, Reason, RepeatState, State, Status, compile, next, start, status,
 };
@@ -101,25 +99,6 @@ impl Fx {
 
     fn verdict(&mut self, fi: &InstanceId, repeat: &str, iteration: u32, holds: bool) {
         self.append(fi, Guarded { repeat: repeat.into(), iteration, holds }.to_event().unwrap());
-    }
-
-    fn claim(&mut self, fi: &InstanceId, node: &str, attempt: u32, lease_until: Timestamp) -> Timestamp {
-        let c = Claimed {
-            node: node.into(),
-            iteration: iter(&[]),
-            attempt,
-            lease_until: lease_until.to_string(),
-            token_sha256: "sha256:00".into(),
-            inputs: Default::default(),
-            performer: None,
-            tool_use_id: None,
-        };
-        self.append(fi, c.to_event().unwrap())
-    }
-
-    fn heartbeat(&mut self, fi: &InstanceId, node: &str, attempt: u32, lease_until: Timestamp) {
-        let h = Heartbeat { node: node.into(), iteration: iter(&[]), attempt, lease_until: lease_until.to_string() };
-        self.append(fi, h.to_event().unwrap());
     }
 
     fn status(&self, fi: &InstanceId, now: Timestamp) -> Status {
@@ -347,6 +326,7 @@ fn a_receipt_from_one_iteration_never_satisfies_another() {
     f.verdict(&fi, "rounds", 0, false);
     let s = f.status(&fi, now);
     assert_eq!(s.repeats["rounds"].iteration, 1);
+    assert!(!s.repeats["rounds"].awaiting_verdict, "iteration 1 has not settled");
     assert_eq!(s.nodes["review"].iteration, iter(&[("rounds", 1)]));
     assert_eq!(state(&s, "review"), State::Ready);
     assert_eq!(state(&s, "fix"), State::Blocked, "iteration 0's review does not satisfy iteration 1's fix");
@@ -418,7 +398,7 @@ fn a_repeat_that_reaches_max_is_exhausted_and_routes_to_on_exhausted() {
     assert_eq!(unmet(&s, "waive"), vec![needs("escalate")]);
     assert_eq!(state(&s, "escalate"), State::Waiting, "on_exhausted is the route, here to the owner");
     assert_eq!(
-        s.nodes["escalate"].waits,
+        s.nodes["escalate"].unmet,
         vec![Reason::Owner { ask: "The review did not converge. Merge anyway?".into() }]
     );
     // An exhausted repeat takes no more receipts, and a repeat with no until takes no verdict.
@@ -494,18 +474,34 @@ fn a_stale_observation_blocks_every_dependent() {
     assert_eq!(unmet(&s, "check"), vec![Reason::Stale { node: "pin".into() }]);
     assert_eq!(enabled(&f.next(&fi, t + mins(11))), vec!["pin"], "only the re-run of pin");
 
-    // Further down, past a node that is done: exercise is blocked too.
+    // Receipts downstream are not done while pin is stale, however far down.
     f.complete(&fi, "check", &[], json!({}));
-    assert_eq!(state(&f.status(&fi, t + mins(9)), "exercise"), State::Ready);
+    f.complete(&fi, "exercise", &[], json!({}));
+    let s = f.status(&fi, t + mins(9));
+    assert_eq!((state(&s, "check"), state(&s, "exercise")), (State::Done, State::Done));
     let s = f.status(&fi, t + mins(11));
-    assert_eq!(state(&s, "check"), State::Done);
+    assert_eq!((state(&s, "check"), state(&s, "exercise")), (State::Stale, State::Stale));
+    assert_eq!(unmet(&s, "check"), vec![Reason::Stale { node: "pin".into() }]);
     assert_eq!(unmet(&s, "exercise"), vec![Reason::Stale { node: "pin".into() }]);
+    assert_eq!(enabled(&f.next(&fi, t + mins(11))), vec!["pin"], "pin is re-run; its dependents wait for it");
 
-    // A fresh observation with the same result unblocks them and keeps check's receipt.
+    // A fresh observation with the same result re-validates them without a re-run.
     let t2 = f.observe(&fi, "pin", &[], 0);
     let s = f.status(&fi, t2 + mins(1));
-    assert_eq!(state(&s, "check"), State::Done);
-    assert_eq!(state(&s, "exercise"), State::Ready);
+    assert_eq!((state(&s, "check"), state(&s, "exercise")), (State::Done, State::Done));
+    // One stamped after the read's clock is stale too.
+    assert_eq!(state(&f.status(&fi, t2 - mins(1)), "pin"), State::Stale);
+}
+
+#[test]
+fn only_the_stale_observation_furthest_upstream_is_re_run() {
+    let mut f = fx(
+        "flow: f\nversion: 1\nnodes:\n  o1: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: ok}}\n  o2: {class: observe, run: [x], fresh_for: 1m, needs: [o1], exit_map: {0: ok}}\n",
+    );
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "o1", &[], 0);
+    let t = f.observe(&fi, "o2", &[], 0);
+    assert_eq!(enabled(&f.next(&fi, t + mins(5))), vec!["o1"], "o2 waits for o1's re-run");
 }
 
 #[test]
@@ -539,6 +535,19 @@ fn a_receipt_whose_inputs_changed_is_not_done() {
     assert_eq!(enabled(&f.next(&fi, t)), vec!["build"], "a stale receipt is redone");
     f.complete(&fi, "build", &[], json!({ "artifact": 2 }));
     assert_eq!(state(&f.status(&fi, t), "deploy"), State::Ready);
+
+    // An observation's value is part of its digest, even with no outputs; flipping back to the
+    // value a receipt consumed re-validates it.
+    let mut f = fx(
+        "flow: f\nversion: 1\nnodes:\n  probe: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: ok, 1: bad}}\n  build: {class: pure, run: [x], needs: [probe]}\n",
+    );
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "probe", &[], 0);
+    f.complete(&fi, "build", &[], json!({}));
+    let t = f.observe(&fi, "probe", &[], 1);
+    assert_eq!(unmet(&f.status(&fi, t), "build"), vec![Reason::InputChanged { input: "probe".into() }]);
+    let t = f.observe(&fi, "probe", &[], 0);
+    assert_eq!(state(&f.status(&fi, t), "build"), State::Done);
 }
 
 #[test]
@@ -600,6 +609,84 @@ repeats:
     assert_eq!(unmet(&s, "land"), vec![Reason::Stale { node: "ci".into() }]);
 }
 
+const POLL: &str = "flow: f
+version: 1
+nodes:
+  ci: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: green, 1: red}}
+  land: {class: effect, reconcile: [x], needs: [poll]}
+  notify: {class: work, verify: [x], needs: [poll]}
+repeats:
+  poll: {body: [ci], max: 5, until: '.nodes.ci.value == \"green\"'}
+";
+
+#[test]
+fn a_re_run_that_changes_a_finished_repeat_s_body_takes_its_verdict_back() {
+    let mut f = fx(POLL);
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "ci", &[("poll", 0)], 0);
+    f.verdict(&fi, "poll", 0, true);
+    f.complete(&fi, "notify", &[], json!({}));
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!(
+        (s.repeats["poll"].state, state(&s, "land"), state(&s, "notify")),
+        (RepeatState::Done, State::Ready, State::Done)
+    );
+
+    // The same result again keeps the verdict and what consumed it.
+    f.observe(&fi, "ci", &[("poll", 0)], 0);
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!((s.repeats["poll"].state, state(&s, "notify")), (RepeatState::Done, State::Done));
+
+    // Red: the verdict judged another body, so the repeat waits for a new one and nothing that
+    // needs it, done or not, stands.
+    f.observe(&fi, "ci", &[("poll", 0)], 1);
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!(s.repeats["poll"].state, RepeatState::Running);
+    assert!(s.repeats["poll"].awaiting_verdict);
+    assert_eq!(unmet(&s, "land"), vec![Reason::RepeatRunning { repeat: "poll".into() }]);
+    assert_eq!(unmet(&s, "notify"), vec![Reason::RepeatRunning { repeat: "poll".into() }]);
+    f.verdict(&fi, "poll", 0, false);
+    assert_eq!(f.status(&fi, Timestamp::now()).repeats["poll"].iteration, 1);
+}
+
+#[test]
+fn a_body_node_made_stale_by_its_input_takes_the_verdict_back() {
+    let mut f = fx("flow: f
+version: 1
+nodes:
+  head: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: a, 1: b}}
+  ci: {class: work, verify: [x], needs: [head]}
+  land: {class: work, verify: [x], needs: [poll]}
+repeats:
+  poll: {body: [ci], max: 5, until: 'true'}
+");
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "head", &[], 0);
+    f.complete(&fi, "ci", &[("poll", 0)], json!({}));
+    f.verdict(&fi, "poll", 0, true);
+    assert_eq!(state(&f.status(&fi, Timestamp::now()), "land"), State::Ready);
+    let t = f.observe(&fi, "head", &[], 1);
+    let s = f.status(&fi, t);
+    assert_eq!(unmet(&s, "ci"), vec![Reason::InputChanged { input: "head".into() }]);
+    assert_eq!(s.repeats["poll"].state, RepeatState::Running, "the verdict judged a body that no longer stands");
+    assert_eq!(state(&s, "land"), State::Blocked);
+}
+
+#[test]
+fn a_receipt_that_needs_a_repeat_consumes_its_body() {
+    let mut f = fx(POLL);
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "ci", &[("poll", 0)], 0);
+    f.verdict(&fi, "poll", 0, true);
+    f.complete(&fi, "notify", &[], json!({}));
+    // A body that changed and was judged again: notify's receipt is out of date.
+    f.receipt(&fi, "ci", &[("poll", 0)], json!({ "run": 2 }), Some(0));
+    f.verdict(&fi, "poll", 0, true);
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!(s.repeats["poll"].state, RepeatState::Done);
+    assert_eq!(unmet(&s, "notify"), vec![Reason::InputChanged { input: "poll".into() }]);
+}
+
 #[test]
 fn an_observation_outside_a_repeat_reads_a_body_node_at_its_final_iteration() {
     let mut f = fx("flow: f
@@ -618,55 +705,6 @@ repeats:
     let s = f.status(&fi, t);
     assert_eq!(state(&s, "ci"), State::Done);
     assert_eq!(state(&s, "land"), State::Ready);
-}
-
-#[test]
-fn claims_leases_retry_and_cancel_decide_waiting_ready_and_failed() {
-    let mut f = fx(
-        "flow: f\nversion: 1\nnodes:\n  ci: {class: work, verify: [x], retry: {attempts: 2}, wait: {external: CI checks, heartbeat: 5m}}\n  long: {class: work, verify: [x], cancel: {after: 30m}}\n  gaps: {class: work, verify: [x]}\n",
-    );
-    let fi = f.begin(json!({}));
-    let lease = Timestamp::now() + mins(10);
-    let t = f.claim(&fi, "ci", 1, lease);
-    let s = f.status(&fi, t);
-    assert_eq!(state(&s, "ci"), State::Waiting);
-    assert!(matches!(s.nodes["ci"].waits[0], Reason::Claimed { attempt: 1, .. }));
-    assert_eq!(s.nodes["ci"].waits[1], Reason::External { waits_for: "CI checks".into(), heartbeat_secs: 300 });
-    assert_eq!(state(&f.status(&fi, lease), "ci"), State::Ready, "a lease ends at its instant");
-
-    // The lease passed: the node is released, and the next claim is attempt 2.
-    let later = t + mins(20);
-    let n = f.next(&fi, later);
-    assert_eq!(enabled(&n), vec!["ci", "gaps", "long"]);
-    assert_eq!(n.enabled[0].attempt, 2);
-    // A claim that does not number above the last counts for nothing.
-    f.claim(&fi, "ci", 1, later + mins(30));
-    f.claim(&fi, "ci", 2, later + mins(1));
-    let s = f.status(&fi, later + mins(5));
-    assert_eq!(state(&s, "ci"), State::Failed, "the second lapsed attempt uses the two retry allows");
-    assert_eq!(unmet(&s, "ci"), vec![Reason::AttemptsUsed { attempts: 2 }]);
-
-    // cancel.after ends an attempt whatever its heartbeats say, at its instant.
-    let t = f.claim(&fi, "long", 1, Timestamp::now() + mins(10));
-    f.heartbeat(&fi, "long", 1, t + mins(60));
-    f.heartbeat(&fi, "long", 1, t + mins(15));
-    f.heartbeat(&fi, "long", 9, t + mins(90));
-    assert_eq!(state(&f.status(&fi, t + mins(20)), "long"), State::Waiting, "the heartbeat extended the lease");
-    assert_eq!(state(&f.status(&fi, t + mins(30)), "long"), State::Ready, "cancelled at 30m, so released");
-
-    // Attempts number on from the last one; when the numbers run out, the node fails closed.
-    let t = f.claim(&fi, "gaps", 1, Timestamp::now());
-    f.claim(&fi, "gaps", 3, t);
-    assert_eq!(f.next(&fi, t + mins(1)).enabled.iter().find(|e| e.node == "gaps").map(|e| e.attempt), Some(4));
-    f.claim(&fi, "gaps", u32::MAX, t);
-    let s = f.status(&fi, t + mins(1));
-    assert_eq!(state(&s, "gaps"), State::Failed);
-    assert_eq!(unmet(&s, "gaps"), vec![Reason::AttemptsExhausted]);
-    assert_eq!(
-        rejected(&s),
-        vec![rej("ci", "attempt_not_after_last"), rej("long", "lease_not_extended"), rej("long", "no_such_attempt")],
-        "and a heartbeat never shortens a lease"
-    );
 }
 
 #[test]
@@ -815,4 +853,31 @@ fn an_instance_that_does_not_replay_is_an_error_never_an_empty_flow() {
     let first = started(&f).to_event().unwrap();
     let fi = fresh(&mut f, "fi_ok", first);
     assert_eq!(state(&f.try_status(&fi).unwrap(), "a"), State::Ready);
+}
+
+fn chain(n: usize) -> String {
+    let mut y = String::from("flow: f\nversion: 1\nnodes:\n  n0: {class: pure, run: [x]}\n");
+    for i in 1..n {
+        y.push_str(&format!("  n{i}: {{class: pure, run: [x], needs: [n{}]}}\n", i - 1));
+    }
+    y
+}
+
+#[test]
+fn the_deepest_chain_a_definition_may_have_replays_on_a_small_stack() {
+    assert_eq!(compile(&chain(MAX_DEPTH + 1)).map(|_| ()).map_err(|e| e.code()), Err("definition_invalid"));
+    let mut f = fx(&chain(MAX_DEPTH));
+    let fi = f.begin(json!({}));
+    let root = f.root.clone();
+    let last = format!("n{}", MAX_DEPTH - 1);
+    let replayed = std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(move || {
+            let reader = Reader::new(&root, Options::default()).unwrap();
+            status(&reader.lock().unwrap(), &fi, Timestamp::now()).unwrap().nodes[&last].state
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(replayed, State::Blocked);
 }

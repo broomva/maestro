@@ -375,3 +375,26 @@ fn names_cannot_leave_their_directory() {
     let refused = ledger.lock().unwrap().append(&id("fi_a"), 0, event("../kind", 0));
     assert_eq!(code(refused), "invalid");
 }
+
+#[test]
+fn an_event_line_or_a_log_over_its_bound_is_refused_and_never_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    let body = serde_json::json!({ "s": "x".repeat(maestro_flow::log::MAX_LINE as usize) });
+    let huge = maestro_flow::NewEvent::new("Started", body);
+    assert_eq!(code(ledger.lock().unwrap().append(&id("fi_big"), 0, huge)), "too_large");
+    assert!(ledger.lock().unwrap().instances().unwrap().is_empty(), "nothing was written");
+
+    let fi = id("fi_a");
+    append_at_head(&mut ledger, &fi, event("Started", 0)).unwrap();
+    let log = root.join("instances/fi_a/events.jsonl");
+    let reader = Reader::new(&root, Options::default()).unwrap();
+    // At the bound the log is read (its zeros are a torn tail); a byte over, it is refused unread.
+    let resize = |len: u64| std::fs::OpenOptions::new().write(true).open(&log).unwrap().set_len(len).unwrap();
+    resize(maestro_flow::log::MAX_LOG);
+    assert_eq!(code(reader.lock().unwrap().log(&fi)), "torn_tail");
+    resize(maestro_flow::log::MAX_LOG + 1);
+    assert_eq!(code(reader.lock().unwrap().log(&fi)), "too_large");
+    assert_eq!(code(append_at_head(&mut ledger, &fi, event("Tick", 1))), "too_large");
+}

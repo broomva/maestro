@@ -6,8 +6,8 @@
 //!   node's edge or an observe node's `exit_map` value, `repeat` with `max`, `until` and
 //!   `on_exhausted`, declared waits (`wait` on work and effect nodes, the `human` class), and
 //!   `retry` and `cancel` per node. Subflows, traits and templates are refused as unsupported.
-//! - **Guards** are jq, checked at compile time and evaluated only by writers, through the
-//!   bounded [`evaluate`]; their verdicts are recorded in the log, and replay only reads them.
+//! - **Guards** are jq, checked at compile time; writers evaluate them (3b2) and record the
+//!   verdicts in the log, and replay only reads them.
 //! - **The IR** ([`Ir`]) is what a definition compiles to; it carries a content hash, and
 //!   [`ir::validate`] holds its rules: no unknown reference, no loop without a bound, no switch
 //!   case its subject does not declare, no effect without `reconcile`, and the class rules.
@@ -30,7 +30,6 @@ mod replay;
 pub use compile::{CompiledFlow, compile};
 pub use error::{CompileError, KernelError};
 pub use ir::{Ir, Iteration};
-pub use jq::{GuardRefusal, evaluate};
 pub use replay::{
     Begun, Enabled, Next, NodeStatus, Reason, Rejected, RepeatState, RepeatStatus, State, Status, next, start, status,
 };

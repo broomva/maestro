@@ -18,6 +18,13 @@ pub const IR_VERSION: u32 = 1;
 /// a replay's work bounded by the definition.
 pub const MAX_REPEAT: u32 = 1000;
 
+/// The most nodes a definition may declare.
+pub const MAX_NODES: usize = 512;
+
+/// The longest chain of dependencies (needs, switches, repeat bodies) a definition may have,
+/// counted in nodes and repeats. Replay follows a chain by recursion, so this bounds its stack.
+pub const MAX_DEPTH: usize = 128;
+
 /// A repeat's iteration index for each repeat enclosing a node; `{}` outside any repeat.
 pub type Iteration = BTreeMap<String, u32>;
 
@@ -114,21 +121,13 @@ pub struct Exit {
     pub value: String,
 }
 
+/// A declared input of an observation: a param (fixed for the instance, so the observation
+/// never goes stale by it) or a node it also needs (whose receipt digest it consumes).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "from", rename_all = "snake_case")]
 pub enum Input {
     Param { name: String },
     Node { node: String },
-}
-
-impl Input {
-    /// The key a receipt records this input's digest under: `params.<name>` or the node id.
-    pub fn key(&self) -> String {
-        match self {
-            Input::Param { name } => format!("params.{name}"),
-            Input::Node { node } => node.clone(),
-        }
-    }
 }
 
 /// Who performs a node and how to start them: the hint `next` returns. The kernel launches nothing.
@@ -170,6 +169,9 @@ fn unknown(from: impl Into<String>, name: &str) -> CompileError {
 pub fn validate(ir: &Ir) -> Result<(), CompileError> {
     if ir.ir_version != IR_VERSION {
         return Err(CompileError::invalid(format!("IR version {} is not {IR_VERSION}", ir.ir_version)));
+    }
+    if ir.nodes.len() > MAX_NODES {
+        return Err(CompileError::invalid(format!("{} nodes is more than {MAX_NODES}", ir.nodes.len())));
     }
     let node = |from: &str, name: &str| ir.nodes.get(name).ok_or_else(|| unknown(from, name));
     let repeat = |from: &str, name: &str| ir.repeats.get(name).ok_or_else(|| unknown(from, name));
@@ -280,42 +282,70 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
             }
         }
     }
-    acyclic(ir)
+    topology(ir)
 }
 
-/// Refuses a cycle through `needs`, switches and repeat bodies: the only loops are repeats.
-fn acyclic(ir: &Ir) -> Result<(), CompileError> {
-    // Vertices: `n:<node>` and `r:<repeat>`. An edge points from a vertex to what it waits on.
+/// Refuses a cycle through `needs`, switches and repeat bodies (the only loops are repeats) and
+/// a chain longer than [`MAX_DEPTH`], in one topological pass.
+fn topology(ir: &Ir) -> Result<(), CompileError> {
+    let member: BTreeMap<&str, &str> =
+        ir.repeats.iter().flat_map(|(rid, r)| r.body.iter().map(move |b| (b.as_str(), rid.as_str()))).collect();
+    // Vertices: `n:<node>` and `r:<repeat>`. An edge points from a vertex to what it waits on;
+    // waiting on a body node from outside its repeat waits on the whole repeat too.
     let mut deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (id, n) in &ir.nodes {
         let set = deps.entry(format!("n:{id}")).or_default();
-        for need in &n.needs {
-            set.insert(match need {
-                Need::Node { node } => format!("n:{node}"),
-                Need::Repeat { repeat } | Need::Exhausted { repeat } => format!("r:{repeat}"),
-            });
-        }
-        if let Some(case) = &n.switch {
-            set.insert(format!("n:{}", case.on));
+        let on = n.needs.iter().filter_map(|need| match need {
+            Need::Node { node } => Some(node.as_str()),
+            Need::Repeat { repeat } | Need::Exhausted { repeat } => {
+                set.insert(format!("r:{repeat}"));
+                None
+            }
+        });
+        let on: Vec<&str> = on.chain(n.switch.as_ref().map(|c| c.on.as_str())).collect();
+        for m in on {
+            set.insert(format!("n:{m}"));
+            if let Some(r) = member.get(m)
+                && member.get(id.as_str()) != Some(r)
+            {
+                set.insert(format!("r:{r}"));
+            }
         }
     }
     for (rid, r) in &ir.repeats {
-        let set = deps.entry(format!("r:{rid}")).or_default();
-        set.extend(r.body.iter().map(|b| format!("n:{b}")));
+        deps.entry(format!("r:{rid}")).or_default().extend(r.body.iter().map(|b| format!("n:{b}")));
     }
-    // Kahn: peel vertices with no unfinished dependency; whatever is left lies on a cycle.
-    let mut left = deps;
-    loop {
-        let free: Vec<String> =
-            left.iter().filter(|(_, ds)| ds.iter().all(|d| !left.contains_key(d))).map(|(v, _)| v.clone()).collect();
-        if free.is_empty() {
-            break;
-        }
-        for v in free {
-            left.remove(&v);
+    let mut waiting: BTreeMap<&str, usize> = deps.iter().map(|(v, ds)| (v.as_str(), ds.len())).collect();
+    let mut dependents: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (v, ds) in &deps {
+        for d in ds {
+            dependents.entry(d.as_str()).or_default().push(v.as_str());
         }
     }
-    let Some(v) = left.keys().next() else { return Ok(()) };
+    let mut depth: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut free: Vec<&str> = waiting.iter().filter(|(_, n)| **n == 0).map(|(v, _)| *v).collect();
+    let mut finished = 0;
+    while let Some(v) = free.pop() {
+        finished += 1;
+        let d = depth.get(v).copied().unwrap_or(0) + 1;
+        if d > MAX_DEPTH {
+            return Err(CompileError::invalid(format!("a chain of dependencies is deeper than {MAX_DEPTH}")));
+        }
+        for w in dependents.get(v).map(Vec::as_slice).unwrap_or_default() {
+            let at = depth.entry(w).or_default();
+            *at = (*at).max(d);
+            if let Some(n) = waiting.get_mut(w) {
+                *n -= 1;
+                if *n == 0 {
+                    free.push(w);
+                }
+            }
+        }
+    }
+    if finished == deps.len() {
+        return Ok(());
+    }
+    let v = waiting.iter().find(|(_, n)| **n > 0).map_or("", |(v, _)| *v);
     let what = match v.strip_prefix("n:") {
         Some(id) => format!("node {id}"),
         None => format!("repeat {}", v.strip_prefix("r:").unwrap_or(v)),

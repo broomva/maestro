@@ -2,7 +2,7 @@
 //! tables name the case that failed.
 
 use maestro_flow::kernel::compile;
-use maestro_flow::kernel::ir::{Class, Need};
+use maestro_flow::kernel::ir::{Class, MAX_NODES, Need};
 
 const VERIFY: &str = include_str!("../flows/verify.yaml");
 
@@ -98,6 +98,10 @@ fn a_cycle_is_refused_because_only_a_repeat_may_loop() {
             (
                 "a body node needing its own repeat",
                 "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x], needs: [r]}\nrepeats:\n  r: {body: [a], max: 2}\n",
+            ),
+            (
+                "an outside node needing a body node whose sibling needs it back",
+                "flow: f\nversion: 1\nnodes:\n  o: {class: pure, run: [x], needs: [m]}\n  m: {class: pure, run: [x]}\n  b: {class: pure, run: [x], needs: [o]}\nrepeats:\n  r: {body: [m, b], max: 2}\n",
             ),
         ],
     );
@@ -277,4 +281,14 @@ fn class_rules_are_held() {
     );
     let ok = "flow: f\nversion: 1\nnodes:\n  b: {class: pure, run: [x]}\n  o: {class: observe, run: [x], needs: [b], inputs: [b], exit_map: {0: ok}}\n  h: {class: human, ask: Approve the budget?, retry: {attempts: 1}, cancel: {after: 1h}}\n";
     assert_eq!(code(ok), "ok", "{:?}", compile(ok).err());
+}
+
+#[test]
+fn a_definition_holds_at_most_max_nodes() {
+    let wide = |n: usize| {
+        let nodes: String = (0..n).map(|i| format!("  n{i}: {{class: pure, run: [x]}}\n")).collect();
+        format!("flow: f\nversion: 1\nnodes:\n{nodes}")
+    };
+    assert_eq!(code(&wide(MAX_NODES)), "ok");
+    assert_eq!(code(&wide(MAX_NODES + 1)), "definition_invalid");
 }

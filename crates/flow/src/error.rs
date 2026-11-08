@@ -60,6 +60,10 @@ pub enum FlowError {
     /// An id, host or event kind that is not allowed.
     #[error("{what} {value:?} is not allowed: {reason}.")]
     Invalid { what: &'static str, value: String, reason: &'static str },
+    /// An event line or a log over its bound ([`crate::log::MAX_LINE`], [`crate::log::MAX_LOG`]):
+    /// refused at append, and never read into memory.
+    #[error("The {what} is {size} bytes, over its limit of {limit}, so it was not written or read.")]
+    TooLarge { what: &'static str, size: u64, limit: u64 },
     /// An operator function was asked to act on a state it does not handle.
     #[error("{0}")]
     OperatorRefused(String),
@@ -93,6 +97,7 @@ impl FlowError {
             FlowError::UnknownInstance { .. } => "unknown_instance",
             FlowError::Symlink { .. } => "symlink",
             FlowError::Invalid { .. } => "invalid",
+            FlowError::TooLarge { .. } => "too_large",
             FlowError::OperatorRefused(_) => "operator_refused",
             FlowError::Projection(_) => "projection",
             FlowError::Io { .. } => "io",

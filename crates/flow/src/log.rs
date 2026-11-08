@@ -12,6 +12,25 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+/// The largest event line, newline included.
+pub const MAX_LINE: u64 = 1 << 20;
+
+/// The largest log an instance may have. A larger file is refused before it is read.
+pub const MAX_LOG: u64 = 64 << 20;
+
+/// Refuses a line over [`MAX_LINE`], or one that would take a log of `log_len` bytes over
+/// [`MAX_LOG`].
+pub(crate) fn fits(line_len: u64, log_len: u64) -> Result<()> {
+    if line_len > MAX_LINE {
+        return Err(FlowError::TooLarge { what: "event line", size: line_len, limit: MAX_LINE });
+    }
+    let total = log_len.saturating_add(line_len);
+    if total > MAX_LOG {
+        return Err(FlowError::TooLarge { what: "log", size: total, limit: MAX_LOG });
+    }
+    Ok(())
+}
+
 /// One event as it is stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
@@ -156,4 +175,18 @@ pub(crate) fn next_line(log: &Log, event: &NewEvent) -> Result<(Event, Vec<u8>)>
     })?;
     line.push(b'\n');
     Ok((stored, line))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_line_and_a_log_fit_up_to_their_bounds_and_not_a_byte_more() {
+        let code = |r: Result<()>| r.map_or_else(|e| e.code().to_string(), |()| "ok".to_string());
+        assert_eq!(code(fits(MAX_LINE, 0)), "ok");
+        assert_eq!(code(fits(MAX_LINE + 1, 0)), "too_large");
+        assert_eq!(code(fits(10, MAX_LOG - 10)), "ok");
+        assert_eq!(code(fits(10, MAX_LOG - 9)), "too_large");
+    }
 }

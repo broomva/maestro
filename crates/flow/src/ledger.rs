@@ -315,7 +315,7 @@ pub(crate) fn refuse_retired(root: &Dir, id: &InstanceId) -> Result<()> {
 /// The log's bytes; `None` when the instance has none.
 pub(crate) fn read_log(root: &Dir, id: &InstanceId) -> Result<Option<Vec<u8>>> {
     match instances(root)?.dir(id.as_str())? {
-        Some(dir) => dir.read(EVENTS),
+        Some(dir) => dir.read(EVENTS, log::MAX_LOG),
         None => Ok(None),
     }
 }
@@ -365,10 +365,11 @@ impl WriteGuard<'_> {
         let instances = instances(&self.root)?;
         let dir = instances.dir(id.as_str())?;
         let existing = match &dir {
-            Some(dir) => dir.read(EVENTS)?,
+            Some(dir) => dir.read(EVENTS, log::MAX_LOG)?,
             None => None,
         };
         let created = existing.is_none();
+        let existing_len = existing.as_ref().map_or(0, |b| b.len() as u64);
         let log = match existing {
             Some(bytes) => log::verify(id, &bytes)?,
             None if expected_seq == 0 => Log { instance: id.clone(), events: Vec::new(), last_hash: None },
@@ -378,6 +379,7 @@ impl WriteGuard<'_> {
             return Err(FlowError::StaleSeq { instance: id.to_string(), expected: expected_seq, current: log.seq() });
         }
         let (stored, line) = log::next_line(&log, &event)?;
+        log::fits(line.len() as u64, existing_len)?;
         pause!("append_checked");
         let dir = match dir {
             Some(dir) => dir,
