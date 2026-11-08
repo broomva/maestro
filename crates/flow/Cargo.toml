@@ -1,0 +1,22 @@
+[package]
+name = "maestro-flow"
+description = "The flow ledger's storage: one writer, a hash-chained event log per instance, a rebuildable SQLite projection."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
