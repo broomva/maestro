@@ -136,6 +136,9 @@ pub(crate) fn run(argv: &[String], cwd: &Path, limits: &Limits) -> Ran {
         }
         std::thread::sleep(TICK);
     };
+    // The leader too, by itself, so reaping it can never wait on a command still running. A no-op
+    // once it has been reaped.
+    let _ = child.kill();
     let _ = child.wait();
 
     let mut out = [Vec::new(), Vec::new()];

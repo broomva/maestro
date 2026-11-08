@@ -1113,7 +1113,7 @@ mutate $fk/write.rs '        && !p.spent
         && now < p.lease_until' '        && now < p.lease_until'
 mutate $fk/write.rs '        && now < p.lease_until' '        && now <= p.lease_until'
 mutate $fk/write.rs '        && p.inputs == enabled.inputs' ''
-mutate $fk/write.rs '    let last = prior.map_or(0, |p| p.attempt);' '    let last = 0;'
+mutate $fk/write.rs '    let last = prior.map_or(0, |p| p.attempt);' '    let last: u32 = 0;'
 mutate $fk/write.rs '    let attempt = last.checked_add(1).ok_or_else(' '    let attempt = Some(last.wrapping_add(1)).ok_or_else('
 mutate $fk/write.rs '                    if c.attempt <= last {' '                    if false {'
 mutate $fk/write.rs '        token_sha256: line_hash(token.as_bytes()),' '        token_sha256: token.clone(),'
