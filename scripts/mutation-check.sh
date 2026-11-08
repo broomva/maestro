@@ -965,6 +965,7 @@ mutate $fk/replay.rs '        seq: log.seq(),
         nodes,'
 mutate $fk/replay.rs '                    Loop::Exhausted(_) => Dep::Exhausted(rid.to_string()),' '                    Loop::Exhausted(_) => Dep::Running(rid.to_string()),'
 mutate $fk/replay.rs '                    Loop::Done(i) => Dep::Eval(self.node(m, &Iteration::from([(rid.to_string(), i)]))),' '                    Loop::Done(_) => Dep::Running(rid.to_string()),'
+mutate $fk/replay.rs '                if !(e.dead || e.recorded()) {' '                if !e.recorded() {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

@@ -338,6 +338,27 @@ fn a_repeat_that_reaches_max_is_exhausted_and_routes_to_on_exhausted() {
     );
 }
 
+#[test]
+fn a_branch_not_taken_does_not_hold_up_a_repeat() {
+    let mut f = fx("flow: f
+version: 1
+nodes:
+  pick: {class: choice, edges: {quick: {guard: 'true'}, deep: {guard: 'true'}}}
+  skim: {class: work, verify: [x], switch: {on: pick, case: quick}}
+  dig: {class: work, verify: [x], switch: {on: pick, case: deep}}
+  after: {class: work, verify: [x], needs: [tries]}
+repeats:
+  tries: {body: [pick, skim, dig], max: 2, until: '.nodes.pick.value == \"quick\"'}
+");
+    let fi = f.begin(json!({}));
+    let now = Timestamp::now();
+    f.choose(&fi, "pick", &[("tries", 0)], "quick");
+    f.complete(&fi, "skim", &[("tries", 0)], json!({}));
+    let s = f.status(&fi, now);
+    assert_eq!(s.repeats["tries"].state, RepeatState::Done, "dig was not taken, so iteration 0 is settled");
+    assert_eq!(state(&s, "after"), State::Ready);
+}
+
 fn verify_params(surface: bool) -> Value {
     let mut p = json!({ "repo": "/repo", "head": "9f2c", "check": "make check" });
     if surface {
