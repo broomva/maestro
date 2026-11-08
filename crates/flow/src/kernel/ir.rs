@@ -58,6 +58,11 @@ pub struct Ir {
     pub params: BTreeMap<String, bool>,
     pub nodes: BTreeMap<String, Node>,
     pub repeats: BTreeMap<String, Repeat>,
+    /// The directory the flow's commands run in, `{{params.<name>}}` filled in when they run. A
+    /// flow that declares none has its commands refused `workdir_invalid`. Left out of the JSON
+    /// when absent, so the IR of a flow without one hashes as it did before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

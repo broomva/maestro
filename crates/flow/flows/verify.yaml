@@ -7,6 +7,8 @@
 flow: verify
 version: 1
 params: [repo, head, check, surface?]
+# Every command runs in the repository under check.
+workdir: "{{params.repo}}"
 nodes:
   # V1: the repository is at params.head; exit 0 when it is, 1 when HEAD moved.
   pin:

@@ -22,6 +22,8 @@ pub(crate) struct Definition {
     pub forks: Vec<(String, ForkDef)>,
     #[serde(default, deserialize_with = "entries")]
     pub repeats: Vec<(String, RepeatDef)>,
+    /// The directory every command runs in (`workdir: "{{params.repo}}"`).
+    pub workdir: Option<String>,
     /// Traits (`uses: [verified-finish@1]`): phase 2.
     pub uses: Option<serde_yaml::Value>,
     /// Templates: phase 2.

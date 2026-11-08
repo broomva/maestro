@@ -11,8 +11,13 @@ struct L {
 impl L {
     fn new(yaml: &str) -> L {
         let flow = compile(yaml).unwrap_or_else(|e| panic!("{e}"));
-        let started =
-            Started { flow: flow.name(), ir_hash: flow.hash().into(), ir: flow.ir().clone(), params: json!({}) };
+        let started = Started {
+            flow: flow.name(),
+            ir_hash: flow.hash().into(),
+            ir: flow.ir().clone(),
+            params: json!({}),
+            owner: None,
+        };
         let ev = Event {
             seq: 1,
             prev_event: None,

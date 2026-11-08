@@ -1092,6 +1092,105 @@ mutate $fk/replay.rs '                if let Some(judged) = self.fold.verdicts.g
 mutate $fk/replay.rs '            seq: log.seq(),
             nodes,' '            seq: jiff::Timestamp::now().as_nanosecond() as u64,
             nodes,'
+# Flow writers (BRO-3633 PR 3b2a): ownership, claims, tokens, leases, receipts.
+# Ownership: a marker (non-empty) to write anything, start included; only the owner's session
+# and marker together; an instance with no recorded owner takes no write.
+mutate $fk/write.rs '    let marker = session.owner_marker().filter(|m| !m.is_empty()).ok_or(Refusal::NoOwnerMarker)?;' '    let marker = session.owner_marker().ok_or(Refusal::NoOwnerMarker)?;'
+mutate $fk/replay.rs '    let owner = Some(write::owner(session)?);' '    let owner = write::owner(session).ok();'
+mutate $fk/write.rs '    let Some(owner) = &started.owner else {' '    let Some(owner) = started.owner.as_ref().or(Some(&me)) else {'
+mutate $fk/write.rs '    if *owner != me {' '    if false {'
+mutate $fk/write.rs '    if *owner != me {' '    if owner.marker_sha256 != me.marker_sha256 {'
+mutate $fk/write.rs '    if *owner != me {' '    if owner.session != me.session {'
+mutate $fk/write.rs '    check_owner(&started, instance, session)?;
+    let Some(n) = started.ir.nodes.get(node) else {' '    let Some(n) = started.ir.nodes.get(node) else {'
+mutate $fk/write.rs '    check_owner(&started, instance, session)?;
+    let claims = Claims::fold(&log)?;' '    let claims = Claims::fold(&log)?;'
+# Claims: kernel classes only, an enabled node only (out of order and write-time freshness), one
+# live claim per node, attempts counted per node and iteration with checked arithmetic.
+mutate $fk/write.rs '    if !matches!(n.class, Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. }) {' '    if false {'
+mutate $fk/write.rs '    let Some(enabled) = next.enabled.iter().find(|e| e.node == node) else {' '    let Some(enabled) = next.enabled.iter().find(|e| e.node == node).or(next.enabled.first()) else {'
+mutate $fk/write.rs '        && !p.spent
+        && now < p.lease_until' '        && now < p.lease_until'
+mutate $fk/write.rs '        && now < p.lease_until' '        && now <= p.lease_until'
+mutate $fk/write.rs '        && p.inputs == enabled.inputs' ''
+mutate $fk/write.rs '    let last = prior.map_or(0, |p| p.attempt);' '    let last = 0;'
+mutate $fk/write.rs '    let attempt = last.checked_add(1).ok_or_else(' '    let attempt = Some(last.wrapping_add(1)).ok_or_else('
+mutate $fk/write.rs '                    if c.attempt <= last {' '                    if false {'
+mutate $fk/write.rs '        token_sha256: line_hash(token.as_bytes()),' '        token_sha256: token.clone(),'
+# Leases: the node's heartbeat, bounded; a checked clock; a heartbeat moves the lease.
+mutate $fk/write.rs '    secs(node.class.wait().map_or(DEFAULT_LEASE_SECS, |w| w.heartbeat).min(MAX_LEASE_SECS))' '    secs(node.class.wait().map_or(DEFAULT_LEASE_SECS, |w| w.heartbeat))'
+mutate $fk/write.rs '    secs(node.class.wait().map_or(DEFAULT_LEASE_SECS, |w| w.heartbeat).min(MAX_LEASE_SECS))' '    secs(DEFAULT_LEASE_SECS)'
+mutate $fk/write.rs '    now.checked_add(lease).map_err(|_| Refusal::ClockOutOfRange)' '    Ok(now.checked_add(lease).unwrap_or(now))'
+mutate $fk/write.rs '                        rec.lease_until = lease_until;' ''
+# Tokens: bounded; a spent token is refused; a lease ends at its time, or when a later claim
+# took the node; the claim's iteration must be current (not moved on, not exhausted) and its
+# inputs unchanged; a receipt of the claim's attempt spends it.
+mutate $fk/write.rs '    if token.len() > MAX_TOKEN {' '    if token.len() >= MAX_TOKEN {'
+mutate $fk/write.rs '    if token.len() > MAX_TOKEN {' '    if false {'
+mutate $fk/write.rs '    if rec.spent {' '    if false {'
+mutate $fk/write.rs '                        rec.spent = true;' ''
+mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if now >= rec.lease_until {'
+mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if latest != Some(sha) || now > rec.lease_until {'
+mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if latest != Some(sha) {'
+mutate $fk/write.rs '    if *iteration != rec.iteration || state == Some(State::Exhausted) {' '    if state == Some(State::Exhausted) {'
+mutate $fk/write.rs '    if *iteration != rec.iteration || state == Some(State::Exhausted) {' '    if *iteration != rec.iteration {'
+mutate $fk/write.rs '    if *inputs != rec.inputs {' '    if false {'
+# Complete: limits and outputs bounded; enabled (fresh) before and after the run; the flows
+# lock released while the command runs; everything checked again after it at the advanced
+# clock; only the command's own exit status makes a receipt.
+mutate $fk/write.rs '    limits.check().map_err(|detail| Refusal::InvalidLimits { detail })?;' ''
+mutate $fk/write.rs '    check_outputs(outputs)?;' ''
+mutate $fk/write.rs '    if !(outputs.is_object() || outputs.is_null()) {' '    if false {'
+mutate $fk/write.rs '    if bytes > MAX_OUTPUTS {' '    if bytes >= MAX_OUTPUTS {'
+mutate $fk/write.rs '    if bytes > MAX_OUTPUTS {' '    if false {'
+mutate $fk/write.rs '    if depth >= MAX_NESTING {' '    if depth > MAX_NESTING {'
+mutate $fk/write.rs '    if depth >= MAX_NESTING {' '    if false {'
+mutate $fk/write.rs '    if !held.next.enabled.iter().any(|e| e.node == held.rec.node) {' '    if false {'
+mutate $fk/write.rs '    drop(guard);
+    let ran_at = later(now, clock)?;
+    let ran = exec::run(&plan.argv, &plan.cwd, limits);' '    let ran_at = later(now, clock)?;
+    let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    drop(guard);'
+mutate $fk/write.rs '    let held = hold(&guard, session, &instance, &sha, after)?;' '    let _ = after;
+    let held = held;'
+mutate $fk/write.rs '    let after = later(now, clock)?;' '    let after = now;'
+mutate $fk/write.rs '    if let Err(unfit) = prepare(&held, &outputs) {' '    if let Err(unfit) = Ok::<(), Unfit>(()) {'
+mutate $fk/write.rs '    let Some(exit) = code else {' '    let Some(exit) = code.or(Some(0)) else {'
+mutate $fk/write.rs 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|m| m.exit == exit))' 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|_| true))'
+mutate $fk/write.rs '        _ => (exit != 0).then(' '        _ => false.then('
+# Commands: params fill placeholders within one byte budget, only declared params, only scalars;
+# the workdir is declared, absolute and a directory.
+mutate $fk/write.rs '        left -= filled.len();' ''
+mutate $fk/write.rs '        if out.len() > budget {' '        if out.len() >= budget {'
+mutate $fk/write.rs '        if out.len() > budget {' '        if false {'
+mutate $fk/write.rs '                .filter(|name| ir.params.contains_key(*name))' '                .filter(|_| true)'
+mutate $fk/write.rs '                Some(_) => return Err(format!("param {name} is not a string, number or boolean")),' '                Some(_) => {}'
+mutate $fk/write.rs '    if !cwd.is_absolute() || !cwd.is_dir() {' '    if !cwd.is_dir() {'
+mutate $fk/write.rs '    if !cwd.is_absolute() || !cwd.is_dir() {' '    if !cwd.is_absolute() {'
+# Running: argv with no shell, a cleared environment but the allowed names, a process group
+# killed when the command exits, times out or floods, a byte cap kept to the byte, limits bounded.
+fx=crates/flow/src/kernel/exec.rs
+mutate $fx '    let mut cmd = Command::new(program);
+    cmd.args(args)' '    let mut cmd = Command::new("sh");
+    cmd.args(["-c".to_string(), argv.join(" ")])'
+mutate $fx '.current_dir(cwd).env_clear().stdin(' '.current_dir(cwd).stdin('
+mutate $fx '            cmd.env(name, value);' ''
+mutate $fx '    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);' ''
+mutate $fx 'rustix::process::kill_process_group(' 'rustix::process::kill_process('
+mutate $fx '            Ok(Some(status)) => {
+                kill_group(&child);' '            Ok(Some(status)) => {'
+mutate $fx '        if Instant::now() >= deadline {' '        if false {'
+mutate $fx '        if over.load(Ordering::SeqCst) {
+            kill_group(&child);' '        if false {
+            kill_group(&child);'
+mutate $fx '    if over.load(Ordering::SeqCst) {
+        let detail' '    if false {
+        let detail'
+mutate $fx '            Ok(n) if kept.len().saturating_add(n) > cap =>' '            Ok(n) if kept.len().saturating_add(n) >= cap =>'
+mutate $fx '        if self.timeout < Duration::from_millis(1) || self.timeout > MAX_TIMEOUT {' '        if self.timeout > MAX_TIMEOUT {'
+mutate $fx '        if self.timeout < Duration::from_millis(1) || self.timeout > MAX_TIMEOUT {' '        if self.timeout < Duration::from_millis(1) {'
+mutate $fx '        if self.max_output == 0 || self.max_output > MAX_OUTPUT {' '        if self.max_output > MAX_OUTPUT {'
+mutate $fx '        if self.max_output == 0 || self.max_output > MAX_OUTPUT {' '        if self.max_output == 0 {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

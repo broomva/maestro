@@ -4,5 +4,6 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod claims;
 mod compile;
 mod schedule;

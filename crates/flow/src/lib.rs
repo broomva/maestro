@@ -91,8 +91,9 @@
 //!
 //! Every refusal carries a stable code, [`FlowError::code`].
 //!
-//! The flow kernel built on this layer (definitions, the compiler and the scheduler) is
-//! [`kernel`].
+//! The flow kernel built on this layer (definitions, the compiler, the scheduler and the claim
+//! and complete writers) is [`kernel`]. The kernel is the only part of the crate that starts a
+//! process: `kernel::complete` runs a node's command.
 
 /// A pause point for the crate's own unit tests (`hooks`). Outside `cfg(test)` it expands to
 /// nothing, so no other build, binary or dependent crate can reach one.

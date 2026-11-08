@@ -1,9 +1,9 @@
 //! The kernel's event kinds, each a typed body stored in the storage layer's generic event
 //! (`kind` plus a JSON `body`). Replay reads only these kinds; any other kind fails the replay.
 //!
-//! This PR writes only `Started` (through `start`). `Claimed`, `Completed`, `Refused`, `Chosen`,
-//! `Heartbeat` and `Guarded` are defined here so their writers can be added without changing
-//! what replay reads.
+//! The kernel writes `Started` (`start`), and `Claimed`, `Heartbeat`, `Completed` and `Refused`
+//! (`claim`, `heartbeat`, `complete`, in `write`). `Chosen` and `Guarded` are defined here so their
+//! writers can be added without changing what replay reads.
 //!
 //! A receipt (`Completed`, `Chosen`) records in `inputs` the digest of every receipt it consumed:
 //! each node it needs or switches on, by node id ([`receipt_digest`]). `status` and `next` name
@@ -13,6 +13,7 @@
 use super::error::KernelError;
 use super::ir::{Ir, Iteration};
 use crate::log::NewEvent;
+use maestro_core::session::SessionRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -36,6 +37,25 @@ pub struct Started {
     pub ir_hash: String,
     pub ir: Ir,
     pub params: Value,
+    /// The session that started the instance, and so the only one that may write it. `None` in
+    /// a log written before owners were recorded: such an instance takes no write.
+    #[serde(default)]
+    pub owner: Option<Owner>,
+}
+
+/// An instance's owner: a session and the digest of its owner marker, together. The marker alone
+/// is not an identity (Direct sessions sharing a token share a marker), and a replacement session
+/// keeps the `SessionRef` with a new marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Owner {
+    pub session: SessionRef,
+    /// [`marker_digest`] of the owner marker; the marker itself is never written.
+    pub marker_sha256: String,
+}
+
+/// The `sha256:<hex>` digest of an owner marker, as `Started` records it.
+pub fn marker_digest(marker: &str) -> String {
+    crate::log::line_hash(marker.as_bytes())
 }
 
 /// Who performed an attempt.

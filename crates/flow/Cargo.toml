@@ -1,6 +1,6 @@
 [package]
 name = "maestro-flow"
-description = "The flow ledger and its kernel: one writer, a hash-chained event log per instance, a rebuildable SQLite projection, flow definitions and a read-only scheduler."
+description = "The flow ledger and its kernel: one writer, a hash-chained event log per instance, a rebuildable SQLite projection, flow definitions, a read-only scheduler, and claims and receipts with kernel-run verifies."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,7 @@ license.workspace = true
 doctest = false
 
 [dependencies]
+maestro-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -183,6 +183,7 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
         params: params.into_iter().map(|(name, required)| (name.to_string(), required)).collect(),
         nodes,
         repeats,
+        workdir: def.workdir,
     };
     ir::validate(&ir)?;
     check_guards(&ir)?;
