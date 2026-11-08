@@ -105,6 +105,7 @@ macro_rules! pause {
 }
 
 mod at;
+pub mod clock;
 mod error;
 #[cfg(test)]
 extern crate self as maestro_flow;

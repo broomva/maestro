@@ -118,11 +118,12 @@ pub enum Refusal {
     AttemptOverflow { node: String },
     #[error("The command limits are not allowed: {detail}.")]
     InvalidLimits { detail: String },
-    /// The caller's clock, plus a lease or a command's run, is past the last time there is.
+    /// The clock plus a lease is past the last time there is.
     #[error("The clock is out of range.")]
     ClockOutOfRange,
-    /// The caller's clock is earlier than the instance's last event; the clock never goes back.
-    #[error("The clock ({now}) is earlier than the instance's last event ({at}); read the clock again.")]
+    /// The wall clock reads earlier than the instance's last event: it stepped back. Nothing is
+    /// written until it passes that event.
+    #[error("The clock ({now}) is earlier than the instance's last event ({at}); try again once it is past it.")]
     ClockBehind { now: String, at: String },
 }
 

@@ -37,7 +37,7 @@
 //! `run`, a work node's `verify`, an observe node's `run` (its value is its exit status through
 //! `exit_map`; any other status fails closed). The flows lock is not held while the command runs:
 //! it is dropped, and after the run everything is checked again under the lock, against the log
-//! as it is then and at the clock advanced by the run, before anything is appended. A pass appends
+//! as it is then and at a fresh read of the clock, before anything is appended. A pass appends
 //! `Completed`, the receipt, which spends the token. Anything else about the work appends
 //! `Refused` with a code and keeps the token, so the caller can repair and complete again while
 //! the lease holds. A completion an agent claims is never a receipt: only the command the kernel
@@ -51,11 +51,21 @@
 //!
 //! # The clock
 //!
-//! As with the reads, the clock is the caller's `now`; `complete` advances it by the time its
-//! command took. Leases and freshness are judged at that clock. The clock never goes back: a
-//! `now` earlier than the instance's last event is refused `clock_behind`, with nothing written
-//! (try again with the clock read again). The CLI and MCP verbs (slice 4) must pass the wall
-//! clock.
+//! The writers take no clock from their caller. Each reads the wall clock ([`crate::clock`]), the
+//! one the storage layer stamps every event's `at` with, under the flows lock and right before the
+//! checks it serves: lease expiry, write-time freshness and the claim's inputs. A lease ends at
+//! that read plus the node's lease. `complete` stamps `verify.ran_at` with a read taken as its
+//! command starts, and after the run reads the clock again, under the lock, for every check before
+//! the append; it never adds a measured duration to an earlier read (a monotonic clock stops while
+//! the machine sleeps, so a run's end would fall behind the wall clock and a lease or an input
+//! would be judged before its time). So no caller and no monotonic drift can make an observation
+//! or a lease look fresher or less expired than the wall clock says.
+//!
+//! A wall clock that reads earlier than the instance's last event has stepped back. The write is
+//! refused `clock_behind`, with nothing written, and goes on once the clock passes that event.
+//! Judging at the last event's time instead would fail closed for the checks, but would stamp a
+//! run's start and a lease's end later than the wall clock, making an observation younger and a
+//! lease longer than they are; refusing never fails open.
 
 use super::error::{KernelError, Refusal};
 use super::events::{
@@ -64,6 +74,7 @@ use super::events::{
 use super::exec::{self, Limits, Ran};
 use super::ir::{Class, Ir, Iteration, Node};
 use super::replay::{Next, State, next_of, pinned, secs};
+use crate::clock;
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, WriteGuard, random_epoch};
 use crate::log::{Log, MAX_LINE, MAX_NESTING, line_hash, nesting};
@@ -73,7 +84,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Instant;
 
 /// A claim's lease, in seconds, for a node that declares no `wait.heartbeat`.
 pub const DEFAULT_LEASE_SECS: u64 = 600;
@@ -164,12 +174,6 @@ fn until(now: Timestamp, lease: SignedDuration) -> Result<Timestamp, Refusal> {
     now.checked_add(lease).map_err(|_| Refusal::ClockOutOfRange)
 }
 
-/// The caller's clock advanced by the time since `since`.
-fn later(now: Timestamp, since: Instant) -> Result<Timestamp, Refusal> {
-    let elapsed = SignedDuration::try_from(since.elapsed()).map_err(|_| Refusal::ClockOutOfRange)?;
-    now.checked_add(elapsed).map_err(|_| Refusal::ClockOutOfRange)
-}
-
 /// The instance a token names, and the digest the log keeps of it.
 fn parse_token(token: &str) -> Result<(InstanceId, String), Refusal> {
     if token.len() > MAX_TOKEN {
@@ -215,14 +219,16 @@ fn stamp(log: &Log, seq: u64, text: &str) -> Result<Timestamp, KernelError> {
     })
 }
 
-/// Refuses a `now` earlier than the instance's last event: the caller's clock never goes back.
-fn not_behind(log: &Log, now: Timestamp) -> Result<(), KernelError> {
-    let Some(last) = log.events.last() else { return Ok(()) };
+/// The wall clock, read now, for the checks a write makes against `log`: refused `clock_behind`
+/// when it reads earlier than the log's last event (see the module docs).
+fn wall(log: &Log) -> Result<Timestamp, KernelError> {
+    let now = clock::now();
+    let Some(last) = log.events.last() else { return Ok(now) };
     let at = stamp(log, last.seq, &last.at)?;
     if now < at {
         return Err(Refusal::ClockBehind { now: now.to_string(), at: last.at.clone() }.into());
     }
-    Ok(())
+    Ok(now)
 }
 
 impl Claims {
@@ -304,13 +310,12 @@ pub fn claim(
     session: &VerifiedSession,
     instance: &InstanceId,
     node: &str,
-    now: Timestamp,
 ) -> Result<Claim, KernelError> {
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
     check_owner(&started, instance, session)?;
-    not_behind(&log, now)?;
+    let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(Refusal::UnknownNode { node: node.to_string() }.into());
     };
@@ -372,19 +377,17 @@ impl Held {
     }
 }
 
-/// Checks, in order, the owner, the clock, the token, and that its claim still holds the node
-/// at `now`.
+/// Checks, in order, the owner, the token, and that its claim still holds the node at `now`, the
+/// wall clock read for `log` (by [`wall`], under the lock that read `log`).
 fn hold(
-    guard: &WriteGuard,
+    log: Log,
     session: &VerifiedSession,
     instance: &InstanceId,
     sha: &str,
     now: Timestamp,
 ) -> Result<Held, KernelError> {
-    let log = guard.log(instance)?;
     let started = pinned(&log)?;
     check_owner(&started, instance, session)?;
-    not_behind(&log, now)?;
     let claims = Claims::fold(&log)?;
     let Some(rec) = claims.recs.get(sha).cloned() else {
         return Err(Refusal::UnknownToken { instance: instance.to_string() }.into());
@@ -410,15 +413,12 @@ fn hold(
 }
 
 /// Extends the lease of the claim `token` names. See the module docs.
-pub fn heartbeat(
-    ledger: &mut Ledger,
-    session: &VerifiedSession,
-    token: &str,
-    now: Timestamp,
-) -> Result<Beat, KernelError> {
+pub fn heartbeat(ledger: &mut Ledger, session: &VerifiedSession, token: &str) -> Result<Beat, KernelError> {
     let (instance, sha) = parse_token(token)?;
     let mut guard = ledger.lock()?;
-    let held = hold(&guard, session, &instance, &sha, now)?;
+    let log = guard.log(&instance)?;
+    let now = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, now)?;
     let lease_until = until(now, lease(held.node()?))?;
     let beat = Heartbeat {
         node: held.rec.node.clone(),
@@ -587,14 +587,14 @@ pub fn complete(
     session: &VerifiedSession,
     token: &str,
     outputs: Value,
-    now: Timestamp,
     limits: &Limits,
 ) -> Result<Completion, KernelError> {
-    let clock = Instant::now();
     limits.check().map_err(|detail| Refusal::InvalidLimits { detail })?;
     let (instance, sha) = parse_token(token)?;
     let mut guard = ledger.lock()?;
-    let held = hold(&guard, session, &instance, &sha, now)?;
+    let log = guard.log(&instance)?;
+    let now = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, now)?;
     let plan = match prepare(&held, &outputs) {
         Ok(plan) => plan,
         Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
@@ -604,13 +604,14 @@ pub fn complete(
     }
     // The command runs with the flows lock released, so other writers and readers go on.
     drop(guard);
-    let ran_at = later(now, clock)?;
+    let ran_at = clock::now();
     let ran = exec::run(&plan.argv, &plan.cwd, limits);
 
-    // Everything again, under the lock, against the log as it is now and the clock after the run.
+    // Everything again, under the lock, against the log as it is now and the clock read again.
     let mut guard = ledger.lock()?;
-    let after = later(now, clock)?;
-    let held = hold(&guard, session, &instance, &sha, after)?;
+    let log = guard.log(&instance)?;
+    let after = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, after)?;
     // The command is a function of the pinned IR and params, so only the rest can have changed.
     if let Err(unfit) = prepare(&held, &outputs) {
         return refuse(&mut guard, &held, unfit, &[]);

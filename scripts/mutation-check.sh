@@ -1105,19 +1105,64 @@ mutate $fk/write.rs '    if *owner != me {' '    if false {'
 mutate $fk/write.rs '    if *owner != me {' '    if owner.marker_sha256 != me.marker_sha256 {'
 mutate $fk/write.rs '    if *owner != me {' '    if owner.session != me.session {'
 mutate $fk/write.rs '    check_owner(&started, instance, session)?;
-    not_behind(&log, now)?;
-    let Some(n) = started.ir.nodes.get(node) else {' '    not_behind(&log, now)?;
+    let now = wall(&log)?;
+    let Some(n) = started.ir.nodes.get(node) else {' '    let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {'
 mutate $fk/write.rs '    check_owner(&started, instance, session)?;
-    not_behind(&log, now)?;
-    let claims = Claims::fold(&log)?;' '    not_behind(&log, now)?;
-    let claims = Claims::fold(&log)?;'
-# The clock never goes back past the instance's last event, in claim and in every token use.
-mutate $fk/write.rs '    if now < at {' '    if false {'
-mutate $fk/write.rs '    not_behind(&log, now)?;
-    let Some(n) = started.ir.nodes.get(node) else {' '    let Some(n) = started.ir.nodes.get(node) else {'
-mutate $fk/write.rs '    not_behind(&log, now)?;
     let claims = Claims::fold(&log)?;' '    let claims = Claims::fold(&log)?;'
+# The clock (P20 round 2): every write reads the wall clock itself, under the lock, right before
+# its checks; a run is stamped with its start and judged after it at a fresh read. A clock ahead
+# of or behind the wall clock, or a run's end taken as its start plus a monotonic duration (which
+# stops while the machine sleeps), is killed.
+mutate $fk/write.rs '    let now = wall(&log)?;
+    let Some(n) = started.ir.nodes.get(node) else {' '    let now = wall(&log)? - SignedDuration::from_secs(30);
+    let Some(n) = started.ir.nodes.get(node) else {'
+mutate $fk/write.rs '    let now = wall(&log)?;
+    let Some(n) = started.ir.nodes.get(node) else {' '    let now = wall(&log)? + SignedDuration::from_secs(30);
+    let Some(n) = started.ir.nodes.get(node) else {'
+mutate $fk/write.rs '    let now = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, now)?;
+    let lease_until' '    let now = wall(&log)? + SignedDuration::from_secs(30);
+    let held = hold(log, session, &instance, &sha, now)?;
+    let lease_until'
+mutate $fk/write.rs '    let now = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, now)?;
+    let plan' '    let now = wall(&log)? - SignedDuration::from_secs(30);
+    let held = hold(log, session, &instance, &sha, now)?;
+    let plan'
+mutate $fk/write.rs '    let ran_at = clock::now();' '    let ran_at = clock::now() + SignedDuration::from_secs(30);'
+mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = wall(&log)? - SignedDuration::from_secs(30);'
+mutate $fk/write.rs '    let ran_at = clock::now();
+    let ran = exec::run(&plan.argv, &plan.cwd, limits);
+
+    // Everything again, under the lock, against the log as it is now and the clock read again.
+    let mut guard = ledger.lock()?;
+    let log = guard.log(&instance)?;
+    let after = wall(&log)?;' '    let ran_at = clock::now();
+    let began = std::time::Instant::now();
+    let ran = exec::run(&plan.argv, &plan.cwd, limits);
+
+    // Everything again, under the lock, against the log as it is now and the clock read again.
+    let mut guard = ledger.lock()?;
+    let log = guard.log(&instance)?;
+    let after = ran_at + SignedDuration::try_from(began.elapsed()).unwrap_or(SignedDuration::ZERO);'
+# A wall clock that stepped back below the instance's last event is refused, in claim, in every
+# token use, and after a run.
+mutate $fk/write.rs '    if now < at {' '    if false {'
+mutate $fk/write.rs '    let now = wall(&log)?;
+    let Some(n) = started.ir.nodes.get(node) else {' '    let now = clock::now();
+    let Some(n) = started.ir.nodes.get(node) else {'
+mutate $fk/write.rs '    let now = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, now)?;
+    let lease_until' '    let now = clock::now();
+    let held = hold(log, session, &instance, &sha, now)?;
+    let lease_until'
+mutate $fk/write.rs '    let now = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, now)?;
+    let plan' '    let now = clock::now();
+    let held = hold(log, session, &instance, &sha, now)?;
+    let plan'
+mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = clock::now();'
 # Claims: kernel classes only, an enabled node only (out of order and write-time freshness), one
 # live claim per node, attempts counted per node and iteration with checked arithmetic.
 mutate $fk/write.rs '    if !matches!(n.class, Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. }) {' '    if false {'
@@ -1151,8 +1196,8 @@ mutate $fk/write.rs '    if *iteration != rec.iteration || state == Some(State::
 mutate $fk/write.rs '    if *iteration != rec.iteration || state == Some(State::Exhausted) {' '    if *iteration != rec.iteration {'
 mutate $fk/write.rs '    if *inputs != rec.inputs {' '    if false {'
 # Complete: limits and outputs bounded; enabled (fresh) before and after the run; the flows
-# lock released while the command runs; everything checked again after it at the advanced
-# clock; only the command's own exit status makes a receipt.
+# lock released while the command runs; everything checked again after it at the clock read
+# again; only the command's own exit status makes a receipt.
 mutate $fk/write.rs '    limits.check().map_err(|detail| Refusal::InvalidLimits { detail })?;' ''
 mutate $fk/write.rs '    check_outputs(outputs)?;' ''
 mutate $fk/write.rs '    if !(outputs.is_object() || outputs.is_null()) {' '    if false {'
@@ -1162,19 +1207,26 @@ mutate $fk/write.rs '    if depth >= MAX_NESTING {' '    if depth > MAX_NESTING 
 mutate $fk/write.rs '    if depth >= MAX_NESTING {' '    if false {'
 mutate $fk/write.rs '    if !held.next.enabled.iter().any(|e| e.node == held.rec.node) {' '    if false {'
 mutate $fk/write.rs '    drop(guard);
-    let ran_at = later(now, clock)?;
-    let ran = exec::run(&plan.argv, &plan.cwd, limits);' '    let ran_at = later(now, clock)?;
+    let ran_at = clock::now();
+    let ran = exec::run(&plan.argv, &plan.cwd, limits);' '    let ran_at = clock::now();
     let ran = exec::run(&plan.argv, &plan.cwd, limits);
     drop(guard);'
-mutate $fk/write.rs '    let held = hold(&guard, session, &instance, &sha, after)?;' '    let _ = after;
+mutate $fk/write.rs '    let held = hold(log, session, &instance, &sha, after)?;' '    let _ = (log, after);
     let held = held;'
-mutate $fk/write.rs '    let after = later(now, clock)?;' '    let after = now;'
+mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = now;'
 mutate $fk/write.rs '    if let Err(unfit) = prepare(&held, &outputs) {' '    if let Err(unfit) = Ok::<(), Unfit>(()) {'
 mutate $fk/write.rs '    let Some(exit) = code else {' '    let Some(exit) = code.or(Some(0)) else {'
 mutate $fk/write.rs 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|m| m.exit == exit))' 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|_| true))'
 mutate $fk/write.rs '        _ => (exit != 0).then(' '        _ => false.then('
-# A receipt that could never fit an event line is refused before the command runs.
+# A receipt that could never fit an event line is refused before the command runs: the bound
+# counts the widest exit status, the outputs and a 256-byte margin, accepted at the line's bound
+# and refused one byte over.
 mutate $fk/write.rs '    if size > MAX_LINE as usize {' '    if false {'
+mutate $fk/write.rs '    if size > MAX_LINE as usize {' '    if size >= MAX_LINE as usize {'
+mutate $fk/write.rs 'const RECEIPT_ROOM: usize = 256;' 'const RECEIPT_ROOM: usize = 255;'
+mutate $fk/write.rs 'const RECEIPT_ROOM: usize = 256;' 'const RECEIPT_ROOM: usize = 257;'
+mutate $fk/write.rs 'VerifyRecord { argv: argv.to_vec(), exit: i32::MIN,' 'VerifyRecord { argv: argv.to_vec(), exit: 0,'
+mutate $fk/write.rs '    let body = serde_json::to_vec(&receipt(held, session, outputs.clone(), verify)).map(|b| b.len());' '    let body = serde_json::to_vec(&receipt(held, session, Value::Null, verify)).map(|b| b.len());'
 # An observation's freshness counts from its run's start, never later than its append.
 mutate $fk/replay.rs '                        ran.map_or(at, |ran| ran.min(at))' '                        at'
 mutate $fk/replay.rs '                        ran.map_or(at, |ran| ran.min(at))' '                        ran.map_or(at, |ran| ran)'
