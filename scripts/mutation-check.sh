@@ -928,11 +928,12 @@ mutate $fk/ir.rs '                if edges.is_empty() {' '                if fal
 mutate $fk/ir.rs '                if reconcile.is_empty() {' '                if false {'
 mutate $fk/ir.rs '                if ask.trim().is_empty() {' '                if false {'
 # The topology: one pass refuses cycles (through needs, switches, repeat bodies, and a body node
-# needed from outside its repeat) and chains deeper than MAX_DEPTH.
+# needed from outside its repeat) and chains deeper than MAX_DEPTH. Without it a cyclic pin
+# recurses until the stack overflows.
 mutate $fk/ir.rs '    topology(ir)
 }' '    Ok(())
-}'
-mutate $fk/ir.rs '    if finished == deps.len() {' '    if true {'
+}' 'stack overflow'
+mutate $fk/ir.rs '    if finished == deps.len() {' '    if true {' 'stack overflow'
 mutate $fk/ir.rs '        if d > MAX_DEPTH {' '        if false {'
 mutate $fk/ir.rs '                set.insert(format!("r:{repeat}"));' ''
 mutate $fk/ir.rs '                set.insert(format!("r:{r}"));' ''

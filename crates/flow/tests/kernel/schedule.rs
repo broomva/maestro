@@ -876,21 +876,30 @@ fn an_instance_that_does_not_replay_is_an_error_never_an_empty_flow() {
     assert_eq!(state(&f.try_status(&fi).unwrap(), "a"), State::Ready);
 }
 
-fn chain(n: usize) -> String {
-    let mut y = String::from("flow: f\nversion: 1\nnodes:\n  n0: {class: pure, run: [x]}\n");
-    for i in 1..n {
-        y.push_str(&format!("  n{i}: {{class: pure, run: [x], needs: [n{}]}}\n", i - 1));
+/// A chain `depth` deep, counted in nodes and repeats, within the node cap: each node is the body
+/// of its own repeat and needs the repeat before it (n0, r0, n1, r1, ...); an odd depth ends with
+/// a node outside any repeat.
+fn deep(depth: usize) -> (String, String) {
+    let mut y = String::from("flow: f\nversion: 1\nnodes:\n");
+    let mut repeats = String::from("repeats:\n");
+    let nodes = depth.div_ceil(2);
+    for k in 0..nodes {
+        let needs = if k == 0 { String::new() } else { format!(", needs: [r{}]", k - 1) };
+        y.push_str(&format!("  n{k}: {{class: pure, run: [x]{needs}}}\n"));
+        if 2 * k + 2 <= depth {
+            repeats.push_str(&format!("  r{k}: {{body: [n{k}], max: 2}}\n"));
+        }
     }
-    y
+    (format!("{y}{repeats}"), format!("n{}", nodes - 1))
 }
 
 #[test]
 fn the_deepest_chain_a_definition_may_have_replays_on_a_small_stack() {
-    assert_eq!(compile(&chain(MAX_DEPTH + 1)).map(|_| ()).map_err(|e| e.code()), Err("definition_invalid"));
-    let mut f = fx(&chain(MAX_DEPTH));
+    assert_eq!(compile(&deep(MAX_DEPTH + 1).0).map(|_| ()).map_err(|e| e.code()), Err("definition_invalid"));
+    let (yaml, last) = deep(MAX_DEPTH);
+    let mut f = fx(&yaml);
     let fi = f.begin(json!({}));
     let root = f.root.clone();
-    let last = format!("n{}", MAX_DEPTH - 1);
     let replayed = std::thread::Builder::new()
         .stack_size(2 << 20)
         .spawn(move || {
