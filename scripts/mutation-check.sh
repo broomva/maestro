@@ -851,6 +851,120 @@ mutate $fl/ledger.rs 'Ok(Summary { summary: from_log, cache })' 'Ok(Summary { su
 mutate $fl/ids.rs "} else if !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '} else if false {'
 mutate $fl/operator.rs '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {
             let _ = std::fs::remove_file(&marker);' '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {'
+# Flow kernel (BRO-3633 PR 3b1): definitions, the compiler and the read-only scheduler.
+fk=crates/flow/src/kernel
+# Compile rejections: unknown references, loops without a bound, undeclared switch cases,
+# effects without reconcile, repeated ids, phase 2 reuse, class rules, guards.
+mutate $fk/definition.rs '#[serde(deny_unknown_fields)]
+pub(crate) struct NodeDef {' 'pub(crate) struct NodeDef {'
+mutate $fk/compile.rs '        if !seen.insert(id) {' '        if false && !seen.insert(id) {'
+mutate $fk/compile.rs '    unique("param", params.iter().map(|(name, _)| *name))?;' ''
+mutate $fk/compile.rs '            unique("edge", edges.iter().map(|(e, _)| e.as_str()))?;' ''
+mutate $fk/compile.rs '    if def.uses.is_some() {' '    if false {'
+mutate $fk/compile.rs '    if def.templates.is_some() {' '    if false {'
+mutate $fk/compile.rs '.find(|(_, n)| n.uses.is_some())' '.find(|_| false)'
+mutate $fk/compile.rs '        if let Some(b) = f.all.iter().find(|b| !node_ids.contains(b.as_str())) {' '        if let Some(b) = f.all.iter().find(|_| false) {'
+mutate $fk/compile.rs '.into_iter().find(|f| !allowed.contains(f))' '.into_iter().find(|_| false)'
+mutate $fk/compile.rs '        Ok(s) if s > 0 => Ok(s),' '        Ok(s) => Ok(s),'
+mutate $fk/ir.rs '        if r.max == 0 || r.max > MAX_REPEAT {' '        if r.max > MAX_REPEAT {'
+mutate $fk/ir.rs '        if r.max == 0 || r.max > MAX_REPEAT {' '        if r.max == 0 {'
+mutate $fk/ir.rs '        for b in &r.body {
+            node(&from, b)?;' '        for b in &r.body {'
+mutate $fk/ir.rs 'if let Some(other) = membership.insert(b.as_str(), rid.as_str()) {' 'if let Some(other) = membership.insert(b.as_str(), rid.as_str()).filter(|_| false) {'
+mutate $fk/ir.rs '        if let Some(target) = &r.on_exhausted {
+            node(&from, target)?;' '        if let Some(target) = &r.on_exhausted {'
+mutate $fk/ir.rs '            if r.body.contains(target) {' '            if false {'
+mutate $fk/ir.rs '            guard(format!("repeat {rid} until"), until)?;' '            let _ = until;'
+mutate $fk/ir.rs '                Need::Node { node: m } => {
+                    node(&from, m)?;' '                Need::Node { node: m } => {
+                    let _ = m;'
+mutate $fk/ir.rs '            param(&from, p)?;' '            let _ = p;'
+mutate $fk/ir.rs '        if n.retry == Some(0) {' '        if false {'
+mutate $fk/ir.rs '                Class::Choice { edges, .. } => edges.contains_key(&case.value),' '                Class::Choice { .. } => true,'
+mutate $fk/ir.rs '                Class::Observe { exit_map, .. } => exit_map.iter().any(|e| e.value == case.value),' '                Class::Observe { .. } => true,'
+mutate $fk/ir.rs '                _ => false,
+            };' '                _ => true,
+            };'
+mutate $fk/ir.rs '            if argv.is_empty() {' '            if false {'
+mutate $fk/ir.rs '                if fresh_for.is_none() && inputs.is_empty() {' '                if false {'
+mutate $fk/ir.rs '                if exit_map.is_empty() {' '                if false {'
+mutate $fk/ir.rs '                        Input::Param { name } => param(&from, name)?,' '                        Input::Param { .. } => {}'
+mutate $fk/ir.rs '                        Input::Node { node: m } => {
+                            node(&from, m)?;' '                        Input::Node { node: m } => {'
+mutate $fk/ir.rs '                            if !n.needs.contains(&Need::Node { node: m.clone() }) {' '                            if false {'
+mutate $fk/ir.rs '                if edges.is_empty() {' '                if false {'
+mutate $fk/ir.rs '                    guard(format!("node {id} edge {edge}"), g)?;' '                    let _ = (edge, g);'
+mutate $fk/ir.rs '                if reconcile.is_empty() {' '                if false {'
+mutate $fk/ir.rs '                    guard(format!("node {id} precondition {i}"), g)?;' '                    let _ = (i, g);'
+mutate $fk/ir.rs '                if ask.trim().is_empty() {' '                if false {'
+mutate $fk/ir.rs '    acyclic(ir)
+}' '    Ok(())
+}'
+mutate $fk/ir.rs '            set.insert(format!("n:{}", case.on));' ''
+mutate $fk/ir.rs '        set.extend(r.body.iter().map(|b| format!("n:{b}")));' ''
+# Guards are pure: the clock, the environment, input streams, prints and halts are left out.
+mutate $fk/jq.rs '        .filter(|f| !DENIED.contains(&f.0));' ';'
+mutate $fk/ir.rs '    jq::compile(code).map(|_| ()).map_err(|detail| CompileError::InvalidGuard { at, detail })' '    let _ = (at, code);
+    Ok(())'
+# start: params that do not fit are refused before anything is written.
+mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'
+mutate $fk/replay.rs '    if let Some(name) = given.keys().find(|k| !ir.params.contains_key(*k)) {' '    if let Some(name) = given.keys().find(|_| false) {'
+# Replay reads only what it can trust: a Started first, a pinned IR that validates and matches
+# its hash, kernel event kinds, declared nodes.
+mutate $fk/replay.rs '    if first.kind != Started::KIND {' '    if false {'
+mutate $fk/replay.rs '    ir::validate(&started.ir)
+        .map_err(|e| malformed(log, first.seq, format!("the pinned IR does not validate ({e})")))?;' ''
+mutate $fk/replay.rs '    if ir::content_hash(&started.ir)? != started.ir_hash {' '    if false {'
+mutate $fk/replay.rs '        if started.ir.nodes.contains_key(node) {' '        if true {'
+mutate $fk/replay.rs '            other => return Err(malformed(log, e.seq, format!("{other} is not a kernel event"))),' '            _ => {}'
+# The scheduler: needs, the fork join, switches, iterations, repeats, freshness, exit maps,
+# edges, params, waits, retry and cancel.
+mutate $fk/replay.rs '                    } else if !e.recorded() {' '                    } else if false {'
+mutate $fk/compile.rs '            branches.iter().map(|b| Need::Node { node: b.clone() }).collect()' '            Vec::new()'
+mutate $fk/replay.rs '            && e.value.as_deref() != Some(case.value.as_str())' '            && false'
+mutate $fk/replay.rs '            if !edges.contains_key(&chosen.edge) {' '            if false {'
+mutate $fk/replay.rs '        let (at, receipt) = self.facts.completed.get(key)?;' '        let (at, receipt) = self.facts.completed.iter().rev().find(|(k, _)| k.0 == key.0).map(|(_, v)| v)?;'
+mutate $fk/replay.rs '            if i + 1 >= r.max {' '            if false {'
+mutate $fk/replay.rs '                && jq::holds(filter, &input)' '                && false'
+mutate $fk/jq.rs 'Some(Ok(Val::Bool(true)))' 'Some(Ok(_))'
+mutate $fk/compile.rs '            node.needs.push(Need::Exhausted { repeat: rid.clone() });' ''
+mutate $fk/replay.rs '                    Loop::Exhausted(i) => (i, true),' '                    Loop::Exhausted(i) => (i, false),'
+mutate $fk/replay.rs '                Need::Repeat { repeat: r } => match self.repeat(r) {
+                    Loop::Done(_) => {}
+                    Loop::Running(_) => reasons.push(Reason::RepeatRunning { repeat: r.clone() }),
+                    Loop::Exhausted(_) => {
+                        dead = true;' '                Need::Repeat { repeat: r } => match self.repeat(r) {
+                    Loop::Done(_) => {}
+                    Loop::Running(_) => reasons.push(Reason::RepeatRunning { repeat: r.clone() }),
+                    Loop::Exhausted(_) => {
+                        dead = false;'
+mutate $fk/replay.rs '                    Loop::Done(_) => {
+                        dead = true;' '                    Loop::Done(_) => {
+                        dead = false;'
+mutate $fk/replay.rs '            && age > secs(*f)' '            && false'
+mutate $fk/replay.rs '        if !stale.is_empty() {' '        if false {'
+mutate $fk/replay.rs '                    stale.extend(e.stale.iter().cloned());' ''
+mutate $fk/replay.rs '            if receipt.inputs.get(&input.key()) != self.input_digest(input, key).as_ref() {' '            if false {'
+mutate $fk/replay.rs '.and_then(|x| exit_map.iter().find(|e| e.exit == x))' '.and_then(|_| exit_map.first())'
+mutate $fk/replay.rs '            && !supplied(self.params, p)' '            && false'
+mutate $fk/replay.rs '                self.now < a.lease_until && !cancelled' '                !cancelled'
+mutate $fk/replay.rs 'n.cancel_after.is_some_and(|c| self.now.duration_since(a.claimed_at) >= secs(c))' 'n.cancel_after.is_some_and(|_| false)'
+mutate $fk/replay.rs '            && ended >= max' '            && false'
+mutate $fk/replay.rs '        if let Class::Human { ask } = &n.class {' '        if let Some(ask) = None::<&String> {'
+mutate $fk/replay.rs '                    a.lease_until = lease_until;' ''
+# Positive controls: a replay that ran a command, or that was not a function of the log and the
+# clock, fails the tests that say it never does.
+mutate $fk/replay.rs '        let ir = self.ir;
+        let Some(n) = ir.nodes.get(id) else {' '        let ir = self.ir;
+        if let Some(Class::Pure { run }) = ir.nodes.get(id).map(|n| &n.class) {
+            let _ = std::process::Command::new(&run[0]).args(&run[1..]).status();
+        }
+        let Some(n) = ir.nodes.get(id) else {'
+mutate $fk/replay.rs '        seq: log.seq(),
+        nodes,' '        seq: jiff::Timestamp::now().as_nanosecond() as u64,
+        nodes,'
+mutate $fk/replay.rs '                    Loop::Exhausted(_) => Dep::Exhausted(rid.to_string()),' '                    Loop::Exhausted(_) => Dep::Running(rid.to_string()),'
+mutate $fk/replay.rs '                    Loop::Done(i) => Dep::Eval(self.node(m, &Iteration::from([(rid.to_string(), i)]))),' '                    Loop::Done(_) => Dep::Running(rid.to_string()),'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

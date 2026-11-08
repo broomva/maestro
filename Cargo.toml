@@ -33,6 +33,9 @@ axum = { version = "0.8", default-features = false, features = ["tokio", "http1"
 tempfile = "3"
 rusqlite = { version = "0.41", features = ["bundled"] }
 rustix = { version = "1", features = ["fs"] }
+jaq-core = "3"
+jaq-std = "3"
+jaq-json = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

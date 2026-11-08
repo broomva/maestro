@@ -1,0 +1,33 @@
+# Pilot 1, the verifier (flow kernel spec, "Pilot 1: the verifier").
+#
+# pin (observe) -> check (pure) -> exercise (work, only when a surface is declared).
+# Placeholders such as {{params.head}} are data here: the kernel fills them when it runs a
+# command, which replay never does. The spec's `uses: [verified-finish@1]` trait waits for
+# phase 2 and is left out, since the compiler refuses traits.
+flow: verify
+version: 1
+params: [repo, head, check, surface?]
+nodes:
+  # V1: the repository is at params.head; exit 0 when it is, 1 when HEAD moved.
+  pin:
+    class: observe
+    run: [sh, -c, 'test "$(git -C "$1" rev-parse HEAD)" = "$2"', pin, "{{params.repo}}", "{{params.head}}"]
+    fresh_for: 10m
+    inputs: [params.head]
+    exit_map: {0: at_head, 1: moved}
+  # V2 and V3: the project's own check, run by the kernel, only against a pinned head that is
+  # still fresh.
+  check:
+    class: pure
+    needs: [pin]
+    switch: {on: pin, case: at_head}
+    run: [sh, -c, "{{params.check}}"]
+  # V4: tried as a user, only when a surface is declared; its verify checks a dogfood receipt
+  # bound to the pinned head (the verify argv is settled with the verify runner).
+  exercise:
+    class: work
+    needs: [check]
+    when_param: surface
+    performer: agent:verifier
+    skill: dogfood
+    verify: [maestro, dogfood, verify-receipt, --head, "{{params.head}}", --surface, "{{params.surface}}"]
