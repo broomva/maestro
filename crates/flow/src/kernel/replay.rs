@@ -1,48 +1,52 @@
 //! `start`, and the read-only scheduler: `next` and `status` derive everything from the
 //! instance's log. No current step is stored anywhere.
 //!
-//! Replay reads the events and evaluates the pinned IR over them. It never runs a command (a
-//! node's `run`, `verify` or `reconcile` is data here), never starts a process and writes
-//! nothing; the only code it evaluates is a repeat's `until`, a jq guard compiled without any
-//! filter that reads the clock, the environment or input streams, or prints. The clock is the
+//! Replay folds the log once, in order. Each event is accepted only if it fits the state the
+//! events before it built, with the event's own `at` as the clock; anything else is set aside as
+//! rejected and changes nothing. Replay never runs a command (a node's `run`, `verify` and
+//! `reconcile` are data here), never evaluates a guard (an `until` verdict is read from a
+//! `Guarded` event), never starts a process and writes nothing. The clock of a read is the
 //! caller's `now`, so the same log and the same `now` give byte-identical JSON.
 //!
-//! # Semantics
+//! # Acceptance, at an event's position
 //!
-//! - A node is done when the log holds its receipt for the node's current iteration: a
-//!   `Completed` event, or for a `choice` node a `Chosen` event. The last receipt wins.
-//! - A node outside every repeat has iteration `{}`. A node in repeat `r`'s body is evaluated at
-//!   `{r: i}`, `i` being the repeat's current iteration, and only receipts carrying exactly that
-//!   iteration count. A receipt from iteration `i` never satisfies anything in `i + 1`.
-//! - A repeat's iteration `i` is settled when every body node is done, stale or will not run.
-//!   Then the repeat is done if its `until` holds over that iteration, exhausted if `i + 1` is its
-//!   `max`, and otherwise iteration `i + 1` begins. A node outside the repeat that needs a body
-//!   node sees the body node's final iteration once the repeat is done, and never runs if the
-//!   repeat is exhausted; the `on_exhausted` node runs only then.
-//! - An `observe` receipt is stale when it is older than `fresh_for` (by the event's `at`) or
-//!   when a declared input's digest changed. A stale observation blocks every node downstream of
-//!   it that is not done. Its value is its exit status through `exit_map`; an exit status
-//!   outside the map fails the node.
-//! - A `switch` follows only the recorded value: the chosen edge, or the observed value. A node
-//!   whose case was not taken, or whose `when_param` was not supplied, stays blocked and never
-//!   runs, and so does everything that needs it.
+//! - Every event naming a node must name a declared node and the node's current iteration: `{}`
+//!   outside any repeat, `{r: i}` inside repeat `r` while it runs at `i` (or finished at `i`).
+//! - `Completed` (any class but choice) and `Chosen` (choice only, a declared edge) count only if
+//!   the node is enabled: every need has a receipt that is still valid and its switch case was
+//!   taken, and it is not already done. Only an observation may be recorded again while it is
+//!   done (a re-run). Freshness is a rule of reads: a writer re-checks it before it records.
+//! - `Claimed` must number its attempt above the last; `Heartbeat` must extend a lease it names.
+//! - `Guarded` records a repeat's `until` verdict for its current iteration once that iteration
+//!   has settled. A repeat moves on only from recorded verdicts (or at once, with no `until`).
+//!
+//! # State, at a clock
+//!
+//! - A receipt records the digests of the receipts it consumed (see `events`). If one changed,
+//!   the receipt is stale and the node is not done until it is recorded again. A re-run with the
+//!   same result keeps it.
+//! - An observation older than `fresh_for` is stale: it still satisfies its dependents, but
+//!   blocks every node downstream that is not done. Its value is its exit status through
+//!   `exit_map`; a receipt with no exit status, or one outside the map, fails the node.
+//! - A switch follows only the recorded value. A node whose case was not taken never runs, and
+//!   neither does anything that needs it. A repeat whose whole body will never run is
+//!   unreachable, not exhausted.
 //! - A node with every requirement met is `waiting` while an attempt's lease holds (or the owner
 //!   is asked, for a `human` node), `failed` once `retry.attempts` attempts ended without a
-//!   receipt, and `ready` otherwise. An attempt ends when its lease passes or, with `cancel`,
-//!   `cancel.after` after its claim.
+//!   receipt or the attempt numbers ran out, and `ready` otherwise. An attempt ends when its
+//!   lease passes or, with `cancel`, `cancel.after` after its claim.
 
 use super::compile::CompiledFlow;
 use super::error::KernelError;
-use super::events::{Chosen, Claimed, Completed, Heartbeat, KernelEvent, Refused, Started, digest};
-use super::ir::{self, Class, Input, Ir, Iteration, Launch, Need, Wait};
-use super::jq;
+use super::events::{Chosen, Claimed, Completed, Guarded, Heartbeat, KernelEvent, Refused, Started, receipt_digest};
+use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, ReadGuard, random_epoch};
 use crate::log::{Event, Log};
 use jiff::{SignedDuration, Timestamp};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A node's state, as `status` reports it.
@@ -62,12 +66,11 @@ pub enum State {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum Reason {
-    /// A needed node is not done.
+    /// A needed node has no valid receipt.
     Needs {
         node: String,
     },
-    /// A needed node will never run (its case was not taken, its param was not supplied, or
-    /// something it needs will never run).
+    /// A needed node will never run.
     Unreachable {
         node: String,
     },
@@ -76,10 +79,6 @@ pub enum Reason {
         on: String,
         took: Option<String>,
         case: String,
-    },
-    /// This node's `when_param` was not supplied.
-    ParamAbsent {
-        param: String,
     },
     RepeatRunning {
         repeat: String,
@@ -91,6 +90,10 @@ pub enum Reason {
     RepeatFinished {
         repeat: String,
     },
+    /// No node of the repeat's body will ever run.
+    RepeatUnreachable {
+        repeat: String,
+    },
     /// An observation upstream is stale.
     Stale {
         node: String,
@@ -100,22 +103,20 @@ pub enum Reason {
         age_secs: i64,
         fresh_for_secs: u64,
     },
-    /// A declared input of this observation changed since it was recorded.
+    /// A receipt this one consumed has changed since it was recorded.
     InputChanged {
         input: String,
     },
-    /// This observation's exit status is not in its `exit_map`.
+    /// This observation recorded no exit status, or one outside its `exit_map`.
     ExitUnmapped {
         exit: Option<i32>,
-    },
-    /// The recorded edge is not one this choice node declares.
-    EdgeUndeclared {
-        edge: String,
     },
     /// `retry.attempts` attempts ended without a receipt.
     AttemptsUsed {
         attempts: u32,
     },
+    /// The attempt numbers ran out.
+    AttemptsExhausted,
     /// An attempt holds a lease.
     Claimed {
         attempt: u32,
@@ -147,6 +148,9 @@ pub struct NodeStatus {
     pub unmet: Vec<Reason>,
     /// Who or what the node is waiting on.
     pub waits: Vec<Reason>,
+    /// The digests a receipt for this node recorded now would carry as `inputs`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub inputs: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -155,12 +159,25 @@ pub enum RepeatState {
     Running,
     Done,
     Exhausted,
+    Unreachable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepeatStatus {
     pub state: RepeatState,
     pub iteration: u32,
+    /// The iteration has settled and waits for its `until` verdict (a `Guarded` event).
+    pub awaiting_verdict: bool,
+}
+
+/// An event replay set aside: it did not fit the state at its position, so it changed nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rejected {
+    pub seq: u64,
+    pub kind: String,
+    /// The node or repeat it named.
+    pub subject: String,
+    pub reason: String,
 }
 
 /// Every node's state, derived from the log.
@@ -173,6 +190,7 @@ pub struct Status {
     pub seq: u64,
     pub nodes: BTreeMap<String, NodeStatus>,
     pub repeats: BTreeMap<String, RepeatStatus>,
+    pub rejected: Vec<Rejected>,
 }
 
 /// A node that may be claimed now, and the hint for launching its performer.
@@ -183,6 +201,8 @@ pub struct Enabled {
     pub iteration: Iteration,
     /// The attempt number the next claim gets.
     pub attempt: u32,
+    /// The digests its receipt must record as `inputs`.
+    pub inputs: BTreeMap<String, String>,
     pub launch: Launch,
     pub wait: Option<Wait>,
 }
@@ -229,40 +249,47 @@ fn check_params(ir: &Ir, params: &Value) -> Result<(), KernelError> {
     Ok(())
 }
 
+/// Present and not null.
 fn supplied(params: &Value, name: &str) -> bool {
     params.get(name).is_some_and(|v| !v.is_null())
 }
 
 /// Every node's state. Reads the log under the shared lock and writes nothing.
 pub fn status(guard: &ReadGuard, instance: &InstanceId, now: Timestamp) -> Result<Status, KernelError> {
-    Ok(replay(&guard.log(instance)?, now)?.status)
+    let log = guard.log(instance)?;
+    let started = pinned(&log)?;
+    let fold = Fold::replay(&log, &started)?;
+    Ok(fold.status(&log, &started, now))
 }
 
 /// The enabled nodes and what blocks the others. Reads the log under the shared lock and writes
 /// nothing.
 pub fn next(guard: &ReadGuard, instance: &InstanceId, now: Timestamp) -> Result<Next, KernelError> {
-    let replayed = replay(&guard.log(instance)?, now)?;
-    let Replayed { status, started, attempts } = replayed;
+    let log = guard.log(instance)?;
+    let started = pinned(&log)?;
+    let fold = Fold::replay(&log, &started)?;
+    let status = fold.status(&log, &started, now);
+    let mut eval = Eval::new(&fold, now);
     let mut enabled = Vec::new();
     let mut pending = BTreeMap::new();
     for (id, s) in status.nodes {
-        match s.state {
-            State::Ready => {
-                let class = started.ir.nodes.get(&id).map(|n| &n.class);
-                let key = (id.clone(), s.iteration.clone());
-                enabled.push(Enabled {
-                    attempt: attempts.get(&key).and_then(|a| a.keys().next_back().copied()).unwrap_or(0) + 1,
-                    launch: class.and_then(Class::launch).cloned().unwrap_or_default(),
-                    wait: class.and_then(Class::wait).cloned(),
-                    node: id,
-                    class: s.class,
-                    iteration: s.iteration,
-                });
-            }
-            State::Done => {}
-            _ => {
-                pending.insert(id, s);
-            }
+        let e = eval.node(&id, &s.iteration);
+        // A stale receipt is redone once its requirements hold and nothing upstream is stale.
+        let rerun = s.state == State::Stale && e.enabled && e.stale.iter().all(|s| *s == id);
+        let key = (id.clone(), s.iteration.clone());
+        if let (true, Some(attempt)) = (s.state == State::Ready || rerun, fold.next_attempt(&key)) {
+            let class = started.ir.nodes.get(&id).map(|n| &n.class);
+            enabled.push(Enabled {
+                attempt,
+                inputs: s.inputs,
+                launch: class.and_then(Class::launch).cloned().unwrap_or_default(),
+                wait: class.and_then(Class::wait).cloned(),
+                node: id,
+                class: s.class,
+                iteration: s.iteration,
+            });
+        } else if s.state != State::Done {
+            pending.insert(id, s);
         }
     }
     Ok(Next {
@@ -273,31 +300,6 @@ pub fn next(guard: &ReadGuard, instance: &InstanceId, now: Timestamp) -> Result<
         enabled,
         pending,
     })
-}
-
-/// One attempt at a node: when it was claimed and how long its lease holds.
-#[derive(Debug, Clone)]
-struct Attempt {
-    claimed_at: Timestamp,
-    lease_until: Timestamp,
-    lease_text: String,
-}
-
-type Key = (String, Iteration);
-
-/// What the events after `Started` record, by (node, iteration).
-#[derive(Debug, Default)]
-struct Facts {
-    completed: BTreeMap<Key, (Timestamp, Completed)>,
-    chosen: BTreeMap<Key, Chosen>,
-    attempts: BTreeMap<Key, BTreeMap<u32, Attempt>>,
-}
-
-/// The result of a replay.
-struct Replayed {
-    status: Status,
-    started: Started,
-    attempts: BTreeMap<Key, BTreeMap<u32, Attempt>>,
 }
 
 fn malformed(log: &Log, seq: u64, detail: impl Into<String>) -> KernelError {
@@ -313,9 +315,14 @@ fn timestamp(log: &Log, seq: u64, text: &str) -> Result<Timestamp, KernelError> 
     text.parse().map_err(|_| malformed(log, seq, format!("{text} is not a timestamp")))
 }
 
-/// Replays a verified log. Pure: the result is a function of the log and `now`.
-fn replay(log: &Log, now: Timestamp) -> Result<Replayed, KernelError> {
-    let Some((first, rest)) = log.events.split_first() else {
+fn secs(s: u64) -> SignedDuration {
+    SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))
+}
+
+/// The `Started` event, checked: the first event, an IR of this kernel's version that validates,
+/// matches its hash and is the flow it names.
+fn pinned(log: &Log) -> Result<Started, KernelError> {
+    let Some(first) = log.events.first() else {
         return Err(malformed(log, 0, "the log is empty"));
     };
     if first.kind != Started::KIND {
@@ -327,315 +334,517 @@ fn replay(log: &Log, now: Timestamp) -> Result<Replayed, KernelError> {
     if ir::content_hash(&started.ir)? != started.ir_hash {
         return Err(malformed(log, first.seq, "the pinned IR does not match its hash"));
     }
+    if started.flow != format!("{}@{}", started.ir.flow, started.ir.version) {
+        return Err(malformed(log, first.seq, format!("Started names {}, not its pinned IR", started.flow)));
+    }
+    Ok(started)
+}
 
-    let mut facts = Facts::default();
-    let known = |node: &str, seq: u64| {
-        if started.ir.nodes.contains_key(node) {
-            Ok(())
-        } else {
-            Err(malformed(log, seq, format!("an event names node {node}, which the flow does not declare")))
-        }
-    };
-    for e in rest {
-        let at = timestamp(log, e.seq, &e.at)?;
-        match e.kind.as_str() {
-            Completed::KIND => {
-                let c: Completed = body(log, e)?;
-                known(&c.node, e.seq)?;
-                facts.completed.insert((c.node.clone(), c.iteration.clone()), (at, c));
-            }
-            Chosen::KIND => {
-                let c: Chosen = body(log, e)?;
-                known(&c.node, e.seq)?;
-                facts.chosen.insert((c.node.clone(), c.iteration.clone()), c);
-            }
-            Claimed::KIND => {
-                let c: Claimed = body(log, e)?;
-                known(&c.node, e.seq)?;
-                let lease_until = timestamp(log, e.seq, &c.lease_until)?;
-                let attempt = Attempt { claimed_at: at, lease_until, lease_text: c.lease_until };
-                facts.attempts.entry((c.node, c.iteration)).or_default().insert(c.attempt, attempt);
-            }
-            Heartbeat::KIND => {
-                let h: Heartbeat = body(log, e)?;
-                known(&h.node, e.seq)?;
-                let lease_until = timestamp(log, e.seq, &h.lease_until)?;
-                if let Some(a) = facts.attempts.get_mut(&(h.node, h.iteration)).and_then(|m| m.get_mut(&h.attempt))
-                    && lease_until > a.lease_until
-                {
-                    a.lease_until = lease_until;
-                    a.lease_text = h.lease_until;
-                }
-            }
-            Refused::KIND => {
-                let r: Refused = body(log, e)?;
-                known(&r.node, e.seq)?;
-            }
-            other => return Err(malformed(log, e.seq, format!("{other} is not a kernel event"))),
-        }
-    }
+type Key = (String, Iteration);
 
-    let mut eval = Eval::new(&started, &facts, now);
-    let mut nodes = BTreeMap::new();
-    for id in started.ir.nodes.keys() {
-        nodes.insert(id.clone(), eval.status(id));
-    }
-    let mut repeats = BTreeMap::new();
-    for rid in started.ir.repeats.keys() {
-        let (state, iteration) = match eval.repeat(rid) {
-            Loop::Running(i) => (RepeatState::Running, i),
-            Loop::Done(i) => (RepeatState::Done, i),
-            Loop::Exhausted(i) => (RepeatState::Exhausted, i),
-        };
-        repeats.insert(rid.clone(), RepeatStatus { state, iteration });
-    }
-    let status = Status {
-        instance: log.instance.to_string(),
-        flow: started.flow.clone(),
-        ir_hash: started.ir_hash.clone(),
-        seq: log.seq(),
-        nodes,
-        repeats,
-    };
-    Ok(Replayed { status, started, attempts: facts.attempts })
+/// An accepted receipt.
+#[derive(Debug, Clone)]
+struct Receipt {
+    at: Timestamp,
+    outputs: Value,
+    /// The observed value or the chosen edge.
+    value: Option<String>,
+    /// Why this receipt fails its node, for an observation whose exit status maps to nothing.
+    failure: Option<Reason>,
+    inputs: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct Attempt {
+    claimed_at: Timestamp,
+    lease_until: Timestamp,
+    lease_text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Loop {
+enum Phase {
     Running(u32),
     Done(u32),
     Exhausted(u32),
 }
 
-/// A node evaluated at one iteration.
+/// A repeat's phase as seen at a clock: the folded phase, or unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Loop {
+    Running(u32),
+    Done(u32),
+    Exhausted(u32),
+    Unreachable,
+}
+
+/// The common head of every event that names a node.
+#[derive(Deserialize)]
+struct Subject {
+    node: String,
+    iteration: Iteration,
+}
+
+/// What the accepted events built, in log order.
+struct Fold<'a> {
+    ir: &'a Ir,
+    member: BTreeMap<&'a str, &'a str>,
+    receipts: BTreeMap<Key, Receipt>,
+    attempts: BTreeMap<Key, BTreeMap<u32, Attempt>>,
+    phases: BTreeMap<&'a str, Phase>,
+    verdicts: BTreeMap<(String, u32), bool>,
+    rejected: Vec<Rejected>,
+}
+
+impl<'a> Fold<'a> {
+    fn replay(log: &Log, started: &'a Started) -> Result<Fold<'a>, KernelError> {
+        let ir = &started.ir;
+        let member =
+            ir.repeats.iter().flat_map(|(rid, r)| r.body.iter().map(move |b| (b.as_str(), rid.as_str()))).collect();
+        let mut fold = Fold {
+            ir,
+            member,
+            receipts: BTreeMap::new(),
+            attempts: BTreeMap::new(),
+            phases: ir.repeats.keys().map(|r| (r.as_str(), Phase::Running(0))).collect(),
+            verdicts: BTreeMap::new(),
+            rejected: Vec::new(),
+        };
+        for e in log.events.iter().skip(1) {
+            let at = timestamp(log, e.seq, &e.at)?;
+            if let Err(reason) = fold.accept(log, e, at)? {
+                let subject = e.body.get("node").or_else(|| e.body.get("repeat"));
+                let subject = subject.and_then(Value::as_str).unwrap_or_default().to_string();
+                fold.rejected.push(Rejected { seq: e.seq, kind: e.kind.clone(), subject, reason: reason.into() });
+                continue;
+            }
+            fold.advance(at);
+        }
+        Ok(fold)
+    }
+
+    /// The number the next claim on `key` gets; `None` once the numbers ran out.
+    fn next_attempt(&self, key: &Key) -> Option<u32> {
+        match self.attempts.get(key).and_then(|a| a.keys().next_back()) {
+            None => Some(1),
+            Some(last) => last.checked_add(1),
+        }
+    }
+
+    /// The iteration a node's events must carry now; `None` once its repeat is exhausted.
+    fn current(&self, node: &str) -> Option<Iteration> {
+        match self.member.get(node) {
+            None => Some(Iteration::new()),
+            Some(rid) => match self.phases.get(rid)? {
+                Phase::Running(i) | Phase::Done(i) => Some(Iteration::from([(rid.to_string(), *i)])),
+                Phase::Exhausted(_) => None,
+            },
+        }
+    }
+
+    /// Applies one event if it fits; the inner error is why it was set aside.
+    fn accept(&mut self, log: &Log, e: &Event, at: Timestamp) -> Result<Result<(), &'static str>, KernelError> {
+        if e.kind == Guarded::KIND {
+            let g: Guarded = body(log, e)?;
+            return Ok(self.guarded(g, at));
+        }
+        if ![Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND].contains(&e.kind.as_str()) {
+            return Err(malformed(log, e.seq, format!("{} is not a kernel event", e.kind)));
+        }
+        let subject: Subject = body(log, e)?;
+        let Some(node) = self.ir.nodes.get(&subject.node) else { return Ok(Err("unknown_node")) };
+        if self.current(&subject.node).as_ref() != Some(&subject.iteration) {
+            return Ok(Err("not_current_iteration"));
+        }
+        let key = (subject.node, subject.iteration);
+        let receipt = match e.kind.as_str() {
+            Completed::KIND => {
+                let c: Completed = body(log, e)?;
+                let (value, failure) = match &node.class {
+                    Class::Choice { .. } => return Ok(Err("wrong_class")),
+                    Class::Observe { exit_map, .. } => {
+                        let exit = c.verify.as_ref().map(|v| v.exit);
+                        match exit.and_then(|x| exit_map.iter().find(|m| m.exit == x)) {
+                            Some(m) => (Some(m.value.clone()), None),
+                            None => (None, Some(Reason::ExitUnmapped { exit })),
+                        }
+                    }
+                    _ => (None, None),
+                };
+                Receipt { at, outputs: c.outputs, value, failure, inputs: c.inputs }
+            }
+            Chosen::KIND => {
+                let c: Chosen = body(log, e)?;
+                let Class::Choice { edges, .. } = &node.class else { return Ok(Err("wrong_class")) };
+                if !edges.contains_key(&c.edge) {
+                    return Ok(Err("undeclared_edge"));
+                }
+                Receipt { at, outputs: Value::Null, value: Some(c.edge), failure: None, inputs: c.inputs }
+            }
+            Claimed::KIND => {
+                let c: Claimed = body(log, e)?;
+                let lease_until = timestamp(log, e.seq, &c.lease_until)?;
+                let attempts = self.attempts.entry(key).or_default();
+                if attempts.keys().next_back().is_some_and(|last| c.attempt <= *last) {
+                    return Ok(Err("attempt_not_after_last"));
+                }
+                attempts.insert(c.attempt, Attempt { claimed_at: at, lease_until, lease_text: c.lease_until });
+                return Ok(Ok(()));
+            }
+            Heartbeat::KIND => {
+                let h: Heartbeat = body(log, e)?;
+                let lease_until = timestamp(log, e.seq, &h.lease_until)?;
+                let Some(a) = self.attempts.get_mut(&key).and_then(|m| m.get_mut(&h.attempt)) else {
+                    return Ok(Err("no_such_attempt"));
+                };
+                if lease_until <= a.lease_until {
+                    return Ok(Err("lease_not_extended"));
+                }
+                a.lease_until = lease_until;
+                a.lease_text = h.lease_until;
+                return Ok(Ok(()));
+            }
+            _ => {
+                let _: Refused = body(log, e)?;
+                return Ok(Ok(()));
+            }
+        };
+        let now = Eval::new(self, at).node(&key.0, &key.1);
+        if !now.enabled {
+            return Ok(Err("not_enabled"));
+        }
+        if now.state == State::Done && !matches!(node.class, Class::Observe { .. }) {
+            return Ok(Err("already_done"));
+        }
+        self.receipts.insert(key, receipt);
+        Ok(Ok(()))
+    }
+
+    fn guarded(&mut self, g: Guarded, at: Timestamp) -> Result<(), &'static str> {
+        let Some(r) = self.ir.repeats.get(&g.repeat) else { return Err("unknown_repeat") };
+        if r.until.is_none() {
+            return Err("no_until");
+        }
+        if self.phases.get(g.repeat.as_str()) != Some(&Phase::Running(g.iteration)) {
+            return Err("not_current_iteration");
+        }
+        if !Eval::new(self, at).settled(&g.repeat, g.iteration) {
+            return Err("not_settled");
+        }
+        self.verdicts.insert((g.repeat, g.iteration), g.holds);
+        Ok(())
+    }
+
+    /// Moves every repeat whose current iteration settled to its next phase, from the recorded
+    /// verdicts, until none moves.
+    fn advance(&mut self, at: Timestamp) {
+        let ir: &'a Ir = self.ir;
+        loop {
+            let mut moves = Vec::new();
+            let mut eval = Eval::new(self, at);
+            for (rid, r) in &ir.repeats {
+                let Some(Phase::Running(i)) = self.phases.get(rid.as_str()).copied() else { continue };
+                if !eval.settled(rid, i) {
+                    continue;
+                }
+                let holds = match r.until {
+                    Some(_) => match self.verdicts.get(&(rid.clone(), i)) {
+                        Some(holds) => *holds,
+                        None => continue,
+                    },
+                    None => false,
+                };
+                let next = if holds {
+                    Phase::Done(i)
+                } else if i.saturating_add(1) >= r.max {
+                    Phase::Exhausted(i)
+                } else {
+                    Phase::Running(i + 1)
+                };
+                moves.push((rid.as_str(), next));
+            }
+            if moves.is_empty() {
+                return;
+            }
+            self.phases.extend(moves);
+        }
+    }
+
+    fn status(&self, log: &Log, started: &Started, now: Timestamp) -> Status {
+        let mut eval = Eval::new(self, now);
+        let nodes = self.ir.nodes.keys().map(|id| (id.clone(), eval.status(id))).collect();
+        let repeats = self
+            .ir
+            .repeats
+            .iter()
+            .map(|(rid, r)| {
+                let (state, iteration) = match eval.phase(rid) {
+                    Loop::Running(i) => (RepeatState::Running, i),
+                    Loop::Done(i) => (RepeatState::Done, i),
+                    Loop::Exhausted(i) => (RepeatState::Exhausted, i),
+                    Loop::Unreachable => (RepeatState::Unreachable, 0),
+                };
+                let awaiting_verdict = state == RepeatState::Running
+                    && r.until.is_some()
+                    && eval.settled(rid, iteration)
+                    && !self.verdicts.contains_key(&(rid.clone(), iteration));
+                (rid.clone(), RepeatStatus { state, iteration, awaiting_verdict })
+            })
+            .collect();
+        Status {
+            instance: log.instance.to_string(),
+            flow: started.flow.clone(),
+            ir_hash: started.ir_hash.clone(),
+            seq: log.seq(),
+            nodes,
+            repeats,
+            rejected: self.rejected.clone(),
+        }
+    }
+}
+
+/// A node evaluated at one iteration and one clock.
 #[derive(Debug, Clone)]
 struct NodeEval {
     state: State,
     reasons: Vec<Reason>,
     /// It will never run in this iteration.
     dead: bool,
+    /// Every requirement is met: a receipt would be accepted.
+    enabled: bool,
+    /// Its receipt satisfies a dependent (done, or an observation only past its `fresh_for`).
+    satisfies: bool,
     /// Stale observations at or upstream of this node.
     stale: BTreeSet<String>,
-    /// The observed value or the chosen edge, once done.
+    /// The digest of its receipt, for a dependent's inputs.
+    digest: Option<String>,
     value: Option<String>,
-    outputs: Value,
+    /// The digests a receipt for this node must record.
+    consumed: BTreeMap<String, String>,
 }
 
 impl NodeEval {
-    /// Done or stale: the node has its receipt.
-    fn recorded(&self) -> bool {
-        matches!(self.state, State::Done | State::Stale)
+    fn new(state: State, reasons: Vec<Reason>) -> Self {
+        NodeEval {
+            state,
+            reasons,
+            dead: false,
+            enabled: false,
+            satisfies: false,
+            stale: BTreeSet::new(),
+            digest: None,
+            value: None,
+            consumed: BTreeMap::new(),
+        }
     }
 }
 
 /// What a dependency looks like from a node's iteration.
 enum Dep {
-    Eval(NodeEval),
-    Running(String),
-    Exhausted(String),
+    Eval(Box<NodeEval>),
+    Waits(Reason),
+    Dead(Reason),
 }
 
-struct Eval<'a> {
-    ir: &'a Ir,
-    params: &'a Value,
-    facts: &'a Facts,
+/// Evaluates the folded state at one clock. Nothing here changes the fold.
+struct Eval<'f, 'a> {
+    fold: &'f Fold<'a>,
     now: Timestamp,
-    member: BTreeMap<&'a str, &'a str>,
-    nodes: BTreeMap<Key, NodeEval>,
-    loops: BTreeMap<String, Loop>,
+    memo: BTreeMap<Key, NodeEval>,
 }
 
-impl<'a> Eval<'a> {
-    fn new(started: &'a Started, facts: &'a Facts, now: Timestamp) -> Self {
-        let ir = &started.ir;
-        let member =
-            ir.repeats.iter().flat_map(|(rid, r)| r.body.iter().map(move |b| (b.as_str(), rid.as_str()))).collect();
-        Eval { ir, params: &started.params, facts, now, member, nodes: BTreeMap::new(), loops: BTreeMap::new() }
+impl<'f, 'a> Eval<'f, 'a> {
+    fn new(fold: &'f Fold<'a>, now: Timestamp) -> Self {
+        Eval { fold, now, memo: BTreeMap::new() }
+    }
+
+    fn phase(&mut self, rid: &str) -> Loop {
+        let fold = self.fold;
+        match fold.phases.get(rid).copied() {
+            Some(Phase::Done(i)) => Loop::Done(i),
+            Some(Phase::Exhausted(i)) => Loop::Exhausted(i),
+            Some(Phase::Running(i)) => {
+                let body = fold.ir.repeats.get(rid).map(|r| r.body.as_slice()).unwrap_or_default();
+                let at = Iteration::from([(rid.to_string(), i)]);
+                if body.iter().all(|b| self.node(b, &at).dead) { Loop::Unreachable } else { Loop::Running(i) }
+            }
+            None => Loop::Unreachable,
+        }
+    }
+
+    /// Iteration `i` of `rid` has settled: every body node is satisfied or will never run, and
+    /// not all of them will never run.
+    fn settled(&mut self, rid: &str, i: u32) -> bool {
+        let fold = self.fold;
+        let body = fold.ir.repeats.get(rid).map(|r| r.body.as_slice()).unwrap_or_default();
+        let at = Iteration::from([(rid.to_string(), i)]);
+        let evals: Vec<NodeEval> = body.iter().map(|b| self.node(b, &at)).collect();
+        evals.iter().all(|e| e.dead || e.satisfies) && !evals.iter().all(|e| e.dead)
     }
 
     /// A node's reported state: at its repeat's current iteration, or exhausted with it.
     fn status(&mut self, id: &str) -> NodeStatus {
-        let class = self.ir.nodes.get(id).map_or("", |n| n.class.name()).to_string();
-        let (iteration, eval) = match self.member.get(id).copied() {
-            None => (Iteration::new(), None),
+        let class = self.fold.ir.nodes.get(id).map_or("", |n| n.class.name()).to_string();
+        let (iteration, eval) = match self.fold.member.get(id).copied() {
+            None => (Iteration::new(), self.node(id, &Iteration::new())),
             Some(rid) => {
-                let (i, exhausted) = match self.repeat(rid) {
-                    Loop::Running(i) | Loop::Done(i) => (i, false),
-                    Loop::Exhausted(i) => (i, true),
+                let (i, exhausted) = match self.fold.phases.get(rid).copied() {
+                    Some(Phase::Running(i) | Phase::Done(i)) => (i, false),
+                    Some(Phase::Exhausted(i)) => (i, true),
+                    None => (0, false),
                 };
                 let iteration = Iteration::from([(rid.to_string(), i)]);
-                let eval = exhausted.then(|| NodeEval {
-                    state: State::Exhausted,
-                    reasons: vec![Reason::RepeatExhausted { repeat: rid.to_string() }],
-                    dead: true,
-                    stale: BTreeSet::new(),
-                    value: None,
-                    outputs: Value::Null,
-                });
+                let eval = if exhausted {
+                    NodeEval::new(State::Exhausted, vec![Reason::RepeatExhausted { repeat: rid.to_string() }])
+                } else {
+                    self.node(id, &iteration)
+                };
                 (iteration, eval)
             }
         };
-        let eval = match eval {
-            Some(e) => e,
-            None => self.node(id, &iteration),
-        };
         let (waits, unmet) = eval.reasons.into_iter().partition(Reason::is_wait);
-        NodeStatus { state: eval.state, class, iteration, unmet, waits }
+        NodeStatus { state: eval.state, class, iteration, unmet, waits, inputs: eval.consumed }
     }
 
     /// A dependency `m` seen from iteration `iter`.
     fn dep(&mut self, m: &str, iter: &Iteration) -> Dep {
-        match self.member.get(m).copied() {
-            None => Dep::Eval(self.node(m, &Iteration::new())),
-            Some(rid) => {
-                if let Some(i) = iter.get(rid) {
-                    let at = Iteration::from([(rid.to_string(), *i)]);
-                    return Dep::Eval(self.node(m, &at));
-                }
-                match self.repeat(rid) {
-                    Loop::Running(_) => Dep::Running(rid.to_string()),
-                    Loop::Exhausted(_) => Dep::Exhausted(rid.to_string()),
-                    Loop::Done(i) => Dep::Eval(self.node(m, &Iteration::from([(rid.to_string(), i)]))),
-                }
-            }
+        let Some(rid) = self.fold.member.get(m).copied() else {
+            return Dep::Eval(Box::new(self.node(m, &Iteration::new())));
+        };
+        if let Some(i) = iter.get(rid) {
+            return Dep::Eval(Box::new(self.node(m, &Iteration::from([(rid.to_string(), *i)]))));
         }
-    }
-
-    fn repeat(&mut self, rid: &str) -> Loop {
-        if let Some(l) = self.loops.get(rid) {
-            return *l;
-        }
-        let out = self.walk_repeat(rid);
-        self.loops.insert(rid.to_string(), out);
-        out
-    }
-
-    fn walk_repeat(&mut self, rid: &str) -> Loop {
-        let Some(r) = self.ir.repeats.get(rid) else { return Loop::Running(0) };
-        let until = r.until.as_deref().map(jq::compile);
-        let mut i = 0;
-        loop {
-            let at = Iteration::from([(rid.to_string(), i)]);
-            let mut state = serde_json::Map::new();
-            for b in &r.body {
-                let e = self.node(b, &at);
-                if !(e.dead || e.recorded()) {
-                    return Loop::Running(i);
-                }
-                if e.recorded() {
-                    state.insert(b.clone(), json!({ "outputs": e.outputs, "value": e.value }));
-                }
-            }
-            let input = json!({ "params": self.params, "iteration": i, "nodes": state });
-            if let Some(Ok(filter)) = &until
-                && jq::holds(filter, &input)
-            {
-                return Loop::Done(i);
-            }
-            if i + 1 >= r.max {
-                return Loop::Exhausted(i);
-            }
-            i += 1;
+        match self.phase(rid) {
+            Loop::Running(_) => Dep::Waits(Reason::RepeatRunning { repeat: rid.to_string() }),
+            Loop::Exhausted(_) => Dep::Dead(Reason::RepeatExhausted { repeat: rid.to_string() }),
+            Loop::Unreachable => Dep::Dead(Reason::RepeatUnreachable { repeat: rid.to_string() }),
+            Loop::Done(i) => Dep::Eval(Box::new(self.node(m, &Iteration::from([(rid.to_string(), i)])))),
         }
     }
 
     fn node(&mut self, id: &str, iter: &Iteration) -> NodeEval {
         let key = (id.to_string(), iter.clone());
-        if let Some(e) = self.nodes.get(&key) {
+        if let Some(e) = self.memo.get(&key) {
             return e.clone();
         }
-        let out = self.eval_node(id, iter, &key);
-        self.nodes.insert(key, out.clone());
+        let out = self.eval_node(id, &key);
+        self.memo.insert(key, out.clone());
         out
     }
 
-    fn eval_node(&mut self, id: &str, iter: &Iteration, key: &Key) -> NodeEval {
-        let ir = self.ir;
-        let Some(n) = ir.nodes.get(id) else {
-            return blocked(vec![Reason::Unreachable { node: id.to_string() }], true, BTreeSet::new());
+    fn eval_node(&mut self, id: &str, key: &Key) -> NodeEval {
+        let fold = self.fold;
+        let Some(n) = fold.ir.nodes.get(id) else {
+            return NodeEval { dead: true, ..NodeEval::new(State::Blocked, Vec::new()) };
         };
-        let mut reasons = Vec::new();
-        let mut dead = false;
-        let mut stale = BTreeSet::new();
-        let mut needs_node =
-            |this: &mut Self, m: &str, reasons: &mut Vec<Reason>, dead: &mut bool| match this.dep(m, iter) {
-                Dep::Eval(e) => {
-                    stale.extend(e.stale.iter().cloned());
-                    if e.dead {
-                        *dead = true;
-                        reasons.push(Reason::Unreachable { node: m.to_string() });
-                    } else if !e.recorded() {
-                        reasons.push(Reason::Needs { node: m.to_string() });
-                    }
-                    Some(e)
-                }
-                Dep::Running(r) => {
-                    reasons.push(Reason::RepeatRunning { repeat: r });
-                    None
-                }
-                Dep::Exhausted(r) => {
-                    *dead = true;
-                    reasons.push(Reason::RepeatExhausted { repeat: r });
-                    None
-                }
-            };
+        let mut out = NodeEval::new(State::Blocked, Vec::new());
+        let iter = &key.1;
         for need in &n.needs {
             match need {
                 Need::Node { node: m } => {
-                    needs_node(self, m, &mut reasons, &mut dead);
+                    self.consume(m, iter, &mut out);
                 }
-                Need::Repeat { repeat: r } => match self.repeat(r) {
-                    Loop::Done(_) => {}
-                    Loop::Running(_) => reasons.push(Reason::RepeatRunning { repeat: r.clone() }),
-                    Loop::Exhausted(_) => {
-                        dead = true;
-                        reasons.push(Reason::RepeatExhausted { repeat: r.clone() });
+                Need::Repeat { repeat: r } => match self.phase(r) {
+                    Loop::Done(i) => {
+                        let at = Iteration::from([(r.clone(), i)]);
+                        let body = fold.ir.repeats.get(r).map(|r| r.body.as_slice()).unwrap_or_default();
+                        for b in body {
+                            let stale = self.node(b, &at).stale;
+                            out.stale.extend(stale);
+                        }
                     }
+                    Loop::Running(_) => out.reasons.push(Reason::RepeatRunning { repeat: r.clone() }),
+                    Loop::Exhausted(_) => kill(&mut out, Reason::RepeatExhausted { repeat: r.clone() }),
+                    Loop::Unreachable => kill(&mut out, Reason::RepeatUnreachable { repeat: r.clone() }),
                 },
-                Need::Exhausted { repeat: r } => match self.repeat(r) {
+                Need::Exhausted { repeat: r } => match self.phase(r) {
                     Loop::Exhausted(_) => {}
-                    Loop::Running(_) => reasons.push(Reason::RepeatRunning { repeat: r.clone() }),
-                    Loop::Done(_) => {
-                        dead = true;
-                        reasons.push(Reason::RepeatFinished { repeat: r.clone() });
-                    }
+                    Loop::Running(_) => out.reasons.push(Reason::RepeatRunning { repeat: r.clone() }),
+                    Loop::Done(_) => kill(&mut out, Reason::RepeatFinished { repeat: r.clone() }),
+                    Loop::Unreachable => kill(&mut out, Reason::RepeatUnreachable { repeat: r.clone() }),
                 },
             }
         }
         if let Some(case) = &n.switch
-            && let Some(e) = needs_node(self, &case.on, &mut reasons, &mut dead)
-            && e.recorded()
+            && let Some(e) = self.consume(&case.on, iter, &mut out)
+            && e.satisfies
             && e.value.as_deref() != Some(case.value.as_str())
         {
-            dead = true;
-            reasons.push(Reason::Switch { on: case.on.clone(), took: e.value.clone(), case: case.value.clone() });
+            kill(&mut out, Reason::Switch { on: case.on.clone(), took: e.value.clone(), case: case.value.clone() });
         }
-        if let Some(p) = &n.when_param
-            && !supplied(self.params, p)
-        {
-            dead = true;
-            reasons.push(Reason::ParamAbsent { param: p.clone() });
+        out.enabled = !out.dead && out.reasons.is_empty();
+        if out.dead || !out.reasons.is_empty() {
+            return out;
         }
-
-        // The node's own receipt, if any.
-        if let Some(done) = self.receipt(n, id, key, stale.clone()) {
-            return done;
+        if let Some(r) = fold.receipts.get(key) {
+            return self.receipt(n, id, r, out);
         }
-        if dead || !reasons.is_empty() {
-            return blocked(reasons, dead, stale);
-        }
-        if !stale.is_empty() {
-            let reasons = stale.iter().map(|s| Reason::Stale { node: s.clone() }).collect();
-            return blocked(reasons, false, stale);
+        if !out.stale.is_empty() {
+            out.reasons = out.stale.iter().map(|s| Reason::Stale { node: s.clone() }).collect();
+            return out;
         }
         if let Class::Human { ask } = &n.class {
-            return NodeEval {
-                state: State::Waiting,
-                reasons: vec![Reason::Owner { ask: ask.clone() }],
-                ..fresh(stale)
-            };
+            out.state = State::Waiting;
+            out.reasons.push(Reason::Owner { ask: ask.clone() });
+            return out;
         }
-        let attempts = self.facts.attempts.get(key);
+        self.attempts(n, key, out)
+    }
+
+    /// Requires `m`, recording why not or the digest a receipt consumes from it.
+    fn consume(&mut self, m: &str, iter: &Iteration, out: &mut NodeEval) -> Option<NodeEval> {
+        match self.dep(m, iter) {
+            Dep::Eval(e) => {
+                out.stale.extend(e.stale.iter().cloned());
+                if e.dead {
+                    kill(out, Reason::Unreachable { node: m.to_string() });
+                } else if !e.satisfies {
+                    push(out, Reason::Needs { node: m.to_string() });
+                } else if let Some(d) = &e.digest {
+                    out.consumed.insert(m.to_string(), d.clone());
+                }
+                Some(*e)
+            }
+            Dep::Waits(reason) => {
+                push(out, reason);
+                None
+            }
+            Dep::Dead(reason) => {
+                kill(out, reason);
+                None
+            }
+        }
+    }
+
+    /// The node's state from its accepted receipt.
+    fn receipt(&self, n: &ir::Node, id: &str, r: &Receipt, mut out: NodeEval) -> NodeEval {
+        if let Some(failure) = &r.failure {
+            out.state = State::Failed;
+            out.reasons.push(failure.clone());
+            return out;
+        }
+        for (input, d) in &out.consumed {
+            if r.inputs.get(input) != Some(d) {
+                out.reasons.push(Reason::InputChanged { input: input.clone() });
+            }
+        }
+        let changed = !out.reasons.is_empty();
+        if let Class::Observe { fresh_for: Some(f), .. } = &n.class {
+            let age = self.now.duration_since(r.at);
+            if age > secs(*f) {
+                out.reasons.push(Reason::Expired { age_secs: age.as_secs(), fresh_for_secs: *f });
+                out.stale.insert(id.to_string());
+            }
+        }
+        out.state = if out.reasons.is_empty() { State::Done } else { State::Stale };
+        out.satisfies = !changed;
+        out.value = r.value.clone();
+        out.digest = Some(receipt_digest(&r.outputs, r.value.as_deref()));
+        out
+    }
+
+    /// The state of a node with every requirement met and no receipt: waiting, failed or ready.
+    fn attempts(&self, n: &ir::Node, key: &Key, mut out: NodeEval) -> NodeEval {
+        let attempts = self.fold.attempts.get(key);
         let live = attempts.and_then(|a| {
             a.iter().rev().find(|(_, a)| {
                 let cancelled = n.cancel_after.is_some_and(|c| self.now.duration_since(a.claimed_at) >= secs(c));
@@ -643,102 +852,38 @@ impl<'a> Eval<'a> {
             })
         });
         if let Some((attempt, a)) = live {
-            let mut reasons = vec![Reason::Claimed { attempt: *attempt, lease_until: a.lease_text.clone() }];
+            out.state = State::Waiting;
+            out.reasons.push(Reason::Claimed { attempt: *attempt, lease_until: a.lease_text.clone() });
             if let Some(w) = n.class.wait() {
-                reasons.push(Reason::External { waits_for: w.external.clone(), heartbeat_secs: w.heartbeat });
+                out.reasons.push(Reason::External { waits_for: w.external.clone(), heartbeat_secs: w.heartbeat });
             }
-            return NodeEval { state: State::Waiting, reasons, ..fresh(stale) };
+            return out;
         }
-        let ended = attempts.map_or(0, |a| a.len() as u32);
-        if let Some(max) = n.retry
+        let ended = u32::try_from(attempts.map_or(0, BTreeMap::len)).unwrap_or(u32::MAX);
+        if self.fold.next_attempt(key).is_none() {
+            out.state = State::Failed;
+            out.reasons.push(Reason::AttemptsExhausted);
+        } else if let Some(max) = n.retry
             && ended >= max
         {
-            return NodeEval {
-                state: State::Failed,
-                reasons: vec![Reason::AttemptsUsed { attempts: ended }],
-                ..fresh(stale)
-            };
+            out.state = State::Failed;
+            out.reasons.push(Reason::AttemptsUsed { attempts: ended });
+        } else {
+            out.state = State::Ready;
         }
-        NodeEval { state: State::Ready, ..fresh(stale) }
-    }
-
-    /// The node's state from its receipt in this iteration, if the log holds one.
-    fn receipt(&self, n: &ir::Node, id: &str, key: &Key, mut stale: BTreeSet<String>) -> Option<NodeEval> {
-        let done = |value: Option<String>, outputs: Value, stale: BTreeSet<String>| NodeEval {
-            state: State::Done,
-            value,
-            outputs,
-            ..fresh(stale)
-        };
-        let failed = |reason: Reason, stale: BTreeSet<String>| NodeEval {
-            state: State::Failed,
-            reasons: vec![reason],
-            ..fresh(stale)
-        };
-        if let Class::Choice { edges, .. } = &n.class {
-            let chosen = self.facts.chosen.get(key)?;
-            if !edges.contains_key(&chosen.edge) {
-                return Some(failed(Reason::EdgeUndeclared { edge: chosen.edge.clone() }, stale));
-            }
-            return Some(done(Some(chosen.edge.clone()), Value::Null, stale));
-        }
-        let (at, receipt) = self.facts.completed.get(key)?;
-        let Class::Observe { fresh_for, inputs, exit_map, .. } = &n.class else {
-            return Some(done(None, receipt.outputs.clone(), stale));
-        };
-        let exit = receipt.verify.as_ref().map(|v| v.exit);
-        let Some(value) = exit.and_then(|x| exit_map.iter().find(|e| e.exit == x)).map(|e| e.value.clone()) else {
-            return Some(failed(Reason::ExitUnmapped { exit }, stale));
-        };
-        let mut reasons = Vec::new();
-        let age = self.now.duration_since(*at);
-        if let Some(f) = fresh_for
-            && age > secs(*f)
-        {
-            reasons.push(Reason::Expired { age_secs: age.as_secs(), fresh_for_secs: *f });
-        }
-        for input in inputs {
-            if receipt.inputs.get(&input.key()) != self.input_digest(input, key).as_ref() {
-                reasons.push(Reason::InputChanged { input: input.key() });
-            }
-        }
-        if reasons.is_empty() {
-            return Some(done(Some(value), receipt.outputs.clone(), stale));
-        }
-        stale.insert(id.to_string());
-        Some(NodeEval {
-            state: State::Stale,
-            reasons,
-            value: Some(value),
-            outputs: receipt.outputs.clone(),
-            ..fresh(stale)
-        })
-    }
-
-    /// The digest an input has now: a param's value, or a node's latest outputs in the matching
-    /// iteration. `None` when the node has no receipt there.
-    fn input_digest(&self, input: &Input, key: &Key) -> Option<String> {
-        match input {
-            Input::Param { name } => Some(digest(self.params.get(name).unwrap_or(&Value::Null))),
-            Input::Node { node } => {
-                let iter = match self.member.get(node.as_str()) {
-                    Some(rid) => key.1.get(*rid).map(|i| Iteration::from([(rid.to_string(), *i)]))?,
-                    None => Iteration::new(),
-                };
-                self.facts.completed.get(&(node.clone(), iter)).map(|(_, c)| digest(&c.outputs))
-            }
-        }
+        out
     }
 }
 
-fn fresh(stale: BTreeSet<String>) -> NodeEval {
-    NodeEval { state: State::Ready, reasons: Vec::new(), dead: false, stale, value: None, outputs: Value::Null }
+/// Records why a node is not ready, once (a node may need and switch on the same node).
+fn push(out: &mut NodeEval, reason: Reason) {
+    if !out.reasons.contains(&reason) {
+        out.reasons.push(reason);
+    }
 }
 
-fn blocked(reasons: Vec<Reason>, dead: bool, stale: BTreeSet<String>) -> NodeEval {
-    NodeEval { state: State::Blocked, reasons, dead, ..fresh(stale) }
-}
-
-fn secs(s: u64) -> SignedDuration {
-    SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))
+/// Marks a node as never running, for `reason`.
+fn kill(out: &mut NodeEval, reason: Reason) {
+    out.dead = true;
+    push(out, reason);
 }

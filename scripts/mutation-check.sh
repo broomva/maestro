@@ -851,34 +851,38 @@ mutate $fl/ledger.rs 'Ok(Summary { summary: from_log, cache })' 'Ok(Summary { su
 mutate $fl/ids.rs "} else if !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '} else if false {'
 mutate $fl/operator.rs '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {
             let _ = std::fs::remove_file(&marker);' '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {'
-# Flow kernel (BRO-3633 PR 3b1): definitions, the compiler and the read-only scheduler.
+# Flow kernel (BRO-3633 PR 3b1): definitions, the compiler, guards and the read-only scheduler.
 fk=crates/flow/src/kernel
 # Compile rejections: unknown references, loops without a bound, undeclared switch cases,
-# effects without reconcile, repeated ids, phase 2 reuse, class rules, guards.
+# effects without reconcile, repeated or malformed ids, phase 2 reuse, class rules.
 mutate $fk/definition.rs '#[serde(deny_unknown_fields)]
 pub(crate) struct NodeDef {' 'pub(crate) struct NodeDef {'
 mutate $fk/compile.rs '        if !seen.insert(id) {' '        if false && !seen.insert(id) {'
 mutate $fk/compile.rs '    unique("param", params.iter().map(|(name, _)| *name))?;' ''
 mutate $fk/compile.rs '            unique("edge", edges.iter().map(|(e, _)| e.as_str()))?;' ''
+mutate $fk/compile.rs '                unique("exit_map", codes.iter().map(String::as_str))?;' ''
 mutate $fk/compile.rs '    if def.uses.is_some() {' '    if false {'
 mutate $fk/compile.rs '    if def.templates.is_some() {' '    if false {'
 mutate $fk/compile.rs '.find(|(_, n)| n.uses.is_some())' '.find(|_| false)'
+mutate $fk/compile.rs "    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '    if id.is_empty() {'
+mutate $fk/compile.rs '        plain("param", name)?;' ''
+mutate $fk/compile.rs '        if f.all.is_empty() {' '        if false {'
 mutate $fk/compile.rs '        if let Some(b) = f.all.iter().find(|b| !node_ids.contains(b.as_str())) {' '        if let Some(b) = f.all.iter().find(|_| false) {'
 mutate $fk/compile.rs '.into_iter().find(|f| !allowed.contains(f))' '.into_iter().find(|_| false)'
 mutate $fk/compile.rs '        Ok(s) if s > 0 => Ok(s),' '        Ok(s) => Ok(s),'
+mutate $fk/ir.rs '    if ir.ir_version != IR_VERSION {' '    if false {'
 mutate $fk/ir.rs '        if r.max == 0 || r.max > MAX_REPEAT {' '        if r.max > MAX_REPEAT {'
 mutate $fk/ir.rs '        if r.max == 0 || r.max > MAX_REPEAT {' '        if r.max == 0 {'
+mutate $fk/ir.rs '        if r.body.is_empty() {' '        if false {'
 mutate $fk/ir.rs '        for b in &r.body {
             node(&from, b)?;' '        for b in &r.body {'
 mutate $fk/ir.rs 'if let Some(other) = membership.insert(b.as_str(), rid.as_str()) {' 'if let Some(other) = membership.insert(b.as_str(), rid.as_str()).filter(|_| false) {'
 mutate $fk/ir.rs '        if let Some(target) = &r.on_exhausted {
             node(&from, target)?;' '        if let Some(target) = &r.on_exhausted {'
 mutate $fk/ir.rs '            if r.body.contains(target) {' '            if false {'
-mutate $fk/ir.rs '            guard(format!("repeat {rid} until"), until)?;' '            let _ = until;'
 mutate $fk/ir.rs '                Need::Node { node: m } => {
                     node(&from, m)?;' '                Need::Node { node: m } => {
                     let _ = m;'
-mutate $fk/ir.rs '            param(&from, p)?;' '            let _ = p;'
 mutate $fk/ir.rs '        if n.retry == Some(0) {' '        if false {'
 mutate $fk/ir.rs '                Class::Choice { edges, .. } => edges.contains_key(&case.value),' '                Class::Choice { .. } => true,'
 mutate $fk/ir.rs '                Class::Observe { exit_map, .. } => exit_map.iter().any(|e| e.value == case.value),' '                Class::Observe { .. } => true,'
@@ -893,80 +897,110 @@ mutate $fk/ir.rs '                        Input::Node { node: m } => {
                             node(&from, m)?;' '                        Input::Node { node: m } => {'
 mutate $fk/ir.rs '                            if !n.needs.contains(&Need::Node { node: m.clone() }) {' '                            if false {'
 mutate $fk/ir.rs '                if edges.is_empty() {' '                if false {'
-mutate $fk/ir.rs '                    guard(format!("node {id} edge {edge}"), g)?;' '                    let _ = (edge, g);'
 mutate $fk/ir.rs '                if reconcile.is_empty() {' '                if false {'
-mutate $fk/ir.rs '                    guard(format!("node {id} precondition {i}"), g)?;' '                    let _ = (i, g);'
 mutate $fk/ir.rs '                if ask.trim().is_empty() {' '                if false {'
 mutate $fk/ir.rs '    acyclic(ir)
 }' '    Ok(())
 }'
 mutate $fk/ir.rs '            set.insert(format!("n:{}", case.on));' ''
 mutate $fk/ir.rs '        set.extend(r.body.iter().map(|b| format!("n:{b}")));' ''
-# Guards are pure: the clock, the environment, input streams, prints and halts are left out.
-mutate $fk/jq.rs '        .filter(|f| !DENIED.contains(&f.0));' ';'
-mutate $fk/ir.rs '    jq::compile(code).map(|_| ()).map_err(|detail| CompileError::InvalidGuard { at, detail })' '    let _ = (at, code);
-    Ok(())'
-# start: params that do not fit are refused before anything is written.
+# Guards: checked at compile time, refused before they run when they could not end or would read
+# anything but their input, evaluated only by writers, on a thread, within a limit.
+mutate $fk/compile.rs '    check_guards(&ir)?;' ''
+mutate $fk/compile.rs '            check(format!("repeat {rid} until"), until)?;' '            let _ = until;'
+mutate $fk/compile.rs '                    check(format!("node {id} edge {edge}"), g)?;' '                    let _ = (edge, g);'
+mutate $fk/compile.rs '                    check(format!("node {id} precondition {i}"), g)?;' '                    let _ = (i, g);'
+mutate $fk/jq.rs '        Tok::Word if BANNED_WORDS.contains(s) => Some(*s),' '        Tok::Word if false => Some(*s),'
+mutate $fk/jq.rs "        Tok::Sym if s.starts_with('*') => Some(*s)," '        Tok::Sym if false => Some(*s),'
+mutate $fk/jq.rs '        Tok::Block(inner) => banned(inner),' '        Tok::Block(_) => None,'
+mutate $fk/jq.rs '            StrPart::Term(t) => banned(std::slice::from_ref(t)),' '            StrPart::Term(_) => None,'
+mutate $fk/jq.rs '    match rx.recv_timeout(limit) {' '    match rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected) {'
+mutate $fk/jq.rs '        Some(Ok(_)) | None => Err(GuardRefusal::NotBoolean),' '        Some(Ok(_)) | None => Ok(true),'
+mutate $fk/jq.rs '        Some(Err(_)) => Err(GuardRefusal::Error),' '        Some(Err(_)) => Ok(true),'
+# start: params that do not fit are refused before anything is written; null is absent.
 mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'
 mutate $fk/replay.rs '    if let Some(name) = given.keys().find(|k| !ir.params.contains_key(*k)) {' '    if let Some(name) = given.keys().find(|_| false) {'
-# Replay reads only what it can trust: a Started first, a pinned IR that validates (without it a
-# cyclic pin recurses until the stack overflows) and matches its hash, kernel event kinds,
-# declared nodes.
+mutate $fk/replay.rs '    params.get(name).is_some_and(|v| !v.is_null())' '    params.get(name).is_some()'
+# The pin: a Started first, a pinned IR of this version that validates (without it a cyclic pin
+# recurses until the stack overflows), matches its hash and is the flow it names.
 mutate $fk/replay.rs '    if first.kind != Started::KIND {' '    if false {'
 mutate $fk/replay.rs '    ir::validate(&started.ir)
         .map_err(|e| malformed(log, first.seq, format!("the pinned IR does not validate ({e})")))?;' '' 'stack overflow'
 mutate $fk/replay.rs '    if ir::content_hash(&started.ir)? != started.ir_hash {' '    if false {'
-mutate $fk/replay.rs '        if started.ir.nodes.contains_key(node) {' '        if true {'
-mutate $fk/replay.rs '            other => return Err(malformed(log, e.seq, format!("{other} is not a kernel event"))),' '            _ => {}'
-# The scheduler: needs, the fork join, switches, iterations, repeats, freshness, exit maps,
-# edges, params, waits, retry and cancel.
-mutate $fk/replay.rs '                    } else if !e.recorded() {' '                    } else if false {'
-mutate $fk/compile.rs '            branches.iter().map(|b| Need::Node { node: b.clone() }).collect()' '            Vec::new()'
-mutate $fk/replay.rs '            && e.value.as_deref() != Some(case.value.as_str())' '            && false'
-mutate $fk/replay.rs '            if !edges.contains_key(&chosen.edge) {' '            if false {'
-mutate $fk/replay.rs '        let (at, receipt) = self.facts.completed.get(key)?;' '        let (at, receipt) = self.facts.completed.iter().rev().find(|(k, _)| k.0 == key.0).map(|(_, v)| v)?;'
-mutate $fk/replay.rs '            if i + 1 >= r.max {' '            if false {'
-mutate $fk/replay.rs '                && jq::holds(filter, &input)' '                && false'
-mutate $fk/jq.rs 'Some(Ok(Val::Bool(true)))' 'Some(Ok(_))'
+mutate $fk/replay.rs '    if started.flow != format!("{}@{}", started.ir.flow, started.ir.version) {' '    if false {'
+# Acceptance, in log order: kernel kinds only, a declared node, its current iteration, the right
+# class, a declared edge, an enabled node not already done, claims numbered upward, heartbeats
+# that extend a lease, verdicts for a settled current iteration.
+mutate $fk/replay.rs '        if ![Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND].contains(&e.kind.as_str()) {' '        if false {'
+mutate $fk/replay.rs 'let Some(node) = self.ir.nodes.get(&subject.node) else {' 'let Some(node) = self.ir.nodes.get(&subject.node).or_else(|| self.ir.nodes.values().next()) else {'
+mutate $fk/replay.rs '        if self.current(&subject.node).as_ref() != Some(&subject.iteration) {' '        if false {'
+mutate $fk/replay.rs '                Phase::Exhausted(_) => None,' '                Phase::Exhausted(i) => Some(Iteration::from([(rid.to_string(), *i)])),'
+mutate $fk/replay.rs '                    Class::Choice { .. } => return Ok(Err("wrong_class")),' '                    Class::Choice { .. } => (None, None),'
+mutate $fk/replay.rs 'let Class::Choice { edges, .. } = &node.class else { return Ok(Err("wrong_class")) };' 'let Class::Choice { edges, .. } = &node.class else { return Ok(Ok(())) };'
+mutate $fk/replay.rs '                if !edges.contains_key(&c.edge) {' '                if false {'
+mutate $fk/replay.rs 'match exit.and_then(|x| exit_map.iter().find(|m| m.exit == x)) {' 'match exit.or(Some(0)).and_then(|x| exit_map.iter().find(|m| m.exit == x)) {'
+mutate $fk/replay.rs 'exit_map.iter().find(|m| m.exit == x)' 'exit_map.iter().find(|_| true)'
+mutate $fk/replay.rs '.is_some_and(|last| c.attempt <= *last)' '.is_some_and(|last| c.attempt < *last)'
+mutate $fk/replay.rs '.and_then(|m| m.get_mut(&h.attempt))' '.and_then(|m| m.values_mut().next())'
+mutate $fk/replay.rs '                if lease_until <= a.lease_until {' '                if false {'
+mutate $fk/replay.rs '        if !now.enabled {' '        if false {'
+mutate $fk/replay.rs '        if now.state == State::Done && !matches!(node.class, Class::Observe { .. }) {' '        if false {'
+mutate $fk/replay.rs '        if now.state == State::Done && !matches!(node.class, Class::Observe { .. }) {' '        if now.state == State::Done {'
+mutate $fk/replay.rs '        if r.until.is_none() {' '        if false {'
+mutate $fk/replay.rs '        if self.phases.get(g.repeat.as_str()) != Some(&Phase::Running(g.iteration)) {' '        if false {'
+mutate $fk/replay.rs '        if !Eval::new(self, at).settled(&g.repeat, g.iteration) {' '        if false {'
+# Repeats move only on recorded verdicts; they exhaust at max; a body that never runs is
+# unreachable; a body node not taken settles its iteration.
+mutate $fk/replay.rs '                        None => continue,' '                        None => false,'
+mutate $fk/replay.rs '                        Some(holds) => *holds,' '                        Some(_) => true,'
+mutate $fk/replay.rs '                } else if i.saturating_add(1) >= r.max {' '                } else if false {'
+mutate $fk/replay.rs '        evals.iter().all(|e| e.dead || e.satisfies) && !evals.iter().all(|e| e.dead)' '        evals.iter().all(|e| e.satisfies) && !evals.iter().all(|e| e.dead)'
+mutate $fk/replay.rs '        evals.iter().all(|e| e.dead || e.satisfies) && !evals.iter().all(|e| e.dead)' '        evals.iter().all(|e| e.dead || e.satisfies)'
+mutate $fk/replay.rs 'if body.iter().all(|b| self.node(b, &at).dead) {' 'if false {'
+mutate $fk/replay.rs '                    Some(Phase::Exhausted(i)) => (i, true),' '                    Some(Phase::Exhausted(i)) => (i, false),'
+mutate $fk/replay.rs '            Loop::Exhausted(_) => Dep::Dead(Reason::RepeatExhausted { repeat: rid.to_string() }),' '            Loop::Exhausted(_) => Dep::Waits(Reason::RepeatRunning { repeat: rid.to_string() }),'
+mutate $fk/replay.rs '            Loop::Done(i) => Dep::Eval(Box::new(self.node(m, &Iteration::from([(rid.to_string(), i)])))),' '            Loop::Done(_) => Dep::Waits(Reason::RepeatRunning { repeat: rid.to_string() }),'
 mutate $fk/compile.rs '            node.needs.push(Need::Exhausted { repeat: rid.clone() });' ''
-mutate $fk/replay.rs '                    Loop::Exhausted(i) => (i, true),' '                    Loop::Exhausted(i) => (i, false),'
-mutate $fk/replay.rs '                Need::Repeat { repeat: r } => match self.repeat(r) {
-                    Loop::Done(_) => {}
-                    Loop::Running(_) => reasons.push(Reason::RepeatRunning { repeat: r.clone() }),
-                    Loop::Exhausted(_) => {
-                        dead = true;' '                Need::Repeat { repeat: r } => match self.repeat(r) {
-                    Loop::Done(_) => {}
-                    Loop::Running(_) => reasons.push(Reason::RepeatRunning { repeat: r.clone() }),
-                    Loop::Exhausted(_) => {
-                        dead = false;'
-mutate $fk/replay.rs '                    Loop::Done(_) => {
-                        dead = true;' '                    Loop::Done(_) => {
-                        dead = false;'
-mutate $fk/replay.rs '            && age > secs(*f)' '            && false'
-mutate $fk/replay.rs '        if !stale.is_empty() {' '        if false {'
-mutate $fk/replay.rs '                    stale.extend(e.stale.iter().cloned());' ''
-mutate $fk/replay.rs '            if receipt.inputs.get(&input.key()) != self.input_digest(input, key).as_ref() {' '            if false {'
-mutate $fk/replay.rs '.and_then(|x| exit_map.iter().find(|e| e.exit == x))' '.and_then(|_| exit_map.first())'
-mutate $fk/replay.rs '            && !supplied(self.params, p)' '            && false'
+mutate $fk/replay.rs '                    Loop::Exhausted(_) => kill(&mut out, Reason::RepeatExhausted { repeat: r.clone() }),' '                    Loop::Exhausted(_) => push(&mut out, Reason::RepeatExhausted { repeat: r.clone() }),'
+mutate $fk/replay.rs '                    Loop::Done(_) => kill(&mut out, Reason::RepeatFinished { repeat: r.clone() }),' '                    Loop::Done(_) => push(&mut out, Reason::RepeatFinished { repeat: r.clone() }),'
+# Needs, the fork join, switches, dead branches, receipts and their inputs, freshness, exit maps.
+mutate $fk/compile.rs '            branches.iter().map(|b| Need::Node { node: b.clone() }).collect()' '            Vec::new()'
+mutate $fk/replay.rs '                } else if !e.satisfies {' '                } else if false {'
+mutate $fk/replay.rs '                    kill(out, Reason::Unreachable { node: m.to_string() });' '                    push(out, Reason::Unreachable { node: m.to_string() });'
+mutate $fk/replay.rs '                out.stale.extend(e.stale.iter().cloned());' ''
+mutate $fk/replay.rs '                            out.stale.extend(stale);' ''
+mutate $fk/replay.rs '            && e.value.as_deref() != Some(case.value.as_str())' '            && false'
+mutate $fk/replay.rs '        if let Some(failure) = &r.failure {' '        if let Some(failure) = r.failure.as_ref().filter(|_| false) {'
+mutate $fk/replay.rs '            if r.inputs.get(input) != Some(d) {' '            if false {'
+mutate $fk/replay.rs '        out.satisfies = !changed;' '        out.satisfies = true;'
+mutate $fk/replay.rs '            if age > secs(*f) {' '            if age >= secs(*f) {'
+mutate $fk/replay.rs '            if age > secs(*f) {' '            if false {'
+mutate $fk/replay.rs '                out.stale.insert(id.to_string());' ''
+mutate $fk/replay.rs 'let rerun = s.state == State::Stale && e.enabled && e.stale.iter().all(|s| *s == id);' 'let rerun = false;'
+# Waits, leases, cancel, retry and attempt numbers, which fail closed when they run out.
+mutate $fk/replay.rs '        if let Class::Human { ask } = &n.class {' '        if let Some(ask) = None::<&String> {'
+mutate $fk/replay.rs '                self.now < a.lease_until && !cancelled' '                self.now <= a.lease_until && !cancelled'
 mutate $fk/replay.rs '                self.now < a.lease_until && !cancelled' '                !cancelled'
+mutate $fk/replay.rs 'n.cancel_after.is_some_and(|c| self.now.duration_since(a.claimed_at) >= secs(c))' 'n.cancel_after.is_some_and(|c| self.now.duration_since(a.claimed_at) > secs(c))'
 mutate $fk/replay.rs 'n.cancel_after.is_some_and(|c| self.now.duration_since(a.claimed_at) >= secs(c))' 'n.cancel_after.is_some_and(|_| false)'
 mutate $fk/replay.rs '            && ended >= max' '            && false'
-mutate $fk/replay.rs '        if let Class::Human { ask } = &n.class {' '        if let Some(ask) = None::<&String> {'
-mutate $fk/replay.rs '                    a.lease_until = lease_until;' ''
-# Positive controls: a replay that ran a command, or that was not a function of the log and the
-# clock, fails the tests that say it never does.
-mutate $fk/replay.rs '        let ir = self.ir;
-        let Some(n) = ir.nodes.get(id) else {' '        let ir = self.ir;
-        if let Some(Class::Pure { run }) = ir.nodes.get(id).map(|n| &n.class) {
+mutate $fk/replay.rs '            Some(last) => last.checked_add(1),' '            Some(last) => Some(last.wrapping_add(1)),'
+mutate $fk/replay.rs '        if self.fold.next_attempt(key).is_none() {' '        if false {'
+mutate $fk/replay.rs '        match self.attempts.get(key).and_then(|a| a.keys().next_back()) {' '        match self.attempts.get(key).and_then(|a| a.keys().next()) {'
+# Positive controls: a replay that ran a command, evaluated a guard, or was not a function of the
+# log and the clock fails the tests that say it never does.
+mutate $fk/replay.rs '        let fold = self.fold;
+        let Some(n) = fold.ir.nodes.get(id) else {' '        let fold = self.fold;
+        if let Some(Class::Pure { run }) = fold.ir.nodes.get(id).map(|n| &n.class) {
             let _ = std::process::Command::new(&run[0]).args(&run[1..]).status();
         }
-        let Some(n) = ir.nodes.get(id) else {'
-mutate $fk/replay.rs '        seq: log.seq(),
-        nodes,' '        seq: jiff::Timestamp::now().as_nanosecond() as u64,
-        nodes,'
-mutate $fk/replay.rs '                    Loop::Exhausted(_) => Dep::Exhausted(rid.to_string()),' '                    Loop::Exhausted(_) => Dep::Running(rid.to_string()),'
-mutate $fk/replay.rs '                    Loop::Done(i) => Dep::Eval(self.node(m, &Iteration::from([(rid.to_string(), i)]))),' '                    Loop::Done(_) => Dep::Running(rid.to_string()),'
-mutate $fk/replay.rs '                if !(e.dead || e.recorded()) {' '                if !e.recorded() {'
+        let Some(n) = fold.ir.nodes.get(id) else {'
+mutate $fk/replay.rs '                let holds = match r.until {
+                    Some(_) => match self.verdicts.get(&(rid.clone(), i)) {' '                let holds = match r.until {
+                    Some(ref g) => match Some(&super::jq::evaluate(g, &serde_json::json!({}), std::time::Duration::from_secs(5)).unwrap_or(false)) {'
+mutate $fk/replay.rs '            seq: log.seq(),
+            nodes,' '            seq: jiff::Timestamp::now().as_nanosecond() as u64,
+            nodes,'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

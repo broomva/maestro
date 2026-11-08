@@ -22,12 +22,19 @@ nodes:
     needs: [pin]
     switch: {on: pin, case: at_head}
     run: [sh, -c, "{{params.check}}"]
+  # V4: whether a surface was declared, observed from the param itself (it never changes, so
+  # the observation never goes stale).
+  surface:
+    class: observe
+    run: [test, -n, "{{params.surface}}"]
+    inputs: [params.surface]
+    exit_map: {0: declared, 1: none}
   # V4: tried as a user, only when a surface is declared; its verify checks a dogfood receipt
   # bound to the pinned head (the verify argv is settled with the verify runner).
   exercise:
     class: work
     needs: [check]
-    when_param: surface
+    switch: {on: surface, case: declared}
     performer: agent:verifier
     skill: dogfood
     verify: [maestro, dogfood, verify-receipt, --head, "{{params.head}}", --surface, "{{params.surface}}"]

@@ -45,7 +45,6 @@ fn an_unknown_reference_is_refused() {
         &[
             ("needs", "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x], needs: [ghost]}\n"),
             ("switch on", "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x], switch: {on: ghost, case: y}}\n"),
-            ("when_param", "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x], when_param: ghost}\n"),
             (
                 "fork branch",
                 "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\nforks:\n  f: {all: [a, ghost]}\n",
@@ -161,6 +160,10 @@ fn a_repeated_id_is_refused_wherever_it_is_declared() {
                 "an edge twice",
                 "flow: f\nversion: 1\nnodes:\n  c: {class: choice, edges: {y: {guard: 'true'}, y: {guard: 'false'}}}\n",
             ),
+            (
+                "an exit status twice",
+                "flow: f\nversion: 1\nnodes:\n  o: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: a, 0: b}}\n",
+            ),
         ],
     );
 }
@@ -196,6 +199,12 @@ fn a_guard_must_parse_and_read_only_its_input() {
             ("a print", &edge(". | debug | true")),
             ("a halt", &edge("halt")),
             ("a module file", &edge("include \"guards\"; true")),
+            ("recursion", &edge("def f: f; f")),
+            ("an unbounded generator", &edge("last(range(1e15)) > 0")),
+            ("work the log sizes", &edge("[range(0; .nodes.a.outputs.n)] | length > 0")),
+            ("a string the log repeats", &edge("(\"x\" * .n | length) > 0")),
+            ("a banned word inside an interpolation", &edge("\"\\(now)\" != \"\"")),
+            ("a banned word inside a block", &edge("[.[] | repeat(.)] | length > 0")),
             (
                 "an until",
                 "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\nrepeats:\n  r: {body: [a], max: 2, until: 'now > 0'}\n",
@@ -246,6 +255,19 @@ fn class_rules_are_held() {
             (
                 "a duration that does not parse",
                 "flow: f\nversion: 1\nnodes:\n  o: {class: observe, run: [x], fresh_for: soon, exit_map: {0: ok}}\n",
+            ),
+            (
+                "an empty fork",
+                "flow: f\nversion: 1\nnodes:\n  j: {class: pure, run: [x], needs: [s]}\nforks:\n  s: {all: []}\n",
+            ),
+            (
+                "an empty repeat body",
+                "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\nrepeats:\n  r: {body: [], max: 3}\n",
+            ),
+            ("a node id that reads as a param", "flow: f\nversion: 1\nnodes:\n  'params.x': {class: pure, run: [x]}\n"),
+            (
+                "a param name that is not plain",
+                "flow: f\nversion: 1\nparams: ['a.b']\nnodes:\n  a: {class: pure, run: [x]}\n",
             ),
             (
                 "a zero duration",

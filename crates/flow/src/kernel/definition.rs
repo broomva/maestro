@@ -59,7 +59,6 @@ pub(crate) struct NodeDef {
     #[serde(default)]
     pub needs: Vec<String>,
     pub switch: Option<SwitchDef>,
-    pub when_param: Option<String>,
     pub retry: Option<RetryDef>,
     pub cancel: Option<CancelDef>,
     // Fields that belong to some classes only (`compile::CLASS_FIELDS`).
@@ -70,7 +69,8 @@ pub(crate) struct NodeDef {
     pub routing: Option<BTreeMap<String, String>>,
     pub fresh_for: Option<String>,
     pub inputs: Option<Vec<String>>,
-    pub exit_map: Option<BTreeMap<i32, String>>,
+    #[serde(default, deserialize_with = "some_entries")]
+    pub exit_map: Option<Vec<(i32, String)>>,
     #[serde(default, deserialize_with = "some_entries")]
     pub edges: Option<Vec<(String, EdgeDef)>>,
     pub preconditions: Option<Vec<String>>,
@@ -154,16 +154,21 @@ pub(crate) struct RepeatDef {
 
 /// A mapping read as its entries in order, duplicates kept, so `compile` can refuse a repeated
 /// id instead of the parser silently keeping the last one.
-fn entries<'de, D: Deserializer<'de>, V: DeserializeOwned>(d: D) -> Result<Vec<(String, V)>, D::Error> {
-    struct Entries<V>(PhantomData<V>);
-    impl<'de, V: DeserializeOwned> Visitor<'de> for Entries<V> {
-        type Value = Vec<(String, V)>;
+fn entries<'de, D, K, V>(d: D) -> Result<Vec<(K, V)>, D::Error>
+where
+    D: Deserializer<'de>,
+    K: DeserializeOwned,
+    V: DeserializeOwned,
+{
+    struct Entries<K, V>(PhantomData<(K, V)>);
+    impl<'de, K: DeserializeOwned, V: DeserializeOwned> Visitor<'de> for Entries<K, V> {
+        type Value = Vec<(K, V)>;
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
             f.write_str("a mapping")
         }
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
             let mut out = Vec::new();
-            while let Some(entry) = map.next_entry::<String, V>()? {
+            while let Some(entry) = map.next_entry::<K, V>()? {
                 out.push(entry);
             }
             Ok(out)
@@ -172,6 +177,11 @@ fn entries<'de, D: Deserializer<'de>, V: DeserializeOwned>(d: D) -> Result<Vec<(
     d.deserialize_map(Entries(PhantomData))
 }
 
-fn some_entries<'de, D: Deserializer<'de>, V: DeserializeOwned>(d: D) -> Result<Option<Vec<(String, V)>>, D::Error> {
+fn some_entries<'de, D, K, V>(d: D) -> Result<Option<Vec<(K, V)>>, D::Error>
+where
+    D: Deserializer<'de>,
+    K: DeserializeOwned,
+    V: DeserializeOwned,
+{
     entries(d).map(Some)
 }

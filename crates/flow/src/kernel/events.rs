@@ -1,9 +1,14 @@
 //! The kernel's event kinds, each a typed body stored in the storage layer's generic event
 //! (`kind` plus a JSON `body`). Replay reads only these kinds; any other kind fails the replay.
 //!
-//! This PR writes only `Started` (through `start`). `Claimed`, `Completed`, `Refused`, `Chosen`
-//! and `Heartbeat` are defined here so their writers can be added without changing what replay
-//! reads.
+//! This PR writes only `Started` (through `start`). `Claimed`, `Completed`, `Refused`, `Chosen`,
+//! `Heartbeat` and `Guarded` are defined here so their writers can be added without changing
+//! what replay reads.
+//!
+//! A receipt (`Completed`, `Chosen`) records in `inputs` the digest of every receipt it consumed:
+//! each node it needs or switches on, by node id ([`receipt_digest`]). `status` and `next` name
+//! those digests for every node. A receipt whose recorded
+//! inputs no longer match is not done.
 
 use super::error::KernelError;
 use super::ir::{Ir, Iteration};
@@ -75,7 +80,7 @@ pub struct Completed {
     pub node: String,
     pub iteration: Iteration,
     pub attempt: u32,
-    /// Input name (`params.<name>` or a node id) to the digest of the value it had.
+    /// Node id to the digest its receipt had ([`receipt_digest`]).
     #[serde(default)]
     pub inputs: BTreeMap<String, String>,
     #[serde(default)]
@@ -106,6 +111,8 @@ pub struct Chosen {
     pub attempt: u32,
     pub edge: String,
     #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
+    #[serde(default)]
     pub tool_use_id: Option<String>,
 }
 
@@ -116,6 +123,15 @@ pub struct Heartbeat {
     pub iteration: Iteration,
     pub attempt: u32,
     pub lease_until: String,
+}
+
+/// The recorded verdict of a repeat's `until` for one iteration, evaluated once when the
+/// iteration settled. Replay reads verdicts; it never evaluates a guard.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Guarded {
+    pub repeat: String,
+    pub iteration: u32,
+    pub holds: bool,
 }
 
 impl KernelEvent for Started {
@@ -136,9 +152,18 @@ impl KernelEvent for Chosen {
 impl KernelEvent for Heartbeat {
     const KIND: &'static str = "Heartbeat";
 }
+impl KernelEvent for Guarded {
+    const KIND: &'static str = "Guarded";
+}
 
-/// The `sha256:<hex>` digest of a JSON value, as a receipt records an input.
+/// The `sha256:<hex>` digest of a JSON value.
 pub fn digest(value: &Value) -> String {
     // serde_json's map keeps keys sorted (no `preserve_order`), so equal values hash alike.
     crate::log::line_hash(value.to_string().as_bytes())
+}
+
+/// A receipt's digest, as a downstream receipt records it: its outputs and its value (the
+/// observed value or the chosen edge). A re-run with the same result keeps downstream receipts.
+pub fn receipt_digest(outputs: &Value, value: Option<&str>) -> String {
+    digest(&serde_json::json!({ "outputs": outputs, "value": value }))
 }

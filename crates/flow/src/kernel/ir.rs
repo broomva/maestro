@@ -2,10 +2,12 @@
 //!
 //! The IR is plain data: maps keyed by id, in a fixed order, so its JSON is a function of its
 //! content and [`content_hash`] is stable. `Started` pins a copy of it in the instance's log, and
-//! replay runs [`validate`] on that copy again before it trusts it.
+//! replay runs [`validate`] on that copy again before it trusts it. `validate` holds the rules of
+//! the IR version it is given and refuses any other version, so a later version's stricter rules
+//! never reject an instance started under an earlier one. Guards are checked by the compiler, not
+//! here: replay never touches jq.
 
 use super::error::CompileError;
-use super::jq;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,8 +39,6 @@ pub struct Node {
     /// their branches.
     pub needs: Vec<Need>,
     pub switch: Option<Case>,
-    /// The node applies only when this optional param is supplied (present and not null).
-    pub when_param: Option<String>,
     /// Attempts allowed before the node fails; unlimited when absent.
     pub retry: Option<u32>,
     /// Seconds an attempt may run, heartbeats or not, before it counts as ended.
@@ -165,12 +165,12 @@ fn unknown(from: impl Into<String>, name: &str) -> CompileError {
     CompileError::UnknownReference { from: from.into(), name: name.to_string() }
 }
 
-fn guard(at: String, code: &str) -> Result<(), CompileError> {
-    jq::compile(code).map(|_| ()).map_err(|detail| CompileError::InvalidGuard { at, detail })
-}
-
-/// The rules every IR passes, at compile time and again on the copy a `Started` event pins.
+/// The rules every IR of [`IR_VERSION`] passes, at compile time and again on the copy a `Started`
+/// event pins.
 pub fn validate(ir: &Ir) -> Result<(), CompileError> {
+    if ir.ir_version != IR_VERSION {
+        return Err(CompileError::invalid(format!("IR version {} is not {IR_VERSION}", ir.ir_version)));
+    }
     let node = |from: &str, name: &str| ir.nodes.get(name).ok_or_else(|| unknown(from, name));
     let repeat = |from: &str, name: &str| ir.repeats.get(name).ok_or_else(|| unknown(from, name));
     let param = |from: &str, name: &str| ir.params.contains_key(name).then_some(()).ok_or_else(|| unknown(from, name));
@@ -182,6 +182,9 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
             return Err(CompileError::UnboundedLoop {
                 detail: format!("repeat {rid} needs a max from 1 to {MAX_REPEAT}"),
             });
+        }
+        if r.body.is_empty() {
+            return Err(CompileError::invalid(format!("repeat {rid} has an empty body")));
         }
         for b in &r.body {
             node(&from, b)?;
@@ -197,9 +200,6 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
                 )));
             }
         }
-        if let Some(until) = &r.until {
-            guard(format!("repeat {rid} until"), until)?;
-        }
     }
 
     for (id, n) in &ir.nodes {
@@ -213,9 +213,6 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
                     repeat(&from, r)?;
                 }
             }
-        }
-        if let Some(p) = &n.when_param {
-            param(&from, p)?;
         }
         if n.retry == Some(0) {
             return Err(CompileError::invalid(format!("node {id} allows 0 attempts")));
@@ -270,16 +267,10 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
                 if edges.is_empty() {
                     return Err(CompileError::invalid(format!("choice node {id} declares no edges")));
                 }
-                for (edge, g) in edges {
-                    guard(format!("node {id} edge {edge}"), g)?;
-                }
             }
-            Class::Effect { preconditions, reconcile, .. } => {
+            Class::Effect { reconcile, .. } => {
                 if reconcile.is_empty() {
                     return Err(CompileError::EffectWithoutReconcile { node: id.clone() });
-                }
-                for (i, g) in preconditions.iter().enumerate() {
-                    guard(format!("node {id} precondition {i}"), g)?;
                 }
             }
             Class::Human { ask } => {

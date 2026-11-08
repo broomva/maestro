@@ -1,9 +1,11 @@
 //! Compiling a YAML definition to the IR: parse, refuse what phase 1 does not support, refuse
-//! repeated ids and fields outside a node's class, expand forks, then [`ir::validate`].
+//! repeated or malformed ids and fields outside a node's class, expand forks, then
+//! [`ir::validate`] and check every guard ([`jq::check`]).
 
 use super::definition::{ClassDef, Definition, NodeDef};
 use super::error::CompileError;
 use super::ir::{self, Case, Class, Exit, IR_VERSION, Input, Ir, Launch, Need, Node, Repeat, Wait};
+use super::jq;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A definition that compiled: its IR and the IR's content hash. Only [`compile`] makes one.
@@ -29,8 +31,8 @@ impl CompiledFlow {
     }
 }
 
-/// The class-specific fields each class accepts. `needs`, `switch`, `when_param`, `retry` and
-/// `cancel` apply to every class.
+/// The class-specific fields each class accepts. `needs`, `switch`, `retry` and `cancel` apply to
+/// every class.
 const CLASS_FIELDS: &[(ClassDef, &[&str])] = &[
     (ClassDef::Pure, &["run"]),
     (ClassDef::Observe, &["run", "fresh_for", "inputs", "exit_map"]),
@@ -45,6 +47,42 @@ fn unique<'a>(kind: &'static str, ids: impl IntoIterator<Item = &'a str>) -> Res
     for id in ids {
         if !seen.insert(id) {
             return Err(CompileError::DuplicateId { kind, id: id.to_string() });
+        }
+    }
+    Ok(())
+}
+
+/// Ids and param names are `[A-Za-z0-9_-]`, so none reads as `params.<name>` or a path.
+fn plain(kind: &str, id: &str) -> Result<(), CompileError> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err(CompileError::invalid(format!(
+            "the {kind} id {id:?} must be letters, digits, underscores and dashes"
+        )));
+    }
+    Ok(())
+}
+
+/// Checks every guard in the IR without running it.
+fn check_guards(ir: &Ir) -> Result<(), CompileError> {
+    let check = |at: String, code: &str| jq::check(code).map_err(|detail| CompileError::InvalidGuard { at, detail });
+    for (rid, r) in &ir.repeats {
+        if let Some(until) = &r.until {
+            check(format!("repeat {rid} until"), until)?;
+        }
+    }
+    for (id, n) in &ir.nodes {
+        match &n.class {
+            Class::Choice { edges, .. } => {
+                for (edge, g) in edges {
+                    check(format!("node {id} edge {edge}"), g)?;
+                }
+            }
+            Class::Effect { preconditions, .. } => {
+                for (i, g) in preconditions.iter().enumerate() {
+                    check(format!("node {id} precondition {i}"), g)?;
+                }
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -77,10 +115,20 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
     let params: Vec<(&str, bool)> =
         def.params.iter().map(|p| p.strip_suffix('?').map_or((p.as_str(), true), |name| (name, false))).collect();
     unique("param", params.iter().map(|(name, _)| *name))?;
+    let all = def.nodes.iter().map(|(id, _)| ("node", id)).chain(def.forks.iter().map(|(id, _)| ("fork", id)));
+    for (kind, id) in all.chain(def.repeats.iter().map(|(id, _)| ("repeat", id))) {
+        plain(kind, id)?;
+    }
+    for (name, _) in &params {
+        plain("param", name)?;
+    }
 
     let node_ids: BTreeSet<&str> = def.nodes.iter().map(|(id, _)| id.as_str()).collect();
     let forks: BTreeMap<&str, &[String]> = def.forks.iter().map(|(id, f)| (id.as_str(), f.all.as_slice())).collect();
     for (fid, f) in &def.forks {
+        if f.all.is_empty() {
+            return Err(CompileError::invalid(format!("fork {fid} has no branches")));
+        }
         if let Some(b) = f.all.iter().find(|b| !node_ids.contains(b.as_str())) {
             return Err(CompileError::UnknownReference { from: format!("fork {fid}"), name: b.clone() });
         }
@@ -130,6 +178,7 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
         repeats,
     };
     ir::validate(&ir)?;
+    check_guards(&ir)?;
     let hash = ir::content_hash(&ir)?;
     Ok(CompiledFlow { ir, hash })
 }
@@ -156,7 +205,14 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
                     None => Input::Node { node: i },
                 })
                 .collect(),
-            exit_map: n.exit_map.unwrap_or_default().into_iter().map(|(exit, value)| Exit { exit, value }).collect(),
+            exit_map: {
+                let exits = n.exit_map.unwrap_or_default();
+                let codes: Vec<String> = exits.iter().map(|(code, _)| code.to_string()).collect();
+                unique("exit_map", codes.iter().map(String::as_str))?;
+                let mut exits: Vec<Exit> = exits.into_iter().map(|(exit, value)| Exit { exit, value }).collect();
+                exits.sort_by_key(|e| e.exit);
+                exits
+            },
         },
         ClassDef::Work => Class::Work { verify: n.verify.unwrap_or_default(), launch, wait },
         ClassDef::Choice => {
@@ -176,7 +232,6 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
         class,
         needs: n.needs.iter().flat_map(need).collect(),
         switch: n.switch.map(|s| Case { on: s.on, value: s.case }),
-        when_param: n.when_param,
         retry: n.retry.map(|r| r.attempts),
         cancel_after: n.cancel.map(|c| seconds(&format!("node {id} cancel.after"), &c.after)).transpose()?,
     })
