@@ -69,11 +69,14 @@ impl Fx {
         outputs: Value,
         exit: Option<i32>,
     ) -> Timestamp {
+        // As `complete` writes it: an observation's run starts just before its append, and its
+        // freshness counts from that start.
+        let ran = Timestamp::now();
         let verify = exit.map(|exit| VerifyRecord {
             argv: vec!["x".into()],
             exit,
             stdout_sha256: "sha256:00".into(),
-            ran_at: "2026-11-07T00:00:00Z".into(),
+            ran_at: ran.to_string(),
         });
         let c = Completed {
             node: node.into(),
@@ -85,7 +88,8 @@ impl Fx {
             performer: None,
             tool_use_id: None,
         };
-        self.append(fi, c.to_event().unwrap())
+        let at = self.append(fi, c.to_event().unwrap());
+        if exit.is_some() { ran.min(at) } else { at }
     }
 
     fn choose(&mut self, fi: &InstanceId, node: &str, at: &[(&str, u32)], edge: &str) {
@@ -866,6 +870,17 @@ fn an_instance_that_does_not_replay_is_an_error_never_an_empty_flow() {
     s.ir_hash = content_hash(&s.ir).unwrap();
     let fi = fresh(&mut f, "fi_version", s.to_event().unwrap());
     assert_eq!(f.try_status(&fi).unwrap_err(), "malformed_instance");
+    // The version is the IR's shape: version 1 carries no workdir and version 2 carries one.
+    for (name, version, workdir) in
+        [("fi_v1_dir", 1, Some("/tmp")), ("fi_v2_none", 2, None), ("fi_v2_dir", 2, Some("/tmp"))]
+    {
+        let mut s = started(&f);
+        (s.ir.ir_version, s.ir.workdir) = (version, workdir.map(String::from));
+        s.ir_hash = content_hash(&s.ir).unwrap();
+        let fi = fresh(&mut f, name, s.to_event().unwrap());
+        let want = if name == "fi_v2_dir" { Ok(State::Ready) } else { Err("malformed_instance".to_string()) };
+        assert_eq!(f.try_status(&fi).map(|s| state(&s, "a")), want, "{name}");
+    }
     let mut s = started(&f);
     s.flow = "other@7".into();
     let fi = fresh(&mut f, "fi_flow", s.to_event().unwrap());

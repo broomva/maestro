@@ -913,7 +913,10 @@ mutate $fk/compile.rs '    if yaml.len() > MAX_SOURCE {' '    if yaml.len() >= M
 mutate $fk/compile.rs '    if yaml.len() > MAX_SOURCE {' '    if false {'
 mutate $fk/compile.rs '    if bytes > ir::MAX_IR {' '    if bytes >= ir::MAX_IR {'
 mutate $fk/compile.rs '    if bytes > ir::MAX_IR {' '    if false {'
-mutate $fk/ir.rs '    if ir.ir_version != IR_VERSION {' '    if false {'
+mutate $fk/ir.rs '    if ir.ir_version != want {' '    if false {'
+# An IR is written in the lowest version that expresses it: 2 with a workdir, 1 without.
+mutate $fk/ir.rs '    if ir.workdir.is_some() { IR_VERSION } else { 1 }' '    IR_VERSION'
+mutate $fk/ir.rs '    if ir.workdir.is_some() { IR_VERSION } else { 1 }' '    1'
 mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if ir.nodes.len() >= MAX_NODES {'
 mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if false {'
 mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if reads >= MAX_FAN_IN {'
@@ -1102,8 +1105,18 @@ mutate $fk/write.rs '    if *owner != me {' '    if false {'
 mutate $fk/write.rs '    if *owner != me {' '    if owner.marker_sha256 != me.marker_sha256 {'
 mutate $fk/write.rs '    if *owner != me {' '    if owner.session != me.session {'
 mutate $fk/write.rs '    check_owner(&started, instance, session)?;
-    let Some(n) = started.ir.nodes.get(node) else {' '    let Some(n) = started.ir.nodes.get(node) else {'
+    not_behind(&log, now)?;
+    let Some(n) = started.ir.nodes.get(node) else {' '    not_behind(&log, now)?;
+    let Some(n) = started.ir.nodes.get(node) else {'
 mutate $fk/write.rs '    check_owner(&started, instance, session)?;
+    not_behind(&log, now)?;
+    let claims = Claims::fold(&log)?;' '    not_behind(&log, now)?;
+    let claims = Claims::fold(&log)?;'
+# The clock never goes back past the instance's last event, in claim and in every token use.
+mutate $fk/write.rs '    if now < at {' '    if false {'
+mutate $fk/write.rs '    not_behind(&log, now)?;
+    let Some(n) = started.ir.nodes.get(node) else {' '    let Some(n) = started.ir.nodes.get(node) else {'
+mutate $fk/write.rs '    not_behind(&log, now)?;
     let claims = Claims::fold(&log)?;' '    let claims = Claims::fold(&log)?;'
 # Claims: kernel classes only, an enabled node only (out of order and write-time freshness), one
 # live claim per node, attempts counted per node and iteration with checked arithmetic.
@@ -1122,6 +1135,8 @@ mutate $fk/write.rs '    secs(node.class.wait().map_or(DEFAULT_LEASE_SECS, |w| w
 mutate $fk/write.rs '    secs(node.class.wait().map_or(DEFAULT_LEASE_SECS, |w| w.heartbeat).min(MAX_LEASE_SECS))' '    secs(DEFAULT_LEASE_SECS)'
 mutate $fk/write.rs '    now.checked_add(lease).map_err(|_| Refusal::ClockOutOfRange)' '    Ok(now.checked_add(lease).unwrap_or(now))'
 mutate $fk/write.rs '                        rec.lease_until = lease_until;' ''
+mutate $fk/write.rs '                    if let Some(rec) = claims.latest_mut(&(h.node, h.iteration))
+                        && rec.attempt == h.attempt' '                    if let Some(rec) = claims.latest_mut(&(h.node, h.iteration))'
 # Tokens: bounded; a spent token is refused; a lease ends at its time, or when a later claim
 # took the node; the claim's iteration must be current (not moved on, not exhausted) and its
 # inputs unchanged; a receipt of the claim's attempt spends it.
@@ -1158,6 +1173,11 @@ mutate $fk/write.rs '    if let Err(unfit) = prepare(&held, &outputs) {' '    if
 mutate $fk/write.rs '    let Some(exit) = code else {' '    let Some(exit) = code.or(Some(0)) else {'
 mutate $fk/write.rs 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|m| m.exit == exit))' 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|_| true))'
 mutate $fk/write.rs '        _ => (exit != 0).then(' '        _ => false.then('
+# A receipt that could never fit an event line is refused before the command runs.
+mutate $fk/write.rs '    if size > MAX_LINE as usize {' '    if false {'
+# An observation's freshness counts from its run's start, never later than its append.
+mutate $fk/replay.rs '                        ran.map_or(at, |ran| ran.min(at))' '                        at'
+mutate $fk/replay.rs '                        ran.map_or(at, |ran| ran.min(at))' '                        ran.map_or(at, |ran| ran)'
 # Commands: params fill placeholders within one byte budget, only declared params, only scalars;
 # the workdir is declared, absolute and a directory.
 mutate $fk/write.rs '        left -= filled.len();' ''
@@ -1180,13 +1200,22 @@ mutate $fx 'rustix::process::kill_process_group(' 'rustix::process::kill_process
 mutate $fx '            Ok(Some(status)) => {
                 kill_group(&child);' '            Ok(Some(status)) => {'
 mutate $fx '        if Instant::now() >= deadline {' '        if false {'
-mutate $fx '        if over.load(Ordering::SeqCst) {
+mutate $fx '        if over {
             kill_group(&child);' '        if false {
             kill_group(&child);'
-mutate $fx '    if over.load(Ordering::SeqCst) {
+mutate $fx '    if over {
         let detail' '    if false {
         let detail'
-mutate $fx '            Ok(n) if kept.len().saturating_add(n) > cap =>' '            Ok(n) if kept.len().saturating_add(n) >= cap =>'
+mutate $fx '            Ok(n) if p.kept.len().saturating_add(n) > cap =>' '            Ok(n) if p.kept.len().saturating_add(n) >= cap =>'
+# The environment allowlist is exactly its five names.
+mutate $fx 'pub const ENV_ALLOW: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"];' 'pub const ENV_ALLOW: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "CARGO_PKG_NAME"];'
+# Pipes are read without blocking, to their end, for at most the grace once the command ended;
+# then they are closed, so a process that left the group holds nothing of the run.
+mutate $fx 'rustix::io::ioctl_fionbio(fd, true)' 'rustix::io::ioctl_fionbio(fd, false)'
+mutate $fx '            Ok(0) => p.fd = None,' '            Ok(0) => {}'
+mutate $fx 'pub const READ_GRACE: Duration = Duration::from_secs(1);' 'pub const READ_GRACE: Duration = Duration::from_secs(3600);'
+mutate $fx '        if left.is_zero() {' '        if false {'
+mutate $fx '            drop(pipes);' '            std::mem::forget(pipes);'
 mutate $fx '        if self.timeout < Duration::from_millis(1) || self.timeout > MAX_TIMEOUT {' '        if self.timeout > MAX_TIMEOUT {'
 mutate $fx '        if self.timeout < Duration::from_millis(1) || self.timeout > MAX_TIMEOUT {' '        if self.timeout < Duration::from_millis(1) {'
 mutate $fx '        if self.max_output == 0 || self.max_output > MAX_OUTPUT {' '        if self.max_output > MAX_OUTPUT {'

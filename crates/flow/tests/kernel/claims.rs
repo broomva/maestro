@@ -166,14 +166,51 @@ fn only_the_owner_session_with_its_marker_writes_its_instance() {
         assert_eq!(code(completed), "not_owner", "{who}");
     }
     assert_eq!(f.kinds(&fi), ["Started", "Claimed"]);
-    // A restarted process (a new marker) cannot use its old claim even after the lease ends.
+    // A replacement may start an instance of its own, and write that one.
     let replacement = agent("owner", "marker-2");
-    let later = c.lease_until + secs(1);
-    assert_eq!(code(claim(&mut f.ledger, &replacement, &fi, "head", later)), "not_owner");
     let own = start(&mut f.ledger, &replacement, &f.flow, json!({ "dir": f.dir.to_str().unwrap() })).unwrap();
     assert_eq!(code(claim(&mut f.ledger, &replacement, &own.instance, "head", Timestamp::now())), "ok");
-    // The owner claims the next attempt after expiry.
-    assert_eq!(f.claim(&fi, "head", later).attempt, 2);
+}
+
+#[test]
+fn a_resumed_session_finishes_its_own_claim_until_the_lease_ends_and_a_replacement_is_refused() {
+    // Owner decision (BRO-3633): a claim is bound to its owner (session and marker) and to its
+    // lease. The marker survives turns, provider switches and restarts, so a resumed session
+    // (here a new process on another provider, with the same SessionRef and marker) heartbeats and
+    // completes its own claim; the lease is the bound on a restart. A replacement (same SessionRef,
+    // new marker) is refused every write on the instance, during the lease and after it.
+    let mut f = fx(CHAIN);
+    let fi = f.begin();
+    let c = f.claim(&fi, "head", Timestamp::now());
+    let resumed = VerifiedSession::new(
+        "t3:-/owner".parse().unwrap(),
+        "/elsewhere",
+        Some(maestro_core::session::Harness::ClaudeCode),
+        None,
+        vec![],
+    )
+    .with_owner_marker("marker-1");
+    let replacement = agent("owner", "marker-2");
+    let now = Timestamp::now();
+    assert_eq!(code(heartbeat(&mut f.ledger, &replacement, &c.token, now)), "not_owner");
+    assert_eq!(code(complete(&mut f.ledger, &replacement, &c.token, Value::Null, now, &quick())), "not_owner");
+    assert_eq!(code(heartbeat(&mut f.ledger, &resumed, &c.token, Timestamp::now())), "ok");
+    let done = complete(&mut f.ledger, &resumed, &c.token, Value::Null, Timestamp::now(), &quick()).unwrap();
+    assert_eq!(outcome(&done), "completed", "the resumed session finished its own claim");
+    let receipt: Completed = serde_json::from_value(f.last_body(&fi)).unwrap();
+    assert_eq!(receipt.performer.unwrap().harness, "claude-code");
+
+    // The lease bounds the resumed session too: past it the token is void, and the next claim,
+    // the resumed session's or the owner's, takes the next attempt. The replacement takes none.
+    assert_eq!(f.kinds(&fi), ["Started", "Claimed", "Heartbeat", "Completed"]);
+    let fi = f.begin();
+    let c = f.claim(&fi, "head", Timestamp::now());
+    let end = c.lease_until;
+    assert_eq!(code(complete(&mut f.ledger, &resumed, &c.token, Value::Null, end, &quick())), "lease_expired");
+    assert_eq!(code(claim(&mut f.ledger, &replacement, &fi, "head", end)), "not_owner");
+    assert_eq!(code(heartbeat(&mut f.ledger, &replacement, &c.token, end)), "not_owner");
+    assert_eq!(claim(&mut f.ledger, &resumed, &fi, "head", end).unwrap().attempt, 2);
+    assert_eq!(f.kinds(&fi), ["Started", "Claimed", "Claimed"]);
 }
 
 #[test]
@@ -249,13 +286,13 @@ fn a_held_node_is_not_claimed_again_and_the_next_claim_after_expiry_takes_the_ne
     assert_eq!((first.attempt, first.lease_until), (1, now + secs(DEFAULT_LEASE_SECS as i64)));
     assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "head", first.lease_until - secs(1))), "already_claimed");
     std::fs::write(f.dir.join("head"), "7").unwrap();
-    let refused = f.complete(&first.token, Value::Null, now);
+    let refused = f.complete(&first.token, Value::Null, Timestamp::now());
     assert_eq!(outcome(&refused), "exit_unmapped");
     assert_eq!(f.last_body(&fi)["attempt"], 1, "a refusal keeps the attempt");
     let second = f.claim(&fi, "head", first.lease_until);
     assert_eq!(second.attempt, 2);
     // The first token is void now, whatever its lease said.
-    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &first.token, now)), "lease_expired");
+    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &first.token, second.lease_until - secs(1))), "lease_expired");
 }
 
 #[test]
@@ -283,6 +320,7 @@ fn a_heartbeat_lease_is_the_node_s_and_bounded() {
     let fi = f.begin();
     let now = Timestamp::now();
     assert_eq!(f.claim(&fi, "short", now).lease_until, now + secs(30));
+    let now = Timestamp::now();
     assert_eq!(f.claim(&fi, "long", now).lease_until, now + secs(maestro_flow::kernel::MAX_LEASE_SECS as i64));
     let fresh = f.begin();
     assert_eq!(code(claim(&mut f.ledger, &f.me, &fresh, "short", Timestamp::MAX)), "clock_out_of_range");
@@ -592,4 +630,144 @@ fn claim_and_heartbeat_churn_at_the_event_cap_is_refused_clearly() {
     assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &c.token, now)), "too_many_events");
     assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "head", c.lease_until)), "too_many_events");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "nothing was written");
+}
+
+/// A pure node `a` that runs `python3 -c <script>`.
+fn python(script: &str) -> String {
+    let run = serde_json::to_string(&["python3", "-c", script]).unwrap();
+    format!(
+        "flow: p\nversion: 1\nparams: [dir]\nworkdir: \"{{{{params.dir}}}}\"\nnodes:\n  a: {{class: pure, run: {run}}}\n"
+    )
+}
+
+/// The command forks a child that leaves its process group (`setsid`, so the group kill misses
+/// it) and keeps standard output open, writing a byte every 10 ms. When a write fails, the run's
+/// end of the pipe is closed: the child records that in `closed` and exits.
+const ESCAPE: &str = "import os, time
+r, w = os.pipe()
+if os.fork() == 0:
+    os.setsid()
+    os.write(w, b'.')
+    end = time.time() + 5
+    while time.time() < end:
+        try:
+            os.write(1, b'x')
+        except BrokenPipeError:
+            open('closed', 'w').close()
+            break
+        time.sleep(0.01)
+    os._exit(0)
+os.read(r, 1)
+";
+
+#[test]
+fn a_process_that_leaves_the_group_holding_the_output_fails_at_the_grace_and_holds_nothing() {
+    use maestro_flow::kernel::exec::READ_GRACE;
+    let mut f = fx(&python(ESCAPE));
+    let fi = f.begin();
+    let c = f.claim(&fi, "a", Timestamp::now());
+    // `complete` runs on its own thread, so a run that does not return fails this test at a fixed
+    // bound instead of hanging the suite.
+    let (root, me, token) = (f.root.clone(), f.me.clone(), c.token.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+        let started = std::time::Instant::now();
+        let done = complete(&mut ledger, &me, &token, Value::Null, Timestamp::now(), &quick());
+        let _ = tx.send((done.map(|c| outcome(&c).to_string()).map_err(|e| e.code().to_string()), started.elapsed()));
+    });
+    let (done, took) = rx.recv_timeout(Duration::from_secs(3)).expect("complete returned");
+    assert_eq!(done, Ok("output_unclosed".to_string()));
+    assert!(took >= READ_GRACE && took < READ_GRACE + Duration::from_millis(500), "{took:?}");
+    // Nothing of the run outlives it: no descriptor holds the pipe, so the child's next write
+    // fails at once (and no reader thread exists to hold one).
+    let closed = f.dir.join("closed");
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !closed.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(closed.exists(), "the run closed its end of the pipe when it returned");
+    assert_eq!(f.kinds(&fi), ["Started", "Claimed", "Refused"], "the token is kept");
+}
+
+#[test]
+fn a_heartbeat_moves_only_the_lease_of_its_own_attempt() {
+    let mut f = fx(CHAIN);
+    let fi = f.begin();
+    let c = f.claim(&fi, "head", Timestamp::now());
+    // A heartbeat for another attempt of the same node and iteration, with a later lease.
+    let other = maestro_flow::kernel::events::Heartbeat {
+        node: "head".into(),
+        iteration: Default::default(),
+        attempt: c.attempt + 1,
+        lease_until: (c.lease_until + secs(3600)).to_string(),
+    };
+    f.append(&fi, other.to_event().unwrap());
+    let end = c.lease_until;
+    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &c.token, end)), "lease_expired", "the claim's lease did not move");
+    assert_eq!(f.claim(&fi, "head", end).attempt, 2, "the node was released at its lease end");
+}
+
+#[test]
+fn work_whose_receipt_cannot_fit_an_event_line_is_refused_before_it_runs() {
+    // 25 copies of a 10,000-character param fit the argv bound (250,000 bytes), but each control
+    // character is six bytes once JSON escapes it: the receipt would be about 1.5 MB, more than
+    // an event line takes, so no append could ever record it.
+    let words = vec!["\"{{params.big}}\""; 25].join(", ");
+    let mut f = fx(&format!(
+        "flow: d\nversion: 1\nparams: [dir, big?]\nworkdir: \"{{{{params.dir}}}}\"\nnodes:\n  a: {{class: pure, run: [sh, -c, 'touch ran', {words}]}}\n"
+    ));
+    let params = json!({ "dir": f.dir.to_str().unwrap(), "big": "\u{1}".repeat(10_000) });
+    let fi = start(&mut f.ledger, &f.me, &f.flow, params).unwrap().instance;
+    let c = f.claim(&fi, "a", Timestamp::now());
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null, Timestamp::now())), "receipt_too_large");
+    assert!(!f.dir.join("ran").exists(), "nothing ran");
+    assert_eq!(f.kinds(&fi), ["Started", "Claimed", "Refused"]);
+}
+
+#[test]
+fn an_observation_is_as_old_as_its_run_and_never_younger_than_its_append() {
+    let mut f = fx(CHAIN);
+    let fi = f.begin();
+    std::fs::write(f.dir.join("nap"), "0.08").unwrap();
+    let c = f.claim(&fi, "head", Timestamp::now());
+    let Completion::Completed { verify, appended, .. } = f.complete(&c.token, Value::Null, Timestamp::now()) else {
+        panic!("head completes")
+    };
+    let ran: Timestamp = verify.ran_at.parse().unwrap();
+    let at: Timestamp = appended.event.at.parse().unwrap();
+    assert!(at.duration_since(ran) >= SignedDuration::from_millis(80), "the run took the nap");
+    // fresh_for is 1m, counted from the run's start: 60.03 s after it, head is stale, though its
+    // append is younger than a minute then.
+    let read = ran + secs(60) + SignedDuration::from_millis(30);
+    assert!(read < at + secs(60));
+    assert_eq!(f.status(&fi, read).nodes["head"].state, State::Stale);
+    assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "build", read)), "not_enabled");
+
+    // A run stamped by a clock ahead of the append counts from the append, never later.
+    let fi = f.begin();
+    std::fs::write(f.dir.join("nap"), "0").unwrap();
+    let c = f.claim(&fi, "head", Timestamp::now());
+    let ahead = Timestamp::now() + secs(30);
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null, ahead)), "completed");
+    assert_eq!(f.status(&fi, Timestamp::now() + secs(1)).nodes["head"].state, State::Done);
+}
+
+#[test]
+fn a_clock_earlier_than_the_instance_s_last_event_is_refused() {
+    // The caller's clock never goes back past the log: an older `now` could judge freshness and
+    // leases at a time the instance has already passed (a receipt over an input that is stale by
+    // the wall clock). Each verb refuses it with nothing run or written; the clock read again
+    // goes on.
+    let mut f = fx(CHAIN);
+    let fi = f.begin();
+    let at = f.done(&fi, "head");
+    assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "build", at - SignedDuration::from_millis(1))), "clock_behind");
+    let c = f.claim(&fi, "build", Timestamp::now());
+    let before = c.appended.event.at.parse::<Timestamp>().unwrap() - SignedDuration::from_millis(1);
+    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &c.token, before)), "clock_behind");
+    assert_eq!(code(complete(&mut f.ledger, &f.me, &c.token, Value::Null, before, &quick())), "clock_behind");
+    assert!(!f.dir.join("built").exists(), "nothing ran");
+    assert_eq!(f.kinds(&fi), ["Started", "Claimed", "Completed", "Claimed"]);
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null, Timestamp::now())), "completed", "the token was kept");
 }

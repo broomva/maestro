@@ -17,7 +17,10 @@
 //!   node, and the sha256 of a new token. The token goes back to the caller once and is never
 //!   stored, nor returned by `next`, `status` or replay.
 //! - The token is a handle, not a capability: every use checks ownership first, so a token in
-//!   another session's hands grants nothing, nor in a restarted process's (a new marker).
+//!   another session's hands grants nothing, nor in a replacement's (the same `SessionRef` with a
+//!   new marker). A resumed or restarted session keeps its marker (it survives turns, provider
+//!   switches and restarts), so it may heartbeat and complete its own claim until the lease
+//!   ends: the lease is the bound on a restart.
 //! - A claim holds its node while it is the node's latest claim, its lease has not ended, it is
 //!   not spent, its iteration is current and the receipts it was bound to are still the node's
 //!   inputs. While one holds, the node cannot be claimed again (`already_claimed`).
@@ -38,13 +41,21 @@
 //! `Completed`, the receipt, which spends the token. Anything else about the work appends
 //! `Refused` with a code and keeps the token, so the caller can repair and complete again while
 //! the lease holds. A completion an agent claims is never a receipt: only the command the kernel
-//! ran, and its exit status, make one.
+//! ran, and its exit status, make one. Before the command runs, `complete` checks that the
+//! receipt it would append fits an event line (the argv as JSON escapes it, the outputs, the
+//! inputs), and refuses `receipt_too_large` otherwise, so a node is never wedged on a receipt
+//! that can never be written.
+//!
+//! An observation's receipt is stamped with its run's start (`verify.ran_at`), and replay counts
+//! its freshness from there (see `replay`), not from the append that came after the run.
 //!
 //! # The clock
 //!
 //! As with the reads, the clock is the caller's `now`; `complete` advances it by the time its
-//! command took. Leases and freshness are judged at that clock. Production callers pass the
-//! wall clock.
+//! command took. Leases and freshness are judged at that clock. The clock never goes back: a
+//! `now` earlier than the instance's last event is refused `clock_behind`, with nothing written
+//! (try again with the clock read again). The CLI and MCP verbs (slice 4) must pass the wall
+//! clock.
 
 use super::error::{KernelError, Refusal};
 use super::events::{
@@ -55,7 +66,7 @@ use super::ir::{Class, Ir, Iteration, Node};
 use super::replay::{Next, State, next_of, pinned, secs};
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, WriteGuard, random_epoch};
-use crate::log::{Log, MAX_NESTING, line_hash, nesting};
+use crate::log::{Log, MAX_LINE, MAX_NESTING, line_hash, nesting};
 use jiff::{SignedDuration, Timestamp};
 use maestro_core::session::VerifiedSession;
 use serde::de::DeserializeOwned;
@@ -200,14 +211,24 @@ fn stamp(log: &Log, seq: u64, text: &str) -> Result<Timestamp, KernelError> {
     text.parse().map_err(|_| KernelError::Malformed {
         instance: log.instance.to_string(),
         seq,
-        detail: format!("{text} is not a lease end"),
+        detail: format!("{text} is not a timestamp"),
     })
+}
+
+/// Refuses a `now` earlier than the instance's last event: the caller's clock never goes back.
+fn not_behind(log: &Log, now: Timestamp) -> Result<(), KernelError> {
+    let Some(last) = log.events.last() else { return Ok(()) };
+    let at = stamp(log, last.seq, &last.at)?;
+    if now < at {
+        return Err(Refusal::ClockBehind { now: now.to_string(), at: last.at.clone() }.into());
+    }
+    Ok(())
 }
 
 impl Claims {
     /// A `Claimed` counts only with an attempt above its node's last one. A `Heartbeat` moves
-    /// the lease of the latest claim of its node and iteration; a `Completed` spends that claim
-    /// when it is for the claim's attempt.
+    /// the lease of the latest claim of its node and iteration, and a `Completed` spends that
+    /// claim, each only when it is for the claim's attempt.
     fn fold(log: &Log) -> Result<Claims, KernelError> {
         let mut claims = Claims { recs: BTreeMap::new(), latest: BTreeMap::new() };
         for e in &log.events {
@@ -234,7 +255,9 @@ impl Claims {
                 Heartbeat::KIND => {
                     let h: Heartbeat = parse(log, e.seq, &e.kind, &e.body)?;
                     let lease_until = stamp(log, e.seq, &h.lease_until)?;
-                    if let Some(rec) = claims.latest_mut(&(h.node, h.iteration)) {
+                    if let Some(rec) = claims.latest_mut(&(h.node, h.iteration))
+                        && rec.attempt == h.attempt
+                    {
                         rec.lease_until = lease_until;
                     }
                 }
@@ -287,6 +310,7 @@ pub fn claim(
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
     check_owner(&started, instance, session)?;
+    not_behind(&log, now)?;
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(Refusal::UnknownNode { node: node.to_string() }.into());
     };
@@ -348,7 +372,8 @@ impl Held {
     }
 }
 
-/// Checks, in order, the owner, the token, and that its claim still holds the node at `now`.
+/// Checks, in order, the owner, the clock, the token, and that its claim still holds the node
+/// at `now`.
 fn hold(
     guard: &WriteGuard,
     session: &VerifiedSession,
@@ -359,6 +384,7 @@ fn hold(
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
     check_owner(&started, instance, session)?;
+    not_behind(&log, now)?;
     let claims = Claims::fold(&log)?;
     let Some(rec) = claims.recs.get(sha).cloned() else {
         return Err(Refusal::UnknownToken { instance: instance.to_string() }.into());
@@ -503,6 +529,39 @@ fn fill(ir: &Ir, params: &Value, text: &str, budget: usize) -> Result<String, St
     Ok(out)
 }
 
+/// Room a `Completed` line takes beyond the body `complete` measures before the run: the
+/// envelope (`seq`, `prev_event`, `at`, `kind`) and the body's `ran_at`, set only at the append.
+const RECEIPT_ROOM: usize = 256;
+
+/// The receipt for the held claim.
+fn receipt(held: &Held, session: &VerifiedSession, outputs: Value, verify: VerifyRecord) -> Completed {
+    Completed {
+        node: held.rec.node.clone(),
+        iteration: held.rec.iteration.clone(),
+        attempt: held.rec.attempt,
+        inputs: held.rec.inputs.clone(),
+        outputs,
+        verify: Some(verify),
+        performer: Some(performer(session)),
+        tool_use_id: None,
+    }
+}
+
+/// Refuses work whose receipt could never be appended: its body, with the widest exit status and
+/// an empty `ran_at`, plus [`RECEIPT_ROOM`], must fit `log::MAX_LINE`. Checked before the command
+/// runs, since nothing after the run could make the receipt smaller.
+fn check_receipt(held: &Held, session: &VerifiedSession, outputs: &Value, argv: &[String]) -> Result<(), Unfit> {
+    let verify =
+        VerifyRecord { argv: argv.to_vec(), exit: i32::MIN, stdout_sha256: line_hash(b""), ran_at: String::new() };
+    let body = serde_json::to_vec(&receipt(held, session, outputs.clone(), verify)).map(|b| b.len());
+    let size = body.unwrap_or(usize::MAX).saturating_add(RECEIPT_ROOM);
+    if size > MAX_LINE as usize {
+        let detail = format!("the receipt would take about {size} bytes, more than an event line's {MAX_LINE}");
+        return Err(("receipt_too_large", detail));
+    }
+    Ok(())
+}
+
 /// Appends `Refused` for the held claim; the token stays good.
 fn refuse(
     guard: &mut WriteGuard,
@@ -540,6 +599,9 @@ pub fn complete(
         Ok(plan) => plan,
         Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
     };
+    if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
+        return refuse(&mut guard, &held, unfit, &[]);
+    }
     // The command runs with the flows lock released, so other writers and readers go on.
     drop(guard);
     let ran_at = later(now, clock)?;
@@ -569,16 +631,7 @@ pub fn complete(
     if let Some(unfit) = unfit {
         return refuse(&mut guard, &held, unfit, &stderr);
     }
-    let completed = Completed {
-        node: held.rec.node.clone(),
-        iteration: held.rec.iteration.clone(),
-        attempt: held.rec.attempt,
-        inputs: held.rec.inputs.clone(),
-        outputs,
-        verify: Some(verify.clone()),
-        performer: Some(performer(session)),
-        tool_use_id: None,
-    };
+    let completed = receipt(&held, session, outputs, verify.clone());
     let appended = guard.append(&instance, held.log.seq(), completed.to_event()?)?;
     Ok(Completion::Completed { appended, verify, stderr: String::from_utf8_lossy(&stderr).into_owned() })
 }

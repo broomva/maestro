@@ -11,8 +11,16 @@ use super::error::CompileError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The IR's own version. A change to its shape or meaning bumps it.
-pub const IR_VERSION: u32 = 1;
+/// The IR's newest version. A change to its shape or meaning bumps it. Version 2 added
+/// `workdir`.
+pub const IR_VERSION: u32 = 2;
+
+/// The version an IR is written in: the lowest that expresses it, so 2 for an IR that carries a
+/// `workdir` and 1 for one that does not. The IR of a flow without a workdir, and its hash, are
+/// what they were under version 1, and an instance started under version 1 keeps replaying.
+pub fn version_for(ir: &Ir) -> u32 {
+    if ir.workdir.is_some() { IR_VERSION } else { 1 }
+}
 
 /// The most iterations a repeat may declare. Replay walks a repeat's iterations, so a bound keeps
 /// a replay's work bounded by the definition.
@@ -59,8 +67,9 @@ pub struct Ir {
     pub nodes: BTreeMap<String, Node>,
     pub repeats: BTreeMap<String, Repeat>,
     /// The directory the flow's commands run in, `{{params.<name>}}` filled in when they run. A
-    /// flow that declares none has its commands refused `workdir_invalid`. Left out of the JSON
-    /// when absent, so the IR of a flow without one hashes as it did before the field existed.
+    /// flow that declares none has its commands refused `workdir_invalid`. New in IR version 2
+    /// ([`version_for`]); left out of the JSON when absent, so the IR of a flow without one is a
+    /// version 1 IR and hashes as it did before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
 }
@@ -190,11 +199,16 @@ fn unknown(from: impl Into<String>, name: &str) -> CompileError {
     CompileError::UnknownReference { from: from.into(), name: name.to_string() }
 }
 
-/// The rules every IR of [`IR_VERSION`] passes, at compile time and again on the copy a `Started`
-/// event pins.
+/// The rules every IR passes, at compile time and again on the copy a `Started` event pins. Its
+/// version must be [`version_for`] it: version 1 has no `workdir`, version 2 has one, and any
+/// other version is refused.
 pub fn validate(ir: &Ir) -> Result<(), CompileError> {
-    if ir.ir_version != IR_VERSION {
-        return Err(CompileError::invalid(format!("IR version {} is not {IR_VERSION}", ir.ir_version)));
+    let want = version_for(ir);
+    if ir.ir_version != want {
+        return Err(CompileError::invalid(format!(
+            "IR version {} is not {want}, the version of its shape",
+            ir.ir_version
+        )));
     }
     if ir.nodes.len() > MAX_NODES {
         return Err(CompileError::invalid(format!("{} nodes is more than {MAX_NODES}", ir.nodes.len())));

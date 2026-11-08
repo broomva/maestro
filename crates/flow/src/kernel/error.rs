@@ -121,6 +121,9 @@ pub enum Refusal {
     /// The caller's clock, plus a lease or a command's run, is past the last time there is.
     #[error("The clock is out of range.")]
     ClockOutOfRange,
+    /// The caller's clock is earlier than the instance's last event; the clock never goes back.
+    #[error("The clock ({now}) is earlier than the instance's last event ({at}); read the clock again.")]
+    ClockBehind { now: String, at: String },
 }
 
 impl Refusal {
@@ -142,6 +145,7 @@ impl Refusal {
             Refusal::AttemptOverflow { .. } => "attempt_overflow",
             Refusal::InvalidLimits { .. } => "invalid_limits",
             Refusal::ClockOutOfRange => "clock_out_of_range",
+            Refusal::ClockBehind { .. } => "clock_behind",
         }
     }
 }

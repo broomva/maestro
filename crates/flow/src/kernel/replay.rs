@@ -4,7 +4,9 @@
 //! Replay folds the log once, in order: each event is accepted only if it fits the state the
 //! events before it built, and anything else is set aside as rejected and changes nothing. An
 //! event's `at` matters only as the time a receipt was taken (for freshness at a read) and as the
-//! time a verdict's iteration is checked to have settled. Replay never runs a command (a node's
+//! time a verdict's iteration is checked to have settled. An observation was taken when its
+//! command started, so its freshness counts from its `verify.ran_at`, or from the event's `at`
+//! when that is earlier or `ran_at` is missing or unreadable. Replay never runs a command (a node's
 //! `run`, `verify` and `reconcile` are data here), never evaluates a guard (an `until` verdict is
 //! read from a `Guarded` event), never starts a process and writes nothing. The clock of a read is
 //! the caller's `now`, so the same log and the same `now` give byte-identical JSON.
@@ -557,7 +559,15 @@ impl<'a> Fold<'a> {
                     }
                     _ => (None, None),
                 };
-                Receipt::new(at, &c.outputs, value, failure, c.inputs)
+                // An observation is as old as its run, never younger than its append.
+                let taken = match &node.class {
+                    Class::Observe { .. } => {
+                        let ran = c.verify.as_ref().and_then(|v| v.ran_at.parse::<Timestamp>().ok());
+                        ran.map_or(at, |ran| ran.min(at))
+                    }
+                    _ => at,
+                };
+                Receipt::new(taken, &c.outputs, value, failure, c.inputs)
             }
             Chosen::KIND => {
                 let c: Chosen = body(log, e)?;

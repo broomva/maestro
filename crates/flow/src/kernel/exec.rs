@@ -15,17 +15,19 @@
 //! - **Captured output, with a byte cap.** Standard output and error are read whole up to
 //!   [`Limits::max_output`] bytes each; more than that kills the group and fails the run, since
 //!   a hash of a truncated output would describe something the command did not print.
+//! - **No thread, no blocking read.** Both pipes are non-blocking and read in the runner's own
+//!   loop, which waits on them with `poll`. Nothing the command does can leave a thread or a
+//!   descriptor of the run behind.
 //!
-//! Accepted: a process that leaves the group (`setsid`) is not killed with it. If it keeps the
-//! pipes open, the run waits [`READ_GRACE`] for them and then fails `output_unclosed`, leaving
-//! one reader thread blocked until that process exits.
+//! A process that leaves the group (`setsid`) is not killed with it. If it keeps the pipes open,
+//! the run reads them for [`READ_GRACE`], then closes them and fails `output_unclosed`: the run
+//! returns within the grace and holds nothing, and the process's next write to them fails.
 
-use std::io::Read;
+use rustix::event::{PollFd, PollFlags, Timespec};
+use rustix::io::Errno;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// The only environment names a command inherits from the kernel.
@@ -40,8 +42,12 @@ pub const MAX_OUTPUT: usize = 16 << 20;
 /// How long a finished or killed command's pipes may stay open before the run fails.
 pub const READ_GRACE: Duration = Duration::from_secs(1);
 
-/// How often the runner looks at the command while it runs.
+/// The longest the runner waits on the pipes before it looks at the command again.
 const TICK: Duration = Duration::from_millis(2);
+
+/// The most bytes one read takes from a pipe. One read per pipe per wait, so a flood never keeps
+/// the runner from its clock.
+const CHUNK: usize = 64 << 10;
 
 /// How long a command may run and how much it may print.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +85,19 @@ pub(crate) enum Ran {
     Failed { code: &'static str, detail: String, stderr: Vec<u8> },
 }
 
+/// One of the command's output pipes, read without blocking.
+struct Pipe {
+    /// `None` once the pipe reached its end.
+    fd: Option<OwnedFd>,
+    kept: Vec<u8>,
+}
+
+impl Pipe {
+    fn new(fd: Option<OwnedFd>) -> Self {
+        Pipe { fd, kept: Vec::new() }
+    }
+}
+
 /// Runs `argv` in `cwd` within `limits`. `argv` is not empty and `limits` passed
 /// [`Limits::check`]; the caller sees to both.
 pub(crate) fn run(argv: &[String], cwd: &Path, limits: &Limits) -> Ran {
@@ -97,25 +116,21 @@ pub(crate) fn run(argv: &[String], cwd: &Path, limits: &Limits) -> Ran {
         Ok(child) => child,
         Err(e) => return failed("spawn_failed", format!("the command did not start ({e})"), Vec::new()),
     };
-    let over = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel();
-    for (stream, pipe) in [
-        (0, child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>)),
-        (1, child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>)),
-    ] {
-        let (tx, over, cap) = (tx.clone(), over.clone(), limits.max_output);
-        std::thread::spawn(move || {
-            let bytes = pipe.map(|p| drain(p, cap, &over)).unwrap_or_default();
-            let _ = tx.send((stream, bytes));
-        });
+    let mut pipes =
+        [Pipe::new(child.stdout.take().map(OwnedFd::from)), Pipe::new(child.stderr.take().map(OwnedFd::from))];
+    if pipes.iter().filter_map(|p| p.fd.as_ref()).any(|fd| rustix::io::ioctl_fionbio(fd, true).is_err()) {
+        reap(&mut child);
+        return failed("spawn_failed", "the command's output could not be read without blocking".into(), Vec::new());
     }
-    drop(tx);
+    let cap = limits.max_output;
+    let mut buf = vec![0u8; CHUNK];
+    let mut over = false;
 
     let deadline = Instant::now() + limits.timeout;
     let ended = loop {
         // A flood is killed at once; the verdict is the one check below, once the pipes close,
         // so output that goes over just as the command exits fails the same way.
-        if over.load(Ordering::SeqCst) {
+        if over {
             kill_group(&child);
         }
         match child.try_wait() {
@@ -134,26 +149,26 @@ pub(crate) fn run(argv: &[String], cwd: &Path, limits: &Limits) -> Ran {
             kill_group(&child);
             break Err(("verify_timeout", format!("the command ran past {} ms", limits.timeout.as_millis())));
         }
-        std::thread::sleep(TICK);
+        over |= pump(&mut pipes, &mut buf, cap, TICK);
     };
-    // The leader too, by itself, so reaping it can never wait on a command still running. A no-op
-    // once it has been reaped.
-    let _ = child.kill();
-    let _ = child.wait();
+    reap(&mut child);
 
-    let mut out = [Vec::new(), Vec::new()];
+    // What the command printed before it ended is still in the pipes: read them to their end,
+    // for at most the grace.
     let grace = Instant::now() + READ_GRACE;
-    for _ in 0..2 {
-        match rx.recv_timeout(grace.saturating_duration_since(Instant::now())) {
-            Ok((stream, bytes)) => out[stream] = bytes,
-            Err(_) => {
-                let [_, stderr] = out;
-                return failed("output_unclosed", "the command's output stayed open after it ended".into(), stderr);
-            }
+    while pipes.iter().any(|p| p.fd.is_some()) {
+        let left = grace.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            // Something that left the group holds a pipe. Closing this end now leaves nothing of
+            // the run behind; the holder's next write fails.
+            let stderr = std::mem::take(&mut pipes[1].kept);
+            drop(pipes);
+            return failed("output_unclosed", "the command's output stayed open after it ended".into(), stderr);
         }
+        over |= pump(&mut pipes, &mut buf, cap, left);
     }
-    let [stdout, stderr] = out;
-    if over.load(Ordering::SeqCst) {
+    let [stdout, stderr] = pipes.map(|p| p.kept);
+    if over {
         let detail = format!("the command printed more than {} bytes", limits.max_output);
         return failed("output_too_large", detail, Vec::new());
     }
@@ -173,20 +188,40 @@ fn kill_group(child: &Child) {
     let _ = rustix::process::kill_process_group(rustix::process::Pid::from_child(child), rustix::process::Signal::KILL);
 }
 
-/// Reads `pipe` to its end, keeping at most `cap` bytes; past that, flags `over` and discards.
-fn drain(mut pipe: impl Read, cap: usize, over: &AtomicBool) -> Vec<u8> {
-    let mut kept = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        match pipe.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) if kept.len().saturating_add(n) > cap => over.store(true, Ordering::SeqCst),
-            Ok(n) => kept.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+/// Kills the leader by itself and reaps it, so reaping can never wait on a command still
+/// running. A no-op kill once it has been reaped.
+fn reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Waits up to `wait` for the open pipes, then takes one read from each: what fits under `cap`
+/// is kept, more than that is discarded. A pipe at its end, or one that fails, is closed.
+/// Returns whether a pipe went over `cap`.
+fn pump(pipes: &mut [Pipe; 2], buf: &mut [u8], cap: usize, wait: Duration) -> bool {
+    let mut fds: Vec<PollFd<'_>> =
+        pipes.iter().filter_map(|p| p.fd.as_ref()).map(|fd| PollFd::new(fd, PollFlags::IN)).collect();
+    if fds.is_empty() {
+        std::thread::sleep(wait);
+        return false;
+    }
+    let timeout = Timespec::try_from(wait).unwrap_or(Timespec { tv_sec: 0, tv_nsec: 2_000_000 });
+    match rustix::event::poll(&mut fds, Some(&timeout)) {
+        Ok(_) | Err(Errno::INTR) => {}
+        Err(_) => std::thread::sleep(wait.min(TICK)),
+    }
+    let mut over = false;
+    for p in pipes.iter_mut() {
+        let Some(fd) = &p.fd else { continue };
+        match rustix::io::read(fd, &mut *buf) {
+            Ok(0) => p.fd = None,
+            Ok(n) if p.kept.len().saturating_add(n) > cap => over = true,
+            Ok(n) => p.kept.extend_from_slice(&buf[..n]),
+            Err(Errno::AGAIN | Errno::INTR) => {}
+            Err(_) => p.fd = None,
         }
     }
-    kept
+    over
 }
 
 #[cfg(test)]
@@ -239,7 +274,10 @@ mod tests {
         let names: Vec<&str> = text.lines().filter_map(|l| l.split_once('=').map(|(k, _)| k)).collect();
         // cargo runs every test with CARGO_* set, so a run that inherited would show them.
         assert!(std::env::var_os("CARGO_PKG_NAME").is_some(), "the test process has a variable to leak");
-        assert!(names.iter().all(|n| ENV_ALLOW.contains(n)), "{names:?}");
+        // The list itself, not just the names checked against it: a wider list fails here.
+        let allowed = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"];
+        assert_eq!(ENV_ALLOW, allowed);
+        assert!(names.iter().all(|n| allowed.contains(n)), "{names:?}");
         assert!(names.contains(&"PATH"), "the allowed names are passed on: {names:?}");
     }
 
