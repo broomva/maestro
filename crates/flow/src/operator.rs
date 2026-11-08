@@ -1,9 +1,9 @@
 //! Operator functions. None is a kernel verb and none is exposed to agents: each is a step an
 //! operator takes on purpose, under the exclusive lock.
 //!
-//! - [`recover`] finishes or clears a genesis that crashed, restores a lost lock from its root's
-//!   own epoch, and removes crash debris. It never makes a new epoch, so a deleted lock beside a
-//!   live root never re-epochs it.
+//! - [`recover`] finishes a genesis that crashed, restores a lost lock from its root's own
+//!   epoch, and removes crash debris. It never makes a new epoch, so a deleted lock beside a live
+//!   root never re-epochs it.
 //! - [`archive`] moves the root and its lock away together and leaves a marker, so no writer
 //!   starts a new ledger there by itself.
 //! - [`create_fresh_ledger`] makes a new ledger, with a new epoch, for a host, after the old root
@@ -14,27 +14,27 @@
 
 use crate::error::{FlowError, Result};
 use crate::ids::{HostId, InstanceId};
-use crate::layout::{self, EPOCH_FILE, GENESIS, INSTANCES, Layout, RETIRED, State, is_epoch, real_dir};
+use crate::layout::{self, EPOCH_FILE, EVENTS, Layout, RETIRED, State, is_epoch};
 use crate::ledger::{
-    CacheWrite, Ledger, Options, finish_genesis, genesis, open_lock, random_epoch, read_log, refuse_retired, sync_dir,
-    write_lock, write_new,
+    CacheWrite, Ledger, Options, genesis, install_lock, instances, open_lock, random_epoch, refuse_retired, stage_root,
+    sync_dir,
 };
-use crate::lock::{self, Mode};
+use crate::lock::{self, Mode, file_id};
 use crate::log;
-use crate::projection;
-use std::fs::{File, OpenOptions};
+use rustix::fs::OFlags;
+use std::fs::File;
 use std::path::Path;
 
 /// What [`recover`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recovered {
-    /// The lock was missing, empty, or left by a crashed genesis beside a root in place: it now
-    /// names that root's own epoch.
+    /// A genesis (or fresh ledger) crashed after its lock named its stage: the stage is now the
+    /// root, and an archive marker is gone.
+    FinishedGenesis { epoch: String },
+    /// The lock was missing, empty or not an epoch beside a live root: a new lock names that
+    /// root's own epoch.
     RestoredLock { epoch: String },
-    /// A crashed genesis with no root in place: its lock is gone. An archive marker, if one was
-    /// there, stays, so only [`create_fresh_ledger`] starts a ledger there again.
-    ClearedGenesis,
-    /// The ledger was whole; only files left by crashed geneses and recoveries were removed.
+    /// The ledger was whole; only files left by crashes were removed.
     RemovedDebris { count: usize },
 }
 
@@ -49,11 +49,12 @@ fn root_epoch(root: &Path) -> Result<String> {
         .ok_or_else(|| FlowError::LedgerDamaged { detail: "the root's EPOCH is missing or unreadable".into() })
 }
 
-fn open_lock_rw(layout: &Layout) -> Result<Option<File>> {
-    match layout::nofollow(OpenOptions::new().read(true).write(true)).open(&layout.lock) {
+/// The lock file, when there is one.
+fn existing_lock(layout: &Layout) -> Result<Option<File>> {
+    match File::open(&layout.lock) {
         Ok(f) => Ok(Some(f)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(layout::open_error(&layout.lock, e)),
+        Err(e) => Err(FlowError::io(&layout.lock)(e)),
     }
 }
 
@@ -73,22 +74,31 @@ fn under_lock<T>(file: &File, layout: &Layout, options: &Options, run: impl FnOn
     out
 }
 
-/// Removes what crashed geneses and recoveries left beside the root: their stages, and their
-/// private lock files unless a process still holds one (a genesis in flight holds its own).
-/// Called under the lock, where no genesis can be building a stage.
-fn clear_debris(layout: &Layout) -> Result<usize> {
+/// Removes what crashes leave beside the root: stages no lock names (`keep` is the one the lock
+/// names), and private lock files no process holds. A private name for the live lock itself (a
+/// crash between linking and unlinking it) is only a name and always goes. Only the exact shapes
+/// a genesis writes (`.<name>.genesis-<epoch>/`, `.<name>.lock.genesis-<epoch>`,
+/// `.<name>.lock.new-<epoch>`) and file types count; anything else is left alone.
+fn clear_debris(layout: &Layout, keep: Option<&str>) -> Result<usize> {
     let name = layout.name();
     let stage = format!(".{name}.genesis-");
-    let private = [format!(".{name}.lock.genesis-"), format!(".{name}.lock.recover-")];
+    let private = [format!(".{name}.lock.genesis-"), format!(".{name}.lock.new-")];
+    let live = std::fs::metadata(&layout.lock).ok().map(|m| file_id(&m));
     let mut count = 0;
     for entry in std::fs::read_dir(&layout.parent).map_err(FlowError::io(&layout.parent))? {
         let path = entry.map_err(FlowError::io(&layout.parent))?.path();
-        let Some(file) = path.file_name().and_then(|n| n.to_str()) else { continue };
-        if file.starts_with(&stage) {
-            std::fs::remove_dir_all(&path).map_err(FlowError::io(&path))?;
-            count += 1;
-        } else if private.iter().any(|p| file.starts_with(p.as_str()))
-            && File::open(&path).is_ok_and(|f| f.try_lock().is_ok())
+        let (Some(file), Ok(meta)) = (path.file_name().and_then(|n| n.to_str()), std::fs::symlink_metadata(&path))
+        else {
+            continue;
+        };
+        if let Some(epoch) = file.strip_prefix(&stage).filter(|e| is_epoch(e)) {
+            if meta.is_dir() && keep != Some(epoch) {
+                std::fs::remove_dir_all(&path).map_err(FlowError::io(&path))?;
+                count += 1;
+            }
+        } else if private.iter().any(|p| file.strip_prefix(p.as_str()).is_some_and(is_epoch))
+            && meta.is_file()
+            && (Some(file_id(&meta)) == live || File::open(&path).is_ok_and(|f| f.try_lock().is_ok()))
         {
             std::fs::remove_file(&path).map_err(FlowError::io(&path))?;
             count += 1;
@@ -98,62 +108,76 @@ fn clear_debris(layout: &Layout) -> Result<usize> {
 }
 
 /// Repairs the states a crash or a deleted lock leaves, without ever making a new epoch, and
-/// removes the debris of crashed geneses and recoveries.
+/// removes crash debris.
 ///
 /// | State | Recovery |
 /// |---|---|
-/// | Lock missing, empty or `genesis <e>`, root in place | the lock is made to name the root's own epoch |
-/// | Lock empty or `genesis <e>`, no root | the lock is removed; an archive marker stays |
+/// | Lock names epoch `e`, no root, staged root for `e` beside it | the stage is moved into place |
+/// | Lock missing, empty or not an epoch, live root | a new lock names the root's own epoch |
 ///
 /// Restoring a missing lock takes the root directory's own lock first, so it waits for (or
-/// refuses `busy` against) any writer still holding a guard through the deleted lock file. The
-/// text after `genesis ` never reaches a path. Anything else is refused with what was found.
+/// refuses `busy` against) any writer still holding a guard through the deleted lock file.
+/// Readers are not waited for: a read needs only its log rules, and the worst it sees is a torn
+/// tail. A new lock is renamed into place, never written in place. Anything else is refused
+/// with what was found.
 pub fn recover(root: &Path, options: &Options) -> Result<Recovered> {
     let layout = Layout::new(root)?;
-    let Some(file) = open_lock_rw(&layout)? else {
+    let Some(file) = existing_lock(&layout)? else {
         if !layout::exists(&layout.root)? {
             return Err(refused("There is no flows ledger here to recover."));
         }
         let epoch = root_epoch(&layout.root)?;
         // A writer still holding a guard holds the root directory's lock: wait for it.
-        let held_root = lock::lock_root(&layout.root, Mode::Exclusive, options.lock_wait)?;
-        clear_debris(&layout)?;
-        let private = layout.parent.join(format!(".{}.lock.recover-{epoch}", layout.name()));
-        write_new(&private, &format!("{epoch}\n"))?;
-        let linked = std::fs::hard_link(&private, &layout.lock);
-        let _ = std::fs::remove_file(&private);
-        let _ = held_root.unlock();
-        linked.map_err(FlowError::io(&layout.lock))?;
-        sync_dir(&layout.parent);
+        let held_root = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;
+        clear_debris(&layout, None)?;
+        install_lock(&layout, &epoch)?;
+        drop(held_root);
         return Ok(Recovered::RestoredLock { epoch });
     };
     under_lock(&file, &layout, options, || {
-        let debris = clear_debris(&layout)?;
         let content = layout::read_small(&layout.lock)?.unwrap_or_default();
-        if !content.is_empty() && !content.starts_with(GENESIS) {
-            layout::inspect(&layout)?;
-            if debris > 0 {
-                return Ok(Recovered::RemovedDebris { count: debris });
-            }
-            return Err(refused("The flows ledger is whole, so there is nothing to recover."));
-        }
+        let named = Some(content.as_str()).filter(|c| is_epoch(c));
+        let debris = clear_debris(&layout, named)?;
         if layout::exists(&layout.root)? {
             let epoch = root_epoch(&layout.root)?;
-            write_lock(&file, &layout.lock, &epoch)?;
-            return Ok(Recovered::RestoredLock { epoch });
+            if named.is_none() {
+                install_lock(&layout, &epoch)?;
+                return Ok(Recovered::RestoredLock { epoch });
+            }
+        } else if let Some(epoch) = named
+            && layout::exists(&layout.stage(epoch))?
+        {
+            std::fs::rename(layout.stage(epoch), &layout.root).map_err(FlowError::io(&layout.root))?;
+            let _ = std::fs::remove_file(layout.archived_marker());
+            sync_dir(&layout.parent);
+            return Ok(Recovered::FinishedGenesis { epoch: epoch.to_string() });
         }
-        std::fs::remove_file(&layout.lock).map_err(FlowError::io(&layout.lock))?;
-        sync_dir(&layout.parent);
-        Ok(Recovered::ClearedGenesis)
+        layout::inspect(&layout)?;
+        if debris > 0 {
+            return Ok(Recovered::RemovedDebris { count: debris });
+        }
+        Err(refused("The flows ledger is whole, so there is nothing to recover."))
     })
 }
 
-/// Archives the ledger: under its lock, the root moves to `dest/<name>` and the lock to
-/// `dest/<name>.lock`, and a marker `<name>.archived` is left beside where the root was. Every
-/// writer, waiting or new, then refuses `root_moved` and creates nothing, until an operator makes
-/// a fresh ledger there with [`create_fresh_ledger`]. `dest` must not exist, its parent must,
-/// and it must be outside the root; all three are checked before anything is written, and `dest`
-/// is made before the marker.
+/// Whether `a` and `b` are on different filesystems, where a rename cannot move the root.
+fn other_device(a: &Path, b: &Path) -> Result<bool> {
+    let dev = |p: &Path| std::fs::metadata(p).map(|m| file_id(&m).0).map_err(FlowError::io(p));
+    let differ = dev(a)? != dev(b)?;
+    #[cfg(test)]
+    let differ = differ || crate::hooks::other_device();
+    Ok(differ)
+}
+
+/// Archives the ledger: the root moves to `dest/<name>` and the lock to `dest/<name>.lock`, and a
+/// marker `<name>.archived` is left beside where the root was. Every writer, waiting or new, then
+/// refuses `root_moved` and creates nothing, until an operator makes a fresh ledger there with
+/// [`create_fresh_ledger`].
+///
+/// `dest` must not exist, its parent must, it must be outside the root and on the root's
+/// filesystem; all are checked before anything is written. It then takes the lock file and the
+/// root directory's own lock, exclusive, as a writer does: the root directory's lock waits for
+/// any guard, even one held through a replaced lock file.
 pub fn archive(root: &Path, dest: &Path, options: &Options) -> Result<()> {
     let layout = Layout::new(root)?;
     let Some(file) = open_lock(&layout)? else {
@@ -169,11 +193,15 @@ pub fn archive(root: &Path, dest: &Path, options: &Options) -> Result<()> {
     if parent.starts_with(std::fs::canonicalize(&layout.root).map_err(FlowError::io(&layout.root))?) {
         return Err(refused(format!("{} is inside the root, so nothing was archived.", dest.display())));
     }
+    if other_device(&parent, &layout.parent)? {
+        return Err(refused(format!("{} is on another filesystem, so nothing was archived.", dest.display())));
+    }
     lock::take(&file, Mode::Exclusive, options.lock_wait, &layout.lock)?;
     let done = (|| {
         let State::Live { epoch, .. } = layout::inspect(&layout)? else {
             return Err(FlowError::RootMoved { root: layout.root.clone() });
         };
+        let _held = lock::lock_root(&layout.root, None, Mode::Exclusive, options.lock_wait)?;
         std::fs::create_dir(dest).map_err(FlowError::io(dest))?;
         let marker = layout.archived_marker();
         std::fs::write(&marker, format!("{}\n{epoch}\n", dest.display())).map_err(FlowError::io(&marker))?;
@@ -191,10 +219,10 @@ pub fn archive(root: &Path, dest: &Path, options: &Options) -> Result<()> {
 /// Makes a new ledger for `host`, with a new epoch, where the old root was archived or moved
 /// away. Writers that opened the old ledger are refused. Refused while a root is in place.
 ///
-/// While it runs, the archive marker is in place (left by [`archive`], or written here when a
-/// root was moved away by hand and left its lock), and only the finished ledger removes it. So
-/// a crash leaves nothing a normal writer will start a ledger on: [`recover`] clears the
-/// unfinished genesis and the marker stays.
+/// After an [`archive`], the marker stays until the new ledger is whole. After a root was moved
+/// away by hand, its lock stays until a new lock is renamed over it, so a crash before that
+/// leaves the old lock (refused `root_moved`), and a crash after leaves a lock naming the new
+/// stage, which [`recover`] moves into place. No normal writer starts a ledger in between.
 pub fn create_fresh_ledger(root: &Path, host: &HostId, options: &Options) -> Result<String> {
     let layout = Layout::new(root)?;
     let marker = layout.archived_marker();
@@ -209,7 +237,7 @@ pub fn create_fresh_ledger(root: &Path, host: &HostId, options: &Options) -> Res
         sync_dir(&layout.parent);
         Ok(epoch)
     };
-    let Some(file) = open_lock_rw(&layout)? else {
+    let Some(file) = existing_lock(&layout)? else {
         return match genesis(&layout, host)? {
             Some(file) => {
                 let _ = file.unlock();
@@ -218,61 +246,52 @@ pub fn create_fresh_ledger(root: &Path, host: &HostId, options: &Options) -> Res
             None => Err(refused("Another writer created the ledger meanwhile.")),
         };
     };
-    // A root moved away by hand left its lock behind: the new epoch goes into that same file.
+    // A root moved away by hand left its lock behind: a new lock replaces it.
     under_lock(&file, &layout, options, || {
         if in_place()? {
             return Err(still_there());
         }
-        std::fs::write(&marker, "a fresh ledger is being made\n").map_err(FlowError::io(&marker))?;
         let epoch = random_epoch()?;
-        write_lock(&file, &layout.lock, &format!("{GENESIS}{epoch}"))?;
-        finish_genesis(&layout, &file, host, &epoch)?;
+        let stage = stage_root(&layout, host, &epoch)?;
+        install_lock(&layout, &epoch)?;
+        std::fs::rename(&stage, &layout.root).map_err(FlowError::io(&layout.root))?;
         finished(epoch)
     })
 }
 
 /// Retires instance `id`: under the lock, `instances/<id>` moves to `retired/<id>` with its log
-/// as it was. The id is never written again.
+/// as it was, through the root directory the guard holds. The id is never written again.
 pub fn retire(ledger: &mut Ledger, id: &InstanceId) -> Result<CacheWrite> {
     let guard = ledger.lock()?;
-    // Operator writes are writes: the root must still be the one this writer opened.
-    guard.verify()?;
-    let layout = guard.layout().clone();
-    refuse_retired(&layout, id)?;
-    let from = layout.instance_dir(id);
-    if !real_dir(&from)? {
+    let root = guard.root();
+    refuse_retired(root, id)?;
+    let instances = instances(root)?;
+    if !instances.is_dir(id.as_str())? {
         return Err(FlowError::UnknownInstance { instance: id.to_string() });
     }
-    let retired = layout.root.join(RETIRED);
-    if !real_dir(&retired)? {
-        return Err(FlowError::LedgerDamaged { detail: "retired/ is missing".into() });
-    }
-    std::fs::rename(&from, layout.retired_dir(id)).map_err(FlowError::io(&from))?;
-    sync_dir(&retired);
-    sync_dir(&layout.root.join(INSTANCES));
-    Ok(projection::sync(&layout, guard.epoch()).into())
+    let retired =
+        root.dir(RETIRED)?.ok_or_else(|| FlowError::LedgerDamaged { detail: "retired/ is missing".into() })?;
+    instances.rename(id.as_str(), &retired, id.as_str())?;
+    retired.sync();
+    instances.sync();
+    Ok(guard.sync_projection())
 }
 
 /// Cuts a torn last line from instance `id`'s log, back to its last verified line, so appends
 /// resume. Returns the bytes removed. Refused when the log verifies or its chain is broken.
 pub fn truncate_torn_tail(ledger: &mut Ledger, id: &InstanceId) -> Result<u64> {
     let guard = ledger.lock()?;
-    // Operator writes are writes: the root must still be the one this writer opened.
-    guard.verify()?;
-    let layout = guard.layout().clone();
-    refuse_retired(&layout, id)?;
-    let path = layout.events(id);
-    let Some(bytes) = read_log(&layout, id)? else {
-        return Err(FlowError::UnknownInstance { instance: id.to_string() });
-    };
+    let root = guard.root();
+    refuse_retired(root, id)?;
+    let unknown = || FlowError::UnknownInstance { instance: id.to_string() };
+    let dir = instances(root)?.dir(id.as_str())?.ok_or_else(unknown)?;
+    let bytes = dir.read(EVENTS)?.ok_or_else(unknown)?;
     match log::verify_prefix(id, &bytes) {
         Ok(_) => Err(refused(format!("Instance {id}'s log verifies to its end, so nothing was truncated."))),
         Err((FlowError::TornTail { .. }, prefix)) => {
-            let file = layout::nofollow(OpenOptions::new().write(true))
-                .open(&path)
-                .map_err(|e| layout::open_error(&path, e))?;
-            file.set_len(prefix.len).and_then(|()| file.sync_all()).map_err(FlowError::io(&path))?;
-            let _ = projection::sync(&layout, guard.epoch());
+            let file = dir.file(EVENTS, OFlags::WRONLY)?.ok_or_else(unknown)?;
+            file.set_len(prefix.len).and_then(|()| file.sync_all()).map_err(FlowError::io(dir.path.join(EVENTS)))?;
+            let _ = guard.sync_projection();
             Ok(bytes.len() as u64 - prefix.len)
         }
         Err((e, _)) => Err(e),

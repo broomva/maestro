@@ -11,6 +11,8 @@ use std::time::{Duration, Instant, SystemTime};
 pub const CHILD_ENV: &str = "MAESTRO_FLOW_TEST_CHILD";
 /// Read by the crate's pause points, which exist only in its unit tests (`src/hooks.rs`).
 pub const PAUSE_ENV: &str = "MAESTRO_FLOW_TEST_PAUSE";
+/// Makes `operator::archive` in a unit-test child treat its destination as on another filesystem.
+pub const OTHER_DEVICE_ENV: &str = "MAESTRO_FLOW_TEST_OTHER_DEVICE";
 
 pub fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
@@ -86,13 +88,24 @@ pub fn spawn_child(spec: &[&str]) -> Child {
     spawn_child_pausing(spec, None)
 }
 
+/// As [`spawn_child`], with extra environment for the child.
+pub fn spawn_child_with(spec: &[&str], env: &[(&str, &str)]) -> Child {
+    spawn(spec, None, env)
+}
+
 /// As [`spawn_child`], with the child pausing at `pause` (see [`Pause`]).
 pub fn spawn_child_pausing(spec: &[&str], pause: Option<&Pause>) -> Child {
+    spawn(spec, pause, &[])
+}
+
+fn spawn(spec: &[&str], pause: Option<&Pause>, env: &[(&str, &str)]) -> Child {
     let mut cmd = Command::new(std::env::current_exe().unwrap());
     // A filter, not `--exact`: in the crate's unit tests the entry is `hooked::child_process_entry`.
     cmd.args(["child_process_entry", "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, spec.join("\u{1f}"))
         .env_remove(PAUSE_ENV)
+        .env_remove(OTHER_DEVICE_ENV)
+        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(p) = pause {
@@ -150,6 +163,7 @@ pub fn child_result(child: Child) -> String {
 /// - `append <root> <host> <instance> <count> <lock wait ms>`: appends `count` events at the head.
 /// - `open <root> <host>`: opens the ledger.
 /// - `read <root>`: takes the read lock and lists the instances.
+/// - `archive <root> <dest>`: `operator::archive`.
 /// - `recover <root>`: `operator::recover`.
 /// - `fresh <root> <host>`: `operator::create_fresh_ledger`.
 pub fn child_main() {
@@ -176,6 +190,9 @@ pub fn child_main() {
         ["read", root] => maestro_flow::Reader::new(Path::new(root), Options::default())
             .and_then(|r| r.lock().and_then(|g| g.instances()))
             .map(|_| ()),
+        ["archive", root, dest] => {
+            maestro_flow::operator::archive(Path::new(root), Path::new(dest), &Options::default())
+        }
         ["recover", root] => maestro_flow::operator::recover(Path::new(root), &Options::default()).map(|_| ()),
         ["fresh", root, name] => {
             maestro_flow::operator::create_fresh_ledger(Path::new(root), &host(name), &Options::default()).map(|_| ())

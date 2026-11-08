@@ -12,10 +12,12 @@
 //! for another epoch, is rebuilt whole. Readers open it read-only and only compare; the
 //! log wins any disagreement.
 
+use crate::at::Dir;
 use crate::error::{FlowError, Result};
 use crate::ids::InstanceId;
-use crate::layout::{Layout, PROJECTION};
-use crate::ledger::{list_instances, read_log};
+use crate::layout::{EVENTS, Layout, PROJECTION};
+use crate::ledger::{instances, list_instances, read_log};
+use crate::lock::{self, FileId};
 use crate::log::{self, InstanceSummary};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,33 +52,18 @@ pub(crate) struct Row {
 }
 
 /// The log file's stat, as the row records it: what changes when the file does.
-fn stat_key(layout: &Layout, id: &InstanceId) -> String {
-    let Ok(meta) = std::fs::symlink_metadata(layout.events(id)) else { return "missing".to_string() };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        format!(
-            "{}:{}.{}:{}.{}:{}",
-            meta.len(),
-            meta.mtime(),
-            meta.mtime_nsec(),
-            meta.ctime(),
-            meta.ctime_nsec(),
-            meta.ino()
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-        format!("{}:{}", meta.len(), modified.map(|d| d.as_nanos()).unwrap_or(0))
+fn stat_key(root: &Dir, id: &InstanceId) -> String {
+    match instances(root).and_then(|d| d.dir(id.as_str())) {
+        Ok(Some(dir)) => dir.stat_key(EVENTS),
+        _ => "missing".to_string(),
     }
 }
 
 /// The row for `id`, from its log file alone.
-pub(crate) fn analyze(layout: &Layout, id: &InstanceId) -> Row {
-    let stat = stat_key(layout, id);
+pub(crate) fn analyze(root: &Dir, id: &InstanceId) -> Row {
+    let stat = stat_key(root, id);
     let empty = || InstanceSummary { instance: id.to_string(), seq: 0, last_hash: None, counts: BTreeMap::new() };
-    let (state, summary) = match read_log(layout, id) {
+    let (state, summary) = match read_log(root, id) {
         Ok(None) => ("ok".to_string(), empty()),
         Ok(Some(bytes)) => match log::verify_prefix(id, &bytes) {
             Ok(log) => ("ok".to_string(), log.summary()),
@@ -99,7 +86,15 @@ fn db_path(layout: &Layout) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(&layout.root).map_err(FlowError::io(&layout.root))?.join(PROJECTION))
 }
 
-fn open_rw(layout: &Layout) -> Result<Connection> {
+/// Opens the cache for writing, only while the root's path still names the directory `root_id`
+/// (the one the writer holds): SQLite needs a path, and a root moved away must never have its
+/// rows written into whatever ledger now sits at that path.
+fn open_rw(layout: &Layout, root_id: FileId) -> Result<Connection> {
+    if lock::root_id(&layout.root)? != root_id {
+        return Err(FlowError::Projection(
+            "the root's path no longer names this ledger, so the cache was not written".into(),
+        ));
+    }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     Ok(Connection::open_with_flags(db_path(layout)?, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)?)
 }
@@ -146,14 +141,14 @@ fn delete_row(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn rebuild_with(conn: &mut Connection, layout: &Layout, epoch: &str) -> Result<()> {
-    let ids = list_instances(layout)?;
+fn rebuild_with(conn: &mut Connection, root: &Dir, epoch: &str) -> Result<()> {
+    let ids = list_instances(root)?;
     let tx = conn.transaction()?;
     tx.execute_batch("DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS instances; DROP TABLE IF EXISTS kind_counts;")?;
     tx.execute_batch(SCHEMA)?;
     tx.execute("INSERT INTO meta (key, value) VALUES ('epoch', ?1)", params![epoch])?;
     for id in &ids {
-        write_row(&tx, &analyze(layout, id))?;
+        write_row(&tx, &analyze(root, id))?;
     }
     tx.commit()?;
     Ok(())
@@ -161,12 +156,12 @@ fn rebuild_with(conn: &mut Connection, layout: &Layout, epoch: &str) -> Result<(
 
 /// Brings the cache up to the log tree after a write: rows whose log changed are re-analyzed and
 /// rows of instances no longer live are dropped. A cache missing or stale is rebuilt whole.
-pub(crate) fn sync(layout: &Layout, epoch: &str) -> Result<()> {
-    let mut conn = open_rw(layout)?;
+pub(crate) fn sync(root: &Dir, layout: &Layout, epoch: &str, root_id: FileId) -> Result<()> {
+    let mut conn = open_rw(layout, root_id)?;
     if !current(&conn, epoch)? {
-        return rebuild_with(&mut conn, layout, epoch);
+        return rebuild_with(&mut conn, root, epoch);
     }
-    let live = list_instances(layout)?;
+    let live = list_instances(root)?;
     let mut cached = BTreeMap::new();
     {
         let mut stmt = conn.prepare("SELECT id, stat FROM instances")?;
@@ -179,8 +174,8 @@ pub(crate) fn sync(layout: &Layout, epoch: &str) -> Result<()> {
     let mut seen = BTreeSet::new();
     for id in &live {
         seen.insert(id.as_str().to_string());
-        if cached.get(id.as_str()) != Some(&stat_key(layout, id)) {
-            write_row(&tx, &analyze(layout, id))?;
+        if cached.get(id.as_str()) != Some(&stat_key(root, id)) {
+            write_row(&tx, &analyze(root, id))?;
         }
     }
     for id in cached.keys().filter(|id| !seen.contains(*id)) {
@@ -191,9 +186,9 @@ pub(crate) fn sync(layout: &Layout, epoch: &str) -> Result<()> {
 }
 
 /// Rebuilds the whole projection from the logs.
-pub(crate) fn rebuild(layout: &Layout, epoch: &str) -> Result<()> {
-    let mut conn = open_rw(layout)?;
-    rebuild_with(&mut conn, layout, epoch)
+pub(crate) fn rebuild(root: &Dir, layout: &Layout, epoch: &str, root_id: FileId) -> Result<()> {
+    let mut conn = open_rw(layout, root_id)?;
+    rebuild_with(&mut conn, root, epoch)
 }
 
 /// What the cache holds for `id`, read-only: `None` when there is no projection file, `Some(None)`

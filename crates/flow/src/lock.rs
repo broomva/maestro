@@ -1,9 +1,10 @@
-//! The flows lock: OS file locks (`flock` on unix, through `std::fs::File::lock`) on the lock
+//! The flows lock: OS file locks (`flock`, through `std::fs::File::lock`) on the lock
 //! file beside the root, and for writers then on the root directory itself. Writers take them
 //! exclusive, readers take the lock file shared. The lock is released when its guard drops, and
 //! the kernel drops it before any slow external work (filing an ask can wait 30 s on the ask
 //! ledger's own lock).
 
+use crate::at::Dir;
 use crate::error::{FlowError, Result};
 use std::fs::{File, TryLockError};
 use std::path::Path;
@@ -37,34 +38,21 @@ pub(crate) fn take(file: &File, mode: Mode, wait: Duration, lock: &Path) -> Resu
 
 /// Whether the file at `path` is still the one `file` locked. A lock file deleted or replaced
 /// after it was opened would let two holders each lock a different file.
-#[cfg(unix)]
 pub(crate) fn same_file(file: &File, path: &Path) -> Result<bool> {
-    use std::os::unix::fs::MetadataExt as _;
-    let held = file.metadata().map_err(FlowError::io(path))?;
+    let held = file_id(&file.metadata().map_err(FlowError::io(path))?);
     match std::fs::metadata(path) {
-        Ok(now) => Ok(held.dev() == now.dev() && held.ino() == now.ino()),
+        Ok(now) => Ok(held == file_id(&now)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(FlowError::io(path)(e)),
     }
 }
 
-#[cfg(not(unix))]
-pub(crate) fn same_file(_file: &File, path: &Path) -> Result<bool> {
-    Ok(path.exists())
-}
-
-/// A file's identity: device and inode on unix.
+/// A file's identity: device and inode.
 pub(crate) type FileId = (u64, u64);
 
-#[cfg(unix)]
 pub(crate) fn file_id(meta: &std::fs::Metadata) -> FileId {
     use std::os::unix::fs::MetadataExt as _;
     (meta.dev(), meta.ino())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn file_id(_meta: &std::fs::Metadata) -> FileId {
-    (0, 0)
 }
 
 /// The root directory's identity now, by `lstat`: a link put in its place is never taken for it.
@@ -78,10 +66,17 @@ pub(crate) fn root_id(root: &Path) -> Result<FileId> {
     }
 }
 
-/// Locks the root directory itself, so writers exclude each other even when the lock file was
-/// replaced. Which root it is, each write checks ([`root_id`]).
-pub(crate) fn lock_root(root: &Path, mode: Mode, wait: Duration) -> Result<File> {
-    let dir = File::open(root).map_err(FlowError::io(root))?;
-    take(&dir, mode, wait, root)?;
+/// Opens and locks the root directory itself, so writers exclude each other even when the lock
+/// file was replaced, and checks the directory it holds is the root `expected` (when given). The
+/// returned descriptor is how every write reaches the root: a path swapped later cannot redirect
+/// it.
+pub(crate) fn lock_root(root: &Path, expected: Option<FileId>, mode: Mode, wait: Duration) -> Result<Dir> {
+    let dir = Dir::open_root(root)?;
+    take(&dir.fd, mode, wait, root)?;
+    if let Some(want) = expected
+        && dir.id()? != want
+    {
+        return Err(FlowError::RootMoved { root: root.to_path_buf() });
+    }
     Ok(dir)
 }

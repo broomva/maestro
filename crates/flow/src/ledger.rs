@@ -1,16 +1,16 @@
 //! Opening the ledger, writing to it under the exclusive lock, and reading it under the shared one.
 
+use crate::at::Dir;
 use crate::error::{FlowError, Result};
 use crate::ids::{HostId, InstanceId, check_kind};
-use crate::layout::{
-    self, EPOCH_FILE, GENESIS, HOST_FILE, INSTANCES, Layout, RETIRED, State, nofollow, open_error, read_small, real_dir,
-};
+use crate::layout::{self, EPOCH_FILE, EVENTS, HOST_FILE, INSTANCES, Layout, RETIRED, State};
 use crate::lock::{self, FileId, Mode};
 use crate::log::{self, Event, InstanceSummary, Log, NewEvent};
 use crate::projection;
+use rustix::fs::OFlags;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-use std::path::Path;
+use std::io::{Read as _, Write as _};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How long to wait for the lock.
@@ -70,7 +70,7 @@ pub(crate) fn random_epoch() -> Result<String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Creates `path` with `content`; fails when it exists.
+/// Creates `path` with `content`, whole and synced; fails when it exists.
 pub(crate) fn write_new(path: &Path, content: &str) -> Result<()> {
     let mut f = OpenOptions::new().write(true).create_new(true).open(path).map_err(FlowError::io(path))?;
     f.write_all(content.as_bytes()).and_then(|()| f.sync_all()).map_err(FlowError::io(path))
@@ -84,7 +84,8 @@ pub(crate) fn sync_dir(path: &Path) {
 }
 
 /// Builds a whole root for `epoch` at its stage path: `HOST`, `EPOCH`, `instances/`, `retired/`.
-pub(crate) fn stage_root(layout: &Layout, host: &HostId, epoch: &str) -> Result<std::path::PathBuf> {
+/// A stage no lock names is inert: nothing reads it, and `operator::recover` sweeps it.
+pub(crate) fn stage_root(layout: &Layout, host: &HostId, epoch: &str) -> Result<PathBuf> {
     let stage = layout.stage(epoch);
     std::fs::create_dir(&stage).map_err(FlowError::io(&stage))?;
     write_new(&stage.join(HOST_FILE), &format!("{host}\n"))?;
@@ -96,29 +97,37 @@ pub(crate) fn stage_root(layout: &Layout, host: &HostId, epoch: &str) -> Result<
     Ok(stage)
 }
 
-fn open_lock_file(layout: &Layout) -> std::io::Result<File> {
-    File::open(&layout.lock)
+/// Puts a lock naming `epoch` in place. The lock is never rewritten: a new one is written whole
+/// under a private name, synced, and renamed over it. A crash before the rename leaves the old
+/// lock as it was. A holder of the old lock file sees `lock_lost` afterwards.
+pub(crate) fn install_lock(layout: &Layout, epoch: &str) -> Result<()> {
+    let private = layout.private_lock("new", epoch);
+    let _ = std::fs::remove_file(&private);
+    write_new(&private, &format!("{epoch}\n"))?;
+    pause!("lock_written");
+    std::fs::rename(&private, &layout.lock).map_err(FlowError::io(&layout.lock))?;
+    sync_dir(&layout.parent);
+    Ok(())
 }
 
 /// Opens the lock file without creating it. `None` only on an empty tree: no lock, no root, no
 /// archive marker, the one state a genesis may start from.
 pub(crate) fn open_lock(layout: &Layout) -> Result<Option<File>> {
-    match open_lock_file(layout) {
+    let open = || File::open(&layout.lock);
+    match open() {
         Ok(f) => return Ok(Some(f)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(open_error(&layout.lock, e)),
+        Err(e) => return Err(FlowError::io(&layout.lock)(e)),
     }
     // A genesis links its lock before it moves its root into place, so a root seen now means the
     // lock is there too, unless it was deleted.
     if std::fs::symlink_metadata(&layout.root).is_ok() {
-        return match open_lock_file(layout) {
+        return match open() {
             Ok(f) => Ok(Some(f)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match layout::inspect(layout)? {
-                State::Empty | State::Live { .. } => {
-                    Err(FlowError::LockLost { lock: layout.lock.clone(), detail: "the lock is missing".into() })
-                }
-            },
-            Err(e) => Err(open_error(&layout.lock, e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(FlowError::LockLost { lock: layout.lock.clone(), detail: "the lock is missing".into() })
+            }
+            Err(e) => Err(FlowError::io(&layout.lock)(e)),
         };
     }
     // No lock and no root: refused if a ledger was archived here.
@@ -128,59 +137,45 @@ pub(crate) fn open_lock(layout: &Layout) -> Result<Option<File>> {
     Ok(None)
 }
 
-/// Rewrites the lock's content in place: the file, and so every holder's lock, stays the same.
-/// It is emptied first, so a crash midway leaves an empty lock, which reads `lock_lost` beside a
-/// live root and `root_moved` without one, and which `operator::recover` repairs either way.
-pub(crate) fn write_lock(file: &File, lock: &Path, content: &str) -> Result<()> {
-    file.set_len(0).map_err(FlowError::io(lock))?;
-    pause!("lock_truncated");
-    let mut f = file;
-    f.seek(SeekFrom::Start(0))
-        .and_then(|_| f.write_all(format!("{content}\n").as_bytes()))
-        .and_then(|()| file.sync_all())
-        .map_err(FlowError::io(lock))
-}
-
 /// Creates a ledger on an empty tree, bound to `host`. Returns the lock file, held exclusive,
 /// when this writer won; `None` when another first writer linked its lock first.
 ///
-/// The lock is written and locked under a private name, then linked into place: a hard link
-/// fails when the lock exists, so exactly one first writer is elected. It says
-/// `genesis <epoch>` until [`finish_genesis`] has the root in place, so a crash at any point
-/// leaves a state refused `genesis_incomplete` until `operator::recover`.
+/// The root is built whole at a stage path first. Then the lock, written whole and locked under
+/// a private name, is linked into place: a hard link fails when the lock exists, so exactly one
+/// first writer is elected. Only then is the stage renamed into place. A crash between the two
+/// leaves a lock naming a stage, refused `genesis_incomplete` until `operator::recover` moves it
+/// in; a crash before the link leaves only an inert stage.
 pub(crate) fn genesis(layout: &Layout, host: &HostId) -> Result<Option<File>> {
     std::fs::create_dir_all(&layout.parent).map_err(FlowError::io(&layout.parent))?;
     let epoch = random_epoch()?;
-    let private = layout.parent.join(format!(".{}.lock.genesis-{epoch}", layout.name()));
-    let mut file =
-        OpenOptions::new().read(true).write(true).create_new(true).open(&private).map_err(FlowError::io(&private))?;
+    let stage = stage_root(layout, host, &epoch)?;
+    let private = layout.private_lock("genesis", &epoch);
     let linked = (|| {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&private)
+            .map_err(FlowError::io(&private))?;
         lock::take(&file, Mode::Exclusive, Duration::ZERO, &private)?;
-        file.write_all(format!("{GENESIS}{epoch}\n").as_bytes())
+        file.write_all(format!("{epoch}\n").as_bytes())
             .and_then(|()| file.sync_all())
             .map_err(FlowError::io(&private))?;
         match std::fs::hard_link(&private, &layout.lock) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Ok(()) => Ok(Some(file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
             Err(e) => Err(FlowError::io(&layout.lock)(e)),
         }
     })();
     let _ = std::fs::remove_file(&private);
-    if !linked? {
+    let Some(file) = linked? else {
+        let _ = std::fs::remove_dir_all(&stage);
         return Ok(None);
-    }
+    };
     pause!("genesis_linked");
-    finish_genesis(layout, &file, host, &epoch)?;
-    Ok(Some(file))
-}
-
-/// Builds the root for `epoch` at its stage, moves it into place, and only then makes the held
-/// lock name the epoch.
-pub(crate) fn finish_genesis(layout: &Layout, lock_file: &File, host: &HostId, epoch: &str) -> Result<()> {
-    let stage = stage_root(layout, host, epoch)?;
     std::fs::rename(&stage, &layout.root).map_err(FlowError::io(&layout.root))?;
     sync_dir(&layout.parent);
-    write_lock(lock_file, &layout.lock, epoch)
+    Ok(Some(file))
 }
 
 /// The one identity rule every writer passes under the lock: a live ledger, on this host, and
@@ -232,7 +227,7 @@ impl Ledger {
                 });
             }
             let epoch = check_identity(layout::inspect(&layout)?, &layout, host, None)?;
-            Ok((epoch, lock::root_id(&layout.root)?))
+            Ok((epoch, Dir::open_root(&layout.root)?.id()?))
         })();
         let _ = file.unlock();
         let (epoch, root_id) = checked?;
@@ -252,8 +247,8 @@ impl Ledger {
         &self.epoch
     }
 
-    /// Takes the exclusive lock: the lock file, then the root directory itself. Checks the
-    /// ledger is still the one this writer opened.
+    /// Takes the exclusive lock: the lock file, then the root directory itself, which must be
+    /// the very directory this writer opened. The guard writes only through that directory.
     pub fn lock(&mut self) -> Result<WriteGuard<'_>> {
         lock::take(&self.lock_file, Mode::Exclusive, self.options.lock_wait, &self.layout.lock)?;
         let checked = (|| {
@@ -264,10 +259,10 @@ impl Ledger {
                     detail: "the lock file was deleted or replaced after this writer opened it".into(),
                 });
             }
-            lock::lock_root(&self.layout.root, Mode::Exclusive, self.options.lock_wait)
+            lock::lock_root(&self.layout.root, Some(self.root_id), Mode::Exclusive, self.options.lock_wait)
         })();
         match checked {
-            Ok(root_dir) => Ok(WriteGuard { ledger: self, _root_dir: root_dir }),
+            Ok(root) => Ok(WriteGuard { ledger: self, root }),
             Err(e) => {
                 let _ = self.lock_file.unlock();
                 Err(e)
@@ -276,14 +271,13 @@ impl Ledger {
     }
 }
 
-/// The exclusive lock on the ledger. Every write happens through it, and every write first
-/// checks the lock file, the root and its epoch are still the ones the guard was taken on.
-/// Dropping it releases the lock, which the kernel does before any slow external work.
+/// The exclusive lock on the ledger. It holds the root directory it verified, and every write
+/// goes through that descriptor: a root moved or replaced by path afterwards cannot redirect a
+/// write. Dropping it releases the lock, which the kernel does before any slow external work.
 #[derive(Debug)]
 pub struct WriteGuard<'a> {
     ledger: &'a mut Ledger,
-    /// Held for its lock; closing it releases the root directory.
-    _root_dir: File,
+    root: Dir,
 }
 
 impl Drop for WriteGuard<'_> {
@@ -292,103 +286,61 @@ impl Drop for WriteGuard<'_> {
     }
 }
 
-/// Refuses an id whose instance was retired. Stats `retired/<id>`, never reads or writes in it.
-pub(crate) fn refuse_retired(layout: &Layout, id: &InstanceId) -> Result<()> {
-    let retired = layout.retired_dir(id);
-    match std::fs::symlink_metadata(&retired) {
-        Ok(_) => Err(FlowError::Retired { instance: id.to_string() }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(FlowError::io(retired)(e)),
+/// `instances/` under `root`: only a genesis makes it.
+pub(crate) fn instances(root: &Dir) -> Result<Dir> {
+    root.dir(INSTANCES)?.ok_or_else(|| FlowError::LedgerDamaged { detail: "instances/ is missing".into() })
+}
+
+/// Refuses an id whose instance was retired. Stats `retired/<id>`, never opens anything in it.
+pub(crate) fn refuse_retired(root: &Dir, id: &InstanceId) -> Result<()> {
+    match root.dir(RETIRED)? {
+        Some(retired) if retired.exists(id.as_str())? => Err(FlowError::Retired { instance: id.to_string() }),
+        _ => Ok(()),
     }
 }
 
-/// `instances/` must be a real directory: only a genesis makes it.
-fn instances_dir(layout: &Layout) -> Result<std::path::PathBuf> {
-    let dir = layout.root.join(INSTANCES);
-    if !real_dir(&dir)? {
-        return Err(FlowError::LedgerDamaged { detail: "instances/ is missing".into() });
+/// The log's bytes; `None` when the instance has none.
+pub(crate) fn read_log(root: &Dir, id: &InstanceId) -> Result<Option<Vec<u8>>> {
+    match instances(root)?.dir(id.as_str())? {
+        Some(dir) => dir.read(EVENTS),
+        None => Ok(None),
     }
-    Ok(dir)
-}
-
-/// The log's bytes; `None` when the instance has none. Follows no link under the root.
-pub(crate) fn read_log(layout: &Layout, id: &InstanceId) -> Result<Option<Vec<u8>>> {
-    instances_dir(layout)?;
-    if !real_dir(&layout.instance_dir(id))? {
-        return Ok(None);
-    }
-    let path = layout.events(id);
-    let mut file = match nofollow(OpenOptions::new().read(true)).open(&path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(open_error(&path, e)),
-    };
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(FlowError::io(&path))?;
-    Ok(Some(bytes))
 }
 
 /// An instance's verified log, refusing a retired one.
-pub(crate) fn load_log(layout: &Layout, id: &InstanceId) -> Result<Log> {
-    refuse_retired(layout, id)?;
-    match read_log(layout, id)? {
+pub(crate) fn load_log(root: &Dir, id: &InstanceId) -> Result<Log> {
+    refuse_retired(root, id)?;
+    match read_log(root, id)? {
         Some(bytes) => log::verify(id, &bytes),
         None => Err(FlowError::UnknownInstance { instance: id.to_string() }),
     }
 }
 
-/// The live instances, by name. Entries that are not real directories are not instances.
-pub(crate) fn list_instances(layout: &Layout) -> Result<Vec<InstanceId>> {
-    let dir = instances_dir(layout)?;
-    let entries = std::fs::read_dir(&dir).map_err(FlowError::io(&dir))?;
-    let mut out = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(FlowError::io(&dir))?;
-        if let Some(id) = entry.file_name().to_str().and_then(|n| InstanceId::new(n).ok()) {
-            out.push(id);
-        }
-    }
-    out.sort();
-    Ok(out)
+/// The live instances: the real directories under `instances/` with a valid id.
+pub(crate) fn list_instances(root: &Dir) -> Result<Vec<InstanceId>> {
+    Ok(instances(root)?.subdirs()?.into_iter().filter_map(|n| InstanceId::new(n).ok()).collect())
 }
 
 impl WriteGuard<'_> {
-    pub(crate) fn layout(&self) -> &Layout {
-        &self.ledger.layout
+    pub(crate) fn root(&self) -> &Dir {
+        &self.root
     }
 
-    pub(crate) fn epoch(&self) -> &str {
-        &self.ledger.epoch
-    }
-
-    /// Re-checks, at the moment of a write, what the guard was taken on: the lock path is still
-    /// the file this writer locked, the root is still the directory it opened, and its epoch is
-    /// unchanged. Every write calls it first; nothing under the root is written otherwise.
-    pub(crate) fn verify(&self) -> Result<()> {
-        let ledger = &*self.ledger;
-        if !lock::same_file(&ledger.lock_file, &ledger.layout.lock)? {
-            return Err(FlowError::LockLost {
-                lock: ledger.layout.lock.clone(),
-                detail: "the lock file was replaced while this writer held it".into(),
-            });
-        }
-        if lock::root_id(&ledger.layout.root)? != ledger.root_id {
-            return Err(FlowError::RootMoved { root: ledger.layout.root.clone() });
-        }
-        match read_small(&ledger.layout.root.join(EPOCH_FILE))? {
-            Some(found) if found == ledger.epoch => Ok(()),
-            found => Err(FlowError::EpochMismatch { expected: ledger.epoch.clone(), found: found.unwrap_or_default() }),
-        }
+    /// Brings the projection up to the logs. The cache needs a path (SQLite), so it is written
+    /// only while the root's path still names the directory this guard holds; otherwise the
+    /// write is skipped and reported. It is a cache: the log wins either way.
+    pub(crate) fn sync_projection(&self) -> CacheWrite {
+        projection::sync(&self.root, &self.ledger.layout, &self.ledger.epoch, self.ledger.root_id).into()
     }
 
     /// The live instances.
     pub fn instances(&self) -> Result<Vec<InstanceId>> {
-        list_instances(self.layout())
+        list_instances(&self.root)
     }
 
     /// An instance's verified log.
     pub fn log(&self, id: &InstanceId) -> Result<Log> {
-        load_log(self.layout(), id)
+        load_log(&self.root, id)
     }
 
     /// Appends `event` to instance `id` if its log is at `expected_seq` (0 creates the
@@ -396,10 +348,13 @@ impl WriteGuard<'_> {
     /// released the lock and came back is refused `stale_seq` if anything was appended meanwhile.
     pub fn append(&mut self, id: &InstanceId, expected_seq: u64, event: NewEvent) -> Result<Appended> {
         check_kind(&event.kind)?;
-        self.verify()?;
-        let layout = self.layout().clone();
-        refuse_retired(&layout, id)?;
-        let existing = read_log(&layout, id)?;
+        refuse_retired(&self.root, id)?;
+        let instances = instances(&self.root)?;
+        let dir = instances.dir(id.as_str())?;
+        let existing = match &dir {
+            Some(dir) => dir.read(EVENTS)?,
+            None => None,
+        };
         let created = existing.is_none();
         let log = match existing {
             Some(bytes) => log::verify(id, &bytes)?,
@@ -410,36 +365,29 @@ impl WriteGuard<'_> {
             return Err(FlowError::StaleSeq { instance: id.to_string(), expected: expected_seq, current: log.seq() });
         }
         let (stored, line) = log::next_line(&log, &event)?;
-        let dir = layout.instance_dir(id);
-        let path = layout.events(id);
         pause!("append_checked");
-        let written = (|| {
-            // Only the instance's own directory is ever made here, never the root or `instances/`.
-            if !real_dir(&dir)? {
-                std::fs::create_dir(&dir).map_err(FlowError::io(&dir))?;
+        let dir = match dir {
+            Some(dir) => dir,
+            None => {
+                // Only the instance's own directory is ever made here, inside the held root.
+                instances.mkdir(id.as_str())?;
+                instances.dir(id.as_str())?.ok_or_else(|| FlowError::UnknownInstance { instance: id.to_string() })?
             }
-            let mut file =
-                nofollow(OpenOptions::new().append(true).create(true)).open(&path).map_err(|e| open_error(&path, e))?;
-            file.write_all(&line).and_then(|()| file.sync_data()).map_err(FlowError::io(&path))
-        })();
-        if let Err(e) = written {
-            // A root that moved, or a lock replaced, mid-write reads as that, not as a bare io error.
-            self.verify()?;
-            return Err(e);
-        }
+        };
+        let mut file = dir
+            .file(EVENTS, OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE)?
+            .ok_or_else(|| FlowError::UnknownInstance { instance: id.to_string() })?;
+        file.write_all(&line).and_then(|()| file.sync_data()).map_err(FlowError::io(dir.path.join(EVENTS)))?;
         if created {
-            sync_dir(&dir);
-            sync_dir(&layout.root.join(INSTANCES));
+            dir.sync();
+            instances.sync();
         }
-        let cache = projection::sync(&layout, self.epoch()).into();
-        Ok(Appended { event: stored, cache })
+        Ok(Appended { event: stored, cache: self.sync_projection() })
     }
 
     /// Rebuilds the whole projection from the logs.
     pub fn rebuild_projection(&mut self) -> Result<()> {
-        self.verify()?;
-        let layout = self.layout().clone();
-        projection::rebuild(&layout, self.epoch())
+        projection::rebuild(&self.root, &self.ledger.layout, &self.ledger.epoch, self.ledger.root_id)
     }
 }
 
@@ -473,12 +421,12 @@ impl Reader {
                 });
             }
             match layout::inspect(layout)? {
-                State::Live { host, epoch } => Ok((host, epoch)),
+                State::Live { host, epoch } => Ok((host, epoch, Dir::open_root(&layout.root)?)),
                 State::Empty => Err(FlowError::RootMoved { root: layout.root.clone() }),
             }
         })();
         match checked {
-            Ok((host, epoch)) => Ok(ReadGuard { layout: layout.clone(), file, host, epoch }),
+            Ok((host, epoch, root)) => Ok(ReadGuard { layout: layout.clone(), root, file, host, epoch }),
             Err(e) => {
                 let _ = file.unlock();
                 Err(e)
@@ -491,6 +439,7 @@ impl Reader {
 #[derive(Debug)]
 pub struct ReadGuard {
     layout: Layout,
+    root: Dir,
     file: File,
     host: String,
     epoch: String,
@@ -530,12 +479,12 @@ impl ReadGuard {
     }
 
     pub fn instances(&self) -> Result<Vec<InstanceId>> {
-        list_instances(&self.layout)
+        list_instances(&self.root)
     }
 
     /// An instance's verified log. A torn tail is `torn_tail`: unread, never a shorter log.
     pub fn log(&self, id: &InstanceId) -> Result<Log> {
-        load_log(&self.layout, id)
+        load_log(&self.root, id)
     }
 
     /// Every row of the projection, read-only; `None` when there is no projection file. For tests.

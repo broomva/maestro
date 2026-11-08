@@ -994,8 +994,8 @@ name = "maestro-flow"
 version = "0.1.0"
 dependencies = [
  "jiff",
- "libc",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

@@ -29,3 +29,8 @@ pub(crate) fn pause(point: &str) {
         std::thread::sleep(Duration::from_millis(2));
     }
 }
+
+/// Whether a test asks `operator::archive` to treat its destination as on another filesystem.
+pub(crate) fn other_device() -> bool {
+    std::env::var_os("MAESTRO_FLOW_TEST_OTHER_DEVICE").is_some()
+}

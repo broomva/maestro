@@ -174,8 +174,9 @@ fn a_recreated_root_with_another_epoch_is_refused() {
     assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "epoch_mismatch");
 }
 
-/// A lock file replaced while a guard holds the old one: the root directory's own lock still
-/// keeps a second writer out, the first guard's next write refuses, and the log never forks.
+/// A lock file replaced while a guard holds the old one: the root directory's own lock keeps a
+/// second writer out, the guard's writes still go to the root it holds, and the log never forks.
+/// Its next `lock()` refuses `lock_lost`.
 #[test]
 fn a_lock_file_replaced_under_a_guard_never_forks_the_log() {
     let tmp = tempfile::tempdir().unwrap();
@@ -188,64 +189,58 @@ fn a_lock_file_replaced_under_a_guard_never_forks_the_log() {
     replace_with_copy(&lock_of(tmp.path()));
     let mut second = Ledger::open(&root, &host("mac"), quick()).unwrap();
     assert_eq!(code(second.lock()), "busy", "a second writer went ahead beside a held guard");
-    assert_eq!(code(guard.append(&fi, 1, event("Claimed", 1))), "lock_lost");
+    assert_eq!(guard.append(&fi, 1, event("Claimed", 1)).unwrap().event.seq, 2);
     drop(guard);
 
-    assert_eq!(second.lock().unwrap().append(&fi, 1, event("Claimed", 2)).unwrap().event.seq, 2);
+    assert_eq!(second.lock().unwrap().append(&fi, 2, event("Claimed", 2)).unwrap().event.seq, 3);
     assert_eq!(code(first.lock()), "lock_lost");
     let log = Reader::new(&root, quick()).unwrap().lock().unwrap().log(&fi).unwrap();
-    assert_eq!(log.seq(), 2);
-    assert_eq!(log.events[1].body["n"], 2);
+    assert_eq!(log.seq(), 3);
 }
 
-/// A guard held while the root is moved away, replaced by a copy or a link, or its epoch rewritten:
-/// the next write refuses and recreates nothing.
-#[cfg(unix)]
+/// A guard writes through the root directory it verified. With the root moved away, or replaced
+/// by a copy or a link, while the guard is held, its writes land in the root it holds and nothing
+/// appears at the path; the next `lock()` refuses `root_moved`, and a linked root is refused
+/// `symlink` when opened.
 #[test]
-fn a_write_checks_the_root_it_was_given() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = root_in(tmp.path());
-    let parent = tmp.path().join(".broomva");
-    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
-    append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
+fn a_held_guard_writes_only_to_the_root_it_verified() {
+    for swap in ["moved", "copy", "link"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = root_in(tmp.path());
+        let parent = tmp.path().join(".broomva");
+        let held = parent.join("flows-held");
+        let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+        append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
 
-    let mut guard = ledger.lock().unwrap();
-    std::fs::rename(&root, parent.join("flows-moved")).unwrap();
-    assert_eq!(code(guard.append(&id("fi_a"), 1, event("Tick", 1))), "root_moved");
-    assert_eq!(code(guard.append(&id("fi_new"), 0, event("Started", 0))), "root_moved");
-    assert_eq!(names(&parent), vec!["flows-moved", "flows.lock"]);
-
-    // A copy put in its place is another directory.
-    std::fs::create_dir_all(root.join("instances")).unwrap();
-    std::fs::create_dir_all(root.join("retired")).unwrap();
-    for f in ["HOST", "EPOCH"] {
-        std::fs::copy(parent.join("flows-moved").join(f), root.join(f)).unwrap();
+        let mut guard = ledger.lock().unwrap();
+        std::fs::rename(&root, &held).unwrap();
+        match swap {
+            "copy" => {
+                for dir in ["instances", "retired"] {
+                    std::fs::create_dir_all(root.join(dir)).unwrap();
+                }
+                for f in ["HOST", "EPOCH"] {
+                    std::fs::copy(held.join(f), root.join(f)).unwrap();
+                }
+            }
+            "link" => std::os::unix::fs::symlink(&held, &root).unwrap(),
+            _ => {}
+        }
+        let at_path = if swap == "copy" { snapshot(&root) } else { Default::default() };
+        assert_eq!(guard.append(&id("fi_a"), 1, event("Tick", 1)).unwrap().event.seq, 2, "{swap}");
+        assert_eq!(guard.append(&id("fi_new"), 0, event("Started", 0)).unwrap().event.seq, 1, "{swap}");
+        drop(guard);
+        assert_eq!(names(&held.join("instances")), vec!["fi_a", "fi_new"], "{swap}");
+        match swap {
+            "moved" => assert_eq!(names(&parent), vec!["flows-held", "flows.lock"]),
+            "copy" => assert_eq!(snapshot(&root), at_path, "the copy was written"),
+            _ => {
+                assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "symlink");
+                assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "symlink");
+            }
+        }
+        assert_eq!(code(ledger.lock()), if swap == "link" { "symlink" } else { "root_moved" }, "{swap}");
     }
-    assert_eq!(code(guard.append(&id("fi_new"), 0, event("Started", 0))), "root_moved");
-    assert!(names(&root.join("instances")).is_empty());
-    drop(guard);
-    std::fs::remove_dir_all(&root).unwrap();
-    std::fs::rename(parent.join("flows-moved"), &root).unwrap();
-
-    // A link to the real root put in its place: `lstat` never takes the link for the root.
-    let mut guard = ledger.lock().unwrap();
-    std::fs::rename(&root, parent.join("flows-real")).unwrap();
-    std::os::unix::fs::symlink(parent.join("flows-real"), &root).unwrap();
-    assert_eq!(code(guard.append(&id("fi_new"), 0, event("Started", 0))), "root_moved");
-    assert!(!parent.join("flows-real/instances/fi_new").exists());
-    drop(guard);
-    assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "symlink");
-    assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "symlink");
-    std::fs::remove_file(&root).unwrap();
-    std::fs::rename(parent.join("flows-real"), &root).unwrap();
-
-    // The same root with its epoch rewritten under the guard.
-    let mut guard = ledger.lock().unwrap();
-    let epoch = std::fs::read_to_string(root.join("EPOCH")).unwrap();
-    std::fs::write(root.join("EPOCH"), "ffffffffffffffffffffffffffffffff\n").unwrap();
-    assert_eq!(code(guard.append(&id("fi_a"), 1, event("Tick", 1))), "epoch_mismatch");
-    std::fs::write(root.join("EPOCH"), epoch).unwrap();
-    assert_eq!(guard.append(&id("fi_a"), 1, event("Tick", 1)).unwrap().event.seq, 2);
 }
 
 /// With the lock deleted beside a live root, a fresh ledger is refused before it touches
@@ -297,15 +292,38 @@ fn recover_removes_crash_debris_but_not_a_genesis_in_flight() {
     drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
     let e = "0123456789abcdef0123456789abcdef";
     std::fs::create_dir_all(parent.join(format!(".flows.genesis-{e}/instances"))).unwrap();
-    std::fs::write(parent.join(format!(".flows.lock.genesis-{e}")), format!("genesis {e}\n")).unwrap();
-    std::fs::write(parent.join(format!(".flows.lock.recover-{e}")), format!("{e}\n")).unwrap();
+    std::fs::write(parent.join(format!(".flows.lock.genesis-{e}")), format!("{e}\n")).unwrap();
+    std::fs::write(parent.join(format!(".flows.lock.new-{e}")), format!("{e}\n")).unwrap();
+    // A second name for the live lock, left by a crash between linking and unlinking it.
+    std::fs::hard_link(lock_of(tmp.path()), parent.join(".flows.lock.genesis-1111111111111111111111111111111a"))
+        .unwrap();
     let held = parent.join(".flows.lock.genesis-ffffffffffffffffffffffffffffffff");
     std::fs::write(&held, "").unwrap();
     let holder = std::fs::File::open(&held).unwrap();
     holder.lock().unwrap();
-    assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::RemovedDebris { count: 3 });
-    assert_eq!(names(&parent), vec![".flows.lock.genesis-ffffffffffffffffffffffffffffffff", "flows", "flows.lock"]);
+    // Not the shapes a crash leaves: an operator's own directory, a file under a stage name, a
+    // directory under a private lock name, and a name that is not an epoch.
+    let kept = [
+        ".flows.genesis-old",
+        ".flows.genesis-3333333333333333333333333333333c",
+        ".flows.lock.new-2222222222222222222222222222222b",
+        ".flows.lock.new-zz",
+    ];
+    std::fs::create_dir(parent.join(kept[0])).unwrap();
+    std::fs::write(parent.join(kept[1]), "").unwrap();
+    std::fs::create_dir(parent.join(kept[2])).unwrap();
+    std::fs::write(parent.join(kept[3]), "").unwrap();
+    assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::RemovedDebris { count: 4 });
+    let mut left = kept.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+    left.extend([
+        ".flows.lock.genesis-ffffffffffffffffffffffffffffffff".to_string(),
+        "flows".into(),
+        "flows.lock".into(),
+    ]);
+    left.sort();
+    assert_eq!(names(&parent), left);
     assert_eq!(code(operator::recover(&root, &quick())), "operator_refused");
+    Ledger::open(&root, &host("mac"), quick()).unwrap();
     drop(holder);
 }
 
@@ -319,4 +337,54 @@ fn a_root_whose_epoch_is_not_32_hex_is_damaged() {
     std::fs::write(lock_of(tmp.path()), "0123456789abcdef\n").unwrap();
     assert_eq!(code(Ledger::open(&root, &host("mac"), quick())), "ledger_damaged");
     assert_eq!(code(Reader::new(&root, quick()).unwrap().lock()), "ledger_damaged");
+}
+
+/// `archive` takes the root directory's own lock, as a writer does: with a guard held through a
+/// lock file replaced since, it waits and refuses `busy` rather than move the root from under it.
+#[test]
+fn an_archive_waits_for_a_guard_held_through_a_replaced_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    let guard = ledger.lock().unwrap();
+    replace_with_copy(&lock_of(tmp.path()));
+    let before = snapshot(tmp.path());
+    assert_eq!(code(operator::archive(&root, &tmp.path().join("archive"), &quick())), "busy");
+    assert_eq!(snapshot(tmp.path()), before, "a refused archive changed the tree");
+    drop(guard);
+}
+
+/// A fresh ledger that crashed after its lock named its stage: `recover` moves the stage in and
+/// removes the archive marker, so the finished ledger has none beside it.
+#[test]
+fn recovering_a_fresh_ledger_removes_the_archive_marker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent = tmp.path().join(".broomva");
+    drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+    operator::archive(&root, &tmp.path().join("archive"), &quick()).unwrap();
+    let e = "0123456789abcdef0123456789abcdef";
+    let stage = parent.join(format!(".flows.genesis-{e}"));
+    for dir in ["instances", "retired"] {
+        std::fs::create_dir_all(stage.join(dir)).unwrap();
+    }
+    std::fs::write(stage.join("HOST"), "nuc\n").unwrap();
+    std::fs::write(stage.join("EPOCH"), format!("{e}\n")).unwrap();
+    std::fs::write(lock_of(tmp.path()), format!("{e}\n")).unwrap();
+    assert_eq!(code(Ledger::open(&root, &host("nuc"), quick())), "genesis_incomplete");
+    assert_eq!(operator::recover(&root, &quick()).unwrap(), Recovered::FinishedGenesis { epoch: e.into() });
+    assert_eq!(names(&parent), vec!["flows", "flows.lock"]);
+    assert_eq!(Ledger::open(&root, &host("nuc"), quick()).unwrap().epoch(), e);
+}
+
+/// Only real directories under `instances/` are instances: a stray file is not listed.
+#[test]
+fn a_stray_file_under_instances_is_not_an_instance() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
+    std::fs::write(root.join("instances/notes"), "").unwrap();
+    assert_eq!(ledger.lock().unwrap().instances().unwrap(), vec![id("fi_a")]);
+    assert_eq!(Reader::new(&root, quick()).unwrap().lock().unwrap().instances().unwrap(), vec![id("fi_a")]);
 }

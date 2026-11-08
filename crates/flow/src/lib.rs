@@ -5,11 +5,14 @@
 //!
 //! - **In scope:** writers that use this API concurrently (threads, processes, sessions), and
 //!   operator mistakes that can be detected: a lock file deleted, emptied or replaced, a root
-//!   moved, archived or recreated, a crash at any point, a symbolic link placed under the root,
-//!   a torn or corrupted log. Each is refused with a code, never written through.
+//!   moved, archived or recreated, a crash or power loss at any point, a symbolic link placed
+//!   under the root, a torn or corrupted log. Each is refused with a code, never written through.
 //! - **Out of scope:** a hostile local process with write access to the tree. Such a process can
 //!   edit any file directly; the checks here narrow the windows for mistakes, they do not defend
 //!   against it.
+//! - **Accepted:** `operator::recover` restoring a deleted lock does not wait for a reader still
+//!   holding the old one. Reads stay safe: they need only the log rules, and the worst a reader
+//!   sees is a torn tail.
 //!
 //! # Layout
 //!
@@ -17,16 +20,17 @@
 //!
 //! ```text
 //! .broomva/
-//!   flows.lock                 the lock file, beside the root: `<epoch>`, or `genesis <epoch>`
-//!                              while the genesis that made it runs
-//!   flows/                     the root
-//!     HOST                     the host this ledger is bound to
-//!     EPOCH                    32 hex, made once at genesis
+//!   flows.lock                    the lock file, beside the root: the root's epoch
+//!   flows/                        the root
+//!     HOST                        the host this ledger is bound to
+//!     EPOCH                       32 hex, made once at genesis
 //!     instances/<id>/events.jsonl
 //!     retired/<id>/events.jsonl
-//!     projection.sqlite        a cache of the logs, rebuilt from them at will
-//!   flows.archived             left by `operator::archive`: a ledger was here
-//!   .flows.genesis-<epoch>/    a root being built (only during a genesis, or after a crash in one)
+//!     projection.sqlite           a cache of the logs, rebuilt from them at will
+//!   flows.archived                left by `operator::archive`: a ledger was here
+//!   .flows.genesis-<epoch>/       a root being built
+//!   .flows.lock.genesis-<epoch>   a genesis's lock, written whole before it is linked in
+//!   .flows.lock.new-<epoch>       a new lock, written whole before it is renamed in
 //! ```
 //!
 //! # Rules
@@ -38,32 +42,34 @@
 //!   otherwise; that check, under the lock, is the only concurrency rule. The guard releases the
 //!   lock when dropped, so a caller drops it before slow external work (filing an ask can wait
 //!   30 s on the ask ledger's lock) and comes back with the sequence number it saw.
-//! - **Checked at the write, not only at the lock.** Every write first re-checks that the lock
-//!   path is still the file the guard locked (`lock_lost`), that the root is still the directory
-//!   the writer opened, by `lstat` device and inode (`root_moved`), and that its `EPOCH` is
-//!   unchanged (`epoch_mismatch`). The write path never creates the root or `instances/`, only an
-//!   instance's own directory, and follows no symbolic link under the root (`symlink`): `lstat`,
-//!   `create_dir`, `O_NOFOLLOW`, and `SQLITE_OPEN_NOFOLLOW` for the projection.
+//! - **Writes go through the root's descriptor, never a path.** Taking the lock opens the root
+//!   directory and checks it is the very directory (device and inode) the writer opened, and the
+//!   epoch it opened. From then on every open, create, rename and stat under the root is relative
+//!   to that descriptor (`openat`, `mkdirat`, `renameat`, `statat`, in `at.rs`), with
+//!   `O_NOFOLLOW` and `AT_SYMLINK_NOFOLLOW`. A root moved or replaced by path while a guard is
+//!   held cannot redirect a write: it lands in the directory the guard verified, and the next
+//!   lock refuses `root_moved`. No symbolic link under the root is followed (`symlink`). The
+//!   projection is the one exception, since SQLite needs a path: it is written only while the
+//!   root's path still names the held directory, and it is a cache the log always beats.
 //! - **Host binding and identity.** A genesis runs only on an empty tree: no lock, no root and no
-//!   archive marker. It writes `genesis <epoch>` into a private file it holds locked and links
-//!   that as `flows.lock` (a hard link fails if a lock exists, so one first writer is elected and
-//!   the others wait on the lock, then see its `HOST` and refuse `foreign_host`). Holding it, it
-//!   builds the root at a stage, renames it into place, and only then makes the lock name the
-//!   epoch. A writer remembers the epoch and root it opened. A missing or empty lock beside a
+//!   archive marker. It builds the whole root at a stage, then links a lock written whole and
+//!   held under a private name as `flows.lock` (a hard link fails if a lock exists, so one first
+//!   writer is elected and the others wait on the lock, then see its `HOST` and refuse
+//!   `foreign_host`), then renames the stage into place. A missing, empty or partial lock beside a
 //!   live root is `lock_lost`, never a new epoch.
-//! - **Archive and fresh ledgers are operator steps.** [`operator::archive`] moves the root and
-//!   its lock away together, under the lock, and leaves `flows.archived`; every writer then
-//!   refuses `root_moved` and creates nothing. A new ledger there is
-//!   [`operator::create_fresh_ledger`], never a writer's job. A root moved by hand leaves its
-//!   lock behind, which refuses `root_moved` too.
-//! - **Crash recovery.** A crash during a genesis leaves its lock saying `genesis <epoch>`, which
-//!   every writer and reader refuses `genesis_incomplete`. A lock rewrite empties the lock before
-//!   writing it, so a crash there leaves an empty lock. [`operator::recover`] makes the lock name
-//!   the root's own epoch when a root is in place, and removes it otherwise; a fresh ledger keeps
-//!   the archive marker in place until it is whole, so clearing one never lets a normal writer
-//!   start a ledger. It restores a missing lock after taking the root directory's lock, so no
-//!   writer still holds a guard through the deleted one, and removes crash debris that no
-//!   process holds.
+//! - **A lock is never rewritten.** A new lock is written whole under a private name, synced, and
+//!   renamed over the old one; a crash before the rename leaves the old lock as it was.
+//! - **Archive and fresh ledgers are operator steps.** [`operator::archive`] takes the lock and
+//!   the root directory's lock as a writer does, then moves the root and its lock away together
+//!   and leaves `flows.archived`; every writer then refuses `root_moved` and creates nothing. A
+//!   new ledger there is [`operator::create_fresh_ledger`], never a writer's job. A root moved by
+//!   hand leaves its lock behind, which refuses `root_moved` too.
+//! - **Crash recovery.** A crash after a genesis links its lock and before its stage moves in
+//!   leaves a lock naming a stage, refused `genesis_incomplete`; [`operator::recover`] moves the
+//!   stage in. A crash before the link leaves only a stage no lock names, which nothing reads.
+//!   `recover` also restores a missing or broken lock from the root's own epoch, after taking the
+//!   root directory's lock so no writer still holds a guard through the old one, and removes
+//!   crash debris of the exact shapes above that no process holds.
 //! - **Retire.** [`operator::retire`] moves `instances/<id>` to `retired/<id>` under the lock.
 //!   Any later write or read naming that id is refused `retired`; the kernel only stats
 //!   `retired/<id>` and never opens anything inside it.
@@ -87,6 +93,7 @@ macro_rules! pause {
     };
 }
 
+mod at;
 mod error;
 #[cfg(test)]
 extern crate self as maestro_flow;
