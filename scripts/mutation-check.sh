@@ -909,11 +909,12 @@ mutate $fk/ir.rs '    jq::compile(code).map(|_| ()).map_err(|detail| CompileErro
 # start: params that do not fit are refused before anything is written.
 mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'
 mutate $fk/replay.rs '    if let Some(name) = given.keys().find(|k| !ir.params.contains_key(*k)) {' '    if let Some(name) = given.keys().find(|_| false) {'
-# Replay reads only what it can trust: a Started first, a pinned IR that validates and matches
-# its hash, kernel event kinds, declared nodes.
+# Replay reads only what it can trust: a Started first, a pinned IR that validates (without it a
+# cyclic pin recurses until the stack overflows) and matches its hash, kernel event kinds,
+# declared nodes.
 mutate $fk/replay.rs '    if first.kind != Started::KIND {' '    if false {'
 mutate $fk/replay.rs '    ir::validate(&started.ir)
-        .map_err(|e| malformed(log, first.seq, format!("the pinned IR does not validate ({e})")))?;' ''
+        .map_err(|e| malformed(log, first.seq, format!("the pinned IR does not validate ({e})")))?;' '' 'stack overflow'
 mutate $fk/replay.rs '    if ir::content_hash(&started.ir)? != started.ir_hash {' '    if false {'
 mutate $fk/replay.rs '        if started.ir.nodes.contains_key(node) {' '        if true {'
 mutate $fk/replay.rs '            other => return Err(malformed(log, e.seq, format!("{other} is not a kernel event"))),' '            _ => {}'
