@@ -15,11 +15,15 @@
 //!   outside any repeat, `{r: i}` inside repeat `r` while it is at `i` (and not exhausted).
 //! - `Completed` (any class but choice) and `Chosen` (choice only, a declared edge) count only if
 //!   the node is enabled (every need has a receipt whose content is current, and its switch case
-//!   was taken) and it is not already done. Only an observation may be recorded again while it is
-//!   done (a re-run). `Claimed`, `Heartbeat` and `Refused` change nothing here.
+//!   was taken) and it is not already done at the event's own `at`. Only an observation may be
+//!   recorded again while it is done (a re-run). A node whose receipt is stale at that `at`,
+//!   because something upstream had expired by then, is not done, so a new receipt replaces it.
+//! - `Claimed`, `Heartbeat`, `Refused` and every rejected event change nothing and cost no
+//!   evaluation; only an accepted receipt or verdict can move a repeat on.
 //! - `Guarded` records a repeat's `until` verdict for its current iteration once that iteration
-//!   has settled, with the digest of the body it judged. A false verdict moves the repeat on; a
-//!   repeat with no `until` moves on as soon as an iteration settles.
+//!   has settled, with the digest of the body it judged; a second verdict on a body already judged
+//!   is set aside. A false verdict moves the repeat on; a repeat with no `until` moves on as soon
+//!   as an iteration settles.
 //!
 //! # State, at a clock
 //!
@@ -40,9 +44,11 @@
 //!
 //! # Contract for the writers (3b2)
 //!
-//! Acceptance checks order and branches, not freshness. A writer must check, at the moment it
-//! records, that nothing the node consumes is stale, and record the `inputs` that `status`
-//! names; claims, leases, retry and cancel are the writers' to enforce.
+//! Acceptance checks order and branches; freshness only decides whether a node is already done.
+//! A writer must check, at the moment it records, that nothing the node consumes is stale, and
+//! record the `inputs` that `status` names. An `until` may read only the repeat's body nodes,
+//! since a verdict's digest covers only the body. Claims, leases, retry and cancel are the
+//! writers' to enforce.
 
 use super::compile::CompiledFlow;
 use super::error::KernelError;
@@ -57,6 +63,7 @@ use jiff::{SignedDuration, Timestamp};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A node's state, as `status` reports it.
@@ -323,12 +330,26 @@ type Key = (String, Iteration);
 #[derive(Debug, Clone)]
 struct Receipt {
     at: Timestamp,
-    outputs: Value,
     /// The observed value or the chosen edge.
     value: Option<String>,
     /// Why this receipt fails its node, for an observation whose exit status maps to nothing.
     failure: Option<Reason>,
     inputs: BTreeMap<String, String>,
+    /// [`receipt_digest`] of its outputs and value, computed once when it is accepted.
+    digest: String,
+}
+
+impl Receipt {
+    fn new(
+        at: Timestamp,
+        outputs: &Value,
+        value: Option<String>,
+        failure: Option<Reason>,
+        inputs: BTreeMap<String, String>,
+    ) -> Self {
+        let digest = receipt_digest(outputs, value.as_deref());
+        Receipt { at, value, failure, inputs, digest }
+    }
 }
 
 /// A repeat's place in the fold: the iteration it is at, or the one it ran out at.
@@ -347,6 +368,12 @@ enum Loop {
     Unreachable,
 }
 
+/// What an accepted event did: nothing a node's state depends on, or something that may.
+enum Change {
+    Inert,
+    State,
+}
+
 /// The common head of every event that names a node.
 #[derive(Deserialize)]
 struct Subject {
@@ -363,6 +390,18 @@ struct Fold<'a> {
     /// True verdicts, by repeat and iteration, with the digest of the body they judged.
     verdicts: BTreeMap<(String, u32), String>,
     rejected: Vec<Rejected>,
+    /// Node evaluations that do not depend on the clock, kept across events: an accepted receipt
+    /// drops those downstream of its node, a repeat that moves or is judged drops them all.
+    cache: RefCell<BTreeMap<String, BTreeMap<Iteration, NodeEval>>>,
+    /// Body digests kept across events, dropped with the evaluation of any body node.
+    digests: RefCell<BTreeMap<(String, u32), String>>,
+    /// The nodes whose evaluation reads each node: its dependents, and for a body node, every
+    /// node that waits on its repeat.
+    down: BTreeMap<&'a str, BTreeSet<&'a str>>,
+    /// How many times `advance` ran and how many evaluators were built: the work a replay did,
+    /// for the tests that bound it.
+    advances: usize,
+    evaluations: Cell<usize>,
 }
 
 impl<'a> Fold<'a> {
@@ -377,19 +416,49 @@ impl<'a> Fold<'a> {
             phases: ir.repeats.keys().map(|r| (r.as_str(), Phase::At(0))).collect(),
             verdicts: BTreeMap::new(),
             rejected: Vec::new(),
+            cache: RefCell::new(BTreeMap::new()),
+            digests: RefCell::new(BTreeMap::new()),
+            down: downstream(ir),
+            advances: 0,
+            evaluations: Cell::new(0),
         };
         for e in log.events.iter().skip(1) {
             let at: Timestamp =
                 e.at.parse().map_err(|_| malformed(log, e.seq, format!("{} is not a timestamp", e.at)))?;
-            if let Err(reason) = fold.accept(log, e, at)? {
-                let subject = e.body.get("node").or_else(|| e.body.get("repeat"));
-                let subject = subject.and_then(Value::as_str).unwrap_or_default().to_string();
-                fold.rejected.push(Rejected { seq: e.seq, kind: e.kind.clone(), subject, reason: reason.into() });
-                continue;
+            match fold.accept(log, e, at)? {
+                Ok(Change::Inert) => {}
+                Ok(Change::State) => fold.advance(at),
+                Err(reason) => {
+                    let subject = e.body.get("node").or_else(|| e.body.get("repeat"));
+                    let subject = subject.and_then(Value::as_str).unwrap_or_default().to_string();
+                    fold.rejected.push(Rejected { seq: e.seq, kind: e.kind.clone(), subject, reason: reason.into() });
+                }
             }
-            fold.advance(at);
         }
         Ok(fold)
+    }
+
+    /// Drops every kept evaluation and body digest: a repeat moved or was judged.
+    fn forget(&self) {
+        self.cache.borrow_mut().clear();
+        self.digests.borrow_mut().clear();
+    }
+
+    /// Drops the kept evaluations of `node` and of every node downstream of it.
+    fn invalidate(&self, node: &str) {
+        let mut cache = self.cache.borrow_mut();
+        let mut digests = self.digests.borrow_mut();
+        let mut todo = vec![node];
+        let mut seen = BTreeSet::new();
+        while let Some(n) = todo.pop() {
+            if seen.insert(n) {
+                cache.remove(n);
+                if let Some(r) = self.member.get(n) {
+                    digests.retain(|(rid, _), _| rid != r);
+                }
+                todo.extend(self.down.get(n).into_iter().flatten().copied());
+            }
+        }
     }
 
     /// The iteration a node's events must carry now; `None` once its repeat is exhausted.
@@ -404,10 +473,10 @@ impl<'a> Fold<'a> {
     }
 
     /// Applies one event if it fits; the inner error is why it was set aside.
-    fn accept(&mut self, log: &Log, e: &Event, at: Timestamp) -> Result<Result<(), &'static str>, KernelError> {
+    fn accept(&mut self, log: &Log, e: &Event, at: Timestamp) -> Result<Result<Change, &'static str>, KernelError> {
         if e.kind == Guarded::KIND {
             let g: Guarded = body(log, e)?;
-            return Ok(self.guarded(g, at));
+            return Ok(self.guarded(g, at).map(|()| Change::State));
         }
         if ![Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND].contains(&e.kind.as_str()) {
             return Err(malformed(log, e.seq, format!("{} is not a kernel event", e.kind)));
@@ -431,7 +500,7 @@ impl<'a> Fold<'a> {
                     }
                     _ => (None, None),
                 };
-                Receipt { at, outputs: c.outputs, value, failure, inputs: c.inputs }
+                Receipt::new(at, &c.outputs, value, failure, c.inputs)
             }
             Chosen::KIND => {
                 let c: Chosen = body(log, e)?;
@@ -439,19 +508,19 @@ impl<'a> Fold<'a> {
                 if !edges.contains_key(&c.edge) {
                     return Ok(Err("undeclared_edge"));
                 }
-                Receipt { at, outputs: Value::Null, value: Some(c.edge), failure: None, inputs: c.inputs }
+                Receipt::new(at, &Value::Null, Some(c.edge), None, c.inputs)
             }
             Claimed::KIND => {
                 let _: Claimed = body(log, e)?;
-                return Ok(Ok(()));
+                return Ok(Ok(Change::Inert));
             }
             Heartbeat::KIND => {
                 let _: Heartbeat = body(log, e)?;
-                return Ok(Ok(()));
+                return Ok(Ok(Change::Inert));
             }
             _ => {
                 let _: Refused = body(log, e)?;
-                return Ok(Ok(()));
+                return Ok(Ok(Change::Inert));
             }
         };
         let key = (subject.node, subject.iteration);
@@ -462,8 +531,9 @@ impl<'a> Fold<'a> {
         if now.state == State::Done && !matches!(node.class, Class::Observe { .. }) {
             return Ok(Err("already_done"));
         }
+        self.invalidate(&key.0);
         self.receipts.insert(key, receipt);
-        Ok(Ok(()))
+        Ok(Ok(Change::State))
     }
 
     fn guarded(&mut self, g: Guarded, at: Timestamp) -> Result<(), &'static str> {
@@ -479,10 +549,15 @@ impl<'a> Fold<'a> {
             return Err("not_settled");
         }
         let judged = eval.body_digest(&g.repeat, g.iteration);
+        if self.verdicts.get(&(g.repeat.clone(), g.iteration)) == Some(&judged) {
+            return Err("already_judged");
+        }
         if g.holds {
+            self.forget();
             self.verdicts.insert((g.repeat, g.iteration), judged);
         } else {
             let next = self.after(r.max, g.iteration);
+            self.forget();
             self.phases.insert(r_key(self.ir, &g.repeat), next);
         }
         Ok(())
@@ -495,6 +570,7 @@ impl<'a> Fold<'a> {
 
     /// Moves every repeat with no `until` whose current iteration settled on, until none moves.
     fn advance(&mut self, at: Timestamp) {
+        self.advances += 1;
         let ir: &'a Ir = self.ir;
         loop {
             let mut moves = Vec::new();
@@ -509,6 +585,7 @@ impl<'a> Fold<'a> {
             if moves.is_empty() {
                 return;
             }
+            self.forget();
             self.phases.extend(moves);
         }
     }
@@ -544,6 +621,36 @@ impl<'a> Fold<'a> {
     }
 }
 
+/// For each node, the nodes whose evaluation reads it (see `Fold::down`).
+fn downstream(ir: &Ir) -> BTreeMap<&str, BTreeSet<&str>> {
+    let member: BTreeMap<&str, &str> =
+        ir.repeats.iter().flat_map(|(rid, r)| r.body.iter().map(move |b| (b.as_str(), rid.as_str()))).collect();
+    let body = |r: &str| ir.repeats.get(r).map(|r| r.body.as_slice()).unwrap_or_default();
+    let mut down: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (id, n) in &ir.nodes {
+        let mut reads: Vec<&str> = n.switch.iter().map(|c| c.on.as_str()).collect();
+        for need in &n.needs {
+            match need {
+                Need::Node { node } => reads.push(node),
+                Need::Repeat { repeat } | Need::Exhausted { repeat } => {
+                    reads.extend(body(repeat).iter().map(String::as_str))
+                }
+            }
+        }
+        for m in reads.clone() {
+            if let Some(r) = member.get(m)
+                && member.get(id.as_str()) != Some(r)
+            {
+                reads.extend(body(r).iter().map(String::as_str));
+            }
+        }
+        for m in reads {
+            down.entry(m).or_default().insert(id.as_str());
+        }
+    }
+    down
+}
+
 /// The IR's own `&str` for a repeat id, for the phase map's key.
 fn r_key<'a>(ir: &'a Ir, rid: &str) -> &'a str {
     ir.repeats.get_key_value(rid).map_or("", |(k, _)| k.as_str())
@@ -567,6 +674,8 @@ struct NodeEval {
     value: Option<String>,
     /// The digests a receipt for this node must record.
     consumed: BTreeMap<String, String>,
+    /// It read the clock: an observation with `fresh_for` at or upstream of it has a receipt.
+    clocked: bool,
 }
 
 impl NodeEval {
@@ -581,6 +690,7 @@ impl NodeEval {
             digest: None,
             value: None,
             consumed: BTreeMap::new(),
+            clocked: false,
         }
     }
 }
@@ -602,6 +712,7 @@ struct Eval<'f, 'a> {
 
 impl<'f, 'a> Eval<'f, 'a> {
     fn new(fold: &'f Fold<'a>, now: Timestamp) -> Self {
+        fold.evaluations.set(fold.evaluations.get() + 1);
         Eval { fold, now, memo: BTreeMap::new() }
     }
 
@@ -612,6 +723,16 @@ impl<'f, 'a> Eval<'f, 'a> {
 
     /// The digest of a repeat's body at iteration `i`: each body node's receipt digest, or none.
     fn body_digest(&mut self, rid: &str, i: u32) -> String {
+        let key = (rid.to_string(), i);
+        if let Some(d) = self.fold.digests.borrow().get(&key) {
+            return d.clone();
+        }
+        let d = self.compute_body_digest(rid, i);
+        self.fold.digests.borrow_mut().insert(key, d.clone());
+        d
+    }
+
+    fn compute_body_digest(&mut self, rid: &str, i: u32) -> String {
         let at = Iteration::from([(rid.to_string(), i)]);
         let body: BTreeMap<&str, Option<String>> = self
             .body(rid)
@@ -689,7 +810,17 @@ impl<'f, 'a> Eval<'f, 'a> {
         if let Some(e) = self.memo.get(&key) {
             return e.clone();
         }
-        let out = self.eval_node(id, &key);
+        let kept = self.fold.cache.borrow().get(id).and_then(|m| m.get(iter)).cloned();
+        let out = match kept {
+            Some(e) => e,
+            None => {
+                let out = self.eval_node(id, &key);
+                if !out.clocked {
+                    self.fold.cache.borrow_mut().entry(key.0.clone()).or_default().insert(key.1.clone(), out.clone());
+                }
+                out
+            }
+        };
         self.memo.insert(key, out.clone());
         out
     }
@@ -710,8 +841,9 @@ impl<'f, 'a> Eval<'f, 'a> {
                     Loop::Done(i) => {
                         let at = Iteration::from([(r.clone(), i)]);
                         for b in self.body(r) {
-                            let stale = self.node(b, &at).stale;
-                            out.stale.extend(stale);
+                            let e = self.node(b, &at);
+                            out.stale.extend(e.stale);
+                            out.clocked |= e.clocked;
                         }
                         let judged = self.body_digest(r, i);
                         out.consumed.insert(r.clone(), judged);
@@ -760,6 +892,7 @@ impl<'f, 'a> Eval<'f, 'a> {
         match self.dep(m, iter) {
             Dep::Eval(e) => {
                 out.stale.extend(e.stale.iter().cloned());
+                out.clocked |= e.clocked;
                 if e.dead {
                     kill(out, Reason::Unreachable { node: m.to_string() });
                 } else if !e.satisfies {
@@ -795,6 +928,7 @@ impl<'f, 'a> Eval<'f, 'a> {
         }
         out.satisfies = out.reasons.is_empty();
         if let Class::Observe { fresh_for: Some(f), .. } = &n.class {
+            out.clocked = true;
             let age = self.now.duration_since(r.at);
             if age > secs(*f) || age.is_negative() {
                 out.reasons.push(Reason::Expired { age_secs: age.as_secs(), fresh_for_secs: *f });
@@ -804,7 +938,7 @@ impl<'f, 'a> Eval<'f, 'a> {
         out.reasons.extend(out.stale.iter().filter(|s| *s != id).map(|s| Reason::Stale { node: s.clone() }));
         out.state = if out.reasons.is_empty() { State::Done } else { State::Stale };
         out.value = r.value.clone();
-        out.digest = Some(receipt_digest(&r.outputs, r.value.as_deref()));
+        out.digest = Some(r.digest.clone());
         out
     }
 }
@@ -820,4 +954,45 @@ fn push(out: &mut NodeEval, reason: Reason) {
 fn kill(out: &mut NodeEval, reason: Reason) {
     out.dead = true;
     push(out, reason);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::compile;
+
+    fn event(seq: u64, kind: &str, body: Value) -> Event {
+        Event { seq, prev_event: None, at: "2026-11-08T00:00:00Z".into(), kind: kind.into(), body }
+    }
+
+    #[test]
+    fn inert_and_rejected_events_never_advance_or_evaluate() {
+        let flow = compile("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n  b: {class: pure, run: [x]}\nrepeats:\n  r: {max: 2, body: [b]}\n").unwrap();
+        let started =
+            Started { flow: flow.name(), ir_hash: flow.hash().into(), ir: flow.ir().clone(), params: Value::Null };
+        let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];
+        let at = |node: &str| serde_json::json!({ "node": node, "iteration": {}, "attempt": 1, "lease_until": "2026-11-08T00:00:00Z", "token_sha256": "x", "code": "x", "reason": "x" });
+        for (i, kind) in ["Claimed", "Heartbeat", "Refused"].iter().cycle().take(300).enumerate() {
+            events.push(event(i as u64 + 2, kind, at("a")));
+        }
+        // Rejected before any evaluation: an undeclared node, another iteration, the wrong class.
+        events.push(event(302, "Completed", at("ghost")));
+        events.push(event(303, "Completed", serde_json::json!({ "node": "b", "iteration": {}, "attempt": 1 })));
+        events.push(event(
+            304,
+            "Chosen",
+            serde_json::json!({ "node": "a", "iteration": {}, "attempt": 1, "edge": "x" }),
+        ));
+        let log = Log { instance: InstanceId::new("fi_x").unwrap(), events, last_hash: None };
+        let fold = Fold::replay(&log, &started).unwrap();
+        assert_eq!((fold.advances, fold.evaluations.get()), (0, 0));
+        assert_eq!(fold.rejected.len(), 3);
+
+        // An accepted receipt is evaluated once and advances once.
+        let mut log = log;
+        log.events.push(event(305, "Completed", serde_json::json!({ "node": "a", "iteration": {}, "attempt": 1 })));
+        let fold = Fold::replay(&log, &started).unwrap();
+        assert_eq!(fold.advances, 1);
+        assert_eq!(fold.rejected.len(), 3);
+    }
 }

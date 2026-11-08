@@ -101,6 +101,26 @@ impl Fx {
         self.append(fi, Guarded { repeat: repeat.into(), iteration, holds }.to_event().unwrap());
     }
 
+    /// Rewrites the `at` of the events numbered in `edits`, keeping the chain whole.
+    fn rewrite_at(&self, fi: &InstanceId, edits: &[(u64, &str)]) {
+        let path = self.root.join("instances").join(fi.as_str()).join("events.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut prev: Option<String> = None;
+        let mut out = String::new();
+        for line in text.lines() {
+            let mut ev: maestro_flow::Event = serde_json::from_str(line).unwrap();
+            if let Some((_, at)) = edits.iter().find(|(seq, _)| *seq == ev.seq) {
+                ev.at = at.to_string();
+            }
+            ev.prev_event = prev.clone();
+            let l = serde_json::to_string(&ev).unwrap();
+            prev = Some(maestro_flow::log::line_hash(l.as_bytes()));
+            out.push_str(&l);
+            out.push('\n');
+        }
+        std::fs::write(&path, out).unwrap();
+    }
+
     fn status(&self, fi: &InstanceId, now: Timestamp) -> Status {
         let reader = Reader::new(&self.root, Options::default()).unwrap();
         status(&reader.lock().unwrap(), fi, now).unwrap()
@@ -880,4 +900,139 @@ fn the_deepest_chain_a_definition_may_have_replays_on_a_small_stack() {
         .join()
         .unwrap();
     assert_eq!(replayed, State::Blocked);
+}
+
+#[test]
+fn a_stale_observation_anywhere_in_a_finished_body_blocks_what_needs_the_repeat() {
+    let mut f = fx("flow: f
+version: 1
+nodes:
+  w: {class: work, verify: [x]}
+  ci: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: green}}
+  land: {class: work, verify: [x], needs: [poll]}
+repeats:
+  poll: {body: [w, ci], max: 5, until: 'true'}
+");
+    let fi = f.begin(json!({}));
+    f.complete(&fi, "w", &[("poll", 0)], json!({}));
+    let t = f.observe(&fi, "ci", &[("poll", 0)], 0);
+    f.verdict(&fi, "poll", 0, true);
+    f.complete(&fi, "land", &[], json!({}));
+    assert_eq!(state(&f.status(&fi, t), "land"), State::Done);
+    let s = f.status(&fi, t + mins(5));
+    assert_eq!(unmet(&s, "land"), vec![Reason::Stale { node: "ci".into() }]);
+}
+
+#[test]
+fn a_second_verdict_on_a_body_already_judged_is_set_aside() {
+    let mut f = fx(POLL);
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "ci", &[("poll", 0)], 0);
+    f.verdict(&fi, "poll", 0, true);
+    f.complete(&fi, "land", &[], json!({}));
+    f.verdict(&fi, "poll", 0, false);
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!(rejected(&s), vec![rej("poll", "already_judged")]);
+    assert_eq!((s.repeats["poll"].state, state(&s, "land")), (RepeatState::Done, State::Done));
+}
+
+#[test]
+fn a_done_node_takes_a_new_receipt_only_if_it_was_stale_at_that_receipt_s_stamp() {
+    let flow = "flow: f\nversion: 1\nnodes:\n  o: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: ok}}\n  a: {class: pure, run: [x], needs: [o]}\n  b: {class: pure, run: [x], needs: [a]}\n";
+    // Fresh upstream: the second receipt is set aside.
+    let mut f = fx(flow);
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "o", &[], 0);
+    f.complete(&fi, "a", &[], json!({ "v": 1 }));
+    f.complete(&fi, "a", &[], json!({ "v": 2 }));
+    assert_eq!(rejected(&f.status(&fi, Timestamp::now())), vec![rej("a", "already_done")]);
+
+    // The observation was two hours old when the second receipt was stamped: a was stale then,
+    // so the new receipt replaces the old one and b, recorded against the old one, must be redone.
+    let mut f = fx(flow);
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "o", &[], 0);
+    f.complete(&fi, "a", &[], json!({ "v": 1 }));
+    f.complete(&fi, "b", &[], json!({}));
+    let old = (Timestamp::now() - SignedDuration::from_hours(2)).to_string();
+    f.rewrite_at(&fi, &[(2, &old), (3, &old), (4, &old)]);
+    f.complete(&fi, "a", &[], json!({ "v": 2 }));
+    let s = f.status(&fi, Timestamp::now());
+    assert!(rejected(&s).is_empty(), "{:?}", s.rejected);
+    assert_eq!(unmet(&s, "b"), vec![Reason::InputChanged { input: "a".into() }, Reason::Stale { node: "o".into() }]);
+}
+
+#[test]
+fn freshness_is_measured_to_the_second() {
+    let mut f = fx("flow: f\nversion: 1\nnodes:\n  o: {class: observe, run: [x], fresh_for: 90s, exit_map: {0: ok}}\n");
+    let fi = f.begin(json!({}));
+    let t = f.observe(&fi, "o", &[], 0);
+    assert_eq!(state(&f.status(&fi, t + SignedDuration::from_secs(90)), "o"), State::Done);
+    assert_eq!(state(&f.status(&fi, t + SignedDuration::from_secs(91)), "o"), State::Stale);
+}
+
+#[test]
+fn an_event_stamped_with_something_that_is_not_a_time_is_malformed() {
+    let mut f = fx(CHAIN);
+    let fi = f.begin(json!({}));
+    f.complete(&fi, "a", &[], json!({}));
+    f.rewrite_at(&fi, &[(2, "yesterday")]);
+    assert_eq!(f.try_status(&fi).unwrap_err(), "malformed_instance");
+}
+
+#[test]
+fn a_log_at_the_event_cap_replays_inert_events_without_evaluating_them() {
+    use maestro_flow::log::MAX_EVENTS;
+    // A's reproduction, at the cap: a 500-node repeat and heartbeats up to the event cap.
+    let mut yaml = String::from("flow: f\nversion: 1\nnodes:\n  outside: {class: pure, run: [x]}\n");
+    for i in 0..500 {
+        yaml.push_str(&format!("  n{i}: {{class: pure, run: [x]}}\n"));
+    }
+    let body: Vec<String> = (0..500).map(|i| format!("n{i}")).collect();
+    yaml.push_str(&format!("repeats:\n  r: {{max: 2, body: [{}]}}\n", body.join(", ")));
+    let mut f = fx(&yaml);
+    let fi = f.begin(json!({}));
+    let path = f.root.join("instances").join(fi.as_str()).join("events.jsonl");
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    let mut prev = maestro_flow::log::line_hash(text.trim_end().as_bytes());
+    for seq in 2..=MAX_EVENTS {
+        let body = json!({ "node": "outside", "iteration": {}, "attempt": 1, "lease_until": "2026-11-08T00:00:00Z" });
+        let ev =
+            json!({ "seq": seq, "prev_event": prev, "at": "2026-11-08T00:00:00Z", "kind": "Heartbeat", "body": body });
+        let line = serde_json::to_string(&ev).unwrap();
+        prev = maestro_flow::log::line_hash(line.as_bytes());
+        text.push_str(&line);
+        text.push('\n');
+    }
+    std::fs::write(&path, &text).unwrap();
+    let started = std::time::Instant::now();
+    let s = f.status(&fi, Timestamp::now());
+    eprintln!("{MAX_EVENTS} events replayed in {:?}", started.elapsed());
+    assert_eq!(s.seq, MAX_EVENTS);
+    assert!(s.rejected.is_empty());
+    assert_eq!(state(&s, "outside"), State::Ready);
+    let more = maestro_flow::NewEvent::new("Heartbeat", json!({}));
+    assert_eq!(f.ledger.lock().unwrap().append(&fi, MAX_EVENTS, more).unwrap_err().code(), "too_many_events");
+}
+
+#[test]
+fn a_node_needing_a_body_node_from_outside_sees_its_repeat_reopen() {
+    let mut f = fx("flow: f
+version: 1
+nodes:
+  ci: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: green, 1: red}}
+  w: {class: work, verify: [x]}
+  peek: {class: work, verify: [x], needs: [w]}
+repeats:
+  poll: {body: [ci, w], max: 5, until: 'true'}
+");
+    let fi = f.begin(json!({}));
+    f.observe(&fi, "ci", &[("poll", 0)], 0);
+    f.complete(&fi, "w", &[("poll", 0)], json!({}));
+    f.verdict(&fi, "poll", 0, true);
+    f.complete(&fi, "peek", &[], json!({}));
+    assert_eq!(state(&f.status(&fi, Timestamp::now()), "peek"), State::Done);
+    // Only ci, w's sibling, changes; peek reads w through the repeat, which now waits on a verdict.
+    f.observe(&fi, "ci", &[("poll", 0)], 1);
+    assert_eq!(unmet(&f.status(&fi, Timestamp::now()), "peek"), vec![Reason::RepeatRunning { repeat: "poll".into() }]);
 }

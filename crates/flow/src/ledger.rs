@@ -379,7 +379,7 @@ impl WriteGuard<'_> {
             return Err(FlowError::StaleSeq { instance: id.to_string(), expected: expected_seq, current: log.seq() });
         }
         let (stored, line) = log::next_line(&log, &event)?;
-        log::fits(line.len() as u64, existing_len)?;
+        log::fits(line.len() as u64, existing_len, log.seq())?;
         pause!("append_checked");
         let dir = match dir {
             Some(dir) => dir,

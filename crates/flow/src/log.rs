@@ -18,9 +18,17 @@ pub const MAX_LINE: u64 = 1 << 20;
 /// The largest log an instance may have. A larger file is refused before it is read.
 pub const MAX_LOG: u64 = 64 << 20;
 
-/// Refuses a line over [`MAX_LINE`], or one that would take a log of `log_len` bytes over
-/// [`MAX_LOG`].
-pub(crate) fn fits(line_len: u64, log_len: u64) -> Result<()> {
+/// The most events an instance's log may hold. Replay's work grows with the events, so this
+/// bounds a read: room for 100 nodes over 10 iterations with 20 writes each (claims, heartbeats,
+/// refusals, receipts), or a 512-node flow whose every node is written about forty times.
+pub const MAX_EVENTS: u64 = 20_000;
+
+/// Refuses a line over [`MAX_LINE`], one that would take a log of `log_len` bytes over
+/// [`MAX_LOG`], or one more event on a log of `events` that holds [`MAX_EVENTS`] already.
+pub(crate) fn fits(line_len: u64, log_len: u64, events: u64) -> Result<()> {
+    if events >= MAX_EVENTS {
+        return Err(FlowError::TooManyEvents { limit: MAX_EVENTS });
+    }
     if line_len > MAX_LINE {
         return Err(FlowError::TooLarge { what: "event line", size: line_len, limit: MAX_LINE });
     }
@@ -138,6 +146,13 @@ pub(crate) fn verify_prefix(instance: &InstanceId, bytes: &[u8]) -> Result<Log, 
             ));
         };
         let line = &rest[..end];
+        let size = end as u64 + 1;
+        if size > MAX_LINE {
+            return Err((FlowError::TooLarge { what: "event line", size, limit: MAX_LINE }, prefix));
+        }
+        if prefix.seq >= MAX_EVENTS {
+            return Err((FlowError::TooManyEvents { limit: MAX_EVENTS }, prefix));
+        }
         let event = check_line(line, prefix.seq + 1, last_hash.as_deref()).map_err(|detail| {
             (FlowError::ChainBroken { instance: instance.to_string(), line: prefix.seq + 1, detail }, prefix.clone())
         })?;
@@ -184,9 +199,11 @@ mod tests {
     #[test]
     fn a_line_and_a_log_fit_up_to_their_bounds_and_not_a_byte_more() {
         let code = |r: Result<()>| r.map_or_else(|e| e.code().to_string(), |()| "ok".to_string());
-        assert_eq!(code(fits(MAX_LINE, 0)), "ok");
-        assert_eq!(code(fits(MAX_LINE + 1, 0)), "too_large");
-        assert_eq!(code(fits(10, MAX_LOG - 10)), "ok");
-        assert_eq!(code(fits(10, MAX_LOG - 9)), "too_large");
+        assert_eq!(code(fits(MAX_LINE, 0, 0)), "ok");
+        assert_eq!(code(fits(MAX_LINE + 1, 0, 0)), "too_large");
+        assert_eq!(code(fits(10, MAX_LOG - 10, 0)), "ok");
+        assert_eq!(code(fits(10, MAX_LOG - 9, 0)), "too_large");
+        assert_eq!(code(fits(10, 0, MAX_EVENTS - 1)), "ok");
+        assert_eq!(code(fits(10, 0, MAX_EVENTS)), "too_many_events");
     }
 }

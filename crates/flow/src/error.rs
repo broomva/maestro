@@ -64,6 +64,10 @@ pub enum FlowError {
     /// refused at append, and never read into memory.
     #[error("The {what} is {size} bytes, over its limit of {limit}, so it was not written or read.")]
     TooLarge { what: &'static str, size: u64, limit: u64 },
+    /// A log that holds [`crate::log::MAX_EVENTS`] events already, or more: refused at append,
+    /// and never replayed.
+    #[error("The log holds more than {limit} events, or would, so nothing was written or read.")]
+    TooManyEvents { limit: u64 },
     /// An operator function was asked to act on a state it does not handle.
     #[error("{0}")]
     OperatorRefused(String),
@@ -98,6 +102,7 @@ impl FlowError {
             FlowError::Symlink { .. } => "symlink",
             FlowError::Invalid { .. } => "invalid",
             FlowError::TooLarge { .. } => "too_large",
+            FlowError::TooManyEvents { .. } => "too_many_events",
             FlowError::OperatorRefused(_) => "operator_refused",
             FlowError::Projection(_) => "projection",
             FlowError::Io { .. } => "io",

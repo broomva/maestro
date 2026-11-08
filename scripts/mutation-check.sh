@@ -851,15 +851,20 @@ mutate $fl/ledger.rs 'Ok(Summary { summary: from_log, cache })' 'Ok(Summary { su
 mutate $fl/ids.rs "} else if !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '} else if false {'
 mutate $fl/operator.rs '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {
             let _ = std::fs::remove_file(&marker);' '        if let Err(e) = std::fs::rename(&layout.root, dest.join(layout.name())) {'
-# Flow storage bounds (BRO-3633 PR 3b1): an event line and a log over their bounds are refused at
-# append, and a log over its bound is refused before it is read.
+# Flow storage bounds (BRO-3633 PR 3b1): an event line, a log and an event count over their bounds
+# are refused at append, and when an existing log is read or verified.
 mutate $fl/log.rs '    if line_len > MAX_LINE {' '    if line_len >= MAX_LINE {'
 mutate $fl/log.rs '    if line_len > MAX_LINE {' '    if false {'
 mutate $fl/log.rs '    if total > MAX_LOG {' '    if total >= MAX_LOG {'
 mutate $fl/log.rs '    if total > MAX_LOG {' '    if false {'
-mutate $fl/ledger.rs '        log::fits(line.len() as u64, existing_len)?;' ''
+mutate $fl/ledger.rs '        log::fits(line.len() as u64, existing_len, log.seq())?;' ''
 mutate $fl/at.rs '        if size > limit {' '        if size >= limit {'
 mutate $fl/at.rs '        if size > limit {' '        if false {'
+mutate $fl/log.rs '        if size > MAX_LINE {' '        if false {'
+mutate $fl/log.rs '        if prefix.seq >= MAX_EVENTS {' '        if prefix.seq > MAX_EVENTS {'
+mutate $fl/log.rs '        if prefix.seq >= MAX_EVENTS {' '        if false {'
+mutate $fl/log.rs '    if events >= MAX_EVENTS {' '    if events > MAX_EVENTS {'
+mutate $fl/log.rs '    if events >= MAX_EVENTS {' '    if false {'
 
 # Flow kernel (BRO-3633 PR 3b1): definitions, the compiler, guard checks and the read-only scheduler.
 fk=crates/flow/src/kernel
@@ -919,7 +924,7 @@ mutate $fk/ir.rs '    if finished == deps.len() {' '    if true {'
 mutate $fk/ir.rs '        if d > MAX_DEPTH {' '        if false {'
 mutate $fk/ir.rs '                set.insert(format!("r:{repeat}"));' ''
 mutate $fk/ir.rs '                set.insert(format!("r:{r}"));' ''
-mutate $fk/ir.rs '.chain(n.switch.as_ref().map(|c| c.on.as_str()))' '.chain(None::<&str>)'
+mutate $fk/ir.rs 'let on: Vec<&str> = on.chain(n.switch.as_ref().map(|c| c.on.as_str())).collect();' 'let on: Vec<&str> = on.collect();'
 mutate $fk/ir.rs '        deps.entry(format!("r:{rid}")).or_default().extend(r.body.iter().map(|b| format!("n:{b}")));' '        deps.entry(format!("r:{rid}")).or_default();'
 # Guards: checked at compile time, refused when they could recurse, run unbounded generators,
 # read the clock or environment, have an effect or repeat strings.
@@ -982,7 +987,7 @@ mutate $fk/compile.rs '            branches.iter().map(|b| Need::Node { node: b.
 mutate $fk/replay.rs '                } else if !e.satisfies {' '                } else if false {'
 mutate $fk/replay.rs '                    kill(out, Reason::Unreachable { node: m.to_string() });' '                    push(out, Reason::Unreachable { node: m.to_string() });'
 mutate $fk/replay.rs '                out.stale.extend(e.stale.iter().cloned());' ''
-mutate $fk/replay.rs '                            out.stale.extend(stale);' ''
+mutate $fk/replay.rs '                            out.stale.extend(e.stale);' ''
 mutate $fk/replay.rs '                        out.consumed.insert(r.clone(), judged);' ''
 mutate $fk/replay.rs '            && e.value.as_deref() != Some(case.value.as_str())' '            && false'
 mutate $fk/replay.rs '        if let Some(failure) = &r.failure {' '        if let Some(failure) = r.failure.as_ref().filter(|_| false) {'
@@ -993,10 +998,36 @@ mutate $fk/replay.rs '            if age > secs(*f) || age.is_negative() {' '   
 mutate $fk/replay.rs '            if age > secs(*f) || age.is_negative() {' '            if age.is_negative() {'
 mutate $fk/replay.rs '                out.stale.insert(id.to_string());' ''
 mutate $fk/replay.rs '        out.reasons.extend(out.stale.iter().filter(|s| *s != id).map(|s| Reason::Stale { node: s.clone() }));' ''
-mutate $fk/replay.rs '        out.digest = Some(receipt_digest(&r.outputs, r.value.as_deref()));' '        out.digest = Some(receipt_digest(&r.outputs, None));'
+mutate $fk/replay.rs '        let digest = receipt_digest(outputs, value.as_deref());' '        let digest = receipt_digest(outputs, None);'
 mutate $fk/replay.rs '        let rerun = s.state == State::Stale && eval.node(&id, &s.iteration).stale.iter().all(|s| *s == id);' '        let rerun = s.state == State::Stale;'
 mutate $fk/replay.rs '        let rerun = s.state == State::Stale && eval.node(&id, &s.iteration).stale.iter().all(|s| *s == id);' '        let rerun = false;'
 mutate $fk/replay.rs '        if let Class::Human { ask } = &n.class {' '        if let Some(ask) = None::<&String> {'
+# Read-path bounds: inert and rejected events cost no evaluation; a node reads at most
+# MAX_FAN_IN nodes; evaluations and body digests that do not read the clock are kept across
+# events and dropped downstream of each change.
+mutate $fk/replay.rs '                Ok(Change::Inert) => {}' '                Ok(Change::Inert) => fold.advance(at),'
+mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if reads >= MAX_FAN_IN {'
+mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if false {'
+mutate $fk/ir.rs '                Some(r) if member.get(id.as_str()) != Some(r) => 1 + body(r),' '                Some(r) if member.get(id.as_str()) != Some(r) => 1,'
+mutate $fk/ir.rs '                _ if ir.repeats.contains_key(m) => body(m),' '                _ if ir.repeats.contains_key(m) => 1,'
+mutate $fk/replay.rs '        self.invalidate(&key.0);' ''
+mutate $fk/replay.rs '            out.clocked = true;' ''
+mutate $fk/replay.rs '                out.stale.extend(e.stale.iter().cloned());
+                out.clocked |= e.clocked;' '                out.stale.extend(e.stale.iter().cloned());'
+mutate $fk/replay.rs '                            out.stale.extend(e.stale);
+                            out.clocked |= e.clocked;' '                            out.stale.extend(e.stale);'
+mutate $fk/replay.rs '                    digests.retain(|(rid, _), _| rid != r);' ''
+mutate $fk/replay.rs '                    reads.extend(body(repeat).iter().map(String::as_str))' '                    let _ = repeat;'
+mutate $fk/replay.rs '                reads.extend(body(r).iter().map(String::as_str));' ''
+mutate $fk/replay.rs '        self.cache.borrow_mut().clear();
+        self.digests.borrow_mut().clear();' ''
+# A body's stale observations anywhere in it; a second verdict on a body already judged; event
+# timestamps; freshness to the second; acceptance at the event's own clock.
+mutate $fk/replay.rs '                        for b in self.body(r) {' '                        for b in self.body(r).iter().take(1) {'
+mutate $fk/replay.rs '        if self.verdicts.get(&(g.repeat.clone(), g.iteration)) == Some(&judged) {' '        if false {'
+mutate $fk/replay.rs 'e.at.parse().map_err(|_| malformed(log, e.seq, format!("{} is not a timestamp", e.at)))?;' 'e.at.parse().unwrap_or(Timestamp::UNIX_EPOCH);'
+mutate $fk/replay.rs '    SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))' '    SignedDuration::from_mins(i64::try_from(s / 60).unwrap_or(i64::MAX))'
+mutate $fk/replay.rs '        let now = Eval::new(self, at).node(&key.0, &key.1);' '        let now = Eval::new(self, Timestamp::MAX).node(&key.0, &key.1);'
 # Positive controls: a replay that ran a command, judged a repeat from its guard, or was not a
 # function of the log and the clock fails the tests that say it never does.
 mutate $fk/replay.rs '        let fold = self.fold;

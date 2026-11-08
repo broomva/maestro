@@ -2,7 +2,7 @@
 //! tables name the case that failed.
 
 use maestro_flow::kernel::compile;
-use maestro_flow::kernel::ir::{Class, MAX_NODES, Need};
+use maestro_flow::kernel::ir::{Class, MAX_FAN_IN, MAX_NODES, Need};
 
 const VERIFY: &str = include_str!("../flows/verify.yaml");
 
@@ -291,4 +291,47 @@ fn a_definition_holds_at_most_max_nodes() {
     };
     assert_eq!(code(&wide(MAX_NODES)), "ok");
     assert_eq!(code(&wide(MAX_NODES + 1)), "definition_invalid");
+}
+
+#[test]
+fn a_node_reads_at_most_max_fan_in_nodes() {
+    let join = |width: usize, repeat_body: usize| {
+        let mut y = String::from("flow: f\nversion: 1\nnodes:\n");
+        for i in 0..width + repeat_body {
+            y.push_str(&format!("  n{i}: {{class: pure, run: [x]}}\n"));
+        }
+        let mut needs: Vec<String> = (0..width).map(|i| format!("n{i}")).collect();
+        if repeat_body > 0 {
+            needs.push("r".into());
+            let body: Vec<String> = (width..width + repeat_body).map(|i| format!("n{i}")).collect();
+            y.push_str(&format!(
+                "  j: {{class: pure, run: [x], needs: [{}]}}\nrepeats:\n  r: {{max: 2, body: [{}]}}\n",
+                needs.join(", "),
+                body.join(", ")
+            ));
+        } else {
+            y.push_str(&format!("  j: {{class: pure, run: [x], needs: [{}]}}\n", needs.join(", ")));
+        }
+        y
+    };
+    assert_eq!(code(&join(MAX_FAN_IN, 0)), "ok");
+    assert_eq!(code(&join(MAX_FAN_IN + 1, 0)), "definition_invalid");
+    // Needing a repeat reads its whole body.
+    assert_eq!(code(&join(MAX_FAN_IN - 10, 10)), "ok");
+    assert_eq!(code(&join(MAX_FAN_IN - 10, 11)), "definition_invalid");
+    // So does needing a body node from outside its repeat.
+    let outside = |body: usize| {
+        let mut y = String::from("flow: f\nversion: 1\nnodes:\n");
+        for i in 0..body {
+            y.push_str(&format!("  n{i}: {{class: pure, run: [x]}}\n"));
+        }
+        let names: Vec<String> = (0..body).map(|i| format!("n{i}")).collect();
+        y.push_str(&format!(
+            "  j: {{class: pure, run: [x], needs: [n0]}}\nrepeats:\n  r: {{max: 2, body: [{}]}}\n",
+            names.join(", ")
+        ));
+        y
+    };
+    assert_eq!(code(&outside(MAX_FAN_IN - 1)), "ok");
+    assert_eq!(code(&outside(MAX_FAN_IN)), "definition_invalid");
 }

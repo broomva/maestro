@@ -398,3 +398,46 @@ fn an_event_line_or_a_log_over_its_bound_is_refused_and_never_read() {
     assert_eq!(code(reader.lock().unwrap().log(&fi)), "too_large");
     assert_eq!(code(append_at_head(&mut ledger, &fi, event("Tick", 1))), "too_large");
 }
+
+/// Writes `lines` as instance `fi`'s whole log, numbered and chained as the ledger writes them.
+fn write_chain(path: &std::path::Path, lines: impl IntoIterator<Item = (String, serde_json::Value)>) {
+    let mut out = Vec::new();
+    let mut prev: Option<String> = None;
+    for (n, (kind, body)) in lines.into_iter().enumerate() {
+        let ev = serde_json::json!({ "seq": n + 1, "prev_event": prev, "at": "2026-11-08T00:00:00Z", "kind": kind, "body": body });
+        let line = serde_json::to_vec(&ev).unwrap();
+        prev = Some(sha(std::str::from_utf8(&line).unwrap()));
+        out.extend_from_slice(&line);
+        out.push(b'\n');
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+#[test]
+fn a_log_over_its_event_count_or_with_an_over_long_line_is_refused() {
+    use maestro_flow::log::{MAX_EVENTS, MAX_LINE};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    let fi = id("fi_a");
+    append_at_head(&mut ledger, &fi, event("Started", 0)).unwrap();
+    let log = root.join("instances/fi_a/events.jsonl");
+    let reader = Reader::new(&root, Options::default()).unwrap();
+    let ticks = |n: u64| (0..n).map(|i| ("Tick".to_string(), serde_json::json!({ "n": i })));
+
+    write_chain(&log, ticks(MAX_EVENTS));
+    assert_eq!(reader.lock().unwrap().log(&fi).unwrap().seq(), MAX_EVENTS, "a log at the cap reads");
+    assert_eq!(code(append_at_head(&mut ledger, &fi, event("Tick", 0))), "too_many_events");
+    write_chain(&log, ticks(MAX_EVENTS + 1));
+    assert_eq!(code(reader.lock().unwrap().log(&fi)), "too_many_events");
+
+    // A line the ledger would not have written is refused as too large, not read.
+    let long =
+        |extra: usize| [("Tick".to_string(), serde_json::json!({ "s": "x".repeat(MAX_LINE as usize - 120 + extra) }))];
+    write_chain(&log, long(0));
+    let size = std::fs::metadata(&log).unwrap().len();
+    assert!(size <= MAX_LINE, "the fixture line is within the bound ({size})");
+    assert!(reader.lock().unwrap().log(&fi).is_ok());
+    write_chain(&log, long(200));
+    assert_eq!(code(reader.lock().unwrap().log(&fi)), "too_large");
+}

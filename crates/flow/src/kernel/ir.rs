@@ -21,6 +21,11 @@ pub const MAX_REPEAT: u32 = 1000;
 /// The most nodes a definition may declare.
 pub const MAX_NODES: usize = 512;
 
+/// The most nodes one node's evaluation may read: its needs, its switch, and the whole body of
+/// every repeat it waits on (needing it, or needing a node in its body from outside). Replay
+/// re-reads them for every receipt the node takes, so this bounds the work an event costs.
+pub const MAX_FAN_IN: usize = 64;
+
 /// The longest chain of dependencies (needs, switches, repeat bodies) a definition may have,
 /// counted in nodes and repeats. Replay follows a chain by recursion, so this bounds its stack.
 pub const MAX_DEPTH: usize = 128;
@@ -176,6 +181,29 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
     let node = |from: &str, name: &str| ir.nodes.get(name).ok_or_else(|| unknown(from, name));
     let repeat = |from: &str, name: &str| ir.repeats.get(name).ok_or_else(|| unknown(from, name));
     let param = |from: &str, name: &str| ir.params.contains_key(name).then_some(()).ok_or_else(|| unknown(from, name));
+
+    let body = |r: &str| ir.repeats.get(r).map_or(0, |r| r.body.len());
+    let member: BTreeMap<&str, &str> =
+        ir.repeats.iter().flat_map(|(rid, r)| r.body.iter().map(move |b| (b.as_str(), rid.as_str()))).collect();
+    for (id, n) in &ir.nodes {
+        let reads: usize = n
+            .needs
+            .iter()
+            .map(|need| match need {
+                Need::Node { node } => node.as_str(),
+                Need::Repeat { repeat } | Need::Exhausted { repeat } => repeat.as_str(),
+            })
+            .chain(n.switch.as_ref().map(|c| c.on.as_str()))
+            .map(|m| match member.get(m) {
+                Some(r) if member.get(id.as_str()) != Some(r) => 1 + body(r),
+                _ if ir.repeats.contains_key(m) => body(m),
+                _ => 1,
+            })
+            .sum();
+        if reads > MAX_FAN_IN {
+            return Err(CompileError::invalid(format!("node {id} reads {reads} nodes, more than {MAX_FAN_IN}")));
+        }
+    }
 
     let mut membership = BTreeMap::new();
     for (rid, r) in &ir.repeats {
