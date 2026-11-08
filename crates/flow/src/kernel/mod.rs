@@ -23,6 +23,8 @@
 //! - **Events** ([`events`]) are typed bodies of the storage layer's generic event. `Chosen` and
 //!   `Guarded` have no writer yet: `choose` and the `until` verdicts come next.
 
+#[cfg(test)]
+mod clocked;
 mod compile;
 mod definition;
 mod error;

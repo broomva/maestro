@@ -3,30 +3,28 @@
 //! start with it. No write verb takes a clock from its caller, so nothing a caller passes can make
 //! an observation or a lease look fresher or less expired than the wall clock says.
 //!
-//! With the `test-clock` feature, which only this crate's own tests enable (through the
-//! dev-dependency on itself in its manifest), a test thread may install a `TestClock` that sets
-//! or shifts what [`now`] reads on that thread. No production build has the feature, so no caller
-//! can supply a clock there.
+//! [`now`] is one code path in every build: it reads the wall clock. Only in this crate's own
+//! unit-test binary (`cfg(test)`) does it then pass that reading through a test clock, which a
+//! test thread installs to set or shift what [`now`] reads on that thread (`kernel::clocked`).
+//! `cfg(test)` is set for no other build: not a dependent crate, not its tests, not this crate's
+//! integration tests, which link the library as every caller does. None of them can name or reach
+//! the test clock.
 
 use jiff::Timestamp;
 
 /// The wall clock, as the storage layer and the writers read it.
-#[cfg(not(feature = "test-clock"))]
 pub fn now() -> Timestamp {
-    Timestamp::now()
+    let wall = Timestamp::now();
+    // The crate's own unit tests only: what the calling thread's test clock reads instead.
+    #[cfg(test)]
+    let wall = test_clock::read(wall);
+    wall
 }
 
-/// The wall clock, as the storage layer and the writers read it, or what the calling thread's
-/// [`TestClock`] reads instead.
-#[cfg(feature = "test-clock")]
-pub fn now() -> Timestamp {
-    test_clock::read(Timestamp::now())
-}
+#[cfg(test)]
+pub(crate) use test_clock::TestClock;
 
-#[cfg(feature = "test-clock")]
-pub use test_clock::TestClock;
-
-#[cfg(feature = "test-clock")]
+#[cfg(test)]
 mod test_clock {
     use jiff::{SignedDuration, Timestamp};
     use std::cell::RefCell;

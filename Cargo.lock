@@ -1089,7 +1089,6 @@ dependencies = [
  "jaq-std",
  "jiff",
  "maestro-core",
- "maestro-flow",
  "rusqlite",
  "rustix",
  "serde",

@@ -1114,6 +1114,12 @@ mutate $fk/write.rs '    check_owner(&started, instance, session)?;
 # its checks; a run is stamped with its start and judged after it at a fresh read. A clock ahead
 # of or behind the wall clock, or a run's end taken as its start plus a monotonic duration (which
 # stops while the machine sleeps), is killed.
+# The clock itself (P20 round 3): `clock::now` is one code path in every build, the wall clock;
+# only the crate's own unit-test binary passes it through a test clock (`cfg(test)`). A frozen
+# clock, or one an hour ahead or behind, is killed by a test that reads it with no test clock.
+mutate $fl/clock.rs '    let wall = Timestamp::now();' '    let wall = Timestamp::constant(1_762_560_000, 0);'
+mutate $fl/clock.rs '    let wall = Timestamp::now();' '    let wall = Timestamp::now() + jiff::SignedDuration::from_hours(1);'
+mutate $fl/clock.rs '    let wall = Timestamp::now();' '    let wall = Timestamp::now() - jiff::SignedDuration::from_hours(1);'
 mutate $fk/write.rs '    let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {' '    let now = wall(&log)? - SignedDuration::from_secs(30);
     let Some(n) = started.ir.nodes.get(node) else {'
