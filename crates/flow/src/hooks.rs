@@ -1,6 +1,5 @@
-//! Test-only pause points, compiled only with the `test-hooks` feature (off by default). The
-//! tests use them to hold a race window open so that a guard which only matters inside that
-//! window can be proved by a failing test.
+//! Pause points for the crate's own unit tests, compiled only under `cfg(test)`. The tests in
+//! `hooked` use them to hold a race window open, or to kill a child process at a crash point.
 //!
 //! When `MAESTRO_FLOW_TEST_PAUSE` is `<point>@<dir>`, the process writes `<dir>/reached` on
 //! reaching `<point>` and waits (up to 30 s) for `<dir>/go`. Unset, every pause is a no-op. The
@@ -10,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-/// The variable the tests set on a child process.
-pub const PAUSE_ENV: &str = "MAESTRO_FLOW_TEST_PAUSE";
+/// The variable the tests set on a child process (`tests/common`).
+const PAUSE_ENV: &str = "MAESTRO_FLOW_TEST_PAUSE";
 
 pub(crate) fn pause(point: &str) {
     static SPEC: OnceLock<Option<(String, PathBuf)>> = OnceLock::new();

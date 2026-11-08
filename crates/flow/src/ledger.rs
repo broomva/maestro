@@ -97,7 +97,7 @@ pub(crate) fn stage_root(layout: &Layout, host: &HostId, epoch: &str) -> Result<
 }
 
 fn open_lock_file(layout: &Layout) -> std::io::Result<File> {
-    nofollow(OpenOptions::new().read(true)).open(&layout.lock)
+    File::open(&layout.lock)
 }
 
 /// Opens the lock file without creating it. `None` only on an empty tree: no lock, no root, no
@@ -128,13 +128,15 @@ pub(crate) fn open_lock(layout: &Layout) -> Result<Option<File>> {
     Ok(None)
 }
 
-/// Overwrites the lock's content in place: the file, and so every holder's lock, stays the same.
+/// Rewrites the lock's content in place: the file, and so every holder's lock, stays the same.
+/// It is emptied first, so a crash midway leaves an empty lock, which reads `lock_lost` beside a
+/// live root and `root_moved` without one, and which `operator::recover` repairs either way.
 pub(crate) fn write_lock(file: &File, lock: &Path, content: &str) -> Result<()> {
+    file.set_len(0).map_err(FlowError::io(lock))?;
+    pause!("lock_truncated");
     let mut f = file;
-    let line = format!("{content}\n");
     f.seek(SeekFrom::Start(0))
-        .and_then(|_| f.write_all(line.as_bytes()))
-        .and_then(|()| file.set_len(line.len() as u64))
+        .and_then(|_| f.write_all(format!("{content}\n").as_bytes()))
         .and_then(|()| file.sync_all())
         .map_err(FlowError::io(lock))
 }
@@ -265,7 +267,7 @@ impl Ledger {
             lock::lock_root(&self.layout.root, Mode::Exclusive, self.options.lock_wait)
         })();
         match checked {
-            Ok(root_dir) => Ok(WriteGuard { ledger: self, root_dir }),
+            Ok(root_dir) => Ok(WriteGuard { ledger: self, _root_dir: root_dir }),
             Err(e) => {
                 let _ = self.lock_file.unlock();
                 Err(e)
@@ -280,12 +282,12 @@ impl Ledger {
 #[derive(Debug)]
 pub struct WriteGuard<'a> {
     ledger: &'a mut Ledger,
-    root_dir: File,
+    /// Held for its lock; closing it releases the root directory.
+    _root_dir: File,
 }
 
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
-        let _ = self.root_dir.unlock();
         let _ = self.ledger.lock_file.unlock();
     }
 }
@@ -342,9 +344,6 @@ pub(crate) fn list_instances(layout: &Layout) -> Result<Vec<InstanceId>> {
     let mut out = Vec::new();
     for entry in entries {
         let entry = entry.map_err(FlowError::io(&dir))?;
-        if !entry.file_type().map_err(FlowError::io(entry.path()))?.is_dir() {
-            continue;
-        }
         if let Some(id) = entry.file_name().to_str().and_then(|n| InstanceId::new(n).ok()) {
             out.push(id);
         }
@@ -378,8 +377,7 @@ impl WriteGuard<'_> {
         }
         match read_small(&ledger.layout.root.join(EPOCH_FILE))? {
             Some(found) if found == ledger.epoch => Ok(()),
-            Some(found) => Err(FlowError::EpochMismatch { expected: ledger.epoch.clone(), found }),
-            None => Err(FlowError::LedgerDamaged { detail: "the root's EPOCH is missing".into() }),
+            found => Err(FlowError::EpochMismatch { expected: ledger.epoch.clone(), found: found.unwrap_or_default() }),
         }
     }
 
@@ -420,9 +418,8 @@ impl WriteGuard<'_> {
             if !real_dir(&dir)? {
                 std::fs::create_dir(&dir).map_err(FlowError::io(&dir))?;
             }
-            let mut file = nofollow(OpenOptions::new().append(true).create_new(created))
-                .open(&path)
-                .map_err(|e| open_error(&path, e))?;
+            let mut file =
+                nofollow(OpenOptions::new().append(true).create(true)).open(&path).map_err(|e| open_error(&path, e))?;
             file.write_all(&line).and_then(|()| file.sync_data()).map_err(FlowError::io(&path))
         })();
         if let Err(e) = written {
@@ -550,8 +547,8 @@ impl ReadGuard {
     /// The instance's summary from its log, compared with the projection. The log wins.
     pub fn summary(&self, id: &InstanceId) -> Result<Summary> {
         let from_log = self.log(id)?.summary();
-        let cache = match projection::read(&self.layout, &self.epoch, id) {
-            Ok(Some(Some(row))) if row.state == "ok" && row.summary == from_log => CacheState::Agrees,
+        let cache = match projection::read(&self.layout, id) {
+            Ok(Some(Some(row))) if row.summary == from_log => CacheState::Agrees,
             Ok(Some(row)) => CacheState::Disagrees(row.map(|r| r.summary)),
             Ok(None) => CacheState::Missing,
             Err(e) => CacheState::Unreadable(e.to_string()),

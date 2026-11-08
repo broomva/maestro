@@ -9,6 +9,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 pub const CHILD_ENV: &str = "MAESTRO_FLOW_TEST_CHILD";
+/// Read by the crate's pause points, which exist only in its unit tests (`src/hooks.rs`).
+pub const PAUSE_ENV: &str = "MAESTRO_FLOW_TEST_PAUSE";
 
 pub fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
@@ -87,18 +89,19 @@ pub fn spawn_child(spec: &[&str]) -> Child {
 /// As [`spawn_child`], with the child pausing at `pause` (see [`Pause`]).
 pub fn spawn_child_pausing(spec: &[&str], pause: Option<&Pause>) -> Child {
     let mut cmd = Command::new(std::env::current_exe().unwrap());
-    cmd.args(["child_process_entry", "--exact", "--nocapture", "--test-threads=1"])
+    // A filter, not `--exact`: in the crate's unit tests the entry is `hooked::child_process_entry`.
+    cmd.args(["child_process_entry", "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, spec.join("\u{1f}"))
-        .env_remove(maestro_flow::hooks::PAUSE_ENV)
+        .env_remove(PAUSE_ENV)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(p) = pause {
-        cmd.env(maestro_flow::hooks::PAUSE_ENV, format!("{}@{}", p.point, p.dir.path().display()));
+        cmd.env(PAUSE_ENV, format!("{}@{}", p.point, p.dir.path().display()));
     }
     cmd.spawn().unwrap()
 }
 
-/// A pause point a child holds open (`maestro_flow::hooks`): the child writes `reached` there and
+/// A pause point a child holds open (`src/hooks.rs`, unit tests only): the child writes `reached` there and
 /// waits for `go`.
 pub struct Pause {
     pub point: &'static str,
@@ -147,6 +150,7 @@ pub fn child_result(child: Child) -> String {
 /// - `append <root> <host> <instance> <count> <lock wait ms>`: appends `count` events at the head.
 /// - `open <root> <host>`: opens the ledger.
 /// - `read <root>`: takes the read lock and lists the instances.
+/// - `recover <root>`: `operator::recover`.
 /// - `fresh <root> <host>`: `operator::create_fresh_ledger`.
 pub fn child_main() {
     let Ok(spec) = std::env::var(CHILD_ENV) else { return };
@@ -172,6 +176,7 @@ pub fn child_main() {
         ["read", root] => maestro_flow::Reader::new(Path::new(root), Options::default())
             .and_then(|r| r.lock().and_then(|g| g.instances()))
             .map(|_| ()),
+        ["recover", root] => maestro_flow::operator::recover(Path::new(root), &Options::default()).map(|_| ()),
         ["fresh", root, name] => {
             maestro_flow::operator::create_fresh_ledger(Path::new(root), &host(name), &Options::default()).map(|_| ())
         }

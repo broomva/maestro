@@ -29,6 +29,7 @@ fn a_retired_instance_keeps_its_log_and_is_never_written_again() {
     drop(guard);
     assert_eq!(code(Reader::new(&root, quick()).unwrap().lock().unwrap().log(&fi)), "retired");
     assert_eq!(code(operator::retire(&mut ledger, &fi)), "retired");
+    assert_eq!(code(operator::retire(&mut ledger, &id("fi_none"))), "unknown_instance");
     assert_eq!(std::fs::read(root.join("retired/fi_a/events.jsonl")).unwrap(), log);
 }
 

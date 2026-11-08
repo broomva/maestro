@@ -1,6 +1,6 @@
 //! The SQLite projection: a cache of what the logs say, rebuilt from them at will.
 //!
-//! Tables: `meta` (`schema`, `epoch`), `instances` (`id`, `state`, `seq`, `last_hash`, `stat`)
+//! Tables: `meta` (`epoch`), `instances` (`id`, `state`, `seq`, `last_hash`, `stat`)
 //! and `kind_counts` (`instance`, `kind`, `n`). Every live instance has a row, whatever its log
 //! holds: `state` is `ok`, `torn_tail`, `chain_broken` or `unreadable`, and `seq`, `last_hash`
 //! and the counts describe the verified prefix (nothing, when unreadable). `stat` is the log
@@ -9,7 +9,7 @@
 //! Each row is a function of its log file alone ([`analyze`]), so the incremental path and a
 //! rebuild agree on any tree: after every write, [`sync`] re-analyzes each instance whose `stat`
 //! changed and drops the rows of instances no longer live (retired). A cache missing, or built
-//! for another epoch or schema, is rebuilt whole. Readers open it read-only and only compare; the
+//! for another epoch, is rebuilt whole. Readers open it read-only and only compare; the
 //! log wins any disagreement.
 
 use crate::error::{FlowError, Result};
@@ -21,7 +21,6 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-const SCHEMA_VERSION: &str = "2";
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS instances (
@@ -115,14 +114,14 @@ fn open_ro(layout: &Layout) -> Result<Option<Connection>> {
     }
 }
 
-/// Whether the cache was built for this epoch and schema.
+/// Whether the cache was built for this epoch.
 fn current(conn: &Connection, epoch: &str) -> Result<bool> {
     let get = |key: &str| -> Result<Option<String>> {
         Ok(conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     };
     let has_meta: bool =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'", [], |r| r.get(0))?;
-    Ok(has_meta && get("schema")?.as_deref() == Some(SCHEMA_VERSION) && get("epoch")?.as_deref() == Some(epoch))
+    Ok(has_meta && get("epoch")?.as_deref() == Some(epoch))
 }
 
 fn write_row(tx: &rusqlite::Transaction<'_>, row: &Row) -> Result<()> {
@@ -152,7 +151,7 @@ fn rebuild_with(conn: &mut Connection, layout: &Layout, epoch: &str) -> Result<(
     let tx = conn.transaction()?;
     tx.execute_batch("DROP TABLE IF EXISTS meta; DROP TABLE IF EXISTS instances; DROP TABLE IF EXISTS kind_counts;")?;
     tx.execute_batch(SCHEMA)?;
-    tx.execute("INSERT INTO meta (key, value) VALUES ('schema', ?1), ('epoch', ?2)", params![SCHEMA_VERSION, epoch])?;
+    tx.execute("INSERT INTO meta (key, value) VALUES ('epoch', ?1)", params![epoch])?;
     for id in &ids {
         write_row(&tx, &analyze(layout, id))?;
     }
@@ -198,12 +197,10 @@ pub(crate) fn rebuild(layout: &Layout, epoch: &str) -> Result<()> {
 }
 
 /// What the cache holds for `id`, read-only: `None` when there is no projection file, `Some(None)`
-/// when it has no row for `id` or was built for another epoch.
-pub(crate) fn read(layout: &Layout, epoch: &str, id: &InstanceId) -> Result<Option<Option<Row>>> {
+/// when it has no row for `id`. A row from another epoch's cache is compared like any other; the
+/// log wins either way.
+pub(crate) fn read(layout: &Layout, id: &InstanceId) -> Result<Option<Option<Row>>> {
     let Some(conn) = open_ro(layout)? else { return Ok(None) };
-    if !current(&conn, epoch)? {
-        return Ok(Some(None));
-    }
     let row = conn
         .query_row("SELECT state, seq, last_hash, stat FROM instances WHERE id = ?1", [id.as_str()], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?))

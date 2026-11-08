@@ -995,7 +995,6 @@ version = "0.1.0"
 dependencies = [
  "jiff",
  "libc",
- "maestro-flow",
  "rusqlite",
  "serde",
  "serde_json",

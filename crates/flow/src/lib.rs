@@ -57,10 +57,13 @@
 //!   [`operator::create_fresh_ledger`], never a writer's job. A root moved by hand leaves its
 //!   lock behind, which refuses `root_moved` too.
 //! - **Crash recovery.** A crash during a genesis leaves its lock saying `genesis <epoch>`, which
-//!   every writer and reader refuses `genesis_incomplete`. [`operator::recover`] finishes it when
-//!   the root is in place and clears it otherwise. It also restores a lost lock from the root's
-//!   own epoch, after taking the root directory's lock so no writer still holds a guard through
-//!   the deleted lock.
+//!   every writer and reader refuses `genesis_incomplete`. A lock rewrite empties the lock before
+//!   writing it, so a crash there leaves an empty lock. [`operator::recover`] makes the lock name
+//!   the root's own epoch when a root is in place, and removes it otherwise; a fresh ledger keeps
+//!   the archive marker in place until it is whole, so clearing one never lets a normal writer
+//!   start a ledger. It restores a missing lock after taking the root directory's lock, so no
+//!   writer still holds a guard through the deleted one, and removes crash debris that no
+//!   process holds.
 //! - **Retire.** [`operator::retire`] moves `instances/<id>` to `retired/<id>` under the lock.
 //!   Any later write or read naming that id is refused `retired`; the kernel only stats
 //!   `retired/<id>` and never opens anything inside it.
@@ -75,18 +78,22 @@
 //!
 //! Every refusal carries a stable code, [`FlowError::code`].
 
-/// A test-only pause point (`hooks`). Without the `test-hooks` feature it expands to nothing.
+/// A pause point for the crate's own unit tests (`hooks`). Outside `cfg(test)` it expands to
+/// nothing, so no other build, binary or dependent crate can reach one.
 macro_rules! pause {
     ($point:literal) => {
-        #[cfg(feature = "test-hooks")]
+        #[cfg(test)]
         crate::hooks::pause($point);
     };
 }
 
 mod error;
-#[cfg(feature = "test-hooks")]
-#[doc(hidden)]
-pub mod hooks;
+#[cfg(test)]
+extern crate self as maestro_flow;
+#[cfg(test)]
+mod hooked;
+#[cfg(test)]
+mod hooks;
 mod ids;
 mod layout;
 mod ledger;

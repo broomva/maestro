@@ -2,7 +2,7 @@
 //! are opened without following a symbolic link out of it.
 
 use crate::error::{FlowError, Result};
-use crate::ids::{HostId, InstanceId};
+use crate::ids::InstanceId;
 use std::fs::OpenOptions;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -25,12 +25,10 @@ pub(crate) struct Layout {
 
 impl Layout {
     pub(crate) fn new(root: &Path) -> Result<Self> {
-        let name = root.file_name().and_then(|n| n.to_str()).filter(|n| !n.starts_with('.')).ok_or_else(|| {
-            FlowError::Invalid {
-                what: "Flows root",
-                value: root.display().to_string(),
-                reason: "it needs a plain final name",
-            }
+        let name = root.file_name().and_then(|n| n.to_str()).ok_or_else(|| FlowError::Invalid {
+            what: "Flows root",
+            value: root.display().to_string(),
+            reason: "it needs a plain final name",
         })?;
         let parent = match root.parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -142,14 +140,13 @@ pub(crate) fn inspect(layout: &Layout) -> Result<State> {
         return Err(FlowError::GenesisIncomplete { detail: format!("the genesis of epoch {epoch} did not finish") });
     }
     if !exists(&layout.root)? {
-        return match lock.as_deref() {
+        return match lock {
             None => Ok(State::Empty),
-            Some("") => Err(FlowError::LockLost { lock: layout.lock.clone(), detail: "the lock is empty".into() }),
             Some(_) => Err(FlowError::RootMoved { root: layout.root.clone() }),
         };
     }
     real_dir(&layout.root)?;
-    let host = read_small(&layout.root.join(HOST_FILE))?.filter(|h| HostId::new(h.as_str()).is_ok());
+    let host = read_small(&layout.root.join(HOST_FILE))?;
     let epoch = read_small(&layout.root.join(EPOCH_FILE))?.filter(|e| is_epoch(e));
     let (Some(host), Some(epoch)) = (host, epoch) else {
         return Err(FlowError::LedgerDamaged { detail: "the root's HOST or EPOCH is missing or unreadable".into() });

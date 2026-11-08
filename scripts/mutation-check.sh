@@ -708,12 +708,33 @@ mutate $fl/layout.rs '    real_dir(&layout.root)?;' ''
 mutate $fl/ledger.rs 'file.write_all(format!("{GENESIS}{epoch}\n").as_bytes())' 'file.write_all(format!("{epoch}\n").as_bytes())'
 mutate $fl/layout.rs 'if let Some(epoch) = lock.as_deref().and_then(|t| t.strip_prefix(GENESIS)) {' 'if let Some(epoch) = None::<&str> {'
 mutate $fl/ledger.rs '        lock::take(&file, Mode::Shared, options.lock_wait, &layout.lock)?;' ''
-mutate $fl/operator.rs '                write_lock(&file, &layout.lock, epoch)?;
-                return Ok(Recovered::FinishedGenesis' '                return Ok(Recovered::FinishedGenesis'
-mutate $fl/operator.rs '            std::fs::remove_file(&layout.lock).map_err(FlowError::io(&layout.lock))?;
-            sync_dir(&layout.parent);
-            return Ok(Recovered::ClearedGenesis);' '            sync_dir(&layout.parent);
-            return Ok(Recovered::ClearedGenesis);'
+mutate $fl/operator.rs '            write_lock(&file, &layout.lock, &epoch)?;
+            return Ok(Recovered::RestoredLock { epoch });' '            return Ok(Recovered::RestoredLock { epoch });'
+mutate $fl/operator.rs '        std::fs::remove_file(&layout.lock).map_err(FlowError::io(&layout.lock))?;
+        sync_dir(&layout.parent);
+        Ok(Recovered::ClearedGenesis)' '        sync_dir(&layout.parent);
+        Ok(Recovered::ClearedGenesis)'
+mutate $fl/operator.rs '            layout::inspect(&layout)?;
+            if debris > 0 {' '            if debris > 0 {'
+# A lock rewrite empties the lock first, so a crash midway leaves an empty lock that recover repairs.
+mutate $fl/ledger.rs '    file.set_len(0).map_err(FlowError::io(lock))?;
+    pause!("lock_truncated");
+    let mut f = file;
+    f.seek(SeekFrom::Start(0))
+        .and_then(|_| f.write_all(format!("{content}\n").as_bytes()))
+        .and_then(|()| file.sync_all())' '    let mut f = file;
+    f.seek(SeekFrom::Start(0))
+        .and_then(|_| f.write_all(format!("{content}\n").as_bytes()))
+        .map_err(FlowError::io(lock))?;
+    pause!("lock_truncated");
+    file.set_len(format!("{content}\n").len() as u64).map_err(FlowError::io(lock))?;
+    file.sync_all()'
+# recover removes crash debris, but never a private lock file a process holds.
+mutate $fl/operator.rs '        let debris = clear_debris(&layout)?;' '        let debris = 0;'
+mutate $fl/operator.rs '            && File::open(&path).is_ok_and(|f| f.try_lock().is_ok())' ''
+mutate $fl/operator.rs '            if debris > 0 {' '            if false {'
+# An EPOCH is 32 hex digits.
+mutate $fl/layout.rs '    text.len() == 32 && text.bytes()' '    text.bytes()'
 # Every write re-checks the root it was given and makes nothing above its instance.
 mutate $fl/lock.rs '    match std::fs::symlink_metadata(root) {' '    match std::fs::metadata(root) {'
 mutate $fl/ledger.rs 'if lock::root_id(&ledger.layout.root)? != ledger.root_id {' 'if false {'
@@ -745,7 +766,21 @@ mutate $fl/ledger.rs '            if !lock::same_file(&file, &layout.lock)? {
 mutate $fl/operator.rs '        if in_place()? {
             return Err(still_there());
         }
-        let epoch = random_epoch()?;' '        let epoch = random_epoch()?;'
+        std::fs::write(&marker,' '        std::fs::write(&marker,'
+# A fresh ledger is refused beside a live root before it touches anything, and keeps the marker
+# in place until it is whole.
+mutate $fl/operator.rs '    if in_place()? {
+        return Err(still_there());
+    }
+    pause!("fresh_checked");' '    pause!("fresh_checked");'
+mutate $fl/operator.rs '        std::fs::write(&marker, "a fresh ledger is being made\n").map_err(FlowError::io(&marker))?;' ''
+# An archive makes its destination before it leaves a marker.
+mutate $fl/operator.rs '        std::fs::create_dir(dest).map_err(FlowError::io(dest))?;
+        let marker = layout.archived_marker();
+        std::fs::write(&marker, format!("{}\n{epoch}\n", dest.display())).map_err(FlowError::io(&marker))?;' '        let marker = layout.archived_marker();
+        std::fs::write(&marker, format!("{}\n{epoch}\n", dest.display())).map_err(FlowError::io(&marker))?;
+        std::fs::create_dir(dest).map_err(FlowError::io(dest))?;'
+mutate $fl/operator.rs '    if !real_dir(&from)? {' '    if false {'
 mutate $fl/operator.rs '    let out = if lock::same_file(file, &layout.lock)? {' '    let out = if true {'
 # Restoring a lost lock waits for a guard still held through the deleted one.
 mutate $fl/operator.rs '        let held_root = lock::lock_root(&layout.root, Mode::Exclusive, options.lock_wait)?;' '        let held_root = std::fs::File::open(&layout.root).map_err(FlowError::io(&layout.root))?;'

@@ -81,13 +81,7 @@ pub(crate) fn root_id(root: &Path) -> Result<FileId> {
 /// Locks the root directory itself, so writers exclude each other even when the lock file was
 /// replaced. Which root it is, each write checks ([`root_id`]).
 pub(crate) fn lock_root(root: &Path, mode: Mode, wait: Duration) -> Result<File> {
-    let dir = match File::open(root) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(FlowError::RootMoved { root: root.to_path_buf() });
-        }
-        Err(e) => return Err(FlowError::io(root)(e)),
-    };
+    let dir = File::open(root).map_err(FlowError::io(root))?;
     take(&dir, mode, wait, root)?;
     Ok(dir)
 }
