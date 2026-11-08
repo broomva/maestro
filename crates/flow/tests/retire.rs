@@ -5,6 +5,7 @@ mod common;
 use common::*;
 use maestro_flow::operator;
 use maestro_flow::{FlowError, Ledger, Options, Reader};
+use std::io::Write as _;
 
 #[test]
 fn a_retired_instance_keeps_its_log_and_is_never_written_again() {
@@ -108,4 +109,47 @@ fn the_kernel_never_reads_a_retired_log() {
             "retired".into()
         )
     );
+}
+
+/// Copies a directory tree, as an operator restoring a backup over the root would.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+/// Opens a ledger with one instance whose log has a torn tail, then swaps the root for a
+/// same-epoch copy, as an operator restoring a backup over it would. Runs `op` on the opened
+/// ledger: `lock()` still finds a whole ledger with the right epoch, but the write checks the root
+/// is the one this writer opened, so it must refuse `root_moved` and change nothing in either tree.
+fn refuses_a_root_swapped_for_a_copy(op: fn(&mut Ledger, &maestro_flow::InstanceId) -> String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = root_in(tmp.path());
+    let parent = tmp.path().join(".broomva");
+    let fi = id("fi_a");
+    let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
+    append_at_head(&mut ledger, &fi, event("Started", 0)).unwrap();
+    let log = root.join("instances/fi_a/events.jsonl");
+    std::fs::OpenOptions::new().append(true).open(&log).unwrap().write_all(b"{\"seq\":2,").unwrap();
+    std::fs::rename(&root, parent.join("flows-original")).unwrap();
+    copy_tree(&parent.join("flows-original"), &root);
+    let before = snapshot(tmp.path());
+    assert_eq!(op(&mut ledger, &fi), "root_moved");
+    assert_eq!(snapshot(tmp.path()), before, "a refused operator write changed a tree");
+}
+
+#[test]
+fn retire_refuses_a_root_swapped_for_a_copy() {
+    refuses_a_root_swapped_for_a_copy(|ledger, fi| code(operator::retire(ledger, fi)));
+}
+
+#[test]
+fn truncate_refuses_a_root_swapped_for_a_copy() {
+    refuses_a_root_swapped_for_a_copy(|ledger, fi| code(operator::truncate_torn_tail(ledger, fi)));
 }

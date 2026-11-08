@@ -781,6 +781,19 @@ mutate $fl/operator.rs '        std::fs::create_dir(dest).map_err(FlowError::io(
         std::fs::write(&marker, format!("{}\n{epoch}\n", dest.display())).map_err(FlowError::io(&marker))?;
         std::fs::create_dir(dest).map_err(FlowError::io(dest))?;'
 mutate $fl/operator.rs '    if !real_dir(&from)? {' '    if false {'
+# Operator writes check the root too: retire and truncate refuse a root swapped for a copy.
+mutate $fl/operator.rs '    guard.verify()?;
+    let layout = guard.layout().clone();
+    refuse_retired(&layout, id)?;
+    let from' '    let layout = guard.layout().clone();
+    refuse_retired(&layout, id)?;
+    let from'
+mutate $fl/operator.rs '    guard.verify()?;
+    let layout = guard.layout().clone();
+    refuse_retired(&layout, id)?;
+    let path' '    let layout = guard.layout().clone();
+    refuse_retired(&layout, id)?;
+    let path'
 mutate $fl/operator.rs '    let out = if lock::same_file(file, &layout.lock)? {' '    let out = if true {'
 # Restoring a lost lock waits for a guard still held through the deleted one.
 mutate $fl/operator.rs '        let held_root = lock::lock_root(&layout.root, Mode::Exclusive, options.lock_wait)?;' '        let held_root = std::fs::File::open(&layout.root).map_err(FlowError::io(&layout.root))?;'

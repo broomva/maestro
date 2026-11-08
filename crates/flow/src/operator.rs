@@ -235,6 +235,8 @@ pub fn create_fresh_ledger(root: &Path, host: &HostId, options: &Options) -> Res
 /// as it was. The id is never written again.
 pub fn retire(ledger: &mut Ledger, id: &InstanceId) -> Result<CacheWrite> {
     let guard = ledger.lock()?;
+    // Operator writes are writes: the root must still be the one this writer opened.
+    guard.verify()?;
     let layout = guard.layout().clone();
     refuse_retired(&layout, id)?;
     let from = layout.instance_dir(id);
@@ -255,6 +257,8 @@ pub fn retire(ledger: &mut Ledger, id: &InstanceId) -> Result<CacheWrite> {
 /// resume. Returns the bytes removed. Refused when the log verifies or its chain is broken.
 pub fn truncate_torn_tail(ledger: &mut Ledger, id: &InstanceId) -> Result<u64> {
     let guard = ledger.lock()?;
+    // Operator writes are writes: the root must still be the one this writer opened.
+    guard.verify()?;
     let layout = guard.layout().clone();
     refuse_retired(&layout, id)?;
     let path = layout.events(id);
