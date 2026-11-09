@@ -50,7 +50,10 @@
 //! A writer must check, at the moment it records, that nothing the node consumes is stale, and
 //! record the `inputs` that `status` names. An `until` may read only the repeat's body nodes,
 //! since a verdict's digest covers only the body: its input ([`awaiting`]) holds nothing else.
-//! Claims, leases, retry and cancel are the writers' to enforce. The writers (`write`) keep this
+//! Claims, leases and cancel are the writers' to enforce. Retry is projected here, at the read's
+//! clock: a node whose `retry.attempts` have all ended without a receipt (by lease, cancel,
+//! changed inputs or a later claim) is `failed`, unless it is an effect started over its current
+//! inputs, which only its reconcile may finish. The writers (`write`) keep this
 //! contract: `claim`, `heartbeat`, `complete` and `choose`, and the `until` verdicts. What a guard
 //! reads is built here, from the log ([`guard_input`], [`awaiting`]); replay itself never runs it.
 //!
@@ -152,6 +155,10 @@ pub enum Reason {
     /// This observation recorded no exit status, or one outside its `exit_map`.
     ExitUnmapped {
         exit: Option<i32>,
+    },
+    /// The node's `retry.attempts` have all ended without a receipt: it takes no more claims.
+    AttemptsExhausted {
+        attempts: u32,
     },
     /// The owner's answer to this ask, through the asks ledger.
     Owner {
@@ -531,6 +538,22 @@ struct Fold<'a> {
     evaluations: Cell<usize>,
     /// How many node cores were computed (not taken from the cache): the bound tests' ceiling.
     cores: Cell<usize>,
+    /// The claims of each node with `retry`, by iteration, in log order (the retry projection).
+    attempts: BTreeMap<Key<'a>, Vec<Attempt>>,
+    /// The effects started and not withdrawn by a refusal that their command never started
+    /// (`spawn_failed`): by node and iteration, each attempt's inputs.
+    started_effects: BTreeMap<Key<'a>, BTreeMap<u32, BTreeMap<String, String>>>,
+}
+
+/// A claim, for the retry projection: it ends at its lease's end (which is never past its cancel
+/// deadline), when the inputs it was bound to are no longer the node's, or when a later claim
+/// takes the node, unless a receipt spent it.
+#[derive(Debug, Clone)]
+struct Attempt {
+    attempt: u32,
+    lease_until: Timestamp,
+    inputs: BTreeMap<String, String>,
+    spent: bool,
 }
 
 impl<'a> Fold<'a> {
@@ -551,6 +574,8 @@ impl<'a> Fold<'a> {
             advances: 0,
             evaluations: Cell::new(0),
             cores: Cell::new(0),
+            attempts: BTreeMap::new(),
+            started_effects: BTreeMap::new(),
         };
         for e in log.events.iter().skip(1) {
             let at: Timestamp =
@@ -649,7 +674,7 @@ impl<'a> Fold<'a> {
                     }
                     _ => at,
                 };
-                Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs)
+                (Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs), c.attempt)
             }
             Chosen::KIND => {
                 let c: Chosen = body(log, e)?;
@@ -657,25 +682,53 @@ impl<'a> Fold<'a> {
                 if !edges.contains_key(&c.edge) {
                     return Ok(Err("undeclared_edge"));
                 }
-                Receipt::new(e.seq, at, &Value::Null, Some(c.edge), None, c.inputs)
+                (Receipt::new(e.seq, at, &Value::Null, Some(c.edge), None, c.inputs), c.attempt)
             }
             Claimed::KIND => {
-                let _: Claimed = body(log, e)?;
+                let c: Claimed = body(log, e)?;
+                if node.retry.is_some() {
+                    let stamp = |text: &str| {
+                        text.parse::<Timestamp>()
+                            .map_err(|_| malformed(log, e.seq, format!("{text} is not a timestamp")))
+                    };
+                    let claims = self.attempts.entry((id, i)).or_default();
+                    if claims.last().is_none_or(|last| c.attempt > last.attempt) {
+                        let lease_until = stamp(&c.lease_until)?;
+                        claims.push(Attempt { attempt: c.attempt, lease_until, inputs: c.inputs, spent: false });
+                    }
+                }
                 return Ok(Ok(Change::Inert));
             }
             Heartbeat::KIND => {
-                let _: Heartbeat = body(log, e)?;
+                let h: Heartbeat = body(log, e)?;
+                if let Some(last) = self.attempts.get_mut(&(id, i)).and_then(|c| c.last_mut())
+                    && last.attempt == h.attempt
+                {
+                    let at = h
+                        .lease_until
+                        .parse()
+                        .map_err(|_| malformed(log, e.seq, format!("{} is not a timestamp", h.lease_until)))?;
+                    last.lease_until = at;
+                }
                 return Ok(Ok(Change::Inert));
             }
             EffectStarted::KIND => {
-                let _: EffectStarted = body(log, e)?;
+                let s: EffectStarted = body(log, e)?;
+                self.started_effects.entry((id, i)).or_default().insert(s.attempt, s.inputs);
                 return Ok(Ok(Change::Inert));
             }
             _ => {
-                let _: Refused = body(log, e)?;
+                let r: Refused = body(log, e)?;
+                // The effect's command never started (`exec`), so its start no longer stands.
+                if r.code == "spawn_failed"
+                    && let Some(started) = self.started_effects.get_mut(&(id, i))
+                {
+                    started.remove(&r.attempt);
+                }
                 return Ok(Ok(Change::Inert));
             }
         };
+        let (receipt, attempt) = receipt;
         let key = (id, i);
         let mut eval = Eval::new(self, at);
         let core = eval.node(id, i);
@@ -694,7 +747,31 @@ impl<'a> Fold<'a> {
             self.invalidate(id);
         }
         self.receipts.insert(key, receipt);
+        if let Some(last) = self.attempts.get_mut(&key).and_then(|c| c.last_mut())
+            && last.attempt == attempt
+        {
+            last.spent = true;
+        }
         Ok(Ok(Change::State))
+    }
+
+    /// The node's `retry.attempts`, when they have all ended without a receipt at `now`, in its
+    /// current iteration. An effect started over its current `inputs` is never exhausted: only
+    /// its reconcile runs, and a reconcile takes no attempt. (A done node is never exhausted, so
+    /// a start a receipt followed needs no clearing.)
+    fn exhausted(&self, id: &'a str, now: Timestamp, inputs: &BTreeMap<String, String>) -> Option<u32> {
+        let attempts = self.ir.nodes.get(id)?.retry?;
+        let i = self.current(id)?;
+        if self.started_effects.get(&(id, i)).is_some_and(|s| s.values().any(|started| started == inputs)) {
+            return None;
+        }
+        let claims = self.attempts.get(&(id, i))?;
+        let ended = claims
+            .iter()
+            .enumerate()
+            .filter(|(k, c)| !c.spent && (k + 1 < claims.len() || now >= c.lease_until || c.inputs != *inputs))
+            .count();
+        (ended >= usize::try_from(attempts).unwrap_or(usize::MAX)).then_some(attempts)
     }
 
     fn guarded(&mut self, g: Guarded, at: Timestamp) -> Result<(), &'static str> {
@@ -760,7 +837,13 @@ impl<'a> Fold<'a> {
         let mut nodes = BTreeMap::new();
         let mut stale = BTreeMap::new();
         for id in ir.nodes.keys() {
-            let (status, set) = eval.status(id);
+            let (mut status, set) = eval.status(id);
+            if let Some(attempts) = self.exhausted(id, now, &status.inputs)
+                && !matches!(status.state, State::Done | State::Exhausted)
+            {
+                status.state = State::Failed;
+                status.unmet.push(Reason::AttemptsExhausted { attempts });
+            }
             nodes.insert(id.clone(), status);
             stale.insert(id.clone(), set);
         }

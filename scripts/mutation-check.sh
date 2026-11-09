@@ -1363,9 +1363,8 @@ mutate $fk/write.rs '            Err(unfit) => return refuse(&mut guard, &held, 
         };
         let intent'
 mutate $fk/write.rs '        guard.append(&instance, held.log.seq(), intent.to_event()?)?;' ''
-mutate $fk/write.rs '                    claims.effects.insert((started.node, started.iteration));' ''
-mutate $fk/write.rs '                    claims.effects.remove(&key);' ''
-mutate $fk/write.rs '    let effect_started = claims.effects.contains(&key);' '    let effect_started = false;'
+mutate $fk/write.rs '                    claims.effects.insert((started.node, started.iteration, started.inputs), started.attempt);' ''
+mutate $fk/write.rs 'let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));' 'let effect_started = false;'
 mutate $fk/write.rs '        Some(Class::Effect { reconcile, .. }) if held.effect_started =>' '        Some(Class::Effect { reconcile, .. }) if false =>'
 mutate $fk/write.rs '        Some(Class::Effect { run, preconditions, .. }) if !run.is_empty() => {' '        Some(Class::Effect { run, preconditions, .. }) => {'
 mutate $fk/write.rs '        Class::Effect { .. } if plan.step == Step::Reconcile =>' '        Class::Effect { .. } if false =>'
@@ -1375,9 +1374,6 @@ mutate $fk/write.rs '        Class::Effect { .. } => {
 # Retry: no claim once the node's attempts have ended without a receipt (a receipt's claim does
 # not count). Cancel: a deadline recorded in the claim, the lease never past it, the token
 # refused cancelled from it on (a claim a later one took over has lost its lease instead).
-mutate $fk/write.rs '        && claims.unspent(node, &enabled.iteration) >= usize::try_from(attempts).unwrap_or(usize::MAX)' '        && claims.unspent(node, &enabled.iteration) > usize::try_from(attempts).unwrap_or(usize::MAX)'
-mutate $fk/write.rs '        && claims.unspent(node, &enabled.iteration) >= usize::try_from(attempts).unwrap_or(usize::MAX)' '        && false'
-mutate $fk/write.rs 'r.iteration == *iteration && !r.spent).count()' 'r.iteration == *iteration).count()'
 mutate $fk/write.rs '    let lease_until = capped(until(now, lease(n))?, cancel_at);' '    let lease_until = until(now, lease(n))?;'
 mutate $fk/write.rs '    let lease_until = capped(until(now, lease(held.node()?))?, held.rec.cancel_at);' '    let lease_until = until(now, lease(held.node()?))?;'
 mutate $fk/write.rs '    cancel_at.map_or(lease_until, |at| lease_until.min(at))' '    cancel_at.map_or(lease_until, |_| lease_until)'
@@ -1386,6 +1382,38 @@ mutate $fk/write.rs '                    let cancel_at = c.cancel_at.as_deref().
 mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|_| false)'
 mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|at| latest == Some(sha) && now > *at)'
 mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|at| now >= *at)'
+# P20 round 1 (maestro#28). The guard host: a process that never called guard_entry evaluates
+# nothing; guard_entry registers it; the variable alone does not make a binary the evaluator; an
+# evaluator that crashes or exits non-zero is an error, never a verdict; the writers' default
+# timeout and the child's default grace are bounded.
+mutate $fg '    if !HOST.load(Ordering::SeqCst) {' '    if false {'
+mutate $fg '        HOST.store(true, Ordering::SeqCst);' ''
+mutate $fg 'std::env::var_os(GUARD_ENV).filter(|_| evaluator) else {' 'std::env::var_os(GUARD_ENV) else {'
+mutate $fg '        Ran::Exited { code: None, .. } => Err(("guard_error", "the evaluator crashed".to_string())),' '        Ran::Exited { code: None, .. } => Ok(true),'
+mutate $fg '        Ran::Exited { code: Some(code), .. } => Err(("guard_error", format!("the evaluator exited {code}"))),' '        Ran::Exited { code: Some(_), .. } => Ok(true),'
+mutate $fg 'pub const GUARD_TIMEOUT: Duration = Duration::from_secs(1);' 'pub const GUARD_TIMEOUT: Duration = Duration::from_secs(3600);'
+mutate $fg 'pub const CHILD_GRACE: Duration = Duration::from_millis(500);' 'pub const CHILD_GRACE: Duration = Duration::from_secs(3600);'
+# Every precondition is judged, not only the first.
+mutate $fk/write.rs '    for (i, code) in preconditions.iter().enumerate() {' '    for (i, code) in preconditions.iter().take(1).enumerate() {'
+# Retry, projected by replay: an attempt ends by its lease (moved by its own heartbeat), by
+# changed inputs or by a later claim, unless a receipt spent it; a node out of attempts is failed
+# and claim says so; an effect started over its current inputs is spared, only its reconcile runs.
+mutate $fk/replay.rs '            if let Some(attempts) = self.exhausted(id, now, &status.inputs)' '            if let Some(attempts) = self.exhausted(id, now, &status.inputs).filter(|_| false)'
+mutate $fk/replay.rs '.filter(|(k, c)| !c.spent && (' '.filter(|(k, c)| (true) && ('
+mutate $fk/replay.rs '(k + 1 < claims.len() || now >= c.lease_until' '(false || now >= c.lease_until'
+mutate $fk/replay.rs '|| now >= c.lease_until || c.inputs != *inputs))' '|| now >= c.lease_until))'
+mutate $fk/replay.rs '                    last.lease_until = at;' ''
+mutate $fk/replay.rs '.insert(s.attempt, s.inputs);' '.entry(s.attempt);'
+mutate $fk/replay.rs '                    started.remove(&r.attempt);' ''
+mutate $fk/replay.rs 'is_some_and(|s| s.values().any(|started| started == inputs)) {' 'is_some_and(|s| !s.is_empty()) {'
+mutate $fk/replay.rs 'is_some_and(|s| s.values().any(|started| started == inputs)) {' 'is_some_and(|_| false) {'
+mutate $fk/write.rs '        if let Some(attempts) = exhausted {' '        if let Some(attempts) = exhausted.filter(|_| false) {'
+# Effects: a command that never started withdraws its start; a start stands for its inputs only;
+# a cancel deadline ends a running command.
+mutate $fk/write.rs '                    if r.code == "spawn_failed" {' '                    if false {'
+mutate $fk/write.rs 'let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));' 'let effect_started = claims.effects.keys().any(|(n, i, _)| *n == rec.node && *i == rec.iteration);'
+mutate $fk/write.rs '    let limits = &cancel_capped(limits, held.rec.cancel_at);' ''
+mutate $fk/write.rs 'timeout: limits.timeout.min(left).max(' 'timeout: limits.timeout.max('
 # Commands: params fill placeholders within one byte budget, only declared params, only scalars;
 # the workdir is declared, absolute and a directory.
 mutate $fk/write.rs '        left -= filled.len();' ''

@@ -144,13 +144,18 @@ pub struct Chosen {
     pub guard_digest: Option<String>,
 }
 
-/// An effect's command about to run for an attempt, written before it runs. An effect started and
-/// not completed in its iteration is never run again: the next completion runs its `reconcile`.
+/// An effect's command about to run for an attempt, written before it runs. An effect started over
+/// some inputs and not completed is never run again over them: the next completion runs its
+/// `reconcile`. A `Refused` with code `spawn_failed` for the attempt withdraws it, since the command
+/// never started.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectStarted {
     pub node: String,
     pub iteration: Iteration,
     pub attempt: u32,
+    /// The claim's input digests: an effect is one run over one set of inputs.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
     /// The digest of the input document its preconditions held over; none without preconditions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_digest: Option<String>,

@@ -8,7 +8,8 @@
 //!   `retry` and `cancel` per node. Subflows, traits and templates are refused as unsupported.
 //! - **Guards** are jq, checked at compile time; writers evaluate them in a bounded child process
 //!   ([`guard`]) and record the verdicts in the log, with the digest of what they read, and
-//!   replay only reads them. A binary that runs the writers calls [`guard_entry`] first in `main`.
+//!   replay only reads them. **A binary that runs the writers calls [`guard_entry`] first in
+//!   `main`**; without it, a write that needs a guard is refused `guard_host_missing`.
 //! - **The IR** ([`Ir`]) is what a definition compiles to; it carries a content hash, and
 //!   [`ir::validate`] holds its rules: no unknown reference, no loop without a bound, no switch
 //!   case its subject does not declare, no effect without `reconcile`, and the class rules.

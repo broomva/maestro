@@ -31,12 +31,16 @@
 //!   work goes on only through a new claim, the next attempt.
 //! - Attempts count claims per node and iteration. A refusal leaves the attempt as it is; the next
 //!   claim takes the next number, with checked arithmetic (`attempt_overflow`).
-//! - **Retry.** A node with `retry: {attempts: n}` takes no claim once n of its claims in the
-//!   iteration have ended without a receipt (`attempts_exhausted`); without `retry` it takes any
-//!   number. An attempt ends when its lease ends, it is cancelled or a later claim takes the node.
+//! - **Retry.** A node with `retry: {attempts: n}` fails once n of its claims in the iteration
+//!   have ended without a receipt: replay projects it (`status` says `failed`, `next` does not
+//!   enable it), and `claim` refuses `attempts_exhausted`. Without `retry` it takes any number. An
+//!   attempt ends when its lease ends, it is cancelled, the inputs it was bound to change or a
+//!   later claim takes the node. An effect that started over its current inputs is never
+//!   exhausted: only its reconcile runs, and a reconcile takes no attempt.
 //! - **Cancel.** A node with `cancel: {after: d}` gives each claim a deadline, `cancel_at`, the
 //!   claim's time plus d, recorded in `Claimed`. The lease never runs past it, heartbeats or not,
-//!   and from it on the token is refused `cancelled` and the node takes a new claim.
+//!   a command `complete` runs is killed at it, and from it on the token is refused `cancelled`
+//!   and the node takes a new claim.
 //!
 //! # Complete
 //!
@@ -62,12 +66,16 @@
 //! An effect node's command (`run`) acts on the world, so it runs at most once in an iteration.
 //! `complete` checks its `preconditions` first: each a jq guard over the recorded state, bounded
 //! (`guard`), evaluated with the lock released and the claim checked again after. When they all
-//! hold, it appends `EffectStarted` under the lock, then runs the command. Exit 0 appends the
-//! receipt; anything else `Refused`. From `EffectStarted` on, the effect is never run again in its
-//! iteration, whatever happened after it (a crash, a timeout, a failure, a second completion
-//! racing the first, which is refused `effect_started`): every later completion, on the same
-//! token or a new claim's, runs the node's `reconcile` instead. Reconcile exiting 0 appends the
-//! receipt, with the reconcile in `verify`; anything else is refused `effect_unreconciled`.
+//! hold, it appends `EffectStarted` under the lock, with the claim's inputs, then runs the
+//! command. Exit 0 appends the receipt; anything else `Refused`. From `EffectStarted` on, the
+//! effect is never run again over those inputs in its iteration, whatever happened after it (a
+//! crash, a timeout, a failure, a second completion racing the first, which is refused
+//! `effect_started`): every later completion, on the same token or a new claim's, runs the node's
+//! `reconcile` instead. Reconcile exiting 0 appends the receipt, with the reconcile in `verify`;
+//! anything else is refused `effect_unreconciled`. Two exceptions, both certain that the effect
+//! did not act over its inputs: over new inputs (an upstream re-run with another value) it is a
+//! new effect and runs; and a command that never started (`spawn_failed`: the program is missing,
+//! say) withdraws its start, so the next completion runs it.
 //!
 //! # Choose
 //!
@@ -115,7 +123,7 @@ use super::events::{
 use super::exec::{self, Limits, Ran};
 use super::guard::{self, GUARD_TIMEOUT, Judged};
 use super::ir::{Class, Ir, Iteration, Node};
-use super::replay::{Awaiting, Next, State, awaiting, guard_input, next_of, pinned, secs};
+use super::replay::{Awaiting, Next, Reason, State, awaiting, guard_input, next_of, pinned, secs};
 use crate::clock;
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, WriteGuard, random_epoch};
@@ -124,7 +132,7 @@ use jiff::{SignedDuration, Timestamp};
 use maestro_core::session::VerifiedSession;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// A claim's lease, in seconds, for a node that declares no `wait.heartbeat`.
@@ -280,8 +288,8 @@ struct Claims {
     recs: BTreeMap<String, ClaimRec>,
     /// The latest claim's token digest for each node and iteration.
     latest: BTreeMap<(String, Iteration), String>,
-    /// The effects started and not completed, by node and iteration.
-    effects: BTreeSet<(String, Iteration)>,
+    /// The effects started and not withdrawn, by node, iteration and inputs, with their attempt.
+    effects: BTreeMap<(String, Iteration, BTreeMap<String, String>), u32>,
 }
 
 fn parse<T: DeserializeOwned>(log: &Log, seq: u64, kind: &str, body: &Value) -> Result<T, KernelError> {
@@ -316,9 +324,11 @@ impl Claims {
     /// A `Claimed` counts only with an attempt above its node's last one. A `Heartbeat` moves
     /// the lease of the latest claim of its node and iteration, and a `Completed` or `Chosen`
     /// spends that claim, each only when it is for the claim's attempt. An `EffectStarted` stands
-    /// until a `Completed` of its node and iteration.
+    /// for its node, iteration and inputs unless a `Refused` with code `spawn_failed` for its
+    /// attempt withdraws it (the command never started). A receipt need not clear it: a done node
+    /// is claimed again only over new inputs, which no start stands for.
     fn fold(log: &Log) -> Result<Claims, KernelError> {
-        let mut claims = Claims { recs: BTreeMap::new(), latest: BTreeMap::new(), effects: BTreeSet::new() };
+        let mut claims = Claims { recs: BTreeMap::new(), latest: BTreeMap::new(), effects: BTreeMap::new() };
         for e in &log.events {
             match e.kind.as_str() {
                 Claimed::KIND => {
@@ -354,7 +364,6 @@ impl Claims {
                 Completed::KIND => {
                     let c: Completed = parse(log, e.seq, &e.kind, &e.body)?;
                     let key = (c.node, c.iteration);
-                    claims.effects.remove(&key);
                     if let Some(rec) = claims.latest_mut(&key)
                         && rec.attempt == c.attempt
                     {
@@ -371,7 +380,15 @@ impl Claims {
                 }
                 EffectStarted::KIND => {
                     let started: EffectStarted = parse(log, e.seq, &e.kind, &e.body)?;
-                    claims.effects.insert((started.node, started.iteration));
+                    claims.effects.insert((started.node, started.iteration, started.inputs), started.attempt);
+                }
+                Refused::KIND => {
+                    let r: Refused = parse(log, e.seq, &e.kind, &e.body)?;
+                    if r.code == "spawn_failed" {
+                        claims.effects.retain(|(node, iteration, _), attempt| {
+                            !(*node == r.node && *iteration == r.iteration && *attempt == r.attempt)
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -385,11 +402,6 @@ impl Claims {
 
     fn latest_mut(&mut self, key: &(String, Iteration)) -> Option<&mut ClaimRec> {
         self.latest.get(key).and_then(|sha| self.recs.get_mut(sha))
-    }
-
-    /// How many claims of `node` in `iteration` have no receipt.
-    fn unspent(&self, node: &str, iteration: &Iteration) -> usize {
-        self.recs.values().filter(|r| r.node == node && r.iteration == *iteration && !r.spent).count()
     }
 }
 
@@ -408,6 +420,10 @@ fn state_name(state: Option<State>) -> String {
 }
 
 /// Takes a claim on `node` of `instance`, owned by `session`. See the module docs.
+///
+/// **Needs a guard host**: a write that evaluates a guard (a choice's edge, an effect's
+/// preconditions, an `until` verdict) is refused `guard_host_missing` unless the process called
+/// [`guard_entry`](super::guard_entry) first in `main` (see `guard`).
 pub fn claim(
     ledger: &mut Ledger,
     session: &VerifiedSession,
@@ -429,6 +445,16 @@ pub fn claim(
     }
     let next = next_of(&log, &started, now)?;
     let Some(enabled) = next.enabled.iter().find(|e| e.node == node) else {
+        // Replay projects a node whose attempts all ended without a receipt as failed.
+        let exhausted = next.pending.get(node).and_then(|s| {
+            s.unmet.iter().find_map(|r| match r {
+                Reason::AttemptsExhausted { attempts } => Some(*attempts),
+                _ => None,
+            })
+        });
+        if let Some(attempts) = exhausted {
+            return Err(Refusal::AttemptsExhausted { node: node.to_string(), attempts }.into());
+        }
         let state = state_name(next.pending.get(node).map(|s| s.state));
         return Err(Refusal::NotEnabled { node: node.to_string(), state }.into());
     };
@@ -440,11 +466,6 @@ pub fn claim(
         && p.inputs == enabled.inputs
     {
         return Err(Refusal::AlreadyClaimed { node: node.to_string(), lease_until: p.lease_until.to_string() }.into());
-    }
-    if let Some(attempts) = n.retry
-        && claims.unspent(node, &enabled.iteration) >= usize::try_from(attempts).unwrap_or(usize::MAX)
-    {
-        return Err(Refusal::AttemptsExhausted { node: node.to_string(), attempts }.into());
     }
     let last = prior.map_or(0, |p| p.attempt);
     let attempt = last.checked_add(1).ok_or_else(|| Refusal::AttemptOverflow { node: node.to_string() })?;
@@ -527,7 +548,7 @@ fn hold(
     if *inputs != rec.inputs {
         return Err(Refusal::InputsChanged { node: rec.node }.into());
     }
-    let effect_started = claims.effects.contains(&key);
+    let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));
     Ok(Held { log, started, rec, next, effect_started })
 }
 
@@ -737,6 +758,10 @@ fn refused(guard: &mut WriteGuard, held: &Held, code: &'static str, reason: &str
 
 /// Completes the claim `token` names: runs the node's command and appends the receipt, or a
 /// refusal. See the module docs.
+///
+/// **Needs a guard host**: a write that evaluates a guard (a choice's edge, an effect's
+/// preconditions, an `until` verdict) is refused `guard_host_missing` unless the process called
+/// [`guard_entry`](super::guard_entry) first in `main` (see `guard`).
 pub fn complete(
     ledger: &mut Ledger,
     session: &VerifiedSession,
@@ -784,10 +809,13 @@ pub fn complete(
             node: held.rec.node.clone(),
             iteration: held.rec.iteration.clone(),
             attempt: held.rec.attempt,
+            inputs: held.rec.inputs.clone(),
             guard_digest,
         };
         guard.append(&instance, held.log.seq(), intent.to_event()?)?;
     }
+    // A claim's cancel deadline ends its command too: the run is no longer than what is left.
+    let limits = &cancel_capped(limits, held.rec.cancel_at);
     // The command runs with the flows lock released, so other writers and readers go on.
     drop(guard);
     let ran_at = clock::now();
@@ -833,6 +861,14 @@ pub fn complete(
     Ok(Completion::Completed { appended, verify, stderr: String::from_utf8_lossy(&stderr).into_owned(), verdicts })
 }
 
+/// `limits`, with the timeout no longer than what is left before `cancel_at` (at least 1 ms, the
+/// shortest a run may have; the check after the run refuses a claim past its deadline).
+fn cancel_capped(limits: &Limits, cancel_at: Option<Timestamp>) -> Limits {
+    let Some(at) = cancel_at else { return limits.clone() };
+    let left = std::time::Duration::try_from(at.duration_since(clock::now())).unwrap_or_default();
+    Limits { timeout: limits.timeout.min(left).max(std::time::Duration::from_millis(1)), ..limits.clone() }
+}
+
 /// Every precondition holds over `input`, evaluated in order, bounded: the digest of the input
 /// they held over, or none when there are none. The first that does not hold is the refusal.
 fn all_hold(preconditions: &[String], input: &Value) -> Result<Option<String>, Unfit> {
@@ -849,6 +885,10 @@ fn all_hold(preconditions: &[String], input: &Value) -> Result<Option<String>, U
 }
 
 /// Takes the edge `edge` of the choice node the claim `token` names. See the module docs.
+///
+/// **Needs a guard host**: a write that evaluates a guard (a choice's edge, an effect's
+/// preconditions, an `until` verdict) is refused `guard_host_missing` unless the process called
+/// [`guard_entry`](super::guard_entry) first in `main` (see `guard`).
 pub fn choose(
     ledger: &mut Ledger,
     session: &VerifiedSession,

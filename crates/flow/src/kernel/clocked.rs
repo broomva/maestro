@@ -14,7 +14,7 @@ use crate::clock::{self, TestClock};
 // The shared helpers, loaded once in this binary (`hooked`); `claiming` re-exports them.
 use crate::hooked::common;
 use crate::kernel::events::{Completed, KernelEvent};
-use crate::kernel::{Completion, DEFAULT_LEASE_SECS, State, claim, complete, heartbeat};
+use crate::kernel::{Completion, DEFAULT_LEASE_SECS, Next, Reason, State, claim, complete, heartbeat};
 use claiming::*;
 use jiff::{SignedDuration, Timestamp};
 use maestro_core::session::VerifiedSession;
@@ -361,9 +361,16 @@ workdir: "{{params.dir}}"
 nodes:
   head: {class: observe, run: [sh, -c, 'exit "$(cat head 2>/dev/null || echo 0)"'], fresh_for: 1m, exit_map: {0: up, 1: down}, retry: {attempts: 1}}
   pick: {class: choice, needs: [head], edges: {go: {guard: 'true'}}}
-  push: {class: effect, needs: [head], preconditions: ['true'], run: [sh, -c, 'echo ran >> effects'], reconcile: ['true']}
+  push: {class: effect, needs: [head], preconditions: ['true'], run: [sh, -c, 'echo ran >> effects; exit "$(cat fail 2>/dev/null || echo 0)"'], reconcile: ['true']}
   twice: {class: work, verify: ['true'], retry: {attempts: 2}}
+  once: {class: work, verify: ['true'], needs: [head], retry: {attempts: 1}}
+  flip: {class: work, verify: ['true'], needs: [head], retry: {attempts: 2}}
+  single: {class: work, verify: ['true'], retry: {attempts: 1}}
+  pushonce: {class: effect, needs: [head], run: [sh, -c, 'echo ran >> effects; exit "$(cat fail 2>/dev/null || echo 0)"'], reconcile: ['true'], retry: {attempts: 1}}
   brief: {class: work, verify: [sh, -c, 'touch briefed; sleep "$(cat nap 2>/dev/null || echo 0)"'], cancel: {after: 30s}}
+  slow: {class: effect, run: [sh, -c, 'sleep 1; echo ran >> effects'], reconcile: ['true'], cancel: {after: 30s}}
+  retried: {class: effect, run: [sh, -c, 'echo ran >> effects; exit "$(cat fail 2>/dev/null || echo 0)"'], reconcile: [sh, -c, 'test -s effects'], retry: {attempts: 1}}
+  act: {class: effect, run: ['{{params.dir}}/act'], reconcile: [sh, -c, 'test -s effects'], retry: {attempts: 1}}
 "#;
 
 use crate::kernel::guard::tests::WHILE_JUDGING;
@@ -394,6 +401,45 @@ fn a_node_takes_no_claim_once_its_attempts_have_ended_without_a_receipt() {
     assert_eq!(second.attempt, 2);
     test_clock.set(second.lease_until);
     assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "twice")), "attempts_exhausted");
+    // Replay projects it: `status` says failed, and `next` does not enable it.
+    let s = f.status(&fi, clock::now());
+    assert_eq!(
+        (s.nodes["twice"].state, &s.nodes["twice"].unmet[..]),
+        (State::Failed, &[Reason::AttemptsExhausted { attempts: 2 }][..])
+    );
+    let n = next_now(&f, &fi);
+    assert!(n.enabled.iter().all(|e| e.node != "twice") && n.pending["twice"].state == State::Failed);
+    // An attempt whose inputs changed has ended too, lease or not: a node with one attempt takes
+    // no claim after its input is re-run with another value.
+    let fi = f.begin();
+    let at = f.done(&fi, "head");
+    f.claim(&fi, "once");
+    test_clock.set(at + secs(61));
+    std::fs::write(f.dir.join("head"), "1").unwrap();
+    f.done(&fi, "head");
+    std::fs::remove_file(f.dir.join("head")).unwrap();
+    assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "once")), "attempts_exhausted");
+    // A claim a later one took over has ended, even once its inputs are the node's again.
+    let fi = f.begin();
+    let at = clock::now();
+    test_clock.set(at);
+    f.done(&fi, "head");
+    f.claim(&fi, "flip");
+    test_clock.set(at + secs(61));
+    std::fs::write(f.dir.join("head"), "1").unwrap();
+    f.done(&fi, "head");
+    assert_eq!(f.claim(&fi, "flip").attempt, 2);
+    test_clock.set(at + secs(122));
+    std::fs::remove_file(f.dir.join("head")).unwrap();
+    f.done(&fi, "head");
+    assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "flip")), "attempts_exhausted");
+    // A heartbeat moves the end of the attempt it extends.
+    let fi = f.begin();
+    let c = f.claim(&fi, "single");
+    test_clock.set(c.lease_until - secs(300));
+    heartbeat(&mut f.ledger, &f.me, &c.token).unwrap();
+    test_clock.set(c.lease_until);
+    assert_eq!(f.status(&fi, clock::now()).nodes["single"].state, State::Ready);
     // Within its attempts a node completes as any other.
     let fi = f.begin();
     let first = f.claim(&fi, "twice");
@@ -421,7 +467,7 @@ fn an_effect_whose_inputs_changed_after_its_receipt_runs_again() {
     f.done(&fi, "head");
     let c = f.claim(&fi, "push");
     let Completion::Completed { verify, .. } = f.complete(&c.token, Value::Null) else { panic!() };
-    assert_eq!(verify.argv[2], "echo ran >> effects", "the effect ran, not its reconcile");
+    assert!(verify.argv[2].starts_with("echo ran"), "the effect ran, not its reconcile: {:?}", verify.argv);
     assert_eq!(runs(&f), 2);
 }
 
@@ -584,7 +630,8 @@ fn an_effect_killed_mid_run_is_reconciled_not_run_again() {
         let c = f.claim(&fi, "push");
         let before = runs(&f);
         let pause = common::Pause::at("command_ran");
-        let mut child = common::spawn_child_pausing(&["complete", f.root.to_str().unwrap(), &c.token], Some(&pause));
+        let mut child =
+            common::spawn_child_pausing(&["complete", f.root.to_str().unwrap(), &c.token, "host"], Some(&pause));
         pause.reached();
         child.kill().unwrap();
         child.wait().unwrap();
@@ -614,7 +661,7 @@ fn two_completions_racing_on_one_claim_run_the_effect_once() {
     ready(&mut f, &fi);
     let c = f.claim(&fi, "push");
     let pause = common::Pause::at("preconditions_judged");
-    let child = common::spawn_child_pausing(&["complete", f.root.to_str().unwrap(), &c.token], Some(&pause));
+    let child = common::spawn_child_pausing(&["complete", f.root.to_str().unwrap(), &c.token, "host"], Some(&pause));
     pause.reached();
     std::fs::write(f.dir.join("fail"), "1").unwrap();
     assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "effect_failed");
@@ -662,4 +709,155 @@ fn a_verdict_is_written_only_over_the_input_it_was_evaluated_on() {
     assert!(record(&mut guard, &log, &started, &awaited, &judged).unwrap().is_some());
     drop(guard);
     assert_eq!(f.kinds(&fi), ["Started", "Completed", "Guarded"]);
+}
+
+#[test]
+fn a_process_that_never_registered_as_a_guard_host_evaluates_no_guard() {
+    // The writers in a child process that never called `guard_entry`: a choice, an effect's
+    // precondition and an until verdict are each refused `guard_host_missing`, before any
+    // evaluator starts, and the effect does not run.
+    let (mut f, _clock) = clocked(LIMITS);
+    let root = f.root.to_str().unwrap().to_string();
+    let bare = |spec: &[&str]| common::child_result(common::spawn_child(spec));
+    let fi = f.begin();
+    f.done(&fi, "head");
+    let pick = f.claim(&fi, "pick");
+    assert_eq!(bare(&["choose", &root, &pick.token, "go", "bare"]), "guard_host_missing");
+    let push = f.claim(&fi, "push");
+    assert_eq!(bare(&["complete", &root, &push.token, "bare"]), "guard_host_missing");
+    assert_eq!(runs(&f), 0);
+    assert!(!f.kinds(&fi).contains(&"EffectStarted".to_string()));
+
+    let mut g = fx(POLL);
+    let fi = g.begin();
+    let ci = g.claim(&fi, "ci");
+    let root = g.root.to_str().unwrap().to_string();
+    assert_eq!(bare(&["complete", &root, &ci.token, "bare"]), "completed:guard_host_missing");
+    assert_eq!(g.kinds(&fi), ["Started", "Claimed", "Completed"], "no verdict written");
+}
+
+#[test]
+fn a_program_that_is_not_the_evaluator_is_refused_through_the_writer() {
+    // A binary without the entry, which rejects the evaluator's arguments and exits non-zero.
+    use crate::kernel::guard::tests::PROGRAM;
+    let (mut f, _clock) = clocked(LIMITS);
+    let fi = f.begin();
+    f.done(&fi, "head");
+    let c = f.claim(&fi, "pick");
+    PROGRAM.with(|p| *p.borrow_mut() = Some("/bin/ls".into()));
+    let refused = choose(&mut f.ledger, &f.me, &c.token, "go");
+    PROGRAM.with(|p| *p.borrow_mut() = None);
+    let Ok(Choosing::Refused { code, reason, .. }) = refused else { panic!("{refused:?}") };
+    assert_eq!(code, "guard_error");
+    assert!(reason.starts_with("the evaluator exited"), "{reason}");
+}
+
+/// What `next` says for `fi` at the clock this thread reads.
+fn next_now(f: &Fx, fi: &crate::InstanceId) -> Next {
+    let reader = crate::Reader::new(&f.root, crate::Options::default()).unwrap();
+    crate::kernel::next(&reader.lock().unwrap(), fi, clock::now()).unwrap()
+}
+
+#[test]
+fn attempts_are_counted_in_each_iteration_of_a_repeat() {
+    let (mut f, test_clock) = clocked(
+        "flow: loop\nversion: 1\nparams: [dir]\nworkdir: \"{{params.dir}}\"\nnodes:\n  step: {class: work, verify: ['true'], retry: {attempts: 2}}\nrepeats:\n  rounds: {body: [step], max: 3, until: '.nodes.step.outputs.ok'}\n",
+    );
+    let fi = f.begin();
+    for ok in [false, true] {
+        // One attempt ends without a receipt in each iteration, then the second completes.
+        let first = f.claim(&fi, "step");
+        test_clock.set(first.lease_until);
+        let second = f.claim(&fi, "step");
+        assert_eq!(second.attempt, 2, "ok {ok}");
+        assert_eq!(outcome(&f.complete(&second.token, json!({ "ok": ok }))), "completed");
+    }
+    assert_eq!(f.status(&fi, clock::now()).repeats["rounds"].state, crate::kernel::RepeatState::Done);
+}
+
+#[test]
+fn an_effect_that_started_is_reconciled_whatever_its_attempts() {
+    // A reconcile takes no attempt: an effect with one attempt whose run failed (it started, so
+    // it is never run again) is reconciled by the next claim once that attempt has ended.
+    let (mut f, test_clock) = clocked(LIMITS);
+    let fi = f.begin();
+    let c = f.claim(&fi, "retried");
+    std::fs::write(f.dir.join("fail"), "1").unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "effect_failed");
+    std::fs::remove_file(f.dir.join("fail")).unwrap();
+    test_clock.set(c.lease_until);
+    assert_eq!(f.status(&fi, clock::now()).nodes["retried"].state, State::Ready);
+    let again = f.claim(&fi, "retried");
+    let Completion::Completed { verify, .. } = f.complete(&again.token, Value::Null) else { panic!() };
+    assert_eq!((verify.argv[2].as_str(), runs(&f)), ("test -s effects", 1));
+    // Only over the inputs it started over: once they change, the attempt has ended and the
+    // node has none left.
+    let fi = f.begin();
+    let at = f.done(&fi, "head");
+    let c = f.claim(&fi, "pushonce");
+    std::fs::write(f.dir.join("fail"), "1").unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "effect_failed");
+    std::fs::remove_file(f.dir.join("fail")).unwrap();
+    test_clock.set(at + secs(61));
+    std::fs::write(f.dir.join("head"), "1").unwrap();
+    f.done(&fi, "head");
+    assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "pushonce")), "attempts_exhausted");
+}
+
+#[test]
+fn an_effect_that_never_started_is_not_kept_from_running() {
+    // The program is missing, so the run fails before anything started (`spawn_failed`): the
+    // start is withdrawn, and once the program exists the same claim runs the effect.
+    let (mut f, test_clock) = clocked(LIMITS);
+    let fi = f.begin();
+    let c = f.claim(&fi, "act");
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "spawn_failed");
+    let act = f.dir.join("act");
+    std::fs::write(&act, "#!/bin/sh\necho ran >> effects\n").unwrap();
+    std::fs::set_permissions(&act, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let Completion::Completed { verify, .. } = f.complete(&c.token, Value::Null) else { panic!() };
+    assert_eq!((verify.argv[0].ends_with("/act"), runs(&f)), (true, 1), "the effect ran, not its reconcile");
+    // A withdrawn start does not spare the attempt: with the program missing again, the one
+    // attempt ends, and the node fails.
+    std::fs::remove_file(&act).unwrap();
+    let fi = f.begin();
+    let c = f.claim(&fi, "act");
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "spawn_failed");
+    test_clock.set(c.lease_until);
+    assert_eq!(f.status(&fi, clock::now()).nodes["act"].state, State::Failed);
+}
+
+#[test]
+fn an_effect_whose_inputs_changed_after_it_started_runs_over_the_new_ones() {
+    // A start stands for its inputs only: over new inputs the effect is a new one, and runs.
+    let (mut f, test_clock) = clocked(LIMITS);
+    let fi = f.begin();
+    let at = f.done(&fi, "head");
+    let c = f.claim(&fi, "push");
+    std::fs::write(f.dir.join("fail"), "1").unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "effect_failed");
+    std::fs::remove_file(f.dir.join("fail")).unwrap();
+    test_clock.set(at + secs(61));
+    std::fs::write(f.dir.join("head"), "1").unwrap();
+    f.done(&fi, "head");
+    let c = f.claim(&fi, "push");
+    let Completion::Completed { verify, .. } = f.complete(&c.token, Value::Null) else { panic!() };
+    assert!(verify.argv[2].starts_with("echo ran"), "the effect ran, not its reconcile: {:?}", verify.argv);
+    assert_eq!(runs(&f), 2);
+}
+
+#[test]
+fn a_cancel_deadline_ends_a_running_command() {
+    // The run is no longer than what is left of the claim: an effect that would act after its
+    // deadline is killed first.
+    let (mut f, test_clock) = clocked(LIMITS);
+    let fi = f.begin();
+    let now = clock::now();
+    test_clock.set(now);
+    let c = f.claim(&fi, "slow");
+    test_clock.set(now + secs(30) - ms(150));
+    let started = std::time::Instant::now();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "verify_timeout");
+    assert!(started.elapsed() < Duration::from_millis(800), "{:?}", started.elapsed());
+    assert_eq!(runs(&f), 0, "the effect never acted");
 }

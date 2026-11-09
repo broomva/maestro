@@ -136,7 +136,7 @@ fn wait(child: &mut Child, limits: &Limits) -> Ran {
         [Pipe::new(child.stdout.take().map(OwnedFd::from)), Pipe::new(child.stderr.take().map(OwnedFd::from))];
     if pipes.iter().filter_map(|p| p.fd.as_ref()).any(|fd| rustix::io::ioctl_fionbio(fd, true).is_err()) {
         reap(child);
-        return failed("spawn_failed", "the command's output could not be read without blocking".into(), Vec::new());
+        return failed("run_failed", "the command's output could not be read without blocking".into(), Vec::new());
     }
     let cap = limits.max_output;
     let mut buf = vec![0u8; CHUNK];
@@ -158,7 +158,7 @@ fn wait(child: &mut Child, limits: &Limits) -> Ran {
             Ok(None) => {}
             Err(e) => {
                 kill_group(child);
-                break Err(("spawn_failed", format!("the command could not be waited on ({e})")));
+                break Err(("run_failed", format!("the command could not be waited on ({e})")));
             }
         }
         if Instant::now() >= deadline {

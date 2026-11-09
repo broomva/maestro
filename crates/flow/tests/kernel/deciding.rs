@@ -22,7 +22,7 @@ nodes:
 "#;
 
 /// The refusal code of a choice, or `chosen`.
-fn chose(c: &Choosing) -> &str {
+pub(crate) fn chose(c: &Choosing) -> &str {
     match c {
         Choosing::Chosen { .. } => "chosen",
         Choosing::Refused { code, .. } => code,
@@ -326,4 +326,71 @@ fn a_hand_pinned_guard_the_compiler_would_refuse_is_refused_before_it_runs() {
     f.pass(&fi, "review", json!({ "verdict": "pass" }));
     let c = f.claim(&fi, "pick");
     assert_eq!(chose(&f.choose(&c.token, "ship")), "guard_invalid");
+}
+
+/// `review` (work) feeds a choice whose one edge runs `guard`.
+fn guarded(guard: &str) -> String {
+    format!(
+        "flow: g\nversion: 1\nparams: [dir]\nworkdir: \"{{{{params.dir}}}}\"\nnodes:\n  review: {{class: work, verify: ['true']}}\n  pick: {{class: choice, needs: [review], edges: {{go: {{guard: '{guard}'}}}}}}\n"
+    )
+}
+
+#[test]
+fn a_guard_that_crashes_its_evaluator_is_refused_through_the_writer() {
+    // A string of nested brackets under the outputs cap, parsed by the guard: the evaluator
+    // overflows its stack and aborts.
+    let mut f = fx(&guarded(".nodes.review.outputs.s | fromjson | length > 0"));
+    let fi = f.begin();
+    let nested = format!("{}{}", "[".repeat(30_000), "]".repeat(30_000));
+    f.pass(&fi, "review", json!({ "s": nested }));
+    let c = f.claim(&fi, "pick");
+    let Choosing::Refused { code, reason, .. } = f.choose(&c.token, "go") else { panic!("chosen") };
+    assert_eq!((code, reason.as_str()), ("guard_error", "the evaluator crashed"));
+}
+
+#[test]
+fn a_guard_that_never_ends_is_refused_at_the_writers_own_timeout() {
+    // No timeout is passed: the writers use `GUARD_TIMEOUT` (1 s). The guard passes the
+    // denylist and would run for minutes.
+    let mut f = fx(&guarded(
+        "reduce (.nodes.review.outputs.xs[] as $a | .nodes.review.outputs.xs[] as $b | .nodes.review.outputs.xs[]) as $x (0; . + $x) > 0",
+    ));
+    let fi = f.begin();
+    let xs: Vec<u32> = (0..2000).collect();
+    f.pass(&fi, "review", json!({ "xs": xs }));
+    let c = f.claim(&fi, "pick");
+    let (root, me, token) = (f.root.clone(), f.me.clone(), c.token.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut ledger = maestro_flow::Ledger::open(&root, &host("mac"), maestro_flow::Options::default()).unwrap();
+        let started = std::time::Instant::now();
+        let chose = choose(&mut ledger, &me, &token, "go").map(|c| super::deciding::chose(&c).to_string());
+        let _ = tx.send((chose.map_err(|e| e.code().to_string()), started.elapsed()));
+    });
+    let Ok((chose, took)) = rx.recv_timeout(std::time::Duration::from_secs(4)) else {
+        // A bound that did not hold: leave no evaluator running.
+        let me = std::process::id().to_string();
+        let arg = maestro_flow::kernel::guard::EVALUATOR_ARG;
+        let _ = std::process::Command::new("pkill").args(["-KILL", "-P", &me, "-f", arg]).status();
+        panic!("choose did not return");
+    };
+    assert_eq!(chose, Ok("guard_timeout".to_string()));
+    assert!(took < std::time::Duration::from_millis(1800), "{took:?}");
+}
+
+#[test]
+fn every_precondition_of_an_effect_must_hold() {
+    let two = EFFECT.replace(
+        "preconditions: ['.nodes.build.outputs.ready == true']",
+        "preconditions: ['.nodes.build.outputs.ready == true', '.nodes.build.outputs.ready == false']",
+    );
+    let mut f = fx(&two);
+    let fi = f.begin();
+    f.pass(&fi, "build", json!({ "ready": true }));
+    let c = f.claim(&fi, "push");
+    let Completion::Refused { code, reason, .. } = f.complete(&c.token, Value::Null) else { panic!("completed") };
+    assert_eq!(code, "precondition_false");
+    assert!(reason.starts_with("precondition 1 "), "{reason}");
+    assert_eq!(runs(&f), 0, "the effect did not run");
+    assert!(!f.kinds(&fi).contains(&"EffectStarted".to_string()));
 }

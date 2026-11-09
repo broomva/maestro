@@ -180,8 +180,12 @@ pub fn child_result(child: Child) -> String {
 /// - `archive <root> <dest>`: `operator::archive`.
 /// - `recover <root>`: `operator::recover`.
 /// - `fresh <root> <host>`: `operator::create_fresh_ledger`.
-/// - `complete <root> <token>`: `kernel::complete` as the session `agent("owner", "marker-1")` on
-///   host `mac`, with no outputs; prints `completed` or the refusal's code.
+/// - `complete <root> <token> <host|bare>`: `kernel::complete` as the session
+///   `agent("owner", "marker-1")` on host `mac`, with no outputs, after `kernel::guard_entry` with
+///   `host` and without it with `bare`; prints `completed` (then `:` and each until verdict left
+///   unrecorded, by code) or the refusal's code.
+/// - `choose <root> <token> <edge> <host|bare>`: `kernel::choose`, the same way; prints `chosen`
+///   or the refusal's code.
 pub fn child_main() {
     let Ok(spec) = std::env::var(CHILD_ENV) else { return };
     let parts: Vec<&str> = spec.split('\u{1f}').collect();
@@ -226,23 +230,43 @@ pub fn child_main() {
         ["fresh", root, name] => {
             maestro_flow::operator::create_fresh_ledger(Path::new(root), &host(name), &Options::default()).map(|_| ())
         }
-        ["complete", root, token] => {
-            use maestro_flow::kernel::{Completion, Limits, complete};
+        ["complete", root, token, registered] => {
+            use maestro_flow::kernel::{Completion, Limits, Verdict, complete};
+            if *registered == "host" {
+                maestro_flow::kernel::guard_entry();
+            }
+            let me = agent("owner", "marker-1");
             let out = match Ledger::open(Path::new(root), &host("mac"), Options::default()) {
                 Err(e) => e.code().to_string(),
                 Ok(mut ledger) => {
-                    match complete(
-                        &mut ledger,
-                        &agent("owner", "marker-1"),
-                        token,
-                        serde_json::Value::Null,
-                        &Limits::default(),
-                    ) {
-                        Ok(Completion::Completed { .. }) => "completed".to_string(),
+                    match complete(&mut ledger, &me, token, serde_json::Value::Null, &Limits::default()) {
+                        Ok(Completion::Completed { verdicts, .. }) => {
+                            let unrecorded = verdicts.iter().filter_map(|v| match v {
+                                Verdict::Unrecorded { code, .. } => Some(*code),
+                                Verdict::Recorded { .. } => None,
+                            });
+                            std::iter::once("completed").chain(unrecorded).collect::<Vec<_>>().join(":")
+                        }
                         Ok(Completion::Refused { code, .. }) => code.to_string(),
                         Err(e) => e.code().to_string(),
                     }
                 }
+            };
+            println!("FLOW_RESULT {out}");
+            return;
+        }
+        ["choose", root, token, edge, registered] => {
+            use maestro_flow::kernel::{Choosing, choose};
+            if *registered == "host" {
+                maestro_flow::kernel::guard_entry();
+            }
+            let out = match Ledger::open(Path::new(root), &host("mac"), Options::default()) {
+                Err(e) => e.code().to_string(),
+                Ok(mut ledger) => match choose(&mut ledger, &agent("owner", "marker-1"), token, edge) {
+                    Ok(Choosing::Chosen { .. }) => "chosen".to_string(),
+                    Ok(Choosing::Refused { code, .. }) => code.to_string(),
+                    Err(e) => e.code().to_string(),
+                },
             };
             println!("FLOW_RESULT {out}");
             return;

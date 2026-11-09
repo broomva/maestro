@@ -58,6 +58,8 @@ pub struct Fx {
 }
 
 pub fn fx(yaml: &str) -> Fx {
+    // This test process is a guard host, as a binary that runs the writers is (`kernel::guard`).
+    maestro_flow::kernel::guard_entry();
     let tmp = tempfile::tempdir().unwrap();
     let root = root_in(tmp.path());
     let dir = tmp.path().join("work");

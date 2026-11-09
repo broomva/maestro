@@ -28,7 +28,10 @@
 //!   The denylist does not bound a guard's work (a `reduce` over the input does not need a banned
 //!   word); the timeout does.
 //!
-//! Memory is bounded by the timeout only: the kernel sets no memory limit on the child.
+//! - **Memory, where the OS enforces it.** On Linux the child limits its own address space to
+//!   [`CHILD_MEMORY`] before it reads anything. macOS does not enforce `RLIMIT_AS` or
+//!   `RLIMIT_DATA`, so there a guard's memory is bounded by the timeout only (a `reduce` that
+//!   doubles a string can take gigabytes within it).
 //!
 //! # The verdict
 //!
@@ -39,13 +42,22 @@
 //! receipts it may read, each with its `outputs` and its `value` (the observed value or the chosen
 //! edge). The digest a verdict records is the sha256 of that document.
 //!
-//! # The entry point
+//! # The host: [`guard_entry`]
 //!
-//! The child is [`std::env::current_exe`] started with [`GUARD_ENV`] set and [`ENTRY_ARGS`]. A
-//! binary that runs the writers calls [`guard_entry`] first thing in `main`: with the variable set
-//! it answers and exits, before it reads any argument. A test binary has a test named
-//! `guard_process_entry` that calls it; the arguments are the test harness's filter for it. A
-//! binary without the entry runs as itself and gives no verdict, which is refused `guard_error`.
+//! **A binary that calls `claim`, `complete` or `choose` must call [`guard_entry`] first thing in
+//! `main`.** The call does two things:
+//!
+//! - It registers the process as a guard host. A write that needs a guard in a process that never
+//!   called it is refused `guard_host_missing` and starts nothing, since running this binary
+//!   again would run its own `main`, not the evaluator.
+//! - In the child the kernel starts (this binary again, [`std::env::current_exe`], with
+//!   [`GUARD_ENV`] set to the child's own deadline and [`ENTRY_ARGS`]), it evaluates the guard,
+//!   answers and exits, before the binary reads its arguments. It does so only when both the
+//!   variable and [`EVALUATOR_ARG`] are there, so a variable left in a shell does nothing.
+//!
+//! A test binary has a test named `guard_process_entry` that calls it (the arguments are the test
+//! harness's filters: its name, and [`EVALUATOR_ARG`], which names no test), and its fixtures call
+//! it to register.
 
 use super::events::digest;
 use super::exec::{self, Limits, Ran};
@@ -56,10 +68,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// How long a writer lets a guard run.
-pub const GUARD_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a writer lets a guard run. Real guards answer in milliseconds; the child's start is
+/// most of it.
+pub const GUARD_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The most bytes of input document a guard reads. A choice reads at most `ir::MAX_FAN_IN` (16)
 /// receipts of at most `write::MAX_OUTPUTS` (64 KiB) each, plus the params (`ir::MAX_PARAMS`).
@@ -76,13 +90,23 @@ pub const MAX_DETAIL: usize = 512;
 pub const GUARD_ENV: &str = "MAESTRO_FLOW_GUARD";
 
 /// How long past the kernel's timeout the child waits before it ends itself.
-pub const CHILD_GRACE: Duration = Duration::from_secs(1);
+pub const CHILD_GRACE: Duration = Duration::from_millis(500);
+
+/// The address space the child allows itself, where the OS enforces it (Linux).
+pub const CHILD_MEMORY: u64 = 1 << 30;
 
 /// The exit status of a child that ended itself at its own deadline.
 pub const DEADLINE_EXIT: i32 = 124;
 
-/// The arguments the child is started with: a test harness's filter for its entry test.
-pub const ENTRY_ARGS: &[&str] = &["guard_process_entry", "--nocapture", "--test-threads=1"];
+/// The argument that, with [`GUARD_ENV`], makes [`guard_entry`] the evaluator. To a test harness it
+/// is a filter that names no test.
+pub const EVALUATOR_ARG: &str = "maestro-flow-guard-evaluator";
+
+/// The arguments the child is started with: a test harness's filters for its entry test.
+pub const ENTRY_ARGS: &[&str] = &["guard_process_entry", EVALUATOR_ARG, "--nocapture", "--test-threads=1"];
+
+/// Set by [`guard_entry`]: this process can be its own guard evaluator.
+static HOST: AtomicBool = AtomicBool::new(false);
 
 /// The line the child answers with.
 const ANSWER: &str = "MAESTRO_FLOW_GUARD ";
@@ -124,12 +148,21 @@ pub(crate) fn judge(code: &str, input: &Value, timeout: Duration) -> Result<Judg
 /// Runs `code` over the JSON `input` in the evaluator's child process. No denylist: [`judge`]
 /// checks it first, and the tests that prove the bounds call this directly.
 pub(crate) fn evaluate(code: &str, input: &[u8], timeout: Duration) -> Evaluated {
-    evaluate_within(code, input, timeout, timeout.saturating_add(CHILD_GRACE))
+    evaluate_within(code, input, timeout, own_deadline(timeout))
+}
+
+/// The child's own deadline for a kernel `timeout`.
+fn own_deadline(timeout: Duration) -> Duration {
+    timeout.saturating_add(CHILD_GRACE)
 }
 
 /// [`evaluate`], with the child's own deadline (`own`) apart from the kernel's timeout.
 fn evaluate_within(code: &str, input: &[u8], timeout: Duration, own: Duration) -> Evaluated {
     let refuse = |code: &'static str, detail: String| Evaluated { outcome: Err((code, cut(detail))), pid: None };
+    if !HOST.load(Ordering::SeqCst) {
+        let detail = "this process never called kernel::guard_entry, so it cannot evaluate a guard";
+        return refuse("guard_host_missing", detail.to_string());
+    }
     if input.len() > MAX_GUARD_INPUT {
         let detail = format!("the guard's input is {} bytes, more than {MAX_GUARD_INPUT}", input.len());
         return refuse("guard_input_too_large", detail);
@@ -138,12 +171,16 @@ fn evaluate_within(code: &str, input: &[u8], timeout: Duration, own: Duration) -
         Ok(program) => program,
         Err(e) => return refuse("guard_error", format!("the evaluator cannot be found ({e})")),
     };
+    // The crate's own unit tests only: another program in the evaluator's place.
+    #[cfg(test)]
+    let program = tests::PROGRAM.with(|p| p.borrow().clone()).unwrap_or(program);
     let stdin = match envelope(code, input) {
         Ok((file, _)) => file,
         Err(e) => return refuse("guard_error", format!("the guard's input cannot be staged ({e})")),
     };
     let mut cmd = Command::new(program);
     cmd.args(ENTRY_ARGS).env_clear().env(GUARD_ENV, own.as_millis().to_string()).stdin(Stdio::from(stdin));
+
     let (ran, pid) = exec::supervise(cmd, &Limits { timeout, max_output: GUARD_OUTPUT });
     let outcome = match ran {
         Ran::Exited { code: Some(0), stdout, .. } => answer(&stdout),
@@ -210,12 +247,16 @@ fn cut(mut detail: String) -> String {
     detail
 }
 
-/// The evaluator's entry point. With [`GUARD_ENV`] set, reads the guard and its input from
-/// standard input, prints its answer and exits; otherwise returns at once. See the module docs.
+/// The guard host's entry point; see the module docs. Started as the evaluator (with
+/// [`GUARD_ENV`] and [`EVALUATOR_ARG`]), it reads the guard and its input from standard input,
+/// prints its answer and exits. Otherwise it registers this process as a guard host and returns.
 pub fn guard_entry() {
-    let Some(own) = std::env::var_os(GUARD_ENV) else {
+    let evaluator = std::env::args_os().any(|a| a == EVALUATOR_ARG);
+    let Some(own) = std::env::var_os(GUARD_ENV).filter(|_| evaluator) else {
+        HOST.store(true, Ordering::SeqCst);
         return;
     };
+    limit_memory();
     // The child's own deadline; a value that does not read as one gets the writers' default.
     let ms = own.to_str().and_then(|ms| ms.parse::<u64>().ok());
     let own = ms.map_or(GUARD_TIMEOUT.saturating_add(CHILD_GRACE), Duration::from_millis);
@@ -233,6 +274,15 @@ pub fn guard_entry() {
     let _ = writeln!(out, "\n{ANSWER}{answer}");
     let _ = out.flush();
     std::process::exit(0);
+}
+
+/// The child's address space, where the OS enforces a limit on it.
+fn limit_memory() {
+    #[cfg(target_os = "linux")]
+    {
+        let limit = rustix::process::Rlimit { current: Some(CHILD_MEMORY), maximum: Some(CHILD_MEMORY) };
+        let _ = rustix::process::setrlimit(rustix::process::Resource::As, limit);
+    }
 }
 
 /// The child's side: read the envelope and run the guard. The kernel wrote the envelope within
@@ -264,6 +314,9 @@ pub(crate) mod tests {
         /// Run by [`judge`] on this thread as a guard is evaluated, with the flows lock released:
         /// the tests that move the clock or the log while a guard runs set it.
         pub(crate) static WHILE_JUDGING: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+        /// Started by [`evaluate`] on this thread in place of this binary: the tests of a
+        /// program that is not the evaluator set it.
+        pub(crate) static PROGRAM: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     }
 
     /// Not a test: the entry the evaluator's child runs (see the module docs).
@@ -290,6 +343,7 @@ pub(crate) mod tests {
     }
 
     fn holds(code: &str, input: Value) -> Result<bool, Unfit> {
+        guard_entry();
         judge(code, &input, GUARD_TIMEOUT).map(|j| j.holds)
     }
 
@@ -311,9 +365,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_guard_s_input_reaches_the_child_through_a_file_unlinked_before_it_is_written() {
+    fn a_guard_s_input_reaches_the_child_through_a_private_file_unlinked_before_it_is_written() {
+        use std::os::unix::fs::PermissionsExt;
         let (mut file, path) = envelope("true", br#"{"a": 1}"#).unwrap();
         assert!(!path.exists(), "a guard's input was left on disk at {}", path.display());
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600, "readable by its owner only");
         let mut text = String::new();
         file.read_to_string(&mut text).unwrap();
         assert_eq!(text, "\"true\"\n{\"a\": 1}");
@@ -330,6 +386,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_guard_input_over_its_bound_is_refused_before_anything_starts() {
+        guard_entry();
         let fits = vec![b' '; MAX_GUARD_INPUT];
         let over = vec![b' '; MAX_GUARD_INPUT + 1];
         let started = evaluate("true", &over, GUARD_TIMEOUT);
@@ -343,10 +400,13 @@ pub(crate) mod tests {
 
     #[test]
     fn a_guard_that_runs_without_bound_is_killed_at_its_timeout_and_leaves_nothing() {
-        // Through `evaluate`, past the denylist: the bound must hold for whatever reaches the
-        // child. A deep reduce, and a count the log supplies (jaq refuses a count that is not an
-        // integer, so 1e15), pass the denylist as they are.
+        // Through `evaluate_within`, past the denylist: the bound must hold for whatever reaches
+        // the child. A deep reduce, and a count the log supplies (jaq refuses a count that is not
+        // an integer, so 1e15), pass the denylist as they are. The child's own deadline is far
+        // off, so the kernel's timeout is what ends them.
+        guard_entry();
         let timeout = Duration::from_millis(150);
+        let own = Duration::from_secs(5);
         let deep = "reduce (.[] as $a | .[] as $b | .[] as $c | .[]) as $x (0; . + $x)";
         let huge = ".nodes.a.outputs as $o | [limit($o.n; $o.xs[] as $a | $o.xs[] as $b | $o.xs[])] | length > 0";
         let xs: Vec<u32> = (0..2000).collect();
@@ -367,41 +427,54 @@ pub(crate) mod tests {
             for (code, input, refused) in cases {
                 scope.spawn(move || {
                     let started = Instant::now();
-                    let evaluated = evaluate(code, &serde_json::to_vec(&input).unwrap(), timeout);
+                    let evaluated = evaluate_within(code, &serde_json::to_vec(&input).unwrap(), timeout, own);
                     let elapsed = started.elapsed();
                     let (refusal, detail) = evaluated.outcome.unwrap_err();
                     assert!(refused.contains(&refusal), "{code}: {refusal} {detail}");
-                    // The kernel kills it at its timeout, well before the child's own deadline.
                     assert!(elapsed < timeout + Duration::from_millis(600), "{code}: {elapsed:?}");
                     assert!(gone(evaluated.pid.unwrap()), "{code}: the evaluator outlived its verdict");
                 });
             }
-            // The two that pass the denylist are refused by the timeout through `judge` too.
-            let deep_input = json!(xs);
-            scope.spawn(move || {
-                assert_eq!(judge(deep, &deep_input, timeout).unwrap_err().0, "guard_timeout");
-            });
         });
     }
 
     #[test]
-    fn an_evaluator_its_kernel_never_kills_ends_itself_at_its_own_deadline() {
-        // As after a kernel crash: the kernel's timeout is far off, the child's own is not.
+    fn an_evaluator_its_kernel_never_kills_ends_itself_at_its_default_deadline() {
+        // As after a kernel crash: the kernel's timeout is far off, and the child has the deadline
+        // the writers give it, their timeout plus the grace (1.5 s).
+        guard_entry();
         let started = Instant::now();
-        let evaluated =
-            evaluate_within("last(range(1e15))", b"null", Duration::from_secs(30), Duration::from_millis(100));
+        let own = own_deadline(GUARD_TIMEOUT);
+        let evaluated = evaluate_within("last(range(1e15))", b"null", Duration::from_secs(10), own);
+        let elapsed = started.elapsed();
         assert_eq!(evaluated.outcome.unwrap_err().0, "guard_timeout");
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(elapsed < Duration::from_millis(2100), "{elapsed:?}");
         assert!(gone(evaluated.pid.unwrap()));
     }
 
     #[test]
     fn the_evaluator_inherits_no_environment() {
+        guard_entry();
         // cargo runs every test with CARGO_* set, so a child that inherited would show them.
         assert!(std::env::var_os("CARGO_PKG_NAME").is_some(), "the test process has a variable to leak");
         let evaluated = evaluate(PROBE_ENV, b"null", GUARD_TIMEOUT);
         let (refusal, names) = evaluated.outcome.unwrap_err();
         assert_eq!((refusal, names.as_str()), ("guard_error", GUARD_ENV));
+    }
+
+    #[test]
+    fn the_variable_alone_does_not_make_a_binary_the_evaluator() {
+        // A MAESTRO_FLOW_GUARD left in a shell: the entry test runs as a test, reads nothing and
+        // answers nothing, since the evaluator's argument is not there.
+        let run = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["guard_process_entry", "--nocapture", "--test-threads=1"])
+            .env(GUARD_ENV, "60000")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(run.status.success(), "{stdout}");
+        assert!(!stdout.contains(ANSWER) && stdout.contains("1 passed"), "{stdout}");
     }
 
     #[test]
@@ -413,5 +486,19 @@ pub(crate) mod tests {
         let long = "é".repeat(MAX_DETAIL);
         let short = cut(long);
         assert!(short.len() <= MAX_DETAIL && short.len() > MAX_DETAIL - 2, "{}", short.len());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_guard_that_takes_more_memory_than_its_child_allows_is_refused() {
+        // Linux enforces the child's address space; macOS does not (see the module docs).
+        guard_entry();
+        let evaluated = evaluate_within(
+            r#"reduce range(0; 40) as $i ("x"; . + .) | length > 0"#,
+            b"null",
+            Duration::from_secs(20),
+            Duration::from_secs(20),
+        );
+        assert_eq!(evaluated.outcome.unwrap_err().0, "guard_error");
     }
 }
