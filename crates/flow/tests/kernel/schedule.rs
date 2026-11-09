@@ -94,13 +94,14 @@ impl Fx {
 
     fn choose(&mut self, fi: &InstanceId, node: &str, at: &[(&str, u32)], edge: &str) {
         let inputs = self.inputs(fi, node);
+        let (iteration, edge) = (iter(at), edge.into());
         let c =
-            Chosen { node: node.into(), iteration: iter(at), attempt: 1, edge: edge.into(), inputs, tool_use_id: None };
+            Chosen { node: node.into(), iteration, attempt: 1, edge, inputs, tool_use_id: None, guard_digest: None };
         self.append(fi, c.to_event().unwrap());
     }
 
     fn verdict(&mut self, fi: &InstanceId, repeat: &str, iteration: u32, holds: bool) {
-        self.append(fi, Guarded { repeat: repeat.into(), iteration, holds }.to_event().unwrap());
+        self.append(fi, Guarded { repeat: repeat.into(), iteration, holds, digest: None }.to_event().unwrap());
     }
 
     /// Rewrites the `at` of the events numbered in `edits`, keeping the chain whole.
@@ -322,7 +323,7 @@ version: 1
 nodes:
   review: {class: work, verify: [x]}
   fix: {class: work, verify: [x], needs: [review]}
-  merge: {class: effect, needs: [rounds], reconcile: [x]}
+  merge: {class: effect, run: [x], needs: [rounds], reconcile: [x]}
   escalate: {class: human, ask: The review did not converge. Merge anyway?}
   announce: {class: work, verify: [x], needs: [merge]}
   waive: {class: work, verify: [x], needs: [escalate]}
@@ -620,7 +621,7 @@ fn a_stale_observation_inside_a_repeat_blocks_what_needs_the_repeat() {
 version: 1
 nodes:
   ci: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: green, 1: red}}
-  land: {class: effect, reconcile: [x], needs: [poll]}
+  land: {class: effect, run: [x], reconcile: [x], needs: [poll]}
 repeats:
   poll: {body: [ci], max: 5, until: '.nodes.ci.value == \"green\"'}
 ");
@@ -636,7 +637,7 @@ const POLL: &str = "flow: f
 version: 1
 nodes:
   ci: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: green, 1: red}}
-  land: {class: effect, reconcile: [x], needs: [poll]}
+  land: {class: effect, run: [x], reconcile: [x], needs: [poll]}
   notify: {class: work, verify: [x], needs: [poll]}
   ack: {class: work, verify: [x], needs: [notify]}
 repeats:
@@ -758,7 +759,7 @@ nodes:
   pin: {{class: observe, run: [touch, '{m}'], fresh_for: 1m, exit_map: {{0: ok}}}}
   check: {{class: pure, run: [touch, '{m}'], needs: [pin]}}
   build: {{class: work, verify: [sh, -c, 'touch {m}'], needs: [check]}}
-  push: {{class: effect, reconcile: [touch, '{m}'], preconditions: ['true'], needs: [build]}}
+  push: {{class: effect, run: [touch, '{m}'], reconcile: [touch, '{m}'], preconditions: ['true'], needs: [build]}}
   pick: {{class: choice, edges: {{a: {{guard: 'true'}}}}, needs: [push]}}
   ask: {{class: human, ask: 'touch {m}', needs: [pick]}}
 "

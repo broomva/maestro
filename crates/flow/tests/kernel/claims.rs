@@ -224,6 +224,7 @@ fn claimed(attempt: u32, until: Timestamp, token: &str) -> NewEvent {
         inputs: Default::default(),
         performer: None,
         tool_use_id: None,
+        cancel_at: None,
     };
     c.to_event().unwrap()
 }

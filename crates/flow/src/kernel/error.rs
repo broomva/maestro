@@ -73,8 +73,8 @@ pub enum KernelError {
     Refused(#[from] Refusal),
 }
 
-/// Why a write verb (`start`, `claim`, `heartbeat`, `complete`) wrote nothing. A refusal is a
-/// normal result: the code says why, and the caller decides what to do next.
+/// Why a write verb (`start`, `claim`, `heartbeat`, `complete`, `choose`) wrote nothing. A refusal
+/// is a normal result: the code says why, and the caller decides what to do next.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
     /// The session carries no owner marker (or an empty one), so it can own and write no flow.
@@ -107,9 +107,18 @@ pub enum Refusal {
     AlreadyClaimed { node: String, lease_until: String },
     #[error("The flow declares no node {node}.")]
     UnknownNode { node: String },
-    /// Only the kernel's own classes are claimed here: pure, observe and work.
+    /// A human node waits for the owner's answer; nothing claims it.
     #[error("Node {node} is a {class} node, which is not claimed with claim and complete.")]
     NotClaimable { node: String, class: String },
+    /// `choose` takes a choice node's claim, and `complete` every other class's.
+    #[error("Node {node} is a {class} node: use {verb} for it.")]
+    WrongVerb { node: String, class: String, verb: &'static str },
+    /// The node's `retry.attempts` have all ended without a receipt, so it takes no more claims.
+    #[error("Node {node} has used its {attempts} attempt(s) without a receipt.")]
+    AttemptsExhausted { node: String, attempts: u32 },
+    /// The attempt ran past its node's `cancel.after`: it is ended, heartbeats or not.
+    #[error("The claim on node {node} was cancelled at {cancel_at}; claim the node again.")]
+    Cancelled { node: String, cancel_at: String },
     /// Out of order, or something it consumes is not current and fresh now.
     #[error("Node {node} is not enabled now ({state}).")]
     NotEnabled { node: String, state: String },
@@ -142,6 +151,9 @@ impl Refusal {
             Refusal::AlreadyClaimed { .. } => "already_claimed",
             Refusal::UnknownNode { .. } => "unknown_node",
             Refusal::NotClaimable { .. } => "not_claimable",
+            Refusal::WrongVerb { .. } => "wrong_verb",
+            Refusal::AttemptsExhausted { .. } => "attempts_exhausted",
+            Refusal::Cancelled { .. } => "cancelled",
             Refusal::NotEnabled { .. } => "not_enabled",
             Refusal::AttemptOverflow { .. } => "attempt_overflow",
             Refusal::InvalidLimits { .. } => "invalid_limits",

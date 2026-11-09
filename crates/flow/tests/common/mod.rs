@@ -180,6 +180,8 @@ pub fn child_result(child: Child) -> String {
 /// - `archive <root> <dest>`: `operator::archive`.
 /// - `recover <root>`: `operator::recover`.
 /// - `fresh <root> <host>`: `operator::create_fresh_ledger`.
+/// - `complete <root> <token>`: `kernel::complete` as the session `agent("owner", "marker-1")` on
+///   host `mac`, with no outputs; prints `completed` or the refusal's code.
 pub fn child_main() {
     let Ok(spec) = std::env::var(CHILD_ENV) else { return };
     let parts: Vec<&str> = spec.split('\u{1f}').collect();
@@ -223,6 +225,27 @@ pub fn child_main() {
         ["recover", root] => maestro_flow::operator::recover(Path::new(root), &Options::default()).map(|_| ()),
         ["fresh", root, name] => {
             maestro_flow::operator::create_fresh_ledger(Path::new(root), &host(name), &Options::default()).map(|_| ())
+        }
+        ["complete", root, token] => {
+            use maestro_flow::kernel::{Completion, Limits, complete};
+            let out = match Ledger::open(Path::new(root), &host("mac"), Options::default()) {
+                Err(e) => e.code().to_string(),
+                Ok(mut ledger) => {
+                    match complete(
+                        &mut ledger,
+                        &agent("owner", "marker-1"),
+                        token,
+                        serde_json::Value::Null,
+                        &Limits::default(),
+                    ) {
+                        Ok(Completion::Completed { .. }) => "completed".to_string(),
+                        Ok(Completion::Refused { code, .. }) => code.to_string(),
+                        Err(e) => e.code().to_string(),
+                    }
+                }
+            };
+            println!("FLOW_RESULT {out}");
+            return;
         }
         _ => panic!("unknown child spec {spec:?}"),
     };

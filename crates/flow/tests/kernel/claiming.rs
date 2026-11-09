@@ -29,6 +29,24 @@ nodes:
   owner: {class: human, ask: budget}
 "#;
 
+/// build (work) -> push (effect): the effect appends a line to `effects` and exits with the
+/// content of `fail` (0 without it); its reconcile confirms a line is there unless `unconfirmed`
+/// exists. Its precondition reads the build's outputs.
+pub const EFFECT: &str = r#"
+flow: effect
+version: 1
+params: [dir]
+workdir: "{{params.dir}}"
+nodes:
+  build: {class: work, verify: ['true']}
+  push: {class: effect, needs: [build], preconditions: ['.nodes.build.outputs.ready == true'], run: [sh, -c, 'echo ran >> effects; exit "$(cat fail 2>/dev/null || echo 0)"'], reconcile: [sh, -c, 'test -s effects && test ! -f unconfirmed']}
+"#;
+
+/// How many times the effect ran.
+pub fn runs(f: &Fx) -> usize {
+    std::fs::read_to_string(f.dir.join("effects")).map_or(0, |t| t.lines().count())
+}
+
 pub struct Fx {
     pub _tmp: tempfile::TempDir,
     pub root: PathBuf,

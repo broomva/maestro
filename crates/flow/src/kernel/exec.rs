@@ -105,21 +105,37 @@ pub(crate) fn run(argv: &[String], cwd: &Path, limits: &Limits) -> Ran {
         return failed("spawn_failed", "the command is empty".into(), Vec::new());
     };
     let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(cwd).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args).current_dir(cwd).env_clear().stdin(Stdio::null());
     for name in ENV_ALLOW {
         if let Some(value) = std::env::var_os(name) {
             cmd.env(name, value);
         }
     }
+    supervise(cmd, limits).0
+}
+
+/// Runs `cmd` within `limits`, as [`run`] runs a node's command: its own process group, killed
+/// when it exits, times out or floods, its output captured up to the cap. The caller has set its
+/// program, arguments, directory, environment and standard input; this sets its output pipes and
+/// its group. Also returns the process id it ran under, once it started (for the tests that check
+/// nothing of a run is left).
+pub(crate) fn supervise(mut cmd: Command, limits: &Limits) -> (Ran, Option<u32>) {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(e) => return failed("spawn_failed", format!("the command did not start ({e})"), Vec::new()),
+        Err(e) => return (failed("spawn_failed", format!("the command did not start ({e})"), Vec::new()), None),
     };
+    let pid = Some(child.id());
+    (wait(&mut child, limits), pid)
+}
+
+/// Waits for a started command within `limits`, reading its pipes, and reaps it.
+fn wait(child: &mut Child, limits: &Limits) -> Ran {
     let mut pipes =
         [Pipe::new(child.stdout.take().map(OwnedFd::from)), Pipe::new(child.stderr.take().map(OwnedFd::from))];
     if pipes.iter().filter_map(|p| p.fd.as_ref()).any(|fd| rustix::io::ioctl_fionbio(fd, true).is_err()) {
-        reap(&mut child);
+        reap(child);
         return failed("spawn_failed", "the command's output could not be read without blocking".into(), Vec::new());
     }
     let cap = limits.max_output;
@@ -131,27 +147,27 @@ pub(crate) fn run(argv: &[String], cwd: &Path, limits: &Limits) -> Ran {
         // A flood is killed at once; the verdict is the one check below, once the pipes close,
         // so output that goes over just as the command exits fails the same way.
         if over {
-            kill_group(&child);
+            kill_group(child);
         }
         match child.try_wait() {
             // Whatever the command started dies with it, so nothing holds its pipes open.
             Ok(Some(status)) => {
-                kill_group(&child);
+                kill_group(child);
                 break Ok(status.code());
             }
             Ok(None) => {}
             Err(e) => {
-                kill_group(&child);
+                kill_group(child);
                 break Err(("spawn_failed", format!("the command could not be waited on ({e})")));
             }
         }
         if Instant::now() >= deadline {
-            kill_group(&child);
+            kill_group(child);
             break Err(("verify_timeout", format!("the command ran past {} ms", limits.timeout.as_millis())));
         }
         over |= pump(&mut pipes, &mut buf, cap, TICK);
     };
-    reap(&mut child);
+    reap(child);
 
     // What the command printed before it ended is still in the pipes: read them to their end,
     // for at most the grace.

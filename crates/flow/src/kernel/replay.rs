@@ -20,8 +20,8 @@
 //!   was taken) and it is not already done at the event's own `at`. Only an observation may be
 //!   recorded again while it is done (a re-run). A node whose receipt is stale at that `at`,
 //!   because something upstream had expired by then, is not done, so a new receipt replaces it.
-//! - `Claimed`, `Heartbeat`, `Refused` and every rejected event change nothing and cost no
-//!   evaluation; only an accepted receipt or verdict can move a repeat on.
+//! - `Claimed`, `Heartbeat`, `Refused`, `EffectStarted` and every rejected event change nothing and
+//!   cost no evaluation; only an accepted receipt or verdict can move a repeat on.
 //! - `Guarded` records a repeat's `until` verdict for its current iteration once that iteration
 //!   has settled, with the digest of the body it judged; a second verdict on a body already judged
 //!   is set aside. A false verdict moves the repeat on; a repeat with no `until` moves on as soon
@@ -49,9 +49,10 @@
 //! Acceptance checks order and branches; freshness only decides whether a node is already done.
 //! A writer must check, at the moment it records, that nothing the node consumes is stale, and
 //! record the `inputs` that `status` names. An `until` may read only the repeat's body nodes,
-//! since a verdict's digest covers only the body. Claims, leases, retry and cancel are the
-//! writers' to enforce. `claim`, `heartbeat` and `complete` (`write`) keep this contract for
-//! receipts and claims; `choose`, verdicts, retry and cancel are still to come.
+//! since a verdict's digest covers only the body: its input ([`awaiting`]) holds nothing else.
+//! Claims, leases, retry and cancel are the writers' to enforce. The writers (`write`) keep this
+//! contract: `claim`, `heartbeat`, `complete` and `choose`, and the `until` verdicts. What a guard
+//! reads is built here, from the log ([`guard_input`], [`awaiting`]); replay itself never runs it.
 //!
 //! # Cost
 //!
@@ -73,7 +74,8 @@
 use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
-    Chosen, Claimed, Completed, Guarded, Heartbeat, KernelEvent, Refused, Started, digest, receipt_digest,
+    Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat, KernelEvent, Refused, Started, digest,
+    receipt_digest,
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
 use super::write;
@@ -333,6 +335,82 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
     })
 }
 
+/// A repeat whose current iteration has settled and has no verdict, and the input its `until`
+/// reads: the params and the receipts of its body at that iteration, and nothing else.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Awaiting {
+    pub repeat: String,
+    pub iteration: u32,
+    pub until: String,
+    pub input: Value,
+}
+
+/// Every repeat with an `until` that awaits its verdict now (`RepeatStatus::awaiting_verdict`).
+pub(crate) fn awaiting(log: &Log, started: &Started) -> Result<Vec<Awaiting>, KernelError> {
+    let fold = Fold::replay(log, started)?;
+    let ir: &Ir = &started.ir;
+    // Cores are clock-free: settling and receipts do not depend on the clock.
+    let mut eval = Eval::new(&fold, Timestamp::UNIX_EPOCH);
+    let mut out = Vec::new();
+    for (rid, r) in &ir.repeats {
+        let Some(until) = &r.until else { continue };
+        let Loop::Running(i) = eval.phase(rid) else { continue };
+        if !eval.settled(rid, i) {
+            continue;
+        }
+        let read: Vec<(&str, Rc<Core>)> = r.body.iter().map(|b| (b.as_str(), eval.node(b, i))).collect();
+        let input = document(log, started, read)?;
+        out.push(Awaiting { repeat: rid.clone(), iteration: i, until: until.clone(), input });
+    }
+    Ok(out)
+}
+
+/// The input a guard on `node` reads at its current iteration: the params, and the receipts it
+/// consumes now (each node it needs or switches on, and a repeat it needs through its body at the
+/// iteration judged), which are exactly the receipts behind the `inputs` `next` names for it. Its
+/// content is a function of those digests and the params, so a writer holding a claim bound to
+/// the same inputs reads the same document.
+pub(crate) fn guard_input(log: &Log, started: &Started, node: &str) -> Result<Value, KernelError> {
+    let fold = Fold::replay(log, started)?;
+    let ir: &Ir = &started.ir;
+    let Some((id, _)) = ir.nodes.get_key_value(node) else {
+        return Err(malformed(log, log.seq(), format!("the flow declares no node {node}")));
+    };
+    let id = id.as_str();
+    let i = fold.current(id).unwrap_or(0);
+    let mine = fold.member.get(id).copied();
+    let mut eval = Eval::new(&fold, Timestamp::UNIX_EPOCH);
+    let core = eval.node(id, i);
+    let mut read = Vec::new();
+    for m in core.consumed.keys().copied() {
+        if ir.nodes.contains_key(m) {
+            if let Dep::Eval(c) = eval.dep(m, mine, i) {
+                read.push((m, c));
+            }
+        } else if let Loop::Done(j) = eval.phase(m) {
+            for b in eval.body(m) {
+                read.push((b.as_str(), eval.node(b, j)));
+            }
+        }
+    }
+    document(log, started, read)
+}
+
+/// `{"params": ..., "nodes": {"<id>": {"outputs": ..., "value": ...}}}` for each node read that has
+/// a receipt; a node without one (it will never run) is left out. A node read here has a receipt
+/// only if its content is current: what a guard reads is consumed, or a settled body.
+fn document(log: &Log, started: &Started, read: Vec<(&str, Rc<Core>)>) -> Result<Value, KernelError> {
+    let mut nodes = serde_json::Map::new();
+    for (id, core) in read {
+        let Some(seq) = core.seq else { continue };
+        let index = usize::try_from(seq.saturating_sub(1)).unwrap_or(usize::MAX);
+        let e = log.events.get(index).filter(|e| e.seq == seq).ok_or_else(|| malformed(log, seq, "no such event"))?;
+        let outputs = e.body.get("outputs").cloned().unwrap_or(Value::Null);
+        nodes.insert(id.to_string(), serde_json::json!({ "outputs": outputs, "value": core.value }));
+    }
+    Ok(serde_json::json!({ "params": started.params, "nodes": nodes }))
+}
+
 fn malformed(log: &Log, seq: u64, detail: impl Into<String>) -> KernelError {
     KernelError::Malformed { instance: log.instance.to_string(), seq, detail: detail.into() }
 }
@@ -374,6 +452,8 @@ type Key<'a> = (&'a str, u32);
 /// An accepted receipt.
 #[derive(Debug, Clone)]
 struct Receipt {
+    /// Its event's position in the log, where a guard's input reads its outputs.
+    seq: u64,
     at: Timestamp,
     /// The observed value or the chosen edge.
     value: Option<String>,
@@ -386,6 +466,7 @@ struct Receipt {
 
 impl Receipt {
     fn new(
+        seq: u64,
         at: Timestamp,
         outputs: &Value,
         value: Option<String>,
@@ -393,7 +474,7 @@ impl Receipt {
         inputs: BTreeMap<String, String>,
     ) -> Self {
         let digest = Rc::from(receipt_digest(outputs, value.as_deref()));
-        Receipt { at, value, failure, inputs, digest }
+        Receipt { seq, at, value, failure, inputs, digest }
     }
 }
 
@@ -535,7 +616,8 @@ impl<'a> Fold<'a> {
             let g: Guarded = body(log, e)?;
             return Ok(self.guarded(g, at).map(|()| Change::State));
         }
-        if ![Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND].contains(&e.kind.as_str()) {
+        let kinds = [Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND, EffectStarted::KIND];
+        if !kinds.contains(&e.kind.as_str()) {
             return Err(malformed(log, e.seq, format!("{} is not a kernel event", e.kind)));
         }
         let subject: Subject = body(log, e)?;
@@ -567,7 +649,7 @@ impl<'a> Fold<'a> {
                     }
                     _ => at,
                 };
-                Receipt::new(taken, &c.outputs, value, failure, c.inputs)
+                Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs)
             }
             Chosen::KIND => {
                 let c: Chosen = body(log, e)?;
@@ -575,7 +657,7 @@ impl<'a> Fold<'a> {
                 if !edges.contains_key(&c.edge) {
                     return Ok(Err("undeclared_edge"));
                 }
-                Receipt::new(at, &Value::Null, Some(c.edge), None, c.inputs)
+                Receipt::new(e.seq, at, &Value::Null, Some(c.edge), None, c.inputs)
             }
             Claimed::KIND => {
                 let _: Claimed = body(log, e)?;
@@ -583,6 +665,10 @@ impl<'a> Fold<'a> {
             }
             Heartbeat::KIND => {
                 let _: Heartbeat = body(log, e)?;
+                return Ok(Ok(Change::Inert));
+            }
+            EffectStarted::KIND => {
+                let _: EffectStarted = body(log, e)?;
                 return Ok(Ok(Change::Inert));
             }
             _ => {
@@ -752,6 +838,8 @@ struct Core<'a> {
     satisfies: bool,
     /// The digest of its receipt, for a dependent's inputs.
     digest: Option<Rc<str>>,
+    /// Its receipt's position in the log.
+    seq: Option<u64>,
     value: Option<String>,
     /// The digests a receipt for this node must record.
     consumed: BTreeMap<&'a str, Rc<str>>,
@@ -782,6 +870,7 @@ impl Core<'_> {
             enabled: false,
             satisfies: false,
             digest: None,
+            seq: None,
             value: None,
             consumed: BTreeMap::new(),
             observed: BTreeSet::new(),
@@ -1061,6 +1150,7 @@ impl<'f, 'a> Eval<'f, 'a> {
         out.form = Form::Recorded;
         out.value = r.value.clone();
         out.digest = Some(r.digest.clone());
+        out.seq = Some(r.seq);
         if let Class::Observe { fresh_for: Some(_), .. } = &n.class {
             out.observed.insert((id, i));
         }

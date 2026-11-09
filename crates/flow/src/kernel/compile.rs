@@ -42,7 +42,7 @@ const CLASS_FIELDS: &[(ClassDef, &[&str])] = &[
     (ClassDef::Observe, &["run", "fresh_for", "inputs", "exit_map"]),
     (ClassDef::Work, &["verify", "performer", "skill", "routing", "wait"]),
     (ClassDef::Choice, &["edges", "performer", "skill", "routing"]),
-    (ClassDef::Effect, &["preconditions", "reconcile", "performer", "skill", "routing", "wait"]),
+    (ClassDef::Effect, &["run", "preconditions", "reconcile", "performer", "skill", "routing", "wait"]),
     (ClassDef::Human, &["ask"]),
 ];
 
@@ -234,6 +234,12 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
             Class::Choice { edges: edges.into_iter().map(|(e, d)| (e, d.guard)).collect(), launch }
         }
         ClassDef::Effect => Class::Effect {
+            // Every effect a definition declares runs something: an empty run is refused here,
+            // and an IR with one is version 3 (`ir::version_for`).
+            run: match n.run {
+                Some(run) if !run.is_empty() => run,
+                _ => return Err(CompileError::invalid(format!("effect node {id} needs a non-empty run command"))),
+            },
             preconditions: n.preconditions.unwrap_or_default(),
             reconcile: n.reconcile.unwrap_or_default(),
             launch,

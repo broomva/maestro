@@ -1,5 +1,6 @@
-//! The writers that take a node from enabled to done: [`claim`], [`heartbeat`] and [`complete`].
-//! They fulfil the contract `replay` leaves to them (see its module docs).
+//! The writers that take a node from enabled to done: [`claim`], [`heartbeat`], [`complete`] and
+//! [`choose`], and the `until` verdicts they write when a repeat's iteration settles. They fulfil
+//! the contract `replay` leaves to them (see its module docs).
 //!
 //! # Ownership
 //!
@@ -12,10 +13,11 @@
 //!
 //! # Claims, tokens and leases
 //!
-//! - `claim` takes an enabled node of a kernel-run class (pure, observe, work) at its current
-//!   iteration and appends `Claimed`: the attempt, a lease, the input digests `next` names for the
-//!   node, and the sha256 of a new token. The token goes back to the caller once and is never
-//!   stored, nor returned by `next`, `status` or replay.
+//! - `claim` takes an enabled node of any class but human at its current iteration and appends
+//!   `Claimed`: the attempt, a lease, the input digests `next` names for the node, and the sha256
+//!   of a new token. The token goes back to the caller once and is never stored, nor returned by
+//!   `next`, `status` or replay. A choice node's claim is finished with `choose`, every other
+//!   class's with `complete`; the other verb is refused `wrong_verb`.
 //! - The token is a handle, not a capability: every use checks ownership first, so a token in
 //!   another session's hands grants nothing, nor in a replacement's (the same `SessionRef` with a
 //!   new marker). A resumed or restarted session keeps its marker (it survives turns, provider
@@ -29,6 +31,12 @@
 //!   work goes on only through a new claim, the next attempt.
 //! - Attempts count claims per node and iteration. A refusal leaves the attempt as it is; the next
 //!   claim takes the next number, with checked arithmetic (`attempt_overflow`).
+//! - **Retry.** A node with `retry: {attempts: n}` takes no claim once n of its claims in the
+//!   iteration have ended without a receipt (`attempts_exhausted`); without `retry` it takes any
+//!   number. An attempt ends when its lease ends, it is cancelled or a later claim takes the node.
+//! - **Cancel.** A node with `cancel: {after: d}` gives each claim a deadline, `cancel_at`, the
+//!   claim's time plus d, recorded in `Claimed`. The lease never runs past it, heartbeats or not,
+//!   and from it on the token is refused `cancelled` and the node takes a new claim.
 //!
 //! # Complete
 //!
@@ -48,6 +56,38 @@
 //!
 //! An observation's receipt is stamped with its run's start (`verify.ran_at`), and replay counts
 //! its freshness from there (see `replay`), not from the append that came after the run.
+//!
+//! # Effects
+//!
+//! An effect node's command (`run`) acts on the world, so it runs at most once in an iteration.
+//! `complete` checks its `preconditions` first: each a jq guard over the recorded state, bounded
+//! (`guard`), evaluated with the lock released and the claim checked again after. When they all
+//! hold, it appends `EffectStarted` under the lock, then runs the command. Exit 0 appends the
+//! receipt; anything else `Refused`. From `EffectStarted` on, the effect is never run again in its
+//! iteration, whatever happened after it (a crash, a timeout, a failure, a second completion
+//! racing the first, which is refused `effect_started`): every later completion, on the same
+//! token or a new claim's, runs the node's `reconcile` instead. Reconcile exiting 0 appends the
+//! receipt, with the reconcile in `verify`; anything else is refused `effect_unreconciled`.
+//!
+//! # Choose
+//!
+//! `choose` takes a choice node's claim and an edge. An edge the node does not declare is refused
+//! `undeclared_edge`. A declared edge's jq guard is evaluated over the recorded state (the node's
+//! inputs, see `replay::guard_input`), bounded, with the lock released; then everything is checked
+//! again under the lock, as `complete` does. A guard that holds appends `Chosen`, with the digest
+//! of the input it read, which spends the token; a guard that is false, fails or runs past its
+//! timeout appends `Refused` (`guard_false`, `guard_error`, `guard_timeout`, and
+//! `guard_input_too_large` or `guard_invalid` before it runs) and keeps the token.
+//!
+//! # Verdicts
+//!
+//! When a receipt settles a repeat's iteration (every body node done, or never to run), the
+//! writer evaluates the repeat's `until` over the body's receipts and the params, bounded, with
+//! the lock released, and appends `Guarded` with the verdict and the digest of its input, but
+//! only if the repeat still awaits a verdict for that iteration over the same input. A verdict
+//! that cannot be had (an error, a timeout) is not written: the repeat keeps awaiting it, and the
+//! next write tries again. `complete` and `choose` do this after their receipt, and `claim`
+//! before it takes a claim, so a verdict a crash left unwritten is written by the next claim.
 //!
 //! # The clock
 //!
@@ -69,11 +109,13 @@
 
 use super::error::{KernelError, Refusal};
 use super::events::{
-    Claimed, Completed, Heartbeat, KernelEvent, Owner, Performer, Refused, Started, VerifyRecord, marker_digest,
+    Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat, KernelEvent, Owner, Performer, Refused, Started,
+    VerifyRecord, digest, marker_digest,
 };
 use super::exec::{self, Limits, Ran};
+use super::guard::{self, GUARD_TIMEOUT, Judged};
 use super::ir::{Class, Ir, Iteration, Node};
-use super::replay::{Next, State, next_of, pinned, secs};
+use super::replay::{Awaiting, Next, State, awaiting, guard_input, next_of, pinned, secs};
 use crate::clock;
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, WriteGuard, random_epoch};
@@ -82,7 +124,7 @@ use jiff::{SignedDuration, Timestamp};
 use maestro_core::session::VerifiedSession;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// A claim's lease, in seconds, for a node that declares no `wait.heartbeat`.
@@ -130,6 +172,8 @@ pub enum Completion {
         verify: VerifyRecord,
         /// The command's standard error, for the caller; never written to the log.
         stderr: String,
+        /// The `until` verdicts the receipt led to.
+        verdicts: Vec<Verdict>,
     },
     Refused {
         appended: Appended,
@@ -137,6 +181,34 @@ pub enum Completion {
         reason: String,
         stderr: String,
     },
+}
+
+/// What `choose` appended: the edge, or a refusal that keeps the token.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Choosing {
+    Chosen {
+        appended: Appended,
+        edge: String,
+        /// The digest of the input document the edge's guard held over.
+        guard_digest: String,
+        /// The `until` verdicts the choice led to.
+        verdicts: Vec<Verdict>,
+    },
+    Refused {
+        appended: Appended,
+        code: &'static str,
+        reason: String,
+    },
+}
+
+/// An `until` verdict a write tried to record.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Verdict {
+    /// `Guarded` appended.
+    Recorded { repeat: String, iteration: u32, holds: bool, appended: Appended },
+    /// Nothing appended: the repeat (when known) still awaits its verdict, and the next write
+    /// tries again.
+    Unrecorded { repeat: Option<String>, code: &'static str, reason: String },
 }
 
 /// The owner a session would be: its `SessionRef` and the digest of its marker.
@@ -174,6 +246,11 @@ fn until(now: Timestamp, lease: SignedDuration) -> Result<Timestamp, Refusal> {
     now.checked_add(lease).map_err(|_| Refusal::ClockOutOfRange)
 }
 
+/// A lease's end, never past the claim's cancel deadline.
+fn capped(lease_until: Timestamp, cancel_at: Option<Timestamp>) -> Timestamp {
+    cancel_at.map_or(lease_until, |at| lease_until.min(at))
+}
+
 /// The instance a token names, and the digest the log keeps of it.
 fn parse_token(token: &str) -> Result<(InstanceId, String), Refusal> {
     if token.len() > MAX_TOKEN {
@@ -191,6 +268,8 @@ struct ClaimRec {
     iteration: Iteration,
     attempt: u32,
     lease_until: Timestamp,
+    /// When `cancel.after` ends the attempt.
+    cancel_at: Option<Timestamp>,
     inputs: BTreeMap<String, String>,
     spent: bool,
 }
@@ -201,6 +280,8 @@ struct Claims {
     recs: BTreeMap<String, ClaimRec>,
     /// The latest claim's token digest for each node and iteration.
     latest: BTreeMap<(String, Iteration), String>,
+    /// The effects started and not completed, by node and iteration.
+    effects: BTreeSet<(String, Iteration)>,
 }
 
 fn parse<T: DeserializeOwned>(log: &Log, seq: u64, kind: &str, body: &Value) -> Result<T, KernelError> {
@@ -233,10 +314,11 @@ fn wall(log: &Log) -> Result<Timestamp, KernelError> {
 
 impl Claims {
     /// A `Claimed` counts only with an attempt above its node's last one. A `Heartbeat` moves
-    /// the lease of the latest claim of its node and iteration, and a `Completed` spends that
-    /// claim, each only when it is for the claim's attempt.
+    /// the lease of the latest claim of its node and iteration, and a `Completed` or `Chosen`
+    /// spends that claim, each only when it is for the claim's attempt. An `EffectStarted` stands
+    /// until a `Completed` of its node and iteration.
     fn fold(log: &Log) -> Result<Claims, KernelError> {
-        let mut claims = Claims { recs: BTreeMap::new(), latest: BTreeMap::new() };
+        let mut claims = Claims { recs: BTreeMap::new(), latest: BTreeMap::new(), effects: BTreeSet::new() };
         for e in &log.events {
             match e.kind.as_str() {
                 Claimed::KIND => {
@@ -247,11 +329,13 @@ impl Claims {
                         continue;
                     }
                     let lease_until = stamp(log, e.seq, &c.lease_until)?;
+                    let cancel_at = c.cancel_at.as_deref().map(|at| stamp(log, e.seq, at)).transpose()?;
                     let rec = ClaimRec {
                         node: c.node,
                         iteration: c.iteration,
                         attempt: c.attempt,
                         lease_until,
+                        cancel_at,
                         inputs: c.inputs,
                         spent: false,
                     };
@@ -269,11 +353,25 @@ impl Claims {
                 }
                 Completed::KIND => {
                     let c: Completed = parse(log, e.seq, &e.kind, &e.body)?;
+                    let key = (c.node, c.iteration);
+                    claims.effects.remove(&key);
+                    if let Some(rec) = claims.latest_mut(&key)
+                        && rec.attempt == c.attempt
+                    {
+                        rec.spent = true;
+                    }
+                }
+                Chosen::KIND => {
+                    let c: Chosen = parse(log, e.seq, &e.kind, &e.body)?;
                     if let Some(rec) = claims.latest_mut(&(c.node, c.iteration))
                         && rec.attempt == c.attempt
                     {
                         rec.spent = true;
                     }
+                }
+                EffectStarted::KIND => {
+                    let started: EffectStarted = parse(log, e.seq, &e.kind, &e.body)?;
+                    claims.effects.insert((started.node, started.iteration));
                 }
                 _ => {}
             }
@@ -287,6 +385,11 @@ impl Claims {
 
     fn latest_mut(&mut self, key: &(String, Iteration)) -> Option<&mut ClaimRec> {
         self.latest.get(key).and_then(|sha| self.recs.get_mut(sha))
+    }
+
+    /// How many claims of `node` in `iteration` have no receipt.
+    fn unspent(&self, node: &str, iteration: &Iteration) -> usize {
+        self.recs.values().filter(|r| r.node == node && r.iteration == *iteration && !r.spent).count()
     }
 }
 
@@ -311,6 +414,8 @@ pub fn claim(
     instance: &InstanceId,
     node: &str,
 ) -> Result<Claim, KernelError> {
+    // A verdict a crash left unwritten is written first, so what waits on it can be claimed.
+    settle(ledger, session, instance)?;
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
@@ -319,7 +424,7 @@ pub fn claim(
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(Refusal::UnknownNode { node: node.to_string() }.into());
     };
-    if !matches!(n.class, Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. }) {
+    if matches!(n.class, Class::Human { .. }) {
         return Err(Refusal::NotClaimable { node: node.to_string(), class: n.class.name().to_string() }.into());
     }
     let next = next_of(&log, &started, now)?;
@@ -336,9 +441,15 @@ pub fn claim(
     {
         return Err(Refusal::AlreadyClaimed { node: node.to_string(), lease_until: p.lease_until.to_string() }.into());
     }
+    if let Some(attempts) = n.retry
+        && claims.unspent(node, &enabled.iteration) >= usize::try_from(attempts).unwrap_or(usize::MAX)
+    {
+        return Err(Refusal::AttemptsExhausted { node: node.to_string(), attempts }.into());
+    }
     let last = prior.map_or(0, |p| p.attempt);
     let attempt = last.checked_add(1).ok_or_else(|| Refusal::AttemptOverflow { node: node.to_string() })?;
-    let lease_until = until(now, lease(n))?;
+    let cancel_at = n.cancel_after.map(|after| until(now, secs(after))).transpose()?;
+    let lease_until = capped(until(now, lease(n))?, cancel_at);
     let token = format!("{instance}.{}", random_epoch()?);
     let claimed = Claimed {
         node: node.to_string(),
@@ -349,6 +460,7 @@ pub fn claim(
         inputs: enabled.inputs.clone(),
         performer: Some(performer(session)),
         tool_use_id: None,
+        cancel_at: cancel_at.map(|at| at.to_string()),
     };
     let appended = guard.append(instance, log.seq(), claimed.to_event()?)?;
     Ok(Claim {
@@ -369,6 +481,8 @@ struct Held {
     started: Started,
     rec: ClaimRec,
     next: Next,
+    /// The node is an effect started in this iteration and not completed (`EffectStarted`).
+    effect_started: bool,
 }
 
 impl Held {
@@ -395,7 +509,11 @@ fn hold(
     if rec.spent {
         return Err(Refusal::TokenSpent { node: rec.node }.into());
     }
-    let latest = claims.latest.get(&(rec.node.clone(), rec.iteration.clone())).map(String::as_str);
+    let key = (rec.node.clone(), rec.iteration.clone());
+    let latest = claims.latest.get(&key).map(String::as_str);
+    if let Some(cancel_at) = rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at) {
+        return Err(Refusal::Cancelled { node: rec.node, cancel_at: cancel_at.to_string() }.into());
+    }
     if latest != Some(sha) || now >= rec.lease_until {
         return Err(Refusal::LeaseExpired { node: rec.node, lease_until: rec.lease_until.to_string() }.into());
     }
@@ -409,7 +527,8 @@ fn hold(
     if *inputs != rec.inputs {
         return Err(Refusal::InputsChanged { node: rec.node }.into());
     }
-    Ok(Held { log, started, rec, next })
+    let effect_started = claims.effects.contains(&key);
+    Ok(Held { log, started, rec, next, effect_started })
 }
 
 /// Extends the lease of the claim `token` names. See the module docs.
@@ -419,7 +538,7 @@ pub fn heartbeat(ledger: &mut Ledger, session: &VerifiedSession, token: &str) ->
     let log = guard.log(&instance)?;
     let now = wall(&log)?;
     let held = hold(log, session, &instance, &sha, now)?;
-    let lease_until = until(now, lease(held.node()?))?;
+    let lease_until = capped(until(now, lease(held.node()?))?, held.rec.cancel_at);
     let beat = Heartbeat {
         node: held.rec.node.clone(),
         iteration: held.rec.iteration.clone(),
@@ -434,6 +553,18 @@ pub fn heartbeat(ledger: &mut Ledger, session: &VerifiedSession, token: &str) ->
 struct Plan {
     argv: Vec<String>,
     cwd: PathBuf,
+    step: Step,
+}
+
+/// What the command is to the node.
+#[derive(Debug, Clone, PartialEq)]
+enum Step {
+    /// A pure or observe node's `run`, or a work node's `verify`.
+    Command,
+    /// An effect's `run`, once its preconditions hold; it has not started in this iteration.
+    Effect { preconditions: Vec<String> },
+    /// An effect's `reconcile`: it started in this iteration and has no receipt.
+    Reconcile,
 }
 
 /// Why the work is refused: a code and a reason, appended as `Refused`.
@@ -443,17 +574,15 @@ type Unfit = (&'static str, String);
 /// current and fresh), outputs that fit, and a command that can run.
 fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
     check_outputs(outputs)?;
-    if !held.next.enabled.iter().any(|e| e.node == held.rec.node) {
-        let state = state_name(held.next.pending.get(&held.rec.node).map(|s| s.state));
-        return Err((
-            "input_stale",
-            format!("node {} is {state} now: something it consumes is not fresh", held.rec.node),
-        ));
-    }
+    enabled(held)?;
     let ir = &held.started.ir;
-    let words = match held.started.ir.nodes.get(&held.rec.node).map(|n| &n.class) {
-        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => run,
-        Some(Class::Work { verify, .. }) => verify,
+    let (words, step) = match held.started.ir.nodes.get(&held.rec.node).map(|n| &n.class) {
+        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command),
+        Some(Class::Work { verify, .. }) => (verify, Step::Command),
+        Some(Class::Effect { reconcile, .. }) if held.effect_started => (reconcile, Step::Reconcile),
+        Some(Class::Effect { run, preconditions, .. }) if !run.is_empty() => {
+            (run, Step::Effect { preconditions: preconditions.clone() })
+        }
         _ => return Err(("not_claimable", format!("node {} has no command the kernel runs", held.rec.node))),
     };
     let params = &held.started.params;
@@ -472,7 +601,29 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
     if !cwd.is_absolute() || !cwd.is_dir() {
         return Err(("workdir_invalid", "the workdir is not an absolute path to a directory".to_string()));
     }
-    Ok(Plan { argv, cwd })
+    Ok(Plan { argv, cwd, step })
+}
+
+/// The node is enabled now, so everything it consumes is current and fresh: write-time freshness.
+fn enabled(held: &Held) -> Result<(), Unfit> {
+    if !held.next.enabled.iter().any(|e| e.node == held.rec.node) {
+        let state = state_name(held.next.pending.get(&held.rec.node).map(|s| s.state));
+        return Err((
+            "input_stale",
+            format!("node {} is {state} now: something it consumes is not fresh", held.rec.node),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses the verb the node's class does not take: a choice is chosen, the rest completed.
+fn check_verb(held: &Held, choosing: bool) -> Result<(), Refusal> {
+    let class = held.node()?.class.name();
+    if (class == "choice") != choosing {
+        let verb = if choosing { "complete" } else { "choose" };
+        return Err(Refusal::WrongVerb { node: held.rec.node.clone(), class: class.to_string(), verb });
+    }
+    Ok(())
 }
 
 /// Outputs are a JSON object (or null), at most [`MAX_OUTPUTS`] bytes, shallow enough that the
@@ -569,15 +720,19 @@ fn refuse(
     (code, reason): Unfit,
     stderr: &[u8],
 ) -> Result<Completion, KernelError> {
+    let appended = refused(guard, held, code, &reason)?;
+    Ok(Completion::Refused { appended, code, reason, stderr: String::from_utf8_lossy(stderr).into_owned() })
+}
+
+fn refused(guard: &mut WriteGuard, held: &Held, code: &'static str, reason: &str) -> Result<Appended, KernelError> {
     let refused = Refused {
         node: held.rec.node.clone(),
         iteration: held.rec.iteration.clone(),
         attempt: held.rec.attempt,
         code: code.to_string(),
-        reason: reason.clone(),
+        reason: reason.to_string(),
     };
-    let appended = guard.append(&held.log.instance, held.log.seq(), refused.to_event()?)?;
-    Ok(Completion::Refused { appended, code, reason, stderr: String::from_utf8_lossy(stderr).into_owned() })
+    Ok(guard.append(&held.log.instance, held.log.seq(), refused.to_event()?)?)
 }
 
 /// Completes the claim `token` names: runs the node's command and appends the receipt, or a
@@ -594,7 +749,8 @@ pub fn complete(
     let mut guard = ledger.lock()?;
     let log = guard.log(&instance)?;
     let now = wall(&log)?;
-    let held = hold(log, session, &instance, &sha, now)?;
+    let mut held = hold(log, session, &instance, &sha, now)?;
+    check_verb(&held, false)?;
     let plan = match prepare(&held, &outputs) {
         Ok(plan) => plan,
         Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
@@ -602,10 +758,41 @@ pub fn complete(
     if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
+    if let Step::Effect { preconditions } = &plan.step {
+        // The preconditions run with the lock released; then everything again under it.
+        let input = guard_input(&held.log, &held.started, &held.rec.node)?;
+        drop(guard);
+        let judged = all_hold(preconditions, &input);
+        pause!("preconditions_judged");
+        guard = ledger.lock()?;
+        let log = guard.log(&instance)?;
+        let judged_at = wall(&log)?;
+        held = hold(log, session, &instance, &sha, judged_at)?;
+        // Another completion of this claim started the effect meanwhile: it is never run twice.
+        if held.effect_started {
+            let reason = "another completion started this effect; complete again to reconcile it";
+            return refuse(&mut guard, &held, ("effect_started", reason.to_string()), &[]);
+        }
+        if let Err(unfit) = prepare(&held, &outputs) {
+            return refuse(&mut guard, &held, unfit, &[]);
+        }
+        let guard_digest = match judged {
+            Ok(digest) => digest,
+            Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
+        };
+        let intent = EffectStarted {
+            node: held.rec.node.clone(),
+            iteration: held.rec.iteration.clone(),
+            attempt: held.rec.attempt,
+            guard_digest,
+        };
+        guard.append(&instance, held.log.seq(), intent.to_event()?)?;
+    }
     // The command runs with the flows lock released, so other writers and readers go on.
     drop(guard);
     let ran_at = clock::now();
     let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    pause!("command_ran");
 
     // Everything again, under the lock, against the log as it is now and the clock read again.
     let mut guard = ledger.lock()?;
@@ -627,6 +814,13 @@ pub fn complete(
     let unfit = match &held.node()?.class {
         Class::Observe { exit_map, .. } => (!exit_map.iter().any(|m| m.exit == exit))
             .then(|| ("exit_unmapped", format!("exit status {exit} is not in the node's exit_map"))),
+        Class::Effect { .. } if plan.step == Step::Reconcile => (exit != 0).then(|| {
+            let reason = format!("reconcile exited {exit}: the effect is not confirmed, and it is not run again");
+            ("effect_unreconciled", reason)
+        }),
+        Class::Effect { .. } => {
+            (exit != 0).then(|| ("effect_failed", format!("the effect exited {exit}; complete again to reconcile it")))
+        }
         _ => (exit != 0).then(|| ("verify_failed", format!("the command exited {exit}"))),
     };
     if let Some(unfit) = unfit {
@@ -634,7 +828,160 @@ pub fn complete(
     }
     let completed = receipt(&held, session, outputs, verify.clone());
     let appended = guard.append(&instance, held.log.seq(), completed.to_event()?)?;
-    Ok(Completion::Completed { appended, verify, stderr: String::from_utf8_lossy(&stderr).into_owned() })
+    drop(guard);
+    let verdicts = settled(ledger, session, &instance);
+    Ok(Completion::Completed { appended, verify, stderr: String::from_utf8_lossy(&stderr).into_owned(), verdicts })
+}
+
+/// Every precondition holds over `input`, evaluated in order, bounded: the digest of the input
+/// they held over, or none when there are none. The first that does not hold is the refusal.
+fn all_hold(preconditions: &[String], input: &Value) -> Result<Option<String>, Unfit> {
+    if preconditions.is_empty() {
+        return Ok(None);
+    }
+    for (i, code) in preconditions.iter().enumerate() {
+        let Judged { holds, digest } = guard::judge(code, input, GUARD_TIMEOUT)?;
+        if !holds {
+            return Err(("precondition_false", format!("precondition {i} is false over the input {digest}")));
+        }
+    }
+    Ok(Some(digest(input)))
+}
+
+/// Takes the edge `edge` of the choice node the claim `token` names. See the module docs.
+pub fn choose(
+    ledger: &mut Ledger,
+    session: &VerifiedSession,
+    token: &str,
+    edge: &str,
+) -> Result<Choosing, KernelError> {
+    let (instance, sha) = parse_token(token)?;
+    let mut guard = ledger.lock()?;
+    let log = guard.log(&instance)?;
+    let now = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, now)?;
+    check_verb(&held, true)?;
+    let reject = |guard: &mut WriteGuard, held: &Held, (code, reason): Unfit| {
+        refused(guard, held, code, &reason).map(|appended| Choosing::Refused { appended, code, reason })
+    };
+    let code = match &held.node()?.class {
+        Class::Choice { edges, .. } => edges.get(edge).cloned(),
+        _ => None,
+    };
+    let Some(code) = code else {
+        let reason = format!("node {} declares no such edge", held.rec.node);
+        return reject(&mut guard, &held, ("undeclared_edge", reason));
+    };
+    // The guard runs with the lock released; then everything is checked under it, freshness
+    // included. Its input is a function of the claim's inputs and the params, so a claim that
+    // still holds read the same.
+    let input = guard_input(&held.log, &held.started, &held.rec.node)?;
+    drop(guard);
+    let judged = guard::judge(&code, &input, GUARD_TIMEOUT);
+    let mut guard = ledger.lock()?;
+    let log = guard.log(&instance)?;
+    let judged_at = wall(&log)?;
+    let held = hold(log, session, &instance, &sha, judged_at)?;
+    if let Err(unfit) = enabled(&held) {
+        return reject(&mut guard, &held, unfit);
+    }
+    let Judged { holds, digest } = match judged {
+        Ok(judged) => judged,
+        Err(unfit) => return reject(&mut guard, &held, unfit),
+    };
+    if !holds {
+        return reject(
+            &mut guard,
+            &held,
+            ("guard_false", format!("the guard of edge {edge} is false over the input {digest}")),
+        );
+    }
+    let chosen = Chosen {
+        node: held.rec.node.clone(),
+        iteration: held.rec.iteration.clone(),
+        attempt: held.rec.attempt,
+        edge: edge.to_string(),
+        inputs: held.rec.inputs.clone(),
+        tool_use_id: None,
+        guard_digest: Some(digest.clone()),
+    };
+    let appended = guard.append(&instance, held.log.seq(), chosen.to_event()?)?;
+    drop(guard);
+    let verdicts = settled(ledger, session, &instance);
+    Ok(Choosing::Chosen { appended, edge: edge.to_string(), guard_digest: digest, verdicts })
+}
+
+/// [`settle`] after a receipt is written: its errors become a verdict left unrecorded, since the
+/// receipt stands either way.
+fn settled(ledger: &mut Ledger, session: &VerifiedSession, instance: &InstanceId) -> Vec<Verdict> {
+    settle(ledger, session, instance)
+        .unwrap_or_else(|e| vec![Verdict::Unrecorded { repeat: None, code: e.code(), reason: e.to_string() }])
+}
+
+/// Writes the `until` verdict of each repeat that awaits one (see the module docs). The repeats
+/// awaiting a verdict are read once, so a write with none costs one replay; each is then
+/// evaluated with the lock released and appended by [`record`] only if it still applies. A
+/// verdict that cannot be had, or whose input changed while it ran, is reported and left to the
+/// next write, and so is a repeat that a verdict written here lets settle.
+fn settle(ledger: &mut Ledger, session: &VerifiedSession, instance: &InstanceId) -> Result<Vec<Verdict>, KernelError> {
+    let (started, pending) = {
+        let guard = ledger.lock()?;
+        let log = guard.log(instance)?;
+        let started = pinned(&log)?;
+        if started.ir.repeats.values().all(|r| r.until.is_none()) {
+            return Ok(Vec::new());
+        }
+        check_owner(&started, instance, session)?;
+        let pending = awaiting(&log, &started)?;
+        (started, pending)
+    };
+    let mut out = Vec::new();
+    for next in pending {
+        let judged = guard::judge(&next.until, &next.input, GUARD_TIMEOUT);
+        // The clock is judged where the verdict is written: after the until ran, under the lock.
+        let mut guard = ledger.lock()?;
+        let log = guard.log(instance)?;
+        wall(&log)?;
+        let verdict = match judged {
+            Err((code, reason)) => Verdict::Unrecorded { repeat: Some(next.repeat), code, reason },
+            Ok(judged) => match record(&mut guard, &log, &started, &next, &judged)? {
+                Some(appended) => {
+                    let (repeat, iteration, holds) = (next.repeat, next.iteration, judged.holds);
+                    Verdict::Recorded { repeat, iteration, holds, appended }
+                }
+                None => {
+                    let reason = "the repeat's body changed while its until ran".to_string();
+                    Verdict::Unrecorded { repeat: Some(next.repeat), code: "verdict_stale", reason }
+                }
+            },
+        };
+        out.push(verdict);
+    }
+    Ok(out)
+}
+
+/// Appends `judged`, the verdict on `awaited`, if the log as it is now still awaits a verdict for
+/// that repeat and iteration over an input with the digest it was evaluated over.
+pub(super) fn record(
+    guard: &mut WriteGuard,
+    log: &Log,
+    started: &Started,
+    awaited: &Awaiting,
+    judged: &Judged,
+) -> Result<Option<Appended>, KernelError> {
+    let still = awaiting(log, started)?
+        .into_iter()
+        .any(|a| a.repeat == awaited.repeat && a.iteration == awaited.iteration && digest(&a.input) == judged.digest);
+    if !still {
+        return Ok(None);
+    }
+    let verdict = Guarded {
+        repeat: awaited.repeat.clone(),
+        iteration: awaited.iteration,
+        holds: judged.holds,
+        digest: Some(judged.digest.clone()),
+    };
+    Ok(Some(guard.append(&log.instance, log.seq(), verdict.to_event()?)?))
 }
 
 #[cfg(test)]
