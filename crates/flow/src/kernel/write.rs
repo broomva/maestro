@@ -74,8 +74,10 @@
 //! `reconcile` instead. Reconcile exiting 0 appends the receipt, with the reconcile in `verify`;
 //! anything else is refused `effect_unreconciled`. Two exceptions, both certain that the effect
 //! did not act over its inputs: over new inputs (an upstream re-run with another value) it is a
-//! new effect and runs; and a command that never started (`spawn_failed`: the program is missing,
-//! say) withdraws its start, so the next completion runs it.
+//! new effect and runs; and an effect whose own command never started (`spawn_failed`: the
+//! program is missing, say) withdraws its start, so the next completion runs it. A reconcile that
+//! cannot start is refused `reconcile_spawn_failed`, which withdraws nothing: the effect may have
+//! acted, so the next completion reconciles again.
 //!
 //! # Choose
 //!
@@ -833,7 +835,13 @@ pub fn complete(
     }
     let (code, stdout, stderr) = match ran {
         Ran::Exited { code, stdout, stderr } => (code, stdout, stderr),
-        Ran::Failed { code, detail, stderr } => return refuse(&mut guard, &held, (code, detail), &stderr),
+        Ran::Failed { code, detail, stderr } => {
+            // Only the effect's own command failing to start withdraws its start; a reconcile that
+            // cannot start says so under its own code, and the effect stays started.
+            let code =
+                if plan.step == Step::Reconcile && code == "spawn_failed" { "reconcile_spawn_failed" } else { code };
+            return refuse(&mut guard, &held, (code, detail), &stderr);
+        }
     };
     let Some(exit) = code else {
         return refuse(&mut guard, &held, ("verify_failed", "a signal ended the command".into()), &stderr);

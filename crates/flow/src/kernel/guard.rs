@@ -298,6 +298,12 @@ fn child() -> Result<bool, String> {
     if code == tests::PROBE_ENV {
         return Err(std::env::vars_os().map(|(k, _)| k.to_string_lossy().into_owned()).collect::<Vec<_>>().join(","));
     }
+    // The crate's own unit tests on Linux only: report the address space limit the child runs under.
+    #[cfg(all(test, target_os = "linux"))]
+    if code == tests::PROBE_MEMORY {
+        let limit = rustix::process::getrlimit(rustix::process::Resource::As);
+        return Err(format!("{:?}", limit.current));
+    }
     jq::first(&code, &bytes[split + 1..])
 }
 
@@ -309,6 +315,10 @@ pub(crate) mod tests {
 
     /// A guard the child answers with the names in its environment (`child`, tests only).
     pub(crate) const PROBE_ENV: &str = "\"maestro-flow probe: env\"";
+
+    /// A guard the child answers with its address space limit (`child`, tests on Linux only).
+    #[cfg(target_os = "linux")]
+    pub(crate) const PROBE_MEMORY: &str = "\"maestro-flow probe: memory\"";
 
     thread_local! {
         /// Run by [`judge`] on this thread as a guard is evaluated, with the flows lock released:
@@ -490,15 +500,12 @@ pub(crate) mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_guard_that_takes_more_memory_than_its_child_allows_is_refused() {
-        // Linux enforces the child's address space; macOS does not (see the module docs).
+    fn the_evaluator_runs_under_its_memory_limit() {
+        // Linux enforces the child's address space limit; the child reports the one it runs under.
+        // macOS does not enforce one (see the module docs), so this test is Linux only.
         guard_entry();
-        let evaluated = evaluate_within(
-            r#"reduce range(0; 40) as $i ("x"; . + .) | length > 0"#,
-            b"null",
-            Duration::from_secs(20),
-            Duration::from_secs(20),
-        );
-        assert_eq!(evaluated.outcome.unwrap_err().0, "guard_error");
+        let evaluated = evaluate(PROBE_MEMORY, b"null", GUARD_TIMEOUT);
+        let (refusal, limit) = evaluated.outcome.unwrap_err();
+        assert_eq!((refusal, limit), ("guard_error", format!("{:?}", Some(CHILD_MEMORY))));
     }
 }

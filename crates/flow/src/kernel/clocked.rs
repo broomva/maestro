@@ -371,6 +371,7 @@ nodes:
   slow: {class: effect, run: [sh, -c, 'sleep 1; echo ran >> effects'], reconcile: ['true'], cancel: {after: 30s}}
   retried: {class: effect, run: [sh, -c, 'echo ran >> effects; exit "$(cat fail 2>/dev/null || echo 0)"'], reconcile: [sh, -c, 'test -s effects'], retry: {attempts: 1}}
   act: {class: effect, run: ['{{params.dir}}/act'], reconcile: [sh, -c, 'test -s effects'], retry: {attempts: 1}}
+  recmiss: {class: effect, run: [sh, -c, 'echo ran >> effects; exit "$(cat fail 2>/dev/null || echo 0)"'], reconcile: ['{{params.dir}}/check'], retry: {attempts: 1}}
 "#;
 
 use crate::kernel::guard::tests::WHILE_JUDGING;
@@ -860,4 +861,163 @@ fn a_cancel_deadline_ends_a_running_command() {
     assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "verify_timeout");
     assert!(started.elapsed() < Duration::from_millis(800), "{:?}", started.elapsed());
     assert_eq!(runs(&f), 0, "the effect never acted");
+}
+
+// P20 round 2 (maestro#28).
+
+/// Makes `name` in the workdir an executable script.
+fn script(f: &Fx, name: &str, body: &str) {
+    let path = f.dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn a_reconcile_that_cannot_start_never_runs_the_effect_again() {
+    // The effect ran and failed; its reconcile's program is missing. The reconcile is refused
+    // under its own code, which withdraws nothing, and is tried again until it runs.
+    let (mut f, _clock) = clocked(LIMITS);
+    let fi = f.begin();
+    let c = f.claim(&fi, "recmiss");
+    std::fs::write(f.dir.join("fail"), "1").unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "effect_failed");
+    std::fs::remove_file(f.dir.join("fail")).unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "reconcile_spawn_failed");
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "reconcile_spawn_failed");
+    assert_eq!(runs(&f), 1, "the effect ran once");
+    script(&f, "check", "exit 0");
+    let Completion::Completed { verify, .. } = f.complete(&c.token, Value::Null) else { panic!() };
+    assert!(verify.argv[0].ends_with("/check"), "the receipt is the reconcile's: {:?}", verify.argv);
+    assert_eq!(runs(&f), 1, "the effect ran once");
+}
+
+#[test]
+fn an_effect_that_acted_is_not_exhausted_when_its_reconcile_cannot_start() {
+    // With one attempt: the effect acted, its reconcile could not start, the attempt ended. The
+    // node is not failed; the next claim reconciles it.
+    let (mut f, test_clock) = clocked(LIMITS);
+    let fi = f.begin();
+    let c = f.claim(&fi, "recmiss");
+    std::fs::write(f.dir.join("fail"), "1").unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "effect_failed");
+    std::fs::remove_file(f.dir.join("fail")).unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "reconcile_spawn_failed");
+    test_clock.set(c.lease_until);
+    assert_eq!(f.status(&fi, clock::now()).nodes["recmiss"].state, State::Ready);
+    script(&f, "check", "exit 0");
+    let again = f.claim(&fi, "recmiss");
+    assert_eq!(outcome(&f.complete(&again.token, Value::Null)), "completed");
+    assert_eq!(runs(&f), 1, "the effect ran once");
+}
+
+#[test]
+fn a_command_that_never_started_withdraws_only_its_own_attempt_s_start() {
+    // A `spawn_failed` for another attempt, or for another iteration, leaves the start standing:
+    // the effect is reconciled, never run again, and its one attempt is not exhausted.
+    let (mut f, test_clock) = clocked(LIMITS);
+    let fi = f.begin();
+    let c = f.claim(&fi, "recmiss");
+    std::fs::write(f.dir.join("fail"), "1").unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "effect_failed");
+    std::fs::remove_file(f.dir.join("fail")).unwrap();
+    let refused = |attempt: u32, iteration: crate::kernel::Iteration| crate::kernel::events::Refused {
+        node: "recmiss".into(),
+        iteration,
+        attempt,
+        code: "spawn_failed".into(),
+        reason: "fixture".into(),
+    };
+    f.append(&fi, refused(2, Default::default()).to_event().unwrap());
+    f.append(&fi, refused(1, [("elsewhere".to_string(), 0)].into()).to_event().unwrap());
+    script(&f, "check", "exit 0");
+    let Completion::Completed { verify, .. } = f.complete(&c.token, Value::Null) else { panic!() };
+    assert!(verify.argv[0].ends_with("/check"), "reconciled, not run again: {:?}", verify.argv);
+    assert_eq!(runs(&f), 1);
+    // The same in replay's retry projection, with the claim's lease over and no receipt.
+    let fi = f.begin();
+    let c = f.claim(&fi, "recmiss");
+    std::fs::write(f.dir.join("fail"), "1").unwrap();
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "effect_failed");
+    std::fs::remove_file(f.dir.join("fail")).unwrap();
+    f.append(&fi, refused(2, Default::default()).to_event().unwrap());
+    test_clock.set(c.lease_until);
+    assert_eq!(f.status(&fi, clock::now()).nodes["recmiss"].state, State::Ready);
+}
+
+#[test]
+fn attempts_are_exhausted_in_a_later_iteration_of_a_repeat() {
+    let (mut f, test_clock) = clocked(
+        "flow: loop\nversion: 1\nparams: [dir]\nworkdir: \"{{params.dir}}\"\nnodes:\n  step: {class: work, verify: ['true'], retry: {attempts: 2}}\nrepeats:\n  rounds: {body: [step], max: 3, until: '.nodes.step.outputs.ok'}\n",
+    );
+    let fi = f.begin();
+    let c = f.claim(&fi, "step");
+    assert_eq!(outcome(&f.complete(&c.token, json!({ "ok": false }))), "completed");
+    // Iteration 1: two attempts end without a receipt, and a third claim is refused.
+    let a = f.claim(&fi, "step");
+    test_clock.set(a.lease_until);
+    let b = f.claim(&fi, "step");
+    test_clock.set(b.lease_until);
+    assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "step")), "attempts_exhausted");
+    assert_eq!(f.status(&fi, clock::now()).nodes["step"].state, State::Failed);
+}
+
+#[test]
+fn a_heartbeat_on_a_later_attempt_keeps_that_attempt_going() {
+    let (mut f, test_clock) = clocked(LIMITS);
+    let fi = f.begin();
+    let a = f.claim(&fi, "twice");
+    test_clock.set(a.lease_until);
+    let b = f.claim(&fi, "twice");
+    test_clock.set(b.lease_until - secs(300));
+    heartbeat(&mut f.ledger, &f.me, &b.token).unwrap();
+    test_clock.set(b.lease_until);
+    assert_eq!(f.status(&fi, clock::now()).nodes["twice"].state, State::Ready);
+    assert_eq!(outcome(&f.complete(&b.token, Value::Null)), "completed");
+}
+
+#[test]
+fn an_evaluator_a_choose_started_ends_itself_when_its_kernel_is_killed() {
+    // Through the writers' own path: a kernel process runs `choose` with a guard that never ends,
+    // and is killed while the guard runs. The orphaned evaluator ends itself at the deadline the
+    // writers give it (`GUARD_TIMEOUT` plus `CHILD_GRACE`, 1.5 s from its start).
+    use crate::kernel::guard::EVALUATOR_ARG;
+    let (mut f, _clock) = clocked(
+        "flow: g\nversion: 1\nparams: [dir]\nworkdir: \"{{params.dir}}\"\nnodes:\n  review: {class: work, verify: ['true']}\n  pick: {class: choice, needs: [review], edges: {go: {guard: 'reduce (.nodes.review.outputs.xs[] as $a | .nodes.review.outputs.xs[] as $b | .nodes.review.outputs.xs[]) as $x (0; . + $x) > 0'}}}\n",
+    );
+    let fi = f.begin();
+    let review = f.claim(&fi, "review");
+    let xs: Vec<u32> = (0..2000).collect();
+    assert_eq!(outcome(&f.complete(&review.token, json!({ "xs": xs }))), "completed");
+    let c = f.claim(&fi, "pick");
+    let mut kernel = common::spawn_child(&["choose", f.root.to_str().unwrap(), &c.token, "go", "host"]);
+    let kernel_pid = kernel.id().to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let evaluator = loop {
+        let found =
+            std::process::Command::new("pgrep").args(["-P", &kernel_pid, "-f", EVALUATOR_ARG]).output().unwrap();
+        let pid = String::from_utf8_lossy(&found.stdout).lines().next().map(str::to_string);
+        if let Some(pid) = pid {
+            break pid;
+        }
+        assert!(std::time::Instant::now() < deadline, "the evaluator never started");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let killed = std::time::Instant::now();
+    kernel.kill().unwrap();
+    kernel.wait().unwrap();
+    let alive = |pid: &str| {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    while alive(&evaluator) && killed.elapsed() < Duration::from_millis(2500) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if alive(&evaluator) {
+        let _ = std::process::Command::new("kill").args(["-KILL", &evaluator]).status();
+        panic!("the orphaned evaluator outlived its deadline");
+    }
 }

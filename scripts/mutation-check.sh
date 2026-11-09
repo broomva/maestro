@@ -1414,6 +1414,21 @@ mutate $fk/write.rs '                    if r.code == "spawn_failed" {' '       
 mutate $fk/write.rs 'let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));' 'let effect_started = claims.effects.keys().any(|(n, i, _)| *n == rec.node && *i == rec.iteration);'
 mutate $fk/write.rs '    let limits = &cancel_capped(limits, held.rec.cancel_at);' ''
 mutate $fk/write.rs 'timeout: limits.timeout.min(left).max(' 'timeout: limits.timeout.max('
+# P20 round 2 (maestro#28). Only the effect's own command failing to start withdraws its
+# start, and only for its own attempt and iteration (a reconcile that cannot start has its own
+# code); retry exhausts in any iteration, and a heartbeat moves its own attempt; the child's
+# deadline as the writers wire it.
+mutate $fk/write.rs 'if plan.step == Step::Reconcile && code == "spawn_failed" { "reconcile_spawn_failed" } else { code };' 'code;'
+mutate $fk/write.rs '!(*node == r.node && *iteration == r.iteration && *attempt == r.attempt)' '!(*node == r.node && *iteration == r.iteration)'
+mutate $fk/write.rs '!(*node == r.node && *iteration == r.iteration && *attempt == r.attempt)' '!(*node == r.node && *attempt == r.attempt)'
+mutate $fk/replay.rs '                    started.remove(&r.attempt);' '                    started.clear();'
+mutate $fk/replay.rs '        let i = self.current(id)?;' '        let i = 0;'
+mutate $fk/replay.rs 'if let Some(last) = self.attempts.get_mut(&(id, i)).and_then(|c| c.last_mut())' 'if let Some(last) = self.attempts.get_mut(&(id, i)).and_then(|c| c.first_mut())'
+mutate $fg '    evaluate_within(code, input, timeout, own_deadline(timeout))' '    evaluate_within(code, input, timeout, Duration::from_secs(3600))'
+# The child's address space limit is enforced, and so tested, on Linux only: this mutant runs
+# where CI's mutation shards run (ubuntu-latest), and is skipped elsewhere, where the code it
+# removes is not compiled and so no test could kill it.
+[ "$(uname -s)" = Linux ] && mutate $fg '        let _ = rustix::process::setrlimit(rustix::process::Resource::As, limit);' ''
 # Commands: params fill placeholders within one byte budget, only declared params, only scalars;
 # the workdir is declared, absolute and a directory.
 mutate $fk/write.rs '        left -= filled.len();' ''
