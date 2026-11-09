@@ -1599,15 +1599,28 @@ mutate $asks 'if clock::now() >= deadline {' 'if false {'
 mutate $asks '.filter(|a| a.id == id || a.uid.as_deref() == Some(id))' '.filter(|a| a.id == id || a.uid.as_deref() == Some(id) || a.state() == AskState::Answered)'
 # The flows lock is never held while an ask is filed.
 mutate $asks 'let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?;' 'let outcome = { let _held = ledger.lock()?; file_pinned(&here.paths, &dir, &rec, body, session)? };'
-# Only the owner path answers: the answers ledger at its revisions, an answered row, the linked ask.
-mutate $asks 'TreeSource::GitRev(rev.to_string())' 'TreeSource::WorkingTree'
-mutate $asks 'if row.state() == AskState::Answered {' 'if true {'
+# Only the owner path answers (owner decision 2026-11-09, "Landed main, remote-checked"): main at
+# the commit the remote names, present here; an answered row; the linked ask. A local
+# maestro/answers or refs/remotes/origin/main never answers, and unread is not unanswered.
+mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed' 'Ok(Found::Row(row)) => return Ok(Answer::Landed'
+mutate $asks '    let sha = maestro_store::tree::remote_ref(&paths.workspace, ORIGIN, MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Some(String::from("refs/remotes/origin/main")))'
+mutate $asks '    let sha = maestro_store::tree::remote_ref(&paths.workspace, ORIGIN, MAIN, REMOTE_TIMEOUT)
+        .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(&paths.workspace, ORIGIN, MAIN, REMOTE_TIMEOUT)
+        .or_else(|_| Ok::<_, String>(Some(String::from("refs/remotes/origin/main"))))
+        .map_err(unread)?'
+mutate $asks '    let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
+    let source = format!("{ORIGIN}/main@{sha}");' '    let at = Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into()));
+    let source = format!("{ORIGIN}/main@{sha}");'
+mutate $asks '    if let Some(reason) = &at.tree.unresolved {
+        return Err(' '    if let Some(reason) = at.tree.unresolved.as_ref().filter(|_| false) {
+        return Err('
+mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
 mutate $replay 'Class::Choice { .. } | Class::Human { .. } => return Ok(Err("wrong_class")),' 'Class::Choice { .. } => return Ok(Err("wrong_class")),'
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {' 'if false {'
 # Every other code `ask` adds, by its guard: ask_body_invalid (ledger name, size, nesting),
 # ask_ledger_unread, ask_id_exhausted, ask_not_filed, ask_unconfirmed, ask_ambiguous,
 # answer_mismatch, answers_unread, answer_too_large and ask_changed.
-mutate $asks 'if !requests::ledger_name_ok(&filing.ledger) {' 'if false {'
+mutate $asks 'if !requests::ledger_name_ok(&filing.ledger) ||' 'if false ||'
 mutate $asks 'if size > MAX_ASK_BODY {' 'if false {'
 mutate $asks 'if nesting(&given) + 2 >= MAX_NESTING {' 'if false {'
 mutate $asks 'return Err(unread("there is no such ledger in the asks folder".into()).into());' 'return Ok(BTreeSet::new());'
@@ -1619,14 +1632,35 @@ mutate $asks '        _ => Found::Ambiguous,' '        (Some(a), _) => Found::Ro
 mutate $asks '    if found != rec.body_hash {
         return Err(Refusal::AnswerMismatch {' '    if false {
         return Err(Refusal::AnswerMismatch {'
-mutate $asks 'match find(&at, &rec.ledger, &rec.ask_id) {
-            Err(e) => unread = unread.or(Some((label.to_string(), e))),' 'match find(&at, &rec.ledger, &rec.ask_id) {
-            Err(_) => {}'
+mutate $asks '        Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),' '        Err(_) => {}'
+mutate $asks '        Ok(Found::Ambiguous) => {
+            let at = format!("{source}:{}", rec.ledger);' '        Ok(Found::Ambiguous) if false => {
+            let at = format!("{source}:{}", rec.ledger);'
 mutate $asks 'if size > MAX_OUTPUTS {' 'if false {'
 mutate $asks '        Some(now) if now == *expect => {}' '        _ => {}'
 # The question is relayed toward a T3 owner's thread, and only once its ask is filed.
 mutate $mf '.filter(|o| o.surface == Surface::T3)' '.filter(|_| true)'
-mutate $mf '(&thread, ask_id, ledger, *linked)' '(&thread, ask_id, ledger, true)'
+mutate $mf '(&thread, ask_id, ledger, state != "unfiled")' '(&thread, ask_id, ledger, true)'
+mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if maestro_view::handoff::fits(&prompt) {'
+mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if plain {'
+# P20 round 1: the guards no test killed. The owner check before anything is read or written; the
+# busy deadline from the first try; only a waiting node files; a pin at the sequence it was minted
+# at; the replay rules for pins and links; an ask is unfiled until linked; echoed text is bounded
+# and a ledger name is printable ASCII; the CLI passes --ask on.
+mutate $asks '    check_owner(&started, instance, session)?;
+    waiting(&log, &started, node)?;' '    waiting(&log, &started, node)?;'
+mutate $asks '    let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;
+    loop {' '    loop {
+        let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;'
+mutate $asks '        Some(s) if s.state == State::Waiting => Ok((s.iteration.clone(), s.inputs.clone())),' '        Some(s) => Ok((s.iteration.clone(), s.inputs.clone())),'
+mutate $asks 'guard.append(instance, seen.seq, pin.to_event()?)?;' 'guard.append(instance, log.seq(), pin.to_event()?)?;'
+mutate $replay '                if self.asks.contains_key(&(id, i)) {' '                if false {'
+mutate $replay 'Some(r) if !r.linked && r.ask_id == l.ask_id && r.body_hash == l.body_hash => {' 'Some(r) if !r.linked && r.ask_id == l.ask_id => {'
+mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| !r.linked && r.ask_id == w.ask_id) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.ask_id == w.ask_id) {'
+mutate $replay 'Some(r) if r.linked => {' 'Some(r) if true => {'
+mutate $asks 'let mut out: String = text.chars().take(MAX_ECHO).collect();' 'let mut out: String = text.chars().collect();'
+mutate $asks ' || !filing.ledger.bytes().all(|b| b.is_ascii_graphic())' ''
+mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Value> = None;'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
