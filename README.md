@@ -94,9 +94,12 @@ maestro flow complete --claim-token T [--outputs '<json>']   # the kernel runs t
 maestro flow choose --claim-token T --edge E                 # take a choice node's edge if its guard holds
 ```
 
-- **Verified writers only.** The writes act for a verified session: a Direct launch token
-  (`MAESTRO_DIRECT_TOKEN`, with `MAESTRO_DIRECT_REGISTRY` and `MAESTRO_CALLER_CWD`) or a bridge
-  credential (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP, the same fields as arguments. The HTTP
+- **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
+  Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential
+  (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP it is the arguments `cwd`, `token`, `node` and
+  `credential`, which every write tool's schema declares. The registries that check it
+  (`MAESTRO_DIRECT_REGISTRY`, `MAESTRO_PASEO_AGENTS_DIR`, `MAESTRO_T3_HOME`,
+  `MAESTRO_BRIDGE_SECRET`) are the server's configuration, never an argument. The HTTP
   daemon (`maestro serve --http`) serves every caller on the machine, so it reads a claim only from
   the call's arguments, never from its own environment, for every agent tool. An unverified
   caller is refused (`caller_unverified`), and a claim that does not verify too (`caller_refused`).
