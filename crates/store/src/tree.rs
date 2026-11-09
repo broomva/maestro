@@ -7,6 +7,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeSource {
@@ -310,6 +311,75 @@ impl Tree {
             _ => Err(format!("`{name}` does not read: {}", String::from_utf8_lossy(&output.stderr).trim())),
         }
     }
+}
+
+/// The most bytes [`remote_ref`] reads of `git ls-remote`'s output, and of its error.
+pub const MAX_LS_REMOTE: usize = 4096;
+
+/// The object `refname` names on `remote`, asked of the remote itself (`git ls-remote`), never of
+/// a local ref, which any process here can move. `Ok(None)` when the remote has no such ref. An
+/// object id is 40 or 64 hex. Bounded: the remote gets `timeout`, then the child is killed, and
+/// at most [`MAX_LS_REMOTE`] bytes of its output and of its error are read. No prompt is shown
+/// (`GIT_TERMINAL_PROMPT=0`), so a remote that wants credentials fails rather than waits.
+pub fn remote_ref(root: &Path, remote: &str, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
+    use std::io::Read as _;
+    if remote.starts_with('-') || refname.starts_with('-') {
+        return Err(format!("`{remote}` `{refname}` is not a remote and a ref"));
+    }
+    let mut child = git_command(root)
+        .args(["ls-remote", "--", remote, refname])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git ls-remote did not start: {e}"))?;
+    let take = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(MAX_LS_REMOTE as u64 + 1).read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = take(child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+    let err = take(child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) => break status,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("git ls-remote {remote} did not answer within {}s", timeout.as_secs()));
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let out = out.join().unwrap_or_default();
+    let err = err.join().unwrap_or_default();
+    if !status.success() {
+        let said = String::from_utf8_lossy(&err[..err.len().min(MAX_LS_REMOTE)]).trim().to_string();
+        return Err(format!("git ls-remote {remote} failed ({status}): {said}"));
+    }
+    if out.len() > MAX_LS_REMOTE {
+        return Err(format!("git ls-remote {remote} said more than {MAX_LS_REMOTE} bytes"));
+    }
+    let text = String::from_utf8_lossy(&out);
+    let mut found = None;
+    for line in text.lines() {
+        let Some((oid, name)) = line.split_once('\t') else { continue };
+        if name != refname {
+            continue;
+        }
+        let hex = oid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {
+            return Err(format!("git ls-remote {remote} named {refname} oddly: {line}"));
+        }
+        found = Some(oid.to_string());
+    }
+    Ok(found)
 }
 
 /// `git -C <root>`. The CLI drops an inherited GIT_DIR (and the like) at startup, so the root
