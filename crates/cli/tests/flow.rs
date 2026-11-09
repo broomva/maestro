@@ -133,6 +133,11 @@ fn cli_writes_need_a_launch_token_or_a_credential() {
         "caller_unverified"
     );
     ok(m.verified().args(["flow", "claim", "--instance", &fi, "--node-id", "review"]));
+    // The human step's verb too (BRO-3635): unverified, refused; verified, it reaches the kernel,
+    // which files asks only for a human node.
+    let ask = ["flow", "ask", "--instance", &fi, "--node-id", "review"];
+    assert_eq!(refused(m.bare().args(ask)), "caller_unverified");
+    assert_eq!(refused(m.verified().args(ask)), "wrong_verb");
 }
 
 /// The binary calls `guard_entry` first in `main`, so a guarded choose runs through it (without

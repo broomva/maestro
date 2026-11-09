@@ -92,7 +92,22 @@ maestro flow claim --instance I --node-id N                  # take a node: a cl
 maestro flow heartbeat --claim-token T                       # extend the lease
 maestro flow complete --claim-token T [--outputs '<json>']   # the kernel runs the node's command
 maestro flow choose --claim-token T --edge E                 # take a choice node's edge if its guard holds
+maestro flow ask --instance I --node-id N [--ledger L.yaml --ask '<json>']   # a human node: file its ask, then take the answer
 ```
+
+- **Human steps (BRO-3635).** A waiting `human` node is the owner's. `flow ask` (MCP
+  `maestro_flow_ask`) files its ask on the first call: the kernel mints the id, takes the question
+  from the definition and `asked_at` from its own clock, adds your `--ask` fields (what the
+  ledger's validator requires), pins that body in the flow's log, and files it through the
+  writer of record (`ask_ledger.py file`, as `ask file` does) with the flow ledger's lock
+  released. It links the row it finds in the working tree by that id and hash. Call it again until
+  it says `answered`: the answer is read only from the answers ledger (`maestro/answers`, this
+  clone's or origin's as last fetched, and `origin/main`), never from the working tree or from
+  you, and recorded as the node's receipt, with the answer's fields as its outputs
+  (`answer_option`, `answer`, ...). A busy asks ledger is retried until the kernel's deadline, then
+  `ask_refused_busy`; a row with that id and another body is `ask_refused`. `flow next` and
+  `flow status` return `relay`: each waiting node's question and ask, and for a T3 owner, links
+  that open its thread with a draft to take the answer.
 
 - **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
   Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential

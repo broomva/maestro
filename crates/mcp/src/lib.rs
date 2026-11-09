@@ -458,6 +458,16 @@ pub const TOOLS: &[ToolSpec] = &[
         ui: Ui::None,
         schema: schema_of::<flow::FlowHeartbeatArgs>,
     },
+    ToolSpec {
+        name: flow::ASK,
+        title: "Ask the owner for a flow step",
+        description: "For a human node of your flow instance that is waiting: the first call files its ask (the definition's question plus your `ask` fields, into `ledger`) through the asks ledger's writer of record, ask_ledger.py, and links it; later calls read the owner's answer from the answers ledger and record it, which resumes the flow. Call it again until it says answered. It takes no answer: only the owner's path records one. Needs a verified session that owns the instance.",
+        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowAskArgs>,
+    },
 ];
 
 fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, McpError> {
@@ -717,9 +727,14 @@ fn dispatch(
             let markdown = packet.render_markdown(a.max_needs.unwrap_or(8));
             Ok(json!({ "markdown": markdown, "packet": packet }))
         }
-        flow::START | flow::NEXT | flow::CLAIM | flow::COMPLETE | flow::CHOOSE | flow::STATUS | flow::HEARTBEAT => {
-            flow::call(&store.paths.workspace, hosts, ambient, name, args)
-        }
+        flow::START
+        | flow::NEXT
+        | flow::CLAIM
+        | flow::COMPLETE
+        | flow::CHOOSE
+        | flow::STATUS
+        | flow::HEARTBEAT
+        | flow::ASK => flow::call(&store.paths, hosts, ambient, name, args),
         other => match request_of(other) {
             Some(kind) => agent_request_in(store, hosts, ambient, kind, args),
             None => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),

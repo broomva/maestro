@@ -25,6 +25,9 @@
 //!   run with no receipt its `reconcile` runs instead. `choose` appends a choice node's edge when
 //!   its guard holds. Both write a repeat's `until` verdict when their receipt settles an
 //!   iteration. See `write`'s module docs for ownership, tokens, leases, retry and cancel.
+//! - **Human steps** ([`ask`], BRO-3635). A `human` node's ask is filed through the asks ledger's
+//!   writer of record with the flows lock released, linked by id and hash in the working tree, and
+//!   answered only from the answers ledger; the answer is the node's receipt. See [`asks`].
 //! - **Events** ([`events`]) are typed bodies of the storage layer's generic event.
 
 pub mod asks;

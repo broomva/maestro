@@ -1,15 +1,20 @@
 //! The flow kernel's verbs as tools (BRO-3634): thin adapters over [`maestro_flow::kernel`]. The
 //! CLI's `maestro flow` subcommands call these same tools, so their JSON in and out is identical.
 //!
-//! - **Verified writers only.** `start`, `claim`, `heartbeat`, `complete` and `choose` act for the
-//!   caller's verified session (`VerifiedSession`, through the same caller check every agent
+//! - **Verified writers only.** `start`, `claim`, `heartbeat`, `complete`, `choose` and `ask` act
+//!   for the caller's verified session (`VerifiedSession`, through the same caller check every agent
 //!   request uses). A caller that is not verified is refused `caller_unverified`, and one whose
 //!   claim does not verify `caller_refused`; both write nothing. `next` and `status` are reads:
 //!   anyone may call them, and they write nothing.
 //! - **Refusals are results.** Every kernel refusal comes back as `{"ok": false, "code", "reason",
 //!   "recorded"}` with the kernel's stable code. `recorded` is true when the kernel appended a
-//!   `Refused` event (a completion or choice whose work did not pass keeps its token). Only
-//!   arguments that do not parse are protocol errors.
+//!   `Refused` event (a completion or choice whose work did not pass keeps its token), or an
+//!   `AskWithdrawn` (an ask the writer of record refused, `ask_not_filed`). Only arguments that do
+//!   not parse are protocol errors.
+//! - **Human steps (BRO-3635).** `ask` files a waiting human node's ask through the asks ledger's
+//!   writer of record and, called again, records the owner's answer once the answers ledger has it
+//!   (`maestro_flow::kernel::asks`). `next` and `status` add `relay`: each waiting human node's
+//!   question, its ask once filed, and for a T3 owner prompt links to its thread ([`relay`]).
 //! - **Only the verbs.** No tool appends a raw event: the storage layer's `WriteGuard::append`
 //!   and `NewEvent` are not reachable from here.
 //! - **One ledger per workspace.** The flows root is `.broomva/flows` in the workspace the path
@@ -20,13 +25,14 @@
 //! - **One host.** The ledger is bound to the machine's host name (its first label, lower case),
 //!   which every process on the machine reads alike ([`host_id`]).
 
-use maestro_core::session::{SessionRef, VerifiedSession};
-use maestro_flow::kernel::{self, Choosing, Completion, KernelError, Limits, Verdict};
+use maestro_core::session::{SessionRef, Surface, VerifiedSession};
+use maestro_flow::kernel::{self, Asked, Choosing, Completion, KernelError, Limits, NodeStatus, Reason, Verdict};
 use maestro_flow::{FlowError, HostId, InstanceId, Ledger, Options, Reader};
 use rmcp::ErrorData as McpError;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const START: &str = "maestro_flow_start";
@@ -36,6 +42,7 @@ pub const COMPLETE: &str = "maestro_flow_complete";
 pub const CHOOSE: &str = "maestro_flow_choose";
 pub const STATUS: &str = "maestro_flow_status";
 pub const HEARTBEAT: &str = "maestro_flow_heartbeat";
+pub const ASK: &str = "maestro_flow_ask";
 
 /// The flows root under the workspace: the ADR's `.broomva/flows`.
 pub const FLOWS: &str = ".broomva/flows";
@@ -145,6 +152,30 @@ pub struct FlowChooseArgs {
     pub credential: Option<Value>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowAskArgs {
+    pub session: String,
+    pub instance: String,
+    /// The human node, one `maestro_flow_next` lists as waiting on the owner.
+    pub node_id: String,
+    /// The asks ledger to file into, a file name in the asks folder (`*.yaml`). Needed on the first
+    /// call only; later calls use the ask already pinned.
+    pub ledger: Option<String>,
+    /// The ask's fields besides `id`, `ask` and `asked_at`, which the kernel writes: what the
+    /// ledger's validator requires (`class`, `gates`, `exhausted`, `blocking`, ...). Needed on the
+    /// first call only.
+    pub ask: Option<serde_json::Map<String, Value>>,
+    /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,
+    /// A Direct session's launch token.
+    pub token: Option<String>,
+    /// The tailnet node your session runs on.
+    pub node: Option<String>,
+    /// A T3 or Paseo session's signed bridge credential, a JSON object.
+    pub credential: Option<Value>,
+}
+
 /// A refusal as a result: the stable code, the reason, and whether the kernel recorded it.
 fn refusal(code: &str, reason: impl std::fmt::Display, recorded: bool) -> Value {
     json!({ "ok": false, "code": code, "reason": reason.to_string(), "recorded": recorded })
@@ -203,14 +234,16 @@ fn bounded<'a>(what: &str, value: &'a str) -> Result<&'a str, Value> {
     Ok(value)
 }
 
-/// Runs one flow tool.
+/// Runs one flow tool. `paths` names the workspace (whose `.broomva/flows` is the ledger) and,
+/// for `ask`, where its asks ledgers and their lock are.
 pub(crate) fn call(
-    workspace: &Path,
+    paths: &maestro_store::Paths,
     hosts: &maestro_hosts::SurfaceRegistry,
     ambient: crate::Ambient,
     name: &str,
     args: Value,
 ) -> Result<Value, McpError> {
+    let workspace = paths.workspace.as_path();
     // A read takes no claim, so a claim passed to one is dropped; a write declares its claim fields.
     match name {
         NEXT | STATUS => {
@@ -315,8 +348,85 @@ pub(crate) fn call(
                 })
             }))
         }
+        ASK => {
+            let a: FlowAskArgs = parse(args.clone())?;
+            let session = crate::session_of(&a.session)?;
+            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+                let node = match bounded("node_id", &a.node_id) {
+                    Ok(node) => node,
+                    Err(v) => return Ok(v),
+                };
+                let instance = InstanceId::new(&a.instance)?;
+                let filing = match (&a.ledger, &a.ask) {
+                    (Some(ledger), Some(body)) => Some(kernel::Filing { ledger: ledger.clone(), body: body.clone() }),
+                    _ => None,
+                };
+                Ok(match kernel::ask(&mut w.ledger()?, paths, &w.me, &instance, node, filing.as_ref())? {
+                    Asked::Waiting { ask_id, ledger, appended } => json!({
+                        "ok": true,
+                        "state": "waiting",
+                        "ask_id": ask_id,
+                        "ledger": ledger,
+                        "seq": appended.map(|a| a.event.seq),
+                    }),
+                    Asked::Answered { ask_id, ledger, outputs, source, appended } => json!({
+                        "ok": true,
+                        "state": "answered",
+                        "ask_id": ask_id,
+                        "ledger": ledger,
+                        "outputs": outputs,
+                        "source": source,
+                        "seq": appended.event.seq,
+                    }),
+                    Asked::Withdrawn { ask_id, ledger, code, reason, appended } => {
+                        let mut v = refusal(code, reason, true);
+                        v["ask_id"] = json!(ask_id);
+                        v["ledger"] = json!(ledger);
+                        v["seq"] = json!(appended.event.seq);
+                        v
+                    }
+                })
+            }))
+        }
         other => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
     }
+}
+
+/// A waiting human node's question, relayed toward the session that drives the flow: data the
+/// reads return, never a message Maestro sends (ADR decisions 4 and 8). Each entry names the node,
+/// the definition's question and, once filed, the ask's id and ledger. When the instance's owner
+/// is a T3 thread and the ask is filed, `t3` holds prompt links (`maestro_view::handoff`) that
+/// open that thread with a draft telling its agent to take the answer with `maestro_flow_ask`.
+/// The draft carries no answer: the kernel reads the answer from the answers ledger only.
+pub fn relay(instance: &str, owner: Option<&SessionRef>, nodes: &BTreeMap<String, NodeStatus>) -> Vec<Value> {
+    let thread = owner
+        .filter(|o| o.surface == Surface::T3)
+        .and_then(|o| o.environment.as_ref().map(|env| format!("{env}/{}", o.id)))
+        .and_then(|t| maestro_view::handoff::AnswerThread::parse(&t).ok());
+    let mut out = Vec::new();
+    for (node, s) in nodes {
+        for reason in &s.unmet {
+            let Reason::Owner { ask, ask_id, ledger, linked } = reason else { continue };
+            let mut entry = json!({
+                "node_id": node,
+                "iteration": s.iteration,
+                "question": ask,
+                "ask_id": ask_id,
+                "ledger": ledger,
+                "linked": linked,
+            });
+            if let (Some(thread), Some(id), Some(ledger), true) = (&thread, ask_id, ledger, *linked) {
+                let prompt = format!(
+                    "Maestro ask {id} in {ledger} is for flow instance {instance}, node {node}. Once it is answered in Maestro's decisions, take the answer with maestro_flow_ask (instance {instance}, node_id {node}); the kernel reads it from the answers ledger, not from this message."
+                );
+                if maestro_view::handoff::fits(&prompt) {
+                    entry["t3"] = json!({ "app": thread.app_link(&prompt), "web": thread.web_link(&prompt) });
+                }
+            }
+            out.push(entry);
+        }
+    }
+    out
 }
 
 fn verdict(v: &Verdict) -> Value {
@@ -339,9 +449,13 @@ fn read(workspace: &Path, name: &str, instance: &str) -> Result<Value, Value> {
         let guard = Reader::new(&root, Options::default())?.lock()?;
         let now = maestro_flow::clock::now();
         Ok(if name == NEXT {
-            json!({ "ok": true, "next": kernel::next(&guard, &instance, now)? })
+            let next = kernel::next(&guard, &instance, now)?;
+            let relay = relay(&next.instance, next.owner.as_ref(), &next.pending);
+            json!({ "ok": true, "next": next, "relay": relay })
         } else {
-            json!({ "ok": true, "status": kernel::status(&guard, &instance, now)? })
+            let status = kernel::status(&guard, &instance, now)?;
+            let relay = relay(&status.instance, status.owner.as_ref(), &status.nodes);
+            json!({ "ok": true, "status": status, "relay": relay })
         })
     };
     run().map_err(|e| refused(&e))

@@ -6,7 +6,7 @@ use maestro_core::session::PeerCredentials;
 use maestro_hosts::{CallerClaim, DirectRegistry, DirectSession, PaseoRegistry, SessionLiveness, SurfaceRegistry};
 use maestro_hosts::{NodeId, T3Registry};
 use maestro_mcp::call_with_hosts;
-use maestro_mcp::flow::{CHOOSE, CLAIM, COMPLETE, HEARTBEAT, MAX_NAME, NEXT, START, STATUS};
+use maestro_mcp::flow::{ASK, CHOOSE, CLAIM, COMPLETE, HEARTBEAT, MAX_NAME, NEXT, START, STATUS};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -185,6 +185,7 @@ fn an_unverified_caller_reads_and_writes_nothing() {
         (HEARTBEAT, json!({ "claim_token": token })),
         (COMPLETE, json!({ "claim_token": token })),
         (CHOOSE, json!({ "claim_token": token, "edge": "ship" })),
+        (ASK, json!({ "instance": fi, "node_id": "review", "ledger": "l.yaml", "ask": { "class": "decision" } })),
     ];
     for (tool, args) in &writes {
         // A Paseo session, with no Paseo registry here and no claim: unverified.
@@ -272,6 +273,8 @@ fn names_passed_to_the_kernel_are_bounded() {
     let long = "n".repeat(MAX_NAME + 1);
     let v = f.d1(CLAIM, json!({ "instance": fi, "node_id": long }));
     assert_eq!(code(&v), "name_too_long", "{v}");
+    let v = f.d1(ASK, json!({ "instance": fi, "node_id": long }));
+    assert_eq!(code(&v), "name_too_long", "{v}");
     assert!(v.to_string().len() < MAX_NAME, "the name is not echoed back");
     // At the bound, the kernel judges it.
     let v = f.d1(CLAIM, json!({ "instance": fi, "node_id": "n".repeat(MAX_NAME) }));
@@ -295,7 +298,7 @@ fn names_passed_to_the_kernel_are_bounded() {
 #[test]
 fn write_schemas_carry_the_callers_claim() {
     let tools = maestro_mcp::MaestroServer::tools();
-    for name in [START, CLAIM, HEARTBEAT, COMPLETE, CHOOSE] {
+    for name in [START, CLAIM, HEARTBEAT, COMPLETE, CHOOSE, ASK] {
         let tool = tools.iter().find(|t| t.name == name).unwrap();
         let schema = Value::Object((*tool.input_schema).clone());
         let props = schema["properties"].as_object().unwrap_or_else(|| panic!("{name}: {schema}"));
@@ -414,4 +417,47 @@ fn verified_t3_and_paseo_sessions_write() {
         let claimed = call_with_hosts(&f.store, &hosts, CLAIM, claim_args).unwrap();
         assert_eq!(claimed["ok"], true, "{session}: {claimed}");
     }
+}
+
+/// A waiting human node's question is relayed as data (BRO-3635, ADR decisions 4 and 8): the
+/// question and, once filed, its ask; a T3 owner also gets prompt links that open its thread with
+/// a draft naming the ask and `maestro_flow_ask`, and carrying no answer. Another surface, an ask
+/// not yet linked, or a T3 owner with no environment gets no link.
+#[test]
+fn a_waiting_human_node_is_relayed_toward_its_t3_thread() {
+    use maestro_flow::kernel::{NodeStatus, Reason, State};
+    let waiting = |ask_id: Option<&str>, linked: bool| {
+        let unmet = vec![Reason::Owner {
+            ask: "Ship it?".into(),
+            ask_id: ask_id.map(str::to_string),
+            ledger: ask_id.map(|_| "arc.yaml".to_string()),
+            linked,
+        }];
+        let s = NodeStatus {
+            state: State::Waiting,
+            class: "human".into(),
+            iteration: BTreeMap::new(),
+            unmet,
+            inputs: BTreeMap::new(),
+        };
+        BTreeMap::from([("owner".to_string(), s)])
+    };
+    let t3: maestro_core::session::SessionRef = "t3:env-1/thread-1".parse().unwrap();
+    let relay = maestro_mcp::flow::relay("fi_1", Some(&t3), &waiting(Some("flow-owner-1"), true));
+    assert_eq!(relay.len(), 1);
+    assert_eq!((&relay[0]["question"], &relay[0]["ask_id"]), (&json!("Ship it?"), &json!("flow-owner-1")));
+    let app = relay[0]["t3"]["app"].as_str().unwrap();
+    assert!(app.starts_with("t3code://threads/env-1/thread-1?prompt="), "{app}");
+    assert!(app.contains("flow-owner-1") && app.contains("maestro_flow_ask"), "{app}");
+    assert!(relay[0]["t3"]["web"].as_str().unwrap().starts_with("https://app.t3.codes/env-1/thread-1?prompt="));
+    let none = |owner: &str, ask_id: Option<&str>, linked: bool| {
+        let owner: maestro_core::session::SessionRef = owner.parse().unwrap();
+        let relay = maestro_mcp::flow::relay("fi_1", Some(&owner), &waiting(ask_id, linked));
+        assert_eq!(relay[0]["question"], "Ship it?");
+        relay[0].get("t3").is_none()
+    };
+    assert!(none("paseo:-/a1", Some("flow-owner-1"), true), "not a T3 owner");
+    assert!(none("t3:-/thread-1", Some("flow-owner-1"), true), "no environment");
+    assert!(none("t3:env-1/thread-1", Some("flow-owner-1"), false), "pinned, not filed");
+    assert!(none("t3:env-1/thread-1", None, false), "no ask yet");
 }

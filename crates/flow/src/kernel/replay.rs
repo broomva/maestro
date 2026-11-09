@@ -43,6 +43,9 @@
 //!   neither does anything that needs it. A repeat whose whole body will never run is
 //!   unreachable, not exhausted.
 //! - A `human` node with every requirement met is `waiting` on the owner; any other is `ready`.
+//!   Its reason names its ask once `asks` pinned it (`AskPinned`, `AskLinked`, `AskWithdrawn` are
+//!   inert). Its receipt is `Answered` (the owner's answer, read by `asks`), never a `Completed`,
+//!   and an `Answered` counts only for the ask linked at that node and iteration.
 //!
 //! # Contract for the writers (3b2)
 //!
