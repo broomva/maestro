@@ -704,7 +704,7 @@ impl<'a> Fold<'a> {
                 if let Some(last) = self.attempts.get_mut(&(id, i)).and_then(|c| c.last_mut())
                     && last.attempt == h.attempt
                 {
-                    let at = h
+                    let at: Timestamp = h
                         .lease_until
                         .parse()
                         .map_err(|_| malformed(log, e.seq, format!("{} is not a timestamp", h.lease_until)))?;
