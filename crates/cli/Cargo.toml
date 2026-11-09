@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 maestro-core.workspace = true
+maestro-flow.workspace = true
 maestro-store.workspace = true
 maestro-mcp.workspace = true
 anyhow.workspace = true

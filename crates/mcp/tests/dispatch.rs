@@ -23,6 +23,47 @@ fn reads_say_read_only_and_requests_do_not() {
     }
 }
 
+/// The flow tools are the kernel's seven verbs and nothing else (BRO-3634): no raw append, no
+/// adoption or retirement (owner decisions the kernel applies), no owner verb under a flow name.
+#[test]
+fn the_flow_tools_are_the_kernel_verbs_alone() {
+    let flow: Vec<(&str, Authority)> =
+        TOOLS.iter().filter(|t| t.name.starts_with("maestro_flow_")).map(|t| (t.name, t.authority)).collect();
+    assert_eq!(
+        flow,
+        [
+            ("maestro_flow_start", Authority::AgentWrite),
+            ("maestro_flow_next", Authority::Read),
+            ("maestro_flow_claim", Authority::AgentWrite),
+            ("maestro_flow_complete", Authority::AgentWrite),
+            ("maestro_flow_choose", Authority::AgentWrite),
+            ("maestro_flow_status", Authority::Read),
+            ("maestro_flow_heartbeat", Authority::AgentWrite),
+        ]
+    );
+    let s = store();
+    for name in [
+        "maestro_flow_append",
+        "maestro_flow_event",
+        "maestro_flow_adopt",
+        "maestro_flow_retire",
+        "maestro_flow_archive",
+        "maestro_flow_decide",
+        "maestro_flow_answer",
+        "maestro_flow_approve",
+    ] {
+        let e = call(&s, name, json!({})).unwrap_err();
+        assert!(e.message.contains("unknown tool"), "{name}: {}", e.message);
+    }
+    // No tool takes an event: neither a kind and body (the storage layer's NewEvent) nor a seq.
+    for tool in MaestroServer::tools() {
+        let props = tool.input_schema.get("properties").and_then(|p| p.as_object()).cloned().unwrap_or_default();
+        for field in ["kind", "body", "event", "seq", "expected_seq"] {
+            assert!(!props.contains_key(field), "{} takes `{field}`", tool.name);
+        }
+    }
+}
+
 #[test]
 fn no_owner_verb_is_reachable() {
     let s = store();
@@ -40,6 +81,7 @@ fn every_tool_answers_on_the_fixture() {
         "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
         "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
         "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
+        "maestro_flow_next" | "maestro_flow_status" => json!({ "instance": "fi_none" }),
         _ => json!({}),
     };
     for spec in TOOLS.iter().filter(|t| t.authority == Authority::Read) {

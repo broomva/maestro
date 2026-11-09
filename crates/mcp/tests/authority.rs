@@ -43,6 +43,22 @@ fn every_tool_is_a_read_or_an_agent_request() {
         }
     }
     assert_eq!(MaestroServer::tools().len(), TOOLS.len());
+    // The flow verbs, explicitly (BRO-3634): the five writes are agent writes into the flow
+    // ledger and make no request; next and status are reads; nothing else is an agent write.
+    let writes = ["maestro_flow_start", "maestro_flow_claim", "maestro_flow_complete", "maestro_flow_choose"];
+    for name in writes.into_iter().chain(["maestro_flow_heartbeat"]) {
+        let spec = TOOLS.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no tool {name}"));
+        assert_eq!(
+            (spec.authority, spec.request, spec.scope),
+            (Authority::AgentWrite, None, ".broomva/flows"),
+            "{name}"
+        );
+    }
+    for name in ["maestro_flow_next", "maestro_flow_status"] {
+        let spec = TOOLS.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no tool {name}"));
+        assert_eq!((spec.authority, spec.request, spec.scope), (Authority::Read, None, "read"), "{name}");
+    }
+    assert_eq!(TOOLS.iter().filter(|t| t.authority == Authority::AgentWrite).count(), 5);
 }
 
 /// The flow ledger's scope: its root `.broomva/flows` or a path below it, never a sibling
@@ -152,6 +168,7 @@ fn a_read_tool_writes_nothing() {
             "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
             "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
             "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
+            "maestro_flow_next" | "maestro_flow_status" => json!({ "instance": "fi_none" }),
             _ => json!({}),
         };
         call(&store, spec.name, args).unwrap_or_else(|e| panic!("{}: {}", spec.name, e.message));
@@ -188,6 +205,122 @@ fn a_held_request_changes_nothing_but_the_journal() {
         assert_eq!(written.lines().count(), lines, "{}", spec.name);
     }
     assert_eq!(lines, RequestKind::ALL.len() - 1);
+    // A flow write is not a request: from an unverified caller it is refused, and it writes no
+    // journal line and nothing else, flow ledger included (BRO-3634).
+    let whole = tree(tmp.path());
+    let session = "paseo:-/a1";
+    for spec in TOOLS.iter().filter(|t| t.authority == Authority::AgentWrite) {
+        let args = match spec.name {
+            "maestro_flow_start" => json!({ "session": session, "definition": "flow: x" }),
+            "maestro_flow_claim" => json!({ "session": session, "instance": "fi_x", "node_id": "n" }),
+            "maestro_flow_choose" => json!({ "session": session, "claim_token": "fi_x.00", "edge": "e" }),
+            _ => json!({ "session": session, "claim_token": "fi_x.00" }),
+        };
+        let v = call(&store, spec.name, args).unwrap_or_else(|e| panic!("{}: {}", spec.name, e.message));
+        assert_eq!((&v["ok"], &v["code"]), (&json!(false), &json!("caller_unverified")), "{}", spec.name);
+        assert!(tree(tmp.path()) == whole, "{} changed the machine", spec.name);
+    }
+}
+
+#[test]
+fn guard_process_entry() {
+    maestro_flow::kernel::guard_entry();
+}
+
+/// What a verified flow write does (BRO-3624 item 9): the first start makes the ledger (its root
+/// and the lock beside it); after that each write verb changes only its instance's log and the
+/// projection (a cache), never the requests journal or anything else on the machine.
+#[test]
+fn a_flow_write_changes_only_its_instance_and_the_flow_ledger() {
+    use std::path::{Path, PathBuf};
+    type Tree = std::collections::BTreeMap<PathBuf, Vec<u8>>;
+    maestro_flow::kernel::guard_entry();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    copy(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine"), &root);
+    let mut paths = Paths::under(&root);
+    paths.ask_locks = root.join("locks");
+    let store = Store::new(paths, TreeSource::WorkingTree);
+    let work = root.join("flow-work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("ok"), "").unwrap();
+    let direct = maestro_hosts::DirectRegistry::new();
+    direct.register(maestro_hosts::DirectSession {
+        id: "d1".into(),
+        cwd: work.to_string_lossy().into_owned(),
+        token: "tok-1".into(),
+        liveness: maestro_hosts::SessionLiveness::Live,
+        harness: None,
+        pending_permissions: vec![],
+    });
+    let hosts = maestro_hosts::SurfaceRegistry::new(None, None, Some(direct));
+    let call = |tool: &str, mut args: serde_json::Value| {
+        args["session"] = json!("direct:-/d1");
+        args["token"] = json!("tok-1");
+        args["cwd"] = json!(work);
+        let v = maestro_mcp::call_with_hosts(&store, &hosts, tool, args)
+            .unwrap_or_else(|e| panic!("{tool}: {}", e.message));
+        assert_eq!(v["ok"], true, "{tool}: {v}");
+        v
+    };
+    let definition = r#"
+flow: decide
+version: 1
+params: [dir]
+workdir: "{{params.dir}}"
+nodes:
+  review: {class: work, verify: [sh, -c, 'test -f ok']}
+  pick: {class: choice, needs: [review], edges: {ship: {guard: '.nodes.review.outputs.verdict == "pass"'}}}
+"#;
+    let ledger = Path::new("workspace/.broomva/flows");
+    // Every path a write added, changed or removed.
+    let changed = |before: &Tree| {
+        let after = tree(&root);
+        let mut paths: Vec<PathBuf> = after
+            .iter()
+            .filter(|(p, b)| before.get(*p) != Some(b))
+            .map(|(p, _)| p.clone())
+            .chain(before.keys().filter(|p| !after.contains_key(*p)).cloned())
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    let before = tree(&root);
+    let begun = call("maestro_flow_start", json!({ "definition": definition, "params": { "dir": work } }));
+    let fi = begun["instance"].as_str().unwrap().to_string();
+    let made = changed(&before);
+    assert!(made.contains(&ledger.join("instances").join(&fi).join("events.jsonl")), "{made:?}");
+    for p in made {
+        assert!(p.starts_with(ledger) || p == Path::new("workspace/.broomva/flows.lock"), "start changed {p:?}");
+    }
+    let instance = ledger.join("instances").join(&fi);
+    let mut token = String::new();
+    let steps = [
+        ("maestro_flow_claim", json!({ "instance": fi, "node_id": "review" })),
+        ("maestro_flow_heartbeat", json!({})),
+        ("maestro_flow_complete", json!({ "outputs": { "verdict": "pass" } })),
+        ("maestro_flow_claim", json!({ "instance": fi, "node_id": "pick" })),
+        ("maestro_flow_choose", json!({ "edge": "ship" })),
+    ];
+    for (tool, mut args) in steps {
+        if tool != "maestro_flow_claim" {
+            args["claim_token"] = json!(token);
+        }
+        let before = tree(&root);
+        let v = call(tool, args);
+        if let Some(t) = v["claim_token"].as_str() {
+            token = t.to_string();
+        }
+        let changed = changed(&before);
+        assert!(changed.contains(&instance.join("events.jsonl")), "{tool} wrote no event: {changed:?}");
+        for p in &changed {
+            let cache = p.parent() == Some(ledger)
+                && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("projection.sqlite"));
+            assert!(p.starts_with(&instance) || cache, "{tool} changed {p:?}");
+        }
+    }
+    assert!(!root.join("broomva-home/ledger/requests/requests.jsonl").exists(), "a flow write journals nothing");
 }
 
 /// An ask filed whose journal line failed on a busy lock is not a busy request: the ask is

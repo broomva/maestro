@@ -1,6 +1,6 @@
 [package]
 name = "maestro-mcp"
-description = "Maestro's MCP server: read tools, context prompts and resources for any agent harness."
+description = "Maestro's MCP server: read tools, agent requests, the flow kernel's verbs, context prompts and resources for any agent harness."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,12 @@ license.workspace = true
 
 [dependencies]
 maestro-core.workspace = true
+maestro-flow.workspace = true
 maestro-hosts.workspace = true
 maestro-store.workspace = true
 maestro-view.workspace = true
 rmcp.workspace = true
+rustix = { workspace = true, features = ["system"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

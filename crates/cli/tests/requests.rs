@@ -399,6 +399,10 @@ fn the_agent_cli_has_no_owner_verb() {
         }
     }
     assert!(seen.iter().any(|c| c == "ask file"), "{seen:?}");
+    // The flow verbs are walked too (BRO-3634): each is an agent write or a read, none an owner verb.
+    for verb in ["start", "next", "claim", "complete", "choose", "status", "heartbeat"] {
+        assert!(seen.iter().any(|c| *c == format!("flow {verb}")), "flow {verb}: {seen:?}");
+    }
     let owner_words = [
         "answer",
         "approve",
