@@ -197,6 +197,12 @@ fn asked_at_is_pinned_before_hashing_and_the_comparable_body_excludes_origin() {
     let clock = TestClock::install();
     clock.set("2026-01-02T03:04:05Z".parse().unwrap());
     let fi = f.begin();
+    // The agent never gives asked_at (nor id, uid or ask): the kernel's own goes in.
+    for key in KERNEL_KEYS {
+        let mut early = filing();
+        early.body.insert(key.into(), Value::String("2020-01-01T00:00:00Z".into()));
+        assert_eq!(code(f.ask(&fi, Some(&early))), "ask_body_invalid", "{key}");
+    }
     let asked = f.ask(&fi, Some(&filing())).unwrap();
     let (id, linked) = waiting(&asked);
     assert!(linked);
@@ -407,4 +413,35 @@ fn a_writer_refusal_with_no_row_withdraws_the_pin() {
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskWithdrawn"]);
     assert!(waiting(&f.ask(&fi, Some(&filing())).unwrap()).1);
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskWithdrawn", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn only_an_answer_to_the_linked_ask_is_a_human_nodes_receipt() {
+    // Replay's half of "nothing an agent passes in stands in for the answer": a `Completed` for a
+    // human node, or an `Answered` naming an ask that is not the one linked, is set aside.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let append = |f: &mut Fx, kind: &str, body: Value| {
+        let mut guard = f.ledger.lock().unwrap();
+        let seq = guard.log(&fi).unwrap().seq();
+        guard.append(&fi, seq, crate::NewEvent::new(kind, body)).unwrap();
+    };
+    append(&mut f, "Completed", serde_json::json!({ "node": "owner", "iteration": {}, "attempt": 1 }));
+    let answered = |id: &str| {
+        serde_json::json!({
+            "node": "owner", "iteration": {}, "ask_id": id, "ledger": "ledger.yaml",
+            "outputs": { "answer_option": "ship" }, "source": "maestro/answers", "row_hash": "x",
+        })
+    };
+    append(&mut f, "Answered", answered("flow-owner-unlinked"));
+    let s = f.status(&fi);
+    assert_eq!(s.nodes["owner"].state, State::Waiting);
+    let why: Vec<&str> = s.rejected.iter().map(|r| r.reason.as_str()).collect();
+    assert_eq!(why, ["wrong_class", "not_linked"]);
+    // Linked, an answer naming another ask is still set aside; one naming the linked ask is not.
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    append(&mut f, "Answered", answered("flow-owner-other"));
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Waiting);
+    append(&mut f, "Answered", answered(&id));
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
 }

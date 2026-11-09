@@ -1570,6 +1570,40 @@ mutate $cli '    if v["ok"] == json!(true) {
         return Ok(());
     }
     bail!'
+
+# Human steps (BRO-3635; BRO-3624 items 1 and 7): a flow's ask, pinned, filed, linked, answered.
+asks=crates/flow/src/kernel/asks.rs
+replay=crates/flow/src/kernel/replay.rs
+# The minted id collides with no id or uid in the ledger.
+mutate $asks '.flat_map(|a| [Some(a.id), a.uid])' '.flat_map(|a| [Some(a.id), None])'
+mutate $asks 'if !taken.contains(&id) {' 'if true {'
+# asked_at is the kernel's, pinned before hashing; the comparable body excludes origin.
+mutate $asks '    body.insert("asked_at".into(), Value::String(clock::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string()));' ''
+mutate $asks 'const KERNEL_KEYS: [&str; 4] = ["id", "uid", "ask", "asked_at"];' 'const KERNEL_KEYS: [&str; 4] = ["id", "uid", "ask", "ask"];'
+mutate $asks 'map.retain(|k, _| !requests::refused_key(k));' 'map.retain(|_, _| true);'
+# The working tree's row with that id and hash links, after a filing and after a duplicate.
+mutate $asks 'let row = match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {' 'let row = match (if outcome.is_ok() { find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? } else { Found::None }) {'
+# A hash miss is ask_refused.
+mutate $asks '    if found != rec.body_hash {
+        return Err(Refusal::AskRefused {' '    if false {
+        return Err(Refusal::AskRefused {'
+# Confirmation reads the working tree, not origin/main.
+mutate $asks 'let here = Store::new(paths.clone(), TreeSource::WorkingTree);' 'let here = Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into()));'
+# A busy ask ledger is retried by the kernel against its own clock, until its deadline, then refused.
+mutate $asks 'if clock::now() >= deadline {' 'if true {'
+mutate $asks 'if clock::now() >= deadline {' 'if false {'
+# The flow finds its ask by the id it minted, never by searching the asks.
+mutate $asks '.filter(|a| a.id == id || a.uid.as_deref() == Some(id))' '.filter(|a| a.id == id || a.uid.as_deref() == Some(id) || a.state() == AskState::Answered)'
+# The flows lock is never held while an ask is filed.
+mutate $asks 'let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?;' 'let outcome = { let _held = ledger.lock()?; file_pinned(&here.paths, &dir, &rec, body, session)? };'
+# Only the owner path answers: the answers ledger at its revisions, an answered row, the linked ask.
+mutate $asks 'TreeSource::GitRev(rev.to_string())' 'TreeSource::WorkingTree'
+mutate $asks 'if row.state() == AskState::Answered {' 'if true {'
+mutate $replay 'Class::Choice { .. } | Class::Human { .. } => return Ok(Err("wrong_class")),' 'Class::Choice { .. } => return Ok(Err("wrong_class")),'
+mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {' 'if false {'
+# The question is relayed toward a T3 owner's thread, and only once its ask is filed.
+mutate $mf '.filter(|o| o.surface == Surface::T3)' '.filter(|_| true)'
+mutate $mf '(&thread, ask_id, ledger, *linked)' '(&thread, ask_id, ledger, true)'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

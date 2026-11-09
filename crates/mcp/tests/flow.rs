@@ -456,7 +456,7 @@ fn a_waiting_human_node_is_relayed_toward_its_t3_thread() {
         assert_eq!(relay[0]["question"], "Ship it?");
         relay[0].get("t3").is_none()
     };
-    assert!(none("paseo:-/a1", Some("flow-owner-1"), true), "not a T3 owner");
+    assert!(none("paseo:env-1/a1", Some("flow-owner-1"), true), "not a T3 owner");
     assert!(none("t3:-/thread-1", Some("flow-owner-1"), true), "no environment");
     assert!(none("t3:env-1/thread-1", Some("flow-owner-1"), false), "pinned, not filed");
     assert!(none("t3:env-1/thread-1", None, false), "no ask yet");
