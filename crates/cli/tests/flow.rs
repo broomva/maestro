@@ -155,6 +155,33 @@ fn a_guarded_choose_runs_through_the_cli() {
     assert_eq!(status["status"]["nodes"]["ship"]["state"], "ready", "{status}");
 }
 
+/// A definition over the kernel's bound is refused for its size as the tool refuses it, JSON and
+/// all, from a file or stdin, even where the read's cut splits a character.
+#[test]
+fn an_oversized_definition_is_the_tools_refusal() {
+    let m = machine();
+    let mut text = "a".repeat(maestro_flow::kernel::MAX_SOURCE);
+    text.push('é');
+    std::fs::write(m.root.join("big.yaml"), &text).unwrap();
+    let file = m.verified().args(["flow", "start", "--definition"]).arg(m.root.join("big.yaml")).output().unwrap();
+    let mut piped = m
+        .verified()
+        .args(["flow", "start", "--definition", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    piped.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+    let piped = piped.wait_with_output().unwrap();
+    for out in [file, piped] {
+        assert_eq!(out.status.code(), Some(1));
+        let v: Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&out.stderr)));
+        assert_eq!(v["code"], "definition_invalid", "{v}");
+        assert!(v["reason"].as_str().unwrap().contains("more than 262144"), "{v}");
+    }
+}
+
 /// The CLI prints exactly what the tool returns, results and refusals alike.
 #[test]
 fn the_cli_prints_the_tools_json() {
@@ -211,8 +238,13 @@ fn the_mcp_server_runs_a_guarded_choose() {
     let _ = child.wait();
 }
 
-/// One stateless MCP 2026-07-28 tools/call to `maestro serve --http` at `addr`; the result.
+/// A tools/call over HTTP ([`http_call`]); its structured result.
 fn http_tool(addr: &str, name: &str, args: Value) -> Value {
+    http_call(addr, name, args)["structuredContent"].clone()
+}
+
+/// One stateless MCP 2026-07-28 tools/call to `maestro serve --http` at `addr`; the whole result.
+fn http_call(addr: &str, name: &str, args: Value) -> Value {
     use std::io::Read as _;
     let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} });
     let body =
@@ -231,7 +263,7 @@ fn http_tool(addr: &str, name: &str, args: Value) -> Value {
     let response = String::from_utf8_lossy(&raw).into_owned();
     let json = response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
     let v: Value = serde_json::from_str(json).unwrap_or_else(|_| panic!("{response}"));
-    v["result"]["structuredContent"].clone()
+    v["result"].clone()
 }
 
 /// A shared daemon (`serve --http`) takes no caller claim from its own environment: a caller
@@ -239,8 +271,29 @@ fn http_tool(addr: &str, name: &str, args: Value) -> Value {
 #[test]
 fn the_http_daemon_takes_no_claim_from_its_environment() {
     let m = machine();
+    // A Paseo session in the work folder, and a valid signed credential for it, issued with the
+    // daemon's own bridge secret: the claim its variables would make.
+    let agents = m.root.join("agents");
+    std::fs::create_dir_all(agents.join("work")).unwrap();
+    let agent = json!({
+        "id": "agent-flow", "cwd": m.work, "provider": "claude", "createdAt": "2026-11-07T00:00:00Z",
+        "lastStatus": "running", "pid": 4101, "startedAt": "2026-11-07T00:00:01Z",
+        "persistence": { "sessionId": "handle-1" }
+    });
+    std::fs::write(agents.join("work/agent-flow.json"), agent.to_string()).unwrap();
+    let issuer = maestro_hosts::SurfaceRegistry::new(Some(maestro_hosts::PaseoRegistry::new(&agents)), None, None)
+        .with_bridge_secret("daemon-secret");
+    let claim = maestro_hosts::CallerClaim::paseo(Some("agent-flow"), Some(m.work.to_string_lossy().into_owned()))
+        .with_peer(maestro_hosts::PeerCredentials { pid: std::process::id(), uid: 1000 });
+    let verified = issuer.verify_caller(&claim).unwrap();
+    let now = maestro_hosts::current_time_ms();
+    let node: maestro_hosts::NodeId = "node-flow".parse().unwrap();
+    let credential = issuer.issue_bridge_credential(&verified, node, now - 5_000, now + 600_000).unwrap();
     let mut child = m
         .verified()
+        .env("MAESTRO_PASEO_AGENTS_DIR", &agents)
+        .env("MAESTRO_BRIDGE_SECRET", "daemon-secret")
+        .env("MAESTRO_BRIDGE_CREDENTIAL", serde_json::to_string(&credential).unwrap())
         .args(["serve", "--http", "--bind", "127.0.0.1:0"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -254,7 +307,18 @@ fn the_http_daemon_takes_no_claim_from_its_environment() {
     let start = json!({ "session": "direct:-/d1", "definition": DECIDE, "params": { "dir": m.work } });
     let refused = http_tool(&addr, "maestro_flow_start", start.clone());
     assert_eq!(refused["code"], "caller_refused", "{refused}");
+    // The daemon's credential is nobody's claim either: a caller that knows the session's folder
+    // but holds no credential is refused.
+    let paseo =
+        json!({ "session": "paseo:-/agent-flow", "cwd": m.work, "definition": DECIDE, "params": { "dir": m.work } });
+    let refused = http_tool(&addr, "maestro_flow_start", paseo);
+    assert_eq!(refused["code"], "caller_refused", "{refused}");
     assert!(!m.root.join("workspace/.broomva/flows").exists(), "the daemon's variables wrote a flow");
+    // Nor for an agent request: a handback naming the session is refused, not recorded verified.
+    let handback = http_call(&addr, "maestro_handback", json!({ "session": "direct:-/d1", "summary": "s" }));
+    assert_eq!(handback["isError"], true, "{handback}");
+    assert!(handback.to_string().contains("launch token is required"), "{handback}");
+    assert!(!m.root.join("broomva-home/ledger/requests/requests.jsonl").exists(), "the handback was journalled");
     let mut own = start;
     own["token"] = json!("tok-1");
     own["cwd"] = json!(m.work);

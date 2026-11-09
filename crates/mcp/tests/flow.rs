@@ -24,7 +24,7 @@ version: 1
 params: [dir]
 workdir: "{{params.dir}}"
 nodes:
-  review: {class: work, verify: [sh, -c, 'test -f ok']}
+  review: {class: work, verify: [sh, -c, 'test -f ok || { echo no ok file >&2; exit 1; }']}
   pick: {class: choice, needs: [review], edges: {ship: {guard: '.nodes.review.outputs.verdict == "pass"'}, fix: {guard: '.nodes.review.outputs.verdict != "pass"'}}}
   ship: {class: pure, run: ['true'], switch: {on: pick, case: ship}}
   fix: {class: pure, run: ['true'], switch: {on: pick, case: fix}}
@@ -128,12 +128,24 @@ fn a_verified_direct_session_runs_a_flow_through_the_tools() {
     assert_eq!(enabled, [json!("review")]);
     assert!(!next.to_string().contains("token"), "a read never returns a token: {next}");
 
-    let review = f.claim(&fi, "review");
+    // The claim's fields, by name: the node as node_id, its first attempt, outside any repeat.
+    let claimed = f.d1(CLAIM, json!({ "instance": fi, "node_id": "review" }));
+    assert_eq!(
+        (&claimed["node_id"], &claimed["attempt"], &claimed["iteration"]),
+        (&json!("review"), &json!(1), &json!({}))
+    );
+    let review = claimed["claim_token"].as_str().unwrap().to_string();
+    let lease = |v: &Value| v["lease_until"].as_str().unwrap().parse::<jiff::Timestamp>().unwrap();
     let beat = f.d1(HEARTBEAT, json!({ "claim_token": review }));
     assert_eq!(beat["ok"], true, "{beat}");
-    // The command fails: recorded, and the token kept.
+    assert!(lease(&beat) > lease(&claimed), "the beat moves the lease: {beat} {claimed}");
+    // Limits the kernel does not allow are refused before the command runs: the timeout is passed on.
+    let limits = f.d1(COMPLETE, json!({ "claim_token": review, "timeout_secs": 0 }));
+    assert_eq!((code(&limits), &limits["recorded"]), ("invalid_limits", &json!(false)), "{limits}");
+    // The command fails: recorded, with its standard error, and the token kept.
     let failed = f.d1(COMPLETE, json!({ "claim_token": review, "outputs": { "verdict": "pass" } }));
     assert_eq!((code(&failed), &failed["recorded"]), ("verify_failed", &json!(true)), "{failed}");
+    assert_eq!(failed["stderr"], "no ok file\n", "{failed}");
     std::fs::write(f.work.join("ok"), "").unwrap();
     let done = f.d1(COMPLETE, json!({ "claim_token": review, "outputs": { "verdict": "pass" } }));
     assert_eq!(done["ok"], true, "{done}");
@@ -264,6 +276,8 @@ fn names_passed_to_the_kernel_are_bounded() {
     // At the bound, the kernel judges it.
     let v = f.d1(CLAIM, json!({ "instance": fi, "node_id": "n".repeat(MAX_NAME) }));
     assert_eq!(code(&v), "unknown_node", "{v}");
+    // A refusal the kernel returns before writing is not recorded.
+    assert_eq!(v["recorded"], false, "{v}");
     let pick = {
         std::fs::write(f.work.join("ok"), "").unwrap();
         let review = f.claim(&fi, "review");
@@ -274,6 +288,55 @@ fn names_passed_to_the_kernel_are_bounded() {
     assert_eq!(code(&v), "name_too_long", "{v}");
     let v = f.d1(CHOOSE, json!({ "claim_token": pick, "edge": "e".repeat(MAX_NAME) }));
     assert_eq!(code(&v), "undeclared_edge", "{v}");
+}
+
+/// Every write tool's advertised schema carries the caller's claim (a shared daemon reads it only
+/// from the call's arguments), still refuses any other field, and a verified Direct call fits it.
+#[test]
+fn write_schemas_carry_the_callers_claim() {
+    let tools = maestro_mcp::MaestroServer::tools();
+    for name in [START, CLAIM, HEARTBEAT, COMPLETE, CHOOSE] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        let schema = Value::Object((*tool.input_schema).clone());
+        let props = schema["properties"].as_object().unwrap_or_else(|| panic!("{name}: {schema}"));
+        for field in ["session", "cwd", "token", "node", "credential"] {
+            assert!(props.contains_key(field), "{name} does not declare `{field}`: {schema}");
+        }
+        assert_eq!(schema["additionalProperties"], false, "{name}");
+    }
+    // A Direct start as a schema-enforcing client sends it: every key declared, every required
+    // key present, and the call verified and written.
+    let f = fx();
+    let call = f.as_direct("d1", "tok-1", json!({ "definition": DECIDE, "params": { "dir": f.work } }));
+    let tool = tools.iter().find(|t| t.name == START).unwrap();
+    let schema = Value::Object((*tool.input_schema).clone());
+    for key in call.as_object().unwrap().keys() {
+        assert!(schema["properties"].get(key).is_some(), "the schema refuses `{key}`");
+    }
+    for key in schema["required"].as_array().unwrap() {
+        assert!(call.get(key.as_str().unwrap()).is_some(), "the call lacks `{key}`");
+    }
+    assert_eq!(f.call(START, call)["ok"], true);
+}
+
+/// A flow with no params starts with none given: they default to an empty object.
+#[test]
+fn missing_params_are_an_empty_object() {
+    let f = fx();
+    let bare = "flow: bare\nversion: 1\nnodes:\n  a: {class: pure, run: ['true']}\n";
+    let v = f.d1(START, json!({ "definition": bare }));
+    assert_eq!(v["ok"], true, "{v}");
+}
+
+/// The ledger's host id is the host name's first DNS label, lower case: the network suffix a Mac
+/// takes from where it is (`.lan`, `.local`) is dropped.
+#[test]
+fn the_host_label_drops_the_network_suffix() {
+    use maestro_mcp::flow::host_label;
+    assert_eq!(host_label("Carloss-MBP.lan"), "carloss-mbp");
+    assert_eq!(host_label("Carloss-MBP.local"), "carloss-mbp");
+    assert_eq!(host_label("carloss-mbp"), "carloss-mbp");
+    assert_eq!(host_label("-nuc box.tail"), "nuc-box");
 }
 
 /// Arguments outside a tool's schema are refused before anything runs: a model cannot pass a

@@ -32,3 +32,4 @@ workspace = true
 maestro-mcp.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+maestro-hosts.workspace = true

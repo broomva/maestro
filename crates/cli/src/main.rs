@@ -532,6 +532,20 @@ fn json_arg(flag: &str, text: Option<&str>) -> Result<Option<Value>> {
     text.map(|t| serde_json::from_str(t).with_context(|| format!("{flag} must be JSON"))).transpose()
 }
 
+/// A definition, read to one byte past the kernel's bound, so an oversized one is never read
+/// whole. Over the bound it goes on with any character the cut split replaced, so the tool
+/// refuses it for its size (`definition_invalid`) exactly as it refuses one sent over MCP;
+/// within the bound it must be UTF-8, as every MCP argument is.
+fn read_definition(source: impl std::io::Read) -> Result<String> {
+    let limit = maestro_flow::kernel::MAX_SOURCE;
+    let mut bytes = Vec::new();
+    source.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    String::from_utf8(bytes).context("the definition is not UTF-8")
+}
+
 /// One flow verb, through the same tool an agent calls over MCP: the same JSON in and out. The
 /// CLI adds no caller claim of its own; the caller variables (`MAESTRO_DIRECT_TOKEN`,
 /// `MAESTRO_BRIDGE_CREDENTIAL`, `MAESTRO_CALLER_CWD`, `MAESTRO_CALLER_NODE`) carry it.
@@ -539,17 +553,14 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
     use maestro_mcp::flow as f;
     let (tool, args) = match command {
         FlowCommand::Start { session, definition, params } => {
-            // Read one byte past the kernel's bound, so an oversized definition is refused by the
-            // kernel, never read whole.
-            let limit = maestro_flow::kernel::MAX_SOURCE as u64 + 1;
-            let mut text = String::new();
-            if definition == "-" {
-                std::io::stdin().take(limit).read_to_string(&mut text)?;
+            let text = if definition == "-" {
+                read_definition(std::io::stdin().lock())?
             } else {
                 std::fs::File::open(definition)
-                    .and_then(|file| file.take(limit).read_to_string(&mut text))
-                    .with_context(|| format!("reading {definition}"))?;
-            }
+                    .map_err(anyhow::Error::from)
+                    .and_then(read_definition)
+                    .with_context(|| format!("reading {definition}"))?
+            };
             let params = json_arg("--params", params.as_deref())?;
             (f::START, json!({ "session": session.session, "definition": text, "params": params }))
         }

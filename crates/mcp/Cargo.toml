@@ -26,5 +26,6 @@ workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+jiff.workspace = true
 maestro-view.workspace = true
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }

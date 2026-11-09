@@ -1542,6 +1542,25 @@ mutate $mcp '        authority: Authority::Read,
 # A shared daemon (serve --http) takes no caller claim from its own environment.
 mutate $http '    let server = MaestroServer::new(store).shared();' '    let server = MaestroServer::new(store);'
 mutate $mcp '        Ambient::Shared => None,' '        Ambient::Shared => std::env::var(key).ok().filter(|s| !s.is_empty()),'
+mutate $mcp '        None => match var("MAESTRO_BRIDGE_CREDENTIAL") {' '        None => match std::env::var("MAESTRO_BRIDGE_CREDENTIAL").ok().filter(|s| !s.is_empty()) {'
+mutate $mcp '            Some(kind) => agent_request_in(store, hosts, ambient, kind, args),' '            Some(kind) => agent_request_in(store, hosts, Ambient::Caller, kind, args),'
+# Every write schema declares the caller's claim, or a schema-enforcing client cannot send it.
+mutate $mf '    pub params: Option<Value>,
+    /// Your session'"'"'s folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,' '    pub params: Option<Value>,'
+# The JSON each verb returns, field by field; a refusal before a write is not recorded.
+mutate $mf '    refusal(e.code(), e, false)' '    refusal(e.code(), e, true)'
+mutate $mf '                    "node_id": c.node,' '                    "node_id": c.instance.as_str(),'
+mutate $mf '                    "attempt": c.attempt,' '                    "attempt": c.iteration,'
+mutate $mf 'beat.lease_until.to_string()' '"2000-01-01T00:00:00Z"'
+mutate $mf '                        v["stderr"] = json!(stderr);' ''
+mutate $mf 'let params = a.params.clone().unwrap_or_else(|| json!({}));' 'let params = a.params.clone().unwrap_or(Value::Null);'
+mutate $mf '                    limits.timeout = std::time::Duration::from_secs(secs);' '                    let _ = secs;'
+# The host id: the first DNS label, lower case, whatever network suffix the name carries.
+mutate $mf "        .split('.')" "        .split(',')"
+mutate $mf '{ c.to_ascii_lowercase() }' '{ c }'
+# An oversized definition is the tool's size refusal, even where the read's cut splits a character.
+mutate $cli '    if bytes.len() > limit {' '    if false {'
 mutate $cli '    maestro_flow::kernel::guard_entry();
     drop_inherited_git_repo();' '    drop_inherited_git_repo();'
 mutate $cli '    if v["ok"] == json!(true) {

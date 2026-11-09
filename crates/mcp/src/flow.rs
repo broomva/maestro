@@ -44,6 +44,10 @@ pub const FLOWS: &str = ".broomva/flows";
 /// passed on to the kernel or echoed back in a refusal.
 pub const MAX_NAME: usize = 1024;
 
+// Every write tool's schema carries the caller's claim (`cwd`, `token`, `node`, `credential`):
+// a schema-enforcing client sends it in the call's arguments, the only place a shared daemon
+// reads it (`crate::Ambient`). The caller check reads these fields from the arguments.
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowStartArgs {
@@ -53,6 +57,14 @@ pub struct FlowStartArgs {
     pub definition: String,
     /// The flow's params, a JSON object.
     pub params: Option<Value>,
+    /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,
+    /// A Direct session's launch token.
+    pub token: Option<String>,
+    /// The tailnet node your session runs on.
+    pub node: Option<String>,
+    /// A T3 or Paseo session's signed bridge credential, a JSON object.
+    pub credential: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -69,6 +81,14 @@ pub struct FlowClaimArgs {
     pub instance: String,
     /// The flow node to claim, one `maestro_flow_next` lists as enabled.
     pub node_id: String,
+    /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,
+    /// A Direct session's launch token.
+    pub token: Option<String>,
+    /// The tailnet node your session runs on.
+    pub node: Option<String>,
+    /// A T3 or Paseo session's signed bridge credential, a JSON object.
+    pub credential: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -77,6 +97,14 @@ pub struct FlowHeartbeatArgs {
     pub session: String,
     /// The token `maestro_flow_claim` returned.
     pub claim_token: String,
+    /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,
+    /// A Direct session's launch token.
+    pub token: Option<String>,
+    /// The tailnet node your session runs on.
+    pub node: Option<String>,
+    /// A T3 or Paseo session's signed bridge credential, a JSON object.
+    pub credential: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -89,6 +117,14 @@ pub struct FlowCompleteArgs {
     pub outputs: Option<Value>,
     /// How long the node's command may run, in seconds (default 300, at most 3600).
     pub timeout_secs: Option<u64>,
+    /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,
+    /// A Direct session's launch token.
+    pub token: Option<String>,
+    /// The tailnet node your session runs on.
+    pub node: Option<String>,
+    /// A T3 or Paseo session's signed bridge credential, a JSON object.
+    pub credential: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -99,6 +135,14 @@ pub struct FlowChooseArgs {
     pub claim_token: String,
     /// The edge to take, one the choice node declares.
     pub edge: String,
+    /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,
+    /// A Direct session's launch token.
+    pub token: Option<String>,
+    /// The tailnet node your session runs on.
+    pub node: Option<String>,
+    /// A T3 or Paseo session's signed bridge credential, a JSON object.
+    pub credential: Option<Value>,
 }
 
 /// A refusal as a result: the stable code, the reason, and whether the kernel recorded it.
@@ -127,11 +171,16 @@ pub fn flows_root(workspace: &Path) -> Result<PathBuf, Value> {
     Ok(workspace.join(FLOWS))
 }
 
-/// This machine's host id for the ledger: the host name's first label, lower case, with any
-/// character a host id does not allow made a dash.
+/// This machine's host id for the ledger: [`host_label`] of its host name.
 pub fn host_id() -> Result<HostId, Value> {
     let uname = rustix::system::uname();
-    let name = uname.nodename().to_string_lossy();
+    HostId::new(host_label(&uname.nodename().to_string_lossy())).map_err(|e| refusal("host_unknown", e, false))
+}
+
+/// A host name's first DNS label, lower case, with any character a host id does not allow made a
+/// dash. The network adds the rest (`Carloss-MBP.lan` on one, `Carloss-MBP.local` on another), so
+/// it is dropped, or every write would be refused `foreign_host` after a move between networks.
+pub fn host_label(name: &str) -> String {
     let label: String = name
         .split('.')
         .next()
@@ -139,7 +188,7 @@ pub fn host_id() -> Result<HostId, Value> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c.to_ascii_lowercase() } else { '-' })
         .collect();
-    HostId::new(label.trim_start_matches('-')).map_err(|e| refusal("host_unknown", e, false))
+    label.trim_start_matches('-').to_string()
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, McpError> {
@@ -162,14 +211,14 @@ pub(crate) fn call(
     name: &str,
     args: Value,
 ) -> Result<Value, McpError> {
-    let clean = crate::strip_auth_fields(args.clone());
+    // A read takes no claim, so a claim passed to one is dropped; a write declares its claim fields.
     match name {
         NEXT | STATUS => {
-            let a: FlowInstanceArgs = parse(clean)?;
+            let a: FlowInstanceArgs = parse(crate::strip_auth_fields(args))?;
             Ok(read(workspace, name, &a.instance).unwrap_or_else(|v| v))
         }
         START => {
-            let a: FlowStartArgs = parse(clean)?;
+            let a: FlowStartArgs = parse(args.clone())?;
             let session = crate::session_of(&a.session)?;
             Ok(write(workspace, (hosts, ambient), &session, &args, true, |w| {
                 // The definition compiles before the ledger is opened, or made.
@@ -186,7 +235,7 @@ pub(crate) fn call(
             }))
         }
         CLAIM => {
-            let a: FlowClaimArgs = parse(clean)?;
+            let a: FlowClaimArgs = parse(args.clone())?;
             let session = crate::session_of(&a.session)?;
             Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
                 let node = match bounded("node_id", &a.node_id) {
@@ -209,7 +258,7 @@ pub(crate) fn call(
             }))
         }
         HEARTBEAT => {
-            let a: FlowHeartbeatArgs = parse(clean)?;
+            let a: FlowHeartbeatArgs = parse(args.clone())?;
             let session = crate::session_of(&a.session)?;
             Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
                 let beat = kernel::heartbeat(&mut w.ledger()?, &w.me, &a.claim_token)?;
@@ -217,7 +266,7 @@ pub(crate) fn call(
             }))
         }
         COMPLETE => {
-            let a: FlowCompleteArgs = parse(clean)?;
+            let a: FlowCompleteArgs = parse(args.clone())?;
             let session = crate::session_of(&a.session)?;
             Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
                 let mut limits = Limits::default();
@@ -243,7 +292,7 @@ pub(crate) fn call(
             }))
         }
         CHOOSE => {
-            let a: FlowChooseArgs = parse(clean)?;
+            let a: FlowChooseArgs = parse(args.clone())?;
             let session = crate::session_of(&a.session)?;
             Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
                 let edge = match bounded("edge", &a.edge) {
