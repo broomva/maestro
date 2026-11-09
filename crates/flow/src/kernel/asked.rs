@@ -12,6 +12,7 @@ use crate::clock::TestClock;
 use crate::hooked::common::{agent, host, root_in};
 use crate::kernel::{CompiledFlow, State, compile, start, status};
 use crate::{Reader, ledger::Ledger};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -54,7 +55,8 @@ fn git(ws: &Path, args: &[&str]) -> String {
 }
 
 /// A workspace whose writer of record is `writer` (python; the stub itself when `None`), with the
-/// seeded ledger committed and `origin/main` at that commit, and an empty flows ledger.
+/// seeded ledger committed and pushed to `origin`, a local bare repository (never the network),
+/// and fetched, and an empty flows ledger.
 fn fx(writer: Option<&str>, extra_asks: &str) -> Fx {
     crate::kernel::guard_entry();
     let tmp = tempfile::tempdir().unwrap();
@@ -75,7 +77,11 @@ fn fx(writer: Option<&str>, extra_asks: &str) -> Fx {
     git(&ws, &["init", "-q", "-b", "main"]);
     git(&ws, &["add", "-A"]);
     git(&ws, &["commit", "-qm", "seed"]);
-    git(&ws, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let origin = base.join("origin.git");
+    git(&base, &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
+    git(&ws, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&ws, &["push", "-q", "origin", "main"]);
+    git(&ws, &["fetch", "-q", "origin"]);
     let flows = root_in(&base.join("fl"));
     let ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
     Fx { tmp, paths, ws, flows, ledger, flow: compile(FLOW).unwrap(), me: agent("owner", "marker-1") }
@@ -166,11 +172,33 @@ impl Fx {
         std::fs::write(self.ws.join(".control/asks/ledger.yaml"), text).unwrap();
     }
 
-    /// Commits the working tree and points `maestro/answers` at it.
-    fn land_on_answers_branch(&self) {
+    /// Commits the working tree here (on the local main only).
+    fn commit(&self) {
         git(&self.ws, &["add", "-A"]);
-        git(&self.ws, &["commit", "-qm", "answers"]);
+        git(&self.ws, &["commit", "-qm", "here"]);
+    }
+
+    /// Commits the working tree and points `maestro/answers` at it: an answer waiting to land.
+    fn put_on_answers_branch(&self) {
+        self.commit();
         git(&self.ws, &["branch", "-f", "maestro/answers"]);
+    }
+
+    /// Commits the working tree, pushes it to origin's main and fetches: the answer has landed.
+    fn land_on_main(&self) {
+        self.commit();
+        git(&self.ws, &["push", "-q", "origin", "main"]);
+        git(&self.ws, &["fetch", "-q", "origin"]);
+    }
+
+    /// A commit holding the working tree's ledger, made without moving main (`commit-tree`), and
+    /// the working tree and index put back: what an agent forging an answer could make.
+    fn forge(&self) -> String {
+        git(&self.ws, &["add", "-A"]);
+        let tree = git(&self.ws, &["write-tree"]).trim().to_string();
+        let forged = git(&self.ws, &["commit-tree", &tree, "-p", "HEAD", "-m", "answers: owner"]).trim().to_string();
+        git(&self.ws, &["reset", "-q", "--hard", "HEAD"]);
+        forged
     }
 }
 
@@ -255,8 +283,8 @@ fn a_row_is_linked_after_a_filing_and_after_a_duplicate_from_a_crash() {
     // Linked, the node waits on the owner with its ask named.
     let s = f.status(&fi);
     assert_eq!(s.nodes["owner"].state, State::Waiting);
-    let crate::kernel::Reason::Owner { ask_id, linked, .. } = &s.nodes["owner"].unmet[0] else { panic!() };
-    assert!(*linked && ask_id.is_some());
+    let crate::kernel::Reason::Owner { ask_id, .. } = &s.nodes["owner"].unmet[0] else { panic!() };
+    assert!(ask_id.starts_with("flow-owner-"));
 }
 
 #[test]
@@ -270,9 +298,10 @@ fn a_hash_miss_is_ask_refused() {
     // Again: the writer refuses the duplicate, and the row still misses.
     assert_eq!(code(f.ask(&fi, None)), "ask_refused");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned"]);
+    // Pinned and never linked: the node waits on its agent, not on the owner.
     let s = f.status(&fi);
-    let crate::kernel::Reason::Owner { linked, .. } = &s.nodes["owner"].unmet[0] else { panic!() };
-    assert!(!linked);
+    let crate::kernel::Reason::Unfiled { ask_id, .. } = &s.nodes["owner"].unmet[0] else { panic!() };
+    assert!(ask_id.is_some());
 }
 
 #[test]
@@ -380,25 +409,41 @@ fn only_the_owner_path_answers_and_the_answer_resumes_the_flow() {
     // Another session is refused.
     let other = agent("other", "marker-9");
     assert_eq!(code(ask(&mut f.ledger, &f.paths, &other, &fi, "owner", Some(&filing()))), "not_owner");
-    assert_eq!(code(ask(&mut f.ledger, &f.paths, &f.me, &fi, "ship", Some(&filing()))), "wrong_verb");
+    assert_eq!(code(ask(&mut f.ledger, &f.paths, &f.me, &fi, "ship", Some(&filing()))), "not_human");
 
     let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
-    // (a) On the answers branch, unanswered: waiting, nothing appended.
-    f.land_on_answers_branch();
+    // On main, unanswered: waiting, nothing appended.
+    f.land_on_main();
     assert_eq!(waiting(&f.ask(&fi, None).unwrap()), (id.as_str(), false));
-    // (b) Answered in the working tree only, by anyone who can write it: still waiting.
+    // Answered in the working tree only, by anyone who can write it: still waiting.
     f.answer_in_worktree(&id);
     assert_eq!(waiting(&f.ask(&fi, None).unwrap()), (id.as_str(), false));
     assert_eq!(f.status(&fi).nodes["owner"].state, State::Waiting);
+    // (f) Answered on Maestro's answers branch and not on main: waiting, with the waiting-to-land
+    // reason the reads give, and no receipt.
+    f.put_on_answers_branch();
+    match f.ask(&fi, None).unwrap() {
+        Asked::Waiting { landing, appended, .. } => {
+            assert_eq!((landing.as_deref(), appended), (Some("maestro/answers"), None))
+        }
+        other => panic!("{other:?}"),
+    }
+    let mut unmet = f.status(&fi).nodes["owner"].unmet.clone();
+    landing(&f.paths, &mut unmet);
+    assert!(
+        matches!(&unmet[0], crate::kernel::Reason::AnswerWaitingToLand { at, .. } if at == "maestro/answers"),
+        "{unmet:?}"
+    );
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
-    // (c) The owner's answer lands on the answers branch: the flow resumes.
-    f.land_on_answers_branch();
+    // (c) The answer lands on origin's main, at the commit the remote names: the flow resumes.
+    git(&f.ws, &["push", "-q", "origin", "main"]);
+    let main = git(&f.ws, &["rev-parse", "HEAD"]).trim().to_string();
     match f.ask(&fi, None).unwrap() {
         Asked::Answered { ask_id, outputs, source, .. } => {
             assert_eq!(ask_id, id);
             assert_eq!(outputs["answer_option"], "ship");
             assert_eq!(outputs["answer"], "Ship it");
-            assert_eq!(source, "maestro/answers");
+            assert_eq!(source, format!("origin/main@{main}"));
         }
         other => panic!("{other:?}"),
     }
@@ -524,7 +569,7 @@ fn two_rows_addressed_by_the_pinned_id_are_ask_ambiguous() {
 
 #[test]
 fn an_answer_to_another_body_is_answer_mismatch() {
-    // `answer_mismatch`: the answers branch has the ask answered, but its body was edited, so the
+    // `answer_mismatch`: main has the ask answered, but its body was edited, so the
     // answer is not to the question the flow asked.
     let mut f = fx(None, "");
     let fi = f.begin();
@@ -532,7 +577,7 @@ fn an_answer_to_another_body_is_answer_mismatch() {
     f.answer_in_worktree(&id);
     let text = f.ledger_text().replace("headline: \"Ship the release?\"", "headline: \"Ship a different release?\"");
     std::fs::write(f.ws.join(".control/asks/ledger.yaml"), text).unwrap();
-    f.land_on_answers_branch();
+    f.land_on_main();
     assert_eq!(code(f.ask(&fi, None)), "answer_mismatch");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
     assert_eq!(f.status(&fi).nodes["owner"].state, State::Waiting);
@@ -540,13 +585,13 @@ fn an_answer_to_another_body_is_answer_mismatch() {
 
 #[test]
 fn an_answers_source_that_does_not_read_is_answers_unread() {
-    // `answers_unread`: the answers branch exists and its ledger does not read. Unread is not
+    // `answers_unread`: the ledger at the commit origin.s main names does not read. Unread is not
     // unanswered: the call refuses rather than saying waiting.
     let mut f = fx(None, "");
     let fi = f.begin();
     assert!(waiting(&f.ask(&fi, Some(&filing())).unwrap()).1);
     std::fs::write(f.ws.join(".control/asks/ledger.yaml"), "asks: [unclosed\n").unwrap();
-    f.land_on_answers_branch();
+    f.land_on_main();
     assert_eq!(code(f.ask(&fi, None)), "answers_unread");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
 }
@@ -559,7 +604,7 @@ fn an_answer_over_the_outputs_bound_is_answer_too_large() {
     let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
     let long = "y".repeat(crate::kernel::MAX_OUTPUTS);
     f.add_to_row(&id, &format!("    answer: \"{long}\"\n    answered_at: \"2026-11-09T00:00:00Z\"\n"));
-    f.land_on_answers_branch();
+    f.land_on_main();
     assert_eq!(code(f.ask(&fi, None)), "answer_too_large");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
 }
@@ -592,4 +637,261 @@ fn an_ask_that_changed_while_it_was_filed_is_ask_changed() {
     std::fs::write(f.ws.join("scripts/go"), "").unwrap();
     assert_eq!(filer.join().unwrap(), "ask_changed");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskWithdrawn"], "nothing linked");
+}
+
+// P20 round 1 (BRO-3635): the guards no test killed, and the answer source the owner chose on
+// 2026-11-09 ("Landed main, remote-checked (Recommended)").
+
+/// Every file under the flows ledger and the asks folder, by path: what a refused write must leave.
+fn machine(f: &Fx) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut todo = vec![f.flows.parent().unwrap().to_path_buf(), f.ws.join(".control/asks")];
+    while let Some(dir) = todo.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                todo.push(path);
+            } else {
+                out.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn another_session_is_refused_and_writes_nothing() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let before = machine(&f);
+    let other = agent("other", "marker-9");
+    assert_eq!(code(ask(&mut f.ledger, &f.paths, &other, &fi, "owner", Some(&filing()))), "not_owner");
+    assert!(machine(&f) == before, "a refused session wrote: log, projection or asks ledger");
+    // A replacement of the owner (same session, new marker) is refused too.
+    let replacement = agent("owner", "marker-2");
+    assert_eq!(code(ask(&mut f.ledger, &f.paths, &replacement, &fi, "owner", Some(&filing()))), "not_owner");
+    assert!(machine(&f) == before);
+}
+
+#[test]
+fn the_busy_deadline_runs_from_the_first_try_not_from_each() {
+    // Each try takes 60 s by the kernel's clock (the mover shifts it while the writer runs, as the
+    // real writer's 30 s wait would). From the first try, the 90 s deadline passes on the second;
+    // a deadline taken afresh per try would never pass.
+    let hold = "C = os.path.join(HERE, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nimport time\nwhile not os.path.exists(os.path.join(HERE, 'go-%d' % n)):\n    time.sleep(0.005)\nif n < 6:\n    sys.stdin.read()\n    print('error: held by pid 1', file=sys.stderr)\n    sys.exit(75)";
+    let mut f = fx(Some(&wrapper(hold)), "");
+    let fi = f.begin();
+    let scripts = f.ws.join("scripts");
+    let clock = TestClock::install();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mover = {
+        let (clock, scripts, done) = (clock.clone(), scripts.clone(), done.clone());
+        std::thread::spawn(move || {
+            for k in 1..=6u32 {
+                let tries = scripts.join("tries");
+                loop {
+                    let n = std::fs::read_to_string(&tries).ok().and_then(|t| t.parse::<u32>().ok()).unwrap_or(0);
+                    if n >= k {
+                        break;
+                    }
+                    if done.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                clock.shift(SignedDuration::from_secs(60));
+                std::fs::write(scripts.join(format!("go-{k}")), "").unwrap();
+            }
+        })
+    };
+    let result = f.ask(&fi, Some(&filing()));
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    mover.join().unwrap();
+    assert_eq!(code(result), "ask_refused_busy");
+    assert_eq!(std::fs::read_to_string(scripts.join("tries")).unwrap(), "2", "refused at the second try");
+}
+
+#[test]
+fn a_human_node_still_blocked_by_its_needs_files_nothing() {
+    let mut f = fx(None, "");
+    f.flow = compile("flow: gate\nversion: 1\nnodes:\n  pre: {class: pure, run: ['true']}\n  owner: {class: human, ask: Ship the release?, needs: [pre]}\n").unwrap();
+    let fi = f.begin();
+    let before = machine(&f);
+    assert_eq!(code(f.ask(&fi, Some(&filing()))), "not_enabled");
+    assert!(machine(&f) == before);
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Blocked);
+}
+
+#[test]
+fn a_pin_is_appended_only_at_the_sequence_it_was_minted_at() {
+    // Another call of the owner's pins, files and links between this call's mint and its pin: this
+    // pin is refused (`stale_seq`), so the node's ask is filed once, not twice.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let (paths, me, flows, fi2) = (f.paths.clone(), f.me.clone(), f.flows.clone(), fi.clone());
+    seams::BEFORE_PIN.with(|c| {
+        *c.borrow_mut() = Some(Box::new(move || {
+            let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
+            assert!(waiting(&ask(&mut ledger, &paths, &me, &fi2, "owner", Some(&filing())).unwrap()).1);
+        }));
+    });
+    assert_eq!(code(f.ask(&fi, Some(&filing()))), "stale_seq");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+    assert_eq!(f.ledger_text().matches("id: \"flow-owner-").count(), 1, "filed once");
+}
+
+#[test]
+fn ambiguity_on_main_is_ask_ambiguous_too() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&id);
+    f.add_entry(&format!("\n  - id: other-3\n    uid: \"{id}\"\n    ask: \"Addressed as the flow's ask\"\n"));
+    f.land_on_main();
+    assert_eq!(code(f.ask(&fi, None)), "ask_ambiguous");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn replay_keeps_the_first_pin_links_only_its_hash_and_never_withdraws_a_link() {
+    let mut f = fx(None, "");
+    let append = |f: &mut Fx, fi: &InstanceId, kind: &str, body: Value| {
+        let mut guard = f.ledger.lock().unwrap();
+        let seq = guard.log(fi).unwrap().seq();
+        guard.append(fi, seq, crate::NewEvent::new(kind, body)).unwrap();
+    };
+    let owner = |f: &Fx, fi: &InstanceId| f.status(fi).nodes["owner"].unmet[0].clone();
+    let pin = |id: &str, hash: &str| serde_json::json!({ "node": "owner", "iteration": {}, "ask_id": id, "ledger": "ledger.yaml", "body": {}, "body_hash": hash });
+    let link = |id: &str, hash: &str| serde_json::json!({ "node": "owner", "iteration": {}, "ask_id": id, "ledger": "ledger.yaml", "body_hash": hash });
+    // A linked ask: a second pin does not replace it, and a withdrawal does not undo it.
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    append(&mut f, &fi, "AskPinned", pin("flow-owner-other", "x"));
+    append(
+        &mut f,
+        &fi,
+        "AskWithdrawn",
+        serde_json::json!({ "node": "owner", "iteration": {}, "ask_id": id, "code": "x", "reason": "x" }),
+    );
+    assert!(matches!(owner(&f, &fi), crate::kernel::Reason::Owner { ask_id, .. } if ask_id == id));
+    // A link names the pin's hash, or it does not link.
+    let fi = f.begin();
+    append(&mut f, &fi, "AskPinned", pin("flow-owner-x", "sha256:pinned"));
+    append(&mut f, &fi, "AskLinked", link("flow-owner-x", "sha256:other"));
+    assert!(matches!(owner(&f, &fi), crate::kernel::Reason::Unfiled { .. }));
+    append(&mut f, &fi, "AskLinked", link("flow-owner-x", "sha256:pinned"));
+    assert!(matches!(owner(&f, &fi), crate::kernel::Reason::Owner { .. }));
+}
+
+/// The working tree's ledger with the answer added to row `id`, the working tree put back.
+fn answered_ledger(f: &Fx, id: &str) -> String {
+    let before = f.ledger_text();
+    f.answer_in_worktree(id);
+    let answered = f.ledger_text();
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), before).unwrap();
+    answered
+}
+
+#[test]
+fn a_local_answers_branch_forgery_does_not_resume_the_flow() {
+    // (a) An agent commits an answer (answered_by owner:maestro-web) with commit-tree and points
+    // the local maestro/answers at it. It reads as waiting to land, never as the owner's answer.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.land_on_main();
+    f.answer_in_worktree(&id);
+    let forged = f.forge();
+    git(&f.ws, &["update-ref", "refs/heads/maestro/answers", &forged]);
+    match f.ask(&fi, None).unwrap() {
+        Asked::Waiting { landing, .. } => assert_eq!(landing.as_deref(), Some("maestro/answers")),
+        other => panic!("the forgery resumed the flow: {other:?}"),
+    }
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn a_moved_origin_main_ref_does_not_resume_the_flow() {
+    // (b) `update-ref refs/remotes/origin/main <forged>`: the kernel asks the remote where main is.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.land_on_main();
+    f.answer_in_worktree(&id);
+    let forged = f.forge();
+    git(&f.ws, &["update-ref", "refs/remotes/origin/main", &forged]);
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { landing: None, .. }));
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn a_remote_that_does_not_answer_is_answers_unread_and_writes_nothing() {
+    // (d) The answer has landed and been fetched, but the remote cannot be asked: fail closed.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&id);
+    f.land_on_main();
+    let nowhere = f.tmp.path().join("nowhere.git");
+    git(&f.ws, &["remote", "set-url", "origin", nowhere.to_str().unwrap()]);
+    let before = machine(&f);
+    assert_eq!(code(f.ask(&fi, None)), "answers_unread");
+    assert!(machine(&f) == before);
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn a_main_this_clone_does_not_have_is_answers_unread_until_fetched() {
+    // (e) The answer lands on origin's main from another clone; this one has not fetched it.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.land_on_main();
+    let answered = answered_ledger(&f, &id);
+    let other = f.tmp.path().join("other");
+    let origin = f.tmp.path().join("origin.git");
+    git(f.tmp.path(), &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()]);
+    std::fs::write(other.join(".control/asks/ledger.yaml"), answered).unwrap();
+    git(&other, &["commit", "-qam", "answers: owner"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+    let e = f.ask(&fi, None).unwrap_err();
+    assert_eq!(e.code(), "answers_unread");
+    assert!(e.to_string().contains("fetch origin"), "{e}");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+    git(&f.ws, &["fetch", "-q", "origin"]);
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { .. }));
+}
+
+#[test]
+fn text_a_refusal_echoes_is_bounded() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let long = Filing { ledger: format!("{}x.yaml", "a/".repeat(50_000)), body: body() };
+    let e = f.ask(&fi, Some(&long)).unwrap_err();
+    assert_eq!(e.code(), "ask_body_invalid");
+    assert!(e.to_string().len() < 2 * MAX_ECHO, "{} bytes", e.to_string().len());
+    // A ledger name that is not printable ASCII is not filed (it would reach a relayed draft).
+    let odd = Filing { ledger: "led\u{2028}ger.yaml".into(), body: body() };
+    assert_eq!(code(f.ask(&fi, Some(&odd))), "ask_body_invalid");
+    assert_eq!(f.kinds(&fi), ["Started"]);
+}
+
+#[test]
+fn the_writers_words_in_a_busy_refusal_are_bounded() {
+    let loud = "sys.stdin.read()\nprint('error: ' + 'w' * 100000, file=sys.stderr)\nsys.exit(75)";
+    let mut f = fx(Some(&wrapper(loud)), "");
+    let fi = f.begin();
+    let clock = TestClock::install();
+    clock.shift(SignedDuration::from_secs(0));
+    let mover = {
+        let clock = clock.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            clock.shift(ASK_BUSY_DEADLINE + SignedDuration::from_secs(1));
+        })
+    };
+    let e = f.ask(&fi, Some(&filing())).unwrap_err();
+    mover.join().unwrap();
+    assert_eq!(e.code(), "ask_refused_busy");
+    assert!(e.to_string().len() < 3 * MAX_ECHO, "{} bytes", e.to_string().len());
 }

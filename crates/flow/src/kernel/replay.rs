@@ -42,7 +42,8 @@
 //! - A switch follows only the recorded value. A node whose case was not taken never runs, and
 //!   neither does anything that needs it. A repeat whose whole body will never run is
 //!   unreachable, not exhausted.
-//! - A `human` node with every requirement met is `waiting` on the owner; any other is `ready`.
+//! - A `human` node with every requirement met is `waiting`; any other is `ready`. Its reason is
+//!   `unfiled` until its ask is linked, then `owner`.
 //!   Its reason names its ask once `asks` pinned it (`AskPinned`, `AskLinked`, `AskWithdrawn` are
 //!   inert). Its receipt is `Answered` (the owner's answer, read by `asks`), never a `Completed`,
 //!   and an `Answered` counts only for the ask linked at that node and iteration.
@@ -163,17 +164,29 @@ pub enum Reason {
     AttemptsExhausted {
         attempts: u32,
     },
-    /// The owner's answer to this ask, through the asks ledger. `ask` is the question the
-    /// definition gives; once `asks::ask` has pinned the ask, `ask_id` and `ledger` name it, and
-    /// `linked` says it was confirmed in the ledger (filed).
-    Owner {
+    /// A human node whose ask is not filed yet: its agent files it with `ask` (`asks`). `ask` is
+    /// the definition's question; `ask_id` and `ledger` name the ask once it is pinned and before
+    /// it is confirmed in the ledger.
+    Unfiled {
         ask: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         ask_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         ledger: Option<String>,
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
-        linked: bool,
+    },
+    /// The owner's answer to this filed ask, which the flow takes once it has landed on main.
+    Owner {
+        ask: String,
+        ask_id: String,
+        ledger: String,
+    },
+    /// The owner's answer to this filed ask is on Maestro's answers branch (`at`) and has not
+    /// landed on main: still waiting. Never replay's: the reads add it (`asks::landing`).
+    AnswerWaitingToLand {
+        ask: String,
+        ask_id: String,
+        ledger: String,
+        at: String,
     },
 }
 
@@ -1212,13 +1225,17 @@ impl<'f, 'a> Eval<'f, 'a> {
             }
             Form::Open => match self.fold.ir.nodes.get(id).map(|n| &n.class) {
                 Some(Class::Human { ask }) => {
-                    let rec = self.fold.asks.get(&key);
-                    reasons.push(Reason::Owner {
-                        ask: ask.clone(),
-                        ask_id: rec.map(|r| r.ask_id.clone()),
-                        ledger: rec.map(|r| r.ledger.clone()),
-                        linked: rec.is_some_and(|r| r.linked),
-                    });
+                    let reason = match self.fold.asks.get(&key) {
+                        Some(r) if r.linked => {
+                            Reason::Owner { ask: ask.clone(), ask_id: r.ask_id.clone(), ledger: r.ledger.clone() }
+                        }
+                        rec => Reason::Unfiled {
+                            ask: ask.clone(),
+                            ask_id: rec.map(|r| r.ask_id.clone()),
+                            ledger: rec.map(|r| r.ledger.clone()),
+                        },
+                    };
+                    reasons.push(reason);
                     State::Waiting
                 }
                 _ => State::Ready,

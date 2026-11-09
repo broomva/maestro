@@ -422,12 +422,7 @@ fn a_repeat_that_reaches_max_is_exhausted_and_routes_to_on_exhausted() {
     assert_eq!(state(&s, "escalate"), State::Waiting, "on_exhausted is the route, here to the owner");
     assert_eq!(
         s.nodes["escalate"].unmet,
-        vec![Reason::Owner {
-            ask: "The review did not converge. Merge anyway?".into(),
-            ask_id: None,
-            ledger: None,
-            linked: false
-        }]
+        vec![Reason::Unfiled { ask: "The review did not converge. Merge anyway?".into(), ask_id: None, ledger: None }]
     );
     // An exhausted repeat takes no more receipts, and a repeat with no until takes no verdict.
     f.complete(&fi, "review", &[("rounds", 2)], json!({}));

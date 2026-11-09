@@ -27,7 +27,8 @@
 //!   iteration. See `write`'s module docs for ownership, tokens, leases, retry and cancel.
 //! - **Human steps** ([`ask`], BRO-3635). A `human` node's ask is filed through the asks ledger's
 //!   writer of record with the flows lock released, linked by id and hash in the working tree, and
-//!   answered only from the answers ledger; the answer is the node's receipt. See [`asks`].
+//!   answered only once the answer has landed on origin's main, at the commit the remote names;
+//!   the answer is the node's receipt. See [`asks`].
 //! - **Events** ([`events`]) are typed bodies of the storage layer's generic event.
 
 pub mod asks;
@@ -44,7 +45,7 @@ mod jq;
 mod replay;
 mod write;
 
-pub use asks::{ASK_NOT_FILED, Asked, Filing, ask};
+pub use asks::{ASK_NOT_FILED, Asked, Filing, ask, landing};
 pub use compile::{CompiledFlow, MAX_SOURCE, compile};
 pub use error::{CompileError, KernelError, Refusal};
 pub use exec::Limits;

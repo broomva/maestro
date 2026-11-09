@@ -1,6 +1,6 @@
 //! Human steps as Maestro asks (BRO-3635): [`ask`] files a human node's question through the asks
-//! ledger's writer of record, links the row it filed, and takes the owner's answer from the
-//! answers ledger as the node's receipt.
+//! ledger's writer of record, links the row it filed, and takes the owner's answer, once it
+//! has landed on origin's main, as the node's receipt.
 //!
 //! # The verb
 //!
@@ -29,14 +29,27 @@
 //!    (`AskWithdrawn`, `ask_not_filed`) and the next call mints anew, with a body the agent can fix.
 //!    No row otherwise, or a ledger that cannot be read, is `ask_unconfirmed`, and the next call
 //!    files the same pin again.
-//! 4. **Answer.** A linked ask's answer is read only from the answers ledger, the owner path:
-//!    the asks ledger at `maestro/answers` (this clone's and origin's as last fetched, where
-//!    Maestro's decisions land an answer) and at `origin/main` (where it lands). The working tree
-//!    is not read for answers: any agent can write it. The verb takes no answer, and nothing an
-//!    agent passes in stands in for one. The row is found by the pinned id, never by searching or
-//!    listing the asks, and must hash as the linked body. Unanswered, the node stays `waiting`.
-//!    Answered, the kernel appends `Answered`, the node's receipt, so it is done and its
-//!    successors become ready.
+//! 4. **Answer.** A linked ask's answer counts only once it has landed on main, read where the
+//!    remote says main is (owner decision, 2026-11-09, verbatim: "Landed main, remote-checked
+//!    (Recommended)"). The kernel asks the remote itself for `refs/heads/main` (`git ls-remote
+//!    origin`, bounded in time and output; `maestro_store::tree::remote_ref`), requires that commit
+//!    to be in this clone, and reads the asks ledger at that exact commit. No local ref counts:
+//!    not `maestro/answers`, not `refs/remotes/origin/main`, which any process here can move. A
+//!    remote that does not answer, or a commit this clone does not have (fetch origin), is
+//!    `answers_unread`: unread is not unanswered (fail closed). The working tree is never read for
+//!    answers, and the verb takes no answer. The row is found by the pinned id, never by searching
+//!    or listing the asks, and must hash as the linked body. Unanswered, the node stays `waiting`.
+//!    Answered, the kernel appends `Answered`, the node's receipt, so it is done and its successors
+//!    become ready. The flow resumes when the answer lands on main, not before.
+//!
+//! An answer on Maestro's answers branch (this clone's or origin's as last fetched,
+//! `maestro_store::views::ANSWERS_REFS`) and not on main is waiting to land, as `views::unlanded`
+//! reads it: [`landing`] reports it as `answer_waiting_to_land` for `next` and `status`, and `ask`
+//! says so, but it is never a receipt.
+//!
+//! **Residual risk.** An agent that can merge a pull request carrying an answer into main, through
+//! the merge gates, can still answer for the owner. The gates are that path's defence, not the
+//! kernel.
 //!
 //! # The answer as outputs
 //!
@@ -49,7 +62,9 @@
 //!
 //! The agent's body is at most [`MAX_ASK_BODY`] bytes as JSON, nested less than the log allows.
 //! Each ledger read is one file, at most `maestro_store::LEDGER_LIMIT` (1 MiB), through the
-//! store's YAML reader; the answers are read from at most [`ANSWER_SOURCES`] revisions. An answer's
+//! store's YAML reader, refused by size before it is taken in. The remote is asked once per call,
+//! with [`REMOTE_TIMEOUT`] and its output bounded; waiting-to-land reads at most the two
+//! [`maestro_store::views::ANSWERS_REFS`]. Text echoed into a refusal is cut to [`MAX_ECHO`]. An answer's
 //! outputs are at most [`MAX_OUTPUTS`](super::MAX_OUTPUTS) bytes. Minting tries [`MINT_TRIES`] ids.
 //!
 //! Adoption and retirement (ADR decision 6) are not here.
@@ -89,14 +104,24 @@ const ASK_RETRY_PAUSE: Duration = Duration::from_secs(1);
 /// How many ids a mint tries before it refuses `ask_id_exhausted`.
 pub const MINT_TRIES: u32 = 8;
 
-/// Where an answer is read, in order, as `(ref, label)`: the owner path. Maestro's answers branch
-/// (this clone's, then origin's as last fetched; `maestro_store::views::ANSWERS_REFS`) and origin's
-/// main, where answers land. Never the working tree.
-pub const ANSWER_SOURCES: [(&str, &str); 3] = [
-    maestro_store::views::ANSWERS_REFS[0],
-    maestro_store::views::ANSWERS_REFS[1],
-    ("refs/remotes/origin/main", "origin/main"),
-];
+/// The remote whose main is the owner path, and its main.
+pub const ORIGIN: &str = "origin";
+pub const MAIN: &str = "refs/heads/main";
+
+/// How long the remote has to say where main is.
+pub const REMOTE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The most characters of any text a refusal echoes (a ledger name, the writer's words).
+pub const MAX_ECHO: usize = 256;
+
+/// `text` cut to [`MAX_ECHO`] characters, marked when cut.
+pub(crate) fn clip(text: &str) -> String {
+    let mut out: String = text.chars().take(MAX_ECHO).collect();
+    if out.len() < text.len() {
+        out.push_str("...");
+    }
+    out
+}
 
 /// The answer fields an `Answered` carries as outputs, when set.
 const ANSWER_FIELDS: [&str; 5] = ["answer_option", "answer_note", "answer_other", "answered_by", "status"];
@@ -115,9 +140,10 @@ pub struct Filing {
 /// What [`ask`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Asked {
-    /// The ask is filed and linked, and the answers ledger holds no answer to it yet. `appended`
-    /// is the `AskLinked` this call wrote, if it linked it.
-    Waiting { ask_id: String, ledger: String, appended: Option<Appended> },
+    /// The ask is filed and linked, and main holds no answer to it yet. `appended` is the
+    /// `AskLinked` this call wrote, if it linked it. `landing` names the answers branch where an
+    /// answer waits to land, if one does: still waiting, never a receipt.
+    Waiting { ask_id: String, ledger: String, appended: Option<Appended>, landing: Option<String> },
     /// The owner's answer, appended as the node's receipt.
     Answered { ask_id: String, ledger: String, outputs: Value, source: String, appended: Appended },
     /// The writer of record refused the pinned ask and the working tree has no row of its id:
@@ -162,9 +188,7 @@ fn waiting(log: &Log, started: &Started, node: &str) -> Result<(Iteration, BTree
         return Err(Refusal::UnknownNode { node: node.to_string() }.into());
     };
     if !matches!(n.class, Class::Human { .. }) {
-        return Err(
-            Refusal::WrongVerb { node: node.to_string(), class: n.class.name().to_string(), verb: "claim" }.into()
-        );
+        return Err(Refusal::NotHuman { node: node.to_string(), class: n.class.name().to_string() }.into());
     }
     let next = next_of(log, started, wall(log)?)?;
     match next.pending.get(node) {
@@ -251,10 +275,12 @@ fn pin(
     let Some(filing) = filing else {
         return Err(invalid("a node's first ask needs a ledger and an ask body"));
     };
-    if !requests::ledger_name_ok(&filing.ledger) {
-        return Err(invalid(format!("`{}` is not a ledger name (a plain `*.yaml` file name)", filing.ledger)));
+    if !requests::ledger_name_ok(&filing.ledger) || !filing.ledger.bytes().all(|b| b.is_ascii_graphic()) {
+        let name = clip(&filing.ledger);
+        return Err(invalid(format!("`{name}` is not a ledger name (a plain `*.yaml` file name, printable ASCII)")));
     }
     if let Some(key) = filing.body.keys().find(|k| KERNEL_KEYS.contains(&k.as_str()) || requests::refused_key(k)) {
+        let key = clip(key);
         return Err(invalid(format!(
             "`{key}` is not the agent's: the kernel writes id, ask and asked_at, and the owner's path the rest"
         )));
@@ -270,6 +296,10 @@ fn pin(
     }
     let taken = taken(paths, &filing.ledger)?;
     let ask_id = mint(node, &taken, &filing.ledger)?;
+    #[cfg(test)]
+    if let Some(meanwhile) = seams::BEFORE_PIN.with(|c| c.borrow_mut().take()) {
+        meanwhile();
+    }
     let mut body = Map::new();
     body.insert("id".into(), Value::String(ask_id.clone()));
     body.insert("ask".into(), Value::String(seen.question.clone()));
@@ -298,7 +328,7 @@ fn pin(
 
 /// Every `id` and `uid` in the ledger's working tree, trimmed as the plugin addresses them.
 fn taken(paths: &Paths, ledger: &str) -> Result<BTreeSet<String>, KernelError> {
-    let unread = |detail: String| Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail };
+    let unread = |detail: String| Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail: clip(&detail) };
     let tree = Store::new(paths.clone(), TreeSource::WorkingTree);
     let Some(l) = tree.ask_ledger(ledger).map_err(unread)? else {
         return Err(unread("there is no such ledger in the asks folder".into()).into());
@@ -362,7 +392,7 @@ fn file_pinned(
         match requests::file_ask(paths, dir, &rec.ledger, body, session.session(), &caller) {
             Err(FileError::Lock(LockError::Busy { holder, .. })) => {
                 if clock::now() >= deadline {
-                    return Err(Refusal::AskRefusedBusy { ledger: rec.ledger.clone(), holder }.into());
+                    return Err(Refusal::AskRefusedBusy { ledger: rec.ledger.clone(), holder: clip(&holder) }.into());
                 }
                 std::thread::sleep(ASK_RETRY_PAUSE);
             }
@@ -380,8 +410,11 @@ fn file_and_link(
     node: &str,
     rec: AskRec,
 ) -> Result<Asked, KernelError> {
-    let unconfirmed =
-        |detail: String| Refusal::AskUnconfirmed { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), detail };
+    let unconfirmed = |detail: String| Refusal::AskUnconfirmed {
+        ledger: rec.ledger.clone(),
+        ask_id: rec.ask_id.clone(),
+        detail: clip(&detail),
+    };
     // The working tree: where the writer of record writes, and where a filing is confirmed.
     let here = Store::new(paths.clone(), TreeSource::WorkingTree);
     let dir = here.rel(ASKS).map_err(|e| unconfirmed(format!("no asks folder: {e}")))?;
@@ -406,6 +439,7 @@ fn file_and_link(
         Found::None => match outcome {
             // Refused, and no row: nothing was filed. The pin is withdrawn.
             Err(FileError::Refused(reason)) => {
+                let reason = clip(&reason);
                 let withdrawn = AskWithdrawn {
                     node: node.to_string(),
                     iteration: Iteration::new(),
@@ -417,7 +451,12 @@ fn file_and_link(
                     AskWithdrawn { iteration: iteration.clone(), ..withdrawn }.to_event()
                 })?;
                 let Some(appended) = appended else {
-                    return Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended: None });
+                    return Ok(Asked::Waiting {
+                        ask_id: rec.ask_id,
+                        ledger: rec.ledger,
+                        appended: None,
+                        landing: None,
+                    });
                 };
                 return Ok(Asked::Withdrawn {
                     ask_id: rec.ask_id,
@@ -453,40 +492,86 @@ fn file_and_link(
     let appended = append_if(ledger, session, instance, node, &rec, |iteration, _| {
         AskLinked { iteration: iteration.clone(), ..linked }.to_event()
     })?;
-    Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended })
+    Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended, landing: None })
 }
 
-/// The answered row of a linked ask, from the first answers source that has it answered.
-fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Option<(Box<Ask>, &'static str)>, KernelError> {
-    let mut unread: Option<(String, String)> = None;
-    for (rev, label) in ANSWER_SOURCES {
-        let at = Store::new(paths.clone(), TreeSource::GitRev(rev.to_string()));
-        if let Some(reason) = &at.tree.unresolved {
-            // A ref that is not there holds no answer; one there that does not resolve is unread.
-            match at.tree.has_ref(rev) {
-                Ok(false) => {}
-                Ok(true) => unread = unread.or(Some((label.to_string(), reason.clone()))),
-                Err(e) => unread = unread.or(Some((label.to_string(), e))),
-            }
-            continue;
-        }
-        match find(&at, &rec.ledger, &rec.ask_id) {
-            Err(e) => unread = unread.or(Some((label.to_string(), e))),
-            Ok(Found::None) => {}
-            Ok(Found::Ambiguous) => {
-                let at = format!("{label}:{}", rec.ledger);
-                return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
-            }
-            Ok(Found::Row(row)) => {
-                if row.state() == AskState::Answered {
-                    return Ok(Some((row, label)));
-                }
-            }
-        }
+/// Where the answer to a linked ask stands.
+enum Answer {
+    /// Answered on main, at the commit the remote names: the receipt.
+    Landed { row: Box<Ask>, source: String },
+    /// Answered on Maestro's answers branch (`at`) and not on main: still waiting.
+    Landing { at: String },
+    /// Not answered on main, and not on the answers branch either.
+    Open,
+}
+
+/// The commit origin's main is at, asked of the remote, and present in this clone: the only
+/// revision an answer is read at (see the module docs). Anything else is `answers_unread`.
+fn landed_main(paths: &Paths) -> Result<String, KernelError> {
+    let unread = |detail: String| Refusal::AnswersUnread { at: format!("{ORIGIN} {MAIN}"), detail: clip(&detail) };
+    let sha = maestro_store::tree::remote_ref(&paths.workspace, ORIGIN, MAIN, REMOTE_TIMEOUT)
+        .map_err(unread)?
+        .ok_or_else(|| unread(format!("{ORIGIN} has no {MAIN}")))?;
+    let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
+    if let Some(reason) = &at.tree.unresolved {
+        return Err(
+            unread(format!("commit {sha} of {ORIGIN}'s main is not in this clone; fetch {ORIGIN} ({reason})")).into()
+        );
     }
-    match unread {
-        Some((at, detail)) => Err(Refusal::AnswersUnread { at, detail }.into()),
-        None => Ok(None),
+    Ok(sha)
+}
+
+/// The linked ask's answer, as main has it at the commit the remote names; failing that, whether
+/// one waits to land on Maestro's answers branch.
+fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
+    let sha = landed_main(paths)?;
+    let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
+    let source = format!("{ORIGIN}/main@{sha}");
+    match find(&at, &rec.ledger, &rec.ask_id) {
+        Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),
+        Ok(Found::Ambiguous) => {
+            let at = format!("{source}:{}", rec.ledger);
+            return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
+        }
+        Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed { row, source }),
+        Ok(_) => {}
+    }
+    Ok(match waiting_to_land(paths, &rec.ledger, &rec.ask_id) {
+        Some(at) => Answer::Landing { at },
+        None => Answer::Open,
+    })
+}
+
+/// The first of Maestro's answers refs (`views::ANSWERS_REFS`) where the ask `ask_id` of `ledger`
+/// is answered: an answer waiting to land on main. Read bounded, for what the reads and `ask`
+/// report only, never as a receipt; a ref that is not there or does not read holds none.
+fn waiting_to_land(paths: &Paths, ledger: &str, ask_id: &str) -> Option<String> {
+    maestro_store::views::ANSWERS_REFS.iter().find_map(|(rev, label)| {
+        let at = Store::new(paths.clone(), TreeSource::GitRev(rev.to_string()));
+        if at.tree.unresolved.is_some() {
+            return None;
+        }
+        match find(&at, ledger, ask_id) {
+            Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),
+            _ => None,
+        }
+    })
+}
+
+/// For the reads (`next`, `status`): each `owner` reason whose answer waits to land on Maestro's
+/// answers branch becomes `answer_waiting_to_land`. Reads git only; writes nothing.
+pub fn landing(paths: &Paths, unmet: &mut [super::Reason]) {
+    for reason in unmet.iter_mut() {
+        if let super::Reason::Owner { ask, ask_id, ledger } = reason
+            && let Some(at) = waiting_to_land(paths, ledger, ask_id)
+        {
+            *reason = super::Reason::AnswerWaitingToLand {
+                ask: ask.clone(),
+                ask_id: ask_id.clone(),
+                ledger: ledger.clone(),
+                at,
+            };
+        }
     }
 }
 
@@ -508,14 +593,20 @@ fn take_answer(
     node: &str,
     rec: AskRec,
 ) -> Result<Asked, KernelError> {
-    let Some((row, source)) = read_answer(paths, &rec)? else {
-        return Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended: None });
+    let (row, source) = match read_answer(paths, &rec)? {
+        Answer::Landed { row, source } => (row, source),
+        Answer::Landing { at } => {
+            return Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended: None, landing: Some(at) });
+        }
+        Answer::Open => {
+            return Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended: None, landing: None });
+        }
     };
     let found = comparable_hash(&row.row);
     if found != rec.body_hash {
         return Err(Refusal::AnswerMismatch {
             ask_id: rec.ask_id.clone(),
-            at: source.to_string(),
+            at: source.clone(),
             linked: rec.body_hash.clone(),
             found,
         }
@@ -533,7 +624,7 @@ fn take_answer(
         ledger: rec.ledger.clone(),
         inputs: inputs.clone(),
         outputs: outputs.clone(),
-        source: source.to_string(),
+        source: source.clone(),
         row_hash: row.hash(),
     };
     let appended =
@@ -541,11 +632,11 @@ fn take_answer(
     let Some(appended) = appended else {
         return Err(Refusal::AskChanged { node: node.to_string() }.into());
     };
-    Ok(Asked::Answered { ask_id: rec.ask_id, ledger: rec.ledger, outputs, source: source.to_string(), appended })
+    Ok(Asked::Answered { ask_id: rec.ask_id, ledger: rec.ledger, outputs, source, appended })
 }
 
-/// Test seams, in this crate's unit tests only: the ids a mint draws, and a crash right after a
-/// filing (before it is confirmed and linked).
+/// Test seams, in this crate's unit tests only: the ids a mint draws, a crash right after a filing
+/// (before it is confirmed and linked), and a write between a mint and its pin.
 #[cfg(test)]
 pub(crate) mod seams {
     use std::cell::{Cell, RefCell};
@@ -554,6 +645,8 @@ pub(crate) mod seams {
     thread_local! {
         pub(crate) static SUFFIXES: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
         pub(crate) static CRASH_AFTER_FILE: Cell<bool> = const { Cell::new(false) };
+        /// Runs once, after a mint and before its pin is appended: another write meanwhile.
+        pub(crate) static BEFORE_PIN: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     }
 }
 

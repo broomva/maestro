@@ -179,6 +179,9 @@ pub enum Refusal {
     /// owner's moved it on). Nothing was recorded; call ask again.
     #[error("The ask of node {node} changed meanwhile; nothing was recorded. Call ask again.")]
     AskChanged { node: String },
+    /// `ask` names a node that is not a human node; it is claimed instead.
+    #[error("Node {node} is a {class} node, and ask takes a human node only; claim it instead.")]
+    NotHuman { node: String, class: String },
     /// The answer's fields are over the outputs bound.
     #[error("The answer to {ask_id} is {size} bytes, over {limit}; it is not taken.")]
     AnswerTooLarge { ask_id: String, size: usize, limit: usize },
@@ -218,6 +221,7 @@ impl Refusal {
             Refusal::AnswerMismatch { .. } => "answer_mismatch",
             Refusal::AnswerTooLarge { .. } => "answer_too_large",
             Refusal::AskChanged { .. } => "ask_changed",
+            Refusal::NotHuman { .. } => "not_human",
         }
     }
 }

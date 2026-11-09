@@ -421,43 +421,64 @@ fn verified_t3_and_paseo_sessions_write() {
 
 /// A waiting human node's question is relayed as data (BRO-3635, ADR decisions 4 and 8): the
 /// question and, once filed, its ask; a T3 owner also gets prompt links that open its thread with
-/// a draft naming the ask and `maestro_flow_ask`, and carrying no answer. Another surface, an ask
-/// not yet linked, or a T3 owner with no environment gets no link.
+/// a draft naming the ask and `maestro_flow_ask`, carrying no answer. Another surface, an ask not
+/// yet filed, a T3 owner with no environment, a value that is not printable ASCII, or a draft over
+/// T3's link limit gets no link.
 #[test]
 fn a_waiting_human_node_is_relayed_toward_its_t3_thread() {
     use maestro_flow::kernel::{NodeStatus, Reason, State};
-    let waiting = |ask_id: Option<&str>, linked: bool| {
-        let unmet = vec![Reason::Owner {
-            ask: "Ship it?".into(),
-            ask_id: ask_id.map(str::to_string),
-            ledger: ask_id.map(|_| "arc.yaml".to_string()),
-            linked,
-        }];
+    let owner = |ask_id: &str, ledger: &str| Reason::Owner {
+        ask: "Ship it?".into(),
+        ask_id: ask_id.to_string(),
+        ledger: ledger.to_string(),
+    };
+    let waiting = |reason: Reason| {
         let s = NodeStatus {
             state: State::Waiting,
             class: "human".into(),
             iteration: BTreeMap::new(),
-            unmet,
+            unmet: vec![reason],
             inputs: BTreeMap::new(),
         };
         BTreeMap::from([("owner".to_string(), s)])
     };
-    let t3: maestro_core::session::SessionRef = "t3:env-1/thread-1".parse().unwrap();
-    let relay = maestro_mcp::flow::relay("fi_1", Some(&t3), &waiting(Some("flow-owner-1"), true));
-    assert_eq!(relay.len(), 1);
-    assert_eq!((&relay[0]["question"], &relay[0]["ask_id"]), (&json!("Ship it?"), &json!("flow-owner-1")));
-    let app = relay[0]["t3"]["app"].as_str().unwrap();
+    let relay = |session: &str, reason: Reason| {
+        let session: maestro_core::session::SessionRef = session.parse().unwrap();
+        maestro_mcp::flow::relay("fi_1", Some(&session), &waiting(reason))
+    };
+    let r = relay("t3:env-1/thread-1", owner("flow-owner-1", "arc.yaml"));
+    assert_eq!(r.len(), 1);
+    assert_eq!(
+        (&r[0]["question"], &r[0]["ask_id"], &r[0]["state"]),
+        (&json!("Ship it?"), &json!("flow-owner-1"), &json!("owner"))
+    );
+    let app = r[0]["t3"]["app"].as_str().unwrap();
     assert!(app.starts_with("t3code://threads/env-1/thread-1?prompt="), "{app}");
     assert!(app.contains("flow-owner-1") && app.contains("maestro_flow_ask"), "{app}");
-    assert!(relay[0]["t3"]["web"].as_str().unwrap().starts_with("https://app.t3.codes/env-1/thread-1?prompt="));
-    let none = |owner: &str, ask_id: Option<&str>, linked: bool| {
-        let owner: maestro_core::session::SessionRef = owner.parse().unwrap();
-        let relay = maestro_mcp::flow::relay("fi_1", Some(&owner), &waiting(ask_id, linked));
-        assert_eq!(relay[0]["question"], "Ship it?");
-        relay[0].get("t3").is_none()
+    assert!(r[0]["t3"]["web"].as_str().unwrap().starts_with("https://app.t3.codes/env-1/thread-1?prompt="));
+    // Waiting to land is still the owner's question, with its link.
+    let landing = Reason::AnswerWaitingToLand {
+        ask: "Ship it?".into(),
+        ask_id: "flow-owner-1".into(),
+        ledger: "arc.yaml".into(),
+        at: "maestro/answers".into(),
     };
-    assert!(none("paseo:env-1/a1", Some("flow-owner-1"), true), "not a T3 owner");
-    assert!(none("t3:-/thread-1", Some("flow-owner-1"), true), "no environment");
-    assert!(none("t3:env-1/thread-1", Some("flow-owner-1"), false), "pinned, not filed");
-    assert!(none("t3:env-1/thread-1", None, false), "no ask yet");
+    let r = relay("t3:env-1/thread-1", landing);
+    assert_eq!((&r[0]["state"], r[0].get("t3").is_some()), (&json!("answer_waiting_to_land"), true));
+    let none = |session: &str, reason: Reason| {
+        let r = relay(session, reason);
+        assert_eq!(r[0]["question"], "Ship it?");
+        r[0].get("t3").is_none()
+    };
+    assert!(none("paseo:env-1/a1", owner("flow-owner-1", "arc.yaml")), "not a T3 owner");
+    assert!(none("t3:-/thread-1", owner("flow-owner-1", "arc.yaml")), "no environment");
+    let unfiled = Reason::Unfiled {
+        ask: "Ship it?".into(),
+        ask_id: Some("flow-owner-1".into()),
+        ledger: Some("arc.yaml".into()),
+    };
+    assert!(none("t3:env-1/thread-1", unfiled), "pinned, not filed");
+    assert!(none("t3:env-1/thread-1", owner("flow-owner-1", "ar\u{2028}c.yaml")), "not printable ASCII");
+    assert!(none("t3:env-1/thread-1", owner("flow-owner-1", "a\nb.yaml")), "a line break");
+    assert!(none("t3:env-1/thread-1", owner(&"f".repeat(9000), "arc.yaml")), "over T3's link limit");
 }

@@ -397,7 +397,10 @@ fn the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record() {
     let quiet = tree(&root);
     let next = maestro_mcp::call_with_hosts(&store, &hosts, "maestro_flow_next", json!({ "instance": fi })).unwrap();
     assert_eq!(next["relay"][0]["ask_id"], json!(id), "{next}");
-    assert_eq!((&next["relay"][0]["question"], &next["relay"][0]["linked"]), (&json!("Merge the gate?"), &json!(true)));
+    assert_eq!(
+        (&next["relay"][0]["question"], &next["relay"][0]["state"]),
+        (&json!("Merge the gate?"), &json!("owner"))
+    );
     assert!(tree(&root) == quiet, "a read wrote");
 }
 

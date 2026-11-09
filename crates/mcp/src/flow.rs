@@ -12,7 +12,7 @@
 //!   `AskWithdrawn` (an ask the writer of record refused, `ask_not_filed`). Only arguments that do
 //!   not parse are protocol errors.
 //! - **Human steps (BRO-3635).** `ask` files a waiting human node's ask through the asks ledger's
-//!   writer of record and, called again, records the owner's answer once the answers ledger has it
+//!   writer of record and, called again, records the owner's answer once it has landed on main
 //!   (`maestro_flow::kernel::asks`). `next` and `status` add `relay`: each waiting human node's
 //!   question, its ask once filed, and for a T3 owner prompt links to its thread ([`relay`]).
 //! - **Only the verbs.** No tool appends a raw event: the storage layer's `WriteGuard::append`
@@ -248,7 +248,7 @@ pub(crate) fn call(
     match name {
         NEXT | STATUS => {
             let a: FlowInstanceArgs = parse(crate::strip_auth_fields(args))?;
-            Ok(read(workspace, name, &a.instance).unwrap_or_else(|v| v))
+            Ok(read(paths, name, &a.instance).unwrap_or_else(|v| v))
         }
         START => {
             let a: FlowStartArgs = parse(args.clone())?;
@@ -362,12 +362,13 @@ pub(crate) fn call(
                     _ => None,
                 };
                 Ok(match kernel::ask(&mut w.ledger()?, paths, &w.me, &instance, node, filing.as_ref())? {
-                    Asked::Waiting { ask_id, ledger, appended } => json!({
+                    Asked::Waiting { ask_id, ledger, appended, landing } => json!({
                         "ok": true,
                         "state": "waiting",
                         "ask_id": ask_id,
                         "ledger": ledger,
                         "seq": appended.map(|a| a.event.seq),
+                        "answer_waiting_to_land": landing,
                     }),
                     Asked::Answered { ask_id, ledger, outputs, source, appended } => json!({
                         "ok": true,
@@ -397,7 +398,7 @@ pub(crate) fn call(
 /// the definition's question and, once filed, the ask's id and ledger. When the instance's owner
 /// is a T3 thread and the ask is filed, `t3` holds prompt links (`maestro_view::handoff`) that
 /// open that thread with a draft telling its agent to take the answer with `maestro_flow_ask`.
-/// The draft carries no answer: the kernel reads the answer from the answers ledger only.
+/// The draft carries no answer: the kernel reads the answer from main only.
 pub fn relay(instance: &str, owner: Option<&SessionRef>, nodes: &BTreeMap<String, NodeStatus>) -> Vec<Value> {
     let thread = owner
         .filter(|o| o.surface == Surface::T3)
@@ -406,20 +407,32 @@ pub fn relay(instance: &str, owner: Option<&SessionRef>, nodes: &BTreeMap<String
     let mut out = Vec::new();
     for (node, s) in nodes {
         for reason in &s.unmet {
-            let Reason::Owner { ask, ask_id, ledger, linked } = reason else { continue };
+            let (state, ask, ask_id, ledger) = match reason {
+                Reason::Unfiled { ask, ask_id, ledger } => ("unfiled", ask, ask_id.as_deref(), ledger.as_deref()),
+                Reason::Owner { ask, ask_id, ledger } => ("owner", ask, Some(ask_id.as_str()), Some(ledger.as_str())),
+                Reason::AnswerWaitingToLand { ask, ask_id, ledger, .. } => {
+                    ("answer_waiting_to_land", ask, Some(ask_id.as_str()), Some(ledger.as_str()))
+                }
+                _ => continue,
+            };
             let mut entry = json!({
                 "node_id": node,
                 "iteration": s.iteration,
+                "state": state,
                 "question": ask,
                 "ask_id": ask_id,
                 "ledger": ledger,
-                "linked": linked,
             });
-            if let (Some(thread), Some(id), Some(ledger), true) = (&thread, ask_id, ledger, *linked) {
+            if let (Some(thread), Some(id), Some(ledger), true) = (&thread, ask_id, ledger, state != "unfiled") {
                 let prompt = format!(
-                    "Maestro ask {id} in {ledger} is for flow instance {instance}, node {node}. Once it is answered in Maestro's decisions, take the answer with maestro_flow_ask (instance {instance}, node_id {node}); the kernel reads it from the answers ledger, not from this message."
+                    "Maestro ask {id} in {ledger} is for flow instance {instance}, node {node}. Once its answer has landed on main, take it with maestro_flow_ask (instance {instance}, node_id {node}); the kernel reads it from main, not from this message."
                 );
-                if maestro_view::handoff::fits(&prompt) {
+                // Every value placed in the draft is printable ASCII, so none can start a line or
+                // hide a character in it (T3 rewrites U+2028 and drops invisible characters), and
+                // the draft fits a T3 link.
+                let plain =
+                    [id, ledger, instance, node.as_str()].iter().all(|v| v.bytes().all(|b| b.is_ascii_graphic()));
+                if plain && maestro_view::handoff::fits(&prompt) {
                     entry["t3"] = json!({ "app": thread.app_link(&prompt), "web": thread.web_link(&prompt) });
                 }
             }
@@ -442,18 +455,24 @@ fn verdict(v: &Verdict) -> Value {
 
 /// `next` or `status`: under the shared lock, writing nothing. A ledger that is not there is
 /// `no_ledger`, never an empty flow.
-fn read(workspace: &Path, name: &str, instance: &str) -> Result<Value, Value> {
-    let root = flows_root(workspace)?;
+fn read(paths: &maestro_store::Paths, name: &str, instance: &str) -> Result<Value, Value> {
+    let root = flows_root(&paths.workspace)?;
     let run = || -> Result<Value, KernelError> {
         let instance = InstanceId::new(instance)?;
         let guard = Reader::new(&root, Options::default())?.lock()?;
         let now = maestro_flow::clock::now();
         Ok(if name == NEXT {
-            let next = kernel::next(&guard, &instance, now)?;
+            let mut next = kernel::next(&guard, &instance, now)?;
+            for s in next.pending.values_mut() {
+                kernel::landing(paths, &mut s.unmet);
+            }
             let relay = relay(&next.instance, next.owner.as_ref(), &next.pending);
             json!({ "ok": true, "next": next, "relay": relay })
         } else {
-            let status = kernel::status(&guard, &instance, now)?;
+            let mut status = kernel::status(&guard, &instance, now)?;
+            for s in status.nodes.values_mut() {
+                kernel::landing(paths, &mut s.unmet);
+            }
             let relay = relay(&status.instance, status.owner.as_ref(), &status.nodes);
             json!({ "ok": true, "status": status, "relay": relay })
         })
