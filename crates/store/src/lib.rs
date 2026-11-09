@@ -257,10 +257,8 @@ impl Store {
             return Ok(None);
         }
         let rel = format!("{dir}/{file}");
-        let text = self.tree.read(&rel).map_err(|e| format!("{rel}: {e}"))?;
-        if text.len() > LEDGER_LIMIT {
-            return Err(format!("{rel}: it is over {LEDGER_LIMIT} bytes"));
-        }
+        // Bounded at the read: a ledger over the limit, at any revision, is never taken in.
+        let text = self.tree.read_bounded(&rel, LEDGER_LIMIT).map_err(|e| e.to_string())?;
         let doc = yaml::parse(&text).map_err(|e| format!("{rel}: {e}"))?.value;
         let (ledger, bad) = AskLedger::from_value(doc).map_err(|e| format!("{rel}: {e}"))?;
         if let Some((i, reason)) = bad.first() {

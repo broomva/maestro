@@ -64,8 +64,8 @@ pub enum TreeError {
     #[error("{rel} is not valid UTF-8")]
     NotUtf8 { rel: String },
     /// A file past [`MAX_READ`]: not read, so no file can make a read allocate without bound.
-    #[error("{rel} is {size} bytes, over the {MAX_READ}-byte read limit")]
-    TooLarge { rel: String, size: u64 },
+    #[error("{rel} is {size} bytes, over the {limit}-byte read limit")]
+    TooLarge { rel: String, size: u64, limit: usize },
     /// The revision named no commit, so nothing is read from it: not the raw name, not a guess.
     #[error("revision `{rev}` did not resolve: {reason}")]
     Unresolved { rev: String, reason: String },
@@ -202,18 +202,38 @@ impl Tree {
     }
 
     pub fn read(&self, rel: &str) -> Result<String, TreeError> {
+        self.read_bounded(rel, MAX_READ)
+    }
+
+    /// [`Tree::read`], refusing a file over `limit` bytes (never more than [`MAX_READ`]) without
+    /// taking it in: the working tree reads through `take`, and a git revision asks the blob's
+    /// size (`cat-file -s`) before reading it. The revision is one resolved commit, so the blob
+    /// read is the one whose size was asked.
+    pub fn read_bounded(&self, rel: &str, limit: usize) -> Result<String, TreeError> {
+        let limit = limit.min(MAX_READ);
         match &self.source {
             TreeSource::WorkingTree => {
                 // Read through `take`, so a file that grows after it is opened is still bounded.
                 let file = std::fs::File::open(self.root.join(rel))?;
                 let mut bytes = Vec::new();
-                std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_READ as u64 + 1), &mut bytes)?;
-                if bytes.len() > MAX_READ {
-                    return Err(TreeError::TooLarge { rel: rel.to_string(), size: bytes.len() as u64 });
+                std::io::Read::read_to_end(&mut std::io::Read::take(file, limit as u64 + 1), &mut bytes)?;
+                if bytes.len() > limit {
+                    return Err(TreeError::TooLarge { rel: rel.to_string(), size: bytes.len() as u64, limit });
                 }
                 utf8(rel, bytes)
             }
-            TreeSource::GitRev(_) => self.git(&["show", &format!("{}:{rel}", self.rev()?)]),
+            TreeSource::GitRev(_) => {
+                let spec = format!("{}:{rel}", self.rev()?);
+                let said = self.git(&["cat-file", "-s", &spec])?;
+                let size: u64 = said.trim().parse().map_err(|_| TreeError::Git {
+                    args: format!("cat-file -s {spec}"),
+                    stderr: format!("not a size: {}", said.trim()),
+                })?;
+                if size > limit as u64 {
+                    return Err(TreeError::TooLarge { rel: rel.to_string(), size, limit });
+                }
+                self.git(&["show", &spec])
+            }
         }
     }
 
@@ -337,7 +357,7 @@ fn read_batch(mut reader: impl BufRead, rev: &str, rels: &[String]) -> Result<Ve
         if size > MAX_READ {
             // Skip the blob to stay in step with the stream, without holding it.
             std::io::copy(&mut std::io::Read::take(&mut reader, size as u64 + 1), &mut std::io::sink())?;
-            out.push((rel.clone(), Err(TreeError::TooLarge { rel: rel.clone(), size: size as u64 })));
+            out.push((rel.clone(), Err(TreeError::TooLarge { rel: rel.clone(), size: size as u64, limit: MAX_READ })));
             continue;
         }
         let mut buf = vec![0u8; size + 1]; // trailing newline
