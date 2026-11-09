@@ -212,7 +212,7 @@ pub(crate) fn next_line(log: &Log, event: &NewEvent) -> Result<(Event, Vec<u8>)>
     let stored = Event {
         seq: log.seq() + 1,
         prev_event: log.last_hash.clone(),
-        at: jiff::Timestamp::now().to_string(),
+        at: crate::clock::now().to_string(),
         kind: event.kind.clone(),
         body: event.body.clone(),
     };

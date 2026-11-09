@@ -4,7 +4,7 @@
 
 use super::definition::{ClassDef, Definition, NodeDef};
 use super::error::CompileError;
-use super::ir::{self, Case, Class, Exit, IR_VERSION, Input, Ir, Launch, Need, Node, Repeat, Wait};
+use super::ir::{self, Case, Class, Exit, Input, Ir, Launch, Need, Node, Repeat, Wait};
 use super::jq;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -176,14 +176,16 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
         repeats.insert(rid, repeat);
     }
 
-    let ir = Ir {
-        ir_version: IR_VERSION,
+    let mut ir = Ir {
+        ir_version: 0,
         flow: def.flow,
         version: def.version,
         params: params.into_iter().map(|(name, required)| (name.to_string(), required)).collect(),
         nodes,
         repeats,
+        workdir: def.workdir,
     };
+    ir.ir_version = ir::version_for(&ir);
     ir::validate(&ir)?;
     check_guards(&ir)?;
     let bytes = serde_json::to_vec(&ir).map(|b| b.len()).unwrap_or(usize::MAX);

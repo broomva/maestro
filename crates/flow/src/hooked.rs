@@ -2,8 +2,9 @@
 //! a crash point. They live in the crate under `cfg(test)` because pause points exist in no other
 //! build. A child is this unit-test binary run again (`tests/common`).
 
+// Loaded once in this binary; `kernel::clocked` uses it too.
 #[path = "../tests/common/mod.rs"]
-mod common;
+pub(crate) mod common;
 
 use crate::operator::{self, Recovered};
 use crate::{Ledger, Options, Reader};

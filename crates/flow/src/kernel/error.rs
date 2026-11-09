@@ -68,6 +68,87 @@ pub enum KernelError {
     /// An event body that does not serialize.
     #[error("An event does not serialize: {0}.")]
     Encode(String),
+    /// A write verb refused before anything was run or written.
+    #[error(transparent)]
+    Refused(#[from] Refusal),
+}
+
+/// Why a write verb (`start`, `claim`, `heartbeat`, `complete`) wrote nothing. A refusal is a
+/// normal result: the code says why, and the caller decides what to do next.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    /// The session carries no owner marker (or an empty one), so it can own and write no flow.
+    #[error("The session has no owner marker, so it writes no flow.")]
+    NoOwnerMarker,
+    /// The instance's `Started` records no owner, so no session may write it.
+    #[error("Instance {instance} records no owner, so no session writes it.")]
+    NoOwner { instance: String },
+    /// Another session, or a replacement of the owner with a new marker.
+    #[error("This session does not own instance {instance}; it may start an instance of its own.")]
+    NotOwner { instance: String },
+    #[error("The token is not a flow token.")]
+    TokenMalformed,
+    #[error("No claim on instance {instance} has this token.")]
+    UnknownToken { instance: String },
+    /// The claim's attempt was completed; its token is spent.
+    #[error("The claim on node {node} was completed, so its token is spent.")]
+    TokenSpent { node: String },
+    /// The lease ended (or a later claim took the node): the node is released, and work goes on
+    /// only through a new claim.
+    #[error("The claim on node {node} lost its lease at {lease_until}; claim the node again.")]
+    LeaseExpired { node: String, lease_until: String },
+    /// The claim's iteration is no longer the node's current one.
+    #[error("The claim on node {node} is for an iteration that is no longer current.")]
+    NotCurrentIteration { node: String },
+    /// A receipt the claim was bound to has changed, so the claim no longer holds the node.
+    #[error("A receipt node {node} consumes has changed since it was claimed; claim it again.")]
+    InputsChanged { node: String },
+    #[error("Node {node} is held by a claim until {lease_until}.")]
+    AlreadyClaimed { node: String, lease_until: String },
+    #[error("The flow declares no node {node}.")]
+    UnknownNode { node: String },
+    /// Only the kernel's own classes are claimed here: pure, observe and work.
+    #[error("Node {node} is a {class} node, which is not claimed with claim and complete.")]
+    NotClaimable { node: String, class: String },
+    /// Out of order, or something it consumes is not current and fresh now.
+    #[error("Node {node} is not enabled now ({state}).")]
+    NotEnabled { node: String, state: String },
+    /// One more attempt would overflow the attempt counter.
+    #[error("Node {node} has no attempt number left.")]
+    AttemptOverflow { node: String },
+    #[error("The command limits are not allowed: {detail}.")]
+    InvalidLimits { detail: String },
+    /// The clock plus a lease is past the last time there is.
+    #[error("The clock is out of range.")]
+    ClockOutOfRange,
+    /// The wall clock reads earlier than the instance's last event: it stepped back. Nothing is
+    /// written until it passes that event.
+    #[error("The clock ({now}) is earlier than the instance's last event ({at}); try again once it is past it.")]
+    ClockBehind { now: String, at: String },
+}
+
+impl Refusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Refusal::NoOwnerMarker => "no_owner_marker",
+            Refusal::NoOwner { .. } => "no_owner",
+            Refusal::NotOwner { .. } => "not_owner",
+            Refusal::TokenMalformed => "token_malformed",
+            Refusal::UnknownToken { .. } => "unknown_token",
+            Refusal::TokenSpent { .. } => "token_spent",
+            Refusal::LeaseExpired { .. } => "lease_expired",
+            Refusal::NotCurrentIteration { .. } => "not_current_iteration",
+            Refusal::InputsChanged { .. } => "inputs_changed",
+            Refusal::AlreadyClaimed { .. } => "already_claimed",
+            Refusal::UnknownNode { .. } => "unknown_node",
+            Refusal::NotClaimable { .. } => "not_claimable",
+            Refusal::NotEnabled { .. } => "not_enabled",
+            Refusal::AttemptOverflow { .. } => "attempt_overflow",
+            Refusal::InvalidLimits { .. } => "invalid_limits",
+            Refusal::ClockOutOfRange => "clock_out_of_range",
+            Refusal::ClockBehind { .. } => "clock_behind",
+        }
+    }
 }
 
 impl KernelError {
@@ -78,6 +159,7 @@ impl KernelError {
             KernelError::InvalidParams { .. } => "invalid_params",
             KernelError::Malformed { .. } => "malformed_instance",
             KernelError::Encode(_) => "encode",
+            KernelError::Refused(r) => r.code(),
         }
     }
 }

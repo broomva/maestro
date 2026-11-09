@@ -39,6 +39,15 @@ fn the_verifier_pilot_compiles_to_a_hashed_ir() {
 }
 
 #[test]
+fn an_ir_is_written_in_the_lowest_version_that_expresses_it() {
+    // Version 2 added `workdir`: the pilot declares one; a flow without one is a version 1 IR,
+    // as it was before the field existed.
+    assert_eq!(compile(VERIFY).unwrap().ir().ir_version, 2);
+    let bare = compile("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n").unwrap();
+    assert_eq!(bare.ir().ir_version, 1);
+}
+
+#[test]
 fn an_unknown_reference_is_refused() {
     all_refused(
         "unknown_reference",

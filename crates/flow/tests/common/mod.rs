@@ -18,6 +18,19 @@ pub fn host(name: &str) -> HostId {
     HostId::new(name).unwrap()
 }
 
+/// A verified T3 session `t3:-/<thread>` with owner marker `marker`.
+pub fn agent(thread: &str, marker: &str) -> maestro_core::session::VerifiedSession {
+    let session = format!("t3:-/{thread}").parse().unwrap();
+    maestro_core::session::VerifiedSession::new(
+        session,
+        "/tmp",
+        Some(maestro_core::session::Harness::Codex),
+        None,
+        vec![],
+    )
+    .with_owner_marker(marker)
+}
+
 pub fn id(name: &str) -> InstanceId {
     InstanceId::new(name).unwrap()
 }

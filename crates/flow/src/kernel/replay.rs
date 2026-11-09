@@ -4,7 +4,9 @@
 //! Replay folds the log once, in order: each event is accepted only if it fits the state the
 //! events before it built, and anything else is set aside as rejected and changes nothing. An
 //! event's `at` matters only as the time a receipt was taken (for freshness at a read) and as the
-//! time a verdict's iteration is checked to have settled. Replay never runs a command (a node's
+//! time a verdict's iteration is checked to have settled. An observation was taken when its
+//! command started, so its freshness counts from its `verify.ran_at`, or from the event's `at`
+//! when that is earlier or `ran_at` is missing or unreadable. Replay never runs a command (a node's
 //! `run`, `verify` and `reconcile` are data here), never evaluates a guard (an `until` verdict is
 //! read from a `Guarded` event), never starts a process and writes nothing. The clock of a read is
 //! the caller's `now`, so the same log and the same `now` give byte-identical JSON.
@@ -48,7 +50,8 @@
 //! A writer must check, at the moment it records, that nothing the node consumes is stale, and
 //! record the `inputs` that `status` names. An `until` may read only the repeat's body nodes,
 //! since a verdict's digest covers only the body. Claims, leases, retry and cancel are the
-//! writers' to enforce.
+//! writers' to enforce. `claim`, `heartbeat` and `complete` (`write`) keep this contract for
+//! receipts and claims; `choose`, verdicts, retry and cancel are still to come.
 //!
 //! # Cost
 //!
@@ -73,10 +76,12 @@ use super::events::{
     Chosen, Claimed, Completed, Guarded, Heartbeat, KernelEvent, Refused, Started, digest, receipt_digest,
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
+use super::write;
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, ReadGuard, random_epoch};
 use crate::log::{Event, Log};
 use jiff::{SignedDuration, Timestamp};
+use maestro_core::session::VerifiedSession;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -234,11 +239,18 @@ pub struct Begun {
     pub appended: Appended,
 }
 
-/// Starts an instance of `flow` with `params`: appends `Started`, which pins the IR.
-pub fn start(ledger: &mut Ledger, flow: &CompiledFlow, params: Value) -> Result<Begun, KernelError> {
+/// Starts an instance of `flow` with `params`: appends `Started`, which pins the IR and records
+/// `session` as the instance's owner. A session with no owner marker starts nothing.
+pub fn start(
+    ledger: &mut Ledger,
+    session: &VerifiedSession,
+    flow: &CompiledFlow,
+    params: Value,
+) -> Result<Begun, KernelError> {
+    let owner = Some(write::owner(session)?);
     check_params(flow.ir(), &params)?;
     let instance = InstanceId::new(format!("fi_{}", random_epoch()?))?;
-    let started = Started { flow: flow.name(), ir_hash: flow.hash().to_string(), ir: flow.ir().clone(), params };
+    let started = Started { flow: flow.name(), ir_hash: flow.hash().to_string(), ir: flow.ir().clone(), params, owner };
     let event = started.to_event()?;
     let appended = ledger.lock()?.append(&instance, 0, event)?;
     Ok(Begun { instance, appended })
@@ -285,8 +297,13 @@ pub fn status(guard: &ReadGuard, instance: &InstanceId, now: Timestamp) -> Resul
 pub fn next(guard: &ReadGuard, instance: &InstanceId, now: Timestamp) -> Result<Next, KernelError> {
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
-    let fold = Fold::replay(&log, &started)?;
-    let (status, stale) = fold.read(&log, &started, now);
+    next_of(&log, &started, now)
+}
+
+/// [`next`] over a log already read and pinned: the writers' view of what is enabled now.
+pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Next, KernelError> {
+    let fold = Fold::replay(log, started)?;
+    let (status, stale) = fold.read(log, started, now);
     let mut enabled = Vec::new();
     let mut pending = BTreeMap::new();
     for (id, s) in status.nodes {
@@ -325,13 +342,13 @@ fn body<T: DeserializeOwned>(log: &Log, e: &Event) -> Result<T, KernelError> {
         .map_err(|err| malformed(log, e.seq, format!("a {} body that does not parse ({err})", e.kind)))
 }
 
-fn secs(s: u64) -> SignedDuration {
+pub(crate) fn secs(s: u64) -> SignedDuration {
     SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))
 }
 
 /// The `Started` event, checked: the first event, an IR of this kernel's version that validates,
 /// matches its hash and is the flow it names.
-fn pinned(log: &Log) -> Result<Started, KernelError> {
+pub(crate) fn pinned(log: &Log) -> Result<Started, KernelError> {
     let Some(first) = log.events.first() else {
         return Err(malformed(log, 0, "the log is empty"));
     };
@@ -542,7 +559,15 @@ impl<'a> Fold<'a> {
                     }
                     _ => (None, None),
                 };
-                Receipt::new(at, &c.outputs, value, failure, c.inputs)
+                // An observation is as old as its run, never younger than its append.
+                let taken = match &node.class {
+                    Class::Observe { .. } => {
+                        let ran = c.verify.as_ref().and_then(|v| v.ran_at.parse::<Timestamp>().ok());
+                        ran.map_or(at, |ran| ran.min(at))
+                    }
+                    _ => at,
+                };
+                Receipt::new(taken, &c.outputs, value, failure, c.inputs)
             }
             Chosen::KIND => {
                 let c: Chosen = body(log, e)?;
@@ -1104,8 +1129,13 @@ mod tests {
     #[test]
     fn inert_and_rejected_events_never_advance_or_evaluate() {
         let flow = compile("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n  b: {class: pure, run: [x]}\nrepeats:\n  r: {max: 2, body: [b]}\n").unwrap();
-        let started =
-            Started { flow: flow.name(), ir_hash: flow.hash().into(), ir: flow.ir().clone(), params: Value::Null };
+        let started = Started {
+            flow: flow.name(),
+            ir_hash: flow.hash().into(),
+            ir: flow.ir().clone(),
+            params: Value::Null,
+            owner: None,
+        };
         let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];
         let at = |node: &str| serde_json::json!({ "node": node, "iteration": {}, "attempt": 1, "lease_until": "2026-11-08T00:00:00Z", "token_sha256": "x", "code": "x", "reason": "x" });
         for (i, kind) in ["Claimed", "Heartbeat", "Refused"].iter().cycle().take(300).enumerate() {
@@ -1137,8 +1167,13 @@ mod tests {
         // A bounded cost, counted rather than timed: re-running an observation everything depends
         // on with the same result, then asking for the last node, computes each core once.
         let flow = compile("flow: f\nversion: 1\nnodes:\n  head: {class: observe, run: [x], fresh_for: 10m, exit_map: {0: a, 1: b}}\n  a: {class: pure, run: [x], needs: [head]}\n  b: {class: pure, run: [x], needs: [a]}\n").unwrap();
-        let started =
-            Started { flow: flow.name(), ir_hash: flow.hash().into(), ir: flow.ir().clone(), params: Value::Null };
+        let started = Started {
+            flow: flow.name(),
+            ir_hash: flow.hash().into(),
+            ir: flow.ir().clone(),
+            params: Value::Null,
+            owner: None,
+        };
         let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];
         let head = |exit: i32| serde_json::json!({ "node": "head", "iteration": {}, "attempt": 1, "verify": { "argv": ["x"], "exit": exit, "stdout_sha256": "s", "ran_at": "x" } });
         let b = serde_json::json!({ "node": "b", "iteration": {}, "attempt": 1 });

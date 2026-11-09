@@ -38,7 +38,7 @@ fn iter(pairs: &[(&str, u32)]) -> Iteration {
 
 impl Fx {
     fn begin(&mut self, params: Value) -> InstanceId {
-        start(&mut self.ledger, &self.flow, params).unwrap().instance
+        start(&mut self.ledger, &agent("a", "m"), &self.flow, params).unwrap().instance
     }
 
     /// Appends `ev` at the head; returns when the storage layer stamped it.
@@ -69,11 +69,14 @@ impl Fx {
         outputs: Value,
         exit: Option<i32>,
     ) -> Timestamp {
+        // As `complete` writes it: an observation's run starts just before its append, and its
+        // freshness counts from that start.
+        let ran = Timestamp::now();
         let verify = exit.map(|exit| VerifyRecord {
             argv: vec!["x".into()],
             exit,
             stdout_sha256: "sha256:00".into(),
-            ran_at: "2026-11-07T00:00:00Z".into(),
+            ran_at: ran.to_string(),
         });
         let c = Completed {
             node: node.into(),
@@ -85,7 +88,8 @@ impl Fx {
             performer: None,
             tool_use_id: None,
         };
-        self.append(fi, c.to_event().unwrap())
+        let at = self.append(fi, c.to_event().unwrap());
+        if exit.is_some() { ran.min(at) } else { at }
     }
 
     fn choose(&mut self, fi: &InstanceId, node: &str, at: &[(&str, u32)], edge: &str) {
@@ -177,7 +181,7 @@ fn start_pins_the_ir_and_refuses_params_that_do_not_fit() {
         (json!({ "repo": ".", "head": "abc", "check": "make", "colour": "blue" }), "an unknown param"),
         (json!(["repo"]), "not an object"),
     ] {
-        let err = start(&mut f.ledger, &f.flow, params).unwrap_err();
+        let err = start(&mut f.ledger, &agent("a", "m"), &f.flow, params).unwrap_err();
         assert_eq!(err.code(), "invalid_params", "{why}");
     }
     assert!(f.ledger.lock().unwrap().instances().unwrap().is_empty(), "a refused start writes nothing");
@@ -828,6 +832,7 @@ fn an_instance_that_does_not_replay_is_an_error_never_an_empty_flow() {
         ir_hash: f.flow.hash().to_string(),
         ir: f.flow.ir().clone(),
         params: json!({}),
+        owner: None,
     };
     let fresh = |f: &mut Fx, name: &str, first: NewEvent| {
         let fi = id(name);
@@ -865,6 +870,17 @@ fn an_instance_that_does_not_replay_is_an_error_never_an_empty_flow() {
     s.ir_hash = content_hash(&s.ir).unwrap();
     let fi = fresh(&mut f, "fi_version", s.to_event().unwrap());
     assert_eq!(f.try_status(&fi).unwrap_err(), "malformed_instance");
+    // The version is the IR's shape: version 1 carries no workdir and version 2 carries one.
+    for (name, version, workdir) in
+        [("fi_v1_dir", 1, Some("/tmp")), ("fi_v2_none", 2, None), ("fi_v2_dir", 2, Some("/tmp"))]
+    {
+        let mut s = started(&f);
+        (s.ir.ir_version, s.ir.workdir) = (version, workdir.map(String::from));
+        s.ir_hash = content_hash(&s.ir).unwrap();
+        let fi = fresh(&mut f, name, s.to_event().unwrap());
+        let want = if name == "fi_v2_dir" { Ok(State::Ready) } else { Err("malformed_instance".to_string()) };
+        assert_eq!(f.try_status(&fi).map(|s| state(&s, "a")), want, "{name}");
+    }
     let mut s = started(&f);
     s.flow = "other@7".into();
     let fi = fresh(&mut f, "fi_flow", s.to_event().unwrap());
@@ -1103,9 +1119,9 @@ fn a_flow_compiled_at_its_byte_bounds_starts_and_params_have_one_too() {
     // `{"p":"..."}` is 8 bytes around its string.
     let params = |len: usize| json!({ "p": "x".repeat(len - 8) });
     assert_eq!(serde_json::to_vec(&params(MAX_PARAMS)).unwrap().len(), MAX_PARAMS);
-    let begun = start(&mut f.ledger, &f.flow, params(MAX_PARAMS)).unwrap();
+    let begun = start(&mut f.ledger, &agent("a", "m"), &f.flow, params(MAX_PARAMS)).unwrap();
     assert!(f.try_status(&begun.instance).is_ok(), "the largest IR with the largest params starts and reads");
-    let err = start(&mut f.ledger, &f.flow, params(MAX_PARAMS + 1)).unwrap_err();
+    let err = start(&mut f.ledger, &agent("a", "m"), &f.flow, params(MAX_PARAMS + 1)).unwrap_err();
     assert_eq!(err.code(), "invalid_params");
 }
 
@@ -1206,7 +1222,7 @@ fn params_and_outputs_nested_too_deep_to_read_back_are_refused_before_anything_i
     // Codex's reproduction: 140 levels, under the byte bound, once made the instance unreadable.
     // `{"p": ...}` adds a level, and `Started` one more around the params.
     for levels in [140, MAX_NESTING - 1] {
-        let err = start(&mut f.ledger, &f.flow, json!({ "p": nested(levels) })).unwrap_err();
+        let err = start(&mut f.ledger, &agent("a", "m"), &f.flow, json!({ "p": nested(levels) })).unwrap_err();
         assert_eq!(err.code(), "invalid_params", "{levels} levels");
     }
     assert!(f.ledger.lock().unwrap().instances().unwrap().is_empty(), "nothing was appended");
