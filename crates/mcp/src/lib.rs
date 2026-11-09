@@ -507,10 +507,33 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
     call_with_hosts(store, &hosts, name, args)
 }
 
-/// Run one tool against an explicit [`maestro_hosts::SurfaceRegistry`].
+/// Run one tool against an explicit [`maestro_hosts::SurfaceRegistry`]. A caller with no claim
+/// of its own takes the one in this process's caller variables (see [`Ambient`]).
 pub fn call_with_hosts(
     store: &Store,
     hosts: &maestro_hosts::SurfaceRegistry,
+    name: &str,
+    args: Value,
+) -> Result<Value, McpError> {
+    dispatch(store, hosts, Ambient::Caller, name, args)
+}
+
+/// Whose environment this process is, for the caller variables (`MAESTRO_CALLER_CWD`,
+/// `MAESTRO_DIRECT_TOKEN`, `MAESTRO_CALLER_NODE`, `MAESTRO_BRIDGE_CREDENTIAL`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ambient {
+    /// The caller's own process (the CLI, or a stdio server its harness started): a caller with
+    /// no claim in its arguments takes the claim in the variables.
+    Caller,
+    /// A shared daemon (`maestro serve --http`): its variables are nobody's claim, so a caller
+    /// is verified only from its own arguments.
+    Shared,
+}
+
+fn dispatch(
+    store: &Store,
+    hosts: &maestro_hosts::SurfaceRegistry,
+    ambient: Ambient,
     name: &str,
     args: Value,
 ) -> Result<Value, McpError> {
@@ -695,10 +718,10 @@ pub fn call_with_hosts(
             Ok(json!({ "markdown": markdown, "packet": packet }))
         }
         flow::START | flow::NEXT | flow::CLAIM | flow::COMPLETE | flow::CHOOSE | flow::STATUS | flow::HEARTBEAT => {
-            flow::call(&store.paths.workspace, hosts, name, args)
+            flow::call(&store.paths.workspace, hosts, ambient, name, args)
         }
         other => match request_of(other) {
-            Some(kind) => agent_request_with_hosts(store, hosts, kind, args),
+            Some(kind) => agent_request_in(store, hosts, ambient, kind, args),
             None => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
         },
     }
@@ -716,42 +739,38 @@ fn resolve_caller(
     hosts: &maestro_hosts::SurfaceRegistry,
     session: &maestro_core::session::SessionRef,
     args: &Value,
+    ambient: Ambient,
 ) -> Result<(maestro_core::session::SessionRef, Principal), McpError> {
-    Ok(match verified_caller(hosts, session, args)? {
+    Ok(match verified_caller(hosts, session, args, ambient)? {
         Some(verified) => (verified.session().clone(), maestro_hosts::verified_identity(&verified)),
         None => (session.clone(), Principal::Unverified),
     })
 }
 
-/// The caller, verified against its surface's registry from the claim in `args` (or the
-/// `MAESTRO_*` caller variables). `None` when its surface has no registry here and it makes no
-/// claim: an unverified caller. A claim that does not verify is an error.
+/// The caller, verified against its surface's registry from the claim in `args` (or, in the
+/// caller's own process, the `MAESTRO_*` caller variables). `None` when its surface has no
+/// registry here and it makes no claim: an unverified caller. A claim that does not verify is an
+/// error.
 fn verified_caller(
     hosts: &maestro_hosts::SurfaceRegistry,
     session: &maestro_core::session::SessionRef,
     args: &Value,
+    ambient: Ambient,
 ) -> Result<Option<maestro_core::session::VerifiedSession>, McpError> {
-    let arg_cwd = args
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| std::env::var("MAESTRO_CALLER_CWD").ok().filter(|s| !s.is_empty()));
-    let arg_token = args
-        .get("token")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| std::env::var("MAESTRO_DIRECT_TOKEN").ok().filter(|s| !s.is_empty()));
-    let arg_node = args
-        .get("node")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| std::env::var("MAESTRO_CALLER_NODE").ok().filter(|s| !s.is_empty()));
+    let var = |key: &str| match ambient {
+        Ambient::Caller => std::env::var(key).ok().filter(|s| !s.is_empty()),
+        Ambient::Shared => None,
+    };
+    let arg_cwd = args.get("cwd").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_CALLER_CWD"));
+    let arg_token =
+        args.get("token").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_DIRECT_TOKEN"));
+    let arg_node = args.get("node").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_CALLER_NODE"));
     let arg_cred: Option<maestro_hosts::BridgeCredential> = match args.get("credential") {
         Some(v) => Some(
             serde_json::from_value(v.clone())
                 .map_err(|e| McpError::invalid_params(format!("`credential`: {e}"), None))?,
         ),
-        None => match std::env::var("MAESTRO_BRIDGE_CREDENTIAL").ok().filter(|s| !s.is_empty()) {
+        None => match var("MAESTRO_BRIDGE_CREDENTIAL") {
             Some(raw) => Some(
                 serde_json::from_str(&raw)
                     .map_err(|e| McpError::invalid_params(format!("MAESTRO_BRIDGE_CREDENTIAL: {e}"), None))?,
@@ -826,13 +845,23 @@ pub fn agent_request_with_hosts(
     kind: RequestKind,
     args: Value,
 ) -> Result<Value, McpError> {
+    agent_request_in(store, hosts, Ambient::Caller, kind, args)
+}
+
+fn agent_request_in(
+    store: &Store,
+    hosts: &maestro_hosts::SurfaceRegistry,
+    ambient: Ambient,
+    kind: RequestKind,
+    args: Value,
+) -> Result<Value, McpError> {
     let session_text = args.get("session").and_then(Value::as_str).unwrap_or_default().to_string();
     let clean_args = strip_auth_fields(args.clone());
     let payload = match kind {
         RequestKind::AskFile => {
             let a: AskFileArgs = parse(clean_args)?;
             let parsed_session = session_of(&a.session)?;
-            let (session, caller) = resolve_caller(hosts, &parsed_session, &args)?;
+            let (session, caller) = resolve_caller(hosts, &parsed_session, &args, ambient)?;
             // Writes go to the working tree, never to a git revision.
             requests::compose_ask(&a.ask).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
             let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);
@@ -856,7 +885,7 @@ pub fn agent_request_with_hosts(
         RequestKind::Escalate => json!(parse::<EscalateArgs>(clean_args)?),
     };
     let parsed_session = session_of(&session_text)?;
-    let (session, caller) = resolve_caller(hosts, &parsed_session, &args)?;
+    let (session, caller) = resolve_caller(hosts, &parsed_session, &args, ambient)?;
     let record = requests::new_record(kind, session, &caller, payload);
     requests::record(&store.paths, &record).map_err(file_error)?;
     Ok(json!({ "request": record, "journal": requests::journal(&store.paths) }))
@@ -926,15 +955,24 @@ pub struct MaestroServer {
     paths: Arc<maestro_store::Paths>,
     source: maestro_store::TreeSource,
     hosts: Arc<maestro_hosts::SurfaceRegistry>,
+    ambient: Ambient,
 }
 
 impl MaestroServer {
+    /// A server in its caller's own process (stdio): see [`Ambient::Caller`].
     pub fn new(store: Store) -> Self {
         Self {
             paths: Arc::new(store.paths),
             source: store.tree.source,
             hosts: Arc::new(maestro_hosts::SurfaceRegistry::from_env()),
+            ambient: Ambient::Caller,
         }
+    }
+
+    /// A shared daemon's server (HTTP): its caller variables verify nobody ([`Ambient::Shared`]).
+    pub fn shared(mut self) -> Self {
+        self.ambient = Ambient::Shared;
+        self
     }
 
     pub fn with_hosts(mut self, hosts: maestro_hosts::SurfaceRegistry) -> Self {
@@ -953,7 +991,7 @@ impl MaestroServer {
 
     /// Run one tool against a store resolved for this call and this server's retained `SurfaceRegistry`.
     pub fn call(&self, name: &str, args: Value) -> Result<Value, McpError> {
-        call_with_hosts(&self.store(), &self.hosts, name, args)
+        dispatch(&self.store(), &self.hosts, self.ambient, name, args)
     }
 
     pub fn tools() -> Vec<Tool> {

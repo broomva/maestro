@@ -158,6 +158,7 @@ fn bounded<'a>(what: &str, value: &'a str) -> Result<&'a str, Value> {
 pub(crate) fn call(
     workspace: &Path,
     hosts: &maestro_hosts::SurfaceRegistry,
+    ambient: crate::Ambient,
     name: &str,
     args: Value,
 ) -> Result<Value, McpError> {
@@ -170,7 +171,7 @@ pub(crate) fn call(
         START => {
             let a: FlowStartArgs = parse(clean)?;
             let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, hosts, &session, &args, true, |w| {
+            Ok(write(workspace, (hosts, ambient), &session, &args, true, |w| {
                 // The definition compiles before the ledger is opened, or made.
                 let flow = kernel::compile(&a.definition)?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
@@ -187,7 +188,7 @@ pub(crate) fn call(
         CLAIM => {
             let a: FlowClaimArgs = parse(clean)?;
             let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, hosts, &session, &args, false, |w| {
+            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
                 let node = match bounded("node_id", &a.node_id) {
                     Ok(node) => node,
                     Err(v) => return Ok(v),
@@ -210,7 +211,7 @@ pub(crate) fn call(
         HEARTBEAT => {
             let a: FlowHeartbeatArgs = parse(clean)?;
             let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, hosts, &session, &args, false, |w| {
+            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
                 let beat = kernel::heartbeat(&mut w.ledger()?, &w.me, &a.claim_token)?;
                 Ok(json!({ "ok": true, "lease_until": beat.lease_until.to_string(), "seq": beat.appended.event.seq }))
             }))
@@ -218,7 +219,7 @@ pub(crate) fn call(
         COMPLETE => {
             let a: FlowCompleteArgs = parse(clean)?;
             let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, hosts, &session, &args, false, |w| {
+            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
                 let mut limits = Limits::default();
                 if let Some(secs) = a.timeout_secs {
                     limits.timeout = std::time::Duration::from_secs(secs);
@@ -244,7 +245,7 @@ pub(crate) fn call(
         CHOOSE => {
             let a: FlowChooseArgs = parse(clean)?;
             let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, hosts, &session, &args, false, |w| {
+            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
                 let edge = match bounded("edge", &a.edge) {
                     Ok(edge) => edge,
                     Err(v) => return Ok(v),
@@ -319,13 +320,13 @@ impl Writer {
 /// which checks its own arguments before it opens the ledger. Every refusal is a result.
 fn write(
     workspace: &Path,
-    hosts: &maestro_hosts::SurfaceRegistry,
+    caller: (&maestro_hosts::SurfaceRegistry, crate::Ambient),
     session: &SessionRef,
     args: &Value,
     may_create: bool,
     verb: impl FnOnce(&Writer) -> Result<Value, KernelError>,
 ) -> Value {
-    let me = match crate::verified_caller(hosts, session, args) {
+    let me = match crate::verified_caller(caller.0, session, args, caller.1) {
         Ok(Some(me)) => me,
         Ok(None) => {
             let reason = format!(

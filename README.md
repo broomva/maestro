@@ -96,7 +96,9 @@ maestro flow choose --claim-token T --edge E                 # take a choice nod
 
 - **Verified writers only.** The writes act for a verified session: a Direct launch token
   (`MAESTRO_DIRECT_TOKEN`, with `MAESTRO_DIRECT_REGISTRY` and `MAESTRO_CALLER_CWD`) or a bridge
-  credential (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP, the same fields as arguments. An unverified
+  credential (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP, the same fields as arguments. The HTTP
+  daemon (`maestro serve --http`) serves every caller on the machine, so it reads a claim only from
+  the call's arguments, never from its own environment, for every agent tool. An unverified
   caller is refused (`caller_unverified`), and a claim that does not verify too (`caller_refused`).
   `next` and `status` read for anyone and write nothing.
 - **Where.** The ledger is `.broomva/flows` in the workspace (the same root every reader uses). A

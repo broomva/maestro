@@ -210,3 +210,56 @@ fn the_mcp_server_runs_a_guarded_choose() {
     drop(stdin);
     let _ = child.wait();
 }
+
+/// One stateless MCP 2026-07-28 tools/call to `maestro serve --http` at `addr`; the result.
+fn http_tool(addr: &str, name: &str, args: Value) -> Value {
+    use std::io::Read as _;
+    let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} });
+    let body =
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args, "_meta": meta } })
+            .to_string();
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    write!(
+        stream,
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: {name}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let response = String::from_utf8_lossy(&raw).into_owned();
+    let json = response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
+    let v: Value = serde_json::from_str(json).unwrap_or_else(|_| panic!("{response}"));
+    v["result"]["structuredContent"].clone()
+}
+
+/// A shared daemon (`serve --http`) takes no caller claim from its own environment: a caller
+/// naming the session its variables describe is refused, and verifies only with its own claim.
+#[test]
+fn the_http_daemon_takes_no_claim_from_its_environment() {
+    let m = machine();
+    let mut child = m
+        .verified()
+        .args(["serve", "--http", "--bind", "127.0.0.1:0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    let url = line.trim().strip_prefix("maestro: serving MCP on http://").unwrap_or_else(|| panic!("{line}"));
+    let addr = url.split_once('/').unwrap().0.to_string();
+    let start = json!({ "session": "direct:-/d1", "definition": DECIDE, "params": { "dir": m.work } });
+    let refused = http_tool(&addr, "maestro_flow_start", start.clone());
+    assert_eq!(refused["code"], "caller_refused", "{refused}");
+    assert!(!m.root.join("workspace/.broomva/flows").exists(), "the daemon's variables wrote a flow");
+    let mut own = start;
+    own["token"] = json!("tok-1");
+    own["cwd"] = json!(m.work);
+    let begun = http_tool(&addr, "maestro_flow_start", own);
+    assert_eq!(begun["ok"], true, "{begun}");
+    let _ = child.kill();
+    let _ = child.wait();
+}

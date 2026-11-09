@@ -1539,6 +1539,9 @@ mutate $mcp '        authority: Authority::Read,
     },
     ToolSpec {
         name: flow::CLAIM,'
+# A shared daemon (serve --http) takes no caller claim from its own environment.
+mutate $http '    let server = MaestroServer::new(store).shared();' '    let server = MaestroServer::new(store);'
+mutate $mcp '        Ambient::Shared => None,' '        Ambient::Shared => std::env::var(key).ok().filter(|s| !s.is_empty()),'
 mutate $cli '    maestro_flow::kernel::guard_entry();
     drop_inherited_git_repo();' '    drop_inherited_git_repo();'
 mutate $cli '    if v["ok"] == json!(true) {
