@@ -914,9 +914,21 @@ mutate $fk/compile.rs '    if yaml.len() > MAX_SOURCE {' '    if false {'
 mutate $fk/compile.rs '    if bytes > ir::MAX_IR {' '    if bytes >= ir::MAX_IR {'
 mutate $fk/compile.rs '    if bytes > ir::MAX_IR {' '    if false {'
 mutate $fk/ir.rs '    if ir.ir_version != want {' '    if false {'
-# An IR is written in the lowest version that expresses it: 2 with a workdir, 1 without.
-mutate $fk/ir.rs '    if ir.workdir.is_some() { IR_VERSION } else { 1 }' '    IR_VERSION'
-mutate $fk/ir.rs '    if ir.workdir.is_some() { IR_VERSION } else { 1 }' '    1'
+# An IR is written in the lowest version that expresses it: 3 with an effect that runs a
+# command, 2 with a workdir, 1 with neither; version 3 needs a command on every effect.
+mutate $fk/ir.rs '    } else if ir.workdir.is_some() {
+        2' '    } else if false {
+        2'
+mutate $fk/ir.rs '    } else {
+        1
+    }
+}' '    } else {
+        2
+    }
+}'
+mutate $fk/ir.rs '    if runs_effect {' '    if false {'
+mutate $fk/ir.rs 'Class::Effect { run, .. } if !run.is_empty()));' 'Class::Effect { .. }));'
+mutate $fk/ir.rs '                if ir.ir_version >= 3 {' '                if false {'
 mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if ir.nodes.len() >= MAX_NODES {'
 mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if false {'
 mutate $fk/ir.rs '        if reads > MAX_FAN_IN {' '        if reads >= MAX_FAN_IN {'
@@ -994,7 +1006,7 @@ mutate $fk/replay.rs '    if started.flow != format!("{}@{}", started.ir.flow, s
 # Acceptance, in log order: kernel kinds only, a declared node, its current iteration, the right
 # class, a declared edge, an enabled node not already done at the event's own clock, verdicts
 # for a settled current iteration of a repeat with an until, once per body.
-mutate $fk/replay.rs '        if ![Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND].contains(&e.kind.as_str()) {' '        if false {'
+mutate $fk/replay.rs '        if !kinds.contains(&e.kind.as_str()) {' '        if false {'
 mutate $fk/replay.rs 'let Some((id, node)) = ir.nodes.get_key_value(&subject.node) else {' 'let Some((id, node)) = ir.nodes.get_key_value(&subject.node).or_else(|| ir.nodes.iter().next()) else {'
 mutate $fk/replay.rs 'let Some(i) = self.current(id).filter(|i| self.iteration(id, *i) == subject.iteration) else {' 'let Some(i) = self.current(id) else {'
 mutate $fk/replay.rs '                Phase::Exhausted(_) => None,' '                Phase::Exhausted(i) => Some(*i),'
@@ -1132,14 +1144,15 @@ mutate $fk/write.rs '    let now = wall(&log)?;
     let held = hold(log, session, &instance, &sha, now)?;
     let lease_until'
 mutate $fk/write.rs '    let now = wall(&log)?;
-    let held = hold(log, session, &instance, &sha, now)?;
-    let plan' '    let now = wall(&log)? - SignedDuration::from_secs(30);
-    let held = hold(log, session, &instance, &sha, now)?;
-    let plan'
+    let mut held = hold(log, session, &instance, &sha, now)?;
+    check_verb(&held, false)?;' '    let now = wall(&log)? - SignedDuration::from_secs(30);
+    let mut held = hold(log, session, &instance, &sha, now)?;
+    check_verb(&held, false)?;'
 mutate $fk/write.rs '    let ran_at = clock::now();' '    let ran_at = clock::now() + SignedDuration::from_secs(30);'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = wall(&log)? - SignedDuration::from_secs(30);'
 mutate $fk/write.rs '    let ran_at = clock::now();
     let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    pause!("command_ran");
 
     // Everything again, under the lock, against the log as it is now and the clock read again.
     let mut guard = ledger.lock()?;
@@ -1147,6 +1160,7 @@ mutate $fk/write.rs '    let ran_at = clock::now();
     let after = wall(&log)?;' '    let ran_at = clock::now();
     let began = std::time::Instant::now();
     let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    pause!("command_ran");
 
     // Everything again, under the lock, against the log as it is now and the clock read again.
     let mut guard = ledger.lock()?;
@@ -1164,14 +1178,14 @@ mutate $fk/write.rs '    let now = wall(&log)?;
     let held = hold(log, session, &instance, &sha, now)?;
     let lease_until'
 mutate $fk/write.rs '    let now = wall(&log)?;
-    let held = hold(log, session, &instance, &sha, now)?;
-    let plan' '    let now = clock::now();
-    let held = hold(log, session, &instance, &sha, now)?;
-    let plan'
+    let mut held = hold(log, session, &instance, &sha, now)?;
+    check_verb(&held, false)?;' '    let now = clock::now();
+    let mut held = hold(log, session, &instance, &sha, now)?;
+    check_verb(&held, false)?;'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = clock::now();'
-# Claims: kernel classes only, an enabled node only (out of order and write-time freshness), one
-# live claim per node, attempts counted per node and iteration with checked arithmetic.
-mutate $fk/write.rs '    if !matches!(n.class, Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. }) {' '    if false {'
+# Claims: every class but human, an enabled node only (out of order and write-time freshness),
+# one live claim per node, attempts counted per node and iteration with checked arithmetic.
+mutate $fk/write.rs '    if matches!(n.class, Class::Human { .. }) {' '    if false {'
 mutate $fk/write.rs '    let Some(enabled) = next.enabled.iter().find(|e| e.node == node) else {' '    let Some(enabled) = next.enabled.iter().find(|e| e.node == node).or(next.enabled.first()) else {'
 mutate $fk/write.rs '        && !p.spent
         && now < p.lease_until' '        && now < p.lease_until'
@@ -1194,7 +1208,18 @@ mutate $fk/write.rs '                    if let Some(rec) = claims.latest_mut(&(
 mutate $fk/write.rs '    if token.len() > MAX_TOKEN {' '    if token.len() >= MAX_TOKEN {'
 mutate $fk/write.rs '    if token.len() > MAX_TOKEN {' '    if false {'
 mutate $fk/write.rs '    if rec.spent {' '    if false {'
-mutate $fk/write.rs '                        rec.spent = true;' ''
+mutate $fk/write.rs '                    if let Some(rec) = claims.latest_mut(&key)
+                        && rec.attempt == c.attempt
+                    {
+                        rec.spent = true;' '                    if let Some(rec) = claims.latest_mut(&key)
+                        && rec.attempt == c.attempt
+                    {'
+mutate $fk/write.rs '                    if let Some(rec) = claims.latest_mut(&(c.node, c.iteration))
+                        && rec.attempt == c.attempt
+                    {
+                        rec.spent = true;' '                    if let Some(rec) = claims.latest_mut(&(c.node, c.iteration))
+                        && rec.attempt == c.attempt
+                    {'
 mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if now >= rec.lease_until {'
 mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if latest != Some(sha) || now > rec.lease_until {'
 mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if latest != Some(sha) {'
@@ -1220,7 +1245,9 @@ mutate $fk/write.rs '    drop(guard);
 mutate $fk/write.rs '    let held = hold(log, session, &instance, &sha, after)?;' '    let _ = (log, after);
     let held = held;'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = now;'
-mutate $fk/write.rs '    if let Err(unfit) = prepare(&held, &outputs) {' '    if let Err(unfit) = Ok::<(), Unfit>(()) {'
+mutate $fk/write.rs '    // The command is a function of the pinned IR and params, so only the rest can have changed.
+    if let Err(unfit) = prepare(&held, &outputs) {' '    // The command is a function of the pinned IR and params, so only the rest can have changed.
+    if let Err(unfit) = Ok::<(), Unfit>(()) {'
 mutate $fk/write.rs '    let Some(exit) = code else {' '    let Some(exit) = code.or(Some(0)) else {'
 mutate $fk/write.rs 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|m| m.exit == exit))' 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|_| true))'
 mutate $fk/write.rs '        _ => (exit != 0).then(' '        _ => false.then('
@@ -1236,6 +1263,172 @@ mutate $fk/write.rs '    let body = serde_json::to_vec(&receipt(held, session, o
 # An observation's freshness counts from its run's start, never later than its append.
 mutate $fk/replay.rs '                        ran.map_or(at, |ran| ran.min(at))' '                        at'
 mutate $fk/replay.rs '                        ran.map_or(at, |ran| ran.min(at))' '                        ran.map_or(at, |ran| ran)'
+# Flow writers (BRO-3633 PR 3b2b): choose, bounded guards, until verdicts, effects, retry and
+# cancel. The guard evaluator: the compile-time denylist again, the input bound, a cleared
+# environment, a timeout told from an error, a strict boolean verdict on its own line, an input
+# file unlinked before it is written, a refusal detail cut to its bound.
+fg=crates/flow/src/kernel/guard.rs
+mutate $fg '    jq::check(code).map_err(|detail| ("guard_invalid", cut(detail)))?;' ''
+mutate $fg '    if input.len() > MAX_GUARD_INPUT {' '    if input.len() >= MAX_GUARD_INPUT {'
+mutate $fg '    if input.len() > MAX_GUARD_INPUT {' '    if false {'
+mutate $fg 'cmd.args(ENTRY_ARGS).env_clear().env(' 'cmd.args(ENTRY_ARGS).env('
+mutate $fg '        Ran::Failed { code: "verify_timeout", .. } => {' '        Ran::Failed { code: "never", .. } => {'
+mutate $fg '        Some("false") => Ok(false),' '        Some("false") => Ok(true),'
+mutate $fg '                std::fs::remove_file(&path)?;' ''
+mutate $fg '    if detail.len() > MAX_DETAIL {' '    if false {'
+# A child its kernel never kills (a kernel crash) ends itself at its own deadline, reported as a
+# timeout; the deadline it gets is the kernel's timeout plus the grace.
+mutate $fg '    std::thread::spawn(move || {
+        std::thread::sleep(own);
+        std::process::exit(DEADLINE_EXIT);
+    });' ''
+mutate $fg '        Ran::Exited { code: Some(DEADLINE_EXIT), .. } => {' '        Ran::Exited { code: Some(-999), .. } => {'
+mutate $fg 'env(GUARD_ENV, own.as_millis().to_string())' 'env(GUARD_ENV, "1")'
+mutate $fg '    let _ = writeln!(out, "\n{ANSWER}{answer}");' '    let _ = writeln!(out, "{ANSWER}{answer}");'
+mutate $fk/jq.rs '            Some(Ok(Val::Bool(holds))) => Ok(holds),' '            Some(Ok(Val::Bool(_))) => Ok(true),'
+mutate $fk/jq.rs '            Some(Ok(_)) => Err("its first output is not true or false".to_string()),' '            Some(Ok(_)) => Ok(true),'
+# What a guard reads: the receipts a node consumes (a needed repeat through its body at the
+# iteration judged), an until only its settled body; EffectStarted is a kernel event.
+mutate $fk/replay.rs '        out.seq = Some(r.seq);' ''
+mutate $fk/replay.rs '        if !eval.settled(rid, i) {
+            continue;
+        }' ''
+mutate $fk/replay.rs '                read.push((m, c));' ''
+mutate $fk/replay.rs '                read.push((b.as_str(), eval.node(b, j)));' ''
+mutate $fk/replay.rs 'Refused::KIND, EffectStarted::KIND];' 'Refused::KIND];'
+# Effects declare a command; the compiler refuses one without.
+mutate $fk/compile.rs '                Some(run) if !run.is_empty() => run,' '                Some(run) => run,
+                None => Vec::new(),'
+mutate $fk/compile.rs '    (ClassDef::Effect, &["run", "preconditions",' '    (ClassDef::Effect, &["preconditions",'
+# Choose: the choice verb only on a choice, a declared edge, its guard over the recorded state,
+# checked again under the lock after it ran (the claim and freshness), a false guard refused,
+# the digest recorded, the token spent, the verdicts it settles written.
+mutate $fk/write.rs '    if (class == "choice") != choosing {' '    if false {'
+mutate $fk/write.rs '    check_verb(&held, false)?;' ''
+mutate $fk/write.rs '    check_verb(&held, true)?;' ''
+mutate $fk/write.rs '        Class::Choice { edges, .. } => edges.get(edge).cloned(),' '        Class::Choice { edges, .. } => edges.values().next().cloned(),'
+mutate $fk/write.rs '    let held = hold(log, session, &instance, &sha, judged_at)?;
+    if let Err(unfit) = enabled(&held) {' '    let _ = (log, judged_at);
+    if let Err(unfit) = enabled(&held) {'
+mutate $fk/write.rs '    if let Err(unfit) = enabled(&held) {
+        return reject(&mut guard, &held, unfit);
+    }
+    let Judged' '    let Judged'
+mutate $fk/write.rs '    if !holds {
+        return reject(' '    if false {
+        return reject('
+mutate $fk/write.rs '        guard_digest: Some(digest.clone()),' '        guard_digest: None,'
+mutate $fk/write.rs '    let verdicts = settled(ledger, session, &instance);
+    Ok(Choosing::Chosen' '    let verdicts = Vec::new();
+    Ok(Choosing::Chosen'
+# Until verdicts: written after a receipt, and by a claim first (a crash left one unwritten),
+# only by the owner, at a clock not behind the log once the until ran, only while
+# the repeat awaits it at that iteration over the input it judged, with that input's digest.
+mutate $fk/write.rs '    settle(ledger, session, instance)?;
+    let mut guard = ledger.lock()?;' '    let mut guard = ledger.lock()?;'
+mutate $fk/write.rs '    let verdicts = settled(ledger, session, &instance);
+    Ok(Completion::Completed' '    let verdicts = Vec::new();
+    Ok(Completion::Completed'
+mutate $fk/write.rs '        check_owner(&started, instance, session)?;
+        let pending' '        let pending'
+mutate $fk/write.rs '        wall(&log)?;
+        let verdict = match judged {' '        let verdict = match judged {'
+mutate $fk/write.rs '.any(|a| a.repeat == awaited.repeat && a.iteration' '.any(|a| a.iteration'
+mutate $fk/write.rs '&& a.iteration == awaited.iteration && digest' '&& digest'
+mutate $fk/write.rs ' && digest(&a.input) == judged.digest);' ');'
+mutate $fk/write.rs '    if !still {' '    if false {'
+mutate $fk/write.rs '        digest: Some(judged.digest.clone()),' '        digest: None,'
+mutate $fk/write.rs 'code: "verdict_stale", reason }' 'code: "guard_error", reason }'
+# Effects: preconditions hold first, checked again with the claim and freshness under the lock;
+# EffectStarted written before the run; never run twice in an iteration (a completion racing
+# one that started it refuses); after a run with no receipt, the reconcile, whose failure is its
+# own refusal; a receipt clears the start, so new inputs run it again; an earlier IR's effect
+# with no command never runs.
+mutate $fk/write.rs '    if let Step::Effect { preconditions } = &plan.step {' '    if let Step::Effect { preconditions } = &Step::Command {'
+mutate $fk/write.rs '        if !holds {
+            return Err(("precondition_false"' '        if false {
+            return Err(("precondition_false"'
+mutate $fk/write.rs '    Ok(Some(digest(input)))' '    Ok(None)'
+mutate $fk/write.rs '        held = hold(log, session, &instance, &sha, judged_at)?;' '        let _ = (log, judged_at);'
+mutate $fk/write.rs '        if held.effect_started {
+            let reason' '        if false {
+            let reason'
+mutate $fk/write.rs '        if let Err(unfit) = prepare(&held, &outputs) {
+            return refuse(&mut guard, &held, unfit, &[]);
+        }
+        let guard_digest' '        let guard_digest'
+mutate $fk/write.rs '            Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
+        };
+        let intent' '            Err(_) => None,
+        };
+        let intent'
+mutate $fk/write.rs '        guard.append(&instance, held.log.seq(), intent.to_event()?)?;' ''
+mutate $fk/write.rs '                    claims.effects.insert((started.node, started.iteration, started.inputs), started.attempt);' ''
+mutate $fk/write.rs 'let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));' 'let effect_started = false;'
+mutate $fk/write.rs '        Some(Class::Effect { reconcile, .. }) if held.effect_started =>' '        Some(Class::Effect { reconcile, .. }) if false =>'
+mutate $fk/write.rs '        Some(Class::Effect { run, preconditions, .. }) if !run.is_empty() => {' '        Some(Class::Effect { run, preconditions, .. }) => {'
+mutate $fk/write.rs '        Class::Effect { .. } if plan.step == Step::Reconcile =>' '        Class::Effect { .. } if false =>'
+mutate $fk/write.rs '        Class::Effect { .. } => {
+            (exit != 0)' '        Class::Effect { .. } => {
+            (exit == i32::MIN)'
+# Retry: no claim once the node's attempts have ended without a receipt (a receipt's claim does
+# not count). Cancel: a deadline recorded in the claim, the lease never past it, the token
+# refused cancelled from it on (a claim a later one took over has lost its lease instead).
+mutate $fk/write.rs '    let lease_until = capped(until(now, lease(n))?, cancel_at);' '    let lease_until = until(now, lease(n))?;'
+mutate $fk/write.rs '    let lease_until = capped(until(now, lease(held.node()?))?, held.rec.cancel_at);' '    let lease_until = until(now, lease(held.node()?))?;'
+mutate $fk/write.rs '    cancel_at.map_or(lease_until, |at| lease_until.min(at))' '    cancel_at.map_or(lease_until, |_| lease_until)'
+mutate $fk/write.rs '        cancel_at: cancel_at.map(|at| at.to_string()),' '        cancel_at: None,'
+mutate $fk/write.rs '                    let cancel_at = c.cancel_at.as_deref().map(|at| stamp(log, e.seq, at)).transpose()?;' '                    let cancel_at: Option<Timestamp> = None;'
+mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|_| false)'
+mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|at| latest == Some(sha) && now > *at)'
+mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|at| now >= *at)'
+# P20 round 1 (maestro#28). The guard host: a process that never called guard_entry evaluates
+# nothing; guard_entry registers it; the variable alone does not make a binary the evaluator; an
+# evaluator that crashes or exits non-zero is an error, never a verdict; the writers' default
+# timeout and the child's default grace are bounded.
+mutate $fg '    if !HOST.load(Ordering::SeqCst) {' '    if false {'
+mutate $fg '        HOST.store(true, Ordering::SeqCst);' ''
+mutate $fg 'std::env::var_os(GUARD_ENV).filter(|_| evaluator) else {' 'std::env::var_os(GUARD_ENV) else {'
+mutate $fg '        Ran::Exited { code: None, .. } => Err(("guard_error", "the evaluator crashed".to_string())),' '        Ran::Exited { code: None, .. } => Ok(true),'
+mutate $fg '        Ran::Exited { code: Some(code), .. } => Err(("guard_error", format!("the evaluator exited {code}"))),' '        Ran::Exited { code: Some(_), .. } => Ok(true),'
+mutate $fg 'pub const GUARD_TIMEOUT: Duration = Duration::from_secs(1);' 'pub const GUARD_TIMEOUT: Duration = Duration::from_secs(3600);'
+mutate $fg 'pub const CHILD_GRACE: Duration = Duration::from_millis(500);' 'pub const CHILD_GRACE: Duration = Duration::from_secs(3600);'
+# Every precondition is judged, not only the first.
+mutate $fk/write.rs '    for (i, code) in preconditions.iter().enumerate() {' '    for (i, code) in preconditions.iter().take(1).enumerate() {'
+# Retry, projected by replay: an attempt ends by its lease (moved by its own heartbeat), by
+# changed inputs or by a later claim, unless a receipt spent it; a node out of attempts is failed
+# and claim says so; an effect started over its current inputs is spared, only its reconcile runs.
+mutate $fk/replay.rs '            if let Some(attempts) = self.exhausted(id, now, &status.inputs)' '            if let Some(attempts) = self.exhausted(id, now, &status.inputs).filter(|_| false)'
+mutate $fk/replay.rs '.filter(|(k, c)| !c.spent && (' '.filter(|(k, c)| (true) && ('
+mutate $fk/replay.rs '(k + 1 < claims.len() || now >= c.lease_until' '(false || now >= c.lease_until'
+mutate $fk/replay.rs '|| now >= c.lease_until || c.inputs != *inputs))' '|| now >= c.lease_until))'
+mutate $fk/replay.rs '                    last.lease_until = at;' ''
+mutate $fk/replay.rs '.insert(s.attempt, s.inputs);' '.entry(s.attempt);'
+mutate $fk/replay.rs '                    started.remove(&r.attempt);' ''
+mutate $fk/replay.rs 'is_some_and(|s| s.values().any(|started| started == inputs)) {' 'is_some_and(|s| !s.is_empty()) {'
+mutate $fk/replay.rs 'is_some_and(|s| s.values().any(|started| started == inputs)) {' 'is_some_and(|_| false) {'
+mutate $fk/write.rs '        if let Some(attempts) = exhausted {' '        if let Some(attempts) = exhausted.filter(|_| false) {'
+# Effects: a command that never started withdraws its start; a start stands for its inputs only;
+# a cancel deadline ends a running command.
+mutate $fk/write.rs '                    if r.code == "spawn_failed" {' '                    if false {'
+mutate $fk/write.rs 'let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));' 'let effect_started = claims.effects.keys().any(|(n, i, _)| *n == rec.node && *i == rec.iteration);'
+mutate $fk/write.rs '    let limits = &cancel_capped(limits, held.rec.cancel_at);' ''
+mutate $fk/write.rs 'timeout: limits.timeout.min(left).max(' 'timeout: limits.timeout.max('
+# P20 round 2 (maestro#28). Only the effect's own command failing to start withdraws its
+# start, and only for its own attempt and iteration (a reconcile that cannot start has its own
+# code); retry exhausts in any iteration, and a heartbeat moves its own attempt; the child's
+# deadline as the writers wire it.
+mutate $fk/write.rs 'if plan.step == Step::Reconcile && code == "spawn_failed" { "reconcile_spawn_failed" } else { code };' 'code;'
+mutate $fk/write.rs '!(*node == r.node && *iteration == r.iteration && *attempt == r.attempt)' '!(*node == r.node && *iteration == r.iteration)'
+mutate $fk/write.rs '!(*node == r.node && *iteration == r.iteration && *attempt == r.attempt)' '!(*node == r.node && *attempt == r.attempt)'
+mutate $fk/replay.rs '                    started.remove(&r.attempt);' '                    started.clear();'
+mutate $fk/replay.rs '        let i = self.current(id)?;' '        let i = 0;'
+mutate $fk/replay.rs 'if let Some(last) = self.attempts.get_mut(&(id, i)).and_then(|c| c.last_mut())' 'if let Some(last) = self.attempts.get_mut(&(id, i)).and_then(|c| c.first_mut())'
+mutate $fg '    evaluate_within(code, input, timeout, own_deadline(timeout))' '    evaluate_within(code, input, timeout, Duration::from_secs(3600))'
+# The child's address space limit is enforced, and so tested, on Linux only: this mutant runs
+# where CI's mutation shards run (ubuntu-latest), and is skipped elsewhere, where the code it
+# removes is not compiled and so no test could kill it.
+[ "$(uname -s)" = Linux ] && mutate $fg '        let _ = rustix::process::setrlimit(rustix::process::Resource::As, limit);' ''
 # Commands: params fill placeholders within one byte budget, only declared params, only scalars;
 # the workdir is declared, absolute and a directory.
 mutate $fk/write.rs '        left -= filled.len();' ''
@@ -1256,11 +1449,11 @@ mutate $fx '            cmd.env(name, value);' ''
 mutate $fx '    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);' ''
 mutate $fx 'rustix::process::kill_process_group(' 'rustix::process::kill_process('
 mutate $fx '            Ok(Some(status)) => {
-                kill_group(&child);' '            Ok(Some(status)) => {'
+                kill_group(child);' '            Ok(Some(status)) => {'
 mutate $fx '        if Instant::now() >= deadline {' '        if false {'
 mutate $fx '        if over {
-            kill_group(&child);' '        if false {
-            kill_group(&child);'
+            kill_group(child);' '        if false {
+            kill_group(child);'
 mutate $fx '    if over {
         let detail' '    if false {
         let detail'

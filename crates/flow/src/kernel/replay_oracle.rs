@@ -44,7 +44,7 @@ nodes:
   pre: {class: observe, run: [x], fresh_for: 10m, exit_map: {0: ok, 1: no}}
   w: {class: work, verify: [x], needs: [pre]}
   ci: {class: observe, run: [x], fresh_for: 10m, needs: [w], exit_map: {0: green, 1: red}}
-  land: {class: effect, needs: [poll], reconcile: [x]}
+  land: {class: effect, run: [x], needs: [poll], reconcile: [x]}
   give_up: {class: work, verify: [x]}
   peek: {class: pure, run: [x], needs: [ci]}
 repeats:
@@ -64,7 +64,7 @@ nodes:
   sw1: {class: pure, run: [x], switch: {on: o1, case: a}}
   p1: {class: pure, run: [x], needs: [o1]}
   p2: {class: pure, run: [x], needs: [o2]}
-  join: {class: effect, needs: [both], reconcile: [x]}
+  join: {class: effect, run: [x], needs: [both], reconcile: [x]}
   after: {class: work, verify: [x], needs: [bx, join]}
   ask: {class: human, ask: a1, needs: [by]}
 forks:
@@ -99,7 +99,7 @@ nodes:
   skim: {class: work, verify: [x], switch: {on: pick, case: quick}}
   dig: {class: observe, run: [x], fresh_for: 2m, switch: {on: pick, case: deep}, exit_map: {0: y, 1: n}}
   after_dig: {class: work, verify: [x], needs: [dig]}
-  after: {class: effect, needs: [tries], reconcile: [x]}
+  after: {class: effect, run: [x], needs: [tries], reconcile: [x]}
   tail: {class: pure, run: [x], needs: [after]}
   noway: {class: work, verify: [x]}
 repeats:
@@ -114,7 +114,7 @@ nodes:
   head: {class: observe, run: [x], fresh_for: 3m, exit_map: {0: same, 1: moved}}
   review: {class: work, verify: [x], needs: [head]}
   fix: {class: work, verify: [x], needs: [review]}
-  merge: {class: effect, needs: [rounds, head], reconcile: [x]}
+  merge: {class: effect, run: [x], needs: [rounds, head], reconcile: [x]}
   owner: {class: human, ask: x, needs: [rounds]}
 repeats:
   rounds: {body: [review, fix], max: 5, until: '.nodes.review.outputs.verdict == \"pass\"', on_exhausted: owner}
@@ -128,7 +128,7 @@ nodes:
   x1: {class: work, verify: [x]}
   x2: {class: observe, run: [x], fresh_for: 10m, exit_map: {0: ok, 1: no}}
   y1: {class: work, verify: [x], needs: [x2]}
-  out: {class: effect, needs: [r2], reconcile: [x]}
+  out: {class: effect, run: [x], needs: [r2], reconcile: [x]}
   e1: {class: work, verify: [x]}
   e2: {class: pure, run: [x], needs: [x1]}
 repeats:

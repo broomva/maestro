@@ -45,6 +45,11 @@ fn an_ir_is_written_in_the_lowest_version_that_expresses_it() {
     assert_eq!(compile(VERIFY).unwrap().ir().ir_version, 2);
     let bare = compile("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n").unwrap();
     assert_eq!(bare.ir().ir_version, 1);
+    // Version 3 added an effect's `run`: any flow with an effect, with or without a workdir.
+    let effect = "flow: f\nversion: 1\nnodes:\n  e: {class: effect, run: [x], reconcile: [y]}\n";
+    assert_eq!(compile(effect).unwrap().ir().ir_version, 3);
+    let effect = format!("{effect}workdir: /tmp\n");
+    assert_eq!(compile(&effect).unwrap().ir().ir_version, 3);
 }
 
 #[test]
@@ -143,12 +148,21 @@ fn a_switch_case_its_subject_does_not_declare_is_refused() {
 fn an_effect_without_reconcile_is_refused() {
     let effect = |reconcile: &str| {
         format!(
-            "flow: f\nversion: 1\nnodes:\n  push: {{class: effect, preconditions: ['.params != null']{reconcile}}}\n"
+            "flow: f\nversion: 1\nnodes:\n  push: {{class: effect, run: [x], preconditions: ['.params != null']{reconcile}}}\n"
         )
     };
     assert_eq!(code(&effect("")), "effect_without_reconcile");
     assert_eq!(code(&effect(", reconcile: []")), "effect_without_reconcile");
     assert_eq!(code(&effect(", reconcile: [git, ls-remote]")), "ok");
+}
+
+#[test]
+fn an_effect_without_a_command_is_refused() {
+    // The kernel runs an effect's command (BRO-3633 PR 3b2b), so a definition must declare one.
+    let effect = |run: &str| format!("flow: f\nversion: 1\nnodes:\n  push: {{class: effect{run}, reconcile: [x]}}\n");
+    assert_eq!(code(&effect("")), "definition_invalid");
+    assert_eq!(code(&effect(", run: []")), "definition_invalid");
+    assert_eq!(code(&effect(", run: [x, y]")), "ok");
 }
 
 #[test]
@@ -224,7 +238,7 @@ fn a_guard_must_parse_and_read_only_its_input() {
             ),
             (
                 "a precondition",
-                "flow: f\nversion: 1\nnodes:\n  e: {class: effect, preconditions: ['.a =='], reconcile: [x]}\n",
+                "flow: f\nversion: 1\nnodes:\n  e: {class: effect, run: [x], preconditions: ['.a =='], reconcile: [x]}\n",
             ),
         ],
     );

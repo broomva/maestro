@@ -1,9 +1,10 @@
 //! The kernel's event kinds, each a typed body stored in the storage layer's generic event
 //! (`kind` plus a JSON `body`). Replay reads only these kinds; any other kind fails the replay.
 //!
-//! The kernel writes `Started` (`start`), and `Claimed`, `Heartbeat`, `Completed` and `Refused`
-//! (`claim`, `heartbeat`, `complete`, in `write`). `Chosen` and `Guarded` are defined here so their
-//! writers can be added without changing what replay reads.
+//! The kernel writes `Started` (`start`), and in `write`: `Claimed` (`claim`), `Heartbeat`
+//! (`heartbeat`), `Completed`, `Refused` and `EffectStarted` (`complete`), `Chosen` (`choose`) and
+//! `Guarded` (a repeat's `until` verdict, written when an iteration settles). A verdict is
+//! recorded with the digest of the input its guard read, so replay never evaluates one.
 //!
 //! A receipt (`Completed`, `Chosen`) records in `inputs` the digest of every receipt it consumed:
 //! each node it needs or switches on, by node id ([`receipt_digest`]). `status` and `next` name
@@ -92,6 +93,10 @@ pub struct Claimed {
     pub performer: Option<Performer>,
     #[serde(default)]
     pub tool_use_id: Option<String>,
+    /// When the node's `cancel.after` ends this attempt, heartbeats or not (RFC 3339). The lease
+    /// never runs past it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_at: Option<String>,
 }
 
 /// The receipt: a node accepted in an iteration, with the verify the kernel ran.
@@ -134,6 +139,26 @@ pub struct Chosen {
     pub inputs: BTreeMap<String, String>,
     #[serde(default)]
     pub tool_use_id: Option<String>,
+    /// The digest of the input document the edge's guard held over (see `guard`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_digest: Option<String>,
+}
+
+/// An effect's command about to run for an attempt, written before it runs. An effect started over
+/// some inputs and not completed is never run again over them: the next completion runs its
+/// `reconcile`. A `Refused` with code `spawn_failed` for the attempt withdraws it, since the command
+/// never started.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectStarted {
+    pub node: String,
+    pub iteration: Iteration,
+    pub attempt: u32,
+    /// The claim's input digests: an effect is one run over one set of inputs.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
+    /// The digest of the input document its preconditions held over; none without preconditions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard_digest: Option<String>,
 }
 
 /// A lease extended to `lease_until`.
@@ -152,6 +177,9 @@ pub struct Guarded {
     pub repeat: String,
     pub iteration: u32,
     pub holds: bool,
+    /// The digest of the input document the `until` was evaluated over (see `guard`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 impl KernelEvent for Started {
@@ -174,6 +202,9 @@ impl KernelEvent for Heartbeat {
 }
 impl KernelEvent for Guarded {
     const KIND: &'static str = "Guarded";
+}
+impl KernelEvent for EffectStarted {
+    const KIND: &'static str = "EffectStarted";
 }
 
 /// The `sha256:<hex>` digest of a JSON value.

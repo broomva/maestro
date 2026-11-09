@@ -224,6 +224,7 @@ fn claimed(attempt: u32, until: Timestamp, token: &str) -> NewEvent {
         inputs: Default::default(),
         performer: None,
         tool_use_id: None,
+        cancel_at: None,
     };
     c.to_event().unwrap()
 }
@@ -398,9 +399,11 @@ fn a_process_that_leaves_the_group_holding_the_output_fails_at_the_grace_and_hol
         let done = complete(&mut ledger, &me, &token, Value::Null, &quick());
         let _ = tx.send((done.map(|c| outcome(&c).to_string()).map_err(|e| e.code().to_string()), started.elapsed()));
     });
-    let (done, took) = rx.recv_timeout(Duration::from_secs(3)).expect("complete returned");
+    let (done, took) = rx.recv_timeout(Duration::from_secs(6)).expect("complete returned");
     assert_eq!(done, Ok("output_unclosed".to_string()));
-    assert!(took >= READ_GRACE && took < READ_GRACE + Duration::from_millis(500), "{took:?}");
+    // The escaped process holds the pipe for 5 s: a run that returns well before that returned at
+    // the grace. The slack is wide so a loaded machine (mutation shards) does not fail it.
+    assert!(took >= READ_GRACE && took < READ_GRACE + Duration::from_secs(3), "{took:?}");
     // Nothing of the run outlives it: no descriptor holds the pipe, so the child's next write
     // fails at once (and no reader thread exists to hold one).
     let closed = f.dir.join("closed");

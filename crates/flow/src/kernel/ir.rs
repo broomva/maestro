@@ -12,14 +12,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The IR's newest version. A change to its shape or meaning bumps it. Version 2 added
-/// `workdir`.
-pub const IR_VERSION: u32 = 2;
+/// `workdir`; version 3 added an effect's `run`.
+pub const IR_VERSION: u32 = 3;
 
-/// The version an IR is written in: the lowest that expresses it, so 2 for an IR that carries a
-/// `workdir` and 1 for one that does not. The IR of a flow without a workdir, and its hash, are
-/// what they were under version 1, and an instance started under version 1 keeps replaying.
+/// The version an IR is written in: the lowest that expresses it, so 3 for an IR with an effect
+/// that has a `run`, 2 for one that carries a `workdir` and 1 for neither. An IR, and its hash,
+/// are what they were under the version that expresses it, and an instance started under an
+/// earlier version keeps replaying.
 pub fn version_for(ir: &Ir) -> u32 {
-    if ir.workdir.is_some() { IR_VERSION } else { 1 }
+    let runs_effect = ir.nodes.values().any(|n| matches!(&n.class, Class::Effect { run, .. } if !run.is_empty()));
+    if runs_effect {
+        IR_VERSION
+    } else if ir.workdir.is_some() {
+        2
+    } else {
+        1
+    }
 }
 
 /// The most iterations a repeat may declare. Replay walks a repeat's iterations, so a bound keeps
@@ -116,8 +124,18 @@ pub enum Class {
     Work { verify: Vec<String>, launch: Launch, wait: Option<Wait> },
     /// A performer proposes one of `edges` (name to jq guard).
     Choice { edges: BTreeMap<String, String>, launch: Launch },
-    /// An action on the world. Never replayed; `reconcile` is how the kernel learns its outcome.
-    Effect { preconditions: Vec<String>, reconcile: Vec<String>, launch: Launch, wait: Option<Wait> },
+    /// An action on the world: `run`, which the kernel runs once its `preconditions` (jq guards)
+    /// hold. Never run twice in an iteration: after a run with no receipt, the kernel runs
+    /// `reconcile` to learn its outcome instead. `run` is new in IR version 3 and left out of the
+    /// JSON when empty, so an earlier IR's effects keep their hash (and are never run).
+    Effect {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        run: Vec<String>,
+        preconditions: Vec<String>,
+        reconcile: Vec<String>,
+        launch: Launch,
+        wait: Option<Wait>,
+    },
     /// Waits for the owner's answer to `ask`, through the asks ledger.
     Human { ask: String },
 }
@@ -200,8 +218,8 @@ fn unknown(from: impl Into<String>, name: &str) -> CompileError {
 }
 
 /// The rules every IR passes, at compile time and again on the copy a `Started` event pins. Its
-/// version must be [`version_for`] it: version 1 has no `workdir`, version 2 has one, and any
-/// other version is refused.
+/// version must be [`version_for`] it: version 1 has no `workdir`, version 2 has one, version 3
+/// has an effect with a `run` (and then every effect has one), and any other version is refused.
 pub fn validate(ir: &Ir) -> Result<(), CompileError> {
     let want = version_for(ir);
     if ir.ir_version != want {
@@ -337,9 +355,12 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
                     return Err(CompileError::invalid(format!("choice node {id} declares no edges")));
                 }
             }
-            Class::Effect { reconcile, .. } => {
+            Class::Effect { run, reconcile, .. } => {
                 if reconcile.is_empty() {
                     return Err(CompileError::EffectWithoutReconcile { node: id.clone() });
+                }
+                if ir.ir_version >= 3 {
+                    command("run", run)?;
                 }
             }
             Class::Human { ask } => {
