@@ -290,6 +290,18 @@ fn an_effect_s_command_is_pinned_in_ir_version_3_and_an_earlier_effect_never_run
     assert_eq!(tried(&mut f, "fi_v2_run", 2, x.clone()).1, Err("malformed_instance"));
     assert_eq!(tried(&mut f, "fi_v3_none", 3, vec![]).1, Err("malformed_instance"));
     assert_eq!(tried(&mut f, "fi_v3_run", 3, x).1, Ok(()));
+    // Version 3 by one effect's command, with a second effect that has none: refused by the
+    // version 3 rule itself, not by the version.
+    let mut ir = f.flow.ir().clone();
+    let mut bare = ir.nodes["push"].clone();
+    let Class::Effect { run, .. } = &mut bare.class else { panic!() };
+    run.clear();
+    ir.nodes.insert("again".into(), bare);
+    assert_eq!(maestro_flow::kernel::ir::version_for(&ir), 3);
+    let fi = pin(&mut f, "fi_v3_mixed", ir);
+    let reader = maestro_flow::Reader::new(&f.root, maestro_flow::Options::default()).unwrap();
+    let s = maestro_flow::kernel::status(&reader.lock().unwrap(), &fi, maestro_flow::clock::now());
+    assert_eq!(s.map(|_| ()).map_err(|e| e.code()), Err("malformed_instance"));
     // An effect pinned before version 3 has no command, so the kernel never runs one for it.
     let (fi, replays) = tried(&mut f, "fi_v2_none", 2, vec![]);
     assert_eq!(replays, Ok(()));
