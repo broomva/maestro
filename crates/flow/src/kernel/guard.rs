@@ -12,6 +12,10 @@
 //! - **Killable.** The child leads its own process group. When it answers, runs past its timeout
 //!   ([`GUARD_TIMEOUT`] for every writer) or floods its output, the whole group is killed and the
 //!   child reaped. The kernel's side starts no thread and leaves no descriptor of it behind.
+//! - **Ends itself.** A child whose kernel died (a crash, a kill) is reaped by no one, so it also
+//!   ends itself at its own deadline, the timeout plus [`CHILD_GRACE`], passed in [`GUARD_ENV`]: a
+//!   watchdog thread in the child exits the whole child process with [`DEADLINE_EXIT`]. The thread
+//!   lives and dies with the child; the kernel's own process never runs a guard or a thread.
 //! - **Bounded input and output.** The input document is at most [`MAX_GUARD_INPUT`] bytes, or the
 //!   guard is refused `guard_input_too_large` before anything starts. It reaches the child as its
 //!   standard input, through a temporary file unlinked before it is written. The child may print
@@ -67,8 +71,15 @@ pub const GUARD_OUTPUT: usize = 64 << 10;
 /// The longest detail a refusal carries from the evaluator.
 pub const MAX_DETAIL: usize = 512;
 
-/// The variable that makes this binary the guard evaluator.
+/// The variable that makes this binary the guard evaluator: its value is the child's own deadline,
+/// in milliseconds.
 pub const GUARD_ENV: &str = "MAESTRO_FLOW_GUARD";
+
+/// How long past the kernel's timeout the child waits before it ends itself.
+pub const CHILD_GRACE: Duration = Duration::from_secs(1);
+
+/// The exit status of a child that ended itself at its own deadline.
+pub const DEADLINE_EXIT: i32 = 124;
 
 /// The arguments the child is started with: a test harness's filter for its entry test.
 pub const ENTRY_ARGS: &[&str] = &["guard_process_entry", "--nocapture", "--test-threads=1"];
@@ -113,6 +124,11 @@ pub(crate) fn judge(code: &str, input: &Value, timeout: Duration) -> Result<Judg
 /// Runs `code` over the JSON `input` in the evaluator's child process. No denylist: [`judge`]
 /// checks it first, and the tests that prove the bounds call this directly.
 pub(crate) fn evaluate(code: &str, input: &[u8], timeout: Duration) -> Evaluated {
+    evaluate_within(code, input, timeout, timeout.saturating_add(CHILD_GRACE))
+}
+
+/// [`evaluate`], with the child's own deadline (`own`) apart from the kernel's timeout.
+fn evaluate_within(code: &str, input: &[u8], timeout: Duration, own: Duration) -> Evaluated {
     let refuse = |code: &'static str, detail: String| Evaluated { outcome: Err((code, cut(detail))), pid: None };
     if input.len() > MAX_GUARD_INPUT {
         let detail = format!("the guard's input is {} bytes, more than {MAX_GUARD_INPUT}", input.len());
@@ -127,10 +143,13 @@ pub(crate) fn evaluate(code: &str, input: &[u8], timeout: Duration) -> Evaluated
         Err(e) => return refuse("guard_error", format!("the guard's input cannot be staged ({e})")),
     };
     let mut cmd = Command::new(program);
-    cmd.args(ENTRY_ARGS).env_clear().env(GUARD_ENV, "1").stdin(Stdio::from(stdin));
+    cmd.args(ENTRY_ARGS).env_clear().env(GUARD_ENV, own.as_millis().to_string()).stdin(Stdio::from(stdin));
     let (ran, pid) = exec::supervise(cmd, &Limits { timeout, max_output: GUARD_OUTPUT });
     let outcome = match ran {
         Ran::Exited { code: Some(0), stdout, .. } => answer(&stdout),
+        Ran::Exited { code: Some(DEADLINE_EXIT), .. } => {
+            Err(("guard_timeout", format!("the guard ran past the evaluator's own {} ms", own.as_millis())))
+        }
         Ran::Exited { code: Some(code), .. } => Err(("guard_error", format!("the evaluator exited {code}"))),
         Ran::Exited { code: None, .. } => Err(("guard_error", "the evaluator crashed".to_string())),
         Ran::Failed { code: "verify_timeout", .. } => {
@@ -194,9 +213,16 @@ fn cut(mut detail: String) -> String {
 /// The evaluator's entry point. With [`GUARD_ENV`] set, reads the guard and its input from
 /// standard input, prints its answer and exits; otherwise returns at once. See the module docs.
 pub fn guard_entry() {
-    if std::env::var_os(GUARD_ENV).is_none() {
+    let Some(own) = std::env::var_os(GUARD_ENV) else {
         return;
-    }
+    };
+    // The child's own deadline; a value that does not read as one gets the writers' default.
+    let ms = own.to_str().and_then(|ms| ms.parse::<u64>().ok());
+    let own = ms.map_or(GUARD_TIMEOUT.saturating_add(CHILD_GRACE), Duration::from_millis);
+    std::thread::spawn(move || {
+        std::thread::sleep(own);
+        std::process::exit(DEADLINE_EXIT);
+    });
     let answer = match child() {
         Ok(true) => "true".to_string(),
         Ok(false) => "false".to_string(),
@@ -345,7 +371,8 @@ pub(crate) mod tests {
                     let elapsed = started.elapsed();
                     let (refusal, detail) = evaluated.outcome.unwrap_err();
                     assert!(refused.contains(&refusal), "{code}: {refusal} {detail}");
-                    assert!(elapsed < timeout + Duration::from_secs(1), "{code}: {elapsed:?}");
+                    // The kernel kills it at its timeout, well before the child's own deadline.
+                    assert!(elapsed < timeout + Duration::from_millis(600), "{code}: {elapsed:?}");
                     assert!(gone(evaluated.pid.unwrap()), "{code}: the evaluator outlived its verdict");
                 });
             }
@@ -355,6 +382,17 @@ pub(crate) mod tests {
                 assert_eq!(judge(deep, &deep_input, timeout).unwrap_err().0, "guard_timeout");
             });
         });
+    }
+
+    #[test]
+    fn an_evaluator_its_kernel_never_kills_ends_itself_at_its_own_deadline() {
+        // As after a kernel crash: the kernel's timeout is far off, the child's own is not.
+        let started = Instant::now();
+        let evaluated =
+            evaluate_within("last(range(1e15))", b"null", Duration::from_secs(30), Duration::from_millis(100));
+        assert_eq!(evaluated.outcome.unwrap_err().0, "guard_timeout");
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(gone(evaluated.pid.unwrap()));
     }
 
     #[test]

@@ -1276,6 +1276,14 @@ mutate $fg '        Ran::Failed { code: "verify_timeout", .. } => {' '        Ra
 mutate $fg '        Some("false") => Ok(false),' '        Some("false") => Ok(true),'
 mutate $fg '                std::fs::remove_file(&path)?;' ''
 mutate $fg '    if detail.len() > MAX_DETAIL {' '    if false {'
+# A child its kernel never kills (a kernel crash) ends itself at its own deadline, reported as a
+# timeout; the deadline it gets is the kernel's timeout plus the grace.
+mutate $fg '    std::thread::spawn(move || {
+        std::thread::sleep(own);
+        std::process::exit(DEADLINE_EXIT);
+    });' ''
+mutate $fg '        Ran::Exited { code: Some(DEADLINE_EXIT), .. } => {' '        Ran::Exited { code: Some(-999), .. } => {'
+mutate $fg 'env(GUARD_ENV, own.as_millis().to_string())' 'env(GUARD_ENV, "1")'
 mutate $fg '    let _ = writeln!(out, "\n{ANSWER}{answer}");' '    let _ = writeln!(out, "{ANSWER}{answer}");'
 mutate $fk/jq.rs '            Some(Ok(Val::Bool(holds))) => Ok(holds),' '            Some(Ok(Val::Bool(_))) => Ok(true),'
 mutate $fk/jq.rs '            Some(Ok(_)) => Err("its first output is not true or false".to_string()),' '            Some(Ok(_)) => Ok(true),'
