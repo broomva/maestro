@@ -1601,6 +1601,26 @@ mutate $asks 'TreeSource::GitRev(rev.to_string())' 'TreeSource::WorkingTree'
 mutate $asks 'if row.state() == AskState::Answered {' 'if true {'
 mutate $replay 'Class::Choice { .. } | Class::Human { .. } => return Ok(Err("wrong_class")),' 'Class::Choice { .. } => return Ok(Err("wrong_class")),'
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {' 'if false {'
+# Every other code `ask` adds, by its guard: ask_body_invalid (ledger name, size, nesting),
+# ask_ledger_unread, ask_id_exhausted, ask_not_filed, ask_unconfirmed, ask_ambiguous,
+# answer_mismatch, answers_unread, answer_too_large and ask_changed.
+mutate $asks 'if !requests::ledger_name_ok(&filing.ledger) {' 'if false {'
+mutate $asks 'if size > MAX_ASK_BODY {' 'if false {'
+mutate $asks 'if nesting(&given) + 2 >= MAX_NESTING {' 'if false {'
+mutate $asks 'return Err(unread("there is no such ledger in the asks folder".into()).into());' 'return Ok(BTreeSet::new());'
+mutate $asks 'for _ in 0..MINT_TRIES {' 'for _ in 0..MINT_TRIES + 1 {'
+mutate $asks '            Err(FileError::Refused(reason)) => {' '            Err(FileError::Refused(reason)) if false => {'
+mutate $asks '            Err(FileError::Refused(reason)) => {' '            _ => {
+                let reason = String::from("withdrawn whatever the writer said");'
+mutate $asks '        _ => Found::Ambiguous,' '        (Some(a), _) => Found::Row(Box::new(a)),'
+mutate $asks '    if found != rec.body_hash {
+        return Err(Refusal::AnswerMismatch {' '    if false {
+        return Err(Refusal::AnswerMismatch {'
+mutate $asks 'match find(&at, &rec.ledger, &rec.ask_id) {
+            Err(e) => unread = unread.or(Some((label.to_string(), e))),' 'match find(&at, &rec.ledger, &rec.ask_id) {
+            Err(_) => {}'
+mutate $asks 'if size > MAX_OUTPUTS {' 'if false {'
+mutate $asks '        Some(now) if now == *expect => {}' '        _ => {}'
 # The question is relayed toward a T3 owner's thread, and only once its ask is filed.
 mutate $mf '.filter(|o| o.surface == Surface::T3)' '.filter(|_| true)'
 mutate $mf '(&thread, ask_id, ledger, *linked)' '(&thread, ask_id, ledger, true)'

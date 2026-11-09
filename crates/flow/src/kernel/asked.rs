@@ -148,12 +148,22 @@ impl Fx {
 
     /// Adds the owner's answer to the row `id` in the working tree, as a writer of answers would.
     fn answer_in_worktree(&self, id: &str) {
+        self.add_to_row(id, "    answer: \"Ship it\"\n    answer_option: \"ship\"\n    answered_at: \"2026-11-09T00:00:00Z\"\n    answered_by: \"owner:maestro-web\"\n");
+    }
+
+    /// Adds `lines` (YAML keys at the row's indent) to the working tree's row `id`.
+    fn add_to_row(&self, id: &str, lines: &str) {
         let text = self.ledger_text();
         let line = format!("  - id: \"{id}\"\n");
         assert!(text.contains(&line), "{text}");
-        let answer = "    answer: \"Ship it\"\n    answer_option: \"ship\"\n    answered_at: \"2026-11-09T00:00:00Z\"\n    answered_by: \"owner:maestro-web\"\n";
-        std::fs::write(self.ws.join(".control/asks/ledger.yaml"), text.replace(&line, &format!("{line}{answer}")))
+        std::fs::write(self.ws.join(".control/asks/ledger.yaml"), text.replace(&line, &format!("{line}{lines}")))
             .unwrap();
+    }
+
+    /// Adds a whole entry at the end of the working tree's asks.
+    fn add_entry(&self, entry: &str) {
+        let text = self.ledger_text().replace("\ndecisions: []", &format!("{entry}\ndecisions: []"));
+        std::fs::write(self.ws.join(".control/asks/ledger.yaml"), text).unwrap();
     }
 
     /// Commits the working tree and points `maestro/answers` at it.
@@ -444,4 +454,142 @@ fn only_an_answer_to_the_linked_ask_is_a_human_nodes_receipt() {
     assert_eq!(f.status(&fi).nodes["owner"].state, State::Waiting);
     append(&mut f, "Answered", answered(&id));
     assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
+}
+
+// The sweep of every code `ask` adds (BRO-3635, coordinator's pre-P20 ask): each guard has a test
+// that fails when the guard is removed, and a line in scripts/mutation-check.sh.
+
+#[test]
+fn an_ask_body_the_kernel_does_not_file_is_ask_body_invalid() {
+    // `ask_body_invalid`, for each of its guards: no first filing, a ledger name that is not one,
+    // a body over its bound, and one nested too deep. Nothing is pinned or filed.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    assert_eq!(code(f.ask(&fi, None)), "ask_body_invalid", "a first ask needs a filing");
+    let bad_name = Filing { ledger: "../ledger.yaml".into(), body: body() };
+    assert_eq!(code(f.ask(&fi, Some(&bad_name))), "ask_body_invalid", "not a ledger name");
+    let mut big = filing();
+    big.body.insert("stakes".into(), Value::String("x".repeat(MAX_ASK_BODY)));
+    assert_eq!(code(f.ask(&fi, Some(&big))), "ask_body_invalid", "over MAX_ASK_BODY");
+    let mut deep = Value::String("x".into());
+    for _ in 0..MAX_NESTING {
+        deep = Value::Array(vec![deep]);
+    }
+    let mut nested = filing();
+    nested.body.insert("stakes".into(), deep);
+    assert_eq!(code(f.ask(&fi, Some(&nested))), "ask_body_invalid", "nested too deep");
+    assert_eq!(f.kinds(&fi), ["Started"]);
+    assert!(!f.ledger_text().contains("flow-owner-"), "nothing filed");
+}
+
+#[test]
+fn a_ledger_that_is_not_there_is_ask_ledger_unread() {
+    // `ask_ledger_unread`: the id is minted against the ledger's working tree, so a ledger that is
+    // not there (or does not read) pins and files nothing.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let missing = Filing { ledger: "absent.yaml".into(), body: body() };
+    assert_eq!(code(f.ask(&fi, Some(&missing))), "ask_ledger_unread");
+    assert_eq!(f.kinds(&fi), ["Started"]);
+}
+
+#[test]
+fn a_writer_that_says_filed_with_no_row_is_ask_unconfirmed_and_withdraws_nothing() {
+    // `ask_unconfirmed`: the writer exits 0 and the working tree has no row. Only a refusal by the
+    // writer proves nothing was filed, so the pin stands and the next call files it again.
+    let lies = "sys.stdin.read()\nprint('filed it')\nsys.exit(0)";
+    let mut f = fx(Some(&wrapper(lies)), "");
+    let fi = f.begin();
+    assert_eq!(code(f.ask(&fi, Some(&filing()))), "ask_unconfirmed");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned"], "the pin stands, not withdrawn");
+    // The same pin, filed by the real writer, links.
+    std::fs::copy(fixtures().join("ask_ledger_stub.py"), f.ws.join("scripts/ask_ledger.py")).unwrap();
+    assert!(waiting(&f.ask(&fi, None).unwrap()).1);
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn two_rows_addressed_by_the_pinned_id_are_ask_ambiguous() {
+    // `ask_ambiguous`: a filing a crash left unlinked, and then another row whose uid is the
+    // pinned id. Neither row is taken for the ask.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert_eq!(code(f.ask(&fi, Some(&filing()))), "encode", "the simulated crash");
+    let id = f.pinned(&fi)["id"].as_str().unwrap().to_string();
+    f.add_entry(&format!("\n  - id: other-2\n    uid: \"{id}\"\n    ask: \"Addressed as the flow's ask\"\n"));
+    assert_eq!(code(f.ask(&fi, None)), "ask_ambiguous");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned"], "nothing linked");
+}
+
+#[test]
+fn an_answer_to_another_body_is_answer_mismatch() {
+    // `answer_mismatch`: the answers branch has the ask answered, but its body was edited, so the
+    // answer is not to the question the flow asked.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&id);
+    let text = f.ledger_text().replace("headline: \"Ship the release?\"", "headline: \"Ship a different release?\"");
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), text).unwrap();
+    f.land_on_answers_branch();
+    assert_eq!(code(f.ask(&fi, None)), "answer_mismatch");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Waiting);
+}
+
+#[test]
+fn an_answers_source_that_does_not_read_is_answers_unread() {
+    // `answers_unread`: the answers branch exists and its ledger does not read. Unread is not
+    // unanswered: the call refuses rather than saying waiting.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    assert!(waiting(&f.ask(&fi, Some(&filing())).unwrap()).1);
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), "asks: [unclosed\n").unwrap();
+    f.land_on_answers_branch();
+    assert_eq!(code(f.ask(&fi, None)), "answers_unread");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn an_answer_over_the_outputs_bound_is_answer_too_large() {
+    // `answer_too_large`: the answer's fields become the node's outputs, which are bounded.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let long = "y".repeat(crate::kernel::MAX_OUTPUTS);
+    f.add_to_row(&id, &format!("    answer: \"{long}\"\n    answered_at: \"2026-11-09T00:00:00Z\"\n"));
+    f.land_on_answers_branch();
+    assert_eq!(code(f.ask(&fi, None)), "answer_too_large");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn an_ask_that_changed_while_it_was_filed_is_ask_changed() {
+    // `ask_changed`: between filing (flows lock released) and linking, another write of the
+    // owner's withdrew the pin. Nothing is linked to a pin that no longer stands.
+    let hold = "open(os.path.join(HERE, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(HERE, 'go')):\n    time.sleep(0.01)";
+    let mut f = fx(Some(&wrapper(hold)), "");
+    let fi = f.begin();
+    let (paths, me, flows, fi2) = (f.paths.clone(), f.me.clone(), f.flows.clone(), fi.clone());
+    let filer = std::thread::spawn(move || {
+        let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
+        code(ask(&mut ledger, &paths, &me, &fi2, "owner", Some(&filing())))
+    });
+    let reached = f.ws.join("scripts/reached");
+    let until = std::time::Instant::now() + Duration::from_secs(20);
+    while !reached.exists() {
+        assert!(std::time::Instant::now() < until, "the writer never ran");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let id = f.pinned(&fi)["id"].as_str().unwrap().to_string();
+    {
+        let mut guard = f.ledger.lock().unwrap();
+        let seq = guard.log(&fi).unwrap().seq();
+        let body = serde_json::json!({ "node": "owner", "iteration": {}, "ask_id": id, "code": "x", "reason": "x" });
+        guard.append(&fi, seq, crate::NewEvent::new("AskWithdrawn", body)).unwrap();
+    }
+    std::fs::write(f.ws.join("scripts/go"), "").unwrap();
+    assert_eq!(filer.join().unwrap(), "ask_changed");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskWithdrawn"], "nothing linked");
 }
