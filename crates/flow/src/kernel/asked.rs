@@ -878,7 +878,9 @@ fn text_a_refusal_echoes_is_bounded() {
 
 #[test]
 fn the_writers_words_in_a_busy_refusal_are_bounded() {
-    let loud = "sys.stdin.read()\nprint('error: ' + 'w' * 100000, file=sys.stderr)\nsys.exit(75)";
+    // Busy, loudly, for five tries, then the stub files: a kernel that never stops retrying ends
+    // in a filing, never a hang.
+    let loud = "C = os.path.join(HERE, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nif n < 6:\n    sys.stdin.read()\n    print('error: ' + 'w' * 100000, file=sys.stderr)\n    sys.exit(75)";
     let mut f = fx(Some(&wrapper(loud)), "");
     let fi = f.begin();
     let clock = TestClock::install();
