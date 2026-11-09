@@ -461,7 +461,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: flow::ASK,
         title: "Ask the owner for a flow step",
-        description: "For a human node of your flow instance that is waiting: the first call files its ask (the definition's question plus your `ask` fields, into `ledger`) through the asks ledger's writer of record, ask_ledger.py, and links it; later calls read the owner's answer once it has landed on origin's main (as the remote reports it) and record it, which resumes the flow. Call it again until it says answered. It takes no answer: only the owner's path records one. Needs a verified session that owns the instance.",
+        description: "For a human node of your flow instance that is waiting: the first call files its ask (the definition's question plus your `ask` fields, into `ledger`) through the asks ledger's writer of record, ask_ledger.py, and links it; later calls read the owner's answer once it has landed on main in the answers remote compiled into Maestro, and record it, which resumes the flow. Call it again until it says answered; while the node waits, each call may take up to 20 s to ask the answers remote where main is. It takes no answer: only the owner's path records one. Needs a verified session that owns the instance.",
         authority: Authority::AgentWrite,
         request: None,
         scope: flow::FLOWS,

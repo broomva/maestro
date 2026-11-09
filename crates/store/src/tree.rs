@@ -316,19 +316,37 @@ impl Tree {
 /// The most bytes [`remote_ref`] reads of `git ls-remote`'s output, and of its error.
 pub const MAX_LS_REMOTE: usize = 4096;
 
-/// The object `refname` names on `remote`, asked of the remote itself (`git ls-remote`), never of
-/// a local ref, which any process here can move. `Ok(None)` when the remote has no such ref. An
-/// object id is 40 or 64 hex. Bounded: the remote gets `timeout`, then the child is killed, and
-/// at most [`MAX_LS_REMOTE`] bytes of its output and of its error are read. No prompt is shown
-/// (`GIT_TERMINAL_PROMPT=0`), so a remote that wants credentials fails rather than waits.
-pub fn remote_ref(root: &Path, remote: &str, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
+/// The environment a git child keeps: only these, from the caller's, so no `GIT_*` variable
+/// (`GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_REPLACE_REF_BASE`, `GIT_CONFIG_*`, ...) reaches it.
+const GIT_ENV_KEPT: [&str; 4] = ["PATH", "HOME", "LANG", "TMPDIR"];
+
+/// The object `refname` names at `url`, asked of that remote itself (`git ls-remote`), never of a
+/// local ref, which any process here can move. `Ok(None)` when the remote has no such ref.
+///
+/// Nothing local applies: git runs in `/`, outside any repository, with no system or global
+/// configuration (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`) and only `PATH` from the
+/// caller's environment, so no `insteadOf`, `uploadpack`, `sshCommand`, proxy or `GIT_CONFIG_*`
+/// can redirect it, and no prompt is shown (`GIT_TERMINAL_PROMPT=0`). Bounded: the remote gets
+/// `timeout`, then git's whole process group (a transport helper included) is killed, and at most
+/// [`MAX_LS_REMOTE`] bytes of its output and of its error are read.
+pub fn remote_ref(url: &str, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
     use std::io::Read as _;
-    if remote.starts_with('-') || refname.starts_with('-') {
-        return Err(format!("`{remote}` `{refname}` is not a remote and a ref"));
+    use std::os::unix::process::CommandExt as _;
+    if url.starts_with('-') || refname.starts_with('-') {
+        return Err(format!("`{url}` `{refname}` is not a remote and a ref"));
     }
-    let mut child = git_command(root)
-        .args(["ls-remote", "--", remote, refname])
+    let mut cmd = Command::new("git");
+    cmd.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    let mut child = cmd
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir("/")
+        .process_group(0)
+        .args(["ls-remote", "--", url, refname])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -348,25 +366,37 @@ pub fn remote_ref(root: &Path, remote: &str, refname: &str, timeout: Duration) -
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => break status,
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("git ls-remote {remote} did not answer within {}s", timeout.as_secs()));
-            }
+            Some(status) => break Some(status),
+            None if std::time::Instant::now() >= deadline => break None,
             None => std::thread::sleep(Duration::from_millis(20)),
         }
+    };
+    let Some(status) = status else {
+        // The whole group: a helper git started (git-remote-https, ssh) holds the pipes too.
+        if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+        let _ = child.wait();
+        let _ = (out.join(), err.join());
+        return Err(format!("git ls-remote {url} did not answer within {}s", timeout.as_secs()));
     };
     let out = out.join().unwrap_or_default();
     let err = err.join().unwrap_or_default();
     if !status.success() {
         let said = String::from_utf8_lossy(&err[..err.len().min(MAX_LS_REMOTE)]).trim().to_string();
-        return Err(format!("git ls-remote {remote} failed ({status}): {said}"));
+        return Err(format!("git ls-remote {url} failed ({status}): {said}"));
     }
+    parse_ls_remote(&out, refname).map_err(|e| format!("git ls-remote {url}: {e}"))
+}
+
+/// The object id `git ls-remote` printed for exactly `refname` (its patterns match by suffix, so
+/// `refs/heads/x/refs/heads/main` is another ref). `out` over [`MAX_LS_REMOTE`] bytes, a second
+/// line for the ref, or an id that is not 40 or 64 lowercase hex is an error.
+pub fn parse_ls_remote(out: &[u8], refname: &str) -> Result<Option<String>, String> {
     if out.len() > MAX_LS_REMOTE {
-        return Err(format!("git ls-remote {remote} said more than {MAX_LS_REMOTE} bytes"));
+        return Err(format!("it said more than {MAX_LS_REMOTE} bytes"));
     }
-    let text = String::from_utf8_lossy(&out);
+    let text = String::from_utf8_lossy(out);
     let mut found = None;
     for line in text.lines() {
         let Some((oid, name)) = line.split_once('\t') else { continue };
@@ -375,18 +405,26 @@ pub fn remote_ref(root: &Path, remote: &str, refname: &str, timeout: Duration) -
         }
         let hex = oid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {
-            return Err(format!("git ls-remote {remote} named {refname} oddly: {line}"));
+            return Err(format!("it named {refname} oddly: {line}"));
         }
         found = Some(oid.to_string());
     }
     Ok(found)
 }
 
-/// `git -C <root>`. The CLI drops an inherited GIT_DIR (and the like) at startup, so the root
-/// alone names the repository.
+/// `git -C <root>`, reading only what the repository's objects hold: replace objects off
+/// (`--no-replace-objects`, so neither `refs/replace/` nor `GIT_REPLACE_REF_BASE` can stand a
+/// forged object in for a genuine one), and none of the caller's `GIT_*` environment
+/// ([`GIT_ENV_KEPT`] only).
 fn git_command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(root);
+    cmd.env_clear();
+    for key in GIT_ENV_KEPT {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd.arg("--no-replace-objects").arg("-C").arg(root);
     cmd
 }
 

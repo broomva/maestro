@@ -30,26 +30,34 @@
 //!    No row otherwise, or a ledger that cannot be read, is `ask_unconfirmed`, and the next call
 //!    files the same pin again.
 //! 4. **Answer.** A linked ask's answer counts only once it has landed on main, read where the
-//!    remote says main is (owner decision, 2026-11-09, verbatim: "Landed main, remote-checked
-//!    (Recommended)"). The kernel asks the remote itself for `refs/heads/main` (`git ls-remote
-//!    origin`, bounded in time and output; `maestro_store::tree::remote_ref`), requires that commit
-//!    to be in this clone, and reads the asks ledger at that exact commit. No local ref counts:
-//!    not `maestro/answers`, not `refs/remotes/origin/main`, which any process here can move. A
-//!    remote that does not answer, or a commit this clone does not have (fetch origin), is
+//!    answers remote says main is. Two owner decisions (AskUserQuestion, 2026-11-09), verbatim:
+//!    "Landed main, remote-checked (Recommended)" and "Compiled into maestro (Recommended)". The
+//!    remote is compiled into Maestro, [`ANSWERS_REMOTE`]; changing it changes Maestro's code, so
+//!    it goes through a pull request and the merge gates. No setting, variable or local remote
+//!    names it (a test build alone swaps in a local fixture, `cfg(test)`). The kernel asks that URL
+//!    for `refs/heads/main` (`maestro_store::tree::remote_ref`: `git ls-remote` run outside any
+//!    repository, with no system, global or local configuration and none of the caller's `GIT_*`
+//!    environment, bounded in time and output, its process group killed at [`REMOTE_TIMEOUT`]),
+//!    requires that commit to be in this clone, and reads the asks ledger at that exact commit,
+//!    with replace objects off (`--no-replace-objects`, so no `refs/replace/` or
+//!    `GIT_REPLACE_REF_BASE` forgery stands in for it). No local ref counts: not `maestro/answers`,
+//!    not `refs/remotes/origin/main`, not `origin`'s URL, which any process here can move. A remote
+//!    that does not answer or has no main, or a commit this clone does not have (fetch), is
 //!    `answers_unread`: unread is not unanswered (fail closed). The working tree is never read for
 //!    answers, and the verb takes no answer. The row is found by the pinned id, never by searching
 //!    or listing the asks, and must hash as the linked body. Unanswered, the node stays `waiting`.
 //!    Answered, the kernel appends `Answered`, the node's receipt, so it is done and its successors
-//!    become ready. The flow resumes when the answer lands on main, not before.
+//!    become ready. The flow resumes when the answer lands on main, not before, and each call of a
+//!    linked ask may take up to [`REMOTE_TIMEOUT`].
 //!
 //! An answer on Maestro's answers branch (this clone's or origin's as last fetched,
 //! `maestro_store::views::ANSWERS_REFS`) and not on main is waiting to land, as `views::unlanded`
 //! reads it: [`landing`] reports it as `answer_waiting_to_land` for `next` and `status`, and `ask`
 //! says so, but it is never a receipt.
 //!
-//! **Residual risk.** An agent that can merge a pull request carrying an answer into main, through
-//! the merge gates, can still answer for the owner. The gates are that path's defence, not the
-//! kernel.
+//! **Residual risk.** Whoever can change Maestro's code or binary (the compiled remote), or merge
+//! a pull request that carries an answer into the answers remote's main through its merge gates,
+//! can still answer for the owner. Those paths' gates are the defence, not the kernel.
 //!
 //! # The answer as outputs
 //!
@@ -104,9 +112,22 @@ const ASK_RETRY_PAUSE: Duration = Duration::from_secs(1);
 /// How many ids a mint tries before it refuses `ask_id_exhausted`.
 pub const MINT_TRIES: u32 = 8;
 
-/// The remote whose main is the owner path, and its main.
-pub const ORIGIN: &str = "origin";
+/// The answers remote: the workspace repository whose main holds landed answers. Compiled in
+/// (owner decision 2026-11-09, "Compiled into maestro"): no setting or variable changes it.
+pub const ANSWERS_REMOTE: &str = "https://github.com/broomva/workspace.git";
+
+/// The ref of the answers remote an answer must have landed on.
 pub const MAIN: &str = "refs/heads/main";
+
+/// The answers remote, as this build reads it: [`ANSWERS_REMOTE`], or in this crate's unit tests
+/// alone the local fixture a test installs on its thread.
+fn answers_remote() -> String {
+    #[cfg(test)]
+    if let Some(url) = seams::REMOTE.with(|r| r.borrow().clone()) {
+        return url;
+    }
+    ANSWERS_REMOTE.to_string()
+}
 
 /// How long the remote has to say where main is.
 pub const REMOTE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -508,15 +529,17 @@ enum Answer {
 /// The commit origin's main is at, asked of the remote, and present in this clone: the only
 /// revision an answer is read at (see the module docs). Anything else is `answers_unread`.
 fn landed_main(paths: &Paths) -> Result<String, KernelError> {
-    let unread = |detail: String| Refusal::AnswersUnread { at: format!("{ORIGIN} {MAIN}"), detail: clip(&detail) };
-    let sha = maestro_store::tree::remote_ref(&paths.workspace, ORIGIN, MAIN, REMOTE_TIMEOUT)
+    let remote = answers_remote();
+    let unread = |detail: String| Refusal::AnswersUnread { at: format!("{remote} {MAIN}"), detail: clip(&detail) };
+    let sha = maestro_store::tree::remote_ref(&remote, MAIN, REMOTE_TIMEOUT)
         .map_err(unread)?
-        .ok_or_else(|| unread(format!("{ORIGIN} has no {MAIN}")))?;
+        .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;
     let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
     if let Some(reason) = &at.tree.unresolved {
-        return Err(
-            unread(format!("commit {sha} of {ORIGIN}'s main is not in this clone; fetch {ORIGIN} ({reason})")).into()
-        );
+        return Err(unread(format!(
+            "commit {sha}, the answers remote's main, is not in this clone; fetch it ({reason})"
+        ))
+        .into());
     }
     Ok(sha)
 }
@@ -526,7 +549,7 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
 fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
     let sha = landed_main(paths)?;
     let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
-    let source = format!("{ORIGIN}/main@{sha}");
+    let source = format!("main@{sha}");
     match find(&at, &rec.ledger, &rec.ask_id) {
         Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),
         Ok(Found::Ambiguous) => {
@@ -645,6 +668,8 @@ pub(crate) mod seams {
     thread_local! {
         pub(crate) static SUFFIXES: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
         pub(crate) static CRASH_AFTER_FILE: Cell<bool> = const { Cell::new(false) };
+        /// The answers remote a test reads instead of the compiled one: a local bare repository.
+        pub(crate) static REMOTE: RefCell<Option<String>> = const { RefCell::new(None) };
         /// Runs once, after a mint and before its pin is appended: another write meanwhile.
         pub(crate) static BEFORE_PIN: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     }

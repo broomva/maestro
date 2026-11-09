@@ -101,11 +101,15 @@ maestro flow ask --instance I --node-id N [--ledger L.yaml --ask '<json>']   # a
   ledger's validator requires), pins that body in the flow's log, and files it through the
   writer of record (`ask_ledger.py file`, as `ask file` does) with the flow ledger's lock
   released. It links the row it finds in the working tree by that id and hash. Call it again until
-  it says `answered`: the answer counts only once it has landed on main, read at the commit
-  `git ls-remote origin refs/heads/main` names (owner decision 2026-11-09, "Landed main,
-  remote-checked"). No local ref counts: an answer on `maestro/answers` (this clone's or
-  origin's) is reported as `answer_waiting_to_land`, and the flow resumes when it lands. A remote
-  that cannot be asked, or a main this clone has not fetched, is `answers_unread`. The answer is
+  it says `answered`: the answer counts only once it has landed on main of the answers remote,
+  `https://github.com/broomva/workspace.git`, compiled into Maestro (owner decisions 2026-11-09,
+  "Landed main, remote-checked" and "Compiled into maestro"; changing it is a code change). The
+  kernel asks that URL for `refs/heads/main` with nothing local applying (outside the repository,
+  no git configuration, none of your `GIT_*` environment), and reads the ledger at that commit with
+  replace objects off. No local ref or remote counts: an answer on `maestro/answers` (this clone's
+  or origin's) is reported as `answer_waiting_to_land`, and the flow resumes when it lands. A
+  remote that cannot be asked (20 s per call), has no main, or names a commit this clone has not
+  fetched is `answers_unread`. The answer is
   never read from the working tree or from you; it is recorded as the node's receipt, with the
   answer's fields as its outputs (`answer_option`, `answer`, ...). A busy asks ledger is retried
   until the kernel's deadline, then `ask_refused_busy`; a row with that id and another body is

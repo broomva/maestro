@@ -720,8 +720,9 @@ impl<'a> Fold<'a> {
             Completed::KIND => {
                 let c: Completed = body(log, e)?;
                 let (value, failure) = match &node.class {
+                    Class::Choice { .. } => return Ok(Err("wrong_class")),
                     // A human node's receipt is the owner's answer (`Answered`), never a completion.
-                    Class::Choice { .. } | Class::Human { .. } => return Ok(Err("wrong_class")),
+                    Class::Human { .. } => return Ok(Err("wrong_class")),
                     Class::Observe { exit_map, .. } => {
                         let exit = c.verify.as_ref().map(|v| v.exit);
                         match exit.and_then(|x| exit_map.iter().find(|m| m.exit == x)) {

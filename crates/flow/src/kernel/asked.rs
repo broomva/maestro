@@ -82,6 +82,8 @@ fn fx(writer: Option<&str>, extra_asks: &str) -> Fx {
     git(&ws, &["remote", "add", "origin", origin.to_str().unwrap()]);
     git(&ws, &["push", "-q", "origin", "main"]);
     git(&ws, &["fetch", "-q", "origin"]);
+    // The answers remote, for this test thread: the local bare origin, never the network.
+    seams::REMOTE.with(|r| *r.borrow_mut() = Some(origin.to_str().unwrap().to_string()));
     let flows = root_in(&base.join("fl"));
     let ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
     Fx { tmp, paths, ws, flows, ledger, flow: compile(FLOW).unwrap(), me: agent("owner", "marker-1") }
@@ -443,7 +445,7 @@ fn only_the_owner_path_answers_and_the_answer_resumes_the_flow() {
             assert_eq!(ask_id, id);
             assert_eq!(outputs["answer_option"], "ship");
             assert_eq!(outputs["answer"], "Ship it");
-            assert_eq!(source, format!("origin/main@{main}"));
+            assert_eq!(source, format!("main@{main}"));
         }
         other => panic!("{other:?}"),
     }
@@ -833,7 +835,7 @@ fn a_remote_that_does_not_answer_is_answers_unread_and_writes_nothing() {
     f.answer_in_worktree(&id);
     f.land_on_main();
     let nowhere = f.tmp.path().join("nowhere.git");
-    git(&f.ws, &["remote", "set-url", "origin", nowhere.to_str().unwrap()]);
+    seams::REMOTE.with(|r| *r.borrow_mut() = Some(nowhere.to_str().unwrap().to_string()));
     let before = machine(&f);
     assert_eq!(code(f.ask(&fi, None)), "answers_unread");
     assert!(machine(&f) == before);
@@ -856,7 +858,7 @@ fn a_main_this_clone_does_not_have_is_answers_unread_until_fetched() {
     git(&other, &["push", "-q", "origin", "main"]);
     let e = f.ask(&fi, None).unwrap_err();
     assert_eq!(e.code(), "answers_unread");
-    assert!(e.to_string().contains("fetch origin"), "{e}");
+    assert!(e.to_string().contains("not in this clone; fetch it"), "{e}");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
     git(&f.ws, &["fetch", "-q", "origin"]);
     assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { .. }));
@@ -896,4 +898,180 @@ fn the_writers_words_in_a_busy_refusal_are_bounded() {
     mover.join().unwrap();
     assert_eq!(e.code(), "ask_refused_busy");
     assert!(e.to_string().len() < 3 * MAX_ECHO, "{} bytes", e.to_string().len());
+}
+
+// P20 round 2 (BRO-3635): replace objects and an agent-controlled `origin` cannot forge an answer;
+// the answers remote is compiled in (owner decision 2026-11-09, "Compiled into maestro"), and a
+// test reads a local bare repository in its place (`seams::REMOTE`).
+
+/// A filed ask, landed on main unanswered, with a forged answered commit made here (not on main):
+/// the fixture, the instance, the ask id, main's commit and the forgery.
+fn landed_unanswered() -> (Fx, InstanceId, String, String, String) {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.land_on_main();
+    let main = git(&f.ws, &["rev-parse", "HEAD"]).trim().to_string();
+    f.answer_in_worktree(&id);
+    let forged = f.forge();
+    (f, fi, id, main, forged)
+}
+
+/// What `git show <rev>:<ledger>` reads with `env` and no other change: the attack's control.
+fn plain_show(f: &Fx, rev: &str, env: &[(&str, &str)]) -> String {
+    let out = Command::new("git")
+        .args(["show", &format!("{rev}:.control/asks/ledger.yaml")])
+        .current_dir(&f.ws)
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+const ASKS_CHILD: &str = "MAESTRO_FLOW_TEST_ASKS_CHILD";
+
+/// Not a test: the entry a child process runs for `in_child`, with the attack's environment set
+/// on it as a whole process. A no-op in a normal test run.
+#[test]
+fn asks_child_entry() {
+    let Ok(spec) = std::env::var(ASKS_CHILD) else { return };
+    let parts: Vec<&str> = spec.split('\u{1f}').collect();
+    let [base, instance, remote] = parts[..] else { panic!("{spec}") };
+    seams::REMOTE.with(|r| *r.borrow_mut() = Some(remote.to_string()));
+    let base = PathBuf::from(base);
+    let mut ledger = Ledger::open(&root_in(&base.join("fl")), &host("mac"), Options::default()).unwrap();
+    let me = agent("owner", "marker-1");
+    let out = match ask(&mut ledger, &Paths::under(&base), &me, &InstanceId::new(instance).unwrap(), "owner", None) {
+        Ok(Asked::Waiting { .. }) => "waiting".to_string(),
+        Ok(Asked::Answered { .. }) => "answered".to_string(),
+        Ok(other) => format!("{other:?}"),
+        Err(e) => e.code().to_string(),
+    };
+    println!("ASKS_RESULT {out}");
+}
+
+/// `ask` on `fi`'s owner node in a child process whose environment adds `env`.
+fn in_child(f: &Fx, fi: &InstanceId, env: &[(&str, &str)]) -> String {
+    let base = f.paths.workspace.parent().unwrap();
+    let remote = seams::REMOTE.with(|r| r.borrow().clone()).unwrap();
+    let spec = [base.to_str().unwrap(), fi.as_str(), &remote].join("\u{1f}");
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["kernel::asks::asked::asks_child_entry", "--exact", "--nocapture", "--test-threads=1"])
+        .env(ASKS_CHILD, spec)
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .find_map(|l| l.split_once("ASKS_RESULT ").map(|(_, r)| r.trim().to_string()))
+        .unwrap_or_else(|| format!("no result: {text}{}", String::from_utf8_lossy(&out.stderr)))
+}
+
+#[test]
+fn a_replace_ref_for_mains_commit_does_not_forge_the_answer() {
+    let (mut f, fi, id, main, forged) = landed_unanswered();
+    git(&f.ws, &["replace", &main, &forged]);
+    assert!(plain_show(&f, &main, &[]).contains("answer_option"), "the control: plain git reads the forgery");
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { .. }), "{id}");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn a_replace_ref_for_the_ledgers_blob_does_not_forge_the_answer() {
+    let (mut f, fi, _id, main, forged) = landed_unanswered();
+    let genuine = git(&f.ws, &["rev-parse", &format!("{main}:.control/asks/ledger.yaml")]).trim().to_string();
+    let fake = git(&f.ws, &["rev-parse", &format!("{forged}:.control/asks/ledger.yaml")]).trim().to_string();
+    git(&f.ws, &["replace", "-f", &genuine, &fake]);
+    assert!(plain_show(&f, &main, &[]).contains("answer_option"), "the control: plain git reads the forgery");
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { .. }));
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn a_replace_ref_base_in_the_environment_does_not_forge_the_answer() {
+    let (f, fi, _id, main, forged) = landed_unanswered();
+    git(&f.ws, &["update-ref", &format!("refs/forge/{main}"), &forged]);
+    let env = [("GIT_REPLACE_REF_BASE", "refs/forge/")];
+    assert!(plain_show(&f, &main, &env).contains("answer_option"), "the control: plain git reads the forgery");
+    assert_eq!(in_child(&f, &fi, &env), "waiting");
+    assert_eq!(in_child(&f, &fi, &[]), "waiting");
+}
+
+/// An evil bare repository whose main is `forged`, which this clone has (an agent fetched it).
+fn evil(f: &Fx, forged: &str) -> String {
+    let evil = f.tmp.path().join("evil.git");
+    git(f.tmp.path(), &["init", "-q", "--bare", "-b", "main", evil.to_str().unwrap()]);
+    git(&f.ws, &["push", "-q", evil.to_str().unwrap(), &format!("{forged}:refs/heads/main")]);
+    evil.to_str().unwrap().to_string()
+}
+
+#[test]
+fn an_agent_controlled_origin_does_not_forge_the_answer() {
+    let (mut f, fi, _id, _main, forged) = landed_unanswered();
+    let evil = evil(&f, &forged);
+    let genuine = seams::REMOTE.with(|r| r.borrow().clone()).unwrap();
+    // origin's URL, an insteadOf for the answers remote, and origin's uploadpack, all in the repo.
+    git(&f.ws, &["remote", "set-url", "origin", &evil]);
+    git(&f.ws, &["config", &format!("url.{evil}.insteadOf"), &genuine]);
+    git(&f.ws, &["config", "remote.origin.uploadpack", &format!("git-upload-pack {evil}")]);
+    let control =
+        Command::new("git").args(["ls-remote", &genuine, "refs/heads/main"]).current_dir(&f.ws).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&control.stdout).starts_with(&forged),
+        "the control: in the repo, git asks the evil remote"
+    );
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { .. }));
+    // The same insteadOf, from the process environment.
+    git(&f.ws, &["config", "--unset", &format!("url.{evil}.insteadOf")]);
+    let key = format!("url.{evil}.insteadOf");
+    let env = [("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", key.as_str()), ("GIT_CONFIG_VALUE_0", genuine.as_str())];
+    let control = Command::new("git").args(["ls-remote", &genuine, "refs/heads/main"]).envs(env).output().unwrap();
+    assert!(String::from_utf8_lossy(&control.stdout).starts_with(&forged), "the control: the env redirects plain git");
+    assert_eq!(in_child(&f, &fi, &env), "waiting");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn only_refs_heads_main_counts_and_a_remote_without_it_is_answers_unread() {
+    let (mut f, fi, _id, _main, forged) = landed_unanswered();
+    // The remote's HEAD names an answered branch; its main is unanswered: still waiting.
+    let origin = seams::REMOTE.with(|r| r.borrow().clone()).unwrap();
+    git(&f.ws, &["push", "-q", &origin, &format!("{forged}:refs/heads/forge")]);
+    git(Path::new(&origin), &["symbolic-ref", "HEAD", "refs/heads/forge"]);
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { .. }));
+    // A remote with no main at all, whose HEAD is the answered branch: unread, never its HEAD.
+    git(Path::new(&origin), &["update-ref", "-d", "refs/heads/main"]);
+    let e = f.ask(&fi, None).unwrap_err();
+    assert_eq!(e.code(), "answers_unread");
+    assert!(e.to_string().contains("has no refs/heads/main"), "{e}");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn an_unanswered_row_on_the_answers_branch_is_not_waiting_to_land() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    assert!(waiting(&f.ask(&fi, Some(&filing())).unwrap()).1);
+    f.put_on_answers_branch();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { landing: None, .. }));
+    let mut unmet = f.status(&fi).nodes["owner"].unmet.clone();
+    landing(&f.paths, &mut unmet);
+    assert!(matches!(&unmet[0], crate::kernel::Reason::Owner { .. }), "{unmet:?}");
+}
+
+#[test]
+fn clipped_text_is_marked_and_a_long_ledger_error_is_clipped() {
+    assert_eq!(clip("short"), "short");
+    let cut = clip(&"x".repeat(MAX_ECHO + 10));
+    assert_eq!(cut, format!("{}...", "x".repeat(MAX_ECHO)));
+    // A ledger name of 250 characters that is a folder: the store's error names it, and the
+    // refusal's detail is clipped.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let name = format!("{}.yaml", "l".repeat(250));
+    std::fs::create_dir(f.ws.join(".control/asks").join(&name)).unwrap();
+    let e = f.ask(&fi, Some(&Filing { ledger: name, body: body() })).unwrap_err();
+    assert_eq!(e.code(), "ask_ledger_unread");
+    let crate::kernel::KernelError::Refused(Refusal::AskLedgerUnread { detail, .. }) = e else { panic!() };
+    assert!(detail.ends_with("...") && detail.len() <= MAX_ECHO + 3, "{} bytes: {detail}", detail.len());
 }

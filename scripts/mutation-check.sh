@@ -1308,7 +1308,8 @@ mutate $fk/replay.rs '        if !eval.settled(rid, i) {
         }' ''
 mutate $fk/replay.rs '                read.push((m, c));' ''
 mutate $fk/replay.rs '                read.push((b.as_str(), eval.node(b, j)));' ''
-mutate $fk/replay.rs 'Refused::KIND, EffectStarted::KIND];' 'Refused::KIND];'
+mutate $fk/replay.rs '            EffectStarted::KIND,
+            AskPinned::KIND,' '            AskPinned::KIND,'
 # Effects declare a command; the compiler refuses one without.
 mutate $fk/compile.rs '                Some(run) if !run.is_empty() => run,' '                Some(run) => run,
                 None => Vec::new(),'
@@ -1511,7 +1512,7 @@ mutate $mf '                let flow = kernel::compile(&a.definition)?;
                 let flow = kernel::compile(&a.definition)?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
                 let begun = kernel::start(&mut ledger, &w.me, &flow, params)?;'
-mutate $mf '    let root = flows_root(workspace)?;' '    let root = workspace.join(FLOWS);'
+mutate $mf '    let root = flows_root(&paths.workspace)?;' '    let root = paths.workspace.join(FLOWS);'
 mutate $mf '    if value.len() > MAX_NAME {' '    if false {'
 mutate $mf '    if value.len() > MAX_NAME {' '    if value.len() >= MAX_NAME {'
 mutate $mf '#[serde(deny_unknown_fields)]
@@ -1603,19 +1604,19 @@ mutate $asks 'let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?
 # the commit the remote names, present here; an answered row; the linked ask. A local
 # maestro/answers or refs/remotes/origin/main never answers, and unread is not unanswered.
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed' 'Ok(Found::Row(row)) => return Ok(Answer::Landed'
-mutate $asks '    let sha = maestro_store::tree::remote_ref(&paths.workspace, ORIGIN, MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Some(String::from("refs/remotes/origin/main")))'
-mutate $asks '    let sha = maestro_store::tree::remote_ref(&paths.workspace, ORIGIN, MAIN, REMOTE_TIMEOUT)
-        .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(&paths.workspace, ORIGIN, MAIN, REMOTE_TIMEOUT)
+mutate $asks '    let sha = maestro_store::tree::remote_ref(&remote, MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Some(String::from("refs/remotes/origin/main")))'
+mutate $asks '    let sha = maestro_store::tree::remote_ref(&remote, MAIN, REMOTE_TIMEOUT)
+        .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(&remote, MAIN, REMOTE_TIMEOUT)
         .or_else(|_| Ok::<_, String>(Some(String::from("refs/remotes/origin/main"))))
         .map_err(unread)?'
 mutate $asks '    let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
-    let source = format!("{ORIGIN}/main@{sha}");' '    let at = Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into()));
-    let source = format!("{ORIGIN}/main@{sha}");'
+    let source = format!("main@{sha}");' '    let at = Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into()));
+    let source = format!("main@{sha}");'
 mutate $asks '    if let Some(reason) = &at.tree.unresolved {
         return Err(' '    if let Some(reason) = at.tree.unresolved.as_ref().filter(|_| false) {
         return Err('
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
-mutate $replay 'Class::Choice { .. } | Class::Human { .. } => return Ok(Err("wrong_class")),' 'Class::Choice { .. } => return Ok(Err("wrong_class")),'
+mutate $replay '                    Class::Human { .. } => return Ok(Err("wrong_class")),' ''
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {' 'if false {'
 # Every other code `ask` adds, by its guard: ask_body_invalid (ledger name, size, nesting),
 # ask_ledger_unread, ask_id_exhausted, ask_not_filed, ask_unconfirmed, ask_ambiguous,
@@ -1643,6 +1644,25 @@ mutate $mf '.filter(|o| o.surface == Surface::T3)' '.filter(|_| true)'
 mutate $mf '(&thread, ask_id, ledger, state != "unfiled")' '(&thread, ask_id, ledger, true)'
 mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if maestro_view::handoff::fits(&prompt) {'
 mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if plain {'
+# P20 round 2: the answers remote is compiled in (owner decision 2026-11-09, "Compiled into
+# maestro") and asked with nothing local applying; reads at its main run with replace objects off;
+# only exactly refs/heads/main counts, and a remote without it is unread, never its HEAD.
+mutate $tree '    cmd.arg("--no-replace-objects").arg("-C").arg(root);' '    cmd.arg("-C").arg(root);'
+mutate $tree '    cmd.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {' '    if let Some(path) = std::env::var_os("PATH") {'
+mutate $tree 'None if std::time::Instant::now() >= deadline => break None,' 'None if false => break None,'
+mutate $tree '    if out.len() > MAX_LS_REMOTE {' '    if false {'
+mutate $tree '        if name != refname {
+            continue;' '        if false {
+            continue;'
+mutate $tree 'if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {' 'if found.is_some() {'
+mutate $tree 'if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {' 'if !(hex && (oid.len() == 40 || oid.len() == 64)) {'
+mutate $asks 'pub const MAIN: &str = "refs/heads/main";' 'pub const MAIN: &str = "HEAD";'
+mutate $asks '        .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;' '        .or_else(|| maestro_store::tree::remote_ref(&remote, "HEAD", REMOTE_TIMEOUT).ok().flatten())
+        .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;'
+mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) => Some(label.to_string()),'
+mutate $asks '        out.push_str("...");' ''
+mutate $asks 'Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail: clip(&detail) }' 'Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail }'
 # P20 round 1: the guards no test killed. The owner check before anything is read or written; the
 # busy deadline from the first try; only a waiting node files; a pin at the sequence it was minted
 # at; the replay rules for pins and links; an ask is unfiled until linked; echoed text is bounded
