@@ -33,19 +33,29 @@ git -C "$copy" add -A
 git -C "$copy" -c core.hooksPath=/dev/null -c user.name=mutation -c user.email=mutation@localhost commit -qm base
 cd "$copy"
 run_tests() { timeout "$limit" cargo test -q --workspace --locked; }
-# A mutant in crates/flow runs only maestro-flow's tests (BRO-3633, owner decision 2026-11-08:
-# the whole-workspace run per mutant no longer fit the CI shards). That is the same verdict only
-# while no other crate depends on maestro-flow, so the run refuses to start once one does.
-run_flow_tests() { timeout "$limit" cargo test -q -p maestro-flow --locked; }
+# A mutant in crates/flow runs maestro-flow's tests and, only if they all pass, the tests of every
+# package that depends on maestro-flow (BRO-3633 and BRO-3634; the whole-workspace run per mutant
+# no longer fit the CI shards). A mutant is killed when any test fails, so the `&&` gives the
+# verdict of running both, and a mutant the flow tests kill (all of them, so far) costs no
+# dependent build. That verdict holds only while every dependent is listed here: the run refuses
+# to start when the workspace has a dependent this list lacks, or the list names a package that
+# is no longer one.
+flow_dependents="maestro-mcp maestro"
+run_flow_tests() {
+  local deps="" d
+  for d in $flow_dependents; do deps+=" -p $d"; done
+  timeout "$limit" sh -c "cargo test -q -p maestro-flow --locked && cargo test -q --locked$deps"
+}
 if ! dependents=$(cargo metadata -q --format-version 1 --no-deps --locked | python3 -c '
 import json, sys
 m = json.load(sys.stdin)
-print(" ".join(p["name"] for p in m["packages"]
-               if p["name"] != "maestro-flow" and any(d["name"] == "maestro-flow" for d in p["dependencies"])))'); then
+print(" ".join(sorted(p["name"] for p in m["packages"]
+               if p["name"] != "maestro-flow" and any(d["name"] == "maestro-flow" for d in p["dependencies"]))))'); then
   echo "cannot read the workspace metadata"; exit 3
 fi
-if [ -n "$dependents" ]; then
-  echo "maestro-flow has dependents ($dependents): run its mutants against the whole workspace again"; exit 3
+listed=$(printf '%s\n' $flow_dependents | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+if [ "$dependents" != "$listed" ]; then
+  echo "maestro-flow's dependents are ($dependents), but its mutants run ($listed): update flow_dependents"; exit 3
 fi
 
 # A mutant only counts as killed against a suite that passes unmutated.
@@ -508,7 +518,7 @@ mutate $requests '        Ok(m) if m.is_file() => {}' '        Ok(_) => {}'
 mutate $requests '    if id.is_empty() {' '    if false {'
 mutate $request '            (Self::AskFile, _) => Disposition::Applied,' '            (Self::AskFile, _) => Disposition::Held,'
 mutate $request '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Held,' '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Recorded,'
-mutate $mcp '    let caller = Principal::Unverified;' '    let caller = Principal::Owner { via: "mcp".into() };'
+mutate $mcp '        None => (session.clone(), Principal::Unverified),' '        None => (session.clone(), Principal::Owner { via: "mcp".into() }),'
 # A filed ask whose journal line fails is a failed request; a busy lock exits 75 to retry (P20 r1).
 mutate $mcp '            if let Err(e) = requests::record(&disk.paths, &record) {' '            if let Some(e) = requests::record(&disk.paths, &record).err().filter(|_| false) {'
 mutate $mcp '        Some(json!({ "filed": { "ledger": ledger, "id": id } })),' '        Some(json!({ "filed": { "ledger": ledger, "id": id }, "busy": true })),'
@@ -1472,6 +1482,94 @@ mutate $fx '        if self.timeout < Duration::from_millis(1) || self.timeout >
 mutate $fx '        if self.timeout < Duration::from_millis(1) || self.timeout > MAX_TIMEOUT {' '        if self.timeout < Duration::from_millis(1) {'
 mutate $fx '        if self.max_output == 0 || self.max_output > MAX_OUTPUT {' '        if self.max_output > MAX_OUTPUT {'
 mutate $fx '        if self.max_output == 0 || self.max_output > MAX_OUTPUT {' '        if self.max_output == 0 {'
+
+# Flow surfaces (BRO-3634, BRO-3624 items 4 and 9): the kernel's verbs as MCP tools and `maestro
+# flow`. Writes only for a verified session (an unverified or refused caller writes as nobody);
+# the flows root only in a workspace's main checkout with .broomva, made only by start; names
+# bounded; no argument outside a tool's schema; the write tools declared agent writes and the
+# reads reads; the binary a guard host from the first line of main; a refusal exits 1.
+mf=crates/mcp/src/flow.rs
+mutate $mf '        Ok(Some(me)) => me,
+        Ok(None) => {' '        Ok(Some(me)) => me,
+        Ok(None) => VerifiedSession::new(session.clone(), "/", None, None, vec![]).with_owner_marker("forged"),
+        #[allow(unreachable_patterns)]
+        Ok(None) => {'
+mutate $mf '        Err(e) => {
+            let mut v = refusal("caller_refused"' '        Err(_) => VerifiedSession::new(session.clone(), "/", None, None, vec![]).with_owner_marker("forged"),
+        #[allow(unreachable_patterns)]
+        Err(e) => {
+            let mut v = refusal("caller_refused"'
+mutate $mf '    if !std::fs::symlink_metadata(&broomva).is_ok_and(|m| m.is_dir()) {' '    if false {'
+mutate $mf '    if std::fs::symlink_metadata(workspace.join(".git")).is_ok_and(|m| !m.is_dir()) {' '    if false {'
+mutate $mf '        if !self.may_create && std::fs::symlink_metadata(&self.root).is_err() {' '        if false {'
+mutate $mf '                let flow = kernel::compile(&a.definition)?;
+                let params = a.params.clone().unwrap_or_else(|| json!({}));
+                let begun = kernel::start(&mut w.ledger()?, &w.me, &flow, params)?;' '                let mut ledger = w.ledger()?;
+                let flow = kernel::compile(&a.definition)?;
+                let params = a.params.clone().unwrap_or_else(|| json!({}));
+                let begun = kernel::start(&mut ledger, &w.me, &flow, params)?;'
+mutate $mf '    let root = flows_root(workspace)?;' '    let root = workspace.join(FLOWS);'
+mutate $mf '    if value.len() > MAX_NAME {' '    if false {'
+mutate $mf '    if value.len() > MAX_NAME {' '    if value.len() >= MAX_NAME {'
+mutate $mf '#[serde(deny_unknown_fields)]
+pub struct FlowClaimArgs {' 'pub struct FlowClaimArgs {'
+mutate $mf '#[serde(deny_unknown_fields)]
+pub struct FlowInstanceArgs {' 'pub struct FlowInstanceArgs {'
+mutate $mcp '        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowStartArgs>,' '        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowStartArgs>,'
+mutate $mcp '        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowInstanceArgs>,
+    },
+    ToolSpec {
+        name: flow::CLAIM,' '        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowInstanceArgs>,
+    },
+    ToolSpec {
+        name: flow::CLAIM,'
+# A shared daemon (serve --http) takes no caller claim from its own environment.
+mutate $http '    let server = MaestroServer::new(store).shared();' '    let server = MaestroServer::new(store);'
+mutate $mcp '        Ambient::Shared => None,' '        Ambient::Shared => std::env::var(key).ok().filter(|s| !s.is_empty()),'
+mutate $mcp '        None => match var("MAESTRO_BRIDGE_CREDENTIAL") {' '        None => match std::env::var("MAESTRO_BRIDGE_CREDENTIAL").ok().filter(|s| !s.is_empty()) {'
+mutate $mcp '            Some(kind) => agent_request_in(store, hosts, ambient, kind, args),' '            Some(kind) => agent_request_in(store, hosts, Ambient::Caller, kind, args),'
+# Every write schema declares the caller's claim, or a schema-enforcing client cannot send it.
+mutate $mf '    pub params: Option<Value>,
+    /// Your session'"'"'s folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,' '    pub params: Option<Value>,'
+# The JSON each verb returns, field by field; a refusal before a write is not recorded.
+mutate $mf '    refusal(e.code(), e, false)' '    refusal(e.code(), e, true)'
+mutate $mf '                    "node_id": c.node,' '                    "node_id": c.instance.as_str(),'
+mutate $mf '                    "attempt": c.attempt,' '                    "attempt": c.iteration,'
+mutate $mf 'beat.lease_until.to_string()' '"2000-01-01T00:00:00Z"'
+mutate $mf '                        v["stderr"] = json!(stderr);' ''
+mutate $mf 'let params = a.params.clone().unwrap_or_else(|| json!({}));' 'let params = a.params.clone().unwrap_or(Value::Null);'
+mutate $mf '                    limits.timeout = std::time::Duration::from_secs(secs);' '                    let _ = secs;'
+# The host id: the first DNS label, lower case, whatever network suffix the name carries.
+mutate $mf "        .split('.')" "        .split(',')"
+mutate $mf '{ c.to_ascii_lowercase() }' '{ c }'
+# An oversized definition is the tool's size refusal, even where the read's cut splits a character.
+mutate $cli '    if bytes.len() > limit {' '    if false {'
+mutate $cli '    maestro_flow::kernel::guard_entry();
+    drop_inherited_git_repo();' '    drop_inherited_git_repo();'
+mutate $cli '    if v["ok"] == json!(true) {
+        return Ok(());
+    }
+    bail!' '    if true {
+        return Ok(());
+    }
+    bail!'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

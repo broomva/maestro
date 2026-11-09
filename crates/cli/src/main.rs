@@ -189,6 +189,76 @@ enum Command {
     /// Evaluate parity cases (JSON on stdin) with the ported functions: scripts/parity-delegation.py.
     #[command(hide = true)]
     ParityEval,
+    /// A flow's steps, through the flow kernel. Each prints the JSON its maestro_flow tool returns,
+    /// and exits 1 on a refusal. Writes need a verified session:
+    /// a Direct launch token (MAESTRO_DIRECT_TOKEN) or a bridge credential (MAESTRO_BRIDGE_CREDENTIAL).
+    Flow {
+        #[command(subcommand)]
+        command: FlowCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum FlowCommand {
+    /// Start an instance of a flow, owned by this session.
+    Start {
+        #[command(flatten)]
+        session: SessionArg,
+        /// The definition's YAML file; `-` reads it from stdin.
+        #[arg(long)]
+        definition: String,
+        /// The flow's params as a JSON object.
+        #[arg(long)]
+        params: Option<String>,
+    },
+    /// The nodes that can be claimed now, and why the others cannot. Writes nothing.
+    Next {
+        #[arg(long)]
+        instance: String,
+    },
+    /// Claim an enabled node.
+    Claim {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        node_id: String,
+    },
+    /// Finish a claim: the kernel runs the node's command and records the receipt if it passes.
+    Complete {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        claim_token: String,
+        /// The node's outputs as a JSON object.
+        #[arg(long)]
+        outputs: Option<String>,
+        /// How long the node's command may run, in seconds.
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+    /// Take a declared edge of a claimed choice node, if its guard holds.
+    Choose {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        claim_token: String,
+        #[arg(long)]
+        edge: String,
+    },
+    /// Every node's state. Writes nothing.
+    Status {
+        #[arg(long)]
+        instance: String,
+    },
+    /// Extend a claim's lease.
+    Heartbeat {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        claim_token: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -326,6 +396,9 @@ fn drop_inherited_git_repo() {
 fn drop_inherited_git_repo() {}
 
 fn main() -> std::process::ExitCode {
+    // First: in the flow kernel's guard evaluator (this binary started again) it answers and
+    // exits here; otherwise it registers this process as a guard host (BRO-3634).
+    maestro_flow::kernel::guard_entry();
     drop_inherited_git_repo();
     let args: Vec<String> = std::env::args().collect();
     let hook = is_hook(&args);
@@ -427,6 +500,7 @@ fn run(cli: &Cli) -> Result<()> {
         Command::Escalate { session, reason } => {
             request(cli, &store, "maestro_escalate", json!({ "session": session.session, "reason": reason }))?
         }
+        Command::Flow { command } => flow(&store, command)?,
         _ => read(cli, &store)?,
     }
     Ok(())
@@ -451,6 +525,68 @@ fn request(cli: &Cli, store: &Store, tool: &str, args: Value) -> Result<()> {
         d => println!("{} {} {}: recorded, {}", s(&r["request"]), s(&r["id"]), s(&r["at"]), d.unwrap_or("?")),
     }
     Ok(())
+}
+
+/// A JSON argument: an object for `params` and `outputs`.
+fn json_arg(flag: &str, text: Option<&str>) -> Result<Option<Value>> {
+    text.map(|t| serde_json::from_str(t).with_context(|| format!("{flag} must be JSON"))).transpose()
+}
+
+/// A definition, read to one byte past the kernel's bound, so an oversized one is never read
+/// whole. Over the bound it goes on with any character the cut split replaced, so the tool
+/// refuses it for its size (`definition_invalid`) exactly as it refuses one sent over MCP;
+/// within the bound it must be UTF-8, as every MCP argument is.
+fn read_definition(source: impl std::io::Read) -> Result<String> {
+    let limit = maestro_flow::kernel::MAX_SOURCE;
+    let mut bytes = Vec::new();
+    source.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    String::from_utf8(bytes).context("the definition is not UTF-8")
+}
+
+/// One flow verb, through the same tool an agent calls over MCP: the same JSON in and out. The
+/// CLI adds no caller claim of its own; the caller variables (`MAESTRO_DIRECT_TOKEN`,
+/// `MAESTRO_BRIDGE_CREDENTIAL`, `MAESTRO_CALLER_CWD`, `MAESTRO_CALLER_NODE`) carry it.
+fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
+    use maestro_mcp::flow as f;
+    let (tool, args) = match command {
+        FlowCommand::Start { session, definition, params } => {
+            let text = if definition == "-" {
+                read_definition(std::io::stdin().lock())?
+            } else {
+                std::fs::File::open(definition)
+                    .map_err(anyhow::Error::from)
+                    .and_then(read_definition)
+                    .with_context(|| format!("reading {definition}"))?
+            };
+            let params = json_arg("--params", params.as_deref())?;
+            (f::START, json!({ "session": session.session, "definition": text, "params": params }))
+        }
+        FlowCommand::Next { instance } => (f::NEXT, json!({ "instance": instance })),
+        FlowCommand::Status { instance } => (f::STATUS, json!({ "instance": instance })),
+        FlowCommand::Claim { session, instance, node_id } => {
+            (f::CLAIM, json!({ "session": session.session, "instance": instance, "node_id": node_id }))
+        }
+        FlowCommand::Complete { session, claim_token, outputs, timeout_secs } => {
+            let outputs = json_arg("--outputs", outputs.as_deref())?;
+            let args = json!({ "session": session.session, "claim_token": claim_token, "outputs": outputs, "timeout_secs": timeout_secs });
+            (f::COMPLETE, args)
+        }
+        FlowCommand::Choose { session, claim_token, edge } => {
+            (f::CHOOSE, json!({ "session": session.session, "claim_token": claim_token, "edge": edge }))
+        }
+        FlowCommand::Heartbeat { session, claim_token } => {
+            (f::HEARTBEAT, json!({ "session": session.session, "claim_token": claim_token }))
+        }
+    };
+    let v = call(store, tool, args)?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    if v["ok"] == json!(true) {
+        return Ok(());
+    }
+    bail!("{}: {}", s(&v["code"]), s(&v["reason"]))
 }
 
 fn doctor(cli: &Cli, store: &Store, bstack: Option<&std::path::Path>) -> Result<()> {

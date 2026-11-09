@@ -4,11 +4,11 @@
 //!
 //! Tools have [`Authority::Read`] or [`Authority::AgentRequest`] (BRO-3267): an agent may
 //! file a validated ask and record a request, and nothing it requests starts anything (A8).
-//! [`Authority::AgentWrite`] is reserved for flow-ledger writes by a verified agent
-//! (BRO-3631); no tool carries it yet.
-//! Owner actions are not exposed: a model-visible tool is not proof of the owner. Every
-//! MCP caller is [`Principal::Unverified`] until a surface adapter verifies sessions
-//! (BRO-3268), so its requests are recorded as unverified and, but for an ask, held.
+//! [`Authority::AgentWrite`] is the flow kernel's write verbs ([`flow`], BRO-3634): they take
+//! effect, so they act only for a verified session; an unverified caller is refused them.
+//! Owner actions are not exposed: a model-visible tool is not proof of the owner. A caller
+//! whose surface has no registry here and that makes no claim is [`Principal::Unverified`], so
+//! its requests are recorded as unverified and, but for an ask, held.
 
 use maestro_core::ask::AskState;
 use maestro_core::authority::{Authority, Principal};
@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 use std::future::Future;
 use std::sync::Arc;
 
+pub mod flow;
 pub mod http;
 pub mod web;
 
@@ -387,6 +388,76 @@ pub const TOOLS: &[ToolSpec] = &[
         ui: Ui::AppOnly,
         schema: schema_of::<UiPollArgs>,
     },
+    ToolSpec {
+        name: flow::START,
+        title: "Start a flow",
+        description: "Start an instance of a flow from its YAML definition and params. The instance is yours: only your verified session (and not a replacement of it) writes it. Needs a verified session; an unverified caller is refused, with code caller_unverified. A refusal is a result: ok false, a stable code and the reason.",
+        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowStartArgs>,
+    },
+    ToolSpec {
+        name: flow::NEXT,
+        title: "Next flow steps",
+        description: "The nodes of a flow instance you can claim now, each with its launch hint, and why every other node is not ready. Replays the instance's log and writes nothing.",
+        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowInstanceArgs>,
+    },
+    ToolSpec {
+        name: flow::CLAIM,
+        title: "Claim a flow step",
+        description: "Claim an enabled node of your flow instance. Returns a claim_token, a lease and the attempt number; finish with maestro_flow_complete (or maestro_flow_choose for a choice node), and extend the lease with maestro_flow_heartbeat. Needs a verified session that owns the instance.",
+        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowClaimArgs>,
+    },
+    ToolSpec {
+        name: flow::COMPLETE,
+        title: "Complete a flow step",
+        description: "Finish a claimed node: the kernel runs the node's own command and records the receipt only when it passes. Your say-so is never a receipt. A failure is recorded and keeps the claim, so you can fix the work and complete again while the lease holds.",
+        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowCompleteArgs>,
+    },
+    ToolSpec {
+        name: flow::CHOOSE,
+        title: "Choose a flow edge",
+        description: "Take one declared edge of a claimed choice node. The kernel evaluates the edge's guard over the recorded state and records the choice only when it holds; otherwise the refusal is recorded and the claim kept.",
+        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowChooseArgs>,
+    },
+    ToolSpec {
+        name: flow::STATUS,
+        title: "Flow status",
+        description: "Every node of a flow instance with its state (done, ready, blocked, stale, waiting, exhausted, failed) and what it waits on. Replays the instance's log and writes nothing.",
+        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowInstanceArgs>,
+    },
+    ToolSpec {
+        name: flow::HEARTBEAT,
+        title: "Extend a flow claim",
+        description: "Extend the lease of your claim on a flow node. After the lease ends the claim is void and the node is claimed again.",
+        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowHeartbeatArgs>,
+    },
 ];
 
 fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T, McpError> {
@@ -436,10 +507,33 @@ pub fn call(store: &Store, name: &str, args: Value) -> Result<Value, McpError> {
     call_with_hosts(store, &hosts, name, args)
 }
 
-/// Run one tool against an explicit [`maestro_hosts::SurfaceRegistry`].
+/// Run one tool against an explicit [`maestro_hosts::SurfaceRegistry`]. A caller with no claim
+/// of its own takes the one in this process's caller variables (see [`Ambient`]).
 pub fn call_with_hosts(
     store: &Store,
     hosts: &maestro_hosts::SurfaceRegistry,
+    name: &str,
+    args: Value,
+) -> Result<Value, McpError> {
+    dispatch(store, hosts, Ambient::Caller, name, args)
+}
+
+/// Whose environment this process is, for the caller variables (`MAESTRO_CALLER_CWD`,
+/// `MAESTRO_DIRECT_TOKEN`, `MAESTRO_CALLER_NODE`, `MAESTRO_BRIDGE_CREDENTIAL`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ambient {
+    /// The caller's own process (the CLI, or a stdio server its harness started): a caller with
+    /// no claim in its arguments takes the claim in the variables.
+    Caller,
+    /// A shared daemon (`maestro serve --http`): its variables are nobody's claim, so a caller
+    /// is verified only from its own arguments.
+    Shared,
+}
+
+fn dispatch(
+    store: &Store,
+    hosts: &maestro_hosts::SurfaceRegistry,
+    ambient: Ambient,
     name: &str,
     args: Value,
 ) -> Result<Value, McpError> {
@@ -623,8 +717,11 @@ pub fn call_with_hosts(
             let markdown = packet.render_markdown(a.max_needs.unwrap_or(8));
             Ok(json!({ "markdown": markdown, "packet": packet }))
         }
+        flow::START | flow::NEXT | flow::CLAIM | flow::COMPLETE | flow::CHOOSE | flow::STATUS | flow::HEARTBEAT => {
+            flow::call(&store.paths.workspace, hosts, ambient, name, args)
+        }
         other => match request_of(other) {
-            Some(kind) => agent_request_with_hosts(store, hosts, kind, args),
+            Some(kind) => agent_request_in(store, hosts, ambient, kind, args),
             None => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
         },
     }
@@ -642,28 +739,38 @@ fn resolve_caller(
     hosts: &maestro_hosts::SurfaceRegistry,
     session: &maestro_core::session::SessionRef,
     args: &Value,
+    ambient: Ambient,
 ) -> Result<(maestro_core::session::SessionRef, Principal), McpError> {
-    let arg_cwd = args
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| std::env::var("MAESTRO_CALLER_CWD").ok().filter(|s| !s.is_empty()));
-    let arg_token = args
-        .get("token")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| std::env::var("MAESTRO_DIRECT_TOKEN").ok().filter(|s| !s.is_empty()));
-    let arg_node = args
-        .get("node")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| std::env::var("MAESTRO_CALLER_NODE").ok().filter(|s| !s.is_empty()));
+    Ok(match verified_caller(hosts, session, args, ambient)? {
+        Some(verified) => (verified.session().clone(), maestro_hosts::verified_identity(&verified)),
+        None => (session.clone(), Principal::Unverified),
+    })
+}
+
+/// The caller, verified against its surface's registry from the claim in `args` (or, in the
+/// caller's own process, the `MAESTRO_*` caller variables). `None` when its surface has no
+/// registry here and it makes no claim: an unverified caller. A claim that does not verify is an
+/// error.
+fn verified_caller(
+    hosts: &maestro_hosts::SurfaceRegistry,
+    session: &maestro_core::session::SessionRef,
+    args: &Value,
+    ambient: Ambient,
+) -> Result<Option<maestro_core::session::VerifiedSession>, McpError> {
+    let var = |key: &str| match ambient {
+        Ambient::Caller => std::env::var(key).ok().filter(|s| !s.is_empty()),
+        Ambient::Shared => None,
+    };
+    let arg_cwd = args.get("cwd").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_CALLER_CWD"));
+    let arg_token =
+        args.get("token").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_DIRECT_TOKEN"));
+    let arg_node = args.get("node").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_CALLER_NODE"));
     let arg_cred: Option<maestro_hosts::BridgeCredential> = match args.get("credential") {
         Some(v) => Some(
             serde_json::from_value(v.clone())
                 .map_err(|e| McpError::invalid_params(format!("`credential`: {e}"), None))?,
         ),
-        None => match std::env::var("MAESTRO_BRIDGE_CREDENTIAL").ok().filter(|s| !s.is_empty()) {
+        None => match var("MAESTRO_BRIDGE_CREDENTIAL") {
             Some(raw) => Some(
                 serde_json::from_str(&raw)
                     .map_err(|e| McpError::invalid_params(format!("MAESTRO_BRIDGE_CREDENTIAL: {e}"), None))?,
@@ -672,9 +779,8 @@ fn resolve_caller(
         },
     };
     let has_claim_meta = arg_cwd.is_some() || arg_token.is_some() || arg_node.is_some() || arg_cred.is_some();
-    let caller = Principal::Unverified;
     if !hosts.has_surface(&session.surface) && !has_claim_meta {
-        return Ok((session.clone(), caller));
+        return Ok(None);
     }
     if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {
         return Err(McpError::invalid_params(
@@ -714,8 +820,7 @@ fn resolve_caller(
             Some(json!({ "reason": "environment_mismatch", "refused": true })),
         ));
     }
-    let verified_session = verified.session().clone();
-    Ok((verified_session, maestro_hosts::verified_identity(&verified)))
+    Ok(Some(verified))
 }
 
 fn strip_auth_fields(mut args: Value) -> Value {
@@ -740,13 +845,23 @@ pub fn agent_request_with_hosts(
     kind: RequestKind,
     args: Value,
 ) -> Result<Value, McpError> {
+    agent_request_in(store, hosts, Ambient::Caller, kind, args)
+}
+
+fn agent_request_in(
+    store: &Store,
+    hosts: &maestro_hosts::SurfaceRegistry,
+    ambient: Ambient,
+    kind: RequestKind,
+    args: Value,
+) -> Result<Value, McpError> {
     let session_text = args.get("session").and_then(Value::as_str).unwrap_or_default().to_string();
     let clean_args = strip_auth_fields(args.clone());
     let payload = match kind {
         RequestKind::AskFile => {
             let a: AskFileArgs = parse(clean_args)?;
             let parsed_session = session_of(&a.session)?;
-            let (session, caller) = resolve_caller(hosts, &parsed_session, &args)?;
+            let (session, caller) = resolve_caller(hosts, &parsed_session, &args, ambient)?;
             // Writes go to the working tree, never to a git revision.
             requests::compose_ask(&a.ask).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
             let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);
@@ -770,7 +885,7 @@ pub fn agent_request_with_hosts(
         RequestKind::Escalate => json!(parse::<EscalateArgs>(clean_args)?),
     };
     let parsed_session = session_of(&session_text)?;
-    let (session, caller) = resolve_caller(hosts, &parsed_session, &args)?;
+    let (session, caller) = resolve_caller(hosts, &parsed_session, &args, ambient)?;
     let record = requests::new_record(kind, session, &caller, payload);
     requests::record(&store.paths, &record).map_err(file_error)?;
     Ok(json!({ "request": record, "journal": requests::journal(&store.paths) }))
@@ -840,15 +955,24 @@ pub struct MaestroServer {
     paths: Arc<maestro_store::Paths>,
     source: maestro_store::TreeSource,
     hosts: Arc<maestro_hosts::SurfaceRegistry>,
+    ambient: Ambient,
 }
 
 impl MaestroServer {
+    /// A server in its caller's own process (stdio): see [`Ambient::Caller`].
     pub fn new(store: Store) -> Self {
         Self {
             paths: Arc::new(store.paths),
             source: store.tree.source,
             hosts: Arc::new(maestro_hosts::SurfaceRegistry::from_env()),
+            ambient: Ambient::Caller,
         }
+    }
+
+    /// A shared daemon's server (HTTP): its caller variables verify nobody ([`Ambient::Shared`]).
+    pub fn shared(mut self) -> Self {
+        self.ambient = Ambient::Shared;
+        self
     }
 
     pub fn with_hosts(mut self, hosts: maestro_hosts::SurfaceRegistry) -> Self {
@@ -867,7 +991,7 @@ impl MaestroServer {
 
     /// Run one tool against a store resolved for this call and this server's retained `SurfaceRegistry`.
     pub fn call(&self, name: &str, args: Value) -> Result<Value, McpError> {
-        call_with_hosts(&self.store(), &self.hosts, name, args)
+        dispatch(&self.store(), &self.hosts, self.ambient, name, args)
     }
 
     pub fn tools() -> Vec<Tool> {
@@ -943,8 +1067,10 @@ impl ServerHandler for MaestroServer {
              work states, loop health, initiatives and the fleet. Call maestro_context at the start of \
              substantive work and before filing an ask. Agent tools file an ask (maestro_ask_file) or \
              record a request for the owner (queue work, request an action, close with a receipt, hand \
-             back, escalate); none of them starts anything. Answering asks, approving work and dispatch \
-             are owner actions taken in the owner's app."
+             back, escalate); none of them starts anything. The maestro_flow tools run a flow's steps \
+             for a verified session: next and status read, the others write that session's own \
+             instances. Answering asks, approving work and dispatch are owner actions taken in the \
+             owner's app."
                 .to_string(),
         );
         info

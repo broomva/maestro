@@ -80,6 +80,35 @@ maestro escalate --reason R
   environment (`BROOMVA_WORKSPACE`, `MAESTRO_ASK_LEDGER`): it files for an agent that could write the
   file itself, and it records that agent as unverified. Verification is the surfaces' (BRO-3268).
 
+Flows (BRO-3634). The flow kernel's verbs (`crates/flow`), each the CLI twin of a `maestro_flow_*`
+MCP tool, printing the tool's JSON. A refusal is a result, `{"ok": false, "code", "reason"}`, and
+the CLI exits 1 on it:
+
+```bash
+maestro flow start --definition F.yaml [--params '<json>']   # start an instance, owned by this session
+maestro flow next --instance I                               # the nodes to claim now, and why not the rest
+maestro flow status --instance I                             # every node's state
+maestro flow claim --instance I --node-id N                  # take a node: a claim token and a lease
+maestro flow heartbeat --claim-token T                       # extend the lease
+maestro flow complete --claim-token T [--outputs '<json>']   # the kernel runs the node's command
+maestro flow choose --claim-token T --edge E                 # take a choice node's edge if its guard holds
+```
+
+- **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
+  Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential
+  (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP it is the arguments `cwd`, `token`, `node` and
+  `credential`, which every write tool's schema declares. The registries that check it
+  (`MAESTRO_DIRECT_REGISTRY`, `MAESTRO_PASEO_AGENTS_DIR`, `MAESTRO_T3_HOME`,
+  `MAESTRO_BRIDGE_SECRET`) are the server's configuration, never an argument. The HTTP
+  daemon (`maestro serve --http`) serves every caller on the machine, so it reads a claim only from
+  the call's arguments, never from its own environment, for every agent tool. An unverified
+  caller is refused (`caller_unverified`), and a claim that does not verify too (`caller_refused`).
+  `next` and `status` read for anyone and write nothing.
+- **Where.** The ledger is `.broomva/flows` in the workspace (the same root every reader uses). A
+  workspace with no `.broomva` folder (`workspace_unready`) or that is a linked git worktree
+  (`workspace_is_worktree`) is refused, and only `start` makes the ledger; the other verbs say
+  `no_ledger`. It is bound to this machine's host name.
+
 Every command takes `--json` (`delegation brief` prints its markdown block either way). Agents should use `--json`: it is the same data the MCP tools return,
 because the CLI and the MCP server share one dispatch.
 
@@ -323,7 +352,8 @@ error for that name. Work under `$BROOMVA_HOME/work` is filed by kind,
 |---|---|---|
 | `crates/core` | `maestro-core` | Typed domain, no I/O: work states and transitions, asks, needs, loops and drift, ticks and due tiers, initiatives, grants, fleet, sessions namespaced by surface, surfaces, harnesses and nodes, authority, context packets, delegation tiers and plan graphs, the capacity economy |
 | `crates/store` | `maestro-store` | Readers for the on-disk control plane (working tree or a git revision) and the shared views |
-| `crates/mcp` | `maestro-mcp` | MCP server: read tools, agent request tools, the `maestro_context` prompt, and `maestro://` resources |
+| `crates/flow` | `maestro-flow` | The flow ledger and its kernel: the one writer of `.broomva/flows` |
+| `crates/mcp` | `maestro-mcp` | MCP server: read tools, agent request tools, the flow kernel's tools, the `maestro_context` prompt, and `maestro://` resources |
 | `crates/cli` | `maestro` | The `maestro` binary |
 
 ## Develop

@@ -1059,6 +1059,8 @@ dependencies = [
  "clap",
  "jiff",
  "maestro-core",
+ "maestro-flow",
+ "maestro-hosts",
  "maestro-mcp",
  "maestro-store",
  "serde",
@@ -1118,11 +1120,14 @@ name = "maestro-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "jiff",
  "maestro-core",
+ "maestro-flow",
  "maestro-hosts",
  "maestro-store",
  "maestro-view",
  "rmcp",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",
