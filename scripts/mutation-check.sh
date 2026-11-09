@@ -1604,9 +1604,9 @@ mutate $asks 'let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?
 # the commit the remote names, present here; an answered row; the linked ask. A local
 # maestro/answers or refs/remotes/origin/main never answers, and unread is not unanswered.
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed' 'Ok(Found::Row(row)) => return Ok(Answer::Landed'
-mutate $asks '    let sha = maestro_store::tree::remote_ref(&remote, MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Some(String::from("refs/remotes/origin/main")))'
-mutate $asks '    let sha = maestro_store::tree::remote_ref(&remote, MAIN, REMOTE_TIMEOUT)
-        .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(&remote, MAIN, REMOTE_TIMEOUT)
+mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Some(String::from("refs/remotes/origin/main")))'
+mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
+        .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .or_else(|_| Ok::<_, String>(Some(String::from("refs/remotes/origin/main"))))
         .map_err(unread)?'
 mutate $asks '    let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
@@ -1649,7 +1649,10 @@ mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if plain {'
 # only exactly refs/heads/main counts, and a remote without it is unread, never its HEAD.
 mutate $tree '    cmd.arg("--no-replace-objects").arg("-C").arg(root);' '    cmd.arg("-C").arg(root);'
 mutate $tree '    cmd.env_clear();
-    if let Some(path) = std::env::var_os("PATH") {' '    if let Some(path) = std::env::var_os("PATH") {'
+    for key in ["PATH", "HOME"] {' '    for key in ["PATH", "HOME"] {'
+# The answers remote is private: its one credential helper is GitHub's, and gh needs HOME.
+mutate $tree '    for key in ["PATH", "HOME"] {' '    for key in ["PATH"] {'
+mutate $asks ', "credential.https://github.com.helper=!gh auth git-credential"]' ']'
 mutate $tree 'None if std::time::Instant::now() >= deadline => break None,' 'None if false => break None,'
 mutate $tree '    if out.len() > MAX_LS_REMOTE {' '    if false {'
 mutate $tree '        if name != refname {
@@ -1658,7 +1661,10 @@ mutate $tree '        if name != refname {
 mutate $tree 'if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {' 'if found.is_some() {'
 mutate $tree 'if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {' 'if !(hex && (oid.len() == 40 || oid.len() == 64)) {'
 mutate $asks 'pub const MAIN: &str = "refs/heads/main";' 'pub const MAIN: &str = "HEAD";'
-mutate $asks '        .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;' '        .or_else(|| maestro_store::tree::remote_ref(&remote, "HEAD", REMOTE_TIMEOUT).ok().flatten())
+mutate $asks '        .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;' '        .or_else(|| {
+            let head = maestro_store::tree::ls_remote_command(&remote, "HEAD", ANSWERS_GIT_CONFIG);
+            maestro_store::tree::remote_ref(head, "HEAD", REMOTE_TIMEOUT).ok().flatten()
+        })
         .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;'
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) => Some(label.to_string()),'
 mutate $asks '        out.push_str("...");' ''

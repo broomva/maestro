@@ -36,8 +36,11 @@
 //!    it goes through a pull request and the merge gates. No setting, variable or local remote
 //!    names it (a test build alone swaps in a local fixture, `cfg(test)`). The kernel asks that URL
 //!    for `refs/heads/main` (`maestro_store::tree::remote_ref`: `git ls-remote` run outside any
-//!    repository, with no system, global or local configuration and none of the caller's `GIT_*`
-//!    environment, bounded in time and output, its process group killed at [`REMOTE_TIMEOUT`]),
+//!    repository, with no system, global or local configuration and none of the caller's
+//!    environment but `PATH` and `HOME`, bounded in time and output, its process group killed at
+//!    [`REMOTE_TIMEOUT`]). The remote is private, so the call names one credential helper,
+//!    GitHub's own ([`ANSWERS_GIT_CONFIG`]); it only supplies credentials, the URL stays compiled
+//!    in and TLS authenticates github.com, and a missing or wrong token is `answers_unread`. Then it
 //!    requires that commit to be in this clone, and reads the asks ledger at that exact commit,
 //!    with replace objects off (`--no-replace-objects`, so no `refs/replace/` or
 //!    `GIT_REPLACE_REF_BASE` forgery stands in for it). No local ref counts: not `maestro/answers`,
@@ -115,6 +118,19 @@ pub const MINT_TRIES: u32 = 8;
 /// The answers remote: the workspace repository whose main holds landed answers. Compiled in
 /// (owner decision 2026-11-09, "Compiled into maestro"): no setting or variable changes it.
 pub const ANSWERS_REMOTE: &str = "https://github.com/broomva/workspace.git";
+
+/// The only configuration the answers remote is asked with: no credential helper but GitHub's
+/// own (`gh auth git-credential`, which reads its token from `HOME`), since the remote is private.
+/// It does not weaken the pin: a helper only supplies credentials; the URL is compiled in and TLS
+/// authenticates github.com. A wrong or missing token fails closed, as `answers_unread`.
+pub const ANSWERS_GIT_CONFIG: &[&str] =
+    &["credential.helper=", "credential.https://github.com.helper=!gh auth git-credential"];
+
+/// The `git ls-remote` that asks `remote` where its main is: [`ANSWERS_GIT_CONFIG`] and nothing
+/// else local (`maestro_store::tree::ls_remote_command`).
+fn answers_ls_remote(remote: &str) -> std::process::Command {
+    maestro_store::tree::ls_remote_command(remote, MAIN, ANSWERS_GIT_CONFIG)
+}
 
 /// The ref of the answers remote an answer must have landed on.
 pub const MAIN: &str = "refs/heads/main";
@@ -531,7 +547,7 @@ enum Answer {
 fn landed_main(paths: &Paths) -> Result<String, KernelError> {
     let remote = answers_remote();
     let unread = |detail: String| Refusal::AnswersUnread { at: format!("{remote} {MAIN}"), detail: clip(&detail) };
-    let sha = maestro_store::tree::remote_ref(&remote, MAIN, REMOTE_TIMEOUT)
+    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .map_err(unread)?
         .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;
     let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));

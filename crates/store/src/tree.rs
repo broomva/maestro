@@ -320,33 +320,40 @@ pub const MAX_LS_REMOTE: usize = 4096;
 /// (`GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_REPLACE_REF_BASE`, `GIT_CONFIG_*`, ...) reaches it.
 const GIT_ENV_KEPT: [&str; 4] = ["PATH", "HOME", "LANG", "TMPDIR"];
 
-/// The object `refname` names at `url`, asked of that remote itself (`git ls-remote`), never of a
-/// local ref, which any process here can move. `Ok(None)` when the remote has no such ref.
-///
-/// Nothing local applies: git runs in `/`, outside any repository, with no system or global
-/// configuration (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`) and only `PATH` from the
-/// caller's environment, so no `insteadOf`, `uploadpack`, `sshCommand`, proxy or `GIT_CONFIG_*`
-/// can redirect it, and no prompt is shown (`GIT_TERMINAL_PROMPT=0`). Bounded: the remote gets
-/// `timeout`, then git's whole process group (a transport helper included) is killed, and at most
-/// [`MAX_LS_REMOTE`] bytes of its output and of its error are read.
-pub fn remote_ref(url: &str, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
-    use std::io::Read as _;
-    use std::os::unix::process::CommandExt as _;
-    if url.starts_with('-') || refname.starts_with('-') {
-        return Err(format!("`{url}` `{refname}` is not a remote and a ref"));
-    }
+/// `git -c <config>... ls-remote -- <url> <refname>`, to be run by [`remote_ref`], with nothing
+/// local applying: it runs in `/`, outside any repository, with no system or global configuration
+/// (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), no prompt (`GIT_TERMINAL_PROMPT=0`), and
+/// only `PATH` and `HOME` from the caller's environment (`HOME` so a credential helper named in
+/// `config` finds its own token). So no `insteadOf`, `uploadpack`, `sshCommand`, proxy or
+/// `GIT_CONFIG_*` redirects it; `config` (each `key=value`, the caller's own constants) is the
+/// only configuration it has. `--` keeps the URL and the ref from reading as options.
+pub fn ls_remote_command(url: &str, refname: &str, config: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.env_clear();
-    if let Some(path) = std::env::var_os("PATH") {
-        cmd.env("PATH", path);
+    for key in ["PATH", "HOME"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
     }
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0");
+    cmd.current_dir("/");
+    for pair in config {
+        cmd.args(["-c", pair]);
+    }
+    cmd.args(["ls-remote", "--", url, refname]);
+    cmd
+}
+
+/// The object `refname` names where `cmd` ([`ls_remote_command`]) asks, from the remote itself,
+/// never from a local ref, which any process here can move. `Ok(None)` when the remote has no
+/// such ref. Bounded: the remote gets `timeout`, then git's whole process group (a transport or
+/// credential helper included) is killed, and at most [`MAX_LS_REMOTE`] bytes of its output and of
+/// its error are read.
+pub fn remote_ref(mut cmd: Command, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
     let mut child = cmd
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .current_dir("/")
         .process_group(0)
-        .args(["ls-remote", "--", url, refname])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -378,15 +385,15 @@ pub fn remote_ref(url: &str, refname: &str, timeout: Duration) -> Result<Option<
         }
         let _ = child.wait();
         let _ = (out.join(), err.join());
-        return Err(format!("git ls-remote {url} did not answer within {}s", timeout.as_secs()));
+        return Err(format!("git ls-remote did not answer within {}s", timeout.as_secs()));
     };
     let out = out.join().unwrap_or_default();
     let err = err.join().unwrap_or_default();
     if !status.success() {
         let said = String::from_utf8_lossy(&err[..err.len().min(MAX_LS_REMOTE)]).trim().to_string();
-        return Err(format!("git ls-remote {url} failed ({status}): {said}"));
+        return Err(format!("git ls-remote failed ({status}): {said}"));
     }
-    parse_ls_remote(&out, refname).map_err(|e| format!("git ls-remote {url}: {e}"))
+    parse_ls_remote(&out, refname).map_err(|e| format!("git ls-remote: {e}"))
 }
 
 /// The object id `git ls-remote` printed for exactly `refname` (its patterns match by suffix, so

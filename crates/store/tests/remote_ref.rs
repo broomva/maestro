@@ -1,7 +1,7 @@
 //! `tree::remote_ref` and its parser (BRO-3635): where a remote says a ref is, bounded in time and
 //! output, taken only for exactly that ref, and only as a well-formed object id.
 
-use maestro_store::tree::{MAX_LS_REMOTE, parse_ls_remote, remote_ref};
+use maestro_store::tree::{MAX_LS_REMOTE, ls_remote_command, parse_ls_remote, remote_ref};
 use std::time::{Duration, Instant};
 
 const A: &str = "1111111111111111111111111111111111111111";
@@ -50,10 +50,33 @@ fn a_remote_that_hangs_is_given_up_at_the_timeout() {
     let (tx, rx) = std::sync::mpsc::channel();
     let started = Instant::now();
     std::thread::spawn(move || {
-        let _ = tx.send(remote_ref(&format!("git://127.0.0.1:{port}/x"), "refs/heads/main", Duration::from_secs(1)));
+        let cmd = ls_remote_command(&format!("git://127.0.0.1:{port}/x"), "refs/heads/main", &[]);
+        let _ = tx.send(remote_ref(cmd, "refs/heads/main", Duration::from_secs(1)));
     });
     let got = rx.recv_timeout(Duration::from_secs(15)).expect("remote_ref never gave up");
     let e = got.unwrap_err();
     assert!(e.contains("did not answer"), "{e}");
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+}
+
+#[test]
+fn the_ls_remote_command_runs_outside_any_repository_with_only_its_own_configuration() {
+    let cmd = ls_remote_command("https://example.com/r.git", "refs/heads/main", &["a.b=c", "d.e="]);
+    let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert_eq!(args, ["-c", "a.b=c", "-c", "d.e=", "ls-remote", "--", "https://example.com/r.git", "refs/heads/main"]);
+    assert_eq!(cmd.get_current_dir(), Some(std::path::Path::new("/")));
+    // The environment is cleared (`env_clear`) and holds exactly these: PATH and HOME from the
+    // caller's (both are set in a test run), and the three that keep git's own configuration out.
+    let mut env: Vec<(String, Option<String>)> = cmd
+        .get_envs()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+        .collect();
+    env.sort();
+    let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
+    let value = |k: &str| env.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.clone());
+    assert_eq!(value("GIT_CONFIG_GLOBAL").as_deref(), Some("/dev/null"));
+    assert_eq!(value("GIT_CONFIG_NOSYSTEM").as_deref(), Some("1"));
+    assert_eq!(value("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
+    assert_eq!(value("HOME"), std::env::var("HOME").ok());
 }

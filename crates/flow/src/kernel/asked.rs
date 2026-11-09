@@ -1075,3 +1075,38 @@ fn clipped_text_is_marked_and_a_long_ledger_error_is_clipped() {
     let crate::kernel::KernelError::Refused(Refusal::AskLedgerUnread { detail, .. }) = e else { panic!() };
     assert!(detail.ends_with("...") && detail.len() <= MAX_ECHO + 3, "{} bytes: {detail}", detail.len());
 }
+
+#[test]
+fn the_production_ls_remote_asks_the_compiled_remote_with_githubs_credential_helper_only() {
+    let cmd = answers_ls_remote(ANSWERS_REMOTE);
+    let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert_eq!(
+        args,
+        [
+            "-c",
+            "credential.helper=",
+            "-c",
+            "credential.https://github.com.helper=!gh auth git-credential",
+            "ls-remote",
+            "--",
+            "https://github.com/broomva/workspace.git",
+            "refs/heads/main",
+        ]
+    );
+    assert_eq!(cmd.get_current_dir(), Some(Path::new("/")));
+    let mut keys: Vec<String> = cmd.get_envs().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+    keys.sort();
+    assert_eq!(keys, ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
+}
+
+/// Not run in CI (`--ignored` by hand): the production call, against GitHub, with this machine's
+/// `gh` login. It prints main's commit.
+#[test]
+#[ignore = "network: asks GitHub for the answers remote's main"]
+fn the_compiled_answers_remote_answers_from_github() {
+    let sha = maestro_store::tree::remote_ref(answers_ls_remote(ANSWERS_REMOTE), MAIN, REMOTE_TIMEOUT)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .expect("the answers remote has a main");
+    println!("{ANSWERS_REMOTE} {MAIN} = {sha}");
+    assert_eq!(sha.len(), 40);
+}
