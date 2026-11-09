@@ -27,6 +27,7 @@
 //!   iteration. See `write`'s module docs for ownership, tokens, leases, retry and cancel.
 //! - **Events** ([`events`]) are typed bodies of the storage layer's generic event.
 
+pub mod asks;
 #[cfg(test)]
 mod clocked;
 mod compile;
@@ -40,6 +41,7 @@ mod jq;
 mod replay;
 mod write;
 
+pub use asks::{ASK_NOT_FILED, Asked, Filing, ask};
 pub use compile::{CompiledFlow, MAX_SOURCE, compile};
 pub use error::{CompileError, KernelError, Refusal};
 pub use exec::Limits;

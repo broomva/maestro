@@ -238,6 +238,37 @@ impl Store {
         Section { source: docs.source, data, errors }
     }
 
+    /// One ask ledger, `file` in the asks folder, read as [`Store::asks`] reads each (the same
+    /// YAML reader, [`LEDGER_LIMIT`], and so the same entry hashes), and nothing else in the
+    /// folder. `Ok(None)` when the tree holds no such file. An entry that does not read is an
+    /// error, never skipped: it may be the one a caller looks for. Used where a caller needs one
+    /// ask by its id, not a listing (the flow kernel's human steps, BRO-3635).
+    pub fn ask_ledger(&self, file: &str) -> Result<Option<AskLedger>, String> {
+        if !requests::ledger_name_ok(file) {
+            return Err(format!("`{file}` is not a ledger name"));
+        }
+        let dir = self.rel(ASKS)?;
+        let listing =
+            self.tree.list(&dir, &[".yaml", ".yml"]).map_err(|e| format!("{}: {e}", self.tree.label(&dir)))?;
+        if let Some((_, reason)) = listing.skipped.iter().find(|(name, _)| name == file) {
+            return Err(format!("{dir}/{file}: {reason}"));
+        }
+        if !listing.names.iter().any(|name| name == file) {
+            return Ok(None);
+        }
+        let rel = format!("{dir}/{file}");
+        let text = self.tree.read(&rel).map_err(|e| format!("{rel}: {e}"))?;
+        if text.len() > LEDGER_LIMIT {
+            return Err(format!("{rel}: it is over {LEDGER_LIMIT} bytes"));
+        }
+        let doc = yaml::parse(&text).map_err(|e| format!("{rel}: {e}"))?.value;
+        let (ledger, bad) = AskLedger::from_value(doc).map_err(|e| format!("{rel}: {e}"))?;
+        if let Some((i, reason)) = bad.first() {
+            return Err(format!("{rel}#{i}: {reason}"));
+        }
+        Ok(Some(ledger))
+    }
+
     pub fn initiatives(&self) -> Section<Vec<Initiative>> {
         self.yaml_dir(INITIATIVES)
     }
