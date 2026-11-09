@@ -196,7 +196,8 @@ fn look(
 }
 
 /// Appends `event` under the flows lock if the node's ask is still `expect` and the node still
-/// waiting; `Ok(None)` when its ask is now `now_linked` (another call of the owner's linked it).
+/// waiting; `Ok(None)` when another call of the owner's linked it meanwhile. Anything else is
+/// `ask_changed`.
 fn append_if(
     ledger: &mut Ledger,
     session: &VerifiedSession,
@@ -214,9 +215,7 @@ fn append_if(
         Some(now) if now == *expect => {}
         Some(now) if now.ask_id == expect.ask_id && now.linked && !expect.linked => return Ok(None),
         _ => {
-            return Err(
-                Refusal::NotEnabled { node: node.to_string(), state: "its ask changed meanwhile".into() }.into()
-            );
+            return Err(Refusal::AskChanged { node: node.to_string() }.into());
         }
     }
     let ev = event(&iteration, &inputs)?;
@@ -540,7 +539,7 @@ fn take_answer(
     let appended =
         append_if(ledger, session, instance, node, &rec, |iteration, inputs| answered(iteration, inputs).to_event())?;
     let Some(appended) = appended else {
-        return Err(Refusal::NotEnabled { node: node.to_string(), state: "its ask changed meanwhile".into() }.into());
+        return Err(Refusal::AskChanged { node: node.to_string() }.into());
     };
     Ok(Asked::Answered { ask_id: rec.ask_id, ledger: rec.ledger, outputs, source: source.to_string(), appended })
 }

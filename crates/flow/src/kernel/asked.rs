@@ -198,7 +198,7 @@ fn asked_at_is_pinned_before_hashing_and_the_comparable_body_excludes_origin() {
     clock.set("2026-01-02T03:04:05Z".parse().unwrap());
     let fi = f.begin();
     // The agent never gives asked_at (nor id, uid or ask): the kernel's own goes in.
-    for key in KERNEL_KEYS {
+    for key in ["id", "uid", "ask", "asked_at"] {
         let mut early = filing();
         early.body.insert(key.into(), Value::String("2020-01-01T00:00:00Z".into()));
         assert_eq!(code(f.ask(&fi, Some(&early))), "ask_body_invalid", "{key}");

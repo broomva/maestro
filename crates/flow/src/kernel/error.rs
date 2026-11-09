@@ -175,6 +175,10 @@ pub enum Refusal {
         "The answer to {ask_id} at {at} is to a body that is not the one linked (hash {found}, not {linked}); it is not taken."
     )]
     AnswerMismatch { ask_id: String, at: String, linked: String, found: String },
+    /// The node's ask changed between reading it and recording the next step (another call of the
+    /// owner's moved it on). Nothing was recorded; call ask again.
+    #[error("The ask of node {node} changed meanwhile; nothing was recorded. Call ask again.")]
+    AskChanged { node: String },
     /// The answer's fields are over the outputs bound.
     #[error("The answer to {ask_id} is {size} bytes, over {limit}; it is not taken.")]
     AnswerTooLarge { ask_id: String, size: usize, limit: usize },
@@ -213,6 +217,7 @@ impl Refusal {
             Refusal::AnswersUnread { .. } => "answers_unread",
             Refusal::AnswerMismatch { .. } => "answer_mismatch",
             Refusal::AnswerTooLarge { .. } => "answer_too_large",
+            Refusal::AskChanged { .. } => "ask_changed",
         }
     }
 }
