@@ -40,10 +40,17 @@
 //!    environment but `PATH` and `HOME`, bounded in time and output, its process group killed at
 //!    [`REMOTE_TIMEOUT`]). The remote is private, so the call names one credential helper,
 //!    GitHub's own ([`ANSWERS_GIT_CONFIG`]); it only supplies credentials, the URL stays compiled
-//!    in and TLS authenticates github.com, and a missing or wrong token is `answers_unread`. Then it
-//!    requires that commit to be in this clone, and reads the asks ledger at that exact commit,
-//!    with replace objects off (`--no-replace-objects`, so no `refs/replace/` or
-//!    `GIT_REPLACE_REF_BASE` forgery stands in for it). No local ref counts: not `maestro/answers`,
+//!    in and TLS authenticates github.com, and a missing or wrong token is `answers_unread`. Every
+//!    git call on this path is the system git by absolute path (`/usr/bin/git`, root-owned) on a
+//!    fixed `PATH` (`maestro_store::tree::GIT_PATH`: the system folders, then the two where `gh`
+//!    is installed, so `gh` is found there; it only supplies credentials, and fails closed). Then
+//!    it requires that commit to be in this clone, and reads the asks ledger at that exact commit
+//!    object by object, each checked against its id in-process (`tree::read_verified`): the commit
+//!    against the remote's id, each tree on the path against its parent's entry, the ledger against
+//!    its tree's entry. Git does not check an object's hash when it reads it, so this is what keeps
+//!    content planted in the object store (an overwritten loose object, a pack naming a genuine id,
+//!    a commit planted under an id not fetched yet) from reading as the answer. Replace objects are
+//!    off too (`--no-replace-objects`), and none of the caller's `GIT_*` environment applies. No local ref counts: not `maestro/answers`,
 //!    not `refs/remotes/origin/main`, not `origin`'s URL, which any process here can move. A remote
 //!    that does not answer or has no main, or a commit this clone does not have (fetch), is
 //!    `answers_unread`: unread is not unanswered (fail closed). The working tree is never read for
@@ -58,9 +65,10 @@
 //! reads it: [`landing`] reports it as `answer_waiting_to_land` for `next` and `status`, and `ask`
 //! says so, but it is never a receipt.
 //!
-//! **Residual risk.** Whoever can change Maestro's code or binary (the compiled remote), or merge
-//! a pull request that carries an answer into the answers remote's main through its merge gates,
-//! can still answer for the owner. Those paths' gates are the defence, not the kernel.
+//! **Residual risk.** Whoever can replace Maestro's own binary (`~/.local/bin/maestro` is the
+//! user's to write), change system git as root, or merge a pull request that carries an answer
+//! into the answers remote's main through its merge gates, can still answer for the owner. Those
+//! paths' own controls are the defence, not the kernel.
 //!
 //! # The answer as outputs
 //!
@@ -404,7 +412,12 @@ enum Found {
 /// The row of `ledger` addressed by `id` (its `id`, or a `uid`), read from `store` alone: the
 /// one ledger file, never a listing of the asks.
 fn find(store: &Store, ledger: &str, id: &str) -> Result<Found, String> {
-    let Some(l) = store.ask_ledger(ledger)? else { return Ok(Found::None) };
+    rows(store.ask_ledger(ledger)?, id)
+}
+
+/// The row of a ledger addressed by `id`, or none, or more than one.
+fn rows(ledger: Option<maestro_core::ask::AskLedger>, id: &str) -> Result<Found, String> {
+    let Some(l) = ledger else { return Ok(Found::None) };
     let mut rows = l.asks.into_iter().filter(|a| a.id == id || a.uid.as_deref() == Some(id));
     Ok(match (rows.next(), rows.next()) {
         (None, _) => Found::None,
@@ -550,12 +563,9 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
     let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .map_err(unread)?
         .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;
-    let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
-    if let Some(reason) = &at.tree.unresolved {
-        return Err(unread(format!(
-            "commit {sha}, the answers remote's main, is not in this clone; fetch it ({reason})"
-        ))
-        .into());
+    // Present, not trusted: what the object store holds under that id is checked as it is read.
+    if !maestro_store::tree::has_object(&paths.workspace, &sha) {
+        return Err(unread(format!("commit {sha}, the answers remote's main, is not in this clone; fetch it")).into());
     }
     Ok(sha)
 }
@@ -564,9 +574,12 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
 /// one waits to land on Maestro's answers branch.
 fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
     let sha = landed_main(paths)?;
-    let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
+    // The asks folder as the registry names it here; the ledger is read at `sha`, every object on
+    // the way checked against its id, so nothing planted in the object store under the commit's,
+    // a tree's or the ledger's id reads as genuine.
+    let local = Store::new(paths.clone(), TreeSource::WorkingTree);
     let source = format!("main@{sha}");
-    match find(&at, &rec.ledger, &rec.ask_id) {
+    match local.ask_ledger_verified(&rec.ledger, &sha).and_then(|l| rows(l, &rec.ask_id)) {
         Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),
         Ok(Found::Ambiguous) => {
             let at = format!("{source}:{}", rec.ledger);

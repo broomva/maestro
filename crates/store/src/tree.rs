@@ -316,24 +316,30 @@ impl Tree {
 /// The most bytes [`remote_ref`] reads of `git ls-remote`'s output, and of its error.
 pub const MAX_LS_REMOTE: usize = 4096;
 
-/// The environment a git child keeps: only these, from the caller's, so no `GIT_*` variable
+/// The git every store read and `ls-remote` runs: the system's, root-owned on macOS and Linux, by
+/// absolute path, so no `git` earlier in a caller's `PATH` stands in for it.
+pub const GIT: &str = "/usr/bin/git";
+
+/// The `PATH` those git children get, whatever the caller's: system folders, then the two where
+/// GitHub's `gh` (the answers remote's credential helper) is installed.
+pub const GIT_PATH: &str = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin";
+
+/// The environment a git child keeps from the caller's: only these, so no `GIT_*` variable
 /// (`GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_REPLACE_REF_BASE`, `GIT_CONFIG_*`, ...) reaches it.
-const GIT_ENV_KEPT: [&str; 4] = ["PATH", "HOME", "LANG", "TMPDIR"];
+const GIT_ENV_KEPT: [&str; 3] = ["HOME", "LANG", "TMPDIR"];
 
 /// `git -c <config>... ls-remote -- <url> <refname>`, to be run by [`remote_ref`], with nothing
 /// local applying: it runs in `/`, outside any repository, with no system or global configuration
-/// (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), no prompt (`GIT_TERMINAL_PROMPT=0`), and
-/// only `PATH` and `HOME` from the caller's environment (`HOME` so a credential helper named in
-/// `config` finds its own token). So no `insteadOf`, `uploadpack`, `sshCommand`, proxy or
+/// (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), no prompt (`GIT_TERMINAL_PROMPT=0`), the
+/// system git ([`GIT`]) on a fixed `PATH` ([`GIT_PATH`]), and only `HOME` from the caller's
+/// environment (so a credential helper named in `config` finds its own token). So no `insteadOf`, `uploadpack`, `sshCommand`, proxy or
 /// `GIT_CONFIG_*` redirects it; `config` (each `key=value`, the caller's own constants) is the
 /// only configuration it has. `--` keeps the URL and the ref from reading as options.
 pub fn ls_remote_command(url: &str, refname: &str, config: &[&str]) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.env_clear();
-    for key in ["PATH", "HOME"] {
-        if let Some(value) = std::env::var_os(key) {
-            cmd.env(key, value);
-        }
+    let mut cmd = Command::new(GIT);
+    cmd.env_clear().env("PATH", GIT_PATH);
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.env("HOME", home);
     }
     cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0");
     cmd.current_dir("/");
@@ -389,6 +395,10 @@ pub fn remote_ref(mut cmd: Command, refname: &str, timeout: Duration) -> Result<
     };
     let out = out.join().unwrap_or_default();
     let err = err.join().unwrap_or_default();
+    if out.len() > MAX_LS_REMOTE {
+        // The reader stopped one byte past the bound and closed the pipe.
+        return Err(format!("git ls-remote said more than {MAX_LS_REMOTE} bytes (read {}, then stopped)", out.len()));
+    }
     if !status.success() {
         let said = String::from_utf8_lossy(&err[..err.len().min(MAX_LS_REMOTE)]).trim().to_string();
         return Err(format!("git ls-remote failed ({status}): {said}"));
@@ -419,13 +429,126 @@ pub fn parse_ls_remote(out: &[u8], refname: &str) -> Result<Option<String>, Stri
     Ok(found)
 }
 
+/// The most bytes [`read_verified`] reads of a commit or a tree object.
+pub const MAX_OBJECT: usize = 1024 * 1024;
+
+/// `rel` at `commit`, read object by object and each object checked against its id before it is
+/// trusted. Git does not check an object's hash when it reads it, so content planted in the
+/// object store under a genuine id (an overwritten loose object, a pack naming that id with other
+/// data, a loose commit planted under an id not fetched yet) reads as genuine to git; it does not
+/// here. Each object is read raw (`git cat-file <type> <id>`, bounded) and hashed in-process as
+/// git names it, `"<type> <size>\0" + content` with the repository's object format (sha1 or
+/// sha256): the commit against `commit`, each tree on the path against the id its parent gives,
+/// and the file against the id its tree gives. `Ok(None)` when the path is not there; a mismatch,
+/// or a file over `limit` bytes, is an error.
+pub fn read_verified(root: &Path, commit: &str, rel: &str, limit: usize) -> Result<Option<String>, String> {
+    let format = git_bytes(root, &["rev-parse", "--show-object-format"], 64)?;
+    let format = String::from_utf8_lossy(&format).trim().to_string();
+    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT)?;
+    check(&format, "commit", commit, &body)?;
+    let tree = String::from_utf8_lossy(&body)
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("tree "))
+        .map(str::to_string)
+        .ok_or_else(|| format!("commit {commit} names no tree"))?;
+    let mut id = tree;
+    let parts: Vec<&str> = rel.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT)?;
+        check(&format, "tree", &id, &body)?;
+        let last = i + 1 == parts.len();
+        match tree_entry(&body, part, &format)? {
+            Some((mode, next)) if last && (mode == "100644" || mode == "100755") => id = next,
+            Some((mode, next)) if !last && mode == "40000" => id = next,
+            _ => return Ok(None),
+        }
+    }
+    let blob = git_bytes(root, &["cat-file", "blob", &id], limit)?;
+    check(&format, "blob", &id, &blob)?;
+    String::from_utf8(blob).map(Some).map_err(|_| format!("{rel} is not valid UTF-8"))
+}
+
+/// Whether the object store of the repository at `root` holds an object under `id`
+/// (`cat-file -e`): present, never trusted ([`read_verified`] checks what it holds).
+pub fn has_object(root: &Path, id: &str) -> bool {
+    !id.starts_with('-')
+        && git_command(root)
+            .args(["cat-file", "-e", id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+}
+
+/// Refuses `body` unless it hashes, as git names objects, to `id`.
+fn check(format: &str, kind: &str, id: &str, body: &[u8]) -> Result<(), String> {
+    use sha2::Digest as _;
+    let header = format!("{kind} {}\0", body.len());
+    let digest: Vec<u8> = match format {
+        "sha1" => sha1::Sha1::new().chain_update(header.as_bytes()).chain_update(body).finalize().to_vec(),
+        "sha256" => sha2::Sha256::new().chain_update(header.as_bytes()).chain_update(body).finalize().to_vec(),
+        other => return Err(format!("the object format {other:?} is not one Maestro checks")),
+    };
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    if hex != id {
+        return Err(format!("the {kind} object {id} does not hash to its id (it hashes to {hex})"));
+    }
+    Ok(())
+}
+
+/// The mode and id of entry `name` in a raw tree object (`<mode> <name>\0<id bytes>`...).
+fn tree_entry(body: &[u8], name: &str, format: &str) -> Result<Option<(String, String)>, String> {
+    let width = if format == "sha256" { 32 } else { 20 };
+    let mut rest = body;
+    while !rest.is_empty() {
+        let space = rest.iter().position(|b| *b == b' ').ok_or("a tree entry has no mode")?;
+        let nul = rest.iter().position(|b| *b == 0).ok_or("a tree entry has no name")?;
+        if nul < space || rest.len() < nul + 1 + width {
+            return Err("a tree entry is cut short".into());
+        }
+        let mode = String::from_utf8_lossy(&rest[..space]).into_owned();
+        let entry = &rest[space + 1..nul];
+        let id: String = rest[nul + 1..nul + 1 + width].iter().map(|b| format!("{b:02x}")).collect();
+        if entry == name.as_bytes() {
+            return Ok(Some((mode, id)));
+        }
+        rest = &rest[nul + 1 + width..];
+    }
+    Ok(None)
+}
+
+/// `git <args>` in `root` ([`git_command`]), its output read to at most `limit` bytes.
+fn git_bytes(root: &Path, args: &[&str], limit: usize) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let mut child = git_command(root)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("git {} did not start: {e}", args.join(" ")))?;
+    let mut out = Vec::new();
+    let read = child.stdout.take().map(|p| p.take(limit as u64 + 1).read_to_end(&mut out));
+    if out.len() > limit {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("git {} said more than {limit} bytes", args.join(" ")));
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    match read {
+        Some(Ok(_)) if status.success() => Ok(out),
+        _ => Err(format!("git {} failed ({status})", args.join(" "))),
+    }
+}
+
 /// `git -C <root>`, reading only what the repository's objects hold: replace objects off
 /// (`--no-replace-objects`, so neither `refs/replace/` nor `GIT_REPLACE_REF_BASE` can stand a
 /// forged object in for a genuine one), and none of the caller's `GIT_*` environment
-/// ([`GIT_ENV_KEPT`] only).
+/// ([`GIT_ENV_KEPT`] only), the system git ([`GIT`]) on a fixed `PATH` ([`GIT_PATH`]).
 fn git_command(root: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.env_clear();
+    let mut cmd = Command::new(GIT);
+    cmd.env_clear().env("PATH", GIT_PATH);
     for key in GIT_ENV_KEPT {
         if let Some(value) = std::env::var_os(key) {
             cmd.env(key, value);

@@ -75,8 +75,39 @@ fn the_ls_remote_command_runs_outside_any_repository_with_only_its_own_configura
     let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(keys, ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
     let value = |k: &str| env.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.clone());
+    // The system git, by absolute path, on a fixed PATH: none earlier in the caller's stands in.
+    assert_eq!(cmd.get_program(), "/usr/bin/git");
+    assert_eq!(value("PATH").as_deref(), Some("/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"));
     assert_eq!(value("GIT_CONFIG_GLOBAL").as_deref(), Some("/dev/null"));
     assert_eq!(value("GIT_CONFIG_NOSYSTEM").as_deref(), Some("1"));
     assert_eq!(value("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
     assert_eq!(value("HOME"), std::env::var("HOME").ok());
+}
+
+#[test]
+fn output_past_the_bound_is_refused_and_the_reader_stops_at_it() {
+    // A bare repository whose refs ending in refs/heads/main (ls-remote's patterns match by
+    // suffix) say far more than MAX_LS_REMOTE.
+    let tmp = tempfile::tempdir().unwrap();
+    let bare = tmp.path().join("r.git");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@localhost"])
+            .arg("-C")
+            .arg(&bare)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    std::fs::create_dir(&bare).unwrap();
+    git(&["init", "-q", "--bare"]);
+    let tree = git(&["hash-object", "-t", "tree", "-w", "/dev/null"]);
+    let commit = git(&["commit-tree", &tree, "-m", "x"]);
+    let refs: String = (0..200).map(|i| format!("{commit} refs/heads/x{i:03}/refs/heads/main\n")).collect();
+    std::fs::write(bare.join("packed-refs"), format!("{refs}{commit} refs/heads/main\n")).unwrap();
+    let cmd = ls_remote_command(bare.to_str().unwrap(), "refs/heads/main", &[]);
+    let e = remote_ref(cmd, "refs/heads/main", Duration::from_secs(20)).unwrap_err();
+    assert!(e.contains(&format!("read {}, then stopped", MAX_LS_REMOTE + 1)), "{e}");
 }

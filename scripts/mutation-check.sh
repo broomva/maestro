@@ -1609,12 +1609,8 @@ mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&r
         .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .or_else(|_| Ok::<_, String>(Some(String::from("refs/remotes/origin/main"))))
         .map_err(unread)?'
-mutate $asks '    let at = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
-    let source = format!("main@{sha}");' '    let at = Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into()));
-    let source = format!("main@{sha}");'
-mutate $asks '    if let Some(reason) = &at.tree.unresolved {
-        return Err(' '    if let Some(reason) = at.tree.unresolved.as_ref().filter(|_| false) {
-        return Err('
+mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id) {'
+mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha) {' '    if false {'
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
 mutate $replay '                    Class::Human { .. } => return Ok(Err("wrong_class")),' ''
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {' 'if false {'
@@ -1648,13 +1644,39 @@ mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if plain {'
 # maestro") and asked with nothing local applying; reads at its main run with replace objects off;
 # only exactly refs/heads/main counts, and a remote without it is unread, never its HEAD.
 mutate $tree '    cmd.arg("--no-replace-objects").arg("-C").arg(root);' '    cmd.arg("-C").arg(root);'
-mutate $tree '    cmd.env_clear();
-    for key in ["PATH", "HOME"] {' '    for key in ["PATH", "HOME"] {'
+mutate $tree '    cmd.env_clear().env("PATH", GIT_PATH);
+    if let Some(home) = std::env::var_os("HOME") {' '    cmd.env("PATH", GIT_PATH);
+    if let Some(home) = std::env::var_os("HOME") {'
 # The answers remote is private: its one credential helper is GitHub's, and gh needs HOME.
-mutate $tree '    for key in ["PATH", "HOME"] {' '    for key in ["PATH"] {'
+mutate $tree '    if let Some(home) = std::env::var_os("HOME") {
+        cmd.env("HOME", home);
+    }' ''
 mutate $asks ', "credential.https://github.com.helper=!gh auth git-credential"]' ']'
+# P20 round 3: git does not check an object's hash when it reads it; the answer read checks each
+# object against its id, step by step. The system git by absolute path on a fixed PATH; no GIT_*
+# environment redirects a store read; the ls-remote reader stops at its bound.
+mutate $tree '    check(&format, "commit", commit, &body)?;' ''
+mutate $tree '        check(&format, "tree", &id, &body)?;' ''
+mutate $tree '    check(&format, "blob", &id, &blob)?;' ''
+mutate $tree '    if hex != id {' '    if false {'
+mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev(sha.clone())), &rec.ledger, &rec.ask_id) {'
+mutate $tree 'pub const GIT: &str = "/usr/bin/git";' 'pub const GIT: &str = "git";'
+mutate $tree '    let mut cmd = Command::new(GIT);
+    cmd.env_clear().env("PATH", GIT_PATH);
+    if let Some(home)' '    let mut cmd = Command::new(GIT);
+    cmd.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    if let Some(home)'
+mutate $tree '    cmd.env_clear().env("PATH", GIT_PATH);
+    for key in GIT_ENV_KEPT {' '    cmd.env("PATH", GIT_PATH);
+    for key in GIT_ENV_KEPT {'
+mutate $tree '                let _ = pipe.take(MAX_LS_REMOTE as u64 + 1).read_to_end(&mut buf);' '                let _ = pipe.read_to_end(&mut buf);'
+mutate $tree '    if out.len() > MAX_LS_REMOTE {
+        // The reader stopped' '    if false {
+        // The reader stopped'
 mutate $tree 'None if std::time::Instant::now() >= deadline => break None,' 'None if false => break None,'
-mutate $tree '    if out.len() > MAX_LS_REMOTE {' '    if false {'
+mutate $tree '    if out.len() > MAX_LS_REMOTE {
+        return Err(format!("it said more than' '    if false {
+        return Err(format!("it said more than'
 mutate $tree '        if name != refname {
             continue;' '        if false {
             continue;'

@@ -1079,6 +1079,9 @@ fn clipped_text_is_marked_and_a_long_ledger_error_is_clipped() {
 #[test]
 fn the_production_ls_remote_asks_the_compiled_remote_with_githubs_credential_helper_only() {
     let cmd = answers_ls_remote(ANSWERS_REMOTE);
+    assert_eq!(cmd.get_program(), "/usr/bin/git", "the system git, by absolute path");
+    let path = cmd.get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v);
+    assert_eq!(path, Some(std::ffi::OsStr::new("/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")));
     let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     assert_eq!(
         args,
@@ -1109,4 +1112,130 @@ fn the_compiled_answers_remote_answers_from_github() {
         .expect("the answers remote has a main");
     println!("{ANSWERS_REMOTE} {MAIN} = {sha}");
     assert_eq!(sha.len(), 40);
+}
+
+// P20 round 3 (BRO-3635): git does not check an object's hash when it reads it, so content
+// planted in the object store under a genuine id reads as genuine to git. The answer read checks
+// every object on the way against its id (`maestro_store::tree::read_verified`).
+
+/// The loose object file of `id` in the workspace's clone.
+fn loose(f: &Fx, id: &str) -> PathBuf {
+    f.ws.join(".git/objects").join(&id[..2]).join(&id[2..])
+}
+
+/// Puts `forged`'s loose object file where `genuine`'s is: a loose object overwritten in place.
+fn overwrite_loose(f: &Fx, genuine: &str, forged: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let to = loose(f, genuine);
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    if to.exists() {
+        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    std::fs::copy(loose(f, forged), &to).unwrap();
+}
+
+fn object(f: &Fx, rev: &str) -> String {
+    git(&f.ws, &["rev-parse", rev]).trim().to_string()
+}
+
+/// Refused as unread with a hash mismatch, and nothing written.
+fn refused_as_forged(f: &mut Fx, fi: &InstanceId) {
+    let e = f.ask(fi, None).unwrap_err();
+    assert_eq!(e.code(), "answers_unread", "{e}");
+    assert!(e.to_string().contains("does not hash to its id"), "{e}");
+    assert_eq!(f.kinds(fi), ["Started", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn an_overwritten_loose_ledger_blob_is_not_read_as_the_answer() {
+    let (mut f, fi, _id, main, forged) = landed_unanswered();
+    let ledger = ":.control/asks/ledger.yaml";
+    overwrite_loose(&f, &object(&f, &format!("{main}{ledger}")), &object(&f, &format!("{forged}{ledger}")));
+    assert!(plain_show(&f, &main, &[]).contains("answer_option"), "the control: plain git reads the forgery");
+    refused_as_forged(&mut f, &fi);
+}
+
+#[test]
+fn a_pack_naming_the_genuine_blob_with_forged_data_is_not_read_as_the_answer() {
+    let (mut f, fi, _id, main, forged) = landed_unanswered();
+    let genuine = object(&f, &format!("{main}:.control/asks/ledger.yaml"));
+    let data = git(&f.ws, &["cat-file", "blob", &format!("{forged}:.control/asks/ledger.yaml")]);
+    // A one-object pack (v2) and index naming `genuine`, its data the forged ledger.
+    let script = r#"
+import hashlib, struct, sys, zlib, pathlib
+oid, data, dest = bytes.fromhex(sys.argv[1]), pathlib.Path(sys.argv[2]).read_bytes(), pathlib.Path(sys.argv[3])
+size = len(data)
+head = bytearray([(3 << 4) | (size & 0x0f) | (0x80 if size >> 4 else 0)])
+size >>= 4
+while size:
+    head.append((size & 0x7f) | (0x80 if size >> 7 else 0))
+    size >>= 7
+entry = bytes(head) + zlib.compress(data)
+pack = b"PACK" + struct.pack(">II", 2, 1) + entry
+pack += hashlib.sha1(pack).digest()
+fanout = b"".join(struct.pack(">I", 1 if i >= oid[0] else 0) for i in range(256))
+idx = b"\xfftOc" + struct.pack(">I", 2) + fanout + oid + struct.pack(">I", zlib.crc32(entry)) + struct.pack(">I", 12) + pack[-20:]
+idx += hashlib.sha1(idx).digest()
+name = pack[-20:].hex()
+(dest / f"pack-{name}.pack").write_bytes(pack)
+(dest / f"pack-{name}.idx").write_bytes(idx)
+"#;
+    let tmp = f.tmp.path().join("forged-ledger");
+    std::fs::write(&tmp, data).unwrap();
+    let out = Command::new("python3")
+        .args(["-c", script, &genuine, tmp.to_str().unwrap(), f.ws.join(".git/objects/pack").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // The genuine loose copy goes, so the pack is the one git reads (a pack also wins on its own).
+    std::fs::remove_file(loose(&f, &genuine)).unwrap();
+    assert!(plain_show(&f, &main, &[]).contains("answer_option"), "the control: plain git reads the forgery");
+    refused_as_forged(&mut f, &fi);
+}
+
+#[test]
+fn a_forged_loose_commit_under_mains_unfetched_id_is_not_read_as_the_answer() {
+    // The remote's main moves on (another clone pushes an unanswered commit); before this clone
+    // fetches it, a forged commit is planted under that id, so "the commit is here" holds.
+    let (mut f, fi, _id, _main, forged) = landed_unanswered();
+    let other = f.tmp.path().join("other");
+    let origin = f.tmp.path().join("origin.git");
+    git(f.tmp.path(), &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()]);
+    std::fs::write(other.join("unrelated"), "x").unwrap();
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-qm", "unrelated"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+    let moved = git(&other, &["rev-parse", "HEAD"]).trim().to_string();
+    overwrite_loose(&f, &moved, &forged);
+    assert!(plain_show(&f, &moved, &[]).contains("answer_option"), "the control: plain git reads the forgery");
+    refused_as_forged(&mut f, &fi);
+}
+
+#[test]
+fn a_forged_tree_is_not_read_as_the_answer() {
+    let (mut f, fi, _id, main, forged) = landed_unanswered();
+    let asks = ":.control/asks";
+    overwrite_loose(&f, &object(&f, &format!("{main}{asks}")), &object(&f, &format!("{forged}{asks}")));
+    assert!(plain_show(&f, &main, &[]).contains("answer_option"), "the control: plain git reads the forgery");
+    refused_as_forged(&mut f, &fi);
+}
+
+#[test]
+fn a_git_dir_or_object_directory_in_the_environment_does_not_redirect_the_read() {
+    // The answer has landed: in a child whose environment names another repository or another
+    // object store, the kernel still reads this clone, and the flow resumes.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&id);
+    f.land_on_main();
+    let empty = f.tmp.path().join("empty-objects");
+    std::fs::create_dir_all(&empty).unwrap();
+    let nowhere = f.tmp.path().join("nowhere");
+    assert_eq!(in_child(&f, &fi, &[("GIT_OBJECT_DIRECTORY", empty.to_str().unwrap())]), "answered");
+    let fi2 = f.begin();
+    let id2 = waiting(&f.ask(&fi2, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&id2);
+    f.land_on_main();
+    assert_eq!(in_child(&f, &fi2, &[("GIT_DIR", nowhere.to_str().unwrap())]), "answered");
 }
