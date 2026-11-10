@@ -446,23 +446,31 @@ fn run_bounded(
     let out = take(child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
     let err = take(child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
     let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => break Some(status),
-            None if std::time::Instant::now() >= deadline => break None,
-            None => std::thread::sleep(Duration::from_millis(20)),
+    let group = rustix::process::Pid::from_raw(child.id() as i32).ok_or_else(|| format!("{what} has no pid"))?;
+    // Exited, looked at without reaping it (`WNOWAIT`): while the leader is unreaped, its pid,
+    // the group's id, stays ours, so the group kill below reaches only what it started.
+    let exited = || {
+        let options = rustix::process::WaitIdOptions::EXITED
+            | rustix::process::WaitIdOptions::NOHANG
+            | rustix::process::WaitIdOptions::NOWAIT;
+        rustix::process::waitid(rustix::process::WaitId::Pid(group), options).map(|s| s.is_some())
+    };
+    let answered = loop {
+        match exited().map_err(|e| e.to_string())? {
+            true => break true,
+            false if std::time::Instant::now() >= deadline => break false,
+            false => std::thread::sleep(Duration::from_millis(20)),
         }
     };
-    let Some(status) = status else {
-        // The whole group: a helper git started (git-remote-https, ssh) holds the pipes too.
-        if let Some(group) = rustix::process::Pid::from_raw(child.id() as i32) {
-            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-        let _ = child.wait();
-        let _ = (out.join(), err.join());
+    // The whole group, on both paths: a helper git started (git-remote-https, ssh, a credential
+    // helper) can hold the pipes after git is gone, and the readers wait on every holder.
+    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    if !answered {
         return Err(format!("{what} did not answer within {}s", timeout.as_secs()));
-    };
-    Ok((status, out.join().unwrap_or_default(), err.join().unwrap_or_default()))
+    }
+    Ok((status, out, err))
 }
 
 /// The object `refname` names where `cmd` ([`ls_remote_command`]) asks, from the remote itself,
@@ -695,6 +703,38 @@ fn reap(mut child: std::process::Child, writer: std::thread::JoinHandle<std::io:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_helper_that_outlives_git_holding_its_pipes_cannot_hold_the_read() {
+        // A stand-in for git that starts a grandchild holding its output and error, then exits 0:
+        // the readers wait on every holder, so without the group kill this waits 30 s.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", &format!("sleep 30 & echo $! > {}; echo said; exit 0", pidfile.display())]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let _ = tx.send(super::run_bounded(cmd, "sh", 4096, std::time::Duration::from_secs(20)));
+        });
+        let (status, out, _) =
+            rx.recv_timeout(std::time::Duration::from_secs(15)).expect("the read waited on the helper").unwrap();
+        assert!(status.success() && out == b"said\n", "{status} {out:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+        // And the helper is gone: the group kill reached it.
+        let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+        {
+            assert!(std::time::Instant::now() < until, "the helper {pid} was left running");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn every_component_of_the_path_is_checked_on_any_platform() {
         // A table stands in for lstat, so the walk is checked where no root-owned file can be

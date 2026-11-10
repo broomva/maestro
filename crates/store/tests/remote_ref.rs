@@ -182,3 +182,64 @@ fn a_folder_its_group_may_write_is_refused() {
     let e = check_root_owned(dir).unwrap_err();
     assert!(e.contains(&format!("{} is writable by its group or others", dir.display())), "{e}");
 }
+
+const LS_REMOTE_CHILD: &str = "MAESTRO_STORE_TEST_LS_REMOTE_CHILD";
+
+/// Not a test: in a child process run from another folder (`ls_remote_ignores_the_repository_it_is_run_from`),
+/// asks `$MAESTRO_STORE_TEST_LS_REMOTE_CHILD` where its main is. A no-op in a normal test run.
+#[test]
+fn ls_remote_child_entry() {
+    let Ok(url) = std::env::var(LS_REMOTE_CHILD) else { return };
+    let got = remote_ref(ls_remote_command(&url, "refs/heads/main", &[]), "refs/heads/main", Duration::from_secs(20));
+    println!("LS_REMOTE_RESULT {got:?}");
+}
+
+#[test]
+fn ls_remote_ignores_the_repository_it_is_run_from() {
+    // A repository whose own configuration sends the answers remote elsewhere (insteadOf to an
+    // evil remote, and origin's uploadpack), as the folder the process runs in: git, asked from
+    // there, would ask the evil remote. ls_remote_command runs it in `/`, so the genuine main
+    // comes back.
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let run = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@localhost", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let (genuine, evil, work) = (base.join("genuine.git"), base.join("evil.git"), base.join("work"));
+    for bare in [&genuine, &evil] {
+        run(base, &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()]);
+    }
+    std::fs::create_dir(&work).unwrap();
+    run(&work, &["init", "-q", "-b", "main"]);
+    run(&work, &["commit", "-q", "--allow-empty", "-m", "genuine"]);
+    let genuine_main = run(&work, &["rev-parse", "HEAD"]);
+    run(&work, &["push", "-q", genuine.to_str().unwrap(), "main"]);
+    run(&work, &["commit", "-q", "--allow-empty", "-m", "evil"]);
+    let evil_main = run(&work, &["rev-parse", "HEAD"]);
+    run(&work, &["push", "-q", evil.to_str().unwrap(), "main"]);
+    let (g, e) = (genuine.to_str().unwrap(), evil.to_str().unwrap());
+    run(&work, &["remote", "add", "origin", g]);
+    run(&work, &["config", &format!("url.{e}.insteadOf"), g]);
+    run(&work, &["config", "remote.origin.uploadpack", &format!("git-upload-pack {e}")]);
+    let control = run(&work, &["ls-remote", g, "refs/heads/main"]);
+    assert!(control.starts_with(&evil_main), "the control: from there, plain git asks the evil remote: {control}");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["ls_remote_child_entry", "--exact", "--nocapture", "--test-threads=1"])
+        .env(LS_REMOTE_CHILD, g)
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let said = text
+        .lines()
+        .find_map(|l| l.split_once("LS_REMOTE_RESULT ").map(|(_, r)| r.trim().to_string()))
+        .unwrap_or_default();
+    assert_eq!(said, format!("Ok(Some({genuine_main:?}))"), "{text}");
+}

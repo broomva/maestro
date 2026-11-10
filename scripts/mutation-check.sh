@@ -1695,7 +1695,12 @@ mutate $tree '    let (status, out, _) = run_bounded(cmd, &what, limit, timeout)
 mutate $tree '    if out.len() > MAX_LS_REMOTE {
         // The reader stopped' '    if false {
         // The reader stopped'
-mutate $tree 'None if std::time::Instant::now() >= deadline => break None,' 'None if false => break None,'
+mutate $tree 'false if std::time::Instant::now() >= deadline => break false,' 'false if false => break false,'
+# The CodeRabbit minors (owner decision 2026-11-10, "Fix the 2 minors, re-check, merge"): ls-remote
+# runs in `/`, never in the repository the process runs from; the group is killed on both paths, so
+# a helper that outlives git cannot hold the readers.
+mutate $tree '    cmd.current_dir("/");' ''
+mutate $tree '    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);' ''
 mutate $tree '    if out.len() > MAX_LS_REMOTE {
         return Err(format!("it said more than' '    if false {
         return Err(format!("it said more than'
