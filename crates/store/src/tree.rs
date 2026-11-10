@@ -347,13 +347,20 @@ pub fn git_path() -> &'static str {
     git_path_for(std::env::consts::OS)
 }
 
-/// Refuses `path` unless it and every folder above it are owned by root (uid 0) and writable by
-/// no group and no other user: then no user-level write can replace it.
+/// Refuses `path` unless it and every folder above it, as given and each looked at itself
+/// (`lstat`, never through a link), are owned by root (uid 0), writable by no group and no other
+/// user, and none is a symbolic link: then no user-level write can replace it, or point it
+/// elsewhere. `path` must be absolute.
 pub fn check_root_owned(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt as _;
-    let real = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    for at in real.ancestors() {
-        let meta = std::fs::metadata(at).map_err(|e| format!("{}: {e}", at.display()))?;
+    if !path.is_absolute() {
+        return Err(format!("{} is not an absolute path", path.display()));
+    }
+    for at in path.ancestors() {
+        let meta = std::fs::symlink_metadata(at).map_err(|e| format!("{}: {e}", at.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("{} is a symbolic link", at.display()));
+        }
         if meta.uid() != 0 {
             return Err(format!("{} is owned by uid {}, not root", at.display(), meta.uid()));
         }
@@ -532,15 +539,17 @@ pub fn read_verified(
 }
 
 /// Whether the object store of the repository at `root` holds an object under `id`
-/// (`cat-file -e`): present, never trusted ([`read_verified`] checks what it holds).
-pub fn has_object(root: &Path, id: &str) -> bool {
-    !id.starts_with('-')
-        && git_command(root)
-            .args(["cat-file", "-e", id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+/// (`cat-file -e`): present, never trusted ([`read_verified`] checks what it holds). Given
+/// `timeout` ([`run_bounded`]: a FIFO planted where git looks, such as the alternates file,
+/// cannot hang it); a git that does not answer in time is an error.
+pub fn has_object(root: &Path, id: &str, timeout: Duration) -> Result<bool, String> {
+    if id.starts_with('-') {
+        return Ok(false);
+    }
+    let mut cmd = git_command(root);
+    cmd.args(["cat-file", "-e", id]);
+    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, timeout)?;
+    Ok(status.success())
 }
 
 /// Refuses `body` unless it hashes, as git names objects, to `id`.

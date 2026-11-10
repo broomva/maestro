@@ -2,7 +2,7 @@
 //! it is read in full, and every git call it makes is given a deadline, so neither an oversized
 //! object nor a FIFO planted at an object's path holds the answer read.
 
-use maestro_store::tree::{MAX_OBJECT, read_verified};
+use maestro_store::tree::{MAX_OBJECT, has_object, read_verified};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -85,6 +85,24 @@ fn a_fifo_at_an_objects_path_is_given_up_at_the_deadline() {
         let _ = tx.send(read_verified(&root, &head, "f", 100, Duration::from_secs(1)));
     });
     let got = rx.recv_timeout(Duration::from_secs(15)).expect("the read never gave up");
+    let e = got.unwrap_err();
+    assert!(e.contains("did not answer within 1s"), "{e}");
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+}
+
+#[test]
+fn a_fifo_where_git_looks_cannot_hang_the_presence_check() {
+    // A FIFO at the alternates file: `cat-file -e` opens it and would wait forever.
+    let (_tmp, root, head) = repo("x");
+    assert_eq!(has_object(&root, &head, T), Ok(true));
+    let made = Command::new("mkfifo").arg(root.join(".git/objects/info/alternates")).status().unwrap();
+    assert!(made.success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let _ = tx.send(has_object(&root, &head, Duration::from_secs(1)));
+    });
+    let got = rx.recv_timeout(Duration::from_secs(15)).expect("the presence check never gave up");
     let e = got.unwrap_err();
     assert!(e.contains("did not answer within 1s"), "{e}");
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());

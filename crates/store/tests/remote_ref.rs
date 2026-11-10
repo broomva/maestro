@@ -134,7 +134,51 @@ fn only_a_binary_root_owns_alone_up_to_the_root_passes() {
     let mine = tempfile::NamedTempFile::new().unwrap();
     let e = check_root_owned(mine.path()).unwrap_err();
     assert!(e.contains("not root"), "{e}");
-    // A root-owned folder others may write (/tmp, mode 1777) does not.
-    let e = check_root_owned(std::path::Path::new("/tmp")).unwrap_err();
+    // A root-owned folder others may write (/tmp, mode 1777, where it really is: /private/tmp on
+    // macOS, whose /tmp is a link) does not.
+    let e = check_root_owned(&std::fs::canonicalize("/tmp").unwrap()).unwrap_err();
     assert!(e.contains("writable by its group or others"), "{e}");
+}
+
+#[test]
+fn every_folder_above_the_binary_is_checked_not_only_the_binary() {
+    // A hard link to the platform's git (root-owned) in a folder this user owns: the file itself
+    // passes, so only checking the folders above it refuses it.
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("git");
+    if let Err(e) = std::fs::hard_link(git(), &link) {
+        eprintln!("skipped: {} cannot be hard-linked into {} ({e})", git(), dir.path().display());
+        return;
+    }
+    let e = check_root_owned(&link).unwrap_err();
+    assert!(e.contains(&format!("{} is owned by uid", dir.path().display())), "{e}");
+}
+
+#[test]
+fn a_symbolic_link_anywhere_on_the_path_is_refused() {
+    // A link this user makes to the platform's git: refused as a link, never followed.
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("git");
+    std::os::unix::fs::symlink(git(), &link).unwrap();
+    let e = check_root_owned(&link).unwrap_err();
+    assert!(e.contains("is a symbolic link"), "{e}");
+    assert!(check_root_owned(std::path::Path::new("git")).is_err(), "a relative path is refused");
+}
+
+#[test]
+fn a_folder_its_group_may_write_is_refused() {
+    // A root-owned folder whose group (not others) may write, under root-owned folders: macOS's
+    // /Library/Fonts (root:admin 1775), Debian's /var/mail or /var/local (2775). Skipped where none is.
+    use std::os::unix::fs::MetadataExt as _;
+    let found = ["/Library/Fonts", "/var/mail", "/var/local"].into_iter().map(std::path::Path::new).find(|p| {
+        std::fs::symlink_metadata(p)
+            .is_ok_and(|m| m.is_dir() && m.uid() == 0 && m.mode() & 0o020 != 0 && m.mode() & 0o002 == 0)
+            && p.parent().is_some_and(|up| check_root_owned(up).is_ok())
+    });
+    let Some(dir) = found else {
+        eprintln!("skipped: no root-owned, group-writable folder under root-owned folders here");
+        return;
+    };
+    let e = check_root_owned(dir).unwrap_err();
+    assert!(e.contains(&format!("{} is writable by its group or others", dir.display())), "{e}");
 }

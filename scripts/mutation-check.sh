@@ -1610,7 +1610,7 @@ mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&r
         .or_else(|_| Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit))
         .map_err(unread)?'
 mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id) {'
-mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha) {' '    if false {'
+mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha, READ_TIMEOUT).map_err(unread)? {' '    if false {'
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
 mutate $replay '                    Class::Human { .. } => return Ok(Err("wrong_class")),' ''
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {' 'if false {'
@@ -1675,6 +1675,12 @@ mutate $tree '                let _ = pipe.take(limit as u64 + 1).read_to_end(&m
 # before each answer read; xcrun's cache off; each verified read bounded in bytes and in time.
 mutate $tree '        if meta.uid() != 0 {' '        if false {'
 mutate $tree '        if meta.mode() & 0o022 != 0 {' '        if false {'
+# The narrow re-check (owner decision 2026-11-10): every folder above the binary as given, the
+# group-write bit, no symbolic link on the path, and a deadline on the presence check.
+mutate $tree '    for at in path.ancestors() {' '    for at in path.ancestors().take(1) {'
+mutate $tree '        if meta.mode() & 0o022 != 0 {' '        if meta.mode() & 0o002 != 0 {'
+mutate $tree '        if meta.file_type().is_symlink() {' '        if false {'
+mutate $tree '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, timeout)?;' '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, Duration::from_secs(3600))?;'
 mutate $asks '    trusted_git().map_err(|e| unread(format!("the git Maestro runs is not root'"'"'s alone: {e}")))?;' ''
 mutate $tree '    cmd.env("xcrun_nocache", "1");' ''
 mutate $tree '    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;' '    let body = git_bytes(root, &["cat-file", "commit", commit], 4 * MAX_OBJECT, timeout)?;'

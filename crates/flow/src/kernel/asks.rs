@@ -586,7 +586,7 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
         .map_err(unread)?
         .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;
     // Present, not trusted: what the object store holds under that id is checked as it is read.
-    if !maestro_store::tree::has_object(&paths.workspace, &sha) {
+    if !maestro_store::tree::has_object(&paths.workspace, &sha, READ_TIMEOUT).map_err(unread)? {
         return Err(unread(format!("commit {sha}, the answers remote's main, is not in this clone; fetch it")).into());
     }
     Ok(sha)
