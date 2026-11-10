@@ -1604,10 +1604,10 @@ mutate $asks 'let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?
 # the commit the remote names, present here; an answered row; the linked ask. A local
 # maestro/answers or refs/remotes/origin/main never answers, and unread is not unanswered.
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed' 'Ok(Found::Row(row)) => return Ok(Answer::Landed'
-mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Some(String::from("refs/remotes/origin/main")))'
+mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit)'
 mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
-        .or_else(|_| Ok::<_, String>(Some(String::from("refs/remotes/origin/main"))))
+        .or_else(|_| Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit))
         .map_err(unread)?'
 mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id) {'
 mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha) {' '    if false {'
@@ -1669,7 +1669,7 @@ mutate $tree '    let mut cmd = Command::new(GIT);
 mutate $tree '    cmd.env_clear().env("PATH", GIT_PATH);
     for key in GIT_ENV_KEPT {' '    cmd.env("PATH", GIT_PATH);
     for key in GIT_ENV_KEPT {'
-mutate $tree '                let _ = pipe.take(MAX_LS_REMOTE as u64 + 1).read_to_end(&mut buf);' '                let _ = pipe.read_to_end(&mut buf);'
+mutate $tree '                let _ = pipe.take(MAX_LS_REMOTE as u64 + 1).read_to_end(&mut buf);' '                let _ = { let mut pipe = pipe; pipe.read_to_end(&mut buf) };'
 mutate $tree '    if out.len() > MAX_LS_REMOTE {
         // The reader stopped' '    if false {
         // The reader stopped'
