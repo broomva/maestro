@@ -353,23 +353,36 @@ pub fn git_path() -> &'static str {
 /// elsewhere. `path` must be absolute.
 pub fn check_root_owned(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt as _;
+    check_components(path, |at| {
+        let m = std::fs::symlink_metadata(at)?;
+        Ok(CompMeta { is_symlink: m.file_type().is_symlink(), uid: m.uid(), mode: m.mode() })
+    })
+}
+
+/// What [`check_components`] reads of one component of a path, looked at itself (`lstat`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompMeta {
+    is_symlink: bool,
+    uid: u32,
+    mode: u32,
+}
+
+/// [`check_root_owned`]'s rule over `path`, from the path itself up to `/`, each component read
+/// with `meta` (the filesystem's `lstat` in production; a table in the unit tests).
+fn check_components(path: &Path, meta: impl Fn(&Path) -> std::io::Result<CompMeta>) -> Result<(), String> {
     if !path.is_absolute() {
         return Err(format!("{} is not an absolute path", path.display()));
     }
     for at in path.ancestors() {
-        let meta = std::fs::symlink_metadata(at).map_err(|e| format!("{}: {e}", at.display()))?;
-        if meta.file_type().is_symlink() {
+        let meta = meta(at).map_err(|e| format!("{}: {e}", at.display()))?;
+        if meta.is_symlink {
             return Err(format!("{} is a symbolic link", at.display()));
         }
-        if meta.uid() != 0 {
-            return Err(format!("{} is owned by uid {}, not root", at.display(), meta.uid()));
+        if meta.uid != 0 {
+            return Err(format!("{} is owned by uid {}, not root", at.display(), meta.uid));
         }
-        if meta.mode() & 0o022 != 0 {
-            return Err(format!(
-                "{} is writable by its group or others (mode {:o})",
-                at.display(),
-                meta.mode() & 0o7777
-            ));
+        if meta.mode & 0o022 != 0 {
+            return Err(format!("{} is writable by its group or others (mode {:o})", at.display(), meta.mode & 0o7777));
         }
     }
     Ok(())
@@ -682,6 +695,37 @@ fn reap(mut child: std::process::Child, writer: std::thread::JoinHandle<std::io:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_component_of_the_path_is_checked_on_any_platform() {
+        // A table stands in for lstat, so the walk is checked where no root-owned file can be
+        // made: each component in turn is the one bad one, every other is root's, 0755.
+        use super::{CompMeta, check_components};
+        use std::path::{Path, PathBuf};
+        let path = Path::new("/a/b/c/git");
+        let parts: Vec<PathBuf> = path.ancestors().map(Path::to_path_buf).collect();
+        assert_eq!(parts.len(), 5, "the file, three folders, and /");
+        let good = CompMeta { is_symlink: false, uid: 0, mode: 0o40755 };
+        let bad = [
+            (CompMeta { uid: 501, ..good }, "is owned by uid 501, not root"),
+            (CompMeta { mode: 0o40775, ..good }, "is writable by its group or others"),
+            (CompMeta { mode: 0o40757, ..good }, "is writable by its group or others"),
+            (CompMeta { is_symlink: true, ..good }, "is a symbolic link"),
+        ];
+        assert_eq!(check_components(path, |_| Ok(good)), Ok(()));
+        for at in &parts {
+            for (meta, said) in bad {
+                let got = check_components(path, |p| Ok(if p == at { meta } else { good }));
+                let e = got.expect_err(&format!("{} bad as {meta:?}", at.display()));
+                assert!(e.starts_with(&format!("{} ", at.display())) && e.contains(said), "{e}");
+            }
+            // A component that cannot be read is refused too.
+            let got =
+                check_components(path, |p| if p == at { Err(std::io::ErrorKind::NotFound.into()) } else { Ok(good) });
+            assert!(got.is_err(), "{}", at.display());
+        }
+        assert!(check_components(Path::new("a/git"), |_| Ok(good)).is_err(), "a relative path");
+    }
+
     use super::*;
 
     #[test]

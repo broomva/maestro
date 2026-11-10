@@ -1673,13 +1673,15 @@ mutate $tree '    cmd.env_clear().env("PATH", git_path()).env("xcrun_nocache", "
 mutate $tree '                let _ = pipe.take(limit as u64 + 1).read_to_end(&mut buf);' '                let _ = { let mut pipe = pipe; pipe.read_to_end(&mut buf) };'
 # The floor (owner decision 2026-11-09, "Set the floor, fix, re-check"): git root's alone, checked
 # before each answer read; xcrun's cache off; each verified read bounded in bytes and in time.
-mutate $tree '        if meta.uid() != 0 {' '        if false {'
-mutate $tree '        if meta.mode() & 0o022 != 0 {' '        if false {'
+mutate $tree '        if meta.uid != 0 {' '        if false {'
+mutate $tree '        if meta.mode & 0o022 != 0 {' '        if false {'
 # The narrow re-check (owner decision 2026-11-10): every folder above the binary as given, the
 # group-write bit, no symbolic link on the path, and a deadline on the presence check.
 mutate $tree '    for at in path.ancestors() {' '    for at in path.ancestors().take(1) {'
-mutate $tree '        if meta.mode() & 0o022 != 0 {' '        if meta.mode() & 0o002 != 0 {'
-mutate $tree '        if meta.file_type().is_symlink() {' '        if false {'
+mutate $tree '    for at in path.ancestors() {' '    for at in path.ancestors().skip(1) {'
+mutate $tree '    for at in path.ancestors() {' '    for at in path.ancestors().take_while(|p| p.parent().is_some()) {'
+mutate $tree '        if meta.mode & 0o022 != 0 {' '        if meta.mode & 0o002 != 0 {'
+mutate $tree '        if meta.is_symlink {' '        if false {'
 mutate $tree '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, timeout)?;' '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, Duration::from_secs(3600))?;'
 mutate $asks '    trusted_git().map_err(|e| unread(format!("the git Maestro runs is not root'"'"'s alone: {e}")))?;' ''
 mutate $tree '    cmd.env("xcrun_nocache", "1");' ''
