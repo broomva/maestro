@@ -266,12 +266,17 @@ impl Store {
     /// ([`tree::read_verified`]), so nothing planted in the object store reads as the ledger. The
     /// folder is the registry's at this store's tree (as [`Store::rel`] gives it). `Ok(None)` when
     /// the commit has no such file.
-    pub fn ask_ledger_verified(&self, file: &str, commit: &str) -> Result<Option<AskLedger>, String> {
+    pub fn ask_ledger_verified(
+        &self,
+        file: &str,
+        commit: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<AskLedger>, String> {
         if !requests::ledger_name_ok(file) {
             return Err(format!("`{file}` is not a ledger name"));
         }
         let rel = format!("{}/{file}", self.rel(ASKS)?);
-        match tree::read_verified(self.tree.root(), commit, &rel, LEDGER_LIMIT)? {
+        match tree::read_verified(self.tree.root(), commit, &rel, LEDGER_LIMIT, timeout)? {
             Some(text) => ask_ledger_of(&rel, &text).map(Some),
             None => Ok(None),
         }

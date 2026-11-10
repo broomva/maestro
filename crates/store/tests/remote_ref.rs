@@ -1,7 +1,9 @@
 //! `tree::remote_ref` and its parser (BRO-3635): where a remote says a ref is, bounded in time and
 //! output, taken only for exactly that ref, and only as a well-formed object id.
 
-use maestro_store::tree::{MAX_LS_REMOTE, ls_remote_command, parse_ls_remote, remote_ref};
+use maestro_store::tree::{
+    MAX_LS_REMOTE, check_root_owned, git, git_for, git_path, ls_remote_command, parse_ls_remote, remote_ref,
+};
 use std::time::{Duration, Instant};
 
 const A: &str = "1111111111111111111111111111111111111111";
@@ -73,11 +75,15 @@ fn the_ls_remote_command_runs_outside_any_repository_with_only_its_own_configura
         .collect();
     env.sort();
     let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-    assert_eq!(keys, ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
+    assert_eq!(
+        keys,
+        ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "PATH", "xcrun_nocache"]
+    );
     let value = |k: &str| env.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.clone());
-    // The system git, by absolute path, on a fixed PATH: none earlier in the caller's stands in.
-    assert_eq!(cmd.get_program(), "/usr/bin/git");
-    assert_eq!(value("PATH").as_deref(), Some("/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"));
+    // The platform's git, by absolute path, on a fixed PATH: none earlier in the caller's stands in.
+    assert_eq!(cmd.get_program(), git());
+    assert_eq!(value("PATH").as_deref(), Some(git_path()));
+    assert_eq!(value("xcrun_nocache").as_deref(), Some("1"));
     assert_eq!(value("GIT_CONFIG_GLOBAL").as_deref(), Some("/dev/null"));
     assert_eq!(value("GIT_CONFIG_NOSYSTEM").as_deref(), Some("1"));
     assert_eq!(value("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
@@ -110,4 +116,25 @@ fn output_past_the_bound_is_refused_and_the_reader_stops_at_it() {
     let cmd = ls_remote_command(bare.to_str().unwrap(), "refs/heads/main", &[]);
     let e = remote_ref(cmd, "refs/heads/main", Duration::from_secs(20)).unwrap_err();
     assert!(e.contains(&format!("read {}, then stopped", MAX_LS_REMOTE + 1)), "{e}");
+}
+
+#[test]
+fn macos_runs_the_command_line_tools_git_and_linux_the_systems() {
+    // On macOS /usr/bin/git is an xcrun launcher that finds git through a user-writable cache.
+    assert_eq!(git_for("macos"), "/Library/Developer/CommandLineTools/usr/bin/git");
+    assert_eq!(git_for("linux"), "/usr/bin/git");
+    assert_eq!(git(), git_for(std::env::consts::OS));
+}
+
+#[test]
+fn only_a_binary_root_owns_alone_up_to_the_root_passes() {
+    // The platform's git does (the hosts this runs on have it, root-owned).
+    check_root_owned(std::path::Path::new(git())).unwrap();
+    // A file this user owns does not.
+    let mine = tempfile::NamedTempFile::new().unwrap();
+    let e = check_root_owned(mine.path()).unwrap_err();
+    assert!(e.contains("not root"), "{e}");
+    // A root-owned folder others may write (/tmp, mode 1777) does not.
+    let e = check_root_owned(std::path::Path::new("/tmp")).unwrap_err();
+    assert!(e.contains("writable by its group or others"), "{e}");
 }

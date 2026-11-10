@@ -104,12 +104,15 @@ maestro flow ask --instance I --node-id N [--ledger L.yaml --ask '<json>']   # a
   it says `answered`: the answer counts only once it has landed on main of the answers remote,
   `https://github.com/broomva/workspace.git`, compiled into Maestro (owner decisions 2026-11-09,
   "Landed main, remote-checked" and "Compiled into maestro"; changing it is a code change). The
-  kernel asks that URL for `refs/heads/main` with nothing local applying (`/usr/bin/git` on a fixed
-  `PATH`, outside the repository, no git configuration, none of your `GIT_*` environment; the one
-  credential helper is `gh`'s), and reads the ledger at that commit object by object, each checked
-  against its id, so nothing planted in the object store reads as the answer. The residual risk is
-  whoever can replace Maestro's own binary (`~/.local/bin/maestro`), change system git as root, or
-  merge a pull request carrying an answer into that main. No local ref or remote counts: an answer on `maestro/answers` (this clone's
+  kernel asks that URL for `refs/heads/main` with nothing local applying (git by absolute path,
+  the Command Line Tools' on macOS and `/usr/bin/git` on Linux, checked root-owned and not group-
+  or other-writable; a fixed `PATH`; outside the repository; no git configuration; none of your
+  `GIT_*` environment; the one credential helper is `gh`'s, which only supplies credentials), and
+  reads the ledger at that commit object by object, each checked against its id, so nothing planted
+  in the object store reads as the answer. The floor (owner decision 2026-11-09, "Set the floor,
+  fix, re-check"): the residual risk is anything needing the user-level write that can replace
+  Maestro's own binary (`~/.local/bin/maestro`, the macOS `xcrun` cache, Homebrew's `gh`), a
+  root-level change, or merging a pull request carrying an answer into that main. No local ref or remote counts: an answer on `maestro/answers` (this clone's
   or origin's) is reported as `answer_waiting_to_land`, and the flow resumes when it lands. A
   remote that cannot be asked (20 s per call), has no main, or names a commit this clone has not
   fetched is `answers_unread`. The answer is

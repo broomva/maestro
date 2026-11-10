@@ -1609,7 +1609,7 @@ mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&r
         .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .or_else(|_| Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit))
         .map_err(unread)?'
-mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id) {'
+mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id) {'
 mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha) {' '    if false {'
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
 mutate $replay '                    Class::Human { .. } => return Ok(Err("wrong_class")),' ''
@@ -1644,8 +1644,8 @@ mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if plain {'
 # maestro") and asked with nothing local applying; reads at its main run with replace objects off;
 # only exactly refs/heads/main counts, and a remote without it is unread, never its HEAD.
 mutate $tree '    cmd.arg("--no-replace-objects").arg("-C").arg(root);' '    cmd.arg("-C").arg(root);'
-mutate $tree '    cmd.env_clear().env("PATH", GIT_PATH);
-    if let Some(home) = std::env::var_os("HOME") {' '    cmd.env("PATH", GIT_PATH);
+mutate $tree '    cmd.env_clear().env("PATH", git_path());
+    if let Some(home) = std::env::var_os("HOME") {' '    cmd.env("PATH", git_path());
     if let Some(home) = std::env::var_os("HOME") {'
 # The answers remote is private: its one credential helper is GitHub's, and gh needs HOME.
 mutate $tree '    if let Some(home) = std::env::var_os("HOME") {
@@ -1659,17 +1659,31 @@ mutate $tree '    check(&format, "commit", commit, &body)?;' ''
 mutate $tree '        check(&format, "tree", &id, &body)?;' ''
 mutate $tree '    check(&format, "blob", &id, &blob)?;' ''
 mutate $tree '    if hex != id {' '    if false {'
-mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev(sha.clone())), &rec.ledger, &rec.ask_id) {'
-mutate $tree 'pub const GIT: &str = "/usr/bin/git";' 'pub const GIT: &str = "git";'
-mutate $tree '    let mut cmd = Command::new(GIT);
-    cmd.env_clear().env("PATH", GIT_PATH);
-    if let Some(home)' '    let mut cmd = Command::new(GIT);
+mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev(sha.clone())), &rec.ledger, &rec.ask_id) {'
+mutate $tree '        _ => "/usr/bin/git",' '        _ => "git",'
+mutate $tree '        "macos" => "/Library/Developer/CommandLineTools/usr/bin/git",' '        "macos" => "/usr/bin/git",'
+mutate $tree '    let mut cmd = Command::new(git());
+    cmd.env_clear().env("PATH", git_path());
+    if let Some(home)' '    let mut cmd = Command::new(git());
     cmd.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
     if let Some(home)'
-mutate $tree '    cmd.env_clear().env("PATH", GIT_PATH);
-    for key in GIT_ENV_KEPT {' '    cmd.env("PATH", GIT_PATH);
+mutate $tree '    cmd.env_clear().env("PATH", git_path()).env("xcrun_nocache", "1");
+    for key in GIT_ENV_KEPT {' '    cmd.env("PATH", git_path()).env("xcrun_nocache", "1");
     for key in GIT_ENV_KEPT {'
-mutate $tree '                let _ = pipe.take(MAX_LS_REMOTE as u64 + 1).read_to_end(&mut buf);' '                let _ = { let mut pipe = pipe; pipe.read_to_end(&mut buf) };'
+mutate $tree '                let _ = pipe.take(limit as u64 + 1).read_to_end(&mut buf);' '                let _ = { let mut pipe = pipe; pipe.read_to_end(&mut buf) };'
+# The floor (owner decision 2026-11-09, "Set the floor, fix, re-check"): git root's alone, checked
+# before each answer read; xcrun's cache off; each verified read bounded in bytes and in time.
+mutate $tree '        if meta.uid() != 0 {' '        if false {'
+mutate $tree '        if meta.mode() & 0o022 != 0 {' '        if false {'
+mutate $asks '    trusted_git().map_err(|e| unread(format!("the git Maestro runs is not root'"'"'s alone: {e}")))?;' ''
+mutate $tree '    cmd.env("xcrun_nocache", "1");' ''
+mutate $tree '    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;' '    let body = git_bytes(root, &["cat-file", "commit", commit], 4 * MAX_OBJECT, timeout)?;'
+mutate $tree '        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;' '        let body = git_bytes(root, &["cat-file", "tree", &id], 4 * MAX_OBJECT, timeout)?;'
+mutate $tree '    let blob = git_bytes(root, &["cat-file", "blob", &id], limit, timeout)?;' '    let blob = git_bytes(root, &["cat-file", "blob", &id], MAX_OBJECT, timeout)?;'
+mutate $tree '    if out.len() > limit {
+        return Err(format!("{what} said more than' '    if false {
+        return Err(format!("{what} said more than'
+mutate $tree '    let (status, out, _) = run_bounded(cmd, &what, limit, timeout)?;' '    let (status, out, _) = run_bounded(cmd, &what, limit, Duration::from_secs(3600))?;'
 mutate $tree '    if out.len() > MAX_LS_REMOTE {
         // The reader stopped' '    if false {
         // The reader stopped'

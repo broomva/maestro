@@ -1079,9 +1079,11 @@ fn clipped_text_is_marked_and_a_long_ledger_error_is_clipped() {
 #[test]
 fn the_production_ls_remote_asks_the_compiled_remote_with_githubs_credential_helper_only() {
     let cmd = answers_ls_remote(ANSWERS_REMOTE);
-    assert_eq!(cmd.get_program(), "/usr/bin/git", "the system git, by absolute path");
+    let program =
+        if cfg!(target_os = "macos") { "/Library/Developer/CommandLineTools/usr/bin/git" } else { "/usr/bin/git" };
+    assert_eq!(cmd.get_program(), program, "the platform's git, by absolute path");
     let path = cmd.get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v);
-    assert_eq!(path, Some(std::ffi::OsStr::new("/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")));
+    assert_eq!(path, Some(std::ffi::OsStr::new(maestro_store::tree::git_path())));
     let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     assert_eq!(
         args,
@@ -1099,7 +1101,10 @@ fn the_production_ls_remote_asks_the_compiled_remote_with_githubs_credential_hel
     assert_eq!(cmd.get_current_dir(), Some(Path::new("/")));
     let mut keys: Vec<String> = cmd.get_envs().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
     keys.sort();
-    assert_eq!(keys, ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "PATH"]);
+    assert_eq!(
+        keys,
+        ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_TERMINAL_PROMPT", "HOME", "PATH", "xcrun_nocache"]
+    );
 }
 
 /// Not run in CI (`--ignored` by hand): the production call, against GitHub, with this machine's
@@ -1238,4 +1243,25 @@ fn a_git_dir_or_object_directory_in_the_environment_does_not_redirect_the_read()
     f.answer_in_worktree(&id2);
     f.land_on_main();
     assert_eq!(in_child(&f, &fi2, &[("GIT_DIR", nowhere.to_str().unwrap())]), "answered");
+}
+
+#[test]
+fn a_git_that_is_not_roots_alone_reads_no_answer() {
+    // The floor (owner decision 2026-11-09): the git that asks and reads must be root's alone. A
+    // binary this user owns stands in for it here (`seams::GIT_CHECKED`): the answer, landed on
+    // main, is not read, and nothing is written.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&id);
+    f.land_on_main();
+    let mine = f.tmp.path().join("git");
+    std::fs::write(&mine, "").unwrap();
+    seams::GIT_CHECKED.with(|p| *p.borrow_mut() = Some(mine));
+    let e = f.ask(&fi, None).unwrap_err();
+    assert_eq!(e.code(), "answers_unread");
+    assert!(e.to_string().contains("not root's alone"), "{e}");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
+    seams::GIT_CHECKED.with(|p| *p.borrow_mut() = None);
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { .. }));
 }

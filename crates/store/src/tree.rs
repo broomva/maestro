@@ -316,13 +316,57 @@ impl Tree {
 /// The most bytes [`remote_ref`] reads of `git ls-remote`'s output, and of its error.
 pub const MAX_LS_REMOTE: usize = 4096;
 
-/// The git every store read and `ls-remote` runs: the system's, root-owned on macOS and Linux, by
-/// absolute path, so no `git` earlier in a caller's `PATH` stands in for it.
-pub const GIT: &str = "/usr/bin/git";
+/// The git every store read and `ls-remote` runs on `os`, by absolute path, so no `git` earlier in
+/// a caller's `PATH` stands in for it. On macOS, `/usr/bin/git` is an `xcrun` launcher that finds
+/// git through a cache the user can write (`$(getconf DARWIN_USER_TEMP_DIR)xcrun_db`), so it is
+/// the Command Line Tools' git itself; never `xcode-select`'s path, which can name an app bundle.
+/// Before an answer read, [`check_root_owned`] checks it.
+pub fn git_for(os: &str) -> &'static str {
+    match os {
+        "macos" => "/Library/Developer/CommandLineTools/usr/bin/git",
+        _ => "/usr/bin/git",
+    }
+}
 
-/// The `PATH` those git children get, whatever the caller's: system folders, then the two where
-/// GitHub's `gh` (the answers remote's credential helper) is installed.
-pub const GIT_PATH: &str = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin";
+/// The `PATH` git children get on `os`, whatever the caller's: git's own folder first, the system
+/// folders, then the two where GitHub's `gh` (the answers remote's credential helper) is installed.
+pub fn git_path_for(os: &str) -> &'static str {
+    match os {
+        "macos" => "/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        _ => "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+    }
+}
+
+/// [`git_for`] this platform.
+pub fn git() -> &'static str {
+    git_for(std::env::consts::OS)
+}
+
+/// [`git_path_for`] this platform.
+pub fn git_path() -> &'static str {
+    git_path_for(std::env::consts::OS)
+}
+
+/// Refuses `path` unless it and every folder above it are owned by root (uid 0) and writable by
+/// no group and no other user: then no user-level write can replace it.
+pub fn check_root_owned(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let real = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for at in real.ancestors() {
+        let meta = std::fs::metadata(at).map_err(|e| format!("{}: {e}", at.display()))?;
+        if meta.uid() != 0 {
+            return Err(format!("{} is owned by uid {}, not root", at.display(), meta.uid()));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(format!(
+                "{} is writable by its group or others (mode {:o})",
+                at.display(),
+                meta.mode() & 0o7777
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// The environment a git child keeps from the caller's: only these, so no `GIT_*` variable
 /// (`GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_REPLACE_REF_BASE`, `GIT_CONFIG_*`, ...) reaches it.
@@ -330,18 +374,20 @@ const GIT_ENV_KEPT: [&str; 3] = ["HOME", "LANG", "TMPDIR"];
 
 /// `git -c <config>... ls-remote -- <url> <refname>`, to be run by [`remote_ref`], with nothing
 /// local applying: it runs in `/`, outside any repository, with no system or global configuration
-/// (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), no prompt (`GIT_TERMINAL_PROMPT=0`), the
-/// system git ([`GIT`]) on a fixed `PATH` ([`GIT_PATH`]), and only `HOME` from the caller's
-/// environment (so a credential helper named in `config` finds its own token). So no `insteadOf`, `uploadpack`, `sshCommand`, proxy or
-/// `GIT_CONFIG_*` redirects it; `config` (each `key=value`, the caller's own constants) is the
-/// only configuration it has. `--` keeps the URL and the ref from reading as options.
+/// (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), no prompt (`GIT_TERMINAL_PROMPT=0`), no
+/// `xcrun` cache (`xcrun_nocache=1`), the platform's git ([`git`]) on a fixed `PATH` ([`git_path`]),
+/// and only `HOME` from the caller's environment (so a credential helper named in `config` finds
+/// its own token). So no `insteadOf`, `uploadpack`, `sshCommand`, proxy or `GIT_CONFIG_*`
+/// redirects it; `config` (each `key=value`, the caller's own constants) is the only
+/// configuration it has. `--` keeps the URL and the ref from reading as options.
 pub fn ls_remote_command(url: &str, refname: &str, config: &[&str]) -> Command {
-    let mut cmd = Command::new(GIT);
-    cmd.env_clear().env("PATH", GIT_PATH);
+    let mut cmd = Command::new(git());
+    cmd.env_clear().env("PATH", git_path());
     if let Some(home) = std::env::var_os("HOME") {
         cmd.env("HOME", home);
     }
     cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("xcrun_nocache", "1");
     cmd.current_dir("/");
     for pair in config {
         cmd.args(["-c", pair]);
@@ -350,12 +396,15 @@ pub fn ls_remote_command(url: &str, refname: &str, config: &[&str]) -> Command {
     cmd
 }
 
-/// The object `refname` names where `cmd` ([`ls_remote_command`]) asks, from the remote itself,
-/// never from a local ref, which any process here can move. `Ok(None)` when the remote has no
-/// such ref. Bounded: the remote gets `timeout`, then git's whole process group (a transport or
-/// credential helper included) is killed, and at most [`MAX_LS_REMOTE`] bytes of its output and of
-/// its error are read.
-pub fn remote_ref(mut cmd: Command, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
+/// Runs `cmd` in its own process group, for at most `timeout`, reading at most `limit` bytes of
+/// its output and of its error (one past it, then the pipe is closed); past `timeout`, the whole
+/// group (a helper it started included) is killed. Its status, output and error.
+fn run_bounded(
+    mut cmd: Command,
+    what: &str,
+    limit: usize,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
     use std::io::Read as _;
     use std::os::unix::process::CommandExt as _;
     let mut child = cmd
@@ -364,12 +413,12 @@ pub fn remote_ref(mut cmd: Command, refname: &str, timeout: Duration) -> Result<
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("git ls-remote did not start: {e}"))?;
+        .map_err(|e| format!("{what} did not start: {e}"))?;
     let take = |pipe: Option<Box<dyn std::io::Read + Send>>| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(pipe) = pipe {
-                let _ = pipe.take(MAX_LS_REMOTE as u64 + 1).read_to_end(&mut buf);
+                let _ = pipe.take(limit as u64 + 1).read_to_end(&mut buf);
             }
             buf
         })
@@ -391,10 +440,16 @@ pub fn remote_ref(mut cmd: Command, refname: &str, timeout: Duration) -> Result<
         }
         let _ = child.wait();
         let _ = (out.join(), err.join());
-        return Err(format!("git ls-remote did not answer within {}s", timeout.as_secs()));
+        return Err(format!("{what} did not answer within {}s", timeout.as_secs()));
     };
-    let out = out.join().unwrap_or_default();
-    let err = err.join().unwrap_or_default();
+    Ok((status, out.join().unwrap_or_default(), err.join().unwrap_or_default()))
+}
+
+/// The object `refname` names where `cmd` ([`ls_remote_command`]) asks, from the remote itself,
+/// never from a local ref, which any process here can move. `Ok(None)` when the remote has no
+/// such ref. Bounded ([`run_bounded`]): `timeout`, and at most [`MAX_LS_REMOTE`] bytes.
+pub fn remote_ref(cmd: Command, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
+    let (status, out, err) = run_bounded(cmd, "git ls-remote", MAX_LS_REMOTE, timeout)?;
     if out.len() > MAX_LS_REMOTE {
         // The reader stopped one byte past the bound and closed the pipe.
         return Err(format!("git ls-remote said more than {MAX_LS_REMOTE} bytes (read {}, then stopped)", out.len()));
@@ -436,15 +491,22 @@ pub const MAX_OBJECT: usize = 1024 * 1024;
 /// trusted. Git does not check an object's hash when it reads it, so content planted in the
 /// object store under a genuine id (an overwritten loose object, a pack naming that id with other
 /// data, a loose commit planted under an id not fetched yet) reads as genuine to git; it does not
-/// here. Each object is read raw (`git cat-file <type> <id>`, bounded) and hashed in-process as
+/// here. Each object is read raw (`git cat-file <type> <id>`, at most [`MAX_OBJECT`] bytes of a
+/// commit or tree and `limit` of the file, each git call given `timeout`) and hashed in-process as
 /// git names it, `"<type> <size>\0" + content` with the repository's object format (sha1 or
 /// sha256): the commit against `commit`, each tree on the path against the id its parent gives,
 /// and the file against the id its tree gives. `Ok(None)` when the path is not there; a mismatch,
 /// or a file over `limit` bytes, is an error.
-pub fn read_verified(root: &Path, commit: &str, rel: &str, limit: usize) -> Result<Option<String>, String> {
-    let format = git_bytes(root, &["rev-parse", "--show-object-format"], 64)?;
+pub fn read_verified(
+    root: &Path,
+    commit: &str,
+    rel: &str,
+    limit: usize,
+    timeout: Duration,
+) -> Result<Option<String>, String> {
+    let format = git_bytes(root, &["rev-parse", "--show-object-format"], 64, timeout)?;
     let format = String::from_utf8_lossy(&format).trim().to_string();
-    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT)?;
+    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;
     check(&format, "commit", commit, &body)?;
     let tree = String::from_utf8_lossy(&body)
         .lines()
@@ -455,7 +517,7 @@ pub fn read_verified(root: &Path, commit: &str, rel: &str, limit: usize) -> Resu
     let mut id = tree;
     let parts: Vec<&str> = rel.split('/').collect();
     for (i, part) in parts.iter().enumerate() {
-        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT)?;
+        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;
         check(&format, "tree", &id, &body)?;
         let last = i + 1 == parts.len();
         match tree_entry(&body, part, &format)? {
@@ -464,7 +526,7 @@ pub fn read_verified(root: &Path, commit: &str, rel: &str, limit: usize) -> Resu
             _ => return Ok(None),
         }
     }
-    let blob = git_bytes(root, &["cat-file", "blob", &id], limit)?;
+    let blob = git_bytes(root, &["cat-file", "blob", &id], limit, timeout)?;
     check(&format, "blob", &id, &blob)?;
     String::from_utf8(blob).map(Some).map_err(|_| format!("{rel} is not valid UTF-8"))
 }
@@ -518,37 +580,30 @@ fn tree_entry(body: &[u8], name: &str, format: &str) -> Result<Option<(String, S
     Ok(None)
 }
 
-/// `git <args>` in `root` ([`git_command`]), its output read to at most `limit` bytes.
-fn git_bytes(root: &Path, args: &[&str], limit: usize) -> Result<Vec<u8>, String> {
-    use std::io::Read as _;
-    let mut child = git_command(root)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("git {} did not start: {e}", args.join(" ")))?;
-    let mut out = Vec::new();
-    let read = child.stdout.take().map(|p| p.take(limit as u64 + 1).read_to_end(&mut out));
+/// `git <args>` in `root` ([`git_command`]), its output read to at most `limit` bytes, given
+/// `timeout` ([`run_bounded`]: a FIFO planted at an object's path cannot hang the read).
+fn git_bytes(root: &Path, args: &[&str], limit: usize, timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut cmd = git_command(root);
+    cmd.args(args);
+    let what = format!("git {}", args.join(" "));
+    let (status, out, _) = run_bounded(cmd, &what, limit, timeout)?;
     if out.len() > limit {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!("git {} said more than {limit} bytes", args.join(" ")));
+        return Err(format!("{what} said more than {limit} bytes (read {}, then stopped)", out.len()));
     }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    match read {
-        Some(Ok(_)) if status.success() => Ok(out),
-        _ => Err(format!("git {} failed ({status})", args.join(" "))),
+    if !status.success() {
+        return Err(format!("{what} failed ({status})"));
     }
+    Ok(out)
 }
 
 /// `git -C <root>`, reading only what the repository's objects hold: replace objects off
 /// (`--no-replace-objects`, so neither `refs/replace/` nor `GIT_REPLACE_REF_BASE` can stand a
 /// forged object in for a genuine one), and none of the caller's `GIT_*` environment
-/// ([`GIT_ENV_KEPT`] only), the system git ([`GIT`]) on a fixed `PATH` ([`GIT_PATH`]).
+/// ([`GIT_ENV_KEPT`] only), the platform's git ([`git`]) on a fixed `PATH` ([`git_path`]), and no
+/// `xcrun` cache (`xcrun_nocache=1`).
 fn git_command(root: &Path) -> Command {
-    let mut cmd = Command::new(GIT);
-    cmd.env_clear().env("PATH", GIT_PATH);
+    let mut cmd = Command::new(git());
+    cmd.env_clear().env("PATH", git_path()).env("xcrun_nocache", "1");
     for key in GIT_ENV_KEPT {
         if let Some(value) = std::env::var_os(key) {
             cmd.env(key, value);

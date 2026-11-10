@@ -41,9 +41,10 @@
 //!    [`REMOTE_TIMEOUT`]). The remote is private, so the call names one credential helper,
 //!    GitHub's own ([`ANSWERS_GIT_CONFIG`]); it only supplies credentials, the URL stays compiled
 //!    in and TLS authenticates github.com, and a missing or wrong token is `answers_unread`. Every
-//!    git call on this path is the system git by absolute path (`/usr/bin/git`, root-owned) on a
-//!    fixed `PATH` (`maestro_store::tree::GIT_PATH`: the system folders, then the two where `gh`
-//!    is installed, so `gh` is found there; it only supplies credentials, and fails closed). Then
+//!    git call on this path is the platform's git by absolute path (`maestro_store::tree::git`,
+//!    checked root-owned first, see the floor below) on a fixed `PATH` (`tree::git_path`: git's
+//!    folder, the system folders, then the two where `gh` is installed, so `gh` is found there; it
+//!    only supplies credentials, and fails closed). Then
 //!    it requires that commit to be in this clone, and reads the asks ledger at that exact commit
 //!    object by object, each checked against its id in-process (`tree::read_verified`): the commit
 //!    against the remote's id, each tree on the path against its parent's entry, the ledger against
@@ -65,10 +66,15 @@
 //! reads it: [`landing`] reports it as `answer_waiting_to_land` for `next` and `status`, and `ask`
 //! says so, but it is never a receipt.
 //!
-//! **Residual risk.** Whoever can replace Maestro's own binary (`~/.local/bin/maestro` is the
-//! user's to write), change system git as root, or merge a pull request that carries an answer
-//! into the answers remote's main through its merge gates, can still answer for the owner. Those
-//! paths' own controls are the defence, not the kernel.
+//! **The floor (owner decision 2026-11-09, verbatim: "Set the floor, fix, re-check
+//! (Recommended)").** The kernel defends against anything short of the user-level write that can
+//! replace Maestro's own binary. What that write reaches is accepted residual risk:
+//! `~/.local/bin/maestro` itself, the macOS `xcrun` cache, Homebrew's `gh` (which only supplies
+//! credentials, and fails closed), and the like. So are root-level changes (to system git, say)
+//! and merging a pull request that carries an answer into the answers remote's main through its
+//! merge gates. Within the floor: git runs by absolute path (on macOS the Command Line Tools' git
+//! itself, not the `xcrun` launcher at `/usr/bin/git`), checked root-owned and not group- or
+//! other-writable up to `/` before each answer read, with `xcrun_nocache=1` and a fixed `PATH`.
 //!
 //! # The answer as outputs
 //!
@@ -138,6 +144,20 @@ pub const ANSWERS_GIT_CONFIG: &[&str] =
 /// else local (`maestro_store::tree::ls_remote_command`).
 fn answers_ls_remote(remote: &str) -> std::process::Command {
     maestro_store::tree::ls_remote_command(remote, MAIN, ANSWERS_GIT_CONFIG)
+}
+
+/// How long each git call that reads the answer may take (a FIFO planted at an object's path
+/// cannot hang the read).
+pub const READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// [`maestro_store::tree::check_root_owned`] of the platform's git, or in this crate's unit tests
+/// alone of the path a test installs on its thread.
+fn trusted_git() -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(path) = seams::GIT_CHECKED.with(|p| p.borrow().clone()) {
+        return maestro_store::tree::check_root_owned(&path);
+    }
+    maestro_store::tree::check_root_owned(Path::new(maestro_store::tree::git()))
 }
 
 /// The ref of the answers remote an answer must have landed on.
@@ -560,6 +580,8 @@ enum Answer {
 fn landed_main(paths: &Paths) -> Result<String, KernelError> {
     let remote = answers_remote();
     let unread = |detail: String| Refusal::AnswersUnread { at: format!("{remote} {MAIN}"), detail: clip(&detail) };
+    // The git that asks and reads must be root's alone: no user-level write replaces it.
+    trusted_git().map_err(|e| unread(format!("the git Maestro runs is not root's alone: {e}")))?;
     let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .map_err(unread)?
         .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;
@@ -579,7 +601,7 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
     // a tree's or the ledger's id reads as genuine.
     let local = Store::new(paths.clone(), TreeSource::WorkingTree);
     let source = format!("main@{sha}");
-    match local.ask_ledger_verified(&rec.ledger, &sha).and_then(|l| rows(l, &rec.ask_id)) {
+    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
         Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),
         Ok(Found::Ambiguous) => {
             let at = format!("{source}:{}", rec.ledger);
@@ -697,6 +719,8 @@ pub(crate) mod seams {
     thread_local! {
         pub(crate) static SUFFIXES: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
         pub(crate) static CRASH_AFTER_FILE: Cell<bool> = const { Cell::new(false) };
+        /// The git binary a test has checked instead of the platform's (`trusted_git`).
+        pub(crate) static GIT_CHECKED: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
         /// The answers remote a test reads instead of the compiled one: a local bare repository.
         pub(crate) static REMOTE: RefCell<Option<String>> = const { RefCell::new(None) };
         /// Runs once, after a mint and before its pin is appended: another write meanwhile.
