@@ -79,7 +79,9 @@
 //!   removes crash debris of the exact shapes above that no process holds.
 //! - **Retire.** [`operator::retire`] moves `instances/<id>` to `retired/<id>` under the lock.
 //!   Any later write or read naming that id is refused `retired`; the kernel only stats
-//!   `retired/<id>` and never opens anything inside it.
+//!   `retired/<id>` and never opens anything inside it. The kernel retires an instance the same
+//!   way, under the same lock, once the owner has approved an agent's proposal to retire it
+//!   ([`kernel::adoption`]), after appending `Retired` with the approval's evidence.
 //! - **Log and projection.** Each line of `events.jsonl` is one JSON event with `seq` and
 //!   `prev_event`, the sha256 of the line before ([`log`]). A last line without its newline is a
 //!   torn tail: it reads as unread and blocks appends (`torn_tail`) until
@@ -91,8 +93,9 @@
 //!
 //! Every refusal carries a stable code, [`FlowError::code`].
 //!
-//! The flow kernel built on this layer (definitions, the compiler, the scheduler and the claim
-//! and complete writers) is [`kernel`]. The kernel's writers are the only part of the crate that
+//! The flow kernel built on this layer (definitions, the compiler, the scheduler, the claim and
+//! complete writers, human steps as Maestro asks, and owner-approved adoption and retirement) is
+//! [`kernel`]. The kernel's writers are the only part of the crate that
 //! starts a process: `kernel::complete` runs a node's command, and every write that evaluates a
 //! jq guard runs it in a child process (`kernel::guard`).
 

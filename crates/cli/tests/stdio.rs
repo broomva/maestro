@@ -68,6 +68,8 @@ fn mcp_handshake_lists_and_calls_tools() {
             "maestro_flow_complete",
             "maestro_flow_heartbeat",
             "maestro_flow_next",
+            "maestro_flow_propose_adoption",
+            "maestro_flow_propose_retirement",
             "maestro_flow_start",
             "maestro_flow_status",
             "maestro_handback",

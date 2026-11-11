@@ -65,7 +65,8 @@ fn every_write_needs_an_owner_marker_and_start_records_only_its_digest() {
 fn only_the_owner_session_with_its_marker_writes_its_instance() {
     // BRO-3624 items 5 and 6: a replacement (same session, new marker) and another session (even
     // with the same marker) are refused every write on the instance; a token in their hands
-    // grants nothing; a replacement may start its own instance; no transfer or adoption.
+    // grants nothing; a replacement may start its own instance; no agent transfers an instance
+    // (adoption needs the owner's approval, `kernel::adoption`).
     let mut f = fx(CHAIN);
     let fi = f.begin();
     let c = f.claim(&fi, "head");

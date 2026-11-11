@@ -73,7 +73,8 @@ pub enum KernelError {
     Refused(#[from] Refusal),
 }
 
-/// Why a write verb (`start`, `claim`, `heartbeat`, `complete`, `choose`) wrote nothing. A refusal
+/// Why a write verb (`start`, `claim`, `heartbeat`, `complete`, `choose`, `ask`,
+/// `propose_adoption`, `propose_retirement`) wrote nothing. A refusal
 /// is a normal result: the code says why, and the caller decides what to do next.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
@@ -185,6 +186,30 @@ pub enum Refusal {
     /// The answer's fields are over the outputs bound.
     #[error("The answer to {ask_id} is {size} bytes, over {limit}; it is not taken.")]
     AnswerTooLarge { ask_id: String, size: usize, limit: usize },
+    // Adoption and retirement (`adoption`).
+    /// The claim was taken before the instance was adopted: it is not the new owner's, and runs out
+    /// on its lease.
+    #[error(
+        "The claim on node {node} was taken before the instance changed owner; claim the node again once its lease ends."
+    )]
+    FormerOwnersClaim { node: String },
+    /// The session already owns the instance, so it has nothing to adopt.
+    #[error("This session already owns instance {instance}.")]
+    AlreadyOwner { instance: String },
+    /// The instance has changed owner since the proposal named its owner, so the owner's answer to
+    /// it is not applied. A new proposal names the owner as it is now.
+    #[error(
+        "Instance {instance} has changed owner since proposal {ask_id} named it, so its answer is not applied; propose again."
+    )]
+    ProposalStale { instance: String, ask_id: String },
+    /// The proposal changed between reading it and recording the next step. Nothing was recorded.
+    #[error("The proposal {ask_id} changed meanwhile; nothing was recorded. Call again.")]
+    ProposalChanged { ask_id: String },
+    /// The session has pinned as many proposals on the instance as one session may.
+    #[error(
+        "This session has pinned {limit} proposals on instance {instance}, as many as one session may; nothing was pinned."
+    )]
+    ProposalsExhausted { instance: String, limit: usize },
 }
 
 impl Refusal {
@@ -222,6 +247,11 @@ impl Refusal {
             Refusal::AnswerTooLarge { .. } => "answer_too_large",
             Refusal::AskChanged { .. } => "ask_changed",
             Refusal::NotHuman { .. } => "not_human",
+            Refusal::FormerOwnersClaim { .. } => "former_owners_claim",
+            Refusal::AlreadyOwner { .. } => "already_owner",
+            Refusal::ProposalStale { .. } => "proposal_stale",
+            Refusal::ProposalChanged { .. } => "proposal_changed",
+            Refusal::ProposalsExhausted { .. } => "proposals_exhausted",
         }
     }
 }

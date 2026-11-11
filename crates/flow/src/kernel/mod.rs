@@ -29,8 +29,13 @@
 //!   writer of record with the flows lock released, linked by id and hash in the working tree, and
 //!   answered only once the answer has landed on origin's main, at the commit the remote names;
 //!   the answer is the node's receipt. See [`asks`].
+//! - **Adoption and retirement** ([`propose_adoption`], [`propose_retirement`], BRO-3635). Owner
+//!   decisions: an agent proposes one through a Maestro ask filed and linked as a human node's
+//!   is, and the kernel applies it (`Adopted`, or `Retired` and the move to `retired/`) only once
+//!   the owner's approval has landed on main. Until then nothing changes. See [`adoption`].
 //! - **Events** ([`events`]) are typed bodies of the storage layer's generic event.
 
+pub mod adoption;
 pub mod asks;
 #[cfg(test)]
 mod clocked;
@@ -45,6 +50,9 @@ mod jq;
 mod replay;
 mod write;
 
+pub use adoption::{
+    MAX_PROPOSALS, PROPOSAL_NOT_FILED, ProposalStatus, Proposed, Proposing, propose_adoption, propose_retirement,
+};
 pub use asks::{ASK_NOT_FILED, Asked, Filing, ask, landing};
 pub use compile::{CompiledFlow, MAX_SOURCE, compile};
 pub use error::{CompileError, KernelError, Refusal};

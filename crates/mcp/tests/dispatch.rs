@@ -23,9 +23,9 @@ fn reads_say_read_only_and_requests_do_not() {
     }
 }
 
-/// The flow tools are the kernel's eight verbs and nothing else (BRO-3634; `ask`, BRO-3635): no
-/// raw append, no adoption or retirement (owner decisions the kernel applies), no owner verb under
-/// a flow name.
+/// The flow tools are the kernel's ten verbs and nothing else (BRO-3634; `ask` and the two
+/// proposals, BRO-3635): no raw append, no verb that adopts or retires (owner decisions the kernel
+/// applies only on the owner's answer to a proposal), no owner verb under a flow name.
 #[test]
 fn the_flow_tools_are_the_kernel_verbs_alone() {
     let flow: Vec<(&str, Authority)> =
@@ -41,6 +41,8 @@ fn the_flow_tools_are_the_kernel_verbs_alone() {
             ("maestro_flow_status", Authority::Read),
             ("maestro_flow_heartbeat", Authority::AgentWrite),
             ("maestro_flow_ask", Authority::AgentWrite),
+            ("maestro_flow_propose_adoption", Authority::AgentWrite),
+            ("maestro_flow_propose_retirement", Authority::AgentWrite),
         ]
     );
     let s = store();
@@ -53,6 +55,9 @@ fn the_flow_tools_are_the_kernel_verbs_alone() {
         "maestro_flow_decide",
         "maestro_flow_answer",
         "maestro_flow_approve",
+        "maestro_flow_adopted",
+        "maestro_flow_retired",
+        "maestro_flow_transfer",
     ] {
         let e = call(&s, name, json!({})).unwrap_err();
         assert!(e.message.contains("unknown tool"), "{name}: {}", e.message);
