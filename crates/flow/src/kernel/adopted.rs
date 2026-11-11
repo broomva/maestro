@@ -879,3 +879,53 @@ fn an_instance_with_no_recorded_owner_takes_no_proposal() {
     assert_eq!(code(retire(&mut f, &other(), &fi, Some(&proposing()))), "no_owner");
     assert_eq!(f.kinds(&fi), ["Started"]);
 }
+
+// P20 round 2 (BRO-3635): replay takes a pin only within the current epoch, and a pin in a new
+// epoch replaces the session's stale unlinked one.
+
+#[test]
+fn replay_takes_a_pin_only_within_the_current_ownership_epoch() {
+    // A pin forged with a future epoch is set aside, so when A, C, A brings the epoch to it, its
+    // approval still does not apply. A pin with a past epoch evicts nothing.
+    let (f, fi, _clock) = started();
+    let (me, b, c) = (f.me.clone(), other(), agent("third", "marker-3"));
+    let mut ledger = Ledger::open(&f.flows, &host("mac"), Options::default()).unwrap();
+    // Started is 1, these two 2 and 3; A to C lands at 6, C back to A at 9.
+    push_proposal(&mut ledger, &fi, "adoption", &me, &b, 9, "flow-adopt-future");
+    push_adoption(&mut ledger, &fi, &me, &c, 0, "flow-adopt-c");
+    push_adoption(&mut ledger, &fi, &c, &me, 6, "flow-adopt-back");
+    assert_eq!(last_seq(&f, &fi), 9);
+    let adopted =
+        json!({ "from": owner_json(&me), "to": owner_json(&b), "approval": approval("flow-adopt-future", "adopt") });
+    push(&mut ledger, &fi, "Adopted", adopted);
+    let s = f.status(&fi);
+    assert_eq!(s.owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/owner"));
+    let forged: Vec<&str> =
+        s.rejected.iter().filter(|r| r.subject == "flow-adopt-future").map(|r| r.reason.as_str()).collect();
+    assert_eq!(forged, ["not_this_epoch", "not_pinned", "not_proposed"]);
+    // A live unlinked pin of B's in this epoch is not evicted by one naming a past epoch.
+    let pin = |epoch: u64, id: &str| json!({ "proposal": "adoption", "by": owner_json(&b), "owner": owner_json(&me), "epoch": epoch, "ask_id": id, "ledger": "ledger.yaml", "body": {}, "body_hash": "sha256:h" });
+    push(&mut ledger, &fi, "ProposalPinned", pin(9, "flow-adopt-live"));
+    push(&mut ledger, &fi, "ProposalPinned", pin(0, "flow-adopt-past"));
+    let s = f.status(&fi);
+    let standing: Vec<&str> = s.proposals.iter().map(|p| p.ask_id.as_str()).collect();
+    assert_eq!(standing, ["flow-adopt-live"]);
+    assert_eq!(s.rejected.last().map(|r| r.reason.as_str()), Some("not_this_epoch"));
+}
+
+#[test]
+fn asking_again_replaces_a_stale_unlinked_pin() {
+    // A pin left unlinked (a busy or unconfirmed filing) goes stale when an adoption lands; asking
+    // again pins anew in the new epoch, replacing it, and files and links the new one.
+    let (mut f, fi, _clock) = started();
+    let (me, b, c) = (f.me.clone(), other(), agent("third", "marker-3"));
+    let stale = json!({ "proposal": "adoption", "by": owner_json(&b), "owner": owner_json(&me), "epoch": 0, "ask_id": "flow-adopt-unlinked", "ledger": "ledger.yaml", "body": {}, "body_hash": "sha256:h" });
+    append_raw(&mut f, &fi, "ProposalPinned", stale);
+    push_adoption(&mut f.ledger, &fi, &me, &c, 0, "flow-adopt-c");
+    assert_eq!(f.status(&fi).proposals.iter().find(|p| p.ask_id == "flow-adopt-unlinked").unwrap().state, "stale");
+    let id = linked(&adopt_again(&mut f, &b, &fi).unwrap());
+    let s = f.status(&fi);
+    let mine: Vec<(&str, &str)> =
+        s.proposals.iter().filter(|p| p.by.to_string() == "t3:-/other").map(|p| (p.ask_id.as_str(), p.state)).collect();
+    assert_eq!(mine, [(id.as_str(), "owner")]);
+}

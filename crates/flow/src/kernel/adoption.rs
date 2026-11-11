@@ -76,8 +76,11 @@
 //! was proposed and filed. Each session has at most one standing proposal of each kind on an
 //! instance; a new one replaces a linked one (the verb pins anew only after reading a decline)
 //! or a stale one. A session pins at most [`MAX_PROPOSALS`] proposals on an instance, withdrawn
-//! ones included (`proposals_exhausted`), so a stranger whose filings the writer keeps refusing
-//! cannot grow the owner's log toward its bound. Proposal bookkeeping never fails the owner's
+//! ones included (`proposals_exhausted`): a session whose filings the writer keeps refusing adds
+//! at most `2 * MAX_PROPOSALS` (16) events to the owner's log. The cap is per identity (a
+//! `SessionRef` and owner marker together), so what remains is many verified identities, each
+//! within its own cap, filling the log's bound (`log::MAX_EVENTS`); a per-instance budget is a
+//! follow-up. Proposal bookkeeping never fails the owner's
 //! writes either: the owner's human-node ask pin passes over pins, links and withdrawals appended
 //! since it read the log (`asks`). The flow writes no other file: the ask goes through the asks
 //! ledger's writer of record, and the flows lock is never held while it is filed.
@@ -85,8 +88,8 @@
 //! # Replay
 //!
 //! [`owners`] folds the log in order, and accepts each proposal event only if it fits what came
-//! before: a pin from a session with a marker, naming the owner as the log has it (and for an
-//! adoption, a session other than the owner); a link of a standing pin
+//! before: a pin from a session with a marker, naming the owner and the ownership epoch as the
+//! log has them (and for an adoption, a session other than the owner); a link of a standing pin
 //! with its hash; a withdrawal of a standing unlinked pin. `Adopted` counts only for a standing
 //! linked adoption proposal with its ask id and kind, proposed by `to`, naming `from` as the
 //! owner, pinned within the current ownership epoch, and the approve option; `Retired` likewise
@@ -239,6 +242,10 @@ impl Owners {
                 let p: ProposalPinned = body(log, e)?;
                 if self.owner.as_ref() != Some(&p.owner) {
                     return Ok(Err("not_the_owner_named"));
+                }
+                // A pin is made within the current ownership epoch, never a past or a future one.
+                if p.epoch != self.since {
+                    return Ok(Err("not_this_epoch"));
                 }
                 if p.proposal == Proposal::Adoption && p.by == p.owner {
                     return Ok(Err("already_owner"));

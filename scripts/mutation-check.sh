@@ -1774,6 +1774,13 @@ mutate $adopt '        if self.retired.is_some() {
 mutate $adopt '                if self.owner.as_ref() != Some(&p.owner) {' '                if false {'
 mutate $adopt 'r.ask.ask_id == approval.ask_id && r.proposal == kind) else {' 'r.ask.ask_id == approval.ask_id) else {'
 mutate $adopt '        let Some(current) = &owners.owner else {' '        let Some(current) = owners.owner.as_ref().or(Some(me)) else {'
+# P20 round 2: replay takes a pin only within the current ownership epoch (a forged future epoch
+# never applies when the owner returns; a past one evicts nothing), and a pin in a new epoch
+# replaces the session's stale unlinked one.
+mutate $adopt '                if p.epoch != self.since {
+                    return Ok(Err("not_this_epoch"));' '                if false {
+                    return Ok(Err("not_this_epoch"));'
+mutate $adopt 'if !self.proposals[i].ask.linked && self.proposals[i].epoch == p.epoch {' 'if !self.proposals[i].ask.linked {'
 # The kernel's keys (the question, the options, the default) are never the agent's.
 mutate $adopt '["id", "uid", "ask", "asked_at", "headline", "options", "default", "preanswerable"]' '["id", "uid", "ask", "asked_at", "headline", "uid", "uid", "uid"]'
 # The flows lock is never held while a proposal is filed.
