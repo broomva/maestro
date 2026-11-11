@@ -133,6 +133,11 @@ fn cli_writes_need_a_launch_token_or_a_credential() {
         "caller_unverified"
     );
     ok(m.verified().args(["flow", "claim", "--instance", &fi, "--node-id", "review"]));
+    // The human step's verb too (BRO-3635): unverified, refused; verified, it reaches the kernel,
+    // which files asks only for a human node.
+    let ask = ["flow", "ask", "--instance", &fi, "--node-id", "review"];
+    assert_eq!(refused(m.bare().args(ask)), "caller_unverified");
+    assert_eq!(refused(m.verified().args(ask)), "not_human");
 }
 
 /// The binary calls `guard_entry` first in `main`, so a guarded choose runs through it (without
@@ -326,4 +331,44 @@ fn the_http_daemon_takes_no_claim_from_its_environment() {
     assert_eq!(begun["ok"], true, "{begun}");
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// A human node's ask filed through the CLI end to end (BRO-3635): `--ledger` and `--ask` reach the
+/// kernel, which files through the writer of record (here the stub) and links the row.
+#[test]
+fn an_ask_is_filed_through_the_cli() {
+    let m = machine();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/requests");
+    let ws = m.root.join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::create_dir_all(ws.join("scripts")).unwrap();
+    std::fs::copy(fixtures.join("ledger.yaml"), ws.join(".control/asks/ledger.yaml")).unwrap();
+    std::fs::copy(fixtures.join("ask_ledger_stub.py"), ws.join("scripts/ask_ledger.py")).unwrap();
+    std::fs::write(
+        m.root.join("gate.yaml"),
+        "flow: gate\nversion: 1\nnodes:\n  owner: {class: human, ask: Ship it?}\n",
+    )
+    .unwrap();
+    // The scratch HOME hides this machine's Python packages (PyYAML) from the writer.
+    let user_base = Command::new("python3").args(["-m", "site", "--user-base"]).output().unwrap();
+    let user_base = String::from_utf8(user_base.stdout).unwrap().trim().to_string();
+    let cli = || {
+        let mut cmd = m.verified();
+        cmd.env("PYTHONUSERBASE", &user_base).env("MAESTRO_PASEO_ASK_LOCKS", m.root.join("locks"));
+        cmd
+    };
+    let begun = ok(cli().args(["flow", "start", "--definition"]).arg(m.root.join("gate.yaml")));
+    let fi = begun["instance"].as_str().unwrap().to_string();
+    let body = json!({
+        "class": "decision", "gates": ["fixture"], "blocking": false, "default": "hold", "preanswerable": false,
+        "exhausted": ["read: a fixture", "default: a fixture"],
+    });
+    let ask = ["flow", "ask", "--instance", &fi, "--node-id", "owner", "--ledger", "ledger.yaml", "--ask"];
+    let v = ok(cli().args(ask).arg(body.to_string()));
+    assert_eq!(v["state"], "waiting", "{v}");
+    let id = v["ask_id"].as_str().unwrap();
+    let text = std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap();
+    assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "filed once");
+    let status = ok(m.bare().args(["flow", "status", "--instance", &fi]));
+    assert_eq!(status["relay"][0]["state"], "owner", "{status}");
 }

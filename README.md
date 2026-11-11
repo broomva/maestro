@@ -92,7 +92,36 @@ maestro flow claim --instance I --node-id N                  # take a node: a cl
 maestro flow heartbeat --claim-token T                       # extend the lease
 maestro flow complete --claim-token T [--outputs '<json>']   # the kernel runs the node's command
 maestro flow choose --claim-token T --edge E                 # take a choice node's edge if its guard holds
+maestro flow ask --instance I --node-id N [--ledger L.yaml --ask '<json>']   # a human node: file its ask, then take the answer
 ```
+
+- **Human steps (BRO-3635).** A waiting `human` node is the owner's. `flow ask` (MCP
+  `maestro_flow_ask`) files its ask on the first call: the kernel mints the id, takes the question
+  from the definition and `asked_at` from its own clock, adds your `--ask` fields (what the
+  ledger's validator requires), pins that body in the flow's log, and files it through the
+  writer of record (`ask_ledger.py file`, as `ask file` does) with the flow ledger's lock
+  released. It links the row it finds in the working tree by that id and hash. Call it again until
+  it says `answered`: the answer counts only once it has landed on main of the answers remote,
+  `https://github.com/broomva/workspace.git`, compiled into Maestro (owner decisions 2026-11-09,
+  "Landed main, remote-checked" and "Compiled into maestro"; changing it is a code change). The
+  kernel asks that URL for `refs/heads/main` with nothing local applying (git by absolute path,
+  the Command Line Tools' on macOS and `/usr/bin/git` on Linux, checked root-owned and not group-
+  or other-writable; a fixed `PATH`; outside the repository; no git configuration; none of your
+  `GIT_*` environment; the one credential helper is `gh`'s, which only supplies credentials), and
+  reads the ledger at that commit object by object, each checked against its id, so nothing planted
+  in the object store reads as the answer. The floor (owner decision 2026-11-09, "Set the floor,
+  fix, re-check"): the residual risk is anything needing the user-level write that can replace
+  Maestro's own binary (`~/.local/bin/maestro`, the macOS `xcrun` cache, Homebrew's `gh`), a
+  root-level change, or merging a pull request carrying an answer into that main. No local ref or remote counts: an answer on `maestro/answers` (this clone's
+  or origin's) is reported as `answer_waiting_to_land`, and the flow resumes when it lands. A
+  remote that cannot be asked (20 s per call), has no main, or names a commit this clone has not
+  fetched is `answers_unread`. The answer is
+  never read from the working tree or from you; it is recorded as the node's receipt, with the
+  answer's fields as its outputs (`answer_option`, `answer`, ...). A busy asks ledger is retried
+  until the kernel's deadline, then `ask_refused_busy`; a row with that id and another body is
+  `ask_refused`. `flow next` and `flow status` return `relay`: each waiting node's question, its
+  state (`unfiled`, `owner`, `answer_waiting_to_land`) and ask, and for a T3 owner, links that open
+  its thread with a draft to take the answer.
 
 - **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
   Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential

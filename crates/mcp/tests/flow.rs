@@ -6,7 +6,7 @@ use maestro_core::session::PeerCredentials;
 use maestro_hosts::{CallerClaim, DirectRegistry, DirectSession, PaseoRegistry, SessionLiveness, SurfaceRegistry};
 use maestro_hosts::{NodeId, T3Registry};
 use maestro_mcp::call_with_hosts;
-use maestro_mcp::flow::{CHOOSE, CLAIM, COMPLETE, HEARTBEAT, MAX_NAME, NEXT, START, STATUS};
+use maestro_mcp::flow::{ASK, CHOOSE, CLAIM, COMPLETE, HEARTBEAT, MAX_NAME, NEXT, START, STATUS};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -185,6 +185,7 @@ fn an_unverified_caller_reads_and_writes_nothing() {
         (HEARTBEAT, json!({ "claim_token": token })),
         (COMPLETE, json!({ "claim_token": token })),
         (CHOOSE, json!({ "claim_token": token, "edge": "ship" })),
+        (ASK, json!({ "instance": fi, "node_id": "review", "ledger": "l.yaml", "ask": { "class": "decision" } })),
     ];
     for (tool, args) in &writes {
         // A Paseo session, with no Paseo registry here and no claim: unverified.
@@ -272,6 +273,8 @@ fn names_passed_to_the_kernel_are_bounded() {
     let long = "n".repeat(MAX_NAME + 1);
     let v = f.d1(CLAIM, json!({ "instance": fi, "node_id": long }));
     assert_eq!(code(&v), "name_too_long", "{v}");
+    let v = f.d1(ASK, json!({ "instance": fi, "node_id": long }));
+    assert_eq!(code(&v), "name_too_long", "{v}");
     assert!(v.to_string().len() < MAX_NAME, "the name is not echoed back");
     // At the bound, the kernel judges it.
     let v = f.d1(CLAIM, json!({ "instance": fi, "node_id": "n".repeat(MAX_NAME) }));
@@ -295,7 +298,7 @@ fn names_passed_to_the_kernel_are_bounded() {
 #[test]
 fn write_schemas_carry_the_callers_claim() {
     let tools = maestro_mcp::MaestroServer::tools();
-    for name in [START, CLAIM, HEARTBEAT, COMPLETE, CHOOSE] {
+    for name in [START, CLAIM, HEARTBEAT, COMPLETE, CHOOSE, ASK] {
         let tool = tools.iter().find(|t| t.name == name).unwrap();
         let schema = Value::Object((*tool.input_schema).clone());
         let props = schema["properties"].as_object().unwrap_or_else(|| panic!("{name}: {schema}"));
@@ -414,4 +417,68 @@ fn verified_t3_and_paseo_sessions_write() {
         let claimed = call_with_hosts(&f.store, &hosts, CLAIM, claim_args).unwrap();
         assert_eq!(claimed["ok"], true, "{session}: {claimed}");
     }
+}
+
+/// A waiting human node's question is relayed as data (BRO-3635, ADR decisions 4 and 8): the
+/// question and, once filed, its ask; a T3 owner also gets prompt links that open its thread with
+/// a draft naming the ask and `maestro_flow_ask`, carrying no answer. Another surface, an ask not
+/// yet filed, a T3 owner with no environment, a value that is not printable ASCII, or a draft over
+/// T3's link limit gets no link.
+#[test]
+fn a_waiting_human_node_is_relayed_toward_its_t3_thread() {
+    use maestro_flow::kernel::{NodeStatus, Reason, State};
+    let owner = |ask_id: &str, ledger: &str| Reason::Owner {
+        ask: "Ship it?".into(),
+        ask_id: ask_id.to_string(),
+        ledger: ledger.to_string(),
+    };
+    let waiting = |reason: Reason| {
+        let s = NodeStatus {
+            state: State::Waiting,
+            class: "human".into(),
+            iteration: BTreeMap::new(),
+            unmet: vec![reason],
+            inputs: BTreeMap::new(),
+        };
+        BTreeMap::from([("owner".to_string(), s)])
+    };
+    let relay = |session: &str, reason: Reason| {
+        let session: maestro_core::session::SessionRef = session.parse().unwrap();
+        maestro_mcp::flow::relay("fi_1", Some(&session), &waiting(reason))
+    };
+    let r = relay("t3:env-1/thread-1", owner("flow-owner-1", "arc.yaml"));
+    assert_eq!(r.len(), 1);
+    assert_eq!(
+        (&r[0]["question"], &r[0]["ask_id"], &r[0]["state"]),
+        (&json!("Ship it?"), &json!("flow-owner-1"), &json!("owner"))
+    );
+    let app = r[0]["t3"]["app"].as_str().unwrap();
+    assert!(app.starts_with("t3code://threads/env-1/thread-1?prompt="), "{app}");
+    assert!(app.contains("flow-owner-1") && app.contains("maestro_flow_ask"), "{app}");
+    assert!(r[0]["t3"]["web"].as_str().unwrap().starts_with("https://app.t3.codes/env-1/thread-1?prompt="));
+    // Waiting to land is still the owner's question, with its link.
+    let landing = Reason::AnswerWaitingToLand {
+        ask: "Ship it?".into(),
+        ask_id: "flow-owner-1".into(),
+        ledger: "arc.yaml".into(),
+        at: "maestro/answers".into(),
+    };
+    let r = relay("t3:env-1/thread-1", landing);
+    assert_eq!((&r[0]["state"], r[0].get("t3").is_some()), (&json!("answer_waiting_to_land"), true));
+    let none = |session: &str, reason: Reason| {
+        let r = relay(session, reason);
+        assert_eq!(r[0]["question"], "Ship it?");
+        r[0].get("t3").is_none()
+    };
+    assert!(none("paseo:env-1/a1", owner("flow-owner-1", "arc.yaml")), "not a T3 owner");
+    assert!(none("t3:-/thread-1", owner("flow-owner-1", "arc.yaml")), "no environment");
+    let unfiled = Reason::Unfiled {
+        ask: "Ship it?".into(),
+        ask_id: Some("flow-owner-1".into()),
+        ledger: Some("arc.yaml".into()),
+    };
+    assert!(none("t3:env-1/thread-1", unfiled), "pinned, not filed");
+    assert!(none("t3:env-1/thread-1", owner("flow-owner-1", "ar\u{2028}c.yaml")), "not printable ASCII");
+    assert!(none("t3:env-1/thread-1", owner("flow-owner-1", "a\nb.yaml")), "a line break");
+    assert!(none("t3:env-1/thread-1", owner(&"f".repeat(9000), "arc.yaml")), "over T3's link limit");
 }

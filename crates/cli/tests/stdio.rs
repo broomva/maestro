@@ -62,6 +62,7 @@ fn mcp_handshake_lists_and_calls_tools() {
             "maestro_context",
             "maestro_escalate",
             "maestro_fleet_get",
+            "maestro_flow_ask",
             "maestro_flow_choose",
             "maestro_flow_claim",
             "maestro_flow_complete",

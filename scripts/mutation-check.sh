@@ -133,7 +133,10 @@ mutate $views 'TICK_CLOSE_SECS.max(2 * median(&mut lengths))' 'TICK_CLOSE_SECS'
 mutate $views 'if secs(&t.started_at).is_some_and(|s| now.as_second() - s > limit) {' 'if false {'
 # Reading: the plugin's ledger limit, bounded reads, UTF-8 only, regular files only.
 mutate $store 'if t.len() > LEDGER_LIMIT {' 'if false {'
-mutate $tree 'if bytes.len() > MAX_READ {' 'if false {'
+mutate $tree 'if bytes.len() > limit {' 'if false {'
+mutate $tree 'if size > limit as u64 {' 'if false {'
+mutate $store 'let text = self.tree.read_bounded(&rel, LEDGER_LIMIT)' 'let text = self.tree.read_bounded(&rel, tree::MAX_READ)'
+mutate $store 'if let Some((i, reason)) = bad.first() {' 'if let Some((i, reason)) = bad.first().filter(|_| false) {'
 mutate $tree 'if size > MAX_READ {' 'if false {'
 mutate $tree 'if entry.file_type()?.is_file() {' 'if true {'
 mutate $tree '(Some("100644" | "100755"), Some("blob"))' '(Some(_), Some(_))'
@@ -1305,7 +1308,8 @@ mutate $fk/replay.rs '        if !eval.settled(rid, i) {
         }' ''
 mutate $fk/replay.rs '                read.push((m, c));' ''
 mutate $fk/replay.rs '                read.push((b.as_str(), eval.node(b, j)));' ''
-mutate $fk/replay.rs 'Refused::KIND, EffectStarted::KIND];' 'Refused::KIND];'
+mutate $fk/replay.rs '            EffectStarted::KIND,
+            AskPinned::KIND,' '            AskPinned::KIND,'
 # Effects declare a command; the compiler refuses one without.
 mutate $fk/compile.rs '                Some(run) if !run.is_empty() => run,' '                Some(run) => run,
                 None => Vec::new(),'
@@ -1508,7 +1512,7 @@ mutate $mf '                let flow = kernel::compile(&a.definition)?;
                 let flow = kernel::compile(&a.definition)?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
                 let begun = kernel::start(&mut ledger, &w.me, &flow, params)?;'
-mutate $mf '    let root = flows_root(workspace)?;' '    let root = workspace.join(FLOWS);'
+mutate $mf '    let root = flows_root(&paths.workspace)?;' '    let root = paths.workspace.join(FLOWS);'
 mutate $mf '    if value.len() > MAX_NAME {' '    if false {'
 mutate $mf '    if value.len() > MAX_NAME {' '    if value.len() >= MAX_NAME {'
 mutate $mf '#[serde(deny_unknown_fields)]
@@ -1570,6 +1574,168 @@ mutate $cli '    if v["ok"] == json!(true) {
         return Ok(());
     }
     bail!'
+
+# Human steps (BRO-3635; BRO-3624 items 1 and 7): a flow's ask, pinned, filed, linked, answered.
+asks=crates/flow/src/kernel/asks.rs
+replay=crates/flow/src/kernel/replay.rs
+# The minted id collides with no id or uid in the ledger.
+mutate $asks '.flat_map(|a| [Some(a.id), a.uid])' '.flat_map(|a| [Some(a.id), None])'
+mutate $asks 'if !taken.contains(&id) {' 'if true {'
+# asked_at is the kernel's, pinned before hashing; the comparable body excludes origin.
+mutate $asks '    body.insert("asked_at".into(), Value::String(clock::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string()));' ''
+mutate $asks 'const KERNEL_KEYS: [&str; 4] = ["id", "uid", "ask", "asked_at"];' 'const KERNEL_KEYS: [&str; 4] = ["id", "uid", "ask", "ask"];'
+mutate $asks 'map.retain(|k, _| !requests::refused_key(k));' 'map.retain(|_, _| true);'
+# The working tree's row with that id and hash links, after a filing and after a duplicate.
+mutate $asks 'let row = match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {' 'let row = match (if outcome.is_ok() { find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? } else { Found::None }) {'
+# A hash miss is ask_refused.
+mutate $asks '    if found != rec.body_hash {
+        return Err(Refusal::AskRefused {' '    if false {
+        return Err(Refusal::AskRefused {'
+# Confirmation reads the working tree, not origin/main.
+mutate $asks 'let here = Store::new(paths.clone(), TreeSource::WorkingTree);' 'let here = Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into()));'
+# A busy ask ledger is retried by the kernel against its own clock, until its deadline, then refused.
+mutate $asks 'if clock::now() >= deadline {' 'if true {'
+mutate $asks 'if clock::now() >= deadline {' 'if false {'
+# The flow finds its ask by the id it minted, never by searching the asks.
+mutate $asks '.filter(|a| a.id == id || a.uid.as_deref() == Some(id))' '.filter(|a| a.id == id || a.uid.as_deref() == Some(id) || a.state() == AskState::Answered)'
+# The flows lock is never held while an ask is filed.
+mutate $asks 'let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?;' 'let outcome = { let _held = ledger.lock()?; file_pinned(&here.paths, &dir, &rec, body, session)? };'
+# Only the owner path answers (owner decision 2026-11-09, "Landed main, remote-checked"): main at
+# the commit the remote names, present here; an answered row; the linked ask. A local
+# maestro/answers or refs/remotes/origin/main never answers, and unread is not unanswered.
+mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed' 'Ok(Found::Row(row)) => return Ok(Answer::Landed'
+mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit)'
+mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
+        .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
+        .or_else(|_| Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit))
+        .map_err(unread)?'
+mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id) {'
+mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha, READ_TIMEOUT).map_err(unread)? {' '    if false {'
+mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
+mutate $replay '                    Class::Human { .. } => return Ok(Err("wrong_class")),' ''
+mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {' 'if false {'
+# Every other code `ask` adds, by its guard: ask_body_invalid (ledger name, size, nesting),
+# ask_ledger_unread, ask_id_exhausted, ask_not_filed, ask_unconfirmed, ask_ambiguous,
+# answer_mismatch, answers_unread, answer_too_large and ask_changed.
+mutate $asks 'if !requests::ledger_name_ok(&filing.ledger) ||' 'if false ||'
+mutate $asks 'if size > MAX_ASK_BODY {' 'if false {'
+mutate $asks 'if nesting(&given) + 2 >= MAX_NESTING {' 'if false {'
+mutate $asks 'return Err(unread("there is no such ledger in the asks folder".into()).into());' 'return Ok(BTreeSet::new());'
+mutate $asks 'for _ in 0..MINT_TRIES {' 'for _ in 0..MINT_TRIES + 1 {'
+mutate $asks '            Err(FileError::Refused(reason)) => {' '            Err(FileError::Refused(reason)) if false => {'
+mutate $asks '            Err(FileError::Refused(reason)) => {' '            _ => {
+                let reason = String::from("withdrawn whatever the writer said");'
+mutate $asks '        _ => Found::Ambiguous,' '        (Some(a), _) => Found::Row(Box::new(a)),'
+mutate $asks '    if found != rec.body_hash {
+        return Err(Refusal::AnswerMismatch {' '    if false {
+        return Err(Refusal::AnswerMismatch {'
+mutate $asks '        Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),' '        Err(_) => {}'
+mutate $asks '        Ok(Found::Ambiguous) => {
+            let at = format!("{source}:{}", rec.ledger);' '        Ok(Found::Ambiguous) if false => {
+            let at = format!("{source}:{}", rec.ledger);'
+mutate $asks 'if size > MAX_OUTPUTS {' 'if false {'
+mutate $asks '        Some(now) if now == *expect => {}' '        _ => {}'
+# The question is relayed toward a T3 owner's thread, and only once its ask is filed.
+mutate $mf '.filter(|o| o.surface == Surface::T3)' '.filter(|_| true)'
+mutate $mf '(&thread, ask_id, ledger, state != "unfiled")' '(&thread, ask_id, ledger, true)'
+mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if maestro_view::handoff::fits(&prompt) {'
+mutate $mf 'if plain && maestro_view::handoff::fits(&prompt) {' 'if plain {'
+# P20 round 2: the answers remote is compiled in (owner decision 2026-11-09, "Compiled into
+# maestro") and asked with nothing local applying; reads at its main run with replace objects off;
+# only exactly refs/heads/main counts, and a remote without it is unread, never its HEAD.
+mutate $tree '    cmd.arg("--no-replace-objects").arg("-C").arg(root);' '    cmd.arg("-C").arg(root);'
+mutate $tree '    cmd.env_clear().env("PATH", git_path());
+    if let Some(home) = std::env::var_os("HOME") {' '    cmd.env("PATH", git_path());
+    if let Some(home) = std::env::var_os("HOME") {'
+# The answers remote is private: its one credential helper is GitHub's, and gh needs HOME.
+mutate $tree '    if let Some(home) = std::env::var_os("HOME") {
+        cmd.env("HOME", home);
+    }' ''
+mutate $asks ', "credential.https://github.com.helper=!gh auth git-credential"]' ']'
+# P20 round 3: git does not check an object's hash when it reads it; the answer read checks each
+# object against its id, step by step. The system git by absolute path on a fixed PATH; no GIT_*
+# environment redirects a store read; the ls-remote reader stops at its bound.
+mutate $tree '    check(&format, "commit", commit, &body)?;' ''
+mutate $tree '        check(&format, "tree", &id, &body)?;' ''
+mutate $tree '    check(&format, "blob", &id, &blob)?;' ''
+mutate $tree '    if hex != id {' '    if false {'
+mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev(sha.clone())), &rec.ledger, &rec.ask_id) {'
+mutate $tree '        _ => "/usr/bin/git",' '        _ => "git",'
+mutate $tree '        "macos" => "/Library/Developer/CommandLineTools/usr/bin/git",' '        "macos" => "/usr/bin/git",'
+mutate $tree '    let mut cmd = Command::new(git());
+    cmd.env_clear().env("PATH", git_path());
+    if let Some(home)' '    let mut cmd = Command::new(git());
+    cmd.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    if let Some(home)'
+mutate $tree '    cmd.env_clear().env("PATH", git_path()).env("xcrun_nocache", "1");
+    for key in GIT_ENV_KEPT {' '    cmd.env("PATH", git_path()).env("xcrun_nocache", "1");
+    for key in GIT_ENV_KEPT {'
+mutate $tree '                let _ = pipe.take(limit as u64 + 1).read_to_end(&mut buf);' '                let _ = { let mut pipe = pipe; pipe.read_to_end(&mut buf) };'
+# The floor (owner decision 2026-11-09, "Set the floor, fix, re-check"): git root's alone, checked
+# before each answer read; xcrun's cache off; each verified read bounded in bytes and in time.
+mutate $tree '        if meta.uid != 0 {' '        if false {'
+mutate $tree '        if meta.mode & 0o022 != 0 {' '        if false {'
+# The narrow re-check (owner decision 2026-11-10): every folder above the binary as given, the
+# group-write bit, no symbolic link on the path, and a deadline on the presence check.
+mutate $tree '    for at in path.ancestors() {' '    for at in path.ancestors().take(1) {'
+mutate $tree '    for at in path.ancestors() {' '    for at in path.ancestors().skip(1) {'
+mutate $tree '    for at in path.ancestors() {' '    for at in path.ancestors().take_while(|p| p.parent().is_some()) {'
+mutate $tree '        if meta.mode & 0o022 != 0 {' '        if meta.mode & 0o002 != 0 {'
+mutate $tree '        if meta.is_symlink {' '        if false {'
+mutate $tree '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, timeout)?;' '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, Duration::from_secs(3600))?;'
+mutate $asks '    trusted_git().map_err(|e| unread(format!("the git Maestro runs is not root'"'"'s alone: {e}")))?;' ''
+mutate $tree '    cmd.env("xcrun_nocache", "1");' ''
+mutate $tree '    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;' '    let body = git_bytes(root, &["cat-file", "commit", commit], 4 * MAX_OBJECT, timeout)?;'
+mutate $tree '        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;' '        let body = git_bytes(root, &["cat-file", "tree", &id], 4 * MAX_OBJECT, timeout)?;'
+mutate $tree '    let blob = git_bytes(root, &["cat-file", "blob", &id], limit, timeout)?;' '    let blob = git_bytes(root, &["cat-file", "blob", &id], MAX_OBJECT, timeout)?;'
+mutate $tree '    if out.len() > limit {
+        return Err(format!("{what} said more than' '    if false {
+        return Err(format!("{what} said more than'
+mutate $tree '    let (status, out, _) = run_bounded(cmd, &what, limit, timeout)?;' '    let (status, out, _) = run_bounded(cmd, &what, limit, Duration::from_secs(3600))?;'
+mutate $tree '    if out.len() > MAX_LS_REMOTE {
+        // The reader stopped' '    if false {
+        // The reader stopped'
+mutate $tree 'false if std::time::Instant::now() >= deadline => break false,' 'false if false => break false,'
+# The CodeRabbit minors (owner decision 2026-11-10, "Fix the 2 minors, re-check, merge"): ls-remote
+# runs in `/`, never in the repository the process runs from; the group is killed on both paths, so
+# a helper that outlives git cannot hold the readers.
+mutate $tree '    cmd.current_dir("/");' ''
+mutate $tree '    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);' ''
+mutate $tree '    if out.len() > MAX_LS_REMOTE {
+        return Err(format!("it said more than' '    if false {
+        return Err(format!("it said more than'
+mutate $tree '        if name != refname {
+            continue;' '        if false {
+            continue;'
+mutate $tree 'if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {' 'if found.is_some() {'
+mutate $tree 'if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {' 'if !(hex && (oid.len() == 40 || oid.len() == 64)) {'
+mutate $asks 'pub const MAIN: &str = "refs/heads/main";' 'pub const MAIN: &str = "HEAD";'
+mutate $asks '        .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;' '        .or_else(|| {
+            let head = maestro_store::tree::ls_remote_command(&remote, "HEAD", ANSWERS_GIT_CONFIG);
+            maestro_store::tree::remote_ref(head, "HEAD", REMOTE_TIMEOUT).ok().flatten()
+        })
+        .ok_or_else(|| unread(format!("the answers remote has no {MAIN}")))?;'
+mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) => Some(label.to_string()),'
+mutate $asks '        out.push_str("...");' ''
+mutate $asks 'Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail: clip(&detail) }' 'Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail }'
+# P20 round 1: the guards no test killed. The owner check before anything is read or written; the
+# busy deadline from the first try; only a waiting node files; a pin at the sequence it was minted
+# at; the replay rules for pins and links; an ask is unfiled until linked; echoed text is bounded
+# and a ledger name is printable ASCII; the CLI passes --ask on.
+mutate $asks '    check_owner(&started, instance, session)?;
+    waiting(&log, &started, node)?;' '    waiting(&log, &started, node)?;'
+mutate $asks '    let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;
+    loop {' '    loop {
+        let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;'
+mutate $asks '        Some(s) if s.state == State::Waiting => Ok((s.iteration.clone(), s.inputs.clone())),' '        Some(s) => Ok((s.iteration.clone(), s.inputs.clone())),'
+mutate $asks 'guard.append(instance, seen.seq, pin.to_event()?)?;' 'guard.append(instance, log.seq(), pin.to_event()?)?;'
+mutate $replay '                if self.asks.contains_key(&(id, i)) {' '                if false {'
+mutate $replay 'Some(r) if !r.linked && r.ask_id == l.ask_id && r.body_hash == l.body_hash => {' 'Some(r) if !r.linked && r.ask_id == l.ask_id => {'
+mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| !r.linked && r.ask_id == w.ask_id) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.ask_id == w.ask_id) {'
+mutate $replay 'Some(r) if r.linked => {' 'Some(r) if true => {'
+mutate $asks 'let mut out: String = text.chars().take(MAX_ECHO).collect();' 'let mut out: String = text.chars().collect();'
+mutate $asks ' || !filing.ledger.bytes().all(|b| b.is_ascii_graphic())' ''
+mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Value> = None;'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

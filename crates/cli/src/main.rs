@@ -259,6 +259,22 @@ enum FlowCommand {
         #[arg(long)]
         claim_token: String,
     },
+    /// A waiting human node: file its ask (first call), then take the owner's answer from the
+    /// answers ledger once there is one. Call it again until it says answered.
+    Ask {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        node_id: String,
+        /// The asks ledger to file into (first call only).
+        #[arg(long)]
+        ledger: Option<String>,
+        /// The ask's fields besides id, ask and asked_at, as a JSON object (first call only).
+        #[arg(long)]
+        ask: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -579,6 +595,11 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
         }
         FlowCommand::Heartbeat { session, claim_token } => {
             (f::HEARTBEAT, json!({ "session": session.session, "claim_token": claim_token }))
+        }
+        FlowCommand::Ask { session, instance, node_id, ledger, ask } => {
+            let ask = json_arg("--ask", ask.as_deref())?;
+            let args = json!({ "session": session.session, "instance": instance, "node_id": node_id, "ledger": ledger, "ask": ask });
+            (f::ASK, args)
         }
     };
     let v = call(store, tool, args)?;

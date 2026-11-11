@@ -42,7 +42,11 @@
 //! - A switch follows only the recorded value. A node whose case was not taken never runs, and
 //!   neither does anything that needs it. A repeat whose whole body will never run is
 //!   unreachable, not exhausted.
-//! - A `human` node with every requirement met is `waiting` on the owner; any other is `ready`.
+//! - A `human` node with every requirement met is `waiting`; any other is `ready`. Its reason is
+//!   `unfiled` until its ask is linked, then `owner`.
+//!   Its reason names its ask once `asks` pinned it (`AskPinned`, `AskLinked`, `AskWithdrawn` are
+//!   inert). Its receipt is `Answered` (the owner's answer, read by `asks`), never a `Completed`,
+//!   and an `Answered` counts only for the ask linked at that node and iteration.
 //!
 //! # Contract for the writers (3b2)
 //!
@@ -77,8 +81,8 @@
 use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
-    Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat, KernelEvent, Refused, Started, digest,
-    receipt_digest,
+    Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat,
+    KernelEvent, Refused, Started, digest, receipt_digest,
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
 use super::write;
@@ -86,7 +90,7 @@ use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, ReadGuard, random_epoch};
 use crate::log::{Event, Log};
 use jiff::{SignedDuration, Timestamp};
-use maestro_core::session::VerifiedSession;
+use maestro_core::session::{SessionRef, VerifiedSession};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -160,9 +164,29 @@ pub enum Reason {
     AttemptsExhausted {
         attempts: u32,
     },
-    /// The owner's answer to this ask, through the asks ledger.
+    /// A human node whose ask is not filed yet: its agent files it with `ask` (`asks`). `ask` is
+    /// the definition's question; `ask_id` and `ledger` name the ask once it is pinned and before
+    /// it is confirmed in the ledger.
+    Unfiled {
+        ask: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ask_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ledger: Option<String>,
+    },
+    /// The owner's answer to this filed ask, which the flow takes once it has landed on main.
     Owner {
         ask: String,
+        ask_id: String,
+        ledger: String,
+    },
+    /// The owner's answer to this filed ask is on Maestro's answers branch (`at`) and has not
+    /// landed on main: still waiting. Never replay's: the reads add it (`asks::landing`).
+    AnswerWaitingToLand {
+        ask: String,
+        ask_id: String,
+        ledger: String,
+        at: String,
     },
 }
 
@@ -211,6 +235,10 @@ pub struct Status {
     pub instance: String,
     pub flow: String,
     pub ir_hash: String,
+    /// The session that owns the instance (`Started`), so a waiting human node's question can be
+    /// relayed toward it; `None` in a log written before owners were recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<SessionRef>,
     /// The last event replayed.
     pub seq: u64,
     pub nodes: BTreeMap<String, NodeStatus>,
@@ -236,6 +264,9 @@ pub struct Next {
     pub instance: String,
     pub flow: String,
     pub ir_hash: String,
+    /// The instance's owner, as [`Status::owner`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<SessionRef>,
     pub seq: u64,
     pub enabled: Vec<Enabled>,
     pub pending: BTreeMap<String, NodeStatus>,
@@ -336,6 +367,7 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
         instance: status.instance,
         flow: status.flow,
         ir_hash: status.ir_hash,
+        owner: status.owner,
         seq: status.seq,
         enabled,
         pending,
@@ -543,6 +575,26 @@ struct Fold<'a> {
     /// The effects started and not withdrawn by a refusal that their command never started
     /// (`spawn_failed`): by node and iteration, each attempt's inputs.
     started_effects: BTreeMap<Key<'a>, BTreeMap<u32, BTreeMap<String, String>>>,
+    /// Each human node's ask at an iteration: the pin that stands, and whether it was linked.
+    asks: BTreeMap<Key<'a>, AskRec>,
+}
+
+/// A human node's ask as the log has it: pinned (`AskPinned`), and linked once confirmed
+/// (`AskLinked`). A withdrawal (`AskWithdrawn`) of an unlinked pin removes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AskRec {
+    pub ask_id: String,
+    pub ledger: String,
+    pub body: Value,
+    pub body_hash: String,
+    pub linked: bool,
+}
+
+/// The ask of `node` at its current iteration, as replay accepted it.
+pub(crate) fn ask_of(log: &Log, started: &Started, node: &str) -> Result<Option<AskRec>, KernelError> {
+    let fold = Fold::replay(log, started)?;
+    let Some(i) = fold.current(node) else { return Ok(None) };
+    Ok(started.ir.nodes.get_key_value(node).and_then(|(id, _)| fold.asks.get(&(id.as_str(), i)).cloned()))
 }
 
 /// A claim, for the retry projection: it ends at its lease's end (which is never past its cancel
@@ -576,6 +628,7 @@ impl<'a> Fold<'a> {
             cores: Cell::new(0),
             attempts: BTreeMap::new(),
             started_effects: BTreeMap::new(),
+            asks: BTreeMap::new(),
         };
         for e in log.events.iter().skip(1) {
             let at: Timestamp =
@@ -641,7 +694,18 @@ impl<'a> Fold<'a> {
             let g: Guarded = body(log, e)?;
             return Ok(self.guarded(g, at).map(|()| Change::State));
         }
-        let kinds = [Completed::KIND, Chosen::KIND, Claimed::KIND, Heartbeat::KIND, Refused::KIND, EffectStarted::KIND];
+        let kinds = [
+            Completed::KIND,
+            Chosen::KIND,
+            Claimed::KIND,
+            Heartbeat::KIND,
+            Refused::KIND,
+            EffectStarted::KIND,
+            AskPinned::KIND,
+            AskLinked::KIND,
+            AskWithdrawn::KIND,
+            Answered::KIND,
+        ];
         if !kinds.contains(&e.kind.as_str()) {
             return Err(malformed(log, e.seq, format!("{} is not a kernel event", e.kind)));
         }
@@ -657,6 +721,8 @@ impl<'a> Fold<'a> {
                 let c: Completed = body(log, e)?;
                 let (value, failure) = match &node.class {
                     Class::Choice { .. } => return Ok(Err("wrong_class")),
+                    // A human node's receipt is the owner's answer (`Answered`), never a completion.
+                    Class::Human { .. } => return Ok(Err("wrong_class")),
                     Class::Observe { exit_map, .. } => {
                         let exit = c.verify.as_ref().map(|v| v.exit);
                         match exit.and_then(|x| exit_map.iter().find(|m| m.exit == x)) {
@@ -715,6 +781,49 @@ impl<'a> Fold<'a> {
             EffectStarted::KIND => {
                 let s: EffectStarted = body(log, e)?;
                 self.started_effects.entry((id, i)).or_default().insert(s.attempt, s.inputs);
+                return Ok(Ok(Change::Inert));
+            }
+            Answered::KIND => {
+                let a: Answered = body(log, e)?;
+                if !matches!(node.class, Class::Human { .. }) {
+                    return Ok(Err("wrong_class"));
+                }
+                // Only an answer to the linked ask counts.
+                if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {
+                    return Ok(Err("not_linked"));
+                }
+                (Receipt::new(e.seq, at, &a.outputs, None, None, a.inputs), 0)
+            }
+            AskPinned::KIND => {
+                let p: AskPinned = body(log, e)?;
+                if !matches!(node.class, Class::Human { .. }) {
+                    return Ok(Err("wrong_class"));
+                }
+                // A pin stands until it is withdrawn; a linked one is never replaced.
+                if self.asks.contains_key(&(id, i)) {
+                    return Ok(Err("already_pinned"));
+                }
+                let rec =
+                    AskRec { ask_id: p.ask_id, ledger: p.ledger, body: p.body, body_hash: p.body_hash, linked: false };
+                self.asks.insert((id, i), rec);
+                return Ok(Ok(Change::Inert));
+            }
+            AskLinked::KIND => {
+                let l: AskLinked = body(log, e)?;
+                return Ok(match self.asks.get_mut(&(id, i)) {
+                    Some(r) if !r.linked && r.ask_id == l.ask_id && r.body_hash == l.body_hash => {
+                        r.linked = true;
+                        Ok(Change::Inert)
+                    }
+                    _ => Err("not_pinned"),
+                });
+            }
+            AskWithdrawn::KIND => {
+                let w: AskWithdrawn = body(log, e)?;
+                if !self.asks.get(&(id, i)).is_some_and(|r| !r.linked && r.ask_id == w.ask_id) {
+                    return Ok(Err("not_pinned"));
+                }
+                self.asks.remove(&(id, i));
                 return Ok(Ok(Change::Inert));
             }
             _ => {
@@ -866,6 +975,7 @@ impl<'a> Fold<'a> {
             instance: log.instance.to_string(),
             flow: started.flow.clone(),
             ir_hash: started.ir_hash.clone(),
+            owner: started.owner.as_ref().map(|o| o.session.clone()),
             seq: log.seq(),
             nodes,
             repeats,
@@ -1116,7 +1226,17 @@ impl<'f, 'a> Eval<'f, 'a> {
             }
             Form::Open => match self.fold.ir.nodes.get(id).map(|n| &n.class) {
                 Some(Class::Human { ask }) => {
-                    reasons.push(Reason::Owner { ask: ask.clone() });
+                    let reason = match self.fold.asks.get(&key) {
+                        Some(r) if r.linked => {
+                            Reason::Owner { ask: ask.clone(), ask_id: r.ask_id.clone(), ledger: r.ledger.clone() }
+                        }
+                        rec => Reason::Unfiled {
+                            ask: ask.clone(),
+                            ask_id: rec.map(|r| r.ask_id.clone()),
+                            ledger: rec.map(|r| r.ledger.clone()),
+                        },
+                    };
+                    reasons.push(reason);
                     State::Waiting
                 }
                 _ => State::Ready,

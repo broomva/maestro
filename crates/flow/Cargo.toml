@@ -13,6 +13,9 @@ doctest = false
 
 [dependencies]
 maestro-core.workspace = true
+# A human step files its ask through the store's agent path (`requests::file_ask`) and reads the
+# answer with its readers (BRO-3635). maestro-store depends on maestro-core alone.
+maestro-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

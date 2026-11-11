@@ -107,8 +107,8 @@ pub enum Refusal {
     AlreadyClaimed { node: String, lease_until: String },
     #[error("The flow declares no node {node}.")]
     UnknownNode { node: String },
-    /// A human node waits for the owner's answer; nothing claims it.
-    #[error("Node {node} is a {class} node, which is not claimed with claim and complete.")]
+    /// A human node waits for the owner's answer; nothing claims it. Its ask is filed with `ask`.
+    #[error("Node {node} is a {class} node, which is not claimed with claim and complete; file its ask with ask.")]
     NotClaimable { node: String, class: String },
     /// `choose` takes a choice node's claim, and `complete` every other class's.
     #[error("Node {node} is a {class} node: use {verb} for it.")]
@@ -134,6 +134,57 @@ pub enum Refusal {
     /// written until it passes that event.
     #[error("The clock ({now}) is earlier than the instance's last event ({at}); try again once it is past it.")]
     ClockBehind { now: String, at: String },
+    // A human node's ask (`asks`): one code per step, so no two failures that call for different
+    // next steps share one.
+    /// The ledger or the ask body the agent gave is not one the kernel files: no ledger name, a
+    /// body that is not an object, too large or deep, or holding a key the kernel or the owner
+    /// writes (`id`, `uid`, `ask`, `asked_at`, an answer, a status, an origin).
+    #[error("The ask is not filed: {detail}.")]
+    AskBodyInvalid { detail: String },
+    /// The ledger's working tree could not be read to mint an id, so nothing was pinned or filed.
+    #[error("The asks ledger {ledger} could not be read to mint an ask id ({detail}); nothing was filed.")]
+    AskLedgerUnread { ledger: String, detail: String },
+    /// No id was free after every mint.
+    #[error("No free ask id was found in {ledger} after {tries} tries; nothing was filed.")]
+    AskIdExhausted { ledger: String, tries: u32 },
+    /// The ask ledger's lock stayed busy past the kernel's deadline. The ask is pinned and not
+    /// filed; this is not the owner's wait. Calling `ask` again files it again.
+    #[error(
+        "The asks ledger {ledger} stayed locked until the kernel's deadline ({holder}); the ask is pinned, not filed. Call ask again."
+    )]
+    AskRefusedBusy { ledger: String, holder: String },
+    /// The working tree has a row with the pinned id and another body (a hash miss): the pinned
+    /// ask is not that row, so it is never linked.
+    #[error(
+        "The asks ledger {ledger} holds an ask {ask_id} whose body is not the one pinned (hash {found}, not {pinned}); it is not linked."
+    )]
+    AskRefused { ledger: String, ask_id: String, pinned: String, found: String },
+    /// The filing's outcome could not be confirmed: the working tree could not be read, or holds
+    /// no row of the pinned id though the writer did not refuse it. Nothing was recorded; calling
+    /// `ask` again files the same pinned ask again, which links it if it is there.
+    #[error("The ask {ask_id} could not be confirmed in {ledger} ({detail}); call ask again.")]
+    AskUnconfirmed { ledger: String, ask_id: String, detail: String },
+    /// More than one row of a ledger is addressed by the pinned id (an `id` or a `uid`).
+    #[error("More than one ask in {ledger} at {at} is addressed as {ask_id}, so none is taken.")]
+    AskAmbiguous { ledger: String, ask_id: String, at: String },
+    /// An answers source that exists could not be read, and none that was read holds the answer.
+    #[error("The answers ledger could not be read at {at} ({detail}), so the ask's answer is unknown.")]
+    AnswersUnread { at: String, detail: String },
+    /// The answers ledger holds the ask answered with a body that is not the one linked.
+    #[error(
+        "The answer to {ask_id} at {at} is to a body that is not the one linked (hash {found}, not {linked}); it is not taken."
+    )]
+    AnswerMismatch { ask_id: String, at: String, linked: String, found: String },
+    /// The node's ask changed between reading it and recording the next step (another call of the
+    /// owner's moved it on). Nothing was recorded; call ask again.
+    #[error("The ask of node {node} changed meanwhile; nothing was recorded. Call ask again.")]
+    AskChanged { node: String },
+    /// `ask` names a node that is not a human node; it is claimed instead.
+    #[error("Node {node} is a {class} node, and ask takes a human node only; claim it instead.")]
+    NotHuman { node: String, class: String },
+    /// The answer's fields are over the outputs bound.
+    #[error("The answer to {ask_id} is {size} bytes, over {limit}; it is not taken.")]
+    AnswerTooLarge { ask_id: String, size: usize, limit: usize },
 }
 
 impl Refusal {
@@ -159,6 +210,18 @@ impl Refusal {
             Refusal::InvalidLimits { .. } => "invalid_limits",
             Refusal::ClockOutOfRange => "clock_out_of_range",
             Refusal::ClockBehind { .. } => "clock_behind",
+            Refusal::AskBodyInvalid { .. } => "ask_body_invalid",
+            Refusal::AskLedgerUnread { .. } => "ask_ledger_unread",
+            Refusal::AskIdExhausted { .. } => "ask_id_exhausted",
+            Refusal::AskRefusedBusy { .. } => "ask_refused_busy",
+            Refusal::AskRefused { .. } => "ask_refused",
+            Refusal::AskUnconfirmed { .. } => "ask_unconfirmed",
+            Refusal::AskAmbiguous { .. } => "ask_ambiguous",
+            Refusal::AnswersUnread { .. } => "answers_unread",
+            Refusal::AnswerMismatch { .. } => "answer_mismatch",
+            Refusal::AnswerTooLarge { .. } => "answer_too_large",
+            Refusal::AskChanged { .. } => "ask_changed",
+            Refusal::NotHuman { .. } => "not_human",
         }
     }
 }

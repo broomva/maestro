@@ -228,7 +228,7 @@ pub(crate) fn owner(session: &VerifiedSession) -> Result<Owner, Refusal> {
 }
 
 /// Refuses any session but the instance's owner, with the same marker.
-fn check_owner(started: &Started, instance: &InstanceId, session: &VerifiedSession) -> Result<(), Refusal> {
+pub(crate) fn check_owner(started: &Started, instance: &InstanceId, session: &VerifiedSession) -> Result<(), Refusal> {
     let me = owner(session)?;
     let Some(owner) = &started.owner else {
         return Err(Refusal::NoOwner { instance: instance.to_string() });
@@ -312,7 +312,7 @@ fn stamp(log: &Log, seq: u64, text: &str) -> Result<Timestamp, KernelError> {
 
 /// The wall clock, read now, for the checks a write makes against `log`: refused `clock_behind`
 /// when it reads earlier than the log's last event (see the module docs).
-fn wall(log: &Log) -> Result<Timestamp, KernelError> {
+pub(crate) fn wall(log: &Log) -> Result<Timestamp, KernelError> {
     let now = clock::now();
     let Some(last) = log.events.last() else { return Ok(now) };
     let at = stamp(log, last.seq, &last.at)?;

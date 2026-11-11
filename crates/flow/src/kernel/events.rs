@@ -4,9 +4,10 @@
 //! The kernel writes `Started` (`start`), and in `write`: `Claimed` (`claim`), `Heartbeat`
 //! (`heartbeat`), `Completed`, `Refused` and `EffectStarted` (`complete`), `Chosen` (`choose`) and
 //! `Guarded` (a repeat's `until` verdict, written when an iteration settles). A verdict is
-//! recorded with the digest of the input its guard read, so replay never evaluates one.
+//! recorded with the digest of the input its guard read, so replay never evaluates one. A human
+//! node's ask (`asks`) writes `AskPinned`, `AskLinked`, `AskWithdrawn` and `Answered`.
 //!
-//! A receipt (`Completed`, `Chosen`) records in `inputs` the digest of every receipt it consumed:
+//! A receipt (`Completed`, `Chosen`, and `Answered` for a human node) records in `inputs` the digest of every receipt it consumed:
 //! each node it needs or switches on, by node id ([`receipt_digest`]). `status` and `next` name
 //! those digests for every node. A receipt whose recorded
 //! inputs no longer match is not done.
@@ -180,6 +181,73 @@ pub struct Guarded {
     /// The digest of the input document the `until` was evaluated over (see `guard`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
+}
+
+/// A human node's ask, pinned in the log before it is filed: the id the kernel minted, the ledger
+/// it goes to, and the exact body handed to the writer of record (`asked_at` included), with the
+/// hash of its comparable part (`asks::comparable_hash`). A filing that crashed is filed again with
+/// this same body, so it is linked, never filed twice.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AskPinned {
+    pub node: String,
+    pub iteration: Iteration,
+    pub ask_id: String,
+    pub ledger: String,
+    pub body: Value,
+    pub body_hash: String,
+}
+
+/// The pinned ask, confirmed in the asks ledger's working tree: a row with its id and its hash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AskLinked {
+    pub node: String,
+    pub iteration: Iteration,
+    pub ask_id: String,
+    pub ledger: String,
+    pub body_hash: String,
+}
+
+/// A pinned ask the writer of record refused, with no row of its id in the working tree: it was
+/// not filed, so the pin no longer stands and the next `ask` mints another.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AskWithdrawn {
+    pub node: String,
+    pub iteration: Iteration,
+    pub ask_id: String,
+    pub code: String,
+    pub reason: String,
+}
+
+/// The owner's answer to a linked ask, read from the answers ledger, never from an agent: a human
+/// node's receipt. `outputs` holds the answer's fields (see `asks`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Answered {
+    pub node: String,
+    pub iteration: Iteration,
+    pub ask_id: String,
+    pub ledger: String,
+    /// Node id to the digest its receipt had, as every receipt records them.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
+    #[serde(default)]
+    pub outputs: Value,
+    /// The revision the answer was read at.
+    pub source: String,
+    /// The answered row's entry hash (the plugin's `entryHash`), as read.
+    pub row_hash: String,
+}
+
+impl KernelEvent for AskPinned {
+    const KIND: &'static str = "AskPinned";
+}
+impl KernelEvent for AskLinked {
+    const KIND: &'static str = "AskLinked";
+}
+impl KernelEvent for AskWithdrawn {
+    const KIND: &'static str = "AskWithdrawn";
+}
+impl KernelEvent for Answered {
+    const KIND: &'static str = "Answered";
 }
 
 impl KernelEvent for Started {
