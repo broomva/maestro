@@ -205,6 +205,11 @@ pub enum Refusal {
     /// The proposal changed between reading it and recording the next step. Nothing was recorded.
     #[error("The proposal {ask_id} changed meanwhile; nothing was recorded. Call again.")]
     ProposalChanged { ask_id: String },
+    /// The session has pinned as many proposals on the instance as one session may.
+    #[error(
+        "This session has pinned {limit} proposals on instance {instance}, as many as one session may; nothing was pinned."
+    )]
+    ProposalsExhausted { instance: String, limit: usize },
 }
 
 impl Refusal {
@@ -246,6 +251,7 @@ impl Refusal {
             Refusal::AlreadyOwner { .. } => "already_owner",
             Refusal::ProposalStale { .. } => "proposal_stale",
             Refusal::ProposalChanged { .. } => "proposal_changed",
+            Refusal::ProposalsExhausted { .. } => "proposals_exhausted",
         }
     }
 }

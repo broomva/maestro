@@ -45,7 +45,7 @@ fn other() -> VerifiedSession {
 }
 
 fn adopt(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId, filing: Option<&Filing>) -> Result<Proposed, KernelError> {
-    propose_adoption(&mut f.ledger, &f.paths, who, fi, filing)
+    propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false })
 }
 
 fn retire(
@@ -54,7 +54,16 @@ fn retire(
     fi: &InstanceId,
     filing: Option<&Filing>,
 ) -> Result<Proposed, KernelError> {
-    propose_retirement(&mut f.ledger, &f.paths, who, fi, filing)
+    propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false })
+}
+
+/// Proposes adoption again, with the fixture's filing, in place of a declined or stale proposal.
+fn adopt_again(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId) -> Result<Proposed, KernelError> {
+    propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true })
+}
+
+fn retire_again(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId) -> Result<Proposed, KernelError> {
+    propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true })
 }
 
 /// The ask id of a linked proposal: the call said waiting and linked it.
@@ -115,6 +124,51 @@ fn append_raw(f: &mut Fx, fi: &InstanceId, kind: &str, body: Value) {
 
 fn owner_json(who: &VerifiedSession) -> Value {
     serde_json::to_value(super::owner(who).unwrap()).unwrap()
+}
+
+fn push(ledger: &mut Ledger, fi: &InstanceId, kind: &str, body: Value) {
+    let mut guard = ledger.lock().unwrap();
+    let seq = guard.log(fi).unwrap().seq();
+    guard.append(fi, seq, NewEvent::new(kind, body)).unwrap();
+}
+
+fn approval(id: &str, option: &str) -> Value {
+    json!({ "ask_id": id, "ledger": "ledger.yaml", "answer_option": option, "source": "main@x", "row_hash": "x" })
+}
+
+/// A proposal of `kind` by `by`, naming `owner` within `epoch`, pinned and linked as the kernel
+/// appends them.
+fn push_proposal(
+    ledger: &mut Ledger,
+    fi: &InstanceId,
+    kind: &str,
+    owner: &VerifiedSession,
+    by: &VerifiedSession,
+    epoch: u64,
+    id: &str,
+) {
+    let pin = json!({ "proposal": kind, "by": owner_json(by), "owner": owner_json(owner), "epoch": epoch, "ask_id": id, "ledger": "ledger.yaml", "body": {}, "body_hash": "sha256:h" });
+    push(ledger, fi, "ProposalPinned", pin);
+    push(ledger, fi, "ProposalLinked", json!({ "ask_id": id, "ledger": "ledger.yaml", "body_hash": "sha256:h" }));
+}
+
+/// A whole approved adoption from `from` to `to`, as the kernel appends it.
+fn push_adoption(
+    ledger: &mut Ledger,
+    fi: &InstanceId,
+    from: &VerifiedSession,
+    to: &VerifiedSession,
+    epoch: u64,
+    id: &str,
+) {
+    push_proposal(ledger, fi, "adoption", from, to, epoch, id);
+    let adopted = json!({ "from": owner_json(from), "to": owner_json(to), "approval": approval(id, "adopt") });
+    push(ledger, fi, "Adopted", adopted);
+}
+
+/// The seq of the last event of `fi`: the epoch an `Adopted` just appended starts.
+fn last_seq(f: &Fx, fi: &InstanceId) -> u64 {
+    f.events(fi).last().unwrap()["seq"].as_u64().unwrap()
 }
 
 #[test]
@@ -233,8 +287,13 @@ fn without_the_owners_approval_nothing_changes() {
             Proposed::Declined { answer_option, .. } => assert_eq!(answer_option.as_deref(), option),
             other => panic!("{option:?}: {other:?}"),
         }
-        // Called again with a filing, the session proposes anew.
-        id = linked(&adopt(&mut f, &other(), &fi, Some(&proposing())).unwrap());
+        // The same call again is declined again, filing or not: nothing is pinned or filed.
+        let kinds = f.kinds(&fi);
+        let asks = f.ledger_text();
+        assert_eq!(state(&adopt(&mut f, &other(), &fi, Some(&proposing())).unwrap()), "declined");
+        assert_eq!((f.kinds(&fi), f.ledger_text()), (kinds, asks), "the owner is not asked again");
+        // Only asking again proposes anew.
+        id = linked(&adopt_again(&mut f, &other(), &fi).unwrap());
     }
     assert!(!f.kinds(&fi).iter().any(|k| k == "Adopted"));
     assert_eq!(work(&f, &fi), before);
@@ -265,7 +324,7 @@ fn an_approved_retirement_retires_the_instance_and_keeps_its_log() {
     assert!(f.flows.join("instances").join(fi.as_str()).is_dir());
     let c2 = claim(&mut f.ledger, &me, &fi, "two").unwrap();
     // Proposed again and approved: retired.
-    let id = linked(&retire(&mut f, &other(), &fi, Some(&proposing())).unwrap());
+    let id = linked(&retire_again(&mut f, &other(), &fi).unwrap());
     answer(&f, &id, Some("retire"));
     f.land_on_main();
     let kept = std::fs::read_to_string(f.flows.join("instances").join(fi.as_str()).join("events.jsonl")).unwrap();
@@ -298,6 +357,14 @@ fn a_retirement_a_crash_left_unmoved_takes_no_write_and_the_next_call_moves_it()
     let approval = json!({ "ask_id": id, "ledger": "ledger.yaml", "answer_option": "retire", "source": "main@x", "row_hash": "x" });
     append_raw(&mut f, &fi, "Retired", json!({ "by": owner_json(&other()), "approval": approval }));
     assert_eq!(f.status(&fi).retired.as_deref(), Some(id.as_str()));
+    // Nothing counts after `Retired`: not even a whole adoption appended as it would be.
+    let third = agent("third", "marker-3");
+    push_adoption(&mut f.ledger, &fi, &me, &third, 0, "flow-adopt-late");
+    let s = f.status(&fi);
+    assert_eq!(s.owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/owner"));
+    let late: Vec<&str> =
+        s.rejected.iter().filter(|r| r.subject == "flow-adopt-late").map(|r| r.reason.as_str()).collect();
+    assert_eq!(late, ["retired", "retired", "retired"]);
     assert_eq!(code(claim(&mut f.ledger, &me, &fi, "one")), "retired");
     assert_eq!(code(adopt(&mut f, &other(), &fi, Some(&proposing()))), "retired");
     match retire(&mut f, &agent("third", "marker-3"), &fi, None).unwrap() {
@@ -343,11 +410,12 @@ fn an_approval_for_an_owner_since_replaced_is_proposal_stale() {
     assert_eq!(s.retired, None);
     let why: Vec<&str> = s.rejected.iter().map(|r| r.reason.as_str()).collect();
     assert_eq!(why, ["owner_changed", "owner_changed"]);
-    // The reads say the proposals are stale, and with a filing the session proposes anew, naming
-    // the owner as it is now.
+    // The reads say the proposals are stale; a filing alone does not propose anew, asking again
+    // does, naming the owner as it is now.
     let states: Vec<&str> = s.proposals.iter().map(|p| p.state).collect();
     assert_eq!(states, ["stale", "stale"]);
-    let again = linked(&adopt(&mut f, &b, &fi, Some(&proposing())).unwrap());
+    assert_eq!(code(adopt(&mut f, &b, &fi, Some(&proposing()))), "proposal_stale");
+    let again = linked(&adopt_again(&mut f, &b, &fi).unwrap());
     assert_ne!(again, ib);
     assert!(proposal_body(&f, &fi)["ask"].as_str().unwrap().contains("is owned by session t3:-/third"));
     let states: Vec<&str> = f.status(&fi).proposals.iter().map(|p| p.state).collect();
@@ -518,26 +586,296 @@ fn the_reads_report_proposals_as_data_and_write_nothing() {
 
 #[test]
 fn a_proposal_that_changed_while_it_was_filed_records_nothing() {
-    // Between filing (flows lock released) and linking, the instance was retired by another call:
-    // nothing is linked to a proposal that no longer stands.
-    let hold = "open(os.path.join(HERE, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(HERE, 'go')):\n    time.sleep(0.01)";
-    let (mut f, fi, _clock) = started();
-    std::fs::write(f.ws.join("scripts/ask_ledger.py"), wrapper(hold)).unwrap();
-    let (paths, flows, fi2) = (f.paths.clone(), f.flows.clone(), fi.clone());
-    let filer = std::thread::spawn(move || {
-        let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
-        code(propose_adoption(&mut ledger, &paths, &other(), &fi2, Some(&proposing())))
-    });
-    let reached = f.ws.join("scripts/reached");
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !reached.exists() {
-        assert!(std::time::Instant::now() < until, "the writer never ran");
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    // Between filing (flows lock released) and linking, the proposal was withdrawn, or replaced by
+    // another of the same session's: nothing is linked to a proposal that no longer stands.
+    for replaced in [false, true] {
+        let hold = "open(os.path.join(HERE, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(HERE, 'go')):\n    time.sleep(0.01)";
+        let (mut f, fi, _clock) = started();
+        std::fs::write(f.ws.join("scripts/ask_ledger.py"), wrapper(hold)).unwrap();
+        let (paths, flows, fi2) = (f.paths.clone(), f.flows.clone(), fi.clone());
+        let filer = std::thread::spawn(move || {
+            let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
+            let asking = Proposing { filing: Some(&proposing()), again: false };
+            code(propose_adoption(&mut ledger, &paths, &other(), &fi2, asking))
+        });
+        let reached = f.ws.join("scripts/reached");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !reached.exists() {
+            assert!(std::time::Instant::now() < until, "the writer never ran");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let pin: Value = f.events(&fi).into_iter().find(|e| e["kind"] == "ProposalPinned").unwrap();
+        let id = pin["body"]["ask_id"].as_str().unwrap().to_string();
+        append_raw(&mut f, &fi, "ProposalWithdrawn", json!({ "ask_id": id, "code": "x", "reason": "x" }));
+        if replaced {
+            let mut again = pin["body"].clone();
+            again["ask_id"] = json!("flow-adopt-replaced");
+            append_raw(&mut f, &fi, "ProposalPinned", again);
+        }
+        std::fs::write(f.ws.join("scripts/go"), "").unwrap();
+        assert_eq!(filer.join().unwrap(), "proposal_changed", "replaced: {replaced}");
+        assert!(!f.kinds(&fi).iter().any(|k| k == "ProposalLinked"), "nothing linked");
     }
-    let pin: Value = f.events(&fi).into_iter().find(|e| e["kind"] == "ProposalPinned").unwrap();
-    let id = pin["body"]["ask_id"].as_str().unwrap().to_string();
-    append_raw(&mut f, &fi, "ProposalWithdrawn", json!({ "ask_id": id, "code": "x", "reason": "x" }));
-    std::fs::write(f.ws.join("scripts/go"), "").unwrap();
-    assert_eq!(filer.join().unwrap(), "proposal_changed");
-    assert_eq!(f.kinds(&fi), ["Started", "ProposalPinned", "ProposalWithdrawn"], "nothing linked");
+}
+
+// P20 round 1 (BRO-3635): ownership epochs, the owner's checks around a verdict, bounded proposals,
+// and the guards no test killed.
+
+#[test]
+fn an_approval_given_while_stale_never_applies_even_when_the_owner_returns() {
+    // A owns; B proposes adopting it. C's adoption is approved, so B's proposal is stale; the
+    // owner approves it anyway; A takes the instance back. B's approval still never applies: a
+    // proposal belongs to the ownership epoch it was pinned under.
+    let (mut f, fi, _clock) = started();
+    let (me, b, c) = (f.me.clone(), other(), agent("third", "marker-3"));
+    let ib = linked(&adopt(&mut f, &b, &fi, Some(&proposing())).unwrap());
+    let rb = linked(&retire(&mut f, &b, &fi, Some(&proposing())).unwrap());
+    let ic = linked(&adopt(&mut f, &c, &fi, Some(&proposing())).unwrap());
+    answer(&f, &ic, Some("adopt"));
+    f.land_on_main();
+    assert_eq!(state(&adopt(&mut f, &c, &fi, None).unwrap()), "adopted");
+    // Stale and unanswered: refused at once, before the answers remote is asked.
+    let nowhere = f.tmp.path().join("nowhere.git");
+    let origin = seams::REMOTE.with(|r| r.replace(Some(nowhere.to_str().unwrap().to_string())));
+    assert_eq!(code(adopt(&mut f, &b, &fi, None)), "proposal_stale");
+    seams::REMOTE.with(|r| *r.borrow_mut() = origin);
+    answer(&f, &ib, Some("adopt"));
+    f.land_on_main();
+    assert_eq!(code(adopt(&mut f, &b, &fi, None)), "proposal_stale");
+    // A proposes taking it back, and the owner approves.
+    let ia = linked(&adopt(&mut f, &me, &fi, Some(&proposing())).unwrap());
+    answer(&f, &ia, Some("adopt"));
+    f.land_on_main();
+    assert_eq!(state(&adopt(&mut f, &me, &fi, None).unwrap()), "adopted");
+    let back = last_seq(&f, &fi);
+    assert_eq!(f.status(&fi).owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/owner"));
+    // B's approval, given while it was stale, does not apply now that A owns it again.
+    let kinds = f.kinds(&fi);
+    assert_eq!(code(adopt(&mut f, &b, &fi, None)), "proposal_stale");
+    assert_eq!(f.kinds(&fi), kinds, "nothing recorded");
+    let s = f.status(&fi);
+    assert_eq!(s.owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/owner"));
+    let states: Vec<&str> = s.proposals.iter().filter(|p| p.ask_id == ib || p.ask_id == rb).map(|p| p.state).collect();
+    assert_eq!(states, ["stale", "stale"]);
+    // B's unanswered retirement, pinned while A owned it, is stale too: refused at once.
+    let origin = seams::REMOTE.with(|r| r.replace(Some(nowhere.to_str().unwrap().to_string())));
+    assert_eq!(code(retire(&mut f, &b, &fi, None)), "proposal_stale");
+    seams::REMOTE.with(|r| *r.borrow_mut() = origin);
+    // Replay agrees: the same approval, appended as it would be, is set aside.
+    let adopted = json!({ "from": owner_json(&me), "to": owner_json(&b), "approval": approval(&ib, "adopt") });
+    append_raw(&mut f, &fi, "Adopted", adopted);
+    let s = f.status(&fi);
+    assert_eq!(s.owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/owner"));
+    assert_eq!(s.rejected.last().map(|r| r.reason.as_str()), Some("owner_changed"));
+    // A pin within the current epoch does apply: the epoch is the one A took it back in.
+    push_adoption(&mut f.ledger, &fi, &me, &b, back, "flow-adopt-now");
+    assert_eq!(f.status(&fi).owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/other"));
+}
+
+#[test]
+fn a_retirement_approved_while_stale_never_retires_even_when_the_owner_returns() {
+    // C proposes retiring A's instance; B adopts it, then A takes it back; the owner approves C's
+    // retirement. It never applies: the instance changed owner since it was pinned.
+    let (mut f, fi, _clock) = started();
+    let (me, b, c) = (f.me.clone(), other(), agent("third", "marker-3"));
+    let ir = linked(&retire(&mut f, &c, &fi, Some(&proposing())).unwrap());
+    let ib = linked(&adopt(&mut f, &b, &fi, Some(&proposing())).unwrap());
+    answer(&f, &ib, Some("adopt"));
+    f.land_on_main();
+    assert_eq!(state(&adopt(&mut f, &b, &fi, None).unwrap()), "adopted");
+    let ia = linked(&adopt(&mut f, &me, &fi, Some(&proposing())).unwrap());
+    answer(&f, &ia, Some("adopt"));
+    f.land_on_main();
+    assert_eq!(state(&adopt(&mut f, &me, &fi, None).unwrap()), "adopted");
+    answer(&f, &ir, Some("retire"));
+    f.land_on_main();
+    assert_eq!(code(retire(&mut f, &c, &fi, None)), "proposal_stale");
+    assert!(f.flows.join("instances").join(fi.as_str()).is_dir(), "not retired");
+    let retired = json!({ "by": owner_json(&c), "approval": approval(&ir, "retire") });
+    append_raw(&mut f, &fi, "Retired", retired);
+    let s = f.status(&fi);
+    assert_eq!(s.retired, None);
+    assert_eq!(s.rejected.last().map(|r| r.reason.as_str()), Some("owner_changed"));
+    assert_eq!(s.proposals.iter().find(|p| p.ask_id == ir).unwrap().state, "stale");
+    // The owner goes on writing.
+    let c1 = claim(&mut f.ledger, &me, &fi, "one").unwrap();
+    assert_eq!(complete_as(&mut f, &me, &c1.token), "completed");
+}
+
+#[test]
+fn an_owner_change_between_reading_an_approval_and_applying_it_is_proposal_stale() {
+    // The approval is read with the flows lock released; another adoption lands before it is
+    // applied. Under the lock, the kernel finds the epoch moved: nothing is appended, and a
+    // retirement moves nothing.
+    for kind in ["adoption", "retirement"] {
+        let (mut f, fi, _clock) = started();
+        let (me, b) = (f.me.clone(), other());
+        let id = if kind == "adoption" {
+            linked(&adopt(&mut f, &b, &fi, Some(&proposing())).unwrap())
+        } else {
+            linked(&retire(&mut f, &b, &fi, Some(&proposing())).unwrap())
+        };
+        answer(&f, &id, Some(if kind == "adoption" { "adopt" } else { "retire" }));
+        f.land_on_main();
+        let (flows, fi2, me2) = (f.flows.clone(), fi.clone(), me.clone());
+        super::seams::BEFORE_APPLY.with(|c| {
+            *c.borrow_mut() = Some(Box::new(move || {
+                let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
+                push_adoption(&mut ledger, &fi2, &me2, &agent("third", "marker-3"), 0, "flow-adopt-meanwhile");
+            }));
+        });
+        let result = if kind == "adoption" { adopt(&mut f, &b, &fi, None) } else { retire(&mut f, &b, &fi, None) };
+        assert_eq!(code(result), "proposal_stale", "{kind}");
+        assert_eq!(f.kinds(&fi).last().map(String::as_str), Some("Adopted"), "{kind}: nothing after the meanwhile");
+        assert_eq!(f.status(&fi).owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/third"));
+        assert!(f.flows.join("instances").join(fi.as_str()).is_dir(), "{kind}: not retired");
+    }
+}
+
+#[test]
+fn a_verdict_is_recorded_only_while_its_writer_still_owns_the_instance() {
+    // `complete` settles a repeat's iteration and evaluates its `until` with the flows lock
+    // released; an adoption lands meanwhile. The former owner records no verdict.
+    let mut f = fx(None, "");
+    f.flow = compile(&format!(
+        "flow: loop\nversion: 1\nworkdir: {}\nnodes:\n  step: {{class: pure, run: ['true']}}\nrepeats:\n  rounds: {{body: [step], max: 3, until: '.nodes.step.outputs == null'}}\n",
+        f.ws.display()
+    ))
+    .unwrap();
+    let fi = f.begin();
+    let me = f.me.clone();
+    let c = claim(&mut f.ledger, &me, &fi, "step").unwrap();
+    let (flows, fi2, me2) = (f.flows.clone(), fi.clone(), me.clone());
+    let once = std::cell::Cell::new(false);
+    crate::kernel::guard::tests::WHILE_JUDGING.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            if !once.replace(true) {
+                let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
+                push_adoption(&mut ledger, &fi2, &me2, &other(), 0, "flow-adopt-meanwhile");
+            }
+        }));
+    });
+    match complete(&mut f.ledger, &me, &c.token, Value::Null, &Limits::default()).unwrap() {
+        Completion::Completed { verdicts, .. } => match verdicts.as_slice() {
+            [crate::kernel::Verdict::Unrecorded { code, .. }] => assert_eq!(*code, "not_owner"),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+    assert!(!f.kinds(&fi).iter().any(|k| k == "Guarded"), "{:?}", f.kinds(&fi));
+    // The repeat still awaits its verdict. The former owner's claim is refused before any guard
+    // runs; the new owner's claim evaluates it first and records it.
+    let judged = std::rc::Rc::new(std::cell::Cell::new(0));
+    let count = judged.clone();
+    crate::kernel::guard::tests::WHILE_JUDGING
+        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || count.set(count.get() + 1))));
+    assert_eq!(code(claim(&mut f.ledger, &me, &fi, "step")), "not_owner");
+    assert_eq!(judged.get(), 0, "a guard ran for a session that does not own the instance");
+    // (The verdict holds, so the repeat is done and `step` takes no claim.)
+    assert_eq!(code(claim(&mut f.ledger, &other(), &fi, "step")), "not_enabled");
+    assert_eq!(judged.get(), 1);
+    crate::kernel::guard::tests::WHILE_JUDGING.with(|hook| *hook.borrow_mut() = None);
+    assert!(f.kinds(&fi).iter().any(|k| k == "Guarded"), "{:?}", f.kinds(&fi));
+}
+
+#[test]
+fn a_session_pins_a_bounded_number_of_proposals() {
+    // A stranger whose filings the writer keeps refusing (pinned, then withdrawn) stops at
+    // `MAX_PROPOSALS`: the owner's log does not grow without the owner's part.
+    let (mut f, fi, _clock) = started();
+    let mut bad = proposing();
+    bad.body.insert("stakes".into(), json!("STUB-INVALID"));
+    for _ in 0..MAX_PROPOSALS {
+        assert_eq!(state(&adopt(&mut f, &other(), &fi, Some(&bad)).unwrap()), "withdrawn");
+    }
+    let before = machine(&f);
+    assert_eq!(code(adopt(&mut f, &other(), &fi, Some(&bad))), "proposals_exhausted");
+    assert_eq!(code(retire(&mut f, &other(), &fi, Some(&proposing()))), "proposals_exhausted");
+    assert!(machine(&f) == before, "a refused proposal wrote");
+    assert_eq!(f.kinds(&fi).len(), 1 + 2 * MAX_PROPOSALS);
+    // Another session, and the owner, are not held to the stranger's count.
+    let me = f.me.clone();
+    assert_eq!(state(&retire(&mut f, &me, &fi, Some(&proposing())).unwrap()), "waiting");
+    assert_eq!(state(&adopt(&mut f, &agent("third", "marker-3"), &fi, Some(&proposing())).unwrap()), "waiting");
+}
+
+#[test]
+fn a_strangers_proposal_never_fails_the_owners_ask_but_an_adoption_does() {
+    // Between the owner's mint and its pin, a stranger pins and withdraws a proposal: the owner's
+    // ask is pinned and filed all the same. An adoption landing there instead stops it.
+    for adoption in [false, true] {
+        let mut f = fx(None, "");
+        let fi = f.begin();
+        let (flows, fi2, me) = (f.flows.clone(), fi.clone(), f.me.clone());
+        crate::kernel::asks::seams::BEFORE_PIN.with(|c| {
+            *c.borrow_mut() = Some(Box::new(move || {
+                let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
+                if adoption {
+                    push_adoption(&mut ledger, &fi2, &me, &other(), 0, "flow-adopt-meanwhile");
+                } else {
+                    push_proposal(&mut ledger, &fi2, "adoption", &me, &other(), 0, "flow-adopt-x");
+                    push(
+                        &mut ledger,
+                        &fi2,
+                        "ProposalWithdrawn",
+                        json!({ "ask_id": "flow-adopt-y", "code": "x", "reason": "x" }),
+                    );
+                }
+            }));
+        });
+        let result = f.ask(&fi, Some(&filing()));
+        if adoption {
+            assert_eq!(code(result), "stale_seq");
+            assert!(!f.kinds(&fi).iter().any(|k| k == "AskPinned"), "a former owner pinned");
+        } else {
+            assert!(matches!(result.unwrap(), crate::kernel::Asked::Waiting { appended: Some(_), .. }));
+            assert_eq!(f.kinds(&fi)[4..], ["AskPinned", "AskLinked"]);
+        }
+    }
+}
+
+#[test]
+fn replay_keeps_a_proposal_to_the_owner_it_names_and_the_kind_it_is() {
+    // A pin naming someone other than the owner is set aside, so no approval of it applies; and an
+    // approval applies only to a proposal of its own kind.
+    let (f, fi, _clock) = started();
+    let (me, b, c) = (f.me.clone(), other(), agent("third", "marker-3"));
+    let mut ledger = Ledger::open(&f.flows, &host("mac"), Options::default()).unwrap();
+    push_proposal(&mut ledger, &fi, "adoption", &c, &b, 0, "flow-adopt-misnamed");
+    let adopted =
+        json!({ "from": owner_json(&c), "to": owner_json(&b), "approval": approval("flow-adopt-misnamed", "adopt") });
+    push(&mut ledger, &fi, "Adopted", adopted);
+    push_proposal(&mut ledger, &fi, "retirement", &me, &b, 0, "flow-retire-kind");
+    let adopted =
+        json!({ "from": owner_json(&me), "to": owner_json(&b), "approval": approval("flow-retire-kind", "adopt") });
+    push(&mut ledger, &fi, "Adopted", adopted);
+    let s = f.status(&fi);
+    assert_eq!(s.owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/owner"));
+    let why: Vec<(&str, &str)> = s.rejected.iter().map(|r| (r.kind.as_str(), r.reason.as_str())).collect();
+    assert_eq!(
+        why,
+        [
+            ("ProposalPinned", "not_the_owner_named"),
+            ("ProposalLinked", "not_pinned"),
+            ("Adopted", "not_proposed"),
+            ("Adopted", "not_proposed")
+        ]
+    );
+}
+
+#[test]
+fn an_instance_with_no_recorded_owner_takes_no_proposal() {
+    let (mut f, _fi, _clock) = started();
+    let fi = InstanceId::new("fi_legacy").unwrap();
+    let started = crate::kernel::events::Started {
+        flow: f.flow.name(),
+        ir_hash: f.flow.hash().into(),
+        ir: f.flow.ir().clone(),
+        params: json!({}),
+        owner: None,
+    };
+    f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
+    assert_eq!(code(adopt(&mut f, &other(), &fi, Some(&proposing()))), "no_owner");
+    assert_eq!(code(retire(&mut f, &other(), &fi, Some(&proposing()))), "no_owner");
+    assert_eq!(f.kinds(&fi), ["Started"]);
 }

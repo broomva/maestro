@@ -35,11 +35,14 @@
 //!    unanswered, and nothing changes.
 //! 4. **Act.** The owner approves by choosing the proposal's approve option, `adopt` or `retire`,
 //!    exactly ([`Proposal::approve_option`], as the plugin reads `answer_option`). Any other
-//!    answer (`keep`, another option, an answer with no option, a default) is `declined`, and
-//!    nothing is recorded; called again with a filing, the session proposes anew. Approved, the
-//!    kernel checks under the lock that the proposal still stands, linked, from the same owner:
-//!    an instance that changed owner since it was pinned refuses `proposal_stale` (the reads say
-//!    `stale`), and called with a filing the session proposes anew. Then:
+//!    answer (`keep`, another option, an answer with no option, a default) is `declined` on every
+//!    call, and nothing is recorded; only a call that asks to propose again ([`Proposing::again`],
+//!    with a filing) files a new proposal, so the owner is not asked again on every call.
+//!    Approved, the kernel checks under the lock that the proposal still stands, linked, within the
+//!    ownership epoch it was pinned under (the position of the `Adopted` that made its owner the
+//!    owner, 0 for `Started`'s). An instance that changed owner since, even back to the same owner,
+//!    makes the proposal stale for good: every call refuses `proposal_stale` (the reads say
+//!    `stale`), and only asking again proposes anew. Then:
 //!    - **Adoption** appends `Adopted { from, to, approval }`, with the answer's evidence (the ask,
 //!      the option, the revision read and the row's hash). From there on only `to` writes the
 //!      instance (`write::check_owner`). Completed receipts stand. Claims taken before it are not
@@ -72,20 +75,24 @@
 //! without the owner's approval nothing changes, while the log still records, hash-chained, what
 //! was proposed and filed. Each session has at most one standing proposal of each kind on an
 //! instance; a new one replaces a linked one (the verb pins anew only after reading a decline)
-//! or a stale one. The flow writes no other file: the ask goes through the asks ledger's writer of
-//! record, and the flows lock is never held while it is filed.
+//! or a stale one. A session pins at most [`MAX_PROPOSALS`] proposals on an instance, withdrawn
+//! ones included (`proposals_exhausted`), so a stranger whose filings the writer keeps refusing
+//! cannot grow the owner's log toward its bound. Proposal bookkeeping never fails the owner's
+//! writes either: the owner's human-node ask pin passes over pins, links and withdrawals appended
+//! since it read the log (`asks`). The flow writes no other file: the ask goes through the asks
+//! ledger's writer of record, and the flows lock is never held while it is filed.
 //!
 //! # Replay
 //!
 //! [`owners`] folds the log in order, and accepts each proposal event only if it fits what came
 //! before: a pin from a session with a marker, naming the owner as the log has it (and for an
-//! adoption, a session other than the owner); a link of a standing pin with its hash; a withdrawal
-//! of a standing unlinked pin. `Adopted` counts only for a standing linked adoption proposal with
-//! its ask id, proposed by `to`, naming `from` as the owner, `from` being the owner still, and the
-//! approve option; `Retired` likewise for a retirement proposal. Anything else is set aside as
-//! rejected and changes nothing, and nothing counts after `Retired`. `status` and `next` report the
-//! current owner and each standing proposal (its kind, ask, ledger, proposer and state), never an
-//! answer.
+//! adoption, a session other than the owner); a link of a standing pin
+//! with its hash; a withdrawal of a standing unlinked pin. `Adopted` counts only for a standing
+//! linked adoption proposal with its ask id and kind, proposed by `to`, naming `from` as the
+//! owner, pinned within the current ownership epoch, and the approve option; `Retired` likewise
+//! for a retirement proposal. Anything else is set aside as rejected and changes nothing, and
+//! nothing counts after `Retired`. `status` and `next` report the current owner and each standing
+//! proposal (its kind, ask, ledger, proposer and state), never an answer.
 
 use super::asks::{self, Answer, Confirmed, Filing};
 use super::error::{KernelError, Refusal};
@@ -122,6 +129,20 @@ pub const PROPOSAL_NOT_FILED: &str = "proposal_not_filed";
 /// The most node ids the question names in each list of its progress.
 const PROGRESS_NAMES: usize = 20;
 
+/// The most proposals one session may pin on one instance, of both kinds, withdrawn or not. Each
+/// pin is a line of the instance's log, which is bounded (`log::MAX_EVENTS`), so no session may
+/// grow it without the owner's part: a filing the writer keeps refusing ends here.
+pub const MAX_PROPOSALS: usize = 8;
+
+/// The proposal events that change nothing but a proposal: another write may pass over them.
+pub(crate) const BOOKKEEPING: [&str; 3] = [ProposalPinned::KIND, ProposalLinked::KIND, ProposalWithdrawn::KIND];
+
+/// Whether every event after `seq` in `log` is proposal bookkeeping ([`BOOKKEEPING`]): nothing
+/// that changes an owner, a claim, a receipt or what is ready.
+pub(crate) fn only_proposals_since(log: &Log, seq: u64) -> bool {
+    log.events.iter().filter(|e| e.seq > seq).all(|e| BOOKKEEPING.contains(&e.kind.as_str()))
+}
+
 /// What a proposal call did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Proposed {
@@ -154,6 +175,8 @@ pub(crate) struct ProposalRec {
     pub by: Owner,
     /// The owner when it was pinned.
     pub owner: Owner,
+    /// The ownership epoch it was pinned under ([`Owners::since`]).
+    pub epoch: u64,
     pub ask: AskRec,
 }
 
@@ -162,10 +185,13 @@ pub(crate) struct ProposalRec {
 pub(crate) struct Owners {
     /// `Started`'s owner, or the `to` of the latest accepted `Adopted`.
     pub owner: Option<Owner>,
-    /// The position of the latest accepted `Adopted`; 0 when there is none. A claim taken before
-    /// it is the former owner's.
+    /// The position of the latest accepted `Adopted`; 0 when there is none: the ownership epoch.
+    /// A claim taken before it is the former owner's, and a proposal pinned under another epoch is
+    /// stale.
     pub since: u64,
     pub proposals: Vec<ProposalRec>,
+    /// The proposer of each accepted pin, in log order ([`MAX_PROPOSALS`]).
+    pub pins: Vec<Owner>,
     /// The ask id of an accepted `Retired`: the instance takes no write.
     pub retired: Option<String>,
     pub rejected: Vec<Rejected>,
@@ -185,8 +211,14 @@ fn body<T: DeserializeOwned>(log: &Log, e: &Event) -> Result<T, KernelError> {
 
 /// Who owns the instance of `log` and what is proposed for it. Reads events only; runs nothing.
 pub(crate) fn owners(log: &Log, started: &Started) -> Result<Owners, KernelError> {
-    let mut o =
-        Owners { owner: started.owner.clone(), since: 0, proposals: Vec::new(), retired: None, rejected: Vec::new() };
+    let mut o = Owners {
+        owner: started.owner.clone(),
+        since: 0,
+        proposals: Vec::new(),
+        pins: Vec::new(),
+        retired: None,
+        rejected: Vec::new(),
+    };
     for e in log.events.iter().skip(1).filter(|e| KINDS.contains(&e.kind.as_str())) {
         if let Err(reason) = o.accept(log, e)? {
             let subject = e.body.get("ask_id").or_else(|| e.body.get("approval").and_then(|a| a.get("ask_id")));
@@ -215,16 +247,23 @@ impl Owners {
                     return Ok(Err("already_pinned"));
                 }
                 // One standing proposal of each kind per session; a new one replaces one that was
-                // linked, or that names an owner since replaced.
+                // linked, or that is stale.
                 if let Some(i) = self.proposals.iter().position(|r| r.proposal == p.proposal && r.by == p.by) {
-                    if !self.proposals[i].ask.linked && self.proposals[i].owner == p.owner {
+                    if !self.proposals[i].ask.linked && self.proposals[i].epoch == p.epoch {
                         return Ok(Err("already_pinned"));
                     }
                     self.proposals.remove(i);
                 }
                 let ask =
                     AskRec { ask_id: p.ask_id, ledger: p.ledger, body: p.body, body_hash: p.body_hash, linked: false };
-                self.proposals.push(ProposalRec { proposal: p.proposal, by: p.by, owner: p.owner, ask });
+                self.pins.push(p.by.clone());
+                self.proposals.push(ProposalRec {
+                    proposal: p.proposal,
+                    by: p.by,
+                    owner: p.owner,
+                    epoch: p.epoch,
+                    ask,
+                });
             }
             ProposalLinked::KIND => {
                 let l: ProposalLinked = body(log, e)?;
@@ -265,7 +304,7 @@ impl Owners {
     }
 
     /// The standing linked proposal of `kind` by `by` that `approval` answers with the approve
-    /// option, while the owner it named still owns the instance.
+    /// option, within the ownership epoch it was pinned under.
     fn approved(&self, kind: Proposal, approval: &Approval, by: &Owner) -> Result<usize, &'static str> {
         let Some(i) = self.proposals.iter().position(|r| r.ask.ask_id == approval.ask_id && r.proposal == kind) else {
             return Err("not_proposed");
@@ -277,7 +316,7 @@ impl Owners {
         if r.by != *by {
             return Err("not_the_proposer");
         }
-        if self.owner.as_ref() != Some(&r.owner) {
+        if r.epoch != self.since {
             return Err("owner_changed");
         }
         if approval.answer_option != kind.approve_option() {
@@ -296,8 +335,8 @@ pub struct ProposalStatus {
     /// The session that proposes it.
     pub by: SessionRef,
     /// `unfiled` until it is linked, then `owner` (the owner's answer, once it lands on main);
-    /// `stale` once the instance has changed owner since it was pinned, so no answer to it
-    /// applies (the proposer proposes anew). The reads make `owner` `answer_waiting_to_land` when
+    /// `stale` for good once the instance has changed owner since it was pinned (even back to the
+    /// same owner), so no answer to it applies (the proposer proposes again). The reads make `owner` `answer_waiting_to_land` when
     /// the answer waits on Maestro's answers branch ([`landing`]).
     pub state: &'static str,
 }
@@ -312,7 +351,7 @@ impl Owners {
                 ask_id: r.ask.ask_id.clone(),
                 ledger: r.ask.ledger.clone(),
                 by: r.by.session.clone(),
-                state: match (self.owner.as_ref() == Some(&r.owner), r.ask.linked) {
+                state: match (r.epoch == self.since, r.ask.linked) {
                     (false, _) => "stale",
                     (true, true) => "owner",
                     (true, false) => "unfiled",
@@ -332,28 +371,39 @@ pub fn landing(paths: &Paths, proposals: &mut [ProposalStatus]) {
     }
 }
 
+/// What a proposal call asks for beyond the next step: the filing for a proposal to pin, and
+/// whether to propose again in place of one that was declined or is stale.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Proposing<'a> {
+    /// Used only when a proposal is to be pinned; later calls ignore it.
+    pub filing: Option<&'a Filing>,
+    /// Propose again: pin a new proposal in place of the session's declined or stale one. Without
+    /// it, a declined proposal says `declined` and a stale one `proposal_stale`, every call.
+    pub again: bool,
+}
+
 /// Proposes that the owner hand `instance` to `session`, and carries out the owner's answer. See
-/// the module docs. `filing` is used only when a proposal is to be pinned; later calls ignore it.
+/// the module docs.
 pub fn propose_adoption(
     ledger: &mut Ledger,
     paths: &Paths,
     session: &VerifiedSession,
     instance: &InstanceId,
-    filing: Option<&Filing>,
+    asking: Proposing,
 ) -> Result<Proposed, KernelError> {
-    propose(ledger, paths, session, instance, Proposal::Adoption, filing)
+    propose(ledger, paths, session, instance, Proposal::Adoption, asking)
 }
 
 /// Proposes that the owner retire `instance`, and carries out the owner's answer. See the module
-/// docs. `filing` is used only when a proposal is to be pinned; later calls ignore it.
+/// docs.
 pub fn propose_retirement(
     ledger: &mut Ledger,
     paths: &Paths,
     session: &VerifiedSession,
     instance: &InstanceId,
-    filing: Option<&Filing>,
+    asking: Proposing,
 ) -> Result<Proposed, KernelError> {
-    propose(ledger, paths, session, instance, Proposal::Retirement, filing)
+    propose(ledger, paths, session, instance, Proposal::Retirement, asking)
 }
 
 /// The instance as the log has it, read under the flows lock, which is released on return.
@@ -374,8 +424,9 @@ fn propose(
     session: &VerifiedSession,
     instance: &InstanceId,
     proposal: Proposal,
-    filing: Option<&Filing>,
+    asking: Proposing,
 ) -> Result<Proposed, KernelError> {
+    let Proposing { filing, again } = asking;
     let me = owner(session)?;
     let seen = look(ledger, instance, proposal, &me)?;
     if let Some(ask_id) = seen.owners.retired.clone() {
@@ -385,12 +436,16 @@ fn propose(
         }
         return finish_retirement(ledger, instance, ask_id);
     }
-    // A proposal naming an owner since replaced is answered to no effect; with a filing, the
-    // session proposes anew, naming the owner as it is now.
-    let stale = seen.rec.as_ref().is_some_and(|r| seen.owners.owner.as_ref() != Some(&r.owner));
+    // A proposal pinned under another ownership epoch is stale for good: no answer to it applies.
+    // Asked to, the session proposes again, naming the owner as it is now.
+    let stale = seen.rec.as_ref().is_some_and(|r| r.epoch != seen.owners.since);
     let rec = match seen.rec.clone() {
-        Some(rec) if !(stale && filing.is_some()) => rec,
-        _ => pin(ledger, paths, instance, proposal, &me, &seen, filing)?,
+        None => pin(ledger, paths, instance, proposal, &me, &seen, filing)?,
+        Some(_) if stale && again => pin(ledger, paths, instance, proposal, &me, &seen, filing)?,
+        Some(rec) if stale => {
+            return Err(Refusal::ProposalStale { instance: instance.to_string(), ask_id: rec.ask.ask_id }.into());
+        }
+        Some(rec) => rec,
     };
     if !rec.ask.linked {
         return file_and_link(ledger, paths, session, instance, rec);
@@ -402,10 +457,10 @@ fn propose(
     };
     let answer_option = text(row.row.get("answer_option"));
     if answer_option.as_deref() != Some(proposal.approve_option()) {
-        // Declined: nothing changes. With a filing, the session proposes anew.
-        if filing.is_some() {
-            let again = Seen { rec: None, ..seen };
-            let rec = pin(ledger, paths, instance, proposal, &me, &again, filing)?;
+        // Declined: nothing changes. Asked to, the session proposes again.
+        if again {
+            let seen = Seen { rec: None, ..seen };
+            let rec = pin(ledger, paths, instance, proposal, &me, &seen, filing)?;
             return file_and_link(ledger, paths, session, instance, rec);
         }
         let (ask_id, ledger) = (rec.ask.ask_id, rec.ask.ledger);
@@ -527,8 +582,11 @@ fn pin(
     seen: &Seen,
     filing: Option<&Filing>,
 ) -> Result<ProposalRec, KernelError> {
+    if seen.owners.pins.iter().filter(|by| *by == me).count() >= MAX_PROPOSALS {
+        return Err(Refusal::ProposalsExhausted { instance: instance.to_string(), limit: MAX_PROPOSALS }.into());
+    }
     let Some(filing) = filing else {
-        return Err(asks::invalid("a first proposal needs a ledger and an ask body"));
+        return Err(asks::invalid("a proposal to pin needs a ledger and an ask body"));
     };
     asks::check_filing(filing, &PROPOSAL_KEYS)?;
     let Some(current) = seen.owners.owner.clone() else {
@@ -548,6 +606,7 @@ fn pin(
         proposal,
         by: me.clone(),
         owner: current.clone(),
+        epoch: seen.owners.since,
         ask_id: ask_id.clone(),
         ledger: filing.ledger.clone(),
         body: Value::Object(body),
@@ -558,7 +617,7 @@ fn pin(
     guard.append(instance, seen.seq, pin.to_event()?)?;
     let ask =
         AskRec { ask_id: pin.ask_id, ledger: pin.ledger, body: pin.body, body_hash: pin.body_hash, linked: false };
-    Ok(ProposalRec { proposal, by: pin.by, owner: pin.owner, ask })
+    Ok(ProposalRec { proposal, by: pin.by, owner: pin.owner, epoch: pin.epoch, ask })
 }
 
 /// Under the flows lock: the log, its owners, and the caller's proposal `expect` still standing as
@@ -637,12 +696,16 @@ fn apply(
     rec: &ProposalRec,
     approval: Approval,
 ) -> Result<Proposed, KernelError> {
+    #[cfg(test)]
+    if let Some(meanwhile) = seams::BEFORE_APPLY.with(|c| c.borrow_mut().take()) {
+        meanwhile();
+    }
     let mut guard = ledger.lock()?;
     let (log, owners, still) = standing(&guard, instance, rec)?;
     if still.is_none() {
         return Err(Refusal::ProposalChanged { ask_id: rec.ask.ask_id.clone() }.into());
     }
-    if owners.owner.as_ref() != Some(&rec.owner) {
+    if owners.since != rec.epoch {
         return Err(Refusal::ProposalStale { instance: instance.to_string(), ask_id: rec.ask.ask_id.clone() }.into());
     }
     let (ask_id, ledger_name, source) = (approval.ask_id.clone(), approval.ledger.clone(), approval.source.clone());
@@ -681,6 +744,18 @@ fn finish_retirement(ledger: &mut Ledger, instance: &InstanceId, ask_id: String)
         .unwrap_or_default()
         .to_string();
     Ok(Proposed::Retired { ask_id, ledger: ledger_name, source: None, appended: None })
+}
+
+/// Test seams, in this crate's unit tests only: another write between reading an approval and
+/// applying it.
+#[cfg(test)]
+pub(crate) mod seams {
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// Runs once, after the answer is read and before the approval is applied under the lock.
+        pub(crate) static BEFORE_APPLY: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
 }
 
 #[cfg(test)]

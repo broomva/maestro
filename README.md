@@ -134,7 +134,8 @@ maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  #
   question, the options and the default) and files an ask naming the instance, its owner, your
   session (each with its owner marker's digest, never the marker) and the progress so far.
   Call it again until it says where it ended. Only the option `adopt` (or `retire`) approves.
-  Anything else, `keep` included, is `declined`, and nothing changes. Unread is
+  Anything else, `keep` included, is `declined` on every call, and nothing changes; `--again`
+  (with `--ledger` and `--ask`) files a new proposal. Unread is
   `answers_unread`. Neither verb takes an answer or an ask id. An adoption is proposed by a
   session that does not own the instance, often a replacement of its owner. On approval the
   kernel records `Adopted`: completed steps stand, the former owner is refused every write, its
@@ -142,8 +143,10 @@ maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  #
   owner claims the next attempt. Any verified session may propose a retirement, the owner
   included. On approval the kernel records `Retired` and moves the instance to `retired/`, as
   the operator's retire does: the log is kept, and every later read or write is refused
-  `retired`. If the instance changed owner since the proposal named its owner, the approval is
-  refused `proposal_stale`; propose again. `flow next` and `flow status` list each standing
+  `retired`. A proposal belongs to the ownership it was filed under: once the instance changes
+  owner (even back to the same owner) it is stale for good, every call says `proposal_stale`,
+  and `--again` proposes anew. One session pins at most eight proposals on an instance
+  (`proposals_exhausted`). `flow next` and `flow status` list each standing
   proposal (`proposals`: kind, ask, proposer, state) and the current `owner`.
 - **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
   Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential

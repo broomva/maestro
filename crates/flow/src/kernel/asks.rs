@@ -95,6 +95,7 @@
 //! Adoption and retirement (ADR decision 6) are proposed through asks pinned, filed, linked and
 //! answered by these same steps; see [`adoption`](super::adoption).
 
+use super::adoption;
 use super::error::{KernelError, Refusal};
 use super::events::{Answered, AskLinked, AskPinned, AskWithdrawn, KernelEvent, Started};
 use super::ir::{Class, Iteration};
@@ -396,8 +397,11 @@ fn pin(
     let started = pinned(&log)?;
     let (iteration, _) = waiting(&log, &started, node)?;
     let pin = AskPinned { iteration, ..pin };
-    // Nothing appended since `look`, or the pin is not appended (`stale_seq`): the only concurrency rule.
-    guard.append(instance, seen.seq, pin.to_event()?)?;
+    // Nothing appended since `look`, or the pin is not appended (`stale_seq`): the only concurrency
+    // rule. Another session's proposal bookkeeping changes nothing the pin depends on, so a
+    // stranger's proposal cannot make the owner's ask fail.
+    let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };
+    guard.append(instance, at, pin.to_event()?)?;
     Ok(AskRec { ask_id: pin.ask_id, ledger: pin.ledger, body: pin.body, body_hash: pin.body_hash, linked: false })
 }
 

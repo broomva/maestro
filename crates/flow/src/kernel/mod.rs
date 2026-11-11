@@ -50,7 +50,9 @@ mod jq;
 mod replay;
 mod write;
 
-pub use adoption::{PROPOSAL_NOT_FILED, ProposalStatus, Proposed, propose_adoption, propose_retirement};
+pub use adoption::{
+    MAX_PROPOSALS, PROPOSAL_NOT_FILED, ProposalStatus, Proposed, Proposing, propose_adoption, propose_retirement,
+};
 pub use asks::{ASK_NOT_FILED, Asked, Filing, ask, landing};
 pub use compile::{CompiledFlow, MAX_SOURCE, compile};
 pub use error::{CompileError, KernelError, Refusal};

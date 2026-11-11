@@ -262,14 +262,18 @@ impl Proposal {
 
 /// A proposal's ask, pinned in the log before it is filed, as `AskPinned` pins a human node's:
 /// the id the kernel minted, the ledger, the exact body and the hash of its comparable part. `by`
-/// is the session that proposes it, and `owner` the instance's owner when it was pinned; the
-/// owner's approval applies only while that is still the owner. A pin changes no owner, claim,
-/// receipt or readiness.
+/// is the session that proposes it, `owner` the instance's owner when it was pinned, and `epoch`
+/// the ownership it was pinned under: the position of the `Adopted` that made `owner` the owner,
+/// 0 for `Started`'s. The owner's approval applies only within that epoch: once the instance
+/// changes owner the proposal is stale for good, even if the same owner takes it back. A pin
+/// changes no owner, claim, receipt or readiness.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProposalPinned {
     pub proposal: Proposal,
     pub by: Owner,
     pub owner: Owner,
+    #[serde(default)]
+    pub epoch: u64,
     pub ask_id: String,
     pub ledger: String,
     pub body: Value,

@@ -1729,7 +1729,7 @@ mutate $asks '    let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map
     loop {' '    loop {
         let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;'
 mutate $asks '        Some(s) if s.state == State::Waiting => Ok((s.iteration.clone(), s.inputs.clone())),' '        Some(s) => Ok((s.iteration.clone(), s.inputs.clone())),'
-mutate $asks 'guard.append(instance, seen.seq, pin.to_event()?)?;' 'guard.append(instance, log.seq(), pin.to_event()?)?;'
+mutate $asks 'let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };' 'let at = log.seq();'
 mutate $replay '                if self.asks.contains_key(&(id, i)) {' '                if false {'
 mutate $replay 'Some(r) if !r.linked && r.ask_id == l.ask_id && r.body_hash == l.body_hash => {' 'Some(r) if !r.linked && r.ask_id == l.ask_id => {'
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| !r.linked && r.ask_id == w.ask_id) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.ask_id == w.ask_id) {'
@@ -1745,10 +1745,35 @@ mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if answer_option.as_deref().map(str::to_lowercase).as_deref() != Some(proposal.approve_option()) {'
 # The owner adopts nothing; an approval applies only while the owner it named still owns it.
 mutate $adopt '        if proposal == Proposal::Adoption && current == me {' '        if false {'
-mutate $adopt '    if owners.owner.as_ref() != Some(&rec.owner) {' '    if false {'
-# A proposal naming an owner since replaced is stale: the reads say so, and a filing proposes anew.
-mutate $adopt 'Some(rec) if !(stale && filing.is_some()) => rec,' 'Some(rec) => rec,'
-mutate $adopt 'state: match (self.owner.as_ref() == Some(&r.owner), r.ask.linked) {' 'state: match (true, r.ask.linked) {'
+mutate $adopt '    if owners.since != rec.epoch {' '    if false {'
+# P20 round 1: a proposal belongs to the ownership epoch it was pinned under, so it is stale for
+# good once the instance changes owner, even back to the same owner (A, C, A); only asking again
+# proposes anew, and a declined proposal says declined on every call until then.
+mutate $adopt '    let stale = seen.rec.as_ref().is_some_and(|r| r.epoch != seen.owners.since);' '    let stale = seen.rec.as_ref().is_some_and(|r| seen.owners.owner.as_ref() != Some(&r.owner));'
+mutate $adopt '        Some(rec) if stale => {' '        Some(rec) if false => {'
+mutate $adopt '        Some(_) if stale && again => pin(ledger, paths, instance, proposal, &me, &seen, filing)?,' ''
+mutate $adopt '        if r.epoch != self.since {' '        if self.owner.as_ref() != Some(&r.owner) {'
+mutate $adopt 'state: match (r.epoch == self.since, r.ask.linked) {' 'state: match (true, r.ask.linked) {'
+mutate $adopt 'state: match (r.epoch == self.since, r.ask.linked) {' 'state: match (self.owner.as_ref() == Some(&r.owner), r.ask.linked) {'
+mutate $adopt '        if again {' '        if true {'
+# A verdict is recorded only while its writer still owns the instance (the until ran unlocked).
+mutate $fk/write.rs '        // The instance may have changed owner while the until ran.
+        check_owner(&log, &started, instance, session)?;' ''
+# Proposals are bounded per session and instance, and their bookkeeping never fails the owner's
+# ask pin, while an adoption landing meanwhile does.
+mutate $adopt '    if seen.owners.pins.iter().filter(|by| *by == me).count() >= MAX_PROPOSALS {' '    if false {'
+mutate $adopt '                self.pins.push(p.by.clone());' ''
+mutate $asks 'let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };' 'let at = seen.seq;'
+mutate $adopt '.all(|e| BOOKKEEPING.contains(&e.kind.as_str()))' '.all(|e| KINDS.contains(&e.kind.as_str()))'
+# The guards no test killed: a proposal that changed (replaced) records nothing; nothing counts
+# after `Retired`; a pin names the current owner; an approval matches its kind; no owner, no proposal.
+mutate $adopt '        Some(now) if now == expect => {}' '        Some(_) => {}'
+mutate $adopt '        if self.retired.is_some() {
+            return Ok(Err("retired"));' '        if false {
+            return Ok(Err("retired"));'
+mutate $adopt '                if self.owner.as_ref() != Some(&p.owner) {' '                if false {'
+mutate $adopt 'r.ask.ask_id == approval.ask_id && r.proposal == kind) else {' 'r.ask.ask_id == approval.ask_id) else {'
+mutate $adopt '        let Some(current) = &owners.owner else {' '        let Some(current) = owners.owner.as_ref().or(Some(me)) else {'
 # The kernel's keys (the question, the options, the default) are never the agent's.
 mutate $adopt '["id", "uid", "ask", "asked_at", "headline", "options", "default", "preanswerable"]' '["id", "uid", "ask", "asked_at", "headline", "uid", "uid", "uid"]'
 # The flows lock is never held while a proposal is filed.
@@ -1767,9 +1792,7 @@ mutate $adopt '        if !r.ask.linked {
             return Err("not_linked");' '        if false {
             return Err("not_linked");'
 mutate $adopt '        if r.by != *by {' '        if false {'
-mutate $adopt '        if self.owner.as_ref() != Some(&r.owner) {
-            return Err("owner_changed");' '        if false {
-            return Err("owner_changed");'
+mutate $adopt '        if r.epoch != self.since {' '        if false {'
 mutate $adopt '        if approval.answer_option != kind.approve_option() {' '        if false {'
 mutate $adopt '                if self.proposals[i].owner != a.from {' '                if false {'
 mutate $adopt 'Some(r) if !r.ask.linked && r.ask.body_hash == l.body_hash => r.ask.linked = true,' 'Some(r) if !r.ask.linked => r.ask.linked = true,'

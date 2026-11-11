@@ -194,12 +194,16 @@ pub struct FlowProposeArgs {
     /// The instance, as `maestro_flow_status` names it.
     pub instance: String,
     /// The asks ledger to file the proposal into, a file name in the asks folder (`*.yaml`). Needed
-    /// on the first call only, and again to propose anew after the owner declined.
+    /// on the first call only, and with `again`.
     pub ledger: Option<String>,
     /// The ask's fields besides those the kernel writes (`id`, `asked_at`, `headline`, `ask`,
     /// `options`, `default`, `preanswerable`): what the ledger's validator requires (`class`,
     /// `gates`, `exhausted`, `blocking`, `stakes`, `why_you`, ...). Needed with `ledger`.
     pub ask: Option<serde_json::Map<String, Value>>,
+    /// Propose again, in place of your proposal that the owner declined or that is stale (the
+    /// instance changed owner since it was filed): a new ask, so it needs `ledger` and `ask`.
+    /// Without it, a declined proposal says declined and a stale one proposal_stale, every call.
+    pub again: Option<bool>,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
     pub cwd: Option<String>,
     /// A Direct session's launch token.
@@ -434,7 +438,8 @@ pub(crate) fn call(
                 };
                 let propose =
                     if name == PROPOSE_ADOPTION { kernel::propose_adoption } else { kernel::propose_retirement };
-                Ok(proposed(propose(&mut w.ledger()?, paths, &w.me, &instance, filing.as_ref())?))
+                let asking = kernel::Proposing { filing: filing.as_ref(), again: a.again.unwrap_or(false) };
+                Ok(proposed(propose(&mut w.ledger()?, paths, &w.me, &instance, asking)?))
             }))
         }
         other => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),

@@ -1015,6 +1015,8 @@ fn settle(ledger: &mut Ledger, session: &VerifiedSession, instance: &InstanceId)
         // The clock is judged where the verdict is written: after the until ran, under the lock.
         let mut guard = ledger.lock()?;
         let log = guard.log(instance)?;
+        // The instance may have changed owner while the until ran.
+        check_owner(&log, &started, instance, session)?;
         wall(&log)?;
         let verdict = match judged {
             Err((code, reason)) => Verdict::Unrecorded { repeat: Some(next.repeat), code, reason },
