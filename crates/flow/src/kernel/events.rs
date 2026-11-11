@@ -5,7 +5,10 @@
 //! (`heartbeat`), `Completed`, `Refused` and `EffectStarted` (`complete`), `Chosen` (`choose`) and
 //! `Guarded` (a repeat's `until` verdict, written when an iteration settles). A verdict is
 //! recorded with the digest of the input its guard read, so replay never evaluates one. A human
-//! node's ask (`asks`) writes `AskPinned`, `AskLinked`, `AskWithdrawn` and `Answered`.
+//! node's ask (`asks`) writes `AskPinned`, `AskLinked`, `AskWithdrawn` and `Answered`. A proposal
+//! to adopt or retire the instance (`adoption`) writes `ProposalPinned`, `ProposalLinked` and
+//! `ProposalWithdrawn`, which change nothing but the proposal, and, on the owner's approval,
+//! `Adopted` or `Retired`.
 //!
 //! A receipt (`Completed`, `Chosen`, and `Answered` for a human node) records in `inputs` the digest of every receipt it consumed:
 //! each node it needs or switches on, by node id ([`receipt_digest`]). `status` and `next` name
@@ -235,6 +238,104 @@ pub struct Answered {
     pub source: String,
     /// The answered row's entry hash (the plugin's `entryHash`), as read.
     pub row_hash: String,
+}
+
+/// What a proposal asks the owner to decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Proposal {
+    /// Hand the instance to the session that proposes it.
+    Adoption,
+    /// Retire the instance: its log is kept, and it is never written again.
+    Retirement,
+}
+
+impl Proposal {
+    /// The option of the proposal's ask that approves it, exactly (see `adoption`).
+    pub fn approve_option(self) -> &'static str {
+        match self {
+            Proposal::Adoption => "adopt",
+            Proposal::Retirement => "retire",
+        }
+    }
+}
+
+/// A proposal's ask, pinned in the log before it is filed, as `AskPinned` pins a human node's:
+/// the id the kernel minted, the ledger, the exact body and the hash of its comparable part. `by`
+/// is the session that proposes it, and `owner` the instance's owner when it was pinned; the
+/// owner's approval applies only while that is still the owner. A pin changes no owner, claim,
+/// receipt or readiness.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProposalPinned {
+    pub proposal: Proposal,
+    pub by: Owner,
+    pub owner: Owner,
+    pub ask_id: String,
+    pub ledger: String,
+    pub body: Value,
+    pub body_hash: String,
+}
+
+/// The pinned proposal, confirmed in the asks ledger's working tree by its id and hash.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProposalLinked {
+    pub ask_id: String,
+    pub ledger: String,
+    pub body_hash: String,
+}
+
+/// A pinned proposal the writer of record refused, with no row of its id: it was not filed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProposalWithdrawn {
+    pub ask_id: String,
+    pub code: String,
+    pub reason: String,
+}
+
+/// The evidence of the owner's approval, read from the answers ledger, never from an agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Approval {
+    pub ask_id: String,
+    pub ledger: String,
+    /// The answered row's `answer_option`: the proposal's approve option.
+    pub answer_option: String,
+    /// The revision the answer was read at (`main@<commit>`).
+    pub source: String,
+    /// The answered row's entry hash, as read.
+    pub row_hash: String,
+}
+
+/// The instance's new owner, on the owner's approval of an adoption proposal. From here on only
+/// `to` writes the instance; the claims taken before it hold nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Adopted {
+    pub from: Owner,
+    pub to: Owner,
+    pub approval: Approval,
+}
+
+/// The instance retired, on the owner's approval of a retirement proposal. Written last, before
+/// the instance moves to `retired/`; no write follows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Retired {
+    pub by: Owner,
+    pub approval: Approval,
+}
+
+impl KernelEvent for ProposalPinned {
+    const KIND: &'static str = "ProposalPinned";
+}
+impl KernelEvent for ProposalLinked {
+    const KIND: &'static str = "ProposalLinked";
+}
+impl KernelEvent for ProposalWithdrawn {
+    const KIND: &'static str = "ProposalWithdrawn";
+}
+impl KernelEvent for Adopted {
+    const KIND: &'static str = "Adopted";
+}
+impl KernelEvent for Retired {
+    const KIND: &'static str = "Retired";
 }
 
 impl KernelEvent for AskPinned {

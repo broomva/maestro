@@ -4,7 +4,8 @@
 //! (`asks::seams`). The writer of record is the stub in `fixtures/requests` (the workspace
 //! repository is private), run as `ask_ledger.py file` is, sometimes behind a wrapper that checks
 //! something while it runs. The workspace is a git repository whose `origin/main` holds the
-//! seeded ledger, so the answers ledger can be read at its revisions as in production.
+//! seeded ledger, so the answers ledger can be read at its revisions as in production. The
+//! adoption and retirement tests (`adoption`'s) share this fixture.
 
 use super::*;
 use crate::Options;
@@ -19,28 +20,28 @@ use std::process::Command;
 /// `owner` (human) gates `ship`.
 const FLOW: &str = "flow: gate\nversion: 1\nnodes:\n  owner: {class: human, ask: Ship the release?}\n  ship: {class: pure, run: ['true'], needs: [owner]}\n";
 
-fn fixtures() -> PathBuf {
+pub(crate) fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/requests")
 }
 
 /// A python preamble the wrapper runs before the stub writer, in the writer's own process.
-fn wrapper(pre: &str) -> String {
+pub(crate) fn wrapper(pre: &str) -> String {
     format!(
         "import fcntl, io, json, os, runpy, sys\nHERE = os.path.dirname(os.path.abspath(__file__))\n{pre}\nrunpy.run_path(os.path.join(HERE, 'stub.py'), run_name='__main__')\n"
     )
 }
 
-struct Fx {
-    tmp: tempfile::TempDir,
-    paths: Paths,
-    ws: PathBuf,
-    flows: PathBuf,
-    ledger: Ledger,
-    flow: CompiledFlow,
-    me: VerifiedSession,
+pub(crate) struct Fx {
+    pub(crate) tmp: tempfile::TempDir,
+    pub(crate) paths: Paths,
+    pub(crate) ws: PathBuf,
+    pub(crate) flows: PathBuf,
+    pub(crate) ledger: Ledger,
+    pub(crate) flow: CompiledFlow,
+    pub(crate) me: VerifiedSession,
 }
 
-fn git(ws: &Path, args: &[&str]) -> String {
+pub(crate) fn git(ws: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(["-c", "user.name=t", "-c", "user.email=t@localhost", "-c", "commit.gpgsign=false"])
         .args(args)
@@ -57,7 +58,7 @@ fn git(ws: &Path, args: &[&str]) -> String {
 /// A workspace whose writer of record is `writer` (python; the stub itself when `None`), with the
 /// seeded ledger committed and pushed to `origin`, a local bare repository (never the network),
 /// and fetched, and an empty flows ledger.
-fn fx(writer: Option<&str>, extra_asks: &str) -> Fx {
+pub(crate) fn fx(writer: Option<&str>, extra_asks: &str) -> Fx {
     crate::kernel::guard_entry();
     let tmp = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(tmp.path()).unwrap();
@@ -90,7 +91,7 @@ fn fx(writer: Option<&str>, extra_asks: &str) -> Fx {
 }
 
 /// The body an agent gives: what the stub's ledger fixture holds for every ask.
-fn body() -> Map<String, Value> {
+pub(crate) fn body() -> Map<String, Value> {
     serde_json::json!({
         "headline": "Ship the release?",
         "stakes": "Nothing is blocked; a fixture.",
@@ -108,59 +109,59 @@ fn body() -> Map<String, Value> {
     .clone()
 }
 
-fn filing() -> Filing {
+pub(crate) fn filing() -> Filing {
     Filing { ledger: "ledger.yaml".into(), body: body() }
 }
 
-fn code<T>(r: Result<T, KernelError>) -> String {
+pub(crate) fn code<T>(r: Result<T, KernelError>) -> String {
     r.map_or_else(|e| e.code().to_string(), |_| "ok".to_string())
 }
 
 impl Fx {
-    fn begin(&mut self) -> InstanceId {
+    pub(crate) fn begin(&mut self) -> InstanceId {
         start(&mut self.ledger, &self.me, &self.flow, serde_json::json!({})).unwrap().instance
     }
 
-    fn ask(&mut self, fi: &InstanceId, filing: Option<&Filing>) -> Result<Asked, KernelError> {
+    pub(crate) fn ask(&mut self, fi: &InstanceId, filing: Option<&Filing>) -> Result<Asked, KernelError> {
         ask(&mut self.ledger, &self.paths, &self.me, fi, "owner", filing)
     }
 
-    fn events(&self, fi: &InstanceId) -> Vec<Value> {
+    pub(crate) fn events(&self, fi: &InstanceId) -> Vec<Value> {
         let text =
             std::fs::read_to_string(self.flows.join("instances").join(fi.as_str()).join("events.jsonl")).unwrap();
         text.lines().map(|l| serde_json::from_str(l).unwrap()).collect()
     }
 
-    fn kinds(&self, fi: &InstanceId) -> Vec<String> {
+    pub(crate) fn kinds(&self, fi: &InstanceId) -> Vec<String> {
         self.events(fi).iter().map(|e| e["kind"].as_str().unwrap().to_string()).collect()
     }
 
-    fn pinned(&self, fi: &InstanceId) -> Value {
+    pub(crate) fn pinned(&self, fi: &InstanceId) -> Value {
         self.events(fi).into_iter().find(|e| e["kind"] == "AskPinned").expect("a pin")["body"]["body"].clone()
     }
 
-    fn ledger_text(&self) -> String {
+    pub(crate) fn ledger_text(&self) -> String {
         std::fs::read_to_string(self.ws.join(".control/asks/ledger.yaml")).unwrap()
     }
 
     /// The working tree's row with `id`, as the store reads it.
-    fn row(&self, id: &str) -> Option<Ask> {
+    pub(crate) fn row(&self, id: &str) -> Option<Ask> {
         let tree = Store::new(self.paths.clone(), TreeSource::WorkingTree);
         tree.ask_ledger("ledger.yaml").unwrap().unwrap().asks.into_iter().find(|a| a.id == id)
     }
 
-    fn status(&self, fi: &InstanceId) -> crate::kernel::Status {
+    pub(crate) fn status(&self, fi: &InstanceId) -> crate::kernel::Status {
         let reader = Reader::new(&self.flows, Options::default()).unwrap();
         status(&reader.lock().unwrap(), fi, clock::now()).unwrap()
     }
 
     /// Adds the owner's answer to the row `id` in the working tree, as a writer of answers would.
-    fn answer_in_worktree(&self, id: &str) {
+    pub(crate) fn answer_in_worktree(&self, id: &str) {
         self.add_to_row(id, "    answer: \"Ship it\"\n    answer_option: \"ship\"\n    answered_at: \"2026-11-09T00:00:00Z\"\n    answered_by: \"owner:maestro-web\"\n");
     }
 
     /// Adds `lines` (YAML keys at the row's indent) to the working tree's row `id`.
-    fn add_to_row(&self, id: &str, lines: &str) {
+    pub(crate) fn add_to_row(&self, id: &str, lines: &str) {
         let text = self.ledger_text();
         let line = format!("  - id: \"{id}\"\n");
         assert!(text.contains(&line), "{text}");
@@ -169,25 +170,25 @@ impl Fx {
     }
 
     /// Adds a whole entry at the end of the working tree's asks.
-    fn add_entry(&self, entry: &str) {
+    pub(crate) fn add_entry(&self, entry: &str) {
         let text = self.ledger_text().replace("\ndecisions: []", &format!("{entry}\ndecisions: []"));
         std::fs::write(self.ws.join(".control/asks/ledger.yaml"), text).unwrap();
     }
 
     /// Commits the working tree here (on the local main only).
-    fn commit(&self) {
+    pub(crate) fn commit(&self) {
         git(&self.ws, &["add", "-A"]);
         git(&self.ws, &["commit", "-qm", "here"]);
     }
 
     /// Commits the working tree and points `maestro/answers` at it: an answer waiting to land.
-    fn put_on_answers_branch(&self) {
+    pub(crate) fn put_on_answers_branch(&self) {
         self.commit();
         git(&self.ws, &["branch", "-f", "maestro/answers"]);
     }
 
     /// Commits the working tree, pushes it to origin's main and fetches: the answer has landed.
-    fn land_on_main(&self) {
+    pub(crate) fn land_on_main(&self) {
         self.commit();
         git(&self.ws, &["push", "-q", "origin", "main"]);
         git(&self.ws, &["fetch", "-q", "origin"]);
@@ -195,7 +196,7 @@ impl Fx {
 
     /// A commit holding the working tree's ledger, made without moving main (`commit-tree`), and
     /// the working tree and index put back: what an agent forging an answer could make.
-    fn forge(&self) -> String {
+    pub(crate) fn forge(&self) -> String {
         git(&self.ws, &["add", "-A"]);
         let tree = git(&self.ws, &["write-tree"]).trim().to_string();
         let forged = git(&self.ws, &["commit-tree", &tree, "-p", "HEAD", "-m", "answers: owner"]).trim().to_string();
@@ -645,7 +646,7 @@ fn an_ask_that_changed_while_it_was_filed_is_ask_changed() {
 // 2026-11-09 ("Landed main, remote-checked (Recommended)").
 
 /// Every file under the flows ledger and the asks folder, by path: what a refused write must leave.
-fn machine(f: &Fx) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(crate) fn machine(f: &Fx) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut todo = vec![f.flows.parent().unwrap().to_path_buf(), f.ws.join(".control/asks")];
     while let Some(dir) = todo.pop() {

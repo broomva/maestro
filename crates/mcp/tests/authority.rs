@@ -48,8 +48,12 @@ fn every_tool_is_a_read_or_an_agent_request() {
     let writes = ["maestro_flow_start", "maestro_flow_claim", "maestro_flow_complete", "maestro_flow_choose"];
     // The sixth, `ask` (BRO-3635), writes the flow ledger too, and its one other effect, an ask
     // filed through the asks ledger's writer of record, is pinned by
-    // `the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record` below.
-    for name in writes.into_iter().chain(["maestro_flow_heartbeat", "maestro_flow_ask"]) {
+    // `the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record` below. So do the
+    // seventh and eighth, the proposals to adopt or retire an instance (BRO-3635, ADR decision 7):
+    // agent writes that file an ask and apply only the owner's answer, pinned by
+    // `a_flow_proposal_writes_its_instance_and_one_ask_and_takes_no_answer` below.
+    let proposals = ["maestro_flow_propose_adoption", "maestro_flow_propose_retirement"];
+    for name in writes.into_iter().chain(["maestro_flow_heartbeat", "maestro_flow_ask"]).chain(proposals) {
         let spec = TOOLS.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no tool {name}"));
         assert_eq!(
             (spec.authority, spec.request, spec.scope),
@@ -61,7 +65,7 @@ fn every_tool_is_a_read_or_an_agent_request() {
         let spec = TOOLS.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no tool {name}"));
         assert_eq!((spec.authority, spec.request, spec.scope), (Authority::Read, None, "read"), "{name}");
     }
-    assert_eq!(TOOLS.iter().filter(|t| t.authority == Authority::AgentWrite).count(), 6);
+    assert_eq!(TOOLS.iter().filter(|t| t.authority == Authority::AgentWrite).count(), 8);
 }
 
 /// The flow ledger's scope: its root `.broomva/flows` or a path below it, never a sibling
@@ -219,6 +223,9 @@ fn a_held_request_changes_nothing_but_the_journal() {
             "maestro_flow_choose" => json!({ "session": session, "claim_token": "fi_x.00", "edge": "e" }),
             "maestro_flow_ask" => json!({
                 "session": session, "instance": "fi_x", "node_id": "n", "ledger": "demo-arc.yaml", "ask": { "class": "decision" },
+            }),
+            "maestro_flow_propose_adoption" | "maestro_flow_propose_retirement" => json!({
+                "session": session, "instance": "fi_x", "ledger": "demo-arc.yaml", "ask": { "class": "decision" },
             }),
             _ => json!({ "session": session, "claim_token": "fi_x.00" }),
         };
@@ -401,6 +408,108 @@ fn the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record() {
         (&next["relay"][0]["question"], &next["relay"][0]["state"]),
         (&json!("Merge the gate?"), &json!("owner"))
     );
+    assert!(tree(&root) == quiet, "a read wrote");
+}
+
+/// The proposals to adopt or retire an instance (BRO-3635, ADR decisions 6 and 7), explicitly:
+/// each is an agent write that changes its instance's log, the projection and one asks ledger,
+/// through the writer of record, and nothing else. Neither takes an answer or an ask id, the owner
+/// cannot propose adopting its own instance, and a read afterwards lists the proposal as data and
+/// writes nothing.
+#[test]
+fn a_flow_proposal_writes_its_instance_and_one_ask_and_takes_no_answer() {
+    use std::path::{Path, PathBuf};
+    maestro_flow::kernel::guard_entry();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    copy(&fixtures.join("machine"), &root);
+    std::fs::create_dir_all(root.join("workspace/scripts")).unwrap();
+    std::fs::copy(fixtures.join("requests/ask_ledger_stub.py"), root.join("workspace/scripts/ask_ledger.py")).unwrap();
+    let mut paths = Paths::under(&root);
+    paths.ask_locks = root.join("locks");
+    let store = Store::new(paths, TreeSource::WorkingTree);
+    let direct = maestro_hosts::DirectRegistry::new();
+    for (id, token) in [("d1", "tok-1"), ("d2", "tok-2")] {
+        direct.register(maestro_hosts::DirectSession {
+            id: id.into(),
+            cwd: root.to_string_lossy().into_owned(),
+            token: token.into(),
+            liveness: maestro_hosts::SessionLiveness::Live,
+            harness: None,
+            pending_permissions: vec![],
+        });
+    }
+    let hosts = maestro_hosts::SurfaceRegistry::new(None, None, Some(direct));
+    let call_as = |who: (&str, &str), tool: &str, mut args: serde_json::Value| {
+        args["session"] = json!(format!("direct:-/{}", who.0));
+        args["token"] = json!(who.1);
+        args["cwd"] = json!(root);
+        maestro_mcp::call_with_hosts(&store, &hosts, tool, args)
+    };
+    let (owner, other) = (("d1", "tok-1"), ("d2", "tok-2"));
+    let definition = "flow: gate\nversion: 1\nnodes:\n  owner: {class: human, ask: Merge the gate?}\n";
+    let begun = call_as(owner, "maestro_flow_start", json!({ "definition": definition })).unwrap();
+    let fi = begun["instance"].as_str().unwrap().to_string();
+    let ask = json!({
+        "class": "decision", "gates": ["merge"], "blocking": false, "stakes": "The owner is gone.",
+        "why_you": "Only the owner hands a flow over.", "exhausted": ["read: a fixture", "default: a fixture"],
+    });
+    let filing = json!({ "instance": fi, "ledger": "demo-arc.yaml", "ask": ask });
+    // No answer and no ask id are arguments: either is a protocol error, and nothing is written.
+    let quiet = tree(&root);
+    for (field, value) in [("answer", json!("adopt")), ("answer_option", json!("adopt")), ("ask_id", json!("x"))] {
+        for tool in ["maestro_flow_propose_adoption", "maestro_flow_propose_retirement"] {
+            let mut args = filing.clone();
+            args[field] = value.clone();
+            assert!(call_as(other, tool, args).is_err(), "{tool} took {field}");
+        }
+    }
+    let mine = call_as(owner, "maestro_flow_propose_adoption", filing.clone()).unwrap();
+    assert_eq!((&mine["ok"], &mine["code"]), (&json!(false), &json!("already_owner")), "{mine}");
+    assert!(tree(&root) == quiet, "a refused proposal wrote");
+
+    let ledger = Path::new("workspace/.broomva/flows");
+    let asks = Path::new("workspace/.control/asks/demo-arc.yaml");
+    for tool in ["maestro_flow_propose_adoption", "maestro_flow_propose_retirement"] {
+        let before = tree(&root);
+        let v = call_as(other, tool, filing.clone()).unwrap();
+        assert_eq!((&v["ok"], &v["state"]), (&json!(true), &json!("waiting")), "{tool}: {v}");
+        let id = v["ask_id"].as_str().unwrap().to_string();
+        let after = tree(&root);
+        let changed: Vec<PathBuf> = after
+            .iter()
+            .filter(|(p, b)| before.get(*p) != Some(b))
+            .map(|(p, _)| p.clone())
+            .chain(before.keys().filter(|p| !after.contains_key(*p)).cloned())
+            .collect();
+        assert!(changed.iter().any(|p| p == asks), "{tool}: {changed:?}");
+        for p in &changed {
+            let flows = p.starts_with(ledger.join("instances").join(&fi))
+                || (p.parent() == Some(ledger)
+                    && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("projection.sqlite")));
+            assert!(flows || p == asks || p.starts_with("locks"), "{tool} changed {p:?}");
+        }
+        let text = std::fs::read_to_string(root.join(asks)).unwrap();
+        assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "{tool}: one ask filed");
+    }
+    assert!(!root.join("broomva-home/ledger/requests/requests.jsonl").exists(), "nothing journalled");
+    // A read lists both proposals, as data, and writes nothing.
+    let quiet = tree(&root);
+    let status =
+        maestro_mcp::call_with_hosts(&store, &hosts, "maestro_flow_status", json!({ "instance": fi })).unwrap();
+    let proposals = status["status"]["proposals"].as_array().unwrap();
+    let kinds: Vec<_> =
+        proposals.iter().map(|p| (p["proposal"].clone(), p["by"].clone(), p["state"].clone())).collect();
+    assert_eq!(
+        kinds,
+        [
+            (json!("adoption"), json!({ "surface": "direct", "id": "d2" }), json!("owner")),
+            (json!("retirement"), json!({ "surface": "direct", "id": "d2" }), json!("owner")),
+        ],
+        "{status}"
+    );
+    assert_eq!(status["status"]["owner"], json!({ "surface": "direct", "id": "d1" }));
     assert!(tree(&root) == quiet, "a read wrote");
 }
 

@@ -93,6 +93,8 @@ maestro flow heartbeat --claim-token T                       # extend the lease
 maestro flow complete --claim-token T [--outputs '<json>']   # the kernel runs the node's command
 maestro flow choose --claim-token T --edge E                 # take a choice node's edge if its guard holds
 maestro flow ask --instance I --node-id N [--ledger L.yaml --ask '<json>']   # a human node: file its ask, then take the answer
+maestro flow propose-adoption --instance I [--ledger L.yaml --ask '<json>']    # ask the owner to hand you an instance
+maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  # ask the owner to retire an instance
 ```
 
 - **Human steps (BRO-3635).** A waiting `human` node is the owner's. `flow ask` (MCP
@@ -123,6 +125,26 @@ maestro flow ask --instance I --node-id N [--ledger L.yaml --ask '<json>']   # a
   state (`unfiled`, `owner`, `answer_waiting_to_land`) and ask, and for a T3 owner, links that open
   its thread with a draft to take the answer.
 
+- **Adoption and retirement (BRO-3635).** Who owns a flow is the owner's decision, so no verb
+  adopts or retires an instance: `flow propose-adoption` and `flow propose-retirement` (MCP
+  `maestro_flow_propose_adoption`, `maestro_flow_propose_retirement`) put it to the owner as a
+  Maestro ask, filed, linked and answered exactly as a human node's ask is, and the kernel
+  carries out only the owner's answer, read from main of the answers remote. The first call
+  takes `--ledger` and `--ask` (the fields the validator requires; the kernel writes the
+  question, the options and the default) and files an ask naming the instance, its owner, your
+  session (each with its owner marker's digest, never the marker) and the progress so far.
+  Call it again until it says where it ended. Only the option `adopt` (or `retire`) approves.
+  Anything else, `keep` included, is `declined`, and nothing changes. Unread is
+  `answers_unread`. Neither verb takes an answer or an ask id. An adoption is proposed by a
+  session that does not own the instance, often a replacement of its owner. On approval the
+  kernel records `Adopted`: completed steps stand, the former owner is refused every write, its
+  claims are not transferred (`former_owners_claim`) and run out on their leases, and the new
+  owner claims the next attempt. Any verified session may propose a retirement, the owner
+  included. On approval the kernel records `Retired` and moves the instance to `retired/`, as
+  the operator's retire does: the log is kept, and every later read or write is refused
+  `retired`. If the instance changed owner since the proposal named its owner, the approval is
+  refused `proposal_stale`; propose again. `flow next` and `flow status` list each standing
+  proposal (`proposals`: kind, ask, proposer, state) and the current `owner`.
 - **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
   Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential
   (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP it is the arguments `cwd`, `token`, `node` and

@@ -8,7 +8,8 @@
 //!   starts a new ledger there by itself.
 //! - [`create_fresh_ledger`] makes a new ledger, with a new epoch, for a host, after the old root
 //!   was archived. A normal writer never does this.
-//! - [`retire`] moves an instance to `retired/<id>`, its log kept as it was.
+//! - [`retire`] moves an instance to `retired/<id>`, its log kept as it was. The kernel moves an
+//!   instance the owner approved retiring through the same step (`kernel::adoption`).
 //! - [`truncate_torn_tail`] cuts a torn last line so appends resume.
 //! - [`rebuild_projection`] rebuilds the SQLite cache from the logs.
 
@@ -16,8 +17,8 @@ use crate::error::{FlowError, Result};
 use crate::ids::{HostId, InstanceId};
 use crate::layout::{self, EPOCH_FILE, EVENTS, Layout, RETIRED, State, is_epoch};
 use crate::ledger::{
-    CacheWrite, Ledger, Options, genesis, install_lock, instances, open_lock, random_epoch, refuse_retired, stage_root,
-    sync_dir,
+    CacheWrite, Ledger, Options, WriteGuard, genesis, install_lock, instances, open_lock, random_epoch, refuse_retired,
+    stage_root, sync_dir,
 };
 use crate::lock::{self, Mode, file_id};
 use crate::log;
@@ -306,6 +307,12 @@ pub fn create_fresh_ledger(root: &Path, host: &HostId, options: &Options) -> Res
 /// as it was, through the root directory the guard holds. The id is never written again.
 pub fn retire(ledger: &mut Ledger, id: &InstanceId) -> Result<CacheWrite> {
     let guard = ledger.lock()?;
+    retire_held(&guard, id)
+}
+
+/// [`retire`] under a lock the caller holds: the kernel retires an instance the owner approved
+/// retiring (`kernel::adoption`) through this same move, right after appending `Retired`.
+pub(crate) fn retire_held(guard: &WriteGuard, id: &InstanceId) -> Result<CacheWrite> {
     let root = guard.root();
     refuse_retired(root, id)?;
     let instances = instances(root)?;

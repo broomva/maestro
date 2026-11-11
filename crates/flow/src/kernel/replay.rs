@@ -47,6 +47,11 @@
 //!   Its reason names its ask once `asks` pinned it (`AskPinned`, `AskLinked`, `AskWithdrawn` are
 //!   inert). Its receipt is `Answered` (the owner's answer, read by `asks`), never a `Completed`,
 //!   and an `Answered` counts only for the ask linked at that node and iteration.
+//! - Ownership and proposals (`ProposalPinned`, `ProposalLinked`, `ProposalWithdrawn`, `Adopted`,
+//!   `Retired`) are folded by `adoption::owners`, never here: they change no node. `status` and
+//!   `next` report the owner they leave (`Started`'s, or the latest accepted `Adopted`'s), each
+//!   standing proposal, and whether the instance is retired, and list their rejected events with
+//!   the rest.
 //!
 //! # Contract for the writers (3b2)
 //!
@@ -78,6 +83,7 @@
 //!   receipt with new content drops the whole cone downstream of its node; and a repeat with no
 //!   `until` re-evaluates its cone through `settled` at every event.
 
+use super::adoption::{self, Owners, ProposalStatus};
 use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
@@ -235,10 +241,18 @@ pub struct Status {
     pub instance: String,
     pub flow: String,
     pub ir_hash: String,
-    /// The session that owns the instance (`Started`), so a waiting human node's question can be
-    /// relayed toward it; `None` in a log written before owners were recorded.
+    /// The session that owns the instance (`Started`'s, or the latest accepted `Adopted`'s), so a
+    /// waiting human node's question can be relayed toward it; `None` in a log written before
+    /// owners were recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<SessionRef>,
+    /// The proposals to adopt or retire the instance that stand, each with its ask and state.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<ProposalStatus>,
+    /// The ask whose approval retired the instance, when its log records `Retired`: it takes no
+    /// write, and the next `propose_retirement` moves it to `retired/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired: Option<String>,
     /// The last event replayed.
     pub seq: u64,
     pub nodes: BTreeMap<String, NodeStatus>,
@@ -267,6 +281,12 @@ pub struct Next {
     /// The instance's owner, as [`Status::owner`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<SessionRef>,
+    /// As [`Status::proposals`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<ProposalStatus>,
+    /// As [`Status::retired`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retired: Option<String>,
     pub seq: u64,
     pub enabled: Vec<Enabled>,
     pub pending: BTreeMap<String, NodeStatus>,
@@ -368,6 +388,8 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
         flow: status.flow,
         ir_hash: status.ir_hash,
         owner: status.owner,
+        proposals: status.proposals,
+        retired: status.retired,
         seq: status.seq,
         enabled,
         pending,
@@ -577,6 +599,8 @@ struct Fold<'a> {
     started_effects: BTreeMap<Key<'a>, BTreeMap<u32, BTreeMap<String, String>>>,
     /// Each human node's ask at an iteration: the pin that stands, and whether it was linked.
     asks: BTreeMap<Key<'a>, AskRec>,
+    /// Who owns the instance and what is proposed for it (`adoption::owners`).
+    owners: Owners,
 }
 
 /// A human node's ask as the log has it: pinned (`AskPinned`), and linked once confirmed
@@ -629,6 +653,7 @@ impl<'a> Fold<'a> {
             attempts: BTreeMap::new(),
             started_effects: BTreeMap::new(),
             asks: BTreeMap::new(),
+            owners: adoption::owners(log, started)?,
         };
         for e in log.events.iter().skip(1) {
             let at: Timestamp =
@@ -693,6 +718,10 @@ impl<'a> Fold<'a> {
         if e.kind == Guarded::KIND {
             let g: Guarded = body(log, e)?;
             return Ok(self.guarded(g, at).map(|()| Change::State));
+        }
+        // Ownership and proposals: `adoption::owners` folds them; they change no node.
+        if adoption::KINDS.contains(&e.kind.as_str()) {
+            return Ok(Ok(Change::Inert));
         }
         let kinds = [
             Completed::KIND,
@@ -971,15 +1000,19 @@ impl<'a> Fold<'a> {
                 (rid.clone(), RepeatStatus { state, iteration, awaiting_verdict })
             })
             .collect();
+        let mut rejected: Vec<Rejected> = self.rejected.iter().chain(&self.owners.rejected).cloned().collect();
+        rejected.sort_by_key(|r| r.seq);
         let status = Status {
             instance: log.instance.to_string(),
             flow: started.flow.clone(),
             ir_hash: started.ir_hash.clone(),
-            owner: started.owner.as_ref().map(|o| o.session.clone()),
+            owner: self.owners.owner.as_ref().map(|o| o.session.clone()),
+            proposals: self.owners.report(),
+            retired: self.owners.retired.clone(),
             seq: log.seq(),
             nodes,
             repeats,
-            rejected: self.rejected.clone(),
+            rejected,
         };
         (status, stale)
     }

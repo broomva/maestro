@@ -138,6 +138,11 @@ fn cli_writes_need_a_launch_token_or_a_credential() {
     let ask = ["flow", "ask", "--instance", &fi, "--node-id", "review"];
     assert_eq!(refused(m.bare().args(ask)), "caller_unverified");
     assert_eq!(refused(m.verified().args(ask)), "not_human");
+    // And the proposals: unverified, refused; the owner proposing to adopt its own, refused.
+    for verb in ["propose-adoption", "propose-retirement"] {
+        assert_eq!(refused(m.bare().args(["flow", verb, "--instance", &fi])), "caller_unverified", "{verb}");
+    }
+    assert_eq!(refused(m.verified().args(["flow", "propose-adoption", "--instance", &fi])), "already_owner");
 }
 
 /// The binary calls `guard_entry` first in `main`, so a guarded choose runs through it (without
@@ -371,4 +376,49 @@ fn an_ask_is_filed_through_the_cli() {
     assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "filed once");
     let status = ok(m.bare().args(["flow", "status", "--instance", &fi]));
     assert_eq!(status["relay"][0]["state"], "owner", "{status}");
+}
+
+/// A proposal to adopt an instance filed through the CLI end to end (BRO-3635): another verified
+/// session's `--ledger` and `--ask` reach the kernel, which files the ask through the writer of
+/// record (here the stub) and links it; the owner and the work are as they were.
+#[test]
+fn a_proposal_is_filed_through_the_cli() {
+    let m = machine();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/requests");
+    let ws = m.root.join("workspace");
+    std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+    std::fs::create_dir_all(ws.join("scripts")).unwrap();
+    std::fs::copy(fixtures.join("ledger.yaml"), ws.join(".control/asks/ledger.yaml")).unwrap();
+    std::fs::copy(fixtures.join("ask_ledger_stub.py"), ws.join("scripts/ask_ledger.py")).unwrap();
+    let registry = json!([
+        { "id": "d1", "cwd": m.work, "token": "tok-1", "liveness": "live" },
+        { "id": "d2", "cwd": m.work, "token": "tok-2", "liveness": "live" },
+    ]);
+    std::fs::write(m.root.join("direct.json"), registry.to_string()).unwrap();
+    let user_base = Command::new("python3").args(["-m", "site", "--user-base"]).output().unwrap();
+    let user_base = String::from_utf8(user_base.stdout).unwrap().trim().to_string();
+    let fi = m.start();
+    let mut other = m.verified();
+    other
+        .env("MAESTRO_SESSION", "direct:-/d2")
+        .env("MAESTRO_DIRECT_TOKEN", "tok-2")
+        .env("PYTHONUSERBASE", &user_base)
+        .env("MAESTRO_PASEO_ASK_LOCKS", m.root.join("locks"));
+    let body = json!({
+        "class": "decision", "gates": ["fixture"], "blocking": false, "stakes": "The owner is gone.",
+        "why_you": "Only the owner hands a flow over.", "exhausted": ["read: a fixture", "default: a fixture"],
+    });
+    let v = ok(other
+        .args(["flow", "propose-adoption", "--instance", &fi, "--ledger", "ledger.yaml", "--ask"])
+        .arg(body.to_string()));
+    assert_eq!((&v["state"], &v["proposal"]), (&json!("waiting"), &json!("adoption")), "{v}");
+    let id = v["ask_id"].as_str().unwrap();
+    assert!(id.starts_with("flow-adopt-"), "{id}");
+    let text = std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap();
+    assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "filed once");
+    let status = ok(m.bare().args(["flow", "status", "--instance", &fi]));
+    assert_eq!(status["status"]["owner"], json!({ "surface": "direct", "id": "d1" }), "{status}");
+    assert_eq!(status["status"]["proposals"][0]["state"], "owner", "{status}");
+    // The owner goes on writing.
+    ok(m.verified().args(["flow", "claim", "--instance", &fi, "--node-id", "review"]));
 }

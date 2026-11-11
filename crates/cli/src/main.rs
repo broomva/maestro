@@ -275,6 +275,36 @@ enum FlowCommand {
         #[arg(long)]
         ask: Option<String>,
     },
+    /// Propose to the owner that this session adopt an instance it does not own: file the ask
+    /// (first call), then carry out the owner's answer once it has landed on main. Call it again
+    /// until it says adopted or declined.
+    ProposeAdoption {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        instance: String,
+        /// The asks ledger to file into (first call, or to propose anew after a decline).
+        #[arg(long)]
+        ledger: Option<String>,
+        /// The ask's fields besides those the kernel writes, as a JSON object (with --ledger).
+        #[arg(long)]
+        ask: Option<String>,
+    },
+    /// Propose to the owner that an instance be retired: file the ask (first call), then carry
+    /// out the owner's answer once it has landed on main. Call it again until it says retired or
+    /// declined.
+    ProposeRetirement {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        instance: String,
+        /// The asks ledger to file into (first call, or to propose anew after a decline).
+        #[arg(long)]
+        ledger: Option<String>,
+        /// The ask's fields besides those the kernel writes, as a JSON object (with --ledger).
+        #[arg(long)]
+        ask: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -600,6 +630,15 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
             let ask = json_arg("--ask", ask.as_deref())?;
             let args = json!({ "session": session.session, "instance": instance, "node_id": node_id, "ledger": ledger, "ask": ask });
             (f::ASK, args)
+        }
+        FlowCommand::ProposeAdoption { session, instance, ledger, ask }
+        | FlowCommand::ProposeRetirement { session, instance, ledger, ask } => {
+            let tool = match command {
+                FlowCommand::ProposeAdoption { .. } => f::PROPOSE_ADOPTION,
+                _ => f::PROPOSE_RETIREMENT,
+            };
+            let body = json_arg("--ask", ask.as_deref())?;
+            (tool, json!({ "session": session.session, "instance": instance, "ledger": ledger, "ask": body }))
         }
     };
     let v = call(store, tool, args)?;

@@ -92,7 +92,8 @@
 //! [`maestro_store::views::ANSWERS_REFS`]. Text echoed into a refusal is cut to [`MAX_ECHO`]. An answer's
 //! outputs are at most [`MAX_OUTPUTS`](super::MAX_OUTPUTS) bytes. Minting tries [`MINT_TRIES`] ids.
 //!
-//! Adoption and retirement (ADR decision 6) are not here.
+//! Adoption and retirement (ADR decision 6) are proposed through asks pinned, filed, linked and
+//! answered by these same steps; see [`adoption`](super::adoption).
 
 use super::error::{KernelError, Refusal};
 use super::events::{Answered, AskLinked, AskPinned, AskWithdrawn, KernelEvent, Started};
@@ -275,7 +276,7 @@ fn look(
     let guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
-    check_owner(&started, instance, session)?;
+    check_owner(&log, &started, instance, session)?;
     waiting(&log, &started, node)?;
     let question = match started.ir.nodes.get(node).map(|n| &n.class) {
         Some(Class::Human { ask }) => ask.clone(),
@@ -298,7 +299,7 @@ fn append_if(
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
-    check_owner(&started, instance, session)?;
+    check_owner(&log, &started, instance, session)?;
     let (iteration, inputs) = waiting(&log, &started, node)?;
     match ask_of(&log, &started, node)? {
         Some(now) if now == *expect => {}
@@ -323,8 +324,35 @@ pub fn comparable_hash(row: &JsValue) -> String {
     entry_hash(&row)
 }
 
-fn invalid(detail: impl Into<String>) -> KernelError {
+pub(super) fn invalid(detail: impl Into<String>) -> KernelError {
     Refusal::AskBodyInvalid { detail: detail.into() }.into()
+}
+
+/// Checks what an agent gives for a first ask before anything is read or pinned: a ledger name,
+/// and a body with none of `kernel_keys` (the kernel's), none the owner's path writes, within
+/// [`MAX_ASK_BODY`] and nested less than the log allows once pinned.
+pub(super) fn check_filing(filing: &Filing, kernel_keys: &[&str]) -> Result<(), KernelError> {
+    if !requests::ledger_name_ok(&filing.ledger) || !filing.ledger.bytes().all(|b| b.is_ascii_graphic()) {
+        let name = clip(&filing.ledger);
+        return Err(invalid(format!("`{name}` is not a ledger name (a plain `*.yaml` file name, printable ASCII)")));
+    }
+    if let Some(key) = filing.body.keys().find(|k| kernel_keys.contains(&k.as_str()) || requests::refused_key(k)) {
+        let key = clip(key);
+        return Err(invalid(format!(
+            "`{key}` is not the agent's: the kernel writes {}, and the owner's path the rest",
+            kernel_keys.join(", ")
+        )));
+    }
+    let given = Value::Object(filing.body.clone());
+    let size = serde_json::to_vec(&given).map_or(usize::MAX, |b| b.len());
+    if size > MAX_ASK_BODY {
+        return Err(invalid(format!("the body is {size} bytes, more than {MAX_ASK_BODY}")));
+    }
+    // A pin carries the body two levels inside its event body.
+    if nesting(&given) + 2 >= MAX_NESTING {
+        return Err(invalid("the body nests too deep"));
+    }
+    Ok(())
 }
 
 /// Mints an id, appends `AskPinned`, and returns the pin. The flows lock is not held while the
@@ -340,25 +368,7 @@ fn pin(
     let Some(filing) = filing else {
         return Err(invalid("a node's first ask needs a ledger and an ask body"));
     };
-    if !requests::ledger_name_ok(&filing.ledger) || !filing.ledger.bytes().all(|b| b.is_ascii_graphic()) {
-        let name = clip(&filing.ledger);
-        return Err(invalid(format!("`{name}` is not a ledger name (a plain `*.yaml` file name, printable ASCII)")));
-    }
-    if let Some(key) = filing.body.keys().find(|k| KERNEL_KEYS.contains(&k.as_str()) || requests::refused_key(k)) {
-        let key = clip(key);
-        return Err(invalid(format!(
-            "`{key}` is not the agent's: the kernel writes id, ask and asked_at, and the owner's path the rest"
-        )));
-    }
-    let given = Value::Object(filing.body.clone());
-    let size = serde_json::to_vec(&given).map_or(usize::MAX, |b| b.len());
-    if size > MAX_ASK_BODY {
-        return Err(invalid(format!("the body is {size} bytes, more than {MAX_ASK_BODY}")));
-    }
-    // `AskPinned` carries the body two levels inside its event body.
-    if nesting(&given) + 2 >= MAX_NESTING {
-        return Err(invalid("the body nests too deep"));
-    }
+    check_filing(filing, &KERNEL_KEYS)?;
     let taken = taken(paths, &filing.ledger)?;
     let ask_id = mint(node, &taken, &filing.ledger)?;
     #[cfg(test)]
@@ -392,7 +402,7 @@ fn pin(
 }
 
 /// Every `id` and `uid` in the ledger's working tree, trimmed as the plugin addresses them.
-fn taken(paths: &Paths, ledger: &str) -> Result<BTreeSet<String>, KernelError> {
+pub(super) fn taken(paths: &Paths, ledger: &str) -> Result<BTreeSet<String>, KernelError> {
     let unread = |detail: String| Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail: clip(&detail) };
     let tree = Store::new(paths.clone(), TreeSource::WorkingTree);
     let Some(l) = tree.ask_ledger(ledger).map_err(unread)? else {
@@ -401,8 +411,9 @@ fn taken(paths: &Paths, ledger: &str) -> Result<BTreeSet<String>, KernelError> {
     Ok(l.asks.into_iter().flat_map(|a| [Some(a.id), a.uid]).flatten().collect())
 }
 
-/// A fresh id: `flow-<node>-<12 hex>`, none that `taken` holds.
-fn mint(node: &str, taken: &BTreeSet<String>, ledger: &str) -> Result<String, KernelError> {
+/// A fresh id: `flow-<node>-<12 hex>` (`node` is the proposal's name for a proposal), none that
+/// `taken` holds.
+pub(super) fn mint(node: &str, taken: &BTreeSet<String>, ledger: &str) -> Result<String, KernelError> {
     let node: String = node.chars().take(40).collect();
     for _ in 0..MINT_TRIES {
         let id = format!("flow-{node}-{}", suffix()?);
@@ -471,15 +482,25 @@ fn file_pinned(
     }
 }
 
-/// Files the pinned ask (flows lock released), confirms it in the working tree, and links it.
-fn file_and_link(
+/// What filing a pinned ask came to, as the working tree confirms it.
+pub(super) enum Confirmed {
+    /// The working tree holds a row with the pinned id and hash: link it.
+    Row,
+    /// The writer of record refused it and the working tree has no row of its id: nothing was
+    /// filed, so withdraw the pin, with the writer's words.
+    NotFiled { reason: String },
+}
+
+/// Files the pinned ask (flows lock released) and confirms it in the working tree, then hands
+/// what it found to `then`, with the ledger, to record it. A hash miss, an ambiguous id or an
+/// outcome the working tree cannot confirm is refused here, and `then` is not called.
+pub(super) fn file_and_confirm<T>(
     ledger: &mut Ledger,
     paths: &Paths,
     session: &VerifiedSession,
-    instance: &InstanceId,
-    node: &str,
     rec: AskRec,
-) -> Result<Asked, KernelError> {
+    then: impl FnOnce(&mut Ledger, Confirmed) -> Result<T, KernelError>,
+) -> Result<T, KernelError> {
     let unconfirmed = |detail: String| Refusal::AskUnconfirmed {
         ledger: rec.ledger.clone(),
         ask_id: rec.ask_id.clone(),
@@ -492,7 +513,7 @@ fn file_and_link(
     let Some(body) = rec.body.as_object() else {
         return Err(unconfirmed("the pinned body is not an object".into()).into());
     };
-    // No flows guard is alive here: `look`, `pin` and `append_if` each drop theirs on return.
+    // No flows guard is alive here: the callers drop theirs before they file.
     let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?;
     #[cfg(test)]
     if seams::CRASH_AFTER_FILE.with(|c| c.replace(false)) {
@@ -510,31 +531,7 @@ fn file_and_link(
             // Refused, and no row: nothing was filed. The pin is withdrawn.
             Err(FileError::Refused(reason)) => {
                 let reason = clip(&reason);
-                let withdrawn = AskWithdrawn {
-                    node: node.to_string(),
-                    iteration: Iteration::new(),
-                    ask_id: rec.ask_id.clone(),
-                    code: ASK_NOT_FILED.into(),
-                    reason: reason.clone(),
-                };
-                let appended = append_if(ledger, session, instance, node, &rec, |iteration, _| {
-                    AskWithdrawn { iteration: iteration.clone(), ..withdrawn }.to_event()
-                })?;
-                let Some(appended) = appended else {
-                    return Ok(Asked::Waiting {
-                        ask_id: rec.ask_id,
-                        ledger: rec.ledger,
-                        appended: None,
-                        landing: None,
-                    });
-                };
-                return Ok(Asked::Withdrawn {
-                    ask_id: rec.ask_id,
-                    ledger: rec.ledger,
-                    code: ASK_NOT_FILED,
-                    reason,
-                    appended,
-                });
+                return then(ledger, Confirmed::NotFiled { reason });
             }
             Ok(_) => {
                 return Err(unconfirmed("the writer filed it, and the working tree has no row of its id".into()).into());
@@ -552,21 +549,59 @@ fn file_and_link(
         }
         .into());
     }
-    let linked = AskLinked {
-        node: node.to_string(),
-        iteration: Iteration::new(),
-        ask_id: rec.ask_id.clone(),
-        ledger: rec.ledger.clone(),
-        body_hash: rec.body_hash.clone(),
-    };
-    let appended = append_if(ledger, session, instance, node, &rec, |iteration, _| {
-        AskLinked { iteration: iteration.clone(), ..linked }.to_event()
-    })?;
-    Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended, landing: None })
+    then(ledger, Confirmed::Row)
+}
+
+/// Files the pinned ask (flows lock released), confirms it in the working tree, and links it.
+fn file_and_link(
+    ledger: &mut Ledger,
+    paths: &Paths,
+    session: &VerifiedSession,
+    instance: &InstanceId,
+    node: &str,
+    rec: AskRec,
+) -> Result<Asked, KernelError> {
+    let waiting =
+        |appended| Asked::Waiting { ask_id: rec.ask_id.clone(), ledger: rec.ledger.clone(), appended, landing: None };
+    file_and_confirm(ledger, paths, session, rec.clone(), |ledger, confirmed| match confirmed {
+        Confirmed::NotFiled { reason } => {
+            let withdrawn = AskWithdrawn {
+                node: node.to_string(),
+                iteration: Iteration::new(),
+                ask_id: rec.ask_id.clone(),
+                code: ASK_NOT_FILED.into(),
+                reason: reason.clone(),
+            };
+            let appended = append_if(ledger, session, instance, node, &rec, |iteration, _| {
+                AskWithdrawn { iteration: iteration.clone(), ..withdrawn }.to_event()
+            })?;
+            let Some(appended) = appended else { return Ok(waiting(None)) };
+            Ok(Asked::Withdrawn {
+                ask_id: rec.ask_id.clone(),
+                ledger: rec.ledger.clone(),
+                code: ASK_NOT_FILED,
+                reason,
+                appended,
+            })
+        }
+        Confirmed::Row => {
+            let linked = AskLinked {
+                node: node.to_string(),
+                iteration: Iteration::new(),
+                ask_id: rec.ask_id.clone(),
+                ledger: rec.ledger.clone(),
+                body_hash: rec.body_hash.clone(),
+            };
+            let appended = append_if(ledger, session, instance, node, &rec, |iteration, _| {
+                AskLinked { iteration: iteration.clone(), ..linked }.to_event()
+            })?;
+            Ok(waiting(appended))
+        }
+    })
 }
 
 /// Where the answer to a linked ask stands.
-enum Answer {
+pub(super) enum Answer {
     /// Answered on main, at the commit the remote names: the receipt.
     Landed { row: Box<Ask>, source: String },
     /// Answered on Maestro's answers branch (`at`) and not on main: still waiting.
@@ -619,7 +654,7 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
 /// The first of Maestro's answers refs (`views::ANSWERS_REFS`) where the ask `ask_id` of `ledger`
 /// is answered: an answer waiting to land on main. Read bounded, for what the reads and `ask`
 /// report only, never as a receipt; a ref that is not there or does not read holds none.
-fn waiting_to_land(paths: &Paths, ledger: &str, ask_id: &str) -> Option<String> {
+pub(super) fn waiting_to_land(paths: &Paths, ledger: &str, ask_id: &str) -> Option<String> {
     maestro_store::views::ANSWERS_REFS.iter().find_map(|(rev, label)| {
         let at = Store::new(paths.clone(), TreeSource::GitRev(rev.to_string()));
         if at.tree.unresolved.is_some() {
@@ -649,6 +684,24 @@ pub fn landing(paths: &Paths, unmet: &mut [super::Reason]) {
     }
 }
 
+/// The linked ask's answer as [`read_answer`] reads it, the one answer source; an answer landed
+/// on main counts only for the body that was linked (`answer_mismatch` otherwise).
+pub(super) fn landed(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
+    let answer = read_answer(paths, rec)?;
+    let Answer::Landed { row, source } = &answer else { return Ok(answer) };
+    let found = comparable_hash(&row.row);
+    if found != rec.body_hash {
+        return Err(Refusal::AnswerMismatch {
+            ask_id: rec.ask_id.clone(),
+            at: source.clone(),
+            linked: rec.body_hash.clone(),
+            found,
+        }
+        .into());
+    }
+    Ok(answer)
+}
+
 /// An answered row's answer fields that are set, as text (see the module docs).
 fn outputs_of(row: &Ask) -> Map<String, Value> {
     OUTCOME_KEYS
@@ -667,7 +720,7 @@ fn take_answer(
     node: &str,
     rec: AskRec,
 ) -> Result<Asked, KernelError> {
-    let (row, source) = match read_answer(paths, &rec)? {
+    let (row, source) = match landed(paths, &rec)? {
         Answer::Landed { row, source } => (row, source),
         Answer::Landing { at } => {
             return Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended: None, landing: Some(at) });
@@ -676,16 +729,6 @@ fn take_answer(
             return Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended: None, landing: None });
         }
     };
-    let found = comparable_hash(&row.row);
-    if found != rec.body_hash {
-        return Err(Refusal::AnswerMismatch {
-            ask_id: rec.ask_id.clone(),
-            at: source.clone(),
-            linked: rec.body_hash.clone(),
-            found,
-        }
-        .into());
-    }
     let outputs = Value::Object(outputs_of(&row));
     let size = serde_json::to_vec(&outputs).map_or(usize::MAX, |b| b.len());
     if size > MAX_OUTPUTS {
@@ -730,4 +773,4 @@ pub(crate) mod seams {
 
 #[cfg(test)]
 #[path = "asked.rs"]
-mod asked;
+pub(crate) mod asked;

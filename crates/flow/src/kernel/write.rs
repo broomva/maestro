@@ -5,11 +5,15 @@
 //! # Ownership
 //!
 //! An instance is owned by the session that started it: its `SessionRef` and the digest of its
-//! owner marker, together, recorded in `Started`. Every write verb takes the caller's
-//! [`VerifiedSession`] and refuses unless both match: a session with no marker writes nothing
-//! (`no_owner_marker`), another session writes nothing (`not_owner`), and neither does a
-//! replacement of the owner, which keeps the `SessionRef` with a new marker. A replacement may
-//! start an instance of its own. There is no transfer or adoption.
+//! owner marker, together, recorded in `Started`, until the owner approves an adoption (`Adopted`,
+//! see `adoption`): the latest accepted `Adopted` names the owner from there on. Every write verb
+//! takes the caller's [`VerifiedSession`] and refuses unless both match the current owner: a
+//! session with no marker writes nothing (`no_owner_marker`), another session writes nothing
+//! (`not_owner`), and neither does a replacement of the owner, which keeps the `SessionRef` with a
+//! new marker, nor a former owner. A replacement may start an instance of its own, or propose to
+//! adopt this one; no agent transfers an instance, and nothing a session hands another (a claim
+//! token included) transfers it. An instance whose log records `Retired` takes no write
+//! (`retired`).
 //!
 //! # Claims, tokens and leases
 //!
@@ -20,9 +24,11 @@
 //!   class's with `complete`; the other verb is refused `wrong_verb`.
 //! - The token is a handle, not a capability: every use checks ownership first, so a token in
 //!   another session's hands grants nothing, nor in a replacement's (the same `SessionRef` with a
-//!   new marker). A resumed or restarted session keeps its marker (it survives turns, provider
-//!   switches and restarts), so it may heartbeat and complete its own claim until the lease
-//!   ends: the lease is the bound on a restart.
+//!   new marker). A claim taken before the instance was adopted holds nothing for its new owner
+//!   (`former_owners_claim`): it is not transferred, its lease runs out, and the new owner claims
+//!   the node's next attempt. A resumed or restarted session keeps its marker (it survives
+//!   turns, provider switches and restarts), so it may heartbeat and complete its own claim until
+//!   the lease ends: the lease is the bound on a restart.
 //! - A claim holds its node while it is the node's latest claim, its lease has not ended, it is
 //!   not spent, its iteration is current and the receipts it was bound to are still the node's
 //!   inputs. While one holds, the node cannot be claimed again (`already_claimed`).
@@ -117,6 +123,7 @@
 //! run's start and a lease's end later than the wall clock, making an observation younger and a
 //! lease longer than they are; refusing never fails open.
 
+use super::adoption::{Owners, owners};
 use super::error::{KernelError, Refusal};
 use super::events::{
     Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat, KernelEvent, Owner, Performer, Refused, Started,
@@ -126,6 +133,7 @@ use super::exec::{self, Limits, Ran};
 use super::guard::{self, GUARD_TIMEOUT, Judged};
 use super::ir::{Class, Ir, Iteration, Node};
 use super::replay::{Awaiting, Next, Reason, State, awaiting, guard_input, next_of, pinned, secs};
+use crate::FlowError;
 use crate::clock;
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, WriteGuard, random_epoch};
@@ -227,16 +235,27 @@ pub(crate) fn owner(session: &VerifiedSession) -> Result<Owner, Refusal> {
     Ok(Owner { session: session.session().clone(), marker_sha256: marker_digest(marker) })
 }
 
-/// Refuses any session but the instance's owner, with the same marker.
-pub(crate) fn check_owner(started: &Started, instance: &InstanceId, session: &VerifiedSession) -> Result<(), Refusal> {
+/// Refuses any session but the instance's current owner (`Started`'s, or the latest accepted
+/// `Adopted`'s), with the same marker, and any write once the log records `Retired`. Returns who
+/// owns the instance, as the log has it.
+pub(crate) fn check_owner(
+    log: &Log,
+    started: &Started,
+    instance: &InstanceId,
+    session: &VerifiedSession,
+) -> Result<Owners, KernelError> {
     let me = owner(session)?;
-    let Some(owner) = &started.owner else {
-        return Err(Refusal::NoOwner { instance: instance.to_string() });
+    let owners = owners(log, started)?;
+    if owners.retired.is_some() {
+        return Err(FlowError::Retired { instance: instance.to_string() }.into());
+    }
+    let Some(owner) = &owners.owner else {
+        return Err(Refusal::NoOwner { instance: instance.to_string() }.into());
     };
     if *owner != me {
-        return Err(Refusal::NotOwner { instance: instance.to_string() });
+        return Err(Refusal::NotOwner { instance: instance.to_string() }.into());
     }
-    Ok(())
+    Ok(owners)
 }
 
 fn performer(session: &VerifiedSession) -> Performer {
@@ -274,6 +293,8 @@ fn parse_token(token: &str) -> Result<(InstanceId, String), Refusal> {
 /// A claim as the log has it now.
 #[derive(Debug, Clone)]
 struct ClaimRec {
+    /// The `Claimed` event's position in the log.
+    seq: u64,
     node: String,
     iteration: Iteration,
     attempt: u32,
@@ -343,6 +364,7 @@ impl Claims {
                     let lease_until = stamp(log, e.seq, &c.lease_until)?;
                     let cancel_at = c.cancel_at.as_deref().map(|at| stamp(log, e.seq, at)).transpose()?;
                     let rec = ClaimRec {
+                        seq: e.seq,
                         node: c.node,
                         iteration: c.iteration,
                         attempt: c.attempt,
@@ -437,7 +459,7 @@ pub fn claim(
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
-    check_owner(&started, instance, session)?;
+    check_owner(&log, &started, instance, session)?;
     let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(Refusal::UnknownNode { node: node.to_string() }.into());
@@ -524,11 +546,15 @@ fn hold(
     now: Timestamp,
 ) -> Result<Held, KernelError> {
     let started = pinned(&log)?;
-    check_owner(&started, instance, session)?;
+    let owners = check_owner(&log, &started, instance, session)?;
     let claims = Claims::fold(&log)?;
     let Some(rec) = claims.recs.get(sha).cloned() else {
         return Err(Refusal::UnknownToken { instance: instance.to_string() }.into());
     };
+    // A claim the former owner took holds nothing for the new one: it runs out on its lease.
+    if rec.seq < owners.since {
+        return Err(Refusal::FormerOwnersClaim { node: rec.node }.into());
+    }
     if rec.spent {
         return Err(Refusal::TokenSpent { node: rec.node }.into());
     }
@@ -979,7 +1005,7 @@ fn settle(ledger: &mut Ledger, session: &VerifiedSession, instance: &InstanceId)
         if started.ir.repeats.values().all(|r| r.until.is_none()) {
             return Ok(Vec::new());
         }
-        check_owner(&started, instance, session)?;
+        check_owner(&log, &started, instance, session)?;
         let pending = awaiting(&log, &started)?;
         (started, pending)
     };

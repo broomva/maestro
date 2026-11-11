@@ -1125,16 +1125,17 @@ mutate $fk/replay.rs '            seq: log.seq(),
 # and marker together; an instance with no recorded owner takes no write.
 mutate $fk/write.rs '    let marker = session.owner_marker().filter(|m| !m.is_empty()).ok_or(Refusal::NoOwnerMarker)?;' '    let marker = session.owner_marker().ok_or(Refusal::NoOwnerMarker)?;'
 mutate $fk/replay.rs '    let owner = Some(write::owner(session)?);' '    let owner = write::owner(session).ok();'
-mutate $fk/write.rs '    let Some(owner) = &started.owner else {' '    let Some(owner) = started.owner.as_ref().or(Some(&me)) else {'
+mutate $fk/write.rs '    let Some(owner) = &owners.owner else {' '    let Some(owner) = owners.owner.as_ref().or(Some(&me)) else {'
 mutate $fk/write.rs '    if *owner != me {' '    if false {'
 mutate $fk/write.rs '    if *owner != me {' '    if owner.marker_sha256 != me.marker_sha256 {'
 mutate $fk/write.rs '    if *owner != me {' '    if owner.session != me.session {'
-mutate $fk/write.rs '    check_owner(&started, instance, session)?;
+mutate $fk/write.rs '    check_owner(&log, &started, instance, session)?;
     let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {' '    let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {'
-mutate $fk/write.rs '    check_owner(&started, instance, session)?;
-    let claims = Claims::fold(&log)?;' '    let claims = Claims::fold(&log)?;'
+mutate $fk/write.rs '    let owners = check_owner(&log, &started, instance, session)?;
+    let claims = Claims::fold(&log)?;' '    let owners = super::adoption::owners(&log, &started)?;
+    let claims = Claims::fold(&log)?;'
 # The clock (P20 round 2): every write reads the wall clock itself, under the lock, right before
 # its checks; a run is stamped with its start and judged after it at a fresh read. A clock ahead
 # of or behind the wall clock, or a run's end taken as its start plus a monotonic duration (which
@@ -1343,7 +1344,7 @@ mutate $fk/write.rs '    settle(ledger, session, instance)?;
 mutate $fk/write.rs '    let verdicts = settled(ledger, session, &instance);
     Ok(Completion::Completed' '    let verdicts = Vec::new();
     Ok(Completion::Completed'
-mutate $fk/write.rs '        check_owner(&started, instance, session)?;
+mutate $fk/write.rs '        check_owner(&log, &started, instance, session)?;
         let pending' '        let pending'
 mutate $fk/write.rs '        wall(&log)?;
         let verdict = match judged {' '        let verdict = match judged {'
@@ -1722,7 +1723,7 @@ mutate $asks 'Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail: cli
 # busy deadline from the first try; only a waiting node files; a pin at the sequence it was minted
 # at; the replay rules for pins and links; an ask is unfiled until linked; echoed text is bounded
 # and a ledger name is printable ASCII; the CLI passes --ask on.
-mutate $asks '    check_owner(&started, instance, session)?;
+mutate $asks '    check_owner(&log, &started, instance, session)?;
     waiting(&log, &started, node)?;' '    waiting(&log, &started, node)?;'
 mutate $asks '    let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;
     loop {' '    loop {
@@ -1736,6 +1737,55 @@ mutate $replay 'Some(r) if r.linked => {' 'Some(r) if true => {'
 mutate $asks 'let mut out: String = text.chars().take(MAX_ECHO).collect();' 'let mut out: String = text.chars().collect();'
 mutate $asks ' || !filing.ledger.bytes().all(|b| b.is_ascii_graphic())' ''
 mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Value> = None;'
+# Owner-approved adoption and retirement (BRO-3635; ADR decisions 6 and 7): an agent proposes, the
+# owner decides, the kernel applies only the owner's approve option, read from landed main.
+adopt=crates/flow/src/kernel/adoption.rs
+# Only the approve option exactly; anything else is declined and changes nothing.
+mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if false {'
+mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if answer_option.as_deref().map(str::to_lowercase).as_deref() != Some(proposal.approve_option()) {'
+# The owner adopts nothing; an approval applies only while the owner it named still owns it.
+mutate $adopt '        if proposal == Proposal::Adoption && current == me {' '        if false {'
+mutate $adopt '    if owners.owner.as_ref() != Some(&rec.owner) {' '    if false {'
+# A proposal naming an owner since replaced is stale: the reads say so, and a filing proposes anew.
+mutate $adopt 'Some(rec) if !(stale && filing.is_some()) => rec,' 'Some(rec) => rec,'
+mutate $adopt 'state: match (self.owner.as_ref() == Some(&r.owner), r.ask.linked) {' 'state: match (true, r.ask.linked) {'
+# The kernel's keys (the question, the options, the default) are never the agent's.
+mutate $adopt '["id", "uid", "ask", "asked_at", "headline", "options", "default", "preanswerable"]' '["id", "uid", "ask", "asked_at", "headline", "uid", "uid", "uid"]'
+# The flows lock is never held while a proposal is filed.
+mutate $adopt '    asks::file_and_confirm(ledger, paths, session, rec.ask.clone(), |ledger, confirmed| {' '    let _held = crate::Reader::new(ledger.root(), crate::Options::default())?.lock()?;
+    asks::file_and_confirm(ledger, paths, session, rec.ask.clone(), |ledger, confirmed| {'
+# An approved retirement moves the instance, as operator::retire does; so does the next call after
+# a crash between `Retired` and the move.
+mutate $adopt '            crate::operator::retire_held(&guard, instance)?;' ''
+mutate $adopt '        return Err(Refusal::ProposalChanged { ask_id }.into());
+    }
+    crate::operator::retire_held(&guard, instance)?;' '        return Err(Refusal::ProposalChanged { ask_id }.into());
+    }'
+# Replay takes an owner only from a standing linked proposal, by its proposer, of the owner it
+# named, answered with the approve option; a link names its pin's hash.
+mutate $adopt '        if !r.ask.linked {
+            return Err("not_linked");' '        if false {
+            return Err("not_linked");'
+mutate $adopt '        if r.by != *by {' '        if false {'
+mutate $adopt '        if self.owner.as_ref() != Some(&r.owner) {
+            return Err("owner_changed");' '        if false {
+            return Err("owner_changed");'
+mutate $adopt '        if approval.answer_option != kind.approve_option() {' '        if false {'
+mutate $adopt '                if self.proposals[i].owner != a.from {' '                if false {'
+mutate $adopt 'Some(r) if !r.ask.linked && r.ask.body_hash == l.body_hash => r.ask.linked = true,' 'Some(r) if !r.ask.linked => r.ask.linked = true,'
+# After `Adopted`: the claims taken before it are the former owner's; the current owner writes; a
+# log ending in `Retired` takes no write; status names the current owner; replay reads the kinds.
+mutate $adopt '                self.since = e.seq;' ''
+mutate $fk/write.rs '    if rec.seq < owners.since {' '    if false {'
+mutate $fk/write.rs '    let Some(owner) = &owners.owner else {' '    let Some(owner) = &started.owner else {'
+mutate $fk/write.rs '    if owners.retired.is_some() {' '    if false {'
+mutate $replay 'owner: self.owners.owner.as_ref().map(|o| o.session.clone()),' 'owner: started.owner.as_ref().map(|o| o.session.clone()),'
+mutate $replay '        if adoption::KINDS.contains(&e.kind.as_str()) {' '        if false {'
+# The tools take no answer and no ask id, and each proposes its own change; the CLI passes --ask on.
+mutate $mf '#[serde(deny_unknown_fields)]
+pub struct FlowProposeArgs {' 'pub struct FlowProposeArgs {'
+mutate $mf 'if name == PROPOSE_ADOPTION { kernel::propose_adoption } else { kernel::propose_retirement }' 'if name == PROPOSE_ADOPTION { kernel::propose_retirement } else { kernel::propose_adoption }'
+mutate $cli 'let body = json_arg("--ask", ask.as_deref())?;' 'let body: Option<Value> = None;'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

@@ -391,7 +391,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: flow::START,
         title: "Start a flow",
-        description: "Start an instance of a flow from its YAML definition and params. The instance is yours: only your verified session (and not a replacement of it) writes it. Needs a verified session; an unverified caller is refused, with code caller_unverified. A refusal is a result: ok false, a stable code and the reason.",
+        description: "Start an instance of a flow from its YAML definition and params. The instance is yours: only your verified session (and not a replacement of it) writes it, until the owner approves another session's proposal to adopt it. Needs a verified session; an unverified caller is refused, with code caller_unverified. A refusal is a result: ok false, a stable code and the reason.",
         authority: Authority::AgentWrite,
         request: None,
         scope: flow::FLOWS,
@@ -467,6 +467,26 @@ pub const TOOLS: &[ToolSpec] = &[
         scope: flow::FLOWS,
         ui: Ui::None,
         schema: schema_of::<flow::FlowAskArgs>,
+    },
+    ToolSpec {
+        name: flow::PROPOSE_ADOPTION,
+        title: "Propose adopting a flow instance",
+        description: "Propose to the owner that your verified session take over a flow instance another session owns (a replacement of its owner, say). The first call files a Maestro ask naming the instance, its owner, your session and the progress so far (your `ask` fields, into `ledger`), through the asks ledger's writer of record; later calls read the owner's answer once it has landed on main in the answers remote compiled into Maestro. Only the owner's adopt answer hands the instance over: completed steps stand, claims in flight run out on their leases, and you go on from the next ready step. Any other answer changes nothing. Call it again until it says adopted or declined; each call may take up to 20 s while it waits. It takes no answer and no ask id.",
+        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowProposeArgs>,
+    },
+    ToolSpec {
+        name: flow::PROPOSE_RETIREMENT,
+        title: "Propose retiring a flow instance",
+        description: "Propose to the owner that a flow instance (an abandoned one, say) be retired. The first call files a Maestro ask naming the instance, its owner, your session and the progress so far (your `ask` fields, into `ledger`), through the asks ledger's writer of record; later calls read the owner's answer once it has landed on main in the answers remote compiled into Maestro. Only the owner's retire answer retires it: its log is kept and it is never written again. Any other answer changes nothing. Call it again until it says retired or declined. It takes no answer and no ask id. Needs a verified session.",
+        authority: Authority::AgentWrite,
+        request: None,
+        scope: flow::FLOWS,
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowProposeArgs>,
     },
 ];
 
@@ -734,7 +754,9 @@ fn dispatch(
         | flow::CHOOSE
         | flow::STATUS
         | flow::HEARTBEAT
-        | flow::ASK => flow::call(&store.paths, hosts, ambient, name, args),
+        | flow::ASK
+        | flow::PROPOSE_ADOPTION
+        | flow::PROPOSE_RETIREMENT => flow::call(&store.paths, hosts, ambient, name, args),
         other => match request_of(other) {
             Some(kind) => agent_request_in(store, hosts, ambient, kind, args),
             None => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
@@ -1084,7 +1106,8 @@ impl ServerHandler for MaestroServer {
              record a request for the owner (queue work, request an action, close with a receipt, hand \
              back, escalate); none of them starts anything. The maestro_flow tools run a flow's steps \
              for a verified session: next and status read, the others write that session's own \
-             instances. Answering asks, approving work and dispatch are owner actions taken in the \
+             instances, and propose_adoption and propose_retirement put a change of owner or a \
+             retirement to the owner as an ask, applied only on the owner's answer. Answering asks, approving work and dispatch are owner actions taken in the \
              owner's app."
                 .to_string(),
         );

@@ -1,20 +1,26 @@
 //! The flow kernel's verbs as tools (BRO-3634): thin adapters over [`maestro_flow::kernel`]. The
 //! CLI's `maestro flow` subcommands call these same tools, so their JSON in and out is identical.
 //!
-//! - **Verified writers only.** `start`, `claim`, `heartbeat`, `complete`, `choose` and `ask` act
-//!   for the caller's verified session (`VerifiedSession`, through the same caller check every agent
+//! - **Verified writers only.** `start`, `claim`, `heartbeat`, `complete`, `choose`, `ask`,
+//!   `propose_adoption` and `propose_retirement` act for the caller's verified session (`VerifiedSession`, through the same caller check every agent
 //!   request uses). A caller that is not verified is refused `caller_unverified`, and one whose
 //!   claim does not verify `caller_refused`; both write nothing. `next` and `status` are reads:
 //!   anyone may call them, and they write nothing.
 //! - **Refusals are results.** Every kernel refusal comes back as `{"ok": false, "code", "reason",
 //!   "recorded"}` with the kernel's stable code. `recorded` is true when the kernel appended a
-//!   `Refused` event (a completion or choice whose work did not pass keeps its token), or an
-//!   `AskWithdrawn` (an ask the writer of record refused, `ask_not_filed`). Only arguments that do
-//!   not parse are protocol errors.
+//!   `Refused` event (a completion or choice whose work did not pass keeps its token), an
+//!   `AskWithdrawn` (an ask the writer of record refused, `ask_not_filed`), or a
+//!   `ProposalWithdrawn` (`proposal_not_filed`). Only arguments that do not parse are protocol
+//!   errors.
 //! - **Human steps (BRO-3635).** `ask` files a waiting human node's ask through the asks ledger's
 //!   writer of record and, called again, records the owner's answer once it has landed on main
 //!   (`maestro_flow::kernel::asks`). `next` and `status` add `relay`: each waiting human node's
 //!   question, its ask once filed, and for a T3 owner prompt links to its thread ([`relay`]).
+//! - **Adoption and retirement (BRO-3635).** `propose_adoption` and `propose_retirement` put a
+//!   change of owner, or a retirement, to the owner as a Maestro ask filed the same way, and carry
+//!   it out only once the owner's approval has landed on main (`maestro_flow::kernel::adoption`).
+//!   They are owner decisions the kernel applies: the tools take no answer and no ask id, and
+//!   their names only propose. `next` and `status` list each standing proposal and its state.
 //! - **Only the verbs.** No tool appends a raw event: the storage layer's `WriteGuard::append`
 //!   and `NewEvent` are not reachable from here.
 //! - **One ledger per workspace.** The flows root is `.broomva/flows` in the workspace the path
@@ -26,7 +32,10 @@
 //!   which every process on the machine reads alike ([`host_id`]).
 
 use maestro_core::session::{SessionRef, Surface, VerifiedSession};
-use maestro_flow::kernel::{self, Asked, Choosing, Completion, KernelError, Limits, NodeStatus, Reason, Verdict};
+use maestro_flow::kernel::events::Owner;
+use maestro_flow::kernel::{
+    self, Asked, Choosing, Completion, KernelError, Limits, NodeStatus, Proposed, Reason, Verdict,
+};
 use maestro_flow::{FlowError, HostId, InstanceId, Ledger, Options, Reader};
 use rmcp::ErrorData as McpError;
 use schemars::JsonSchema;
@@ -43,6 +52,8 @@ pub const CHOOSE: &str = "maestro_flow_choose";
 pub const STATUS: &str = "maestro_flow_status";
 pub const HEARTBEAT: &str = "maestro_flow_heartbeat";
 pub const ASK: &str = "maestro_flow_ask";
+pub const PROPOSE_ADOPTION: &str = "maestro_flow_propose_adoption";
+pub const PROPOSE_RETIREMENT: &str = "maestro_flow_propose_retirement";
 
 /// The flows root under the workspace: the ADR's `.broomva/flows`.
 pub const FLOWS: &str = ".broomva/flows";
@@ -165,6 +176,29 @@ pub struct FlowAskArgs {
     /// The ask's fields besides `id`, `ask` and `asked_at`, which the kernel writes: what the
     /// ledger's validator requires (`class`, `gates`, `exhausted`, `blocking`, ...). Needed on the
     /// first call only.
+    pub ask: Option<serde_json::Map<String, Value>>,
+    /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,
+    /// A Direct session's launch token.
+    pub token: Option<String>,
+    /// The tailnet node your session runs on.
+    pub node: Option<String>,
+    /// A T3 or Paseo session's signed bridge credential, a JSON object.
+    pub credential: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowProposeArgs {
+    pub session: String,
+    /// The instance, as `maestro_flow_status` names it.
+    pub instance: String,
+    /// The asks ledger to file the proposal into, a file name in the asks folder (`*.yaml`). Needed
+    /// on the first call only, and again to propose anew after the owner declined.
+    pub ledger: Option<String>,
+    /// The ask's fields besides those the kernel writes (`id`, `asked_at`, `headline`, `ask`,
+    /// `options`, `default`, `preanswerable`): what the ledger's validator requires (`class`,
+    /// `gates`, `exhausted`, `blocking`, `stakes`, `why_you`, ...). Needed with `ledger`.
     pub ask: Option<serde_json::Map<String, Value>>,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
     pub cwd: Option<String>,
@@ -389,7 +423,78 @@ pub(crate) fn call(
                 })
             }))
         }
+        PROPOSE_ADOPTION | PROPOSE_RETIREMENT => {
+            let a: FlowProposeArgs = parse(args.clone())?;
+            let session = crate::session_of(&a.session)?;
+            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+                let instance = InstanceId::new(&a.instance)?;
+                let filing = match (&a.ledger, &a.ask) {
+                    (Some(ledger), Some(body)) => Some(kernel::Filing { ledger: ledger.clone(), body: body.clone() }),
+                    _ => None,
+                };
+                let propose =
+                    if name == PROPOSE_ADOPTION { kernel::propose_adoption } else { kernel::propose_retirement };
+                Ok(proposed(propose(&mut w.ledger()?, paths, &w.me, &instance, filing.as_ref())?))
+            }))
+        }
         other => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
+    }
+}
+
+fn owner(o: &Owner) -> Value {
+    json!({ "session": o.session.to_string(), "marker_sha256": o.marker_sha256 })
+}
+
+/// Where a proposal stands, as the tools return it. `state` is `waiting`, `declined`, `adopted`
+/// or `retired`; a withdrawn proposal is a recorded refusal.
+fn proposed(p: Proposed) -> Value {
+    match p {
+        Proposed::Waiting { proposal, ask_id, ledger, appended, landing } => json!({
+            "ok": true,
+            "state": "waiting",
+            "proposal": proposal,
+            "ask_id": ask_id,
+            "ledger": ledger,
+            "seq": appended.map(|a| a.event.seq),
+            "answer_waiting_to_land": landing,
+        }),
+        Proposed::Withdrawn { proposal, ask_id, ledger, code, reason, appended } => {
+            let mut v = refusal(code, reason, true);
+            v["proposal"] = json!(proposal);
+            v["ask_id"] = json!(ask_id);
+            v["ledger"] = json!(ledger);
+            v["seq"] = json!(appended.event.seq);
+            v
+        }
+        Proposed::Declined { proposal, ask_id, ledger, answer_option, source } => json!({
+            "ok": true,
+            "state": "declined",
+            "proposal": proposal,
+            "ask_id": ask_id,
+            "ledger": ledger,
+            "answer_option": answer_option,
+            "source": source,
+        }),
+        Proposed::Adopted { ask_id, ledger, from, to, source, appended } => json!({
+            "ok": true,
+            "state": "adopted",
+            "proposal": "adoption",
+            "ask_id": ask_id,
+            "ledger": ledger,
+            "from": owner(&from),
+            "to": owner(&to),
+            "source": source,
+            "seq": appended.event.seq,
+        }),
+        Proposed::Retired { ask_id, ledger, source, appended } => json!({
+            "ok": true,
+            "state": "retired",
+            "proposal": "retirement",
+            "ask_id": ask_id,
+            "ledger": ledger,
+            "source": source,
+            "seq": appended.map(|a| a.event.seq),
+        }),
     }
 }
 
@@ -466,6 +571,7 @@ fn read(paths: &maestro_store::Paths, name: &str, instance: &str) -> Result<Valu
             for s in next.pending.values_mut() {
                 kernel::landing(paths, &mut s.unmet);
             }
+            kernel::adoption::landing(paths, &mut next.proposals);
             let relay = relay(&next.instance, next.owner.as_ref(), &next.pending);
             json!({ "ok": true, "next": next, "relay": relay })
         } else {
@@ -473,6 +579,7 @@ fn read(paths: &maestro_store::Paths, name: &str, instance: &str) -> Result<Valu
             for s in status.nodes.values_mut() {
                 kernel::landing(paths, &mut s.unmet);
             }
+            kernel::adoption::landing(paths, &mut status.proposals);
             let relay = relay(&status.instance, status.owner.as_ref(), &status.nodes);
             json!({ "ok": true, "status": status, "relay": relay })
         })
