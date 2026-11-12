@@ -1882,8 +1882,10 @@ mutate $fk/snapshot.rs '    let left = deadline.saturating_duration_since(Instan
 mutate $fk/snapshot.rs '    match snapshot.moved(commit) {' '    match None::<String> {'
 mutate $fk/snapshot.rs '    (bytes.len() as u64 <= MAX_LOG).then_some(bytes)' '    Some(bytes)'
 # The snapshot's HEAD and its log are read only from a regular file, never through a link (a link
-# to a regular file is none) and never from a FIFO (none, not an empty file, and no hang).
+# to a regular file is none) and never from a FIFO (none, not an empty file, and no hang: without
+# NONBLOCK the open waits for a writer, and the test fails at its 5 s bound).
 mutate $fk/snapshot.rs '    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;' '    let flags = rustix::fs::OFlags::NONBLOCK;'
+mutate $fk/snapshot.rs '    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;' '    let flags = rustix::fs::OFlags::NOFOLLOW;'
 mutate $fk/snapshot.rs '    if !file.metadata().ok()?.is_file() {' '    if false {'
 mutate $fk/snapshot.rs '        if head.as_deref().map(|h| h.trim_ascii()) != Some(commit.as_bytes()) {' '        if false {'
 mutate $fk/snapshot.rs "            .any(|line| line.split(|b| *b == b' ').nth(1) != Some(commit.as_bytes()));" '            .any(|_| false);'
