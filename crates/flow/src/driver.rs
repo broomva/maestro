@@ -2,7 +2,9 @@
 //! `SKILL.md`, in the Agent Skills format, generated from the flow's compiled IR. It tells an
 //! agent to call `flow next`, do each enabled node with the node's own skill (launching an
 //! `agent:<name>` performer through the harness's own subagent), call `flow complete`, and stop
-//! when `flow status` is terminal.
+//! when `flow status` says `terminal` (`kernel::Status::terminal`). The kernel decides when to
+//! stop: the skill's loop reads that field, or finds nothing enabled for the driver, and never
+//! judges node states itself.
 //!
 //! The loop, the verbs and what to do for each class of node are this module's fixed text. The
 //! steps (which nodes, in which order, what each waits on and when it applies), each performer's
@@ -12,11 +14,13 @@
 //!
 //! **The order** ([`steps`]). A node is at the step after the latest step of everything it waits
 //! on: the nodes it needs, the node its switch reads, and every node of a repeat it needs or whose
-//! exhaustion it handles. Nodes at one step do not wait on each other and are listed by id. `flow
+//! exhaustion it handles. A node it needs or switches on inside a repeat it is not in stands for
+//! that repeat's whole body. Nodes at one step do not wait on each other and are listed by id. `flow
 //! next` stays the authority on what is enabled now; the steps are the order it will enable them in.
 //!
 //! The skill is named `flow-<flow>-v<version>` ([`skill_name`]), with every character the Agent
-//! Skills spec does not allow in a name made a dash.
+//! Skills spec does not allow in a name made a dash. Its description is at most
+//! [`MAX_DESCRIPTION`] characters.
 
 use crate::agents::{self, LaunchSpec};
 use crate::kernel::CompiledFlow;
@@ -65,18 +69,27 @@ pub fn skill_name(flow: &CompiledFlow) -> Result<String, DriverError> {
 }
 
 /// What a node waits on before it can run: its needs, its switch's subject, and the body of every
-/// repeat it needs.
-fn waits_on<'a>(ir: &'a Ir, node: &'a Node) -> Vec<&'a str> {
-    let mut out = Vec::new();
+/// repeat it needs. A node it needs or switches on inside a repeat it is not in stands for that
+/// repeat's whole body, as the kernel reads it (`ir::validate`'s fan-in).
+fn waits_on<'a>(ir: &'a Ir, id: &str, node: &'a Node) -> Vec<&'a str> {
+    let body = |r: &'a str| ir.repeats.get(r).into_iter().flat_map(|r| r.body.iter().map(String::as_str));
+    let repeat_of =
+        |n: &str| ir.repeats.iter().find(|(_, r)| r.body.iter().any(|b| b == n)).map(|(rid, _)| rid.as_str());
+    let mut on = Vec::new();
     for need in &node.needs {
         match need {
-            Need::Node { node } => out.push(node.as_str()),
-            Need::Repeat { repeat } | Need::Exhausted { repeat } => {
-                out.extend(ir.repeats.get(repeat).into_iter().flat_map(|r| r.body.iter().map(String::as_str)));
-            }
+            Need::Node { node } => on.push(node.as_str()),
+            Need::Repeat { repeat } | Need::Exhausted { repeat } => on.extend(body(repeat)),
         }
     }
-    out.extend(node.switch.as_ref().map(|c| c.on.as_str()));
+    on.extend(node.switch.as_ref().map(|c| c.on.as_str()));
+    let mut out = Vec::new();
+    for d in on {
+        match repeat_of(d) {
+            Some(r) if repeat_of(id) != Some(r) => out.extend(body(r)),
+            _ => out.push(d),
+        }
+    }
     out
 }
 
@@ -88,7 +101,7 @@ pub fn steps(flow: &CompiledFlow) -> Vec<Vec<String>> {
         }
         // A compiled IR has no cycle and no chain past `ir::MAX_DEPTH`, so this ends.
         let Some(node) = ir.nodes.get(id) else { return 0 };
-        let step = waits_on(ir, node).into_iter().map(|d| at(ir, d, memo) + 1).max().unwrap_or(0);
+        let step = waits_on(ir, id, node).into_iter().map(|d| at(ir, d, memo) + 1).max().unwrap_or(0);
         memo.insert(id, step);
         step
     }
@@ -146,7 +159,12 @@ fn node_section(out: &mut String, ir: &Ir, id: &str, node: &Node) {
             Need::Exhausted { repeat } => format!("repeat {} to run out (its on_exhausted route)", code(repeat)),
         })
         .collect();
-    let waits: Vec<String> = waits.into_iter().collect();
+    let mut waits: Vec<String> = waits.into_iter().collect();
+    if let Some(case) = &node.switch
+        && !node.needs.contains(&Need::Node { node: case.on.clone() })
+    {
+        waits.push(format!("{} (its switch reads it)", code(&case.on)));
+    }
     let waits = if waits.is_empty() { "nothing".to_string() } else { waits.join(", ") };
     let _ = writeln!(out, "- Waits on: {waits}.");
     if let Some(case) = &node.switch {
@@ -201,7 +219,7 @@ fn node_section(out: &mut String, ir: &Ir, id: &str, node: &Node) {
                 None => String::new(),
             };
             format!(
-                "claim it, then complete it with no outputs. The kernel runs its command{place}. A refusal means the command failed, and a pure command fails again: stop and report it."
+                "claim it, then complete it with no outputs. The kernel runs its command{place}. A refusal `verify_failed` means the command failed, and a pure command fails the same way again: stop and report it."
             )
         }
         Class::Observe { fresh_for, exit_map, .. } => {
@@ -262,14 +280,30 @@ fn agent_section(out: &mut String, agent: &agents::Agent) {
     let _ = writeln!(out, "```json\n{brief}\n```\n");
 }
 
+/// The most characters a skill's description may have (the Agent Skills spec).
+pub const MAX_DESCRIPTION: usize = 1024;
+
+/// The skill's description, naming the flow; a flow name that would carry it past
+/// [`MAX_DESCRIPTION`] is named by the skill's own name instead.
+fn description(flow_name: &str, skill: &str) -> String {
+    let say = |name: &str| {
+        format!(
+            "Drives an instance of the Maestro flow {name} through the flow kernel until its status is terminal: flow next, each enabled node with its own skill (agent performers through the harness's own subagents), flow complete. Generated from the flow's compiled IR; use it to start or resume a {name} instance."
+        )
+    };
+    let full = say(flow_name);
+    if full.chars().count() > MAX_DESCRIPTION { say(skill) } else { full }
+}
+
 /// The driver skill of `flow`: its `SKILL.md`, frontmatter included.
 pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
     let ir = flow.ir();
-    let (name, flow_name, hash) = (skill_name(flow)?, flow.name(), flow.hash());
+    // A flow's name is the definition's text: a control character in it would end a line of
+    // the frontmatter or a heading, so each is shown as a space.
+    let flow_name: String = flow.name().chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let (name, hash) = (skill_name(flow)?, flow.hash());
     let agents = agents_of(flow)?;
-    let description = format!(
-        "Drives an instance of the Maestro flow {flow_name} through the flow kernel until it is terminal: flow next, each enabled node with its own skill (agent performers through the harness's own subagents), flow complete. Generated from the flow's compiled IR; use it to start or resume a {flow_name} instance."
-    );
+    let description = description(&flow_name, &name);
     let mut out = String::new();
     let _ = writeln!(out, "---");
     let _ = writeln!(out, "# Generated by maestro flow driver-skill from {flow_name} ({hash}). Do not edit it.");
@@ -283,7 +317,7 @@ pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
     );
     let _ = writeln!(
         out,
-        "Every verb is a `maestro flow` subcommand with `--json`, and the MCP tool `maestro_flow_<verb>` takes the same JSON. A write acts for your verified session: a Direct launch token or a bridge credential.\n"
+        "Every verb is a `maestro flow` subcommand with `--json`, and the MCP tool `maestro_flow_<verb>` takes the same arguments as JSON. A write acts for your verified session, named by `--session` (or `MAESTRO_SESSION`) on the CLI and `session` over MCP. The CLI reads your claim from the environment: a Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential (`MAESTRO_BRIDGE_CREDENTIAL`). Over MCP, pass it in each write's arguments: `cwd` and `token` for a Direct session, `credential` for a T3 or Paseo session, and `node` for the tailnet node your session runs on.\n"
     );
 
     let _ = writeln!(out, "## Start or resume\n");
@@ -298,43 +332,42 @@ pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
     let _ = writeln!(out, "- Params: {params}.");
     let _ = writeln!(
         out,
-        "- Start: `maestro flow start --definition <the {flow_name} definition> --params '<json>'` (`maestro_flow_start`). The `ir_hash` it returns must be `{hash}`; another hash is another definition, which this skill does not drive."
+        "- Start on the CLI: `maestro flow start --definition <path to the {flow_name} definition file> --params '<json>'`. `--definition` is a file path (`-` reads the YAML from stdin)."
+    );
+    let _ = writeln!(
+        out,
+        "- Start over MCP: `maestro_flow_start` with `definition` holding the definition's YAML text itself, never a path, and `params` as a JSON object."
+    );
+    let _ = writeln!(
+        out,
+        "- Either way, the `ir_hash` it returns must be `{hash}`; another hash is another definition, which this skill does not drive."
     );
     let _ = writeln!(out, "- Resume: keep the instance id `flow start` returned; every verb below takes it.\n");
 
     let _ = writeln!(out, "## The loop\n");
     let _ = writeln!(
         out,
-        "1. Run `maestro flow next --instance <I> --json` (`maestro_flow_next`). `next.enabled` lists the nodes to do now; `relay` lists the human nodes and where their asks stand."
+        "Whether to stop is decided by the kernel, in step 1 and step 4, never by reading node states yourself.\n"
     );
     let _ = writeln!(
         out,
-        "2. Do each enabled node as The nodes below says, in any order: `flow claim --instance <I> --node-id <N>` (`maestro_flow_claim`) gives a `claim_token`; finish with `flow complete --claim-token <T>` (`maestro_flow_complete`, `--outputs '<json>'` for a performer's work) or, for a choice, `flow choose --claim-token <T> --edge <E>` (`maestro_flow_choose`). Heartbeat a long claim with `flow heartbeat --claim-token <T>` (`maestro_flow_heartbeat`). An enabled node's `launch_spec` of `kind: agent` says how your harness launches its agent; one of `kind: unknown_agent` cannot be launched, so stop and report it."
+        "1. Run `maestro flow status --instance <I> --json` (`maestro_flow_status`). If `status.terminal` is `true`, stop: report each node's state and the accepting spine, `flow spine --instance <I>` (`maestro_flow_spine`). The flow is done; a node blocked by a branch not taken never runs, and that is not a failure."
     );
     let _ = writeln!(
         out,
-        "3. For each `relay` entry whose state is `unfiled`, file its ask with `flow ask` (`maestro_flow_ask`)."
-    );
-    let _ = writeln!(out, "4. Go back to 1.\n");
-
-    let _ = writeln!(out, "## When to stop\n");
-    let _ = writeln!(
-        out,
-        "Stop when `maestro flow status --instance <I> --json` (`maestro_flow_status`) is terminal: no node is `ready`, `stale` or `waiting`. A node `blocked` by a switch case that was not taken never runs; that is the flow's branch, not a failure. Then report each node's state and the accepting spine, `flow spine --instance <I>` (`maestro_flow_spine`).\n"
-    );
-    let _ = writeln!(out, "Stop before that, and report why, when:\n");
-    let _ = writeln!(
-        out,
-        "- a node the kernel runs (pure, observe, effect) is refused because its command failed: it would fail again;"
+        "2. Run `maestro flow next --instance <I> --json` (`maestro_flow_next`). Do each node in `next.enabled` as The nodes below says, in any order: `flow claim --instance <I> --node-id <N>` (`maestro_flow_claim`) gives a `claim_token`; finish with `flow complete --claim-token <T>` (`maestro_flow_complete`, `--outputs '<json>'` for a performer's work) or, for a choice, `flow choose --claim-token <T> --edge <E>` (`maestro_flow_choose`). Heartbeat a long claim with `flow heartbeat --claim-token <T>` (`maestro_flow_heartbeat`). An enabled node's `launch_spec` of `kind: agent` says how your harness launches its agent; one of `kind: unknown_agent` cannot be launched, so stop and report it."
     );
     let _ = writeln!(
         out,
-        "- a human node waits on the owner (`relay` state `owner` or `answer_waiting_to_land`): the owner answers through the asks ledger, never you;"
+        "3. For each `relay` entry `flow next` returned whose state is `unfiled`, file its ask with `flow ask` (`maestro_flow_ask`)."
     );
-    let _ = writeln!(out, "- a node is `failed` or `exhausted`.\n");
     let _ = writeln!(
         out,
-        "A refusal is a result, not an error: read its `code`. After `lease_expired` or `cancelled`, claim the node again; after `not_enabled`, run `flow next` again.\n"
+        "4. If `next.enabled` was empty and step 3 filed nothing, nothing is yours to do now: the instance waits on someone else (the owner's answer to a `relay` ask, or another claim's lease). Stop and report what `relay` and `next.pending` name; the instance stays open. Otherwise go back to 1.\n"
+    );
+    let _ = writeln!(
+        out,
+        "A refusal is a result, not an error: read its `code`. After `lease_expired` or `cancelled`, claim the node again; after `not_enabled`, go back to 1. A pure node's `verify_failed` means its command failed, and a pure command fails the same way again: stop and report it, never retry it. A human node's answer comes from the owner through the asks ledger, never from you.\n"
     );
 
     let _ = writeln!(out, "## The nodes\n");

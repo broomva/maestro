@@ -256,6 +256,11 @@ pub struct Status {
     pub retired: Option<String>,
     /// The last event replayed.
     pub seq: u64,
+    /// No node is `ready`, `stale` or `waiting` at the read's clock: nothing in the flow can be
+    /// done now, so a driver stops (BRO-3636). Every other node is done, failed, exhausted, or
+    /// blocked on one of those or on a branch not taken. It holds at the read's clock: an
+    /// observation that goes stale later makes the instance not terminal again.
+    pub terminal: bool,
     pub nodes: BTreeMap<String, NodeStatus>,
     pub repeats: BTreeMap<String, RepeatStatus>,
     pub rejected: Vec<Rejected>,
@@ -293,6 +298,8 @@ pub struct Next {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retired: Option<String>,
     pub seq: u64,
+    /// As [`Status::terminal`].
+    pub terminal: bool,
     pub enabled: Vec<Enabled>,
     pub pending: BTreeMap<String, NodeStatus>,
 }
@@ -397,6 +404,7 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
         proposals: status.proposals,
         retired: status.retired,
         seq: status.seq,
+        terminal: status.terminal,
         enabled,
         pending,
     })
@@ -1014,6 +1022,8 @@ impl<'a> Fold<'a> {
             .collect();
         let mut rejected: Vec<Rejected> = self.rejected.iter().chain(&self.owners.rejected).cloned().collect();
         rejected.sort_by_key(|r| r.seq);
+        let terminal =
+            !nodes.values().any(|n: &NodeStatus| matches!(n.state, State::Ready | State::Stale | State::Waiting));
         let status = Status {
             instance: log.instance.to_string(),
             flow: started.flow.clone(),
@@ -1022,6 +1032,7 @@ impl<'a> Fold<'a> {
             proposals: self.owners.report(),
             retired: self.owners.retired.clone(),
             seq: log.seq(),
+            terminal,
             nodes,
             repeats,
             rejected,

@@ -258,3 +258,94 @@ fn a_root_without_sources_is_unread_never_empty() {
     let e = agents::check(tmp.path()).unwrap_err();
     assert!(e.to_string().starts_with("x.agent.yaml is not a valid agent source"), "{e}");
 }
+
+#[test]
+fn a_repeated_key_in_outputs_is_refused_at_any_level() {
+    let f = "verifier.agent.yaml";
+    let top = VERIFIER.replace("  type: object\n  required", "  type: object\n  type: object\n  required");
+    assert!(refused(f, &top).contains("outputs repeats the key \"type\""), "{}", refused(f, &top));
+    let nested = VERIFIER.replace(
+        "      type: string\n      description: The receipt's path",
+        "      type: string\n      type: number\n      description: The receipt's path",
+    );
+    assert!(refused(f, &nested).contains("outputs repeats the key \"type\""), "{}", refused(f, &nested));
+}
+
+#[cfg(unix)]
+fn link(target: &Path, at: &Path) {
+    std::os::unix::fs::symlink(target, at).unwrap();
+}
+
+/// A root with the verifier's source and nothing rendered, and a folder outside it.
+#[cfg(unix)]
+fn bare_root() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(root.join("agents")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(root.join("agents/verifier.agent.yaml"), VERIFIER).unwrap();
+    (tmp, root, outside)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_render_that_is_a_link_is_drift_and_write_replaces_the_link_not_its_target() {
+    let (_tmp, root, outside) = bare_root();
+    std::fs::create_dir_all(root.join(".claude/agents")).unwrap();
+    // The link's target holds exactly the render: still drift, since it is a link.
+    let render = verifier().renders().remove(0);
+    let target = outside.join("victim.md");
+    std::fs::write(&target, &render.text).unwrap();
+    let at = root.join(".claude/agents/verifier.md");
+    link(&target, &at);
+    assert_eq!(drift(&root), Drift { file: ".claude/agents/verifier.md".into(), kind: DriftKind::Link });
+    assert!(drift(&root).to_string().contains("it is a symbolic link"));
+
+    std::fs::write(&target, "keep me\n").unwrap();
+    agents::write(&root).unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me\n", "the link's target is untouched");
+    let m = std::fs::symlink_metadata(&at).unwrap();
+    assert!(m.is_file() && !m.file_type().is_symlink(), "the link was replaced by the render");
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), render.text);
+    assert_eq!(agents::check(&root).unwrap(), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_render_folder_that_is_a_link_is_refused_and_nothing_is_written_through_it() {
+    // The render folder itself, and a folder above it.
+    for (made, linked) in [(".gemini", ".gemini/agents"), ("", ".grok")] {
+        let (_tmp, root, outside) = bare_root();
+        if !made.is_empty() {
+            std::fs::create_dir_all(root.join(made)).unwrap();
+        }
+        std::fs::create_dir_all(outside.join("agents")).unwrap();
+        let target = if linked.ends_with("agents") { outside.join("agents") } else { outside.clone() };
+        link(&target, &root.join(linked));
+        let e = agents::write(&root).unwrap_err();
+        assert_eq!(e.code(), "render_path_unsafe", "{linked}: {e}");
+        assert!(e.to_string().contains(linked) && e.to_string().contains("is a symbolic link"), "{e}");
+        assert!(!outside.join("agents/verifier.md").exists(), "{linked}: nothing written outside the root");
+        let e = agents::check(&root).unwrap_err();
+        assert_eq!(e.code(), "render_path_unsafe", "{linked}: {e}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_is_never_taken_for_an_orphan_or_removed() {
+    let (_tmp, root, outside) = bare_root();
+    agents::write(&root).unwrap();
+    // A file outside the root that reads as a render whose source is gone, linked into a folder.
+    let checker = agents::parse("checker.agent.yaml", &VERIFIER.replace("name: verifier", "name: checker")).unwrap();
+    let target = outside.join("checker.md");
+    std::fs::write(&target, &checker.renders()[0].text).unwrap();
+    let at = root.join(".claude/agents/checker.md");
+    link(&target, &at);
+    assert_eq!(agents::check(&root).unwrap(), None, "a link is not a render of ours");
+    let w = agents::write(&root).unwrap();
+    assert!(w.removed.is_empty(), "{w:?}");
+    assert!(std::fs::symlink_metadata(&at).unwrap().file_type().is_symlink(), "the link stays");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), checker.renders()[0].text, "its target stays");
+}

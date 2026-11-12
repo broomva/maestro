@@ -76,3 +76,94 @@ fn a_skill_name_is_made_from_the_flow_name_and_version() {
     let e = skill_name(&compile(&long).unwrap()).unwrap_err();
     assert_eq!(e.code(), "skill_name_invalid");
 }
+
+/// The skill's text from `from` up to the next `## ` heading.
+fn section<'a>(skill: &'a str, from: &str) -> &'a str {
+    let start = skill.find(from).unwrap_or_else(|| panic!("no {from}"));
+    let rest = &skill[start + from.len()..];
+    &skill[start..start + from.len() + rest.find("\n## ").unwrap_or(rest.len())]
+}
+
+#[test]
+fn the_loop_stops_on_the_kernels_terminal_never_on_node_states() {
+    let skill = driver::generate(&compile(VERIFY).unwrap()).unwrap();
+    let the_loop = section(&skill, "## The loop");
+    // The stop decision is a step of the loop, and it reads the kernel's field.
+    assert!(the_loop.contains("\n1. Run `maestro flow status --instance <I> --json`"), "{the_loop}");
+    assert!(the_loop.contains("If `status.terminal` is `true`, stop"), "{the_loop}");
+    assert!(the_loop.contains("\n4. If `next.enabled` was empty and step 3 filed nothing"), "{the_loop}");
+    assert!(
+        the_loop.find("1. Run `maestro flow status").unwrap() < the_loop.find("2. Run `maestro flow next").unwrap()
+    );
+    // No rule of its own over node states, anywhere in the skill.
+    for rule in ["## When to stop", "is `failed` or `exhausted`", "no node is `ready`, `stale` or `waiting`"] {
+        assert!(!skill.contains(rule), "the skill judges node states: {rule}");
+    }
+}
+
+#[test]
+fn a_node_outside_a_repeat_waits_on_the_whole_body_it_reaches_into() {
+    let flow = compile(
+        "flow: body
+version: 1
+nodes:
+  x: {class: work, verify: [x]}
+  p: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: ok}, needs: [x]}
+  q: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: ok}}
+  r: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: ok}, needs: [q]}
+  after: {class: work, verify: [x], needs: [q]}
+repeats:
+  loop: {body: [p, q, r], max: 2}
+",
+    )
+    .unwrap();
+    // `after` needs q alone, but q's repeat is not its own: it waits on p, q and r. Inside the
+    // repeat, r needs only q.
+    assert_eq!(steps(&flow), [vec!["q", "x"], vec!["p", "r"], vec!["after"]]);
+}
+
+#[test]
+fn waits_on_names_the_node_a_switch_reads() {
+    let skill = driver::generate(&compile(VERIFY).unwrap()).unwrap();
+    let exercise = section(&skill, "#### `exercise` (work)");
+    assert!(exercise.contains("- Waits on: `check`, `surface` (its switch reads it)."), "{exercise}");
+    let check = section(&skill, "#### `check` (pure)");
+    assert!(check.contains("- Waits on: `pin`.\n"), "a switch subject it needs is named once: {check}");
+}
+
+#[test]
+fn the_description_stays_within_the_agent_skills_limit_and_the_frontmatter_reads() {
+    let name = format!("{}name\\nnext: line", "\\\"#: '-".repeat(200));
+    let flow = compile(&format!("flow: \"{name}\"\nversion: 1\nnodes:\n  a: {{class: work, verify: [x]}}\n")).unwrap();
+    assert!(flow.name().len() > driver::MAX_DESCRIPTION);
+    let skill = driver::generate(&flow).unwrap();
+    let front = skill.strip_prefix("---\n").unwrap().split("\n---\n").next().unwrap();
+    assert_eq!(front.lines().count(), 3, "a comment, name and description: {front}");
+    let v: serde_json::Value = serde_yaml::from_str(front).unwrap();
+    let description = v["description"].as_str().unwrap();
+    assert!(description.chars().count() <= driver::MAX_DESCRIPTION, "{}", description.chars().count());
+    assert!(description.contains(v["name"].as_str().unwrap()), "{description}");
+    // The verifier's own description names its flow.
+    let skill = driver::generate(&compile(VERIFY).unwrap()).unwrap();
+    assert!(skill.contains("description: \"Drives an instance of the Maestro flow verify@1 "));
+}
+
+#[test]
+fn start_tells_the_cli_path_from_the_mcp_text_and_names_the_auth_arguments() {
+    let skill = driver::generate(&compile(VERIFY).unwrap()).unwrap();
+    assert!(skill.contains("`--definition` is a file path"));
+    assert!(
+        skill
+            .contains("`maestro_flow_start` with `definition` holding the definition's YAML text itself, never a path")
+    );
+    for arg in [
+        "`session`",
+        "`cwd` and `token`",
+        "`credential`",
+        "`node`",
+        "`MAESTRO_DIRECT_TOKEN`",
+        "`MAESTRO_BRIDGE_CREDENTIAL`",
+    ] {
+        assert!(skill.contains(arg), "{arg}");
+    }
+}

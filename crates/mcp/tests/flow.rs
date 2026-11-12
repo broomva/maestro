@@ -491,6 +491,10 @@ fn next_returns_a_launch_spec_for_an_agent_performer_and_start_refuses_an_unknow
     let fi = f.begin();
     let next = f.call(NEXT, json!({ "instance": fi }));
     assert!(next["next"]["enabled"][0].get("launch_spec").is_none(), "{next}");
+    // `terminal`, the kernel's stop decision, in both reads.
+    assert_eq!(next["next"]["terminal"], false, "{next}");
+    let status = f.call(STATUS, json!({ "instance": fi }));
+    assert_eq!(status["status"]["terminal"], false, "{status}");
 
     let flow = |performer: &str| {
         format!(

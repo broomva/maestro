@@ -87,7 +87,7 @@ the CLI exits 1 on it:
 ```bash
 maestro flow start --definition F.yaml [--params '<json>']   # start an instance, owned by this session
 maestro flow next --instance I                               # the nodes to claim now, and why not the rest
-maestro flow status --instance I                             # every node's state
+maestro flow status --instance I                             # every node's state, and terminal: nothing left to do now
 maestro flow claim --instance I --node-id N                  # take a node: a claim token and a lease
 maestro flow heartbeat --claim-token T                       # extend the lease
 maestro flow complete --claim-token T [--outputs '<json>']   # the kernel runs the node's command
@@ -185,7 +185,10 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
   renders whose source is gone (a file whose second line is not the render marker is never
   touched); the Codex `spawn_agent` brief is not a file but part of the driver skill and of the
   launch spec. `--check` writes nothing and exits 1 naming the first render that is missing,
-  differs, or has no source: what `bstack doctor` will call. Each harness gets only the fields
+  differs, is a symbolic link, or has no source: what `bstack doctor` will call. No link is
+  followed: a render folder that is a link (or any folder between the root and it) is refused,
+  each render is written to a new file and renamed into place (which replaces a link at that
+  path), and only regular files are removed as orphans. Each harness gets only the fields
   its docs define: Claude Code `name`, `description`, `tools`, `model`, `skills`; Gemini CLI
   `name`, `description`, `kind: local`, `tools`, `model`; Grok `name`, `description`, `tools`,
   `model`. **Not confirmed:** that Claude Code's `subagent_type` is the agent's `name` (inferred
@@ -205,13 +208,19 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
   agent with no source does not compile (`unknown_agent`): it is a reference to nothing, refused
   where the compiler refuses unknown references, before an instance that could never be launched
   is started, and with no file read at compile time. An instance pinned by a build that had the
-  agent replays as it did, and `next` gives that node `kind: unknown_agent`, never no spec.
-- **Driver skills (BRO-3636).** `maestro flow driver-skill` generates a flow's `SKILL.md` (Agent
+  agent replays as it did, and `next` gives that node `kind: unknown_agent`, never no spec. **A
+  running instance takes the current build's agent** (owner decision, BRO-3636): the IR pins the
+  performer's name, not its source, so `next` launches the source this build has, and
+  `source_sha256` in the launch spec says which one applied.
+- **Driver skills (BRO-3636).** `maestro flow driver-skill` (with `--json`, `{"skill", "path"}`)
+  generates a flow's `SKILL.md` (Agent
   Skills format, named `flow-<flow>-v<version>`) from its compiled IR: loop `flow next`, do each
   enabled node with its own skill (an agent performer through the harness's own subagent, or
-  Codex's brief), `flow complete`, and stop when `flow status` has no node `ready`, `stale` or
-  `waiting`. Its steps put each node after everything it waits on (needs, the node its switch
-  reads, a needed repeat's body), by id within a step; the loop's text is fixed, and nothing in
+  Codex's brief), `flow complete`, and stop when `flow status` says `terminal` (a field of
+  `status` and `next`: no node `ready`, `stale` or `waiting`, decided by the kernel) or nothing is
+  enabled for the driver. Its steps put each node after everything it waits on (needs, the node
+  its switch reads, a needed repeat's body, and the whole body of a repeat it reaches into from
+  outside), by id within a step; the loop's text is fixed, and nothing in
   the order is written by hand. `skills/flow-verify-v1/SKILL.md` is verify@1's, regenerated with
   `maestro flow driver-skill --definition crates/flow/flows/verify.yaml --out
   skills/flow-verify-v1/SKILL.md`; tests hold it, and the committed renders, to a fresh

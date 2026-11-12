@@ -589,3 +589,64 @@ fn flow_driver_skill_prints_writes_and_checks_the_generated_skill() {
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("unknown_agent"), "{}", stderr(&out));
 }
+
+#[test]
+fn flow_driver_skill_refuses_an_out_that_is_the_definition_by_any_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let definition = dir.join("flows/verify.yaml");
+    std::fs::create_dir_all(definition.parent().unwrap()).unwrap();
+    std::fs::copy(VERIFY, &definition).unwrap();
+    let original = std::fs::read(&definition).unwrap();
+    std::os::unix::fs::symlink(&definition, dir.join("alias.yaml")).unwrap();
+    let def = definition.to_str().unwrap();
+    for out in [
+        def.to_string(),
+        format!("{}/flows/../flows/verify.yaml", dir.display()),
+        dir.join("alias.yaml").display().to_string(),
+    ] {
+        for check in [false, true] {
+            let mut cmd = bare(&dir);
+            cmd.args(["flow", "driver-skill", "--definition", def, "--out", &out]);
+            if check {
+                cmd.arg("--check");
+            }
+            let o = cmd.output().unwrap();
+            assert_eq!(o.status.code(), Some(1), "{out}");
+            assert!(stderr(&o).contains("is the definition itself; nothing was written"), "{}", stderr(&o));
+            assert_eq!(std::fs::read(&definition).unwrap(), original, "{out}: the definition is untouched");
+        }
+    }
+    // Another file beside it is written as usual.
+    let o = bare(&dir).args(["flow", "driver-skill", "--definition", def, "--out", "SKILL.md"]).output().unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+}
+
+#[test]
+fn flow_driver_skill_json_prints_the_skill_as_a_json_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let committed =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills/flow-verify-v1/SKILL.md")).unwrap();
+    let (v, out) = run(bare(dir).args(["--json", "flow", "driver-skill", "--definition", VERIFY]));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(v, json!({ "ok": true, "skill": committed, "path": null }));
+    let (v, out) =
+        run(bare(dir).args(["--json", "flow", "driver-skill", "--definition", VERIFY, "--out", "s/SKILL.md"]));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!((&v["ok"], &v["path"]), (&json!(true), &json!("s/SKILL.md")));
+    assert_eq!(std::fs::read_to_string(dir.join("s/SKILL.md")).unwrap(), committed);
+    std::fs::write(dir.join("s/SKILL.md"), "stale").unwrap();
+    let (v, out) = run(bare(dir).args([
+        "--json",
+        "flow",
+        "driver-skill",
+        "--definition",
+        VERIFY,
+        "--out",
+        "s/SKILL.md",
+        "--check",
+    ]));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(v, json!({ "ok": false, "code": "drift", "path": "s/SKILL.md" }));
+}

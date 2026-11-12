@@ -1118,8 +1118,8 @@ mutate $fk/replay.rs '                if let Some(judged) = self.fold.verdicts.g
                     && *judged == self.body_digest(rid, i)
                 {' '                if self.fold.ir.repeats.get(rid).and_then(|r| r.until.as_deref()).is_some_and(|g| super::jq::check(g).is_ok()) {'
 mutate $fk/replay.rs '            seq: log.seq(),
-            nodes,' '            seq: jiff::Timestamp::now().as_nanosecond() as u64,
-            nodes,'
+            terminal,' '            seq: jiff::Timestamp::now().as_nanosecond() as u64,
+            terminal,'
 # Flow writers (BRO-3633 PR 3b2a): ownership, claims, tokens, leases, receipts.
 # Ownership: a marker (non-empty) to write anything, start included; only the owner's session
 # and marker together; an instance with no recorded owner takes no write.
@@ -1999,9 +1999,9 @@ mutate $agt '        if model.is_empty() || model.len() > MAX_MODEL || !ok {' ' 
 mutate $agt '        if !plain(skill) {' '        if false {'
 mutate $agt '        if s.skills[..i].contains(skill) {' '        if false {'
 mutate $agt '    if s.outputs.get("type") != Some(&Value::from("object")) {' '    if false {'
-mutate $agt '            None => DriftKind::Missing,' '            None => continue,'
+mutate $agt '                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => DriftKind::Missing,' '                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,'
 mutate $agt '            Some(bytes) if bytes != r.text.as_bytes() => DriftKind::Differs,' '            Some(_) if false => DriftKind::Differs,'
-mutate $agt 'read(&root.join(&r.path), r.text.len())?' 'read(&root.join(&r.path), r.text.len() - 1)?'
+mutate $agt 'Ok(_) => match read(&path, r.text.len())? {' 'Ok(_) => match read(&path, r.text.len() - 1)? {'
 mutate $agt '            if agents.iter().any(|a| a.name == stem) {' '            if false {'
 mutate $agt '.is_some_and(|line| line.starts_with(MARKER.as_bytes()))' '.is_some()'
 mutate $agt '            if generated {' '            if false {'
@@ -2022,12 +2022,39 @@ mutate $agt '    Some(match find(name) {' '    find(name)?;
 # exits 1 on a skill that is not what the IR generates.
 drv=$fl/driver.rs
 mutate $drv '.map(|d| at(ir, d, memo) + 1).max().unwrap_or(0);' '.map(|d| at(ir, d, memo) * 0).max().unwrap_or(0);'
-mutate $drv '    out.extend(node.switch.as_ref().map(|c| c.on.as_str()));
+mutate $drv '    on.extend(node.switch.as_ref().map(|c| c.on.as_str()));
 ' ''
-mutate $drv '                out.extend(ir.repeats.get(repeat).into_iter().flat_map(|r| r.body.iter().map(String::as_str)));
-' ''
+mutate $drv 'Need::Repeat { repeat } | Need::Exhausted { repeat } => on.extend(body(repeat)),' 'Need::Repeat { .. } | Need::Exhausted { .. } => {}'
 mutate $drv '    if name.len() > agents::MAX_NAME {' '    if false {'
 mutate $cli '            if on_disk.as_deref() != Some(skill.as_bytes()) {' '            if false {'
+# Round 1 (BRO-3636). No link is followed under the render root: a folder that is a link is
+# refused, a render goes in by rename (which replaces a link), --check reads a link at a render
+# path as drift, and only a regular file is taken for an orphan. A repeated key in outputs is
+# refused at any level.
+mutate $agt '        match std::fs::symlink_metadata(&dir) {' '        match std::fs::metadata(&dir) {'
+mutate $agt '        .and_then(|()| std::fs::rename(&tmp, &dest));' '        .and_then(|()| std::fs::copy(&tmp, &dest).map(|_| ()));'
+mutate $agt '                match std::fs::symlink_metadata(&path) {' '                match std::fs::metadata(&path) {'
+mutate $agt '            if !std::fs::symlink_metadata(&file).map_err(|e| io(&file, e))?.is_file() {' '            if !std::fs::metadata(&file).map_err(|e| io(&file, e))?.is_file() {'
+mutate $agt '            if out.insert(key.clone(), value).is_some() {' '            if out.insert(key.clone(), value).is_some() && false {'
+mutate $agt '    #[serde(deserialize_with = "strict_json")]
+' ''
+# The kernel's stop decision: terminal while no node is ready, stale or waiting, and next says
+# what status says; the driver skill's loop stops on it.
+mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)' 'matches!(n.state, State::Ready | State::Stale)'
+mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)' 'matches!(n.state, State::Ready | State::Waiting)'
+mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)' 'matches!(n.state, State::Stale | State::Waiting)'
+mutate $replay '        terminal: status.terminal,' '        terminal: false,'
+mutate $drv 'If `status.terminal` is `true`, stop' 'If every node is done, stop'
+# The driver skill: a node outside a repeat waits on the whole body it reaches into; Waits on
+# names a switch's subject; the description stays within the spec's limit; a control character
+# in a flow's name never ends a line of the frontmatter.
+mutate $drv '            Some(r) if repeat_of(id) != Some(r) => out.extend(body(r)),' '            Some(r) if false => out.extend(body(r)),'
+mutate $drv '        waits.push(format!("{} (its switch reads it)", code(&case.on)));
+' ''
+mutate $drv 'if full.chars().count() > MAX_DESCRIPTION { say(skill) } else { full }' 'full'
+mutate $drv 'if c.is_control() { '"' '"' } else { c }' 'c'
+# --out naming the definition itself, by any path, is refused before anything is written.
+mutate $cli '        && same_file(path, definition)' '        && false'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

@@ -5,7 +5,8 @@
 //! # The source, `agent@1`
 //!
 //! One YAML mapping, at most [`MAX_SOURCE`] bytes, with exactly these fields. Any other field, at
-//! any level, is refused, and so is a repeated one ([`parse`]).
+//! any level, is refused, and so is a repeated one ([`parse`]), a repeated key inside `outputs`
+//! included.
 //!
 //! | Field | What it holds |
 //! |---|---|
@@ -63,10 +64,18 @@
 //! # Drift
 //!
 //! [`check`] renders every source under a root and compares each render with the file on disk.
-//! The first that is missing or differs, or a render ([`MARKER`] on its second line) whose source is
-//! gone, is a [`Drift`] naming the file; `maestro agents render --check` exits 1 on it, which is
-//! what a `bstack doctor` check will call. [`write`] makes the renders and removes renders whose source is gone,
-//! and touches no other file.
+//! The first that is missing, differs or is a symbolic link, or a render ([`MARKER`] on its second
+//! line) whose source is gone, is a [`Drift`] naming the file; `maestro agents render --check`
+//! exits 1 on it, which is what a `bstack doctor` check will call. [`write`] makes the renders and
+//! removes renders whose source is gone, and touches no other file.
+//!
+//! **Links.** A repository can hold a symbolic link where a render goes, so neither writes nor
+//! removals follow one. Every folder from the root down to a render folder is checked to be a real
+//! folder, never a link (a link, or anything not a folder, is [`AgentError::Unsafe`], and nothing
+//! is written through it). Each render is written whole to a new file beside its place and renamed
+//! over it, and a rename replaces a link without following it. Only regular files are taken for
+//! orphans and removed. This holds against links the tree holds, not against a process changing the
+//! tree while a render runs.
 //!
 //! # The kernel's agents
 //!
@@ -77,6 +86,13 @@
 //! that had the agent keeps its pinned IR; `flow next` then gives that node an
 //! [`LaunchSpec::UnknownAgent`] spec, never none, so a missing agent is never read as a node that
 //! needs no agent.
+//!
+//! **A running instance takes the current build's agent.** The IR pins a performer's name
+//! (`agent:<name>`), never its source: the agent a node is launched with is the source this build
+//! has when `flow next` is read, even for an instance started under another (owner decision,
+//! BRO-3636, round 1). The launch spec carries that source's digest (`source_sha256`), so a driver,
+//! and anyone reading what it did, can see which source applied. The node's verify is the check
+//! either way: an agent's instructions do not decide what the kernel accepts.
 //!
 //! Agent files shape behaviour; they are not a security boundary. A harness's tools list narrows
 //! its built-in tools only, and every consequential check is the kernel's verify.
@@ -131,7 +147,78 @@ struct Source {
     model: Models,
     #[serde(default)]
     skills: Vec<String>,
+    #[serde(deserialize_with = "strict_json")]
     outputs: Value,
+}
+
+/// JSON read from YAML with every mapping's keys checked unique, at every level: a plain
+/// `serde_json::Value` keeps the last of two equal keys and drops the other without a word.
+fn strict_json<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Value, D::Error> {
+    d.deserialize_any(Strict)
+}
+
+struct Strict;
+
+impl<'de> serde::de::DeserializeSeed<'de> for Strict {
+    type Value = Value;
+    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
+        d.deserialize_any(Strict)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for Strict {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Value, E> {
+        serde_json::Number::from_f64(v).map(Value::Number).ok_or_else(|| E::custom(format!("{v} is not a JSON number")))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut out = Vec::new();
+        while let Some(v) = seq.next_element_seed(Strict)? {
+            out.push(v);
+        }
+        Ok(Value::Array(out))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut out = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let value = map.next_value_seed(Strict)?;
+            if out.insert(key.clone(), value).is_some() {
+                return Err(serde::de::Error::custom(format!("outputs repeats the key {key:?}")));
+            }
+        }
+        Ok(Value::Object(out))
+    }
 }
 
 /// What an agent may do with its tools.
@@ -209,6 +296,9 @@ pub enum AgentError {
     Invalid { file: String, detail: String },
     #[error("{path} could not be read or written: {detail}.")]
     Io { path: String, detail: String },
+    /// A render folder that is a symbolic link or not a folder: nothing is written through it.
+    #[error("{path} {detail}, so no render is written or removed through it.")]
+    Unsafe { path: String, detail: String },
 }
 
 impl AgentError {
@@ -216,6 +306,7 @@ impl AgentError {
         match self {
             AgentError::Invalid { .. } => "agent_invalid",
             AgentError::Io { .. } => "agent_io",
+            AgentError::Unsafe { .. } => "render_path_unsafe",
         }
     }
 }
@@ -538,6 +629,8 @@ pub enum DriftKind {
     Missing,
     /// The file is not what the source renders to.
     Differs,
+    /// A symbolic link where the render goes, wherever it points: [`write`] replaces it.
+    Link,
     /// A render whose source is gone.
     Orphan,
 }
@@ -547,6 +640,7 @@ impl DriftKind {
         match self {
             DriftKind::Missing => "it is missing",
             DriftKind::Differs => "it is not what its source renders to",
+            DriftKind::Link => "it is a symbolic link",
             DriftKind::Orphan => "its source is gone",
         }
     }
@@ -561,19 +655,69 @@ pub struct Drift {
     pub kind: DriftKind,
 }
 
-/// The renders under `root` whose source is gone: `*.md` in a render folder whose second line is
-/// [`MARKER`] and whose name no source has. Only such files: a hand-written agent is left alone.
+/// The render folder `rel` under `root`, every folder below the root checked to be a real
+/// folder, never a symbolic link (`symlink_metadata`), so no render or removal is redirected out
+/// of the root by a link the repository holds. The root is the caller's choice and may be reached
+/// through one. A missing folder is made when `create`, and is otherwise `None`.
+fn render_dir(root: &Path, rel: &str, create: bool) -> Result<Option<PathBuf>, AgentError> {
+    if !std::fs::metadata(root).map_err(|e| io(root, e))?.is_dir() {
+        return Err(unsafe_path(root, "is not a folder"));
+    }
+    let mut dir = root.to_path_buf();
+    for part in Path::new(rel).components() {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) if m.file_type().is_symlink() => return Err(unsafe_path(&dir, "is a symbolic link")),
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Err(unsafe_path(&dir, "is not a folder")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
+                // `create_dir` makes nothing where anything, a link included, already is.
+                std::fs::create_dir(&dir).map_err(|e| io(&dir, e))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io(&dir, e)),
+        }
+    }
+    Ok(Some(dir))
+}
+
+fn unsafe_path(path: &Path, what: &str) -> AgentError {
+    AgentError::Unsafe { path: path.display().to_string(), detail: what.to_string() }
+}
+
+/// A render's folder (one of [`RENDER_DIRS`]) and file name.
+fn split(path: &str) -> (&str, &str) {
+    path.rsplit_once('/').unwrap_or(("", path))
+}
+
+/// Puts `bytes` at `dir/file`: written whole to a new file beside it, then renamed over it. The
+/// rename replaces whatever is at `dir/file`, a symbolic link included, and never follows one.
+fn replace(dir: &Path, file: &str, bytes: &[u8]) -> Result<(), AgentError> {
+    use std::io::Write as _;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let tmp = dir.join(format!(".{file}.{}-{nanos}.tmp", std::process::id()));
+    let dest = dir.join(file);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, &dest));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        io(&dest, e)
+    })
+}
+
+/// The renders under `root` whose source is gone: `*.md` regular files (never a link) in a
+/// verified render folder, whose second line is [`MARKER`] and whose name no source has. Only such
+/// files: a hand-written agent, and anything that is not a regular file, is left alone.
 fn orphans(root: &Path, agents: &[Agent]) -> Result<Vec<String>, AgentError> {
     let mut out = Vec::new();
     for dir in RENDER_DIRS {
-        let path = root.join(dir);
-        let entries = match std::fs::read_dir(&path) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(io(&path, e)),
-        };
+        let Some(path) = render_dir(root, dir, false)? else { continue };
         let mut names = Vec::new();
-        for entry in entries {
+        for entry in std::fs::read_dir(&path).map_err(|e| io(&path, e))? {
             names.push(entry.map_err(|e| io(&path, e))?.file_name().to_string_lossy().into_owned());
         }
         names.sort();
@@ -582,7 +726,11 @@ fn orphans(root: &Path, agents: &[Agent]) -> Result<Vec<String>, AgentError> {
             if agents.iter().any(|a| a.name == stem) {
                 continue;
             }
-            let generated = read(&path.join(&name), MAX_SOURCE * 2)?.is_some_and(|text| {
+            let file = path.join(&name);
+            if !std::fs::symlink_metadata(&file).map_err(|e| io(&file, e))?.is_file() {
+                continue;
+            }
+            let generated = read(&file, MAX_SOURCE * 2)?.is_some_and(|text| {
                 text.split(|b| *b == b'\n').nth(1).is_some_and(|line| line.starts_with(MARKER.as_bytes()))
             });
             if generated {
@@ -594,14 +742,28 @@ fn orphans(root: &Path, agents: &[Agent]) -> Result<Vec<String>, AgentError> {
 }
 
 /// The first render under `root` that drifts from its source, in [`render_all`]'s order, then
-/// the orphans; `None` when every render matches.
+/// the orphans; `None` when every render matches. A render folder that is a link is an error
+/// ([`AgentError::Unsafe`]); a render that is a link is drift, however its target reads.
 pub fn check(root: &Path) -> Result<Option<Drift>, AgentError> {
     let agents = load(root)?;
     for r in render_all(&agents) {
-        let kind = match read(&root.join(&r.path), r.text.len())? {
+        let (dir, file) = split(&r.path);
+        let kind = match render_dir(root, dir, false)? {
             None => DriftKind::Missing,
-            Some(bytes) if bytes != r.text.as_bytes() => DriftKind::Differs,
-            Some(_) => continue,
+            Some(dir) => {
+                let path = dir.join(file);
+                match std::fs::symlink_metadata(&path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => DriftKind::Missing,
+                    Err(e) => return Err(io(&path, e)),
+                    Ok(m) if m.file_type().is_symlink() => DriftKind::Link,
+                    Ok(m) if !m.is_file() => DriftKind::Differs,
+                    Ok(_) => match read(&path, r.text.len())? {
+                        None => DriftKind::Missing,
+                        Some(bytes) if bytes != r.text.as_bytes() => DriftKind::Differs,
+                        Some(_) => continue,
+                    },
+                }
+            }
         };
         return Ok(Some(Drift { file: r.path, kind }));
     }
@@ -615,16 +777,15 @@ pub struct Written {
     pub removed: Vec<String>,
 }
 
-/// Writes every render under `root`, and removes the renders whose source is gone.
+/// Writes every render under `root`, each through [`replace`] into a verified folder
+/// ([`render_dir`]), and removes the renders whose source is gone (regular files only).
 pub fn write(root: &Path) -> Result<Written, AgentError> {
     let agents = load(root)?;
     let mut written = Vec::new();
     for r in render_all(&agents) {
-        let path: PathBuf = root.join(&r.path);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
-        }
-        std::fs::write(&path, &r.text).map_err(|e| io(&path, e))?;
+        let (dir, file) = split(&r.path);
+        let dir = render_dir(root, dir, true)?.ok_or_else(|| unsafe_path(&root.join(dir), "was not made"))?;
+        replace(&dir, file, r.text.as_bytes())?;
         written.push(r.path);
     }
     let removed = orphans(root, &agents)?;

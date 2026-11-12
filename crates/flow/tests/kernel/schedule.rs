@@ -1295,3 +1295,67 @@ fn params_and_outputs_nested_too_deep_to_read_back_are_refused_before_anything_i
     drop(guard);
     assert_eq!(f.try_status(&fi).unwrap().seq, 1, "nothing was appended");
 }
+
+#[test]
+fn terminal_is_the_kernels_no_node_ready_stale_or_waiting() {
+    // verify@1 without a surface: terminal only once pin, surface and check are done, exercise
+    // blocked by the branch not taken.
+    let mut f = fx(VERIFY);
+    let fi = f.begin(verify_params(false));
+    let s = f.status(&fi, Timestamp::now());
+    assert!(!s.terminal, "every root is ready");
+    f.observe(&fi, "surface", &[], 1);
+    let t = f.observe(&fi, "pin", &[], 0);
+    assert!(!f.status(&fi, t).terminal, "check is ready");
+    f.complete(&fi, "check", &[], json!({}));
+    let s = f.status(&fi, t);
+    assert_eq!(state(&s, "exercise"), State::Blocked);
+    assert!(s.terminal, "{s:?}");
+    assert!(f.next(&fi, t).terminal, "next says what status says");
+    // The field the driver skill reads is `terminal`, in both.
+    assert_eq!(serde_json::to_value(&s).unwrap()["terminal"], true);
+    assert_eq!(serde_json::to_value(f.next(&fi, t)).unwrap()["terminal"], true);
+    // Once pin is stale it can be run again: no longer terminal.
+    let later = t.checked_add(SignedDuration::from_mins(11)).unwrap();
+    assert_eq!(state(&f.status(&fi, later), "pin"), State::Stale);
+    assert!(!f.status(&fi, later).terminal);
+    assert!(!f.next(&fi, later).terminal);
+
+    // A human node waiting on the owner is not terminal.
+    let mut f = fx("flow: h\nversion: 1\nnodes:\n  q: {class: human, ask: Go?}\n");
+    let fi = f.begin(json!({}));
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!(state(&s, "q"), State::Waiting);
+    assert!(!s.terminal);
+    // A repeat that runs out routes on: its on_exhausted node is ready, so not terminal.
+    let mut f = fx("flow: r
+version: 1
+nodes:
+  ci: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: green, 1: red}}
+  give_up: {class: work, verify: [x]}
+repeats:
+  poll: {body: [ci], max: 1, until: '.nodes.ci.value == \"green\"', on_exhausted: give_up}
+");
+    let fi = f.begin(json!({}));
+    let t = f.observe(&fi, "ci", &[("poll", 0)], 1);
+    f.verdict(&fi, "poll", 0, false);
+    let s = f.status(&fi, t);
+    assert_eq!(state(&s, "give_up"), State::Ready, "{s:?}");
+    assert!(!s.terminal);
+    f.complete(&fi, "give_up", &[], json!({}));
+    assert!(f.status(&fi, t).terminal);
+}
+
+#[test]
+fn a_launch_spec_carries_the_digest_of_the_current_agent_source() {
+    let mut f = fx(VERIFY);
+    let fi = f.begin(verify_params(true));
+    f.observe(&fi, "surface", &[], 0);
+    let t = f.observe(&fi, "pin", &[], 0);
+    f.complete(&fi, "check", &[], json!({}));
+    let n = f.next(&fi, t);
+    let Some(LaunchSpec::Agent(spec)) = &n.enabled[0].launch_spec else { panic!("{n:?}") };
+    let source = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../agents/verifier.agent.yaml")).unwrap();
+    assert_eq!(spec.source_sha256, maestro_flow::dogfood::sha256(&source));
+    assert_eq!(spec.source, "agents/verifier.agent.yaml");
+}

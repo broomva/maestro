@@ -307,8 +307,9 @@ enum FlowCommand {
         against: Option<String>,
     },
     /// The flow's driver skill (a SKILL.md), generated from its compiled IR: printed, or written
-    /// to --out. With --check, write nothing and exit 1 when --out is not what it generates.
-    /// Needs no workspace, and is the one flow command that is no MCP tool's twin.
+    /// to --out. With --check, write nothing and exit 1 when --out is not what it generates. An
+    /// --out that is the definition itself is refused. With --json, prints {"ok", "skill",
+    /// "path"}. Needs no workspace, and is the one flow command that is no MCP tool's twin.
     DriverSkill {
         /// The definition's YAML file.
         #[arg(long)]
@@ -571,7 +572,7 @@ fn main() -> std::process::ExitCode {
             return exit(render_agents(cli.json, root, *check));
         }
         Command::Flow { command: FlowCommand::DriverSkill { definition, out, check } } => {
-            return exit(driver_skill(definition, out.as_deref(), *check));
+            return exit(driver_skill(cli.json, definition, out.as_deref(), *check));
         }
         _ => {}
     }
@@ -798,25 +799,54 @@ fn render_agents(json: bool, root: &std::path::Path, check: bool) -> Result<()> 
     Ok(())
 }
 
+/// Whether `a` and `b` name one file: the same device and inode when both exist (so a link or a
+/// second path to it counts), and otherwise never, since a file that is not there is not `a`.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        #[cfg(unix)]
+        (Ok(x), Ok(y)) => {
+            use std::os::unix::fs::MetadataExt as _;
+            (x.dev(), x.ino()) == (y.dev(), y.ino())
+        }
+        #[cfg(not(unix))]
+        (Ok(_), Ok(_)) => std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok(),
+        _ => false,
+    }
+}
+
 /// `maestro flow driver-skill`: the driver skill generated from a definition
-/// (`maestro_flow::driver`), printed, written to `out`, or with `check` compared with `out`.
-fn driver_skill(definition: &std::path::Path, out: Option<&std::path::Path>, check: bool) -> Result<()> {
+/// (`maestro_flow::driver`), printed, written to `out`, or with `check` compared with `out`. An
+/// `out` that is the definition itself, by any path, is refused before anything is written.
+fn driver_skill(json: bool, definition: &std::path::Path, out: Option<&std::path::Path>, check: bool) -> Result<()> {
+    if let Some(path) = out
+        && same_file(path, definition)
+    {
+        bail!("--out {} is the definition itself; nothing was written", path.display());
+    }
     let text = std::fs::File::open(definition)
         .map_err(anyhow::Error::from)
         .and_then(read_definition)
         .with_context(|| format!("reading {}", definition.display()))?;
     let flow = maestro_flow::kernel::compile(&text).map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
     let skill = maestro_flow::driver::generate(&flow).map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
+    let shown = out.map(|p| p.display().to_string());
     match out {
+        None if json => println!("{}", json!({ "ok": true, "skill": skill, "path": null })),
         None => print!("{skill}"),
         Some(path) if check => {
             let on_disk = std::fs::read(path).ok();
             if on_disk.as_deref() != Some(skill.as_bytes()) {
+                if json {
+                    println!("{}", json!({ "ok": false, "code": "drift", "path": shown }));
+                }
                 bail!(
                     "{} drifts from the driver skill {} generates: run maestro flow driver-skill --out",
                     path.display(),
                     flow.name()
                 );
+            }
+            if json {
+                println!("{}", json!({ "ok": true, "skill": skill, "path": shown }));
             }
         }
         Some(path) => {
@@ -824,6 +854,9 @@ fn driver_skill(definition: &std::path::Path, out: Option<&std::path::Path>, che
                 std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
             }
             std::fs::write(path, &skill).with_context(|| format!("writing {}", path.display()))?;
+            if json {
+                println!("{}", json!({ "ok": true, "skill": skill, "path": shown }));
+            }
         }
     }
     Ok(())
