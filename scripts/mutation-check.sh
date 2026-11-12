@@ -1931,11 +1931,11 @@ mutate $dog '    if got != receipt.evidence.sha256 {' '    if false {'
 mutate $cli '            std::process::ExitCode::from(failure.exit())' '            std::process::ExitCode::FAILURE'
 # verify@1 itself (V1 to V4). V1: pin compares HEAD with params.head, maps a moved one to `moved`,
 # and carries fresh_for. V2: check runs only on at_head, in a snapshot of params.head. V4: exercise
-# only with a declared surface, its receipt bound to the params' head. The kernel guards these
-# rest on are anchored above and reused here: freshness by `fresh_for` (`age > secs(*f)`, three
-# mutants), a stale observation blocking its dependents (`Form::Open if !stale.is_empty()`),
-# write-time freshness in complete (`if !held.next.enabled.iter().any(..)`), a switch on the
-# recorded value (`e.value.as_deref() != Some(case.value.as_str())`), V3's exit status
+# only with a declared surface (the surface node's own `test -n`), its receipt bound to the params'
+# head. The kernel guards these rest on are anchored above and reused here: freshness by `fresh_for`
+# (`age > secs(*f)`, three mutants), a stale observation blocking its dependents (`Form::Open if
+# !stale.is_empty()`), write-time freshness in complete (`if !held.next.enabled.iter().any(..)`), a
+# switch on the recorded value (`e.value.as_deref() != Some(case.value.as_str())`), V3's exit status
 # (`_ => (exit != 0).then(`) and the exit_map (`!exit_map.iter().any(|m| m.exit == exit)`).
 vy=crates/flow/flows/verify.yaml
 mutate $vy 'test "$(git -C "$1" rev-parse HEAD)" = "$2"' 'true'
@@ -1947,6 +1947,7 @@ mutate $vy '    snapshot: "{{params.head}}"
 ' ''
 mutate $vy '    switch: {on: surface, case: declared}
 ' ''
+mutate $vy '    run: [test, -n, "{{params.surface}}"]' '    run: [test, -z, "{{params.surface}}"]'
 mutate $vy '"--head={{params.head}}"' '"--head={{params.repo}}"'
 # The accepting spine: receipts replay accepted only; one record per (node, iteration), at its
 # first place with its latest result; choices and answers on it. Two runs are compared only as
