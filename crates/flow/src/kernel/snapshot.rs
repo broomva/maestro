@@ -91,7 +91,9 @@ fn left(limits: &Limits, deadline: Option<Instant>) -> Limits {
     Limits { timeout: limits.timeout.min(left).max(Duration::from_millis(1)), ..limits.clone() }
 }
 
-/// `path`'s content, at most [`MAX_LOG`] bytes, if it is a regular file (a link is not followed).
+/// `path`'s content, if it is a regular file (a link is not followed) of at most [`MAX_LOG`]
+/// bytes. A longer file is none, read to one byte past the bound, so what is past it is never
+/// taken for its end.
 fn read_file(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -101,8 +103,8 @@ fn read_file(path: &Path) -> Option<Vec<u8>> {
         return None;
     }
     let mut bytes = Vec::new();
-    file.take(MAX_LOG).read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+    file.take(MAX_LOG + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= MAX_LOG).then_some(bytes)
 }
 
 /// A snapshot's folder, removed when dropped, and its HEAD log as the checkout left it.
@@ -278,6 +280,18 @@ mod tests {
     }
 
     #[test]
+    fn a_file_past_the_bound_is_never_read_short() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("log");
+        std::fs::write(&path, vec![b'x'; MAX_LOG as usize]).unwrap();
+        assert_eq!(read_file(&path).map(|b| b.len()), Some(MAX_LOG as usize));
+        std::fs::write(&path, vec![b'x'; MAX_LOG as usize + 1]).unwrap();
+        assert_eq!(read_file(&path), None);
+        std::os::unix::fs::symlink(tmp.path().join("missing"), tmp.path().join("link")).unwrap();
+        assert_eq!(read_file(&tmp.path().join("link")), None);
+    }
+
+    #[test]
     fn a_check_reads_the_heads_history_and_tags() {
         let tmp = tempfile::tempdir().unwrap();
         let first = repository(tmp.path(), "sha1");
@@ -308,6 +322,13 @@ mod tests {
             let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60));
             assert_eq!(outcome(ran), "snapshot_moved", "{case}");
         }
+        // A HEAD log grown past the bound is never read short: an entry past it is not missed.
+        let entry = format!("{first} {head} t <t@localhost> 0 +0000\tcheckout: in place");
+        let check = format!(
+            "yes '{entry}' | head -n 20000 >> .git/logs/HEAD && echo '{head} {first} t <t@localhost> 0 +0000\tx' >> .git/logs/HEAD"
+        );
+        let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60));
+        assert_eq!(outcome(ran), "snapshot_moved", "a log past the bound");
         // Moving to the head itself is no move; a check that does nothing to HEAD passes.
         for check in [format!("git checkout -q {head}"), "git reset -q --hard HEAD".to_string(), "true".to_string()] {
             let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60));

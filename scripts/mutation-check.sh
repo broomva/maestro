@@ -1852,7 +1852,7 @@ mutate $fx '            .and_then(|real| maestro_store::tree::check_root_owned(&
 mutate $fx '            std::os::unix::process::CommandExt::arg0(&mut cmd, name);' ''
 mutate $fx '            cmd.env("PATH", maestro_store::tree::git_path());' '            cmd.env("PATH", std::env::var_os("PATH").unwrap_or_default());'
 mutate $fk/write.rs '    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref() };' '    let feed = Feed { search: Search::Caller, stdin: plan.stdin.as_deref() };'
-mutate $fk/snapshot.rs '    exec::run(argv, &snapshot.root, limits, Feed { search: Search::Caller, stdin: None })' '    exec::run(argv, &snapshot.root, limits, Feed { search: Search::Trusted, stdin: None })'
+mutate $fk/snapshot.rs '&left(limits, deadline), Feed { search: Search::Caller, stdin: None });' '&left(limits, deadline), Feed { search: Search::Trusted, stdin: None });'
 # A work node's verify reads the outputs it judges as JSON on its standard input, from a file that
 # never blocks the kernel; no other command reads them, and `{{outputs.*}}` in any command, a
 # snapshot or the workdir is refused at compile time (an IR pinned before keeps its run-time
@@ -1875,9 +1875,10 @@ mutate $fk/snapshot.rs '        remove(&self.root);' ''
 # The run's timeout is one deadline that setup and the command share. A check that moved the
 # snapshot's HEAD (off the commit, onto a branch, away and back, its log rewritten) is refused.
 mutate $fk/snapshot.rs '            match exec::supervise(cmd, &left(limits, deadline)).0 {' '            match exec::supervise(cmd, limits).0 {'
-mutate $fk/snapshot.rs '    exec::run(argv, &snapshot.root, &left(limits, deadline), Feed' '    exec::run(argv, &snapshot.root, limits, Feed'
+mutate $fk/snapshot.rs 'exec::run(argv, &snapshot.root, &left(limits, deadline), Feed' 'exec::run(argv, &snapshot.root, limits, Feed'
 mutate $fk/snapshot.rs '    let left = deadline.saturating_duration_since(Instant::now());' '    let left = limits.timeout;'
 mutate $fk/snapshot.rs '    match snapshot.moved(commit) {' '    match None::<String> {'
+mutate $fk/snapshot.rs '    (bytes.len() as u64 <= MAX_LOG).then_some(bytes)' '    Some(bytes)'
 mutate $fk/snapshot.rs '        if head.as_deref().map(|h| h.trim_ascii()) != Some(commit.as_bytes()) {' '        if false {'
 mutate $fk/snapshot.rs "            .any(|line| line.split(|b| *b == b' ').nth(1) != Some(commit.as_bytes()));" '            .any(|_| false);'
 mutate $fk/snapshot.rs "            return Some(\"the check rewrote the snapshot's HEAD log\".into());" '            return None;'

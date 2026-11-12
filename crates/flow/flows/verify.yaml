@@ -19,9 +19,9 @@ nodes:
     inputs: [params.head]
     exit_map: {0: at_head, 1: moved}
   # V2 and V3: the project's own check, run by the kernel, only while pin is fresh and at_head.
-  # It runs in a snapshot of params.head (one commit, in a new folder), never in the working tree,
-  # so its exit status is the result for that commit's content whatever the repository does
-  # meanwhile. It alone searches the caller's PATH, for the project's toolchain.
+  # It runs in a snapshot of params.head (a shared clone, history kept, in a new folder), never in
+  # the working tree, so its exit status is the result for that commit's content whatever the
+  # repository does meanwhile. It alone searches the caller's PATH, for the project's toolchain.
   check:
     class: pure
     needs: [pin]
