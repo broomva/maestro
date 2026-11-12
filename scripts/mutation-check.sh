@@ -1873,6 +1873,12 @@ mutate $fk/write.rs '            if !snapshot::is_object_id(&commit) {' '       
 mutate $fk/snapshot.rs '    matches!(commit.len(), 40 | 64) && ' '    true && '
 mutate $fk/snapshot.rs '"-q", "--depth=1", "--no-tags", "--"];' '"-q", "--depth=2147483647", "--no-tags", "--"];'
 mutate $fk/snapshot.rs '        remove(&self.root);' ''
+# The snapshot is made in its commit's object format, and the run's timeout is one deadline that
+# setup and the command share.
+mutate $fk/snapshot.rs '    if commit.len() == 64 { "--object-format=sha256" } else { "--object-format=sha1" }' '    "--object-format=sha1"'
+mutate $fk/snapshot.rs '            match exec::supervise(cmd, &left(limits, deadline)).0 {' '            match exec::supervise(cmd, limits).0 {'
+mutate $fk/snapshot.rs '    exec::run(argv, &snapshot.root, &left(limits, deadline), Feed' '    exec::run(argv, &snapshot.root, limits, Feed'
+mutate $fk/snapshot.rs '    let left = deadline.saturating_duration_since(Instant::now());' '    let left = limits.timeout;'
 mutate $fk/snapshot.rs '        let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));' '        let _ = &dir;'
 mutate $fk/ir.rs '        if n.snapshot.is_some() && !matches!(n.class, Class::Pure { .. }) {' '        if false {'
 mutate $fk/ir.rs '    if ir.nodes.values().any(|n| n.snapshot.is_some()) {' '    if false {'
