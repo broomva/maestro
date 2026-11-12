@@ -2161,6 +2161,12 @@ mutate $stp '        open_instances: open_instances.iter().take(MAX_NAMED).clone
 mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if prior.is_some_and(|p| p.reason == reason) {'
 mutate $gt '    sorted.sort();' ''
 mutate $gt '        Ok(bytes) if bytes.len() <= MAX_INPUT => bytes,' '        Ok(bytes) => bytes,'
+# CodeRabbit at d57da10 (BRO-3636): the root is synced after `stop-gate/` is made in it, so the
+# new folder's entry is durable (a crash cannot be tested; `at::seams::SYNCED`, a unit-test record
+# of every directory synced, observes the sync); and a stop with no readable work clears the
+# counts even beside an unread instance (the mutant is the bug: the clear skipped then).
+mutate $fl/ledger.rs '        root.sync();' ''
+mutate $gt '            if counted {' '            if counted && unread.is_none() {'
 mutate $cli '        Err(e) if gate => {' '        Err(e) if false => {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }

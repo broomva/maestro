@@ -268,11 +268,9 @@ impl Run<'_> {
         }
         let refusing: Vec<&Assessment> = open.refusing().collect();
         if refusing.is_empty() {
-            if unread.is_some() {
-                self.note("instances_unread: no instance that did read has work, so the stop goes through (the gate fails open).");
-                return;
-            }
-            // Nothing refused: a count in a row is broken. Only counts there are need clearing.
+            // Nothing refused: a count in a row is broken, unread instances beside it or not, so
+            // an instance that reads again later starts its count afresh. Only counts there are
+            // need clearing.
             if counted {
                 let cleared =
                     self.ledger(&root).map_err(|(code, why)| format!("{code}: {why}")).and_then(|mut ledger| {
@@ -284,6 +282,9 @@ impl Run<'_> {
                 if let Err(e) = cleared {
                     self.note(format!("the refusal counts were not cleared ({e})."));
                 }
+            }
+            if unread.is_some() {
+                self.note("instances_unread: no instance that did read has work, so the stop goes through (the gate fails open).");
             }
             return;
         }

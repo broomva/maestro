@@ -495,3 +495,19 @@ fn judge_next(f: &Fx, fi: &InstanceId) -> Next {
     let reader = Reader::new(&f.flows, Options::default()).unwrap();
     next(&reader.lock().unwrap(), fi, clock::now()).unwrap()
 }
+
+/// The first save makes `stop-gate/`: the root is synced after it, so the folder's entry, and the
+/// counts in it, survive a crash. A later save syncs only the folder it writes in.
+#[test]
+fn the_first_save_syncs_the_root_that_holds_its_new_folder() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let synced = || crate::at::seams::SYNCED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    synced();
+    count_stop(&mut f.ledger, &me, &[&at("fi_a", 4)]);
+    let first = synced();
+    assert!(first.contains(&f.flows), "{first:?}");
+    assert!(first.contains(&f.flows.join("stop-gate")), "{first:?}");
+    count_stop(&mut f.ledger, &me, &[&at("fi_a", 4)]);
+    assert!(!synced().contains(&f.flows), "the folder is already there");
+}

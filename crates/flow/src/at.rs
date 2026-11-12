@@ -142,6 +142,20 @@ impl Dir {
 
     pub(crate) fn sync(&self) {
         let _ = self.fd.sync_all();
+        #[cfg(test)]
+        seams::SYNCED.with(|s| s.borrow_mut().push(self.path.clone()));
+    }
+}
+
+/// What this crate's unit tests observe of the writes: an fsync leaves no other trace.
+#[cfg(test)]
+pub(crate) mod seams {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        /// Every directory [`super::Dir::sync`] synced on this thread, in order.
+        pub(crate) static SYNCED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     }
 }
 

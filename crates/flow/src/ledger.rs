@@ -344,10 +344,12 @@ pub(crate) fn read_beside(
     }
 }
 
-/// Writes `bytes` as `name` in the root's folder `dir` (made when missing), whole: written aside
-/// under a new name, synced, then renamed over it, all through descriptors, never through a link.
+/// Writes `bytes` as `name` in the root's folder `dir` (made when missing, and the root synced
+/// then), whole: written aside under a new name, synced, then renamed over it, all through
+/// descriptors, never through a link.
 pub(crate) fn write_beside(root: &Dir, dir: &str, name: &str, bytes: &[u8]) -> Result<()> {
-    if !root.exists(dir)? {
+    let made = !root.exists(dir)?;
+    if made {
         root.mkdir(dir)?;
     }
     let d = root.dir(dir)?.ok_or_else(|| FlowError::LedgerDamaged { detail: format!("{dir}/ vanished") })?;
@@ -362,6 +364,11 @@ pub(crate) fn write_beside(root: &Dir, dir: &str, name: &str, bytes: &[u8]) -> R
     }
     moved?;
     d.sync();
+    // A folder made here is durable only once the root's entry for it is: synced as `append`
+    // syncs `instances/` after it makes an instance's folder.
+    if made {
+        root.sync();
+    }
     Ok(())
 }
 

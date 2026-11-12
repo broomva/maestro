@@ -594,3 +594,27 @@ fn a_settings_file_past_its_bound_is_not_read() {
     let i = stop::check_install(Harness::Claude, &path);
     assert!(!i.wired && i.detail.contains("over"), "{i:?}");
 }
+
+/// A stop with no readable work clears the session's counts even when an instance beside it does
+/// not read, so that instance, read again with work at the same position, takes three fresh
+/// refusals before its stop goes through.
+#[test]
+fn an_unread_only_stop_clears_the_counts() {
+    let f = fx();
+    let fi = f.begin("d1");
+    for n in 1..=2 {
+        assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked, "refusal {n}");
+    }
+    let log = f.root.join("workspace/.broomva/flows/instances").join(&fi).join("events.jsonl");
+    let whole = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, format!("{whole}{{\"torn\n")).unwrap();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("instances_unread") && n.contains("fails open")), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "the unread instance is still alerted: {out:?}");
+    std::fs::write(&log, whole).unwrap();
+    for n in 1..=3 {
+        assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked, "fresh refusal {n}");
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+}
