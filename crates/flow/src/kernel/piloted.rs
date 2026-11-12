@@ -143,8 +143,8 @@ fn v2_the_check_runs_on_the_heads_content_never_the_working_tree() {
 #[test]
 fn v2_a_check_that_moves_away_and_back_does_not_pass() {
     // The check checks out another commit, where it would pass, and comes back. The other commit
-    // is the head's own parent, so a snapshot with the head's history would have it; the snapshot
-    // holds the head alone, so there is nothing to move to, and the check fails.
+    // is the head's own parent, which the snapshot has (it has the head's history): the run is
+    // refused as having moved the snapshot, though the command exited 0.
     let (mut f, _clock, _) = pilot(VERIFY);
     std::fs::write(f.dir.join("passed"), "").unwrap();
     let other = commit(&f.dir, "two");
@@ -156,7 +156,7 @@ fn v2_a_check_that_moves_away_and_back_does_not_pass() {
     f.done(&fi, "pin");
     let c = f.claim(&fi, "check");
     let done = f.complete(&c.token, Value::Null);
-    assert_eq!(refused(&done).0, "verify_failed");
+    assert_eq!(refused(&done).0, "snapshot_moved");
     assert_ne!(state(&f, &fi, "check"), State::Done);
     assert_eq!(untouched(&f.dir), before);
     // The same check in the working tree would have passed: that is what it guards.
@@ -203,7 +203,7 @@ fn a_snapshot_that_cannot_be_made_is_its_own_refusal_never_the_projects_exit() {
     let done = f.complete(&c.token, Value::Null);
     let (code, reason) = refused(&done);
     assert_eq!(code, "snapshot_failed");
-    assert!(reason.contains("git fetch"), "{reason}");
+    assert!(reason.contains("git checkout"), "{reason}");
     // Not a full object id: refused before anything runs, whatever git would make of it.
     for commit in ["HEAD", "--upload-pack=touch pwned", &head[..12], &head.to_uppercase()] {
         let fi = begin(&mut f, commit, "touch ran");

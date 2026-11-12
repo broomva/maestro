@@ -154,11 +154,13 @@ maestro dogfood verify-receipt --head=H --surface=S < outputs.json   # check a d
   observes that the repository is at `params.head` (fresh for 10 minutes); `check` runs
   `params.check` in a snapshot of `params.head`, never in the working tree; and `exercise`, only
   when `params.surface` is set, takes the dogfood receipt its performer names. The snapshot is a
-  new repository in a private temporary folder holding that one commit (a depth-1 fetch from the
-  repository, read only), removed once the check ends, whatever it came to, so the result depends
-  on the head's content alone. A snapshot that cannot be made is `snapshot_failed`, and a
-  snapshot commit that is not a full object id `snapshot_invalid`, never an exit status of the
-  project's. The performer completes `exercise` with `--outputs '{"receipt": "<path>",
+  new repository in a private temporary folder, a `git clone --shared --no-checkout` of the
+  repository (read only, its objects shared, its history and tags kept) with the head checked out
+  detached, removed once the check ends, whatever it came to, so the result depends on the head's
+  content alone. Setup and the check share the run's one timeout. A snapshot that cannot be made
+  is `snapshot_failed`, a check that moved the snapshot's HEAD off the head (even and back)
+  `snapshot_moved`, and a snapshot commit that is not a full object id `snapshot_invalid`, never
+  an exit status of the project's. The performer completes `exercise` with `--outputs '{"receipt": "<path>",
   "receipt_sha256": "sha256:<hex>"}'`. The kernel hands those outputs to the verify as JSON on its
   standard input, never in its argv, and records them, so the log pins the receipt's content and
   the receipt pins its evidence. The verify is `maestro dogfood verify-receipt --head=H

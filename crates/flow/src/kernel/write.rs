@@ -57,7 +57,8 @@
 //! as JSON on its standard input (BRO-3636); no command's argv or workdir is ever filled from
 //! them, so a performer's text is never read as code. A pure node with a `snapshot` runs in a
 //! snapshot of that commit, never in the working tree (`snapshot`); a snapshot that cannot be made
-//! is refused `snapshot_failed`, never as an exit status of the project's command. The commands
+//! is refused `snapshot_failed`, and a run that moved the snapshot's HEAD `snapshot_moved`, never
+//! as an exit status of the project's command. The commands
 //! run as `exec` says: `maestro` is the kernel's own executable, `sh`, `git` and `test` the
 //! system's root-owned files, on a fixed `PATH`. The flows lock is not held while the command runs:
 //! it is dropped, and after the run everything is checked again under the lock, against the log

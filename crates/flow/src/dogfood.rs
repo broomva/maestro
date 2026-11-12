@@ -400,6 +400,16 @@ mod tests {
 
     const HEAD: &str = "9f2c3b1a9f2c3b1a9f2c3b1a9f2c3b1a9f2c3b1a";
 
+    #[test]
+    fn a_file_is_opened_closed_on_exec() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("f");
+        std::fs::write(&path, "x").unwrap();
+        let Ok(file) = open_regular(&path) else { panic!("a regular file opens") };
+        let flags = rustix::io::fcntl_getfd(&file).unwrap();
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "{flags:?}");
+    }
+
     /// A change to a receipt's JSON before it is written.
     type Edit = Box<dyn FnOnce(&mut Value)>;
 
