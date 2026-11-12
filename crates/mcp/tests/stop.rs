@@ -332,7 +332,9 @@ fn the_gate_fails_open() {
     std::fs::write(&log, text).unwrap();
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     allowed(&out);
-    assert!(out.notes.iter().any(|n| n.contains("instances_unread")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.contains("instances_unread") && n.contains("fails open")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.contains(&format!("{fi} (chain_broken)"))), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
 
     // A ledger that does not open.
     let f = fx();
@@ -354,11 +356,12 @@ fn the_gate_fails_open() {
     allowed(&out);
     assert!(out.notes.iter().any(|n| n.contains("refusals_unread")), "{out:?}");
 
-    // Refusal counts that cannot be written: their folder takes no new file.
+    // Refusal counts that cannot be written: their folder takes no new file (the count and its lock
+    // were made by a first stop, so they still open).
     let f = fx();
     f.begin("d1");
     let counts = f.root.join("workspace/.broomva/flows.stop-gate");
-    std::fs::create_dir(&counts).unwrap();
+    assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked);
     std::fs::set_permissions(&counts, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     std::fs::set_permissions(&counts, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
@@ -475,4 +478,45 @@ fn an_alert_is_an_ask_the_validator_of_record_takes() {
     }
     assert_eq!(stop::alert_id("x"), stop::alert_id("x"));
     assert_ne!(stop::alert_id("x"), stop::alert_id("y"));
+}
+
+/// An instance that does not read is reported even when another has work: the gate refuses the
+/// stop over the work, names the unread instance in its reason, notes it and alerts it.
+#[test]
+fn an_unread_instance_beside_work_is_still_reported() {
+    let f = fx();
+    let mine = f.begin("d1");
+    let broken = f.begin("d2");
+    let log = f.root.join("workspace/.broomva/flows/instances").join(&broken).join("events.jsonl");
+    let mut text = std::fs::read_to_string(&log).unwrap();
+    text.push_str("{\"torn\n");
+    std::fs::write(&log, text).unwrap();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    let reason = refusal(&out);
+    assert!(reason.contains(&format!("Instance {mine}")), "{reason}");
+    assert!(reason.contains(&format!("Maestro could not read {broken} (chain_broken)")), "{reason}");
+    assert!(out.notes.iter().any(|n| n.contains("instances_unread") && n.contains(&broken)), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert!(f.ledger().contains(&broken), "the alert names it");
+}
+
+/// A session's count lock held past the gate's wait lets the stop through, noted and alerted.
+#[test]
+fn a_count_lock_held_too_long_fails_open() {
+    let f = fx();
+    f.begin("d1");
+    assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked);
+    let dir = f.root.join("workspace/.broomva/flows.stop-gate");
+    let lock = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "lock"))
+        .unwrap();
+    let held = std::fs::OpenOptions::new().read(true).write(true).open(&lock).unwrap();
+    held.lock().unwrap();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    held.unlock().unwrap();
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("refusals_busy") && n.contains("fails open")), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
 }

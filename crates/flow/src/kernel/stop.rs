@@ -41,8 +41,10 @@
 //! that ledger's instance logs, and so share its host and its lifetime. Not inside the root, whose
 //! instance folders hold only their hash-chained logs. One file per session (named by the digest of
 //! its `SessionRef` and owner marker, so a replacement starts afresh) means no two sessions write
-//! one file, and a session's own stops run one at a time. The file is replaced whole (written
-//! aside, then renamed), so a crash leaves the old counts or the new ones.
+//! one file. Stops of one session can still overlap (two hooks, a harness that fires twice), so
+//! the session's count lock (`<digest>.lock` beside it, an OS file lock, as the flows lock is) is
+//! held from the load through the tally to the save: no two stops both read one count. The file is
+//! replaced whole (written aside, then renamed), so a crash leaves the old counts or the new ones.
 //!
 //! # The record
 //!
@@ -68,6 +70,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The key under which `flow next` and `flow status` return an instance's [`Work`], beside
 /// `next` or `status`; the driver skill's step 4 reads it.
@@ -371,6 +374,10 @@ pub fn block_reason(refusing: &[&Assessment], max: usize) -> String {
 /// The folder beside the flows root that holds the gate's refusal counts (see the module docs).
 pub const REFUSALS_DIR: &str = "flows.stop-gate";
 
+/// How long the gate waits for a session's count lock before it fails open. A session's stops
+/// run one at a time, so the lock is only ever held for a load, a tally and a save.
+pub const REFUSALS_WAIT: Duration = Duration::from_secs(2);
+
 /// The most bytes of a refusal-count file the gate reads.
 pub const MAX_REFUSALS_FILE: u64 = 1 << 20;
 
@@ -390,11 +397,14 @@ pub struct Tally {
     pub spent: Vec<String>,
 }
 
-/// One session's refusal counts, by instance (see the module docs).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One session's refusal counts, by instance (see the module docs), held under the session's
+/// count lock from [`Refusals::load`] until dropped.
+#[derive(Debug)]
 pub struct Refusals {
     path: PathBuf,
     pub counts: BTreeMap<String, Count>,
+    /// The session's count lock, `<digest>.lock` beside its counts, held exclusive.
+    _lock: std::fs::File,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -413,14 +423,28 @@ impl Refusals {
         Ok(dir.join(format!("{hex}.json")))
     }
 
-    /// `session`'s counts, or none yet. A file that does not read is an error, never no counts.
-    pub fn load(root: &Path, session: &VerifiedSession) -> Result<Refusals, KernelError> {
+    /// `session`'s counts, or none yet, under its count lock: taken exclusive, waiting up to `wait`
+    /// (`busy` past it), and held until the counts are dropped, so a load, its tally and its save
+    /// are one step that two stops never interleave. A file that does not read is an error, never
+    /// no counts.
+    pub fn load(root: &Path, session: &VerifiedSession, wait: Duration) -> Result<Refusals, KernelError> {
         use std::io::Read as _;
         let path = Refusals::path(root, session)?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(dir).map_err(crate::FlowError::io(dir))?;
+        let at = path.with_extension("lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&at)
+            .map_err(crate::FlowError::io(&at))?;
+        crate::lock::take(&lock, crate::lock::Mode::Exclusive, wait, &at)?;
         let file = match std::fs::File::open(&path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Refusals { path, counts: BTreeMap::new() });
+                return Ok(Refusals { path, counts: BTreeMap::new(), _lock: lock });
             }
             Err(e) => return Err(crate::FlowError::io(&path)(e).into()),
         };
@@ -434,7 +458,7 @@ impl Refusals {
         }
         let parsed: RefusalsFile = serde_json::from_slice(&bytes)
             .map_err(|e| KernelError::Encode(format!("{} does not parse ({e})", path.display())))?;
-        Ok(Refusals { path, counts: parsed.counts })
+        Ok(Refusals { path, counts: parsed.counts, _lock: lock })
     }
 
     /// Counts one more stop over `refusing`, the instances the gate would refuse over now: each

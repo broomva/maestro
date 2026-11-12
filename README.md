@@ -279,11 +279,14 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
     the instance's `seq` moves, and drops an instance it no longer refuses over. It lives in one
     file per session, `.broomva/flows.stop-gate/<digest>.json` beside the flows root, where the
     flow ADR keeps the ledger's coordination files: it counts against that ledger's logs, on its
-    host, for as long as the ledger lives, and the instance folders hold only their logs.
+    host, for as long as the ledger lives, and the instance folders hold only their logs. The
+    session's count lock (`<digest>.lock` beside it) is held from the load through the save, so
+    two stops at once are both counted; one held past 2 s lets the stop through (fail open).
   - **Fail open** (owner decision). The gate refuses only on the kernel's positive answer. Stdin
-    that is not a Stop payload, a session that does not verify, a ledger or an instance that does
-    not read, or counts that cannot be kept let the stop through, say why on stderr and file the
-    alert. A broken ledger must not trap every session. No session named, or no flow ledger, is
+    that is not a Stop payload, a session that does not verify, a ledger that does not read, or
+    counts that cannot be kept let the stop through, say why on stderr and file the alert. A
+    broken ledger must not trap every session. An instance that does not read is noted and
+    alerted in every case: beside one with work, the stop is refused and the reason names it. No session named, or no flow ledger, is
     no flow: the stop goes through with a note, no alert. A command line that does not parse exits
     0 too: exit 2 would block.
   - **`StopUnblockable`** (`harness`, `session`, `open_instances`, `reason`: `no_progress` or

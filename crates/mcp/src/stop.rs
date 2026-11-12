@@ -23,10 +23,14 @@
 //!
 //! - **Fail open.** The gate refuses only on a positive answer from the kernel: an instance the
 //!   session owns that is open and has work. A malformed standard input, a session that does not
-//!   verify, a ledger or an instance that does not read, or refusal counts that cannot be kept let
-//!   the stop through, say why on standard error, and file the alert when they can. By design: a
-//!   broken ledger must not trap every session. No session named, or no flow ledger in the
-//!   workspace, is no Maestro flow at all: the stop goes through with a note and no alert.
+//!   verify, a ledger that does not read, or refusal counts that cannot be kept (their lock held
+//!   past [`REFUSALS_WAIT`](maestro_flow::kernel::stop::REFUSALS_WAIT) included) let the stop
+//!   through, say why on standard error, and file the alert when they can. By design: a broken
+//!   ledger must not trap every session. An instance that does not read is noted and alerted
+//!   whatever else the gate decides: beside an instance with work, the stop is still refused, and
+//!   the refusal names it; with no work beside it, the stop goes through. No session named, or no
+//!   flow ledger in the workspace, is no Maestro flow at all: the stop goes through with a note and
+//!   no alert.
 //! - **The loop bound.** A session refused at one instance's log position
 //!   [`MAX_REFUSALS`](maestro_flow::kernel::stop::MAX_REFUSALS) times in a row is let through the
 //!   next time: the gate appends `StopUnblockable` with reason `no_progress` to each such instance
@@ -205,6 +209,17 @@ impl Run<'_> {
         }
     }
 
+    /// Notes and alerts the instances that did not read (see `judge`).
+    fn report_unread(&mut self, session: &SessionRef, list: &str) {
+        self.note(format!("instances_unread: {list} did not read, so the gate could not check it for work."));
+        let day = maestro_flow::clock::now().to_string();
+        let key = format!("fail_open\n{session}\ninstances_unread\n{}", day.get(..10).unwrap_or_default());
+        let words = format!(
+            "The flow stop gate could not read flow instance(s) {list} while it checked session {session}, so it could not tell whether they had work left. Repair or retire them; until then the gate cannot check them."
+        );
+        self.alert(session, &key, UNCHECKED, &words);
+    }
+
     fn judge(&mut self, input: &[u8]) {
         let named = self.gate.session.clone().filter(|s| !s.trim().is_empty());
         let Some(text) = named else {
@@ -240,20 +255,20 @@ impl Run<'_> {
             Ok(open) => open,
             Err(e) => return self.fail_open(Some(&session), e.code(), &e.to_string()),
         };
+        // An instance that does not read is reported (a note and an alert) whatever else the gate
+        // decides, so a broken log never goes unseen; it is named in a refusal too.
+        let unread = unread_list(&open.unread);
+        if let Some(list) = &unread {
+            self.report_unread(&session, list);
+        }
         let refusing: Vec<&Assessment> = open.refusing().collect();
         if refusing.is_empty() {
-            if let Some(u) = open.unread.first() {
-                let why = format!(
-                    "{} instance(s) did not read, {} first ({}: {})",
-                    open.unread.len(),
-                    u.instance,
-                    u.code,
-                    u.reason
-                );
-                return self.fail_open(Some(&session), "instances_unread", &why);
+            if unread.is_some() {
+                self.note("instances_unread: no instance that did read has work, so the stop goes through (the gate fails open).");
+                return;
             }
             // Nothing refused: a count in a row is broken.
-            if let Err(e) = Refusals::load(&root, &me).and_then(|mut r| {
+            if let Err(e) = Refusals::load(&root, &me, kstop::REFUSALS_WAIT).and_then(|mut r| {
                 r.tally(&[]);
                 r.save(&me)
             }) {
@@ -270,9 +285,14 @@ impl Run<'_> {
             ));
             return self.unblockable(&root, &me, &refusing, Unblockable::HarnessCannotBlock, &ids);
         }
-        let mut counts = match Refusals::load(&root, &me) {
+        // The session's count lock is held from here until `counts` drops: two stops at once are
+        // both counted. A lock still held past its wait lets this stop through.
+        let mut counts = match Refusals::load(&root, &me, kstop::REFUSALS_WAIT) {
             Ok(c) => c,
-            Err(e) => return self.fail_open(Some(&session), "refusals_unread", &format!("{}: {e}", e.code())),
+            Err(e) => {
+                let code = if e.code() == "busy" { "refusals_busy" } else { "refusals_unread" };
+                return self.fail_open(Some(&session), code, &format!("{}: {e}", e.code()));
+            }
         };
         let tally = counts.tally(&refusing);
         if let Err(e) = counts.save(&me) {
@@ -288,7 +308,11 @@ impl Run<'_> {
             return self.unblockable(&root, &me, &spent, Unblockable::NoProgress, &tally.spent);
         }
         let blocking: Vec<&Assessment> = refusing.into_iter().filter(|a| tally.refused.contains(&a.instance)).collect();
-        self.out.stdout = self.gate.harness.block(&kstop::block_reason(&blocking, MAX_NAMED));
+        let mut reason = kstop::block_reason(&blocking, MAX_NAMED);
+        if let Some(list) = &unread {
+            reason.push_str(&format!(" Maestro could not read {list}, so the gate could not check it for work."));
+        }
+        self.out.stdout = self.gate.harness.block(&reason);
         self.out.blocked = true;
     }
 
@@ -398,6 +422,16 @@ impl Run<'_> {
             Err(e) => self.note(format!("the alert was not filed in {}: {}", self.gate.alert_ledger, e.message)),
         }
     }
+}
+
+/// The instances that did not read, each with its code, at most [`MAX_NAMED`]; none when all read.
+fn unread_list(unread: &[kstop::Unread]) -> Option<String> {
+    let mut named: Vec<String> =
+        unread.iter().take(MAX_NAMED).map(|u| format!("{} ({})", u.instance, u.code)).collect();
+    if unread.len() > MAX_NAMED {
+        named.push(format!("{} more", unread.len() - MAX_NAMED));
+    }
+    (!named.is_empty()).then(|| named.join(", "))
 }
 
 fn s(v: &Value) -> &str {

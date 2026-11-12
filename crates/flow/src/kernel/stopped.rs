@@ -275,12 +275,12 @@ fn the_gate_refuses_one_position_three_times_then_lets_the_stop_through() {
     let me = agent("owner", "marker-1");
     let a = at("fi_a", 4);
     for n in 1..=MAX_REFUSALS {
-        let mut r = Refusals::load(&root, &me).unwrap();
+        let mut r = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
         let t = r.tally(&[&a]);
         assert_eq!((t.refused.as_slice(), t.spent.len()), ([String::from("fi_a")].as_slice(), 0), "refusal {n}");
         r.save(&me).unwrap();
     }
-    let mut r = Refusals::load(&root, &me).unwrap();
+    let mut r = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
     assert_eq!(r.counts["fi_a"], Count { seq: 4, refusals: MAX_REFUSALS });
     let t = r.tally(&[&a]);
     assert_eq!((t.refused.len(), t.spent.as_slice()), (0, [String::from("fi_a")].as_slice()));
@@ -295,7 +295,7 @@ fn the_count_starts_again_when_the_instance_moves() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".broomva/flows");
     let me = agent("owner", "marker-1");
-    let mut r = Refusals::load(&root, &me).unwrap();
+    let mut r = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
     r.counts = BTreeMap::from([("fi_a".to_string(), Count { seq: 4, refusals: MAX_REFUSALS })]);
     let t = r.tally(&[&at("fi_a", 5)]);
     assert_eq!(t.refused, ["fi_a"]);
@@ -338,4 +338,64 @@ fn a_choice_node_is_finished_with_choose() {
     // Any other class is completed.
     let (f, fi) = with(RELAY);
     assert!(judge(&f, &fi).next_steps()[0].contains("complete it with `maestro flow complete --claim-token"));
+}
+
+/// Two stops of one session at once: the count lock is held from load to save, so the second
+/// waits for the first and both are counted.
+#[test]
+fn two_stops_at_once_are_both_counted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".broomva/flows");
+    let me = agent("owner", "marker-1");
+    let a = at("fi_a", 4);
+    let mut first = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
+    let second = {
+        let (root, me, a) = (root.clone(), me.clone(), a.clone());
+        std::thread::spawn(move || {
+            let mut r = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
+            r.tally(&[&a]);
+            r.save(&me).unwrap();
+        })
+    };
+    // The second stop has had time to read; under the lock it is still waiting.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    first.tally(&[&a]);
+    first.save(&me).unwrap();
+    drop(first);
+    second.join().unwrap();
+    let counts = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap().counts;
+    assert_eq!(counts["fi_a"], Count { seq: 4, refusals: 2 });
+    // A lock held past the wait is refused busy, never waited out.
+    let held = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
+    let busy = std::thread::spawn(move || {
+        Refusals::load(&root, &me, std::time::Duration::from_millis(50)).map(|_| ()).unwrap_err().code()
+    });
+    assert_eq!(busy.join().unwrap(), "busy");
+    drop(held);
+}
+
+/// A live claim holds the node only for the inputs it was taken over: one over inputs the node no
+/// longer has is not the owner's work in hand, so the node is work to claim anew.
+#[test]
+fn a_claim_over_other_inputs_does_not_hold_the_node() {
+    let (mut f, fi) = with(RELAY);
+    done(&mut f, &fi, "one");
+    let lease_until = (clock::now() + jiff::SignedDuration::from_secs(600)).to_string();
+    let stale = json!({ "node": "two", "iteration": {}, "attempt": 1, "lease_until": lease_until, "token_sha256": "sha256:x", "inputs": { "one": "sha256:other" } });
+    push(&mut f, &fi, "Claimed", stale);
+    let a = judge(&f, &fi);
+    assert_eq!(
+        a.work,
+        [Work::Node { node: "two".into(), class: "pure".into(), iteration: Iteration::default(), held: false }]
+    );
+    // Over the node's inputs as they are, the same claim holds it.
+    let inputs = serde_json::to_value(&judge_next(&f, &fi).enabled[0].inputs).unwrap();
+    let current = json!({ "node": "two", "iteration": {}, "attempt": 2, "lease_until": lease_until, "token_sha256": "sha256:y", "inputs": inputs });
+    push(&mut f, &fi, "Claimed", current);
+    assert!(matches!(&judge(&f, &fi).work[..], [Work::Node { held: true, .. }]));
+}
+
+fn judge_next(f: &Fx, fi: &InstanceId) -> Next {
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    next(&reader.lock().unwrap(), fi, clock::now()).unwrap()
 }

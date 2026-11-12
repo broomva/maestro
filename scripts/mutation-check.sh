@@ -2118,7 +2118,7 @@ mutate $gt '        if tally.refused.is_empty() {' '        if false {'
 mutate $gt '        Some("Stop") => {}' '        Some(_) => {}'
 mutate $gt '        if let Err(e) = payload(input) {' '        if let (true, Err(e)) = (false, payload(input)) {'
 mutate $gt '    if input.len() > MAX_INPUT {' '    if false {'
-mutate $gt '            if let Some(u) = open.unread.first() {' '            if let Some(u) = open.unread.first().filter(|_| false) {'
+mutate $gt '            if unread.is_some() {' '            if false {'
 mutate $gt '        if let Err(e) = counts.save(&me) {' '        if let (true, Err(e)) = (false, counts.save(&me)) {'
 mutate $gt '        if std::fs::symlink_metadata(&root).is_err() {' '        if false {'
 mutate $gt '                self.alert(s, &key, UNCHECKED, &words);' ''
@@ -2132,6 +2132,15 @@ mutate $gt '            if hook.get("type").and_then(Value::as_str) == Some("com
 mutate $stp '    if class == "choice" {' '    if false {'
 mutate $gt '                    already.push((a.instance.clone(), seq));' ''
 mutate $gt '        if made.is_empty() && already.is_empty() && failed.is_empty() {' '        if made.is_empty() && already.is_empty() {'
+# Round 1, stratum B (BRO-3636): two stops of one session at once are both counted (the count
+# lock spans load, tally and save; one held past its wait fails open); an instance that does not
+# read is noted, alerted and named whatever else the gate decides; a live claim holds a node only
+# over its current inputs.
+mutate $stp '        crate::lock::take(&lock, crate::lock::Mode::Exclusive, wait, &at)?;' ''
+mutate $stp '        let held = live.iter().find(|c| c.node == e.node && c.iteration == e.iteration && c.inputs == e.inputs);' '        let held = live.iter().find(|c| c.node == e.node && c.iteration == e.iteration);'
+mutate $gt '            self.report_unread(&session, list);' ''
+mutate $gt '            reason.push_str(&format!(" Maestro could not read {list}, so the gate could not check it for work."));' ''
+mutate $gt '                let code = if e.code() == "busy" { "refusals_busy" } else { "refusals_unread" };' '                let code = "refusals_unread";'
 mutate $cli '        Err(e) if gate => {' '        Err(e) if false => {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
