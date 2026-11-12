@@ -449,6 +449,9 @@ mod tests {
         assert_eq!(ENV_ALLOW, allowed);
         assert!(names.iter().all(|n| allowed.contains(n)), "{names:?}");
         assert!(names.contains(&"PATH"), "the allowed names are passed on: {names:?}");
+        // PATH is set apart from the loop, so the loop's copy needs a name of its own to show.
+        assert!(std::env::var_os("HOME").is_some(), "the test process has HOME to pass on");
+        assert!(names.contains(&"HOME"), "the allowed names besides PATH are passed on: {names:?}");
     }
 
     #[test]
