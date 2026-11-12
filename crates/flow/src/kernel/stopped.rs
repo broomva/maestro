@@ -7,9 +7,9 @@ use super::asks::asked::{Fx, filing, fx, git};
 use super::stop::{self, Assessment, Count, MAX_REFUSALS, Recorded, Refusals, Waiting, Work};
 use super::*;
 use crate::clock;
-use crate::hooked::common::agent;
+use crate::hooked::common::{agent, host};
 use crate::kernel::events::{KernelEvent, StopUnblockable, Unblockable};
-use crate::{InstanceId, NewEvent, Options, Reader};
+use crate::{InstanceId, Ledger, NewEvent, Options, Reader};
 use maestro_core::session::VerifiedSession;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -268,34 +268,54 @@ fn at(instance: &str, seq: u64) -> Assessment {
     }
 }
 
+/// One stop over `a`, counted under the ledger's write lock, as the gate counts it.
+fn count_stop(ledger: &mut Ledger, who: &VerifiedSession, refusing: &[&Assessment]) -> stop::Tally {
+    let guard = ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, who).unwrap();
+    let t = r.tally(refusing);
+    r.save(&guard, who).unwrap();
+    t
+}
+
+fn counts_of(ledger: &mut Ledger, who: &VerifiedSession) -> BTreeMap<String, Count> {
+    let guard = ledger.lock().unwrap();
+    Refusals::load(&guard, who).unwrap().counts
+}
+
+fn files(dir: &std::path::Path) -> Vec<String> {
+    let mut out: Vec<String> = match std::fs::read_dir(dir) {
+        Ok(d) => d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect(),
+        Err(_) => Vec::new(),
+    };
+    out.sort();
+    out
+}
+
 #[test]
 fn the_gate_refuses_one_position_three_times_then_lets_the_stop_through() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join(".broomva/flows");
-    let me = agent("owner", "marker-1");
+    let mut f = fx(None, "");
+    let me = f.me.clone();
     let a = at("fi_a", 4);
     for n in 1..=MAX_REFUSALS {
-        let mut r = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
-        let t = r.tally(&[&a]);
+        let t = count_stop(&mut f.ledger, &me, &[&a]);
         assert_eq!((t.refused.as_slice(), t.spent.len()), ([String::from("fi_a")].as_slice(), 0), "refusal {n}");
-        r.save(&me).unwrap();
     }
-    let mut r = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
-    assert_eq!(r.counts["fi_a"], Count { seq: 4, refusals: MAX_REFUSALS });
-    let t = r.tally(&[&a]);
+    assert_eq!(counts_of(&mut f.ledger, &me)["fi_a"], Count { seq: 4, refusals: MAX_REFUSALS });
+    let t = count_stop(&mut f.ledger, &me, &[&a]);
     assert_eq!((t.refused.len(), t.spent.as_slice()), (0, [String::from("fi_a")].as_slice()));
-    // Durable: one file per session, beside the flows root.
-    let path = Refusals::path(&root, &me).unwrap();
-    assert!(path.starts_with(tmp.path().join(".broomva/flows.stop-gate")), "{}", path.display());
-    assert_ne!(path, Refusals::path(&root, &agent("owner", "marker-2")).unwrap());
+    // Durable, under the ledger's own root: one file per session, a replacement's apart.
+    let dir = f.flows.join("stop-gate");
+    assert_eq!(files(&dir).len(), 1, "{:?}", files(&dir));
+    count_stop(&mut f.ledger, &agent("owner", "marker-2"), &[&a]);
+    assert_eq!(files(&dir).len(), 2, "{:?}", files(&dir));
 }
 
 #[test]
 fn the_count_starts_again_when_the_instance_moves() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join(".broomva/flows");
-    let me = agent("owner", "marker-1");
-    let mut r = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
     r.counts = BTreeMap::from([("fi_a".to_string(), Count { seq: 4, refusals: MAX_REFUSALS })]);
     let t = r.tally(&[&at("fi_a", 5)]);
     assert_eq!(t.refused, ["fi_a"]);
@@ -304,6 +324,116 @@ fn the_count_starts_again_when_the_instance_moves() {
     r.counts.insert("fi_b".into(), Count { seq: 2, refusals: MAX_REFUSALS });
     r.tally(&[&at("fi_a", 5)]);
     assert!(!r.counts.contains_key("fi_b"));
+}
+
+/// Two stops of one session at once: the ledger's write lock is held from load to save, so the
+/// second waits for the first and both are counted; a lock held past the wait is `busy`.
+#[test]
+fn two_stops_at_once_are_both_counted() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let a = at("fi_a", 4);
+    let other_writer = || Ledger::open(&f.flows, &host("mac"), Options::default()).unwrap();
+    let mut second_ledger = other_writer();
+    let guard = f.ledger.lock().unwrap();
+    let mut first = Refusals::load(&guard, &me).unwrap();
+    let second = {
+        let (me, a) = (me.clone(), a.clone());
+        std::thread::spawn(move || {
+            count_stop(&mut second_ledger, &me, &[&a]);
+        })
+    };
+    // The second stop has had time to read; under the lock it is still waiting.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    first.tally(&[&a]);
+    first.save(&guard, &me).unwrap();
+    drop(guard);
+    second.join().unwrap();
+    assert_eq!(counts_of(&mut f.ledger, &me)["fi_a"], Count { seq: 4, refusals: 2 });
+    let _held = f.ledger.lock().unwrap();
+    let wait = Options { lock_wait: std::time::Duration::from_millis(50) };
+    let impatient = Ledger::open(&f.flows, &host("mac"), wait).and_then(|mut l| l.lock().map(|_| ()));
+    assert_eq!(impatient.unwrap_err().code(), "busy");
+}
+
+/// The counts belong to the ledger they were taken in: an archive takes them away with the root,
+/// a fresh ledger starts with none, and counts of another epoch, carried over by hand, are none.
+#[test]
+fn an_archived_ledgers_counts_do_not_carry_to_a_fresh_one() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let a = at("fi_a", 4);
+    for _ in 0..MAX_REFUSALS {
+        count_stop(&mut f.ledger, &me, &[&a]);
+    }
+    let old = files(&f.flows.join("stop-gate"));
+    let dest = f.tmp.path().join("archive");
+    crate::operator::archive(&f.flows, &dest, &Options::default()).unwrap();
+    assert_eq!(files(&dest.join("flows/stop-gate")), old, "the counts moved with the root");
+    crate::operator::create_fresh_ledger(&f.flows, &host("mac"), &Options::default()).unwrap();
+    let mut fresh = Ledger::open(&f.flows, &host("mac"), Options::default()).unwrap();
+    assert!(counts_of(&mut fresh, &me).is_empty());
+    // The old file put back by hand under the new root is another epoch's: no counts.
+    std::fs::create_dir_all(f.flows.join("stop-gate")).unwrap();
+    std::fs::copy(dest.join("flows/stop-gate").join(&old[0]), f.flows.join("stop-gate").join(&old[0])).unwrap();
+    assert!(counts_of(&mut fresh, &me).is_empty());
+    assert_eq!(count_stop(&mut fresh, &me, &[&a]).refused, ["fi_a"], "a first refusal, not a fourth");
+}
+
+/// Counts are written only by this host's writer of the ledger: on a ledger bound to another host
+/// nothing is opened to write them.
+#[test]
+fn a_foreign_host_writes_no_counts() {
+    let f = fx(None, "");
+    assert_eq!(Ledger::open(&f.flows, &host("elsewhere"), Options::default()).unwrap_err().code(), "foreign_host");
+    assert!(files(&f.flows.join("stop-gate")).is_empty());
+    assert!(!f.flows.parent().unwrap().join("flows.stop-gate").exists());
+}
+
+#[test]
+fn a_counts_file_past_its_bound_or_through_a_link_is_refused() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    count_stop(&mut f.ledger, &me, &[&at("fi_a", 4)]);
+    let dir = f.flows.join("stop-gate");
+    let name = files(&dir).pop().unwrap();
+    std::fs::write(dir.join(&name), vec![b' '; stop::MAX_REFUSALS_FILE as usize + 1]).unwrap();
+    let guard = f.ledger.lock().unwrap();
+    assert_eq!(Refusals::load(&guard, &me).unwrap_err().code(), "too_large");
+    drop(guard);
+    std::fs::remove_file(dir.join(&name)).unwrap();
+    std::os::unix::fs::symlink(f.tmp.path().join("elsewhere.json"), dir.join(&name)).unwrap();
+    let guard = f.ledger.lock().unwrap();
+    assert_eq!(Refusals::load(&guard, &me).unwrap_err().code(), "symlink");
+}
+
+/// A stop with nothing to count writes nothing.
+#[test]
+fn an_empty_tally_of_no_counts_writes_nothing() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    count_stop(&mut f.ledger, &me, &[]);
+    assert!(!f.flows.join("stop-gate").exists());
+}
+
+#[test]
+fn a_record_is_refused_when_the_clock_is_behind_the_log() {
+    let (mut f, fi) = with(RELAY);
+    let clock = crate::clock::TestClock::install();
+    clock.set("2000-01-01T00:00:00Z".parse().unwrap());
+    let me = f.me.clone();
+    assert_eq!(record(&mut f, &me, &fi, Unblockable::NoProgress).unwrap_err().code(), "clock_behind");
+    assert_eq!(f.events(&fi).len(), 1);
+}
+
+#[test]
+fn a_record_names_at_most_max_named_instances() {
+    let (mut f, fi) = with(RELAY);
+    let me = f.me.clone();
+    let many: Vec<String> = (0..stop::MAX_NAMED + 6).map(|i| format!("fi_{i:032x}")).collect();
+    stop::record(&mut f.ledger, &me, &fi, "claude", Unblockable::NoProgress, &many).unwrap();
+    let named = f.events(&fi).last().unwrap()["body"]["open_instances"].as_array().unwrap().len();
+    assert_eq!(named, stop::MAX_NAMED);
 }
 
 #[test]
@@ -338,40 +468,6 @@ fn a_choice_node_is_finished_with_choose() {
     // Any other class is completed.
     let (f, fi) = with(RELAY);
     assert!(judge(&f, &fi).next_steps()[0].contains("complete it with `maestro flow complete --claim-token"));
-}
-
-/// Two stops of one session at once: the count lock is held from load to save, so the second
-/// waits for the first and both are counted.
-#[test]
-fn two_stops_at_once_are_both_counted() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join(".broomva/flows");
-    let me = agent("owner", "marker-1");
-    let a = at("fi_a", 4);
-    let mut first = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
-    let second = {
-        let (root, me, a) = (root.clone(), me.clone(), a.clone());
-        std::thread::spawn(move || {
-            let mut r = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
-            r.tally(&[&a]);
-            r.save(&me).unwrap();
-        })
-    };
-    // The second stop has had time to read; under the lock it is still waiting.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    first.tally(&[&a]);
-    first.save(&me).unwrap();
-    drop(first);
-    second.join().unwrap();
-    let counts = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap().counts;
-    assert_eq!(counts["fi_a"], Count { seq: 4, refusals: 2 });
-    // A lock held past the wait is refused busy, never waited out.
-    let held = Refusals::load(&root, &me, stop::REFUSALS_WAIT).unwrap();
-    let busy = std::thread::spawn(move || {
-        Refusals::load(&root, &me, std::time::Duration::from_millis(50)).map(|_| ()).unwrap_err().code()
-    });
-    assert_eq!(busy.join().unwrap(), "busy");
-    drop(held);
 }
 
 /// A live claim holds the node only for the inputs it was taken over: one over inputs the node no

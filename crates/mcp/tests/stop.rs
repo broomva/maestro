@@ -17,6 +17,10 @@ fn guard_process_entry() {
     maestro_flow::kernel::guard_entry();
 }
 
+/// The Direct sessions the fixture registers, with their launch tokens. `spec-check`'s name reads
+/// as a spec word to the asks validator.
+const SESSIONS: [(&str, &str); 3] = [("d1", "tok-1"), ("d2", "tok-2"), ("spec-check", "tok-3")];
+
 /// `one`, then `two`, in the work folder.
 const RELAY: &str = r#"
 flow: relay
@@ -52,7 +56,7 @@ fn fx() -> Fx {
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let direct = DirectRegistry::new();
-    for (id, token) in [("d1", "tok-1"), ("d2", "tok-2")] {
+    for (id, token) in SESSIONS {
         direct.register(DirectSession {
             id: id.into(),
             cwd: work.to_string_lossy().into_owned(),
@@ -94,7 +98,7 @@ impl Fx {
     }
 
     fn claim_of(&self, id: &str) -> Value {
-        let token = if id == "d1" { "tok-1" } else { "tok-2" };
+        let token = SESSIONS.iter().find(|(s, _)| *s == id).map_or("", |(_, t)| t);
         json!({ "token": token, "cwd": self.work })
     }
 
@@ -347,7 +351,7 @@ fn the_gate_fails_open() {
     // Refusal counts that do not read: the session's count file is a folder.
     let f = fx();
     f.begin("d1");
-    let counts = f.root.join("workspace/.broomva/flows.stop-gate");
+    let counts = f.root.join("workspace/.broomva/flows/stop-gate");
     assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked);
     let file = std::fs::read_dir(&counts).unwrap().next().unwrap().unwrap().path();
     std::fs::remove_file(&file).unwrap();
@@ -360,7 +364,7 @@ fn the_gate_fails_open() {
     // were made by a first stop, so they still open).
     let f = fx();
     f.begin("d1");
-    let counts = f.root.join("workspace/.broomva/flows.stop-gate");
+    let counts = f.root.join("workspace/.broomva/flows/stop-gate");
     assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked);
     std::fs::set_permissions(&counts, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
@@ -500,23 +504,93 @@ fn an_unread_instance_beside_work_is_still_reported() {
     assert!(f.ledger().contains(&broken), "the alert names it");
 }
 
-/// A session's count lock held past the gate's wait lets the stop through, noted and alerted.
+/// The ledger's write lock held past the gate's wait, while counts are taken, lets the stop
+/// through, noted and alerted. The root directory's own lock is what a writer takes after the lock
+/// file, so holding it leaves the reads free and stops only the count.
 #[test]
 fn a_count_lock_held_too_long_fails_open() {
     let f = fx();
     f.begin("d1");
-    assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked);
-    let dir = f.root.join("workspace/.broomva/flows.stop-gate");
-    let lock = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.extension().is_some_and(|x| x == "lock"))
-        .unwrap();
-    let held = std::fs::OpenOptions::new().read(true).write(true).open(&lock).unwrap();
-    held.lock().unwrap();
+    let root = std::fs::File::open(f.root.join("workspace/.broomva/flows")).unwrap();
+    root.lock().unwrap();
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
-    held.unlock().unwrap();
+    root.unlock().unwrap();
     allowed(&out);
     assert!(out.notes.iter().any(|n| n.contains("refusals_busy") && n.contains("fails open")), "{out:?}");
     assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// Counts are written only through this host's writer: a ledger bound to another host is refused
+/// before anything is written, and the stop goes through, alerted.
+#[test]
+fn a_ledger_of_another_host_is_not_written() {
+    let f = fx();
+    f.begin("d1");
+    let flows = f.root.join("workspace/.broomva/flows");
+    std::fs::write(flows.join("HOST"), "elsewhere\n").unwrap();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("foreign_host") && n.contains("fails open")), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert!(!flows.join("stop-gate").exists());
+    assert!(!f.root.join("workspace/.broomva/flows.stop-gate").exists());
+}
+
+/// A ledger moved or archived is not "no ledger": the gate cannot read it, so the stop goes
+/// through, noted and alerted.
+#[test]
+fn a_moved_or_archived_ledger_fails_open_alerted() {
+    let f = fx();
+    f.begin("d1");
+    let broomva = f.root.join("workspace/.broomva");
+    std::fs::rename(broomva.join("flows"), broomva.join("flows.moved")).unwrap();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("root_moved") && n.contains("fails open")), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+
+    let f = fx();
+    f.begin("d1");
+    let broomva = f.root.join("workspace/.broomva");
+    let opts = maestro_flow::Options::default();
+    maestro_flow::operator::archive(&broomva.join("flows"), &f.root.join("archive"), &opts).unwrap();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    allowed(&out);
+    // The ledger reads an archived root as moved (its marker stands where it was).
+    assert!(out.notes.iter().any(|n| n.contains("root_moved") && n.contains("fails open")), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// An alert about a session whose name reads as a spec word still files: it carries a summary,
+/// which the asks validator requires then.
+#[test]
+fn an_alert_whose_words_read_as_a_spec_still_files() {
+    let f = fx();
+    let fi = f.begin("spec-check");
+    let out = f.gate_with("spec-check", Harness::Codex, true, &codex_stop());
+    allowed(&out);
+    assert_eq!(out.recorded, [(fi, 2)]);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert!(f.ledger().contains("direct:-/spec-check"));
+}
+
+#[test]
+fn an_alerts_id_does_not_depend_on_the_order_its_records_were_found() {
+    let (a, b) = (("fi_a".to_string(), 3), ("fi_b".to_string(), 7));
+    assert_eq!(stop::unblockable_key(&[a.clone(), b.clone()]), stop::unblockable_key(&[b, a]));
+}
+
+#[test]
+fn a_settings_file_past_its_bound_is_not_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("settings.json");
+    let hook = json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "maestro flow stop-gate --harness claude" }] }] } });
+    let mut text = hook.to_string();
+    assert!(stop::check_install(Harness::Claude, &path).detail.contains("does not read"));
+    std::fs::write(&path, &text).unwrap();
+    assert!(stop::check_install(Harness::Claude, &path).wired);
+    text.push_str(&" ".repeat(stop::MAX_INPUT));
+    std::fs::write(&path, &text).unwrap();
+    let i = stop::check_install(Harness::Claude, &path);
+    assert!(!i.wired && i.detail.contains("over"), "{i:?}");
 }

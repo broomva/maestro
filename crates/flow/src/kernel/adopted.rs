@@ -961,3 +961,48 @@ fn a_former_owners_live_claim_is_waited_on_not_work() {
     );
     assert!(a.waiting.is_empty() && a.refuses_stop());
 }
+
+/// The stop gate (BRO-3636): a record is not written again only when the log ends on the same
+/// session's record. After an adoption, a log that ends on another session's record (the former
+/// owner's) never stands for the new owner's.
+#[test]
+fn another_sessions_stop_record_is_not_this_ones() {
+    use crate::kernel::events::Unblockable;
+    use crate::kernel::stop::{Recorded, record};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    push_adoption(&mut f.ledger, &fi, &me, &other(), 0, "flow-adopt-1");
+    assert_eq!(code(record(&mut f.ledger, &me, &fi, "claude", Unblockable::NoProgress, &[])), "not_owner");
+    let former = json!({ "harness": "claude", "session": serde_json::to_value(me.session()).unwrap(), "open_instances": [], "reason": "no_progress" });
+    push(&mut f.ledger, &fi, "StopUnblockable", former);
+    let mine = record(&mut f.ledger, &other(), &fi, "claude", Unblockable::NoProgress, &[]);
+    assert!(matches!(mine, Ok(Recorded::Appended(_))), "{mine:?}");
+    let again = record(&mut f.ledger, &other(), &fi, "claude", Unblockable::NoProgress, &[]);
+    assert!(matches!(again, Ok(Recorded::Already { .. })), "{again:?}");
+}
+
+/// The stop gate (BRO-3636): an instance whose log records `Retired` takes no write, so it has no
+/// work and is not open, even before it is moved to `retired/`.
+#[test]
+fn a_retired_instance_left_in_place_has_no_work_and_is_not_open() {
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    push_proposal(&mut f.ledger, &fi, "retirement", &me, &me, 0, "flow-retire-1");
+    push(
+        &mut f.ledger,
+        &fi,
+        "Retired",
+        json!({ "by": owner_json(&me), "approval": approval("flow-retire-1", "retire") }),
+    );
+    assert!(f.status(&fi).retired.is_some());
+    assert!(f.flows.join("instances").join(fi.as_str()).is_dir(), "still in place");
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let guard = reader.lock().unwrap();
+    let a =
+        crate::kernel::stop::assess_instance(&guard, &fi, crate::clock::now(), &|_, _| crate::kernel::AnswerSeen::Open)
+            .unwrap();
+    assert!(a.work.is_empty() && !a.refuses_stop(), "{a:?}");
+    let open =
+        crate::kernel::stop::open(&guard, &me, crate::clock::now(), &|_, _| crate::kernel::AnswerSeen::Open).unwrap();
+    assert!(open.instances.is_empty(), "{open:?}");
+}

@@ -277,17 +277,20 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
     position (`seq`), the session's 4th stop goes through: the gate appends `StopUnblockable`
     (reason `no_progress`) to that instance and files the alert. The count starts again whenever
     the instance's `seq` moves, and drops an instance it no longer refuses over. It lives in one
-    file per session, `.broomva/flows.stop-gate/<digest>.json` beside the flows root, where the
-    flow ADR keeps the ledger's coordination files: it counts against that ledger's logs, on its
-    host, for as long as the ledger lives, and the instance folders hold only their logs. The
-    session's count lock (`<digest>.lock` beside it) is held from the load through the save, so
-    two stops at once are both counted; one held past 2 s lets the stop through (fail open).
+    file per session under the ledger's own root, `.broomva/flows/stop-gate/<digest>.json`, read
+    and written through the root's descriptor (never through a link), and taken under the
+    ledger's write lock from the load through the save. So the lock's checks bind it (another
+    host's ledger is `foreign_host`, a moved root or another epoch is refused), two stops at once
+    are both counted, and a lock held past 2 s lets the stop through (fail open). The file
+    records its epoch and counts of another epoch are none; it moves with the root, so an archive
+    takes it away and a fresh ledger starts with none. A stop with nothing to count writes nothing.
   - **Fail open** (owner decision). The gate refuses only on the kernel's positive answer. Stdin
     that is not a Stop payload, a session that does not verify, a ledger that does not read, or
     counts that cannot be kept let the stop through, say why on stderr and file the alert. A
-    broken ledger must not trap every session. An instance that does not read is noted and
-    alerted in every case: beside one with work, the stop is refused and the reason names it. No session named, or no flow ledger, is
-    no flow: the stop goes through with a note, no alert. A command line that does not parse exits
+    broken ledger must not trap every session; a root moved or archived is such a ledger, never
+    "no ledger". An instance that does not read is noted and alerted in every case: beside one
+    with work, the stop is refused and the reason names it. No session named, or no flow ledger,
+    is no flow: the stop goes through with a note, no alert. A command line that does not parse exits
     0 too: exit 2 would block.
   - **`StopUnblockable`** (`harness`, `session`, `open_instances`, `reason`: `no_progress` or
     `harness_cannot_block`) is appended only by the gate, as the instance's owner, with every
@@ -296,7 +299,9 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
   - **The fleet alert** is a Maestro ask filed through `maestro_ask_file` (its writer of record
     validates it) into `--alert-ledger` (`MAESTRO_ALERT_LEDGER`, default `bstack-fleet.yaml`): the
     owner's Decisions view lists open asks, while an escalation goes only to the requests journal.
-    Its id is a digest of its subject, so one record or one failure class a day is one ask.
+    Its id is a digest of its subject (its records sorted), so one record or one failure class a
+    day is one ask. Every alert carries a `summary`, which the validator of record requires when
+    any of its words reads as a spec or design word (a session's name, a quoted error).
 - **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
   Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential
   (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP it is the arguments `cwd`, `token`, `node` and

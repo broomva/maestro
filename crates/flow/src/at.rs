@@ -94,11 +94,16 @@ impl Dir {
     /// The bytes of the file `name`, which must be at most `limit` bytes; `None` when it does not
     /// exist. No more than one byte past `limit` is ever read into memory.
     pub(crate) fn read(&self, name: &str, limit: u64) -> Result<Option<Vec<u8>>> {
+        self.read_as(name, limit, "log")
+    }
+
+    /// [`Dir::read`], naming the file `what` when it is over `limit`.
+    pub(crate) fn read_as(&self, name: &str, limit: u64, what: &'static str) -> Result<Option<Vec<u8>>> {
         let Some(file) = self.file(name, OFlags::RDONLY)? else { return Ok(None) };
         let mut bytes = Vec::new();
         file.take(limit.saturating_add(1)).read_to_end(&mut bytes).map_err(FlowError::io(self.path.join(name)))?;
         if bytes.len() as u64 > limit {
-            return Err(FlowError::TooLarge { what: "log", size: bytes.len() as u64, limit });
+            return Err(FlowError::TooLarge { what, size: bytes.len() as u64, limit });
         }
         Ok(Some(bytes))
     }

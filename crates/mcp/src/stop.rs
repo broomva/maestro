@@ -23,10 +23,11 @@
 //!
 //! - **Fail open.** The gate refuses only on a positive answer from the kernel: an instance the
 //!   session owns that is open and has work. A malformed standard input, a session that does not
-//!   verify, a ledger that does not read, or refusal counts that cannot be kept (their lock held
-//!   past [`REFUSALS_WAIT`](maestro_flow::kernel::stop::REFUSALS_WAIT) included) let the stop
-//!   through, say why on standard error, and file the alert when they can. By design: a broken
-//!   ledger must not trap every session. An instance that does not read is noted and alerted
+//!   verify, a ledger that does not read (a root moved or archived included, never "no ledger"),
+//!   or refusal counts that cannot be kept (the ledger's write lock held past
+//!   [`REFUSALS_WAIT`](maestro_flow::kernel::stop::REFUSALS_WAIT), another host's ledger) let the
+//!   stop through, say why on standard error, and file the alert when they can. By design: a
+//!   broken ledger must not trap every session. An instance that does not read is noted and alerted
 //!   whatever else the gate decides: beside an instance with work, the stop is still refused, and
 //!   the refusal names it; with no work beside it, the stop goes through. No session named, or no
 //!   flow ledger in the workspace, is no Maestro flow at all: the stop goes through with a note and
@@ -195,6 +196,7 @@ impl Run<'_> {
 
     /// Lets the stop through on a failure (fail open), files the alert when it can.
     fn fail_open(&mut self, session: Option<&SessionRef>, code: &str, reason: &str) {
+        let reason = reason.trim_end_matches('.');
         self.note(format!("{code}: {reason}. The stop goes through (the gate fails open)."));
         match session {
             Some(s) => {
@@ -248,11 +250,14 @@ impl Run<'_> {
             }
             Err(v) => return self.fail_open(Some(&session), s(&v["code"]), s(&v["reason"])),
         };
-        if std::fs::symlink_metadata(&root).is_err() {
-            return self.note(format!("there is no flow ledger at {}, so no flow to gate.", root.display()));
-        }
-        let open = match self.open(&root, &me) {
+        let (open, counted) = match self.open(&root, &me) {
             Ok(open) => open,
+            // No ledger here is no flow. Any other refusal (a root moved, or archived, which the
+            // ledger reads as moved; a genesis left half made) is a ledger the gate cannot read: it
+            // fails open, alerted.
+            Err(e) if e.code() == "no_ledger" => {
+                return self.note(format!("there is no flow ledger at {}, so no flow to gate.", root.display()));
+            }
             Err(e) => return self.fail_open(Some(&session), e.code(), &e.to_string()),
         };
         // An instance that does not read is reported (a note and an alert) whatever else the gate
@@ -267,37 +272,55 @@ impl Run<'_> {
                 self.note("instances_unread: no instance that did read has work, so the stop goes through (the gate fails open).");
                 return;
             }
-            // Nothing refused: a count in a row is broken.
-            if let Err(e) = Refusals::load(&root, &me, kstop::REFUSALS_WAIT).and_then(|mut r| {
-                r.tally(&[]);
-                r.save(&me)
-            }) {
-                self.note(format!("the refusal counts were not cleared ({}: {e}).", e.code()));
+            // Nothing refused: a count in a row is broken. Only counts there are need clearing.
+            if counted {
+                let cleared =
+                    self.ledger(&root).map_err(|(code, why)| format!("{code}: {why}")).and_then(|mut ledger| {
+                        let guard = ledger.lock().map_err(|e| format!("{}: {e}", e.code()))?;
+                        let mut r = Refusals::load(&guard, &me).map_err(|e| format!("{}: {e}", e.code()))?;
+                        r.tally(&[]);
+                        r.save(&guard, &me).map_err(|e| format!("{}: {e}", e.code()))
+                    });
+                if let Err(e) = cleared {
+                    self.note(format!("the refusal counts were not cleared ({e})."));
+                }
             }
             return;
         }
         let ids: Vec<String> = refusing.iter().map(|a| a.instance.clone()).collect();
+        let mut ledger = match self.ledger(&root) {
+            Ok(l) => l,
+            Err((code, why)) => return self.fail_open(Some(&session), &code, &why),
+        };
         if self.gate.cannot_block {
             self.note(format!(
                 "{} cannot refuse this stop: recording it on {}.",
                 self.gate.harness.name(),
                 ids.join(", ")
             ));
-            return self.unblockable(&root, &me, &refusing, Unblockable::HarnessCannotBlock, &ids);
+            return self.unblockable(&mut ledger, &me, &refusing, Unblockable::HarnessCannotBlock, &ids);
         }
-        // The session's count lock is held from here until `counts` drops: two stops at once are
-        // both counted. A lock still held past its wait lets this stop through.
-        let mut counts = match Refusals::load(&root, &me, kstop::REFUSALS_WAIT) {
-            Ok(c) => c,
-            Err(e) => {
-                let code = if e.code() == "busy" { "refusals_busy" } else { "refusals_unread" };
-                return self.fail_open(Some(&session), code, &format!("{}: {e}", e.code()));
+        // The ledger's write lock is held from the load through the save: two stops at once are
+        // both counted, and the lock's own checks (host, epoch, root) bind the counts. A lock still
+        // held past its wait lets this stop through.
+        let tally = {
+            let guard = match ledger.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    let code = if e.code() == "busy" { "refusals_busy" } else { "refusals_unread" };
+                    return self.fail_open(Some(&session), code, &format!("{}: {e}", e.code()));
+                }
+            };
+            let mut counts = match Refusals::load(&guard, &me) {
+                Ok(c) => c,
+                Err(e) => return self.fail_open(Some(&session), "refusals_unread", &format!("{}: {e}", e.code())),
+            };
+            let tally = counts.tally(&refusing);
+            if let Err(e) = counts.save(&guard, &me) {
+                return self.fail_open(Some(&session), "refusals_unwritten", &format!("{}: {e}", e.code()));
             }
+            tally
         };
-        let tally = counts.tally(&refusing);
-        if let Err(e) = counts.save(&me) {
-            return self.fail_open(Some(&session), "refusals_unwritten", &format!("{}: {e}", e.code()));
-        }
         if tally.refused.is_empty() {
             self.note(format!(
                 "refused {} times in a row at the same position of {}: the stop goes through, recorded as no_progress.",
@@ -305,7 +328,7 @@ impl Run<'_> {
                 tally.spent.join(", ")
             ));
             let spent: Vec<&Assessment> = refusing.into_iter().filter(|a| tally.spent.contains(&a.instance)).collect();
-            return self.unblockable(&root, &me, &spent, Unblockable::NoProgress, &tally.spent);
+            return self.unblockable(&mut ledger, &me, &spent, Unblockable::NoProgress, &tally.spent);
         }
         let blocking: Vec<&Assessment> = refusing.into_iter().filter(|a| tally.refused.contains(&a.instance)).collect();
         let mut reason = kstop::block_reason(&blocking, MAX_NAMED);
@@ -316,29 +339,34 @@ impl Run<'_> {
         self.out.blocked = true;
     }
 
-    fn open(&self, root: &Path, me: &VerifiedSession) -> Result<kstop::Open, KernelError> {
+    /// The ledger at `root` as this host's writer, waiting at most
+    /// [`REFUSALS_WAIT`](kstop::REFUSALS_WAIT) for its lock: a code and why when it does not open
+    /// (`foreign_host` on a ledger bound to another host).
+    fn ledger(&self, root: &Path) -> Result<Ledger, (String, String)> {
+        let host = crate::flow::host_id().map_err(|v| (s(&v["code"]).to_string(), s(&v["reason"]).to_string()))?;
+        Ledger::open(root, &host, Options { lock_wait: kstop::REFUSALS_WAIT })
+            .map_err(|e| (e.code().to_string(), e.to_string()))
+    }
+
+    /// The session's open instances, and whether it has refusal counts to clear, under one shared
+    /// lock. Counts that do not read are taken as there, so a clear is tried and its error noted.
+    fn open(&self, root: &Path, me: &VerifiedSession) -> Result<(kstop::Open, bool), KernelError> {
         let guard = Reader::new(root, Options::default())?.lock()?;
         let now = maestro_flow::clock::now();
-        kstop::open(&guard, me, now, &|l, a| kernel::seen(self.paths, l, a))
+        let open = kstop::open(&guard, me, now, &|l, a| kernel::seen(self.paths, l, a))?;
+        Ok((open, Refusals::any(&guard, me).unwrap_or(true)))
     }
 
     /// Records `StopUnblockable` on each of `on`, and files one alert for the records made.
     fn unblockable(
         &mut self,
-        root: &Path,
+        ledger: &mut Ledger,
         me: &VerifiedSession,
         on: &[&Assessment],
         reason: Unblockable,
         open_instances: &[String],
     ) {
         let session = me.session().clone();
-        let mut ledger = match crate::flow::host_id()
-            .map_err(|v| format!("{}: {}", s(&v["code"]), s(&v["reason"])))
-            .and_then(|host| Ledger::open(root, &host, Options::default()).map_err(|e| format!("{}: {e}", e.code())))
-        {
-            Ok(l) => l,
-            Err(e) => return self.fail_open(Some(&session), "ledger_unopened", &e),
-        };
         // Appended now; recorded by an earlier stop (its alert is filed again, idempotently, since
         // that stop may have failed to file it); and not recorded at all.
         let (mut made, mut already, mut failed) = (Vec::new(), Vec::new(), Vec::new());
@@ -351,7 +379,7 @@ impl Run<'_> {
                     continue;
                 }
             };
-            match kstop::record(&mut ledger, me, &instance, self.gate.harness.name(), reason, open_instances) {
+            match kstop::record(ledger, me, &instance, self.gate.harness.name(), reason, open_instances) {
                 Ok(Recorded::Appended(appended)) => made.push((a.instance.clone(), appended.event.seq)),
                 Ok(Recorded::Already { seq }) => {
                     self.note(format!(
@@ -379,10 +407,12 @@ impl Run<'_> {
                 kstop::MAX_REFUSALS
             ),
         };
-        let list: Vec<String> = made.iter().chain(&already).map(|(i, seq)| format!("{i} (event {seq})")).collect();
+        let records: Vec<(String, u64)> = made.iter().chain(&already).cloned().collect();
+        let list = record_list(&records);
         let mut words = what;
-        // The key names the records alone, so a record's alert has one id whichever stop files it.
-        let mut key = format!("unblockable\n{}", list.join("\n"));
+        // The key names the records alone, in order, so a record's alert has one id whichever stop
+        // files it and however its records were found.
+        let mut key = unblockable_key(&records);
         if !list.is_empty() {
             words.push_str(&format!(" Recorded as StopUnblockable on: {}.", list.join(", ")));
         }
@@ -438,11 +468,27 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap_or_default()
 }
 
+/// The records an alert names, sorted, as `<instance> (event <seq>)`.
+fn record_list(records: &[(String, u64)]) -> Vec<String> {
+    let mut sorted = records.to_vec();
+    sorted.sort();
+    sorted.iter().map(|(i, seq)| format!("{i} (event {seq})")).collect()
+}
+
+/// What an alert for `StopUnblockable` records is about: the records, in order whatever order
+/// they were found in, so the same records always give the same alert id.
+pub fn unblockable_key(records: &[(String, u64)]) -> String {
+    format!("unblockable\n{}", record_list(records).join("\n"))
+}
+
 /// `stop-gate-<12 hex>`, a digest of what the alert is about.
 pub fn alert_id(key: &str) -> String {
     let d = digest(&json!(key));
     format!("stop-gate-{}", d.trim_start_matches("sha256:").get(..12).unwrap_or_default())
 }
+
+/// Every alert's summary: plain sentences within the asks validator's bounds (40 to 700 characters).
+pub const SUMMARY: &str = "The flow stop gate let a session stop while it could not keep the session on its flow work, or could not check that work. The instances and the reason are below. Resuming the session, or looking into the reason, is what this asks.";
 
 /// An alert's headline: a session stopped with work left.
 pub const LEFT_WORK: &str = "A session stopped with flow work left: should someone resume it?";
@@ -456,6 +502,9 @@ pub fn alert_ask(id: &str, headline: &str, words: &str) -> Map<String, Value> {
     let ask = json!({
         "id": id,
         "headline": headline,
+        // Always given: the validator of record requires one whenever any of the ask's words (a
+        // session's name, a reason quoted from an error) reads as a spec or design word.
+        "summary": SUMMARY,
         "ask": words,
         "stakes": "A flow instance may stay open and unfinished until a session picks it up again.",
         "why_you": "The stop gate could not keep the session working, so only you can send someone back to it.",
@@ -524,7 +573,12 @@ pub fn check_install(harness: Harness, settings: &Path) -> Install {
         commands: Vec::new(),
         detail: String::new(),
     };
-    let text = match std::fs::read(settings) {
+    // Read to one byte past the bound, as the gate reads its standard input.
+    let read = std::fs::File::open(settings).and_then(|f| {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(f, MAX_INPUT as u64 + 1), &mut bytes).map(|_| bytes)
+    });
+    let text = match read {
         Ok(bytes) if bytes.len() <= MAX_INPUT => bytes,
         Ok(_) => {
             install.detail = format!("{} is over {MAX_INPUT} bytes", settings.display());

@@ -2119,8 +2119,8 @@ mutate $gt '        Some("Stop") => {}' '        Some(_) => {}'
 mutate $gt '        if let Err(e) = payload(input) {' '        if let (true, Err(e)) = (false, payload(input)) {'
 mutate $gt '    if input.len() > MAX_INPUT {' '    if false {'
 mutate $gt '            if unread.is_some() {' '            if false {'
-mutate $gt '        if let Err(e) = counts.save(&me) {' '        if let (true, Err(e)) = (false, counts.save(&me)) {'
-mutate $gt '        if std::fs::symlink_metadata(&root).is_err() {' '        if false {'
+mutate $gt '            if let Err(e) = counts.save(&guard, &me) {' '            if let (true, Err(e)) = (false, counts.save(&guard, &me)) {'
+mutate $gt '            Err(e) if e.code() == "no_ledger" => {' '            Err(_) if true => {'
 mutate $gt '                self.alert(s, &key, UNCHECKED, &words);' ''
 mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words);' ''
 mutate $gt '            Err(e) if e.message.contains("already has an ask") => {' '            Err(e) if false => {'
@@ -2136,11 +2136,31 @@ mutate $gt '        if made.is_empty() && already.is_empty() && failed.is_empty(
 # lock spans load, tally and save; one held past its wait fails open); an instance that does not
 # read is noted, alerted and named whatever else the gate decides; a live claim holds a node only
 # over its current inputs.
-mutate $stp '        crate::lock::take(&lock, crate::lock::Mode::Exclusive, wait, &at)?;' ''
 mutate $stp '        let held = live.iter().find(|c| c.node == e.node && c.iteration == e.iteration && c.inputs == e.inputs);' '        let held = live.iter().find(|c| c.node == e.node && c.iteration == e.iteration);'
 mutate $gt '            self.report_unread(&session, list);' ''
 mutate $gt '            reason.push_str(&format!(" Maestro could not read {list}, so the gate could not check it for work."));' ''
 mutate $gt '                let code = if e.code() == "busy" { "refusals_busy" } else { "refusals_unread" };' '                let code = "refusals_unread";'
+# Round 1, stratum A (Gemini, BRO-3636): every alert carries a summary; the counts live under the
+# ledger's own root, bound to its epoch, written only when there is something to write (the lock
+# that spans load and save is the ledger's write lock, which `Refusals::load` takes as its
+# argument, so removing it does not build); a retired instance has no work and is not open; a
+# record checks the clock, names at most MAX_NAMED instances and is deduplicated only against the
+# same session's record; a counts file past its bound is refused; a moved or archived ledger is
+# not "no ledger"; an alert's id does not depend on the order of its records; a settings file past
+# its bound is not read.
+lay=$fl/layout.rs
+mutate $gt '        "summary": SUMMARY,' ''
+mutate $lay 'pub(crate) const STOP_GATE: &str = "stop-gate";' 'pub(crate) const STOP_GATE: &str = "../flows.stop-gate";'
+mutate $stp '    Ok(if parsed.epoch == epoch { parsed.counts } else { BTreeMap::new() })' '    Ok(parsed.counts)'
+mutate $stp '        if self.was_empty && self.counts.is_empty() {' '        if false {'
+mutate $stp '    let retired = owners.retired.is_some();' '    let retired = false;'
+mutate $stp '            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {' '            if owners.owner.as_ref() != Some(&me) {'
+mutate $stp '    wall(&log)?;' ''
+mutate $stp '    let Some(bytes) = read_beside(root, STOP_GATE, name, MAX_REFUSALS_FILE, "refusal-count file")? else {' '    let Some(bytes) = read_beside(root, STOP_GATE, name, u64::MAX, "refusal-count file")? else {'
+mutate $stp '        open_instances: open_instances.iter().take(MAX_NAMED).cloned().collect(),' '        open_instances: open_instances.to_vec(),'
+mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if prior.is_some_and(|p| p.reason == reason) {'
+mutate $gt '    sorted.sort();' ''
+mutate $gt '        Ok(bytes) if bytes.len() <= MAX_INPUT => bytes,' '        Ok(bytes) => bytes,'
 mutate $cli '        Err(e) if gate => {' '        Err(e) if false => {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }

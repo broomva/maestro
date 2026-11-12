@@ -16,7 +16,8 @@
 //! - a human node whose ask is not filed: `flow ask` files it;
 //! - a human node whose answer this clone sees on `origin/main`: `flow ask` takes it.
 //!
-//! An instance that waits only on someone else is not work, or a session could never end. Someone
+//! A retired instance has none, moved to `retired/` or not yet. An instance that waits only on
+//! someone else is not work, or a session could never end. Someone
 //! else is the owner, whose answer to a filed ask has not landed (unanswered, or on an answers
 //! branch only, `asks::seen`), or a former owner, whose claim still holds a node (`write`). A
 //! terminal instance has no work, since nothing in it is ready, stale, waiting or awaiting a verdict.
@@ -36,15 +37,16 @@
 //! drops out. Once an instance has been refused [`MAX_REFUSALS`] times at one position, the next
 //! stop over it goes through and the gate records `no_progress` ([`Refusals::tally`]).
 //!
-//! The counts are one JSON file per session, `flows.stop-gate/<digest>.json` beside the flows root
-//! ([`REFUSALS_DIR`]), where the ADR keeps the ledger's coordination files: they count against
-//! that ledger's instance logs, and so share its host and its lifetime. Not inside the root, whose
-//! instance folders hold only their hash-chained logs. One file per session (named by the digest of
-//! its `SessionRef` and owner marker, so a replacement starts afresh) means no two sessions write
-//! one file. Stops of one session can still overlap (two hooks, a harness that fires twice), so
-//! the session's count lock (`<digest>.lock` beside it, an OS file lock, as the flows lock is) is
-//! held from the load through the tally to the save: no two stops both read one count. The file is
-//! replaced whole (written aside, then renamed), so a crash leaves the old counts or the new ones.
+//! The counts are one JSON file per session under the ledger's own root, `stop-gate/<digest>.json`
+//! (named by the digest of the session's `SessionRef` and owner marker, so a replacement starts
+//! afresh), read and written through the root's descriptor, never through a link, as every file
+//! of the ledger is. They are loaded, tallied and saved under the ledger's write lock, so the
+//! lock's own checks bind them: a ledger of another host is `foreign_host`, a root moved or of
+//! another epoch is refused, and two stops at once are both counted. The file records the epoch
+//! it was taken in, and counts of another epoch are no counts. They move with the root, so
+//! `operator::archive` takes them away and `create_fresh_ledger` starts with none. The file is
+//! replaced whole (written aside, then renamed), so a crash leaves the old counts or the new
+//! ones, and a stop with nothing to count writes nothing.
 //!
 //! # The record
 //!
@@ -60,8 +62,10 @@ use super::events::{KernelEvent, StopUnblockable, Unblockable};
 use super::ir::Iteration;
 use super::replay::{Reason, State, pinned, read_both};
 use super::write::{check_owner, live_claims, owner, wall};
+use crate::at::Dir;
 use crate::ids::InstanceId;
-use crate::ledger::{Appended, Ledger, ReadGuard};
+use crate::layout::STOP_GATE;
+use crate::ledger::{Appended, Ledger, ReadGuard, WriteGuard, read_beside, write_beside};
 use crate::log::Log;
 use jiff::Timestamp;
 use maestro_core::session::VerifiedSession;
@@ -69,7 +73,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The key under which `flow next` and `flow status` return an instance's [`Work`], beside
@@ -183,10 +186,13 @@ pub(crate) fn assess(
     seen: &dyn Fn(&str, &str) -> AnswerSeen,
 ) -> Result<Assessment, KernelError> {
     let (status, next) = read_both(log, started, now)?;
-    let since = adoption::owners(log, started)?.since;
+    let owners = adoption::owners(log, started)?;
+    let since = owners.since;
     let live = live_claims(log, now)?;
     let mut work = Vec::new();
     let mut waiting = Vec::new();
+    // A retired instance takes no write, so nothing in it is anyone's to do, moved or not.
+    let retired = owners.retired.is_some();
     for e in &next.enabled {
         let held = live.iter().find(|c| c.node == e.node && c.iteration == e.iteration && c.inputs == e.inputs);
         match held {
@@ -230,6 +236,10 @@ pub(crate) fn assess(
                 _ => {}
             }
         }
+    }
+    if retired {
+        work.clear();
+        waiting.clear();
     }
     Ok(Assessment {
         instance: status.instance,
@@ -371,11 +381,8 @@ pub fn block_reason(refusing: &[&Assessment], max: usize) -> String {
     out
 }
 
-/// The folder beside the flows root that holds the gate's refusal counts (see the module docs).
-pub const REFUSALS_DIR: &str = "flows.stop-gate";
-
-/// How long the gate waits for a session's count lock before it fails open. A session's stops
-/// run one at a time, so the lock is only ever held for a load, a tally and a save.
+/// How long the gate waits for the ledger's write lock to count a stop before it fails open. The
+/// lock is held for a load, a tally and a save, as briefly as any append.
 pub const REFUSALS_WAIT: Duration = Duration::from_secs(2);
 
 /// The most bytes of a refusal-count file the gate reads.
@@ -397,68 +404,56 @@ pub struct Tally {
     pub spent: Vec<String>,
 }
 
-/// One session's refusal counts, by instance (see the module docs), held under the session's
-/// count lock from [`Refusals::load`] until dropped.
-#[derive(Debug)]
+/// One session's refusal counts in one ledger, by instance (see the module docs). Loaded and saved
+/// under that ledger's write lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusals {
-    path: PathBuf,
+    name: String,
     pub counts: BTreeMap<String, Count>,
-    /// The session's count lock, `<digest>.lock` beside its counts, held exclusive.
-    _lock: std::fs::File,
+    /// Whether it held no counts when it was loaded: then an empty tally writes nothing.
+    was_empty: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 struct RefusalsFile {
     session: String,
+    /// The ledger's epoch the counts were taken in: counts of another epoch are no counts.
+    epoch: String,
     counts: BTreeMap<String, Count>,
 }
 
+/// The file name of `session`'s counts: the digest of its `SessionRef` and owner marker.
+fn file_name(session: &VerifiedSession) -> Result<String, KernelError> {
+    let me = owner(session)?;
+    let key = crate::log::line_hash(format!("{}\n{}", me.session, me.marker_sha256).as_bytes());
+    Ok(format!("{}.json", key.trim_start_matches("sha256:").get(..32).unwrap_or_default()))
+}
+
+/// The counts in the file `name` under `root`, if they were taken in `epoch`; none otherwise.
+fn counts_in(root: &Dir, epoch: &str, name: &str) -> Result<BTreeMap<String, Count>, KernelError> {
+    let Some(bytes) = read_beside(root, STOP_GATE, name, MAX_REFUSALS_FILE, "refusal-count file")? else {
+        return Ok(BTreeMap::new());
+    };
+    let parsed: RefusalsFile = serde_json::from_slice(&bytes)
+        .map_err(|e| KernelError::Encode(format!("{STOP_GATE}/{name} does not parse ({e})")))?;
+    Ok(if parsed.epoch == epoch { parsed.counts } else { BTreeMap::new() })
+}
+
 impl Refusals {
-    /// Where `session`'s counts live for the ledger at `root`.
-    pub fn path(root: &Path, session: &VerifiedSession) -> Result<PathBuf, KernelError> {
-        let me = owner(session)?;
-        let key = crate::log::line_hash(format!("{}\n{}", me.session, me.marker_sha256).as_bytes());
-        let hex = key.trim_start_matches("sha256:").get(..32).unwrap_or_default().to_string();
-        let dir = root.parent().map(|p| p.join(REFUSALS_DIR)).unwrap_or_else(|| PathBuf::from(REFUSALS_DIR));
-        Ok(dir.join(format!("{hex}.json")))
+    /// `session`'s counts in the ledger `guard` holds exclusive, or none yet: one load, its tally
+    /// and its save are one step under that lock, so two stops never both read one count. A file
+    /// that does not read is an error, never no counts; counts taken in another epoch are none.
+    pub fn load(guard: &WriteGuard<'_>, session: &VerifiedSession) -> Result<Refusals, KernelError> {
+        let name = file_name(session)?;
+        let counts = counts_in(guard.root(), guard.epoch(), &name)?;
+        Ok(Refusals { name, was_empty: counts.is_empty(), counts })
     }
 
-    /// `session`'s counts, or none yet, under its count lock: taken exclusive, waiting up to `wait`
-    /// (`busy` past it), and held until the counts are dropped, so a load, its tally and its save
-    /// are one step that two stops never interleave. A file that does not read is an error, never
-    /// no counts.
-    pub fn load(root: &Path, session: &VerifiedSession, wait: Duration) -> Result<Refusals, KernelError> {
-        use std::io::Read as _;
-        let path = Refusals::path(root, session)?;
-        let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir).map_err(crate::FlowError::io(dir))?;
-        let at = path.with_extension("lock");
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&at)
-            .map_err(crate::FlowError::io(&at))?;
-        crate::lock::take(&lock, crate::lock::Mode::Exclusive, wait, &at)?;
-        let file = match std::fs::File::open(&path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Refusals { path, counts: BTreeMap::new(), _lock: lock });
-            }
-            Err(e) => return Err(crate::FlowError::io(&path)(e).into()),
-        };
-        let mut bytes = Vec::new();
-        file.take(MAX_REFUSALS_FILE + 1).read_to_end(&mut bytes).map_err(crate::FlowError::io(&path))?;
-        if bytes.len() as u64 > MAX_REFUSALS_FILE {
-            let size = bytes.len() as u64;
-            return Err(
-                crate::FlowError::TooLarge { what: "refusal-count file", size, limit: MAX_REFUSALS_FILE }.into()
-            );
-        }
-        let parsed: RefusalsFile = serde_json::from_slice(&bytes)
-            .map_err(|e| KernelError::Encode(format!("{} does not parse ({e})", path.display())))?;
-        Ok(Refusals { path, counts: parsed.counts, _lock: lock })
+    /// Whether `session` has counts in the ledger `guard` reads (shared lock): a stop with nothing
+    /// to refuse writes only to clear them.
+    pub fn any(guard: &ReadGuard, session: &VerifiedSession) -> Result<bool, KernelError> {
+        let name = file_name(session)?;
+        Ok(!counts_in(guard.root(), guard.epoch(), &name)?.is_empty())
     }
 
     /// Counts one more stop over `refusing`, the instances the gate would refuse over now: each
@@ -482,19 +477,18 @@ impl Refusals {
         tally
     }
 
-    /// Writes the counts, whole: aside, then renamed over the old file.
-    pub fn save(&self, session: &VerifiedSession) -> Result<(), KernelError> {
-        let io = |e| crate::FlowError::io(&self.path)(e);
-        let dir = self.path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir).map_err(io)?;
-        let body = RefusalsFile { session: session.session().to_string(), counts: self.counts.clone() };
+    /// Writes the counts, whole, through the root `guard` holds: aside, then renamed over the old
+    /// file, never through a link. Counts that were empty and stay empty write nothing.
+    pub fn save(&self, guard: &WriteGuard<'_>, session: &VerifiedSession) -> Result<(), KernelError> {
+        if self.was_empty && self.counts.is_empty() {
+            return Ok(());
+        }
+        let body = RefusalsFile {
+            session: session.session().to_string(),
+            epoch: guard.epoch().to_string(),
+            counts: self.counts.clone(),
+        };
         let bytes = serde_json::to_vec(&body).map_err(|e| KernelError::Encode(e.to_string()))?;
-        let aside = self.path.with_extension(format!("json.{}", crate::ledger::random_epoch()?));
-        std::fs::write(&aside, bytes).map_err(io)?;
-        std::fs::rename(&aside, &self.path).map_err(|e| {
-            let _ = std::fs::remove_file(&aside);
-            io(e)
-        })?;
-        Ok(())
+        Ok(write_beside(guard.root(), STOP_GATE, &self.name, &bytes)?)
     }
 }
