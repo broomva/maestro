@@ -1866,8 +1866,10 @@ mutate $fk/compile.rs '    let mut words: Vec<(String, &String)> = ir.workdir.it
 mutate $fk/compile.rs '            Class::Effect { run, reconcile, .. } => vec![run, reconcile],' '            Class::Effect { run, .. } => vec![run],'
 mutate $fk/compile.rs '.chain(&n.snapshot)' '.chain(&None::<String>)'
 # The project's check runs in a snapshot of one commit (a full object id), never in the working
-# tree: one commit alone, so another cannot be checked out; removed whatever the command came to,
-# a read-only tree included. Only a pure node runs in one, in IR version 4.
+# tree: a shared clone of the repository (its history and tags, read in place) with that commit
+# checked out detached, removed whatever the command came to, a read-only tree included. The
+# history is there, so a check could check out another commit; the run is then `snapshot_moved`
+# (below). Only a pure node runs in one, in IR version 4.
 mutate $fk/write.rs '        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),' '        Some(_) => exec::run(&plan.argv, &plan.cwd, limits, Feed { search: Search::Caller, stdin: None }),'
 mutate $fk/write.rs '            if !snapshot::is_object_id(&commit) {' '            if false {'
 mutate $fk/snapshot.rs '    matches!(commit.len(), 40 | 64) && ' '    true && '
@@ -1879,6 +1881,10 @@ mutate $fk/snapshot.rs 'exec::run(argv, &snapshot.root, &left(limits, deadline),
 mutate $fk/snapshot.rs '    let left = deadline.saturating_duration_since(Instant::now());' '    let left = limits.timeout;'
 mutate $fk/snapshot.rs '    match snapshot.moved(commit) {' '    match None::<String> {'
 mutate $fk/snapshot.rs '    (bytes.len() as u64 <= MAX_LOG).then_some(bytes)' '    Some(bytes)'
+# The snapshot's HEAD and its log are read only from a regular file, never through a link (a link
+# to a regular file is none) and never from a FIFO (none, not an empty file, and no hang).
+mutate $fk/snapshot.rs '    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;' '    let flags = rustix::fs::OFlags::NONBLOCK;'
+mutate $fk/snapshot.rs '    if !file.metadata().ok()?.is_file() {' '    if false {'
 mutate $fk/snapshot.rs '        if head.as_deref().map(|h| h.trim_ascii()) != Some(commit.as_bytes()) {' '        if false {'
 mutate $fk/snapshot.rs "            .any(|line| line.split(|b| *b == b' ').nth(1) != Some(commit.as_bytes()));" '            .any(|_| false);'
 mutate $fk/snapshot.rs "            return Some(\"the check rewrote the snapshot's HEAD log\".into());" '            return None;'

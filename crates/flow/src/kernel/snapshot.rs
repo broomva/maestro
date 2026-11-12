@@ -292,6 +292,29 @@ mod tests {
     }
 
     #[test]
+    fn only_a_regular_file_is_read_never_through_a_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("HEAD");
+        std::fs::write(&file, "content\n").unwrap();
+        assert_eq!(read_file(&file).as_deref(), Some(&b"content\n"[..]));
+        // A link to that very file is not followed.
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(read_file(&link), None);
+        // A folder is none.
+        assert_eq!(read_file(tmp.path()), None);
+        // A FIFO no one writes to is none, never an empty file, and never holds the read up: the
+        // check runs on a thread with a 5 s bound, so a regression fails rather than hangs.
+        let fifo = tmp.path().join("fifo");
+        assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_file(&fifo));
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("the read hung on a FIFO"), None);
+    }
+
+    #[test]
     fn a_check_reads_the_heads_history_and_tags() {
         let tmp = tempfile::tempdir().unwrap();
         let first = repository(tmp.path(), "sha1");
