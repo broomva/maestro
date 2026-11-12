@@ -203,6 +203,17 @@ fn the_cli_prints_the_tools_json() {
         (vec!["flow", "next", "--instance", fi.as_str()], "maestro_flow_next", json!({ "instance": fi })),
         (vec!["flow", "next", "--instance", "fi_missing"], "maestro_flow_next", json!({ "instance": "fi_missing" })),
         (vec!["flow", "next", "--instance", "../x"], "maestro_flow_next", json!({ "instance": "../x" })),
+        (vec!["flow", "spine", "--instance", fi.as_str()], "maestro_flow_spine", json!({ "instance": fi })),
+        (
+            vec!["flow", "spine", "--instance", fi.as_str(), "--against", fi.as_str()],
+            "maestro_flow_spine",
+            json!({ "instance": fi, "against": fi }),
+        ),
+        (
+            vec!["flow", "spine", "--instance", fi.as_str(), "--against", "fi_missing"],
+            "maestro_flow_spine",
+            json!({ "instance": fi, "against": "fi_missing" }),
+        ),
     ] {
         let (cli, _) = run(m.bare().args(&args));
         let tool = maestro_mcp::call(&store, tool, tool_args).unwrap();

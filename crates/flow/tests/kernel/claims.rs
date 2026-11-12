@@ -341,6 +341,41 @@ fn a_command_is_refused_when_its_placeholders_name_no_param_or_it_fills_past_its
 }
 
 #[test]
+fn only_a_work_nodes_verify_reads_the_outputs_it_judges() {
+    // BRO-3636: `{{outputs.<name>}}` fills a work node's verify from the outputs being completed;
+    // one left out is the performer's to fix. Any other command is the pinned IR's and the params'
+    // alone, so there it names no param, outputs or not.
+    let mut f = fx(r#"
+flow: o
+version: 1
+params: [dir]
+workdir: "{{params.dir}}"
+nodes:
+  work: {class: work, verify: [sh, -c, 'test "$0" = shown', "{{outputs.word}}"]}
+  pure: {class: pure, run: [sh, -c, 'test "$0" = shown', "{{outputs.word}}"]}
+  observe: {class: observe, run: [sh, -c, 'test "$0" = shown', "{{outputs.word}}"], fresh_for: 1h, exit_map: {0: ok}}
+"#);
+    let fi = f.begin();
+    let c = f.claim(&fi, "work");
+    assert_eq!(outcome(&f.complete(&c.token, json!({}))), "outputs_invalid");
+    assert_eq!(outcome(&f.complete(&c.token, json!({ "word": { "nested": 1 } }))), "outputs_invalid");
+    assert_eq!(outcome(&f.complete(&c.token, json!({ "word": "hidden" }))), "verify_failed");
+    assert_eq!(outcome(&f.complete(&c.token, json!({ "word": "shown" }))), "completed");
+    assert_eq!(f.last_body(&fi)["verify"]["argv"][3], "shown", "the receipt names what was judged");
+    for node in ["pure", "observe"] {
+        let c = f.claim(&fi, node);
+        assert_eq!(outcome(&f.complete(&c.token, json!({ "word": "shown" }))), "template_invalid", "{node}");
+    }
+    // Nor does the workdir read them, even for a work node's verify.
+    let mut f =
+        fx("flow: o\nversion: 1\nnodes:\n  work: {class: work, verify: ['true']}\nworkdir: \"{{outputs.dir}}\"\n");
+    let fi = start(&mut f.ledger, &f.me, &f.flow, json!({})).unwrap().instance;
+    let c = f.claim(&fi, "work");
+    let dir = f.dir.to_str().unwrap().to_string();
+    assert_eq!(outcome(&f.complete(&c.token, json!({ "dir": dir }))), "workdir_invalid");
+}
+
+#[test]
 fn a_status_after_the_kernel_writes_replays_with_nothing_set_aside() {
     // The writers' events are the ones replay accepts.
     let mut f = fx(CHAIN);

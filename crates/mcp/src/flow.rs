@@ -4,8 +4,13 @@
 //! - **Verified writers only.** `start`, `claim`, `heartbeat`, `complete`, `choose`, `ask`,
 //!   `propose_adoption` and `propose_retirement` act for the caller's verified session (`VerifiedSession`, through the same caller check every agent
 //!   request uses). A caller that is not verified is refused `caller_unverified`, and one whose
-//!   claim does not verify `caller_refused`; both write nothing. `next` and `status` are reads:
-//!   anyone may call them, and they write nothing.
+//!   claim does not verify `caller_refused`; both write nothing. `next`, `status` and `spine` are
+//!   reads: anyone may call them, and they write nothing.
+//! - **The accepting spine (BRO-3636).** `spine` returns an instance's accepting spine
+//!   (`maestro_flow::kernel::spine`) and, with `against`, compares it with another instance's: equal
+//!   is `ok`, and the first difference is a result, `{"ok": false, "code": "spine_differs",
+//!   "difference"}`. It is a tool, not only a CLI command, because every `maestro flow` subcommand
+//!   is the twin of one, so a conformance check gives the same JSON from any harness.
 //! - **Refusals are results.** Every kernel refusal comes back as `{"ok": false, "code", "reason",
 //!   "recorded"}` with the kernel's stable code. `recorded` is true when the kernel appended a
 //!   `Refused` event (a completion or choice whose work did not pass keeps its token), an
@@ -54,6 +59,7 @@ pub const HEARTBEAT: &str = "maestro_flow_heartbeat";
 pub const ASK: &str = "maestro_flow_ask";
 pub const PROPOSE_ADOPTION: &str = "maestro_flow_propose_adoption";
 pub const PROPOSE_RETIREMENT: &str = "maestro_flow_propose_retirement";
+pub const SPINE: &str = "maestro_flow_spine";
 
 /// The flows root under the workspace: the ADR's `.broomva/flows`.
 pub const FLOWS: &str = ".broomva/flows";
@@ -90,6 +96,15 @@ pub struct FlowStartArgs {
 pub struct FlowInstanceArgs {
     /// The instance id `maestro_flow_start` returned, e.g. `fi_0123abcd...`.
     pub instance: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowSpineArgs {
+    /// The instance id `maestro_flow_start` returned, e.g. `fi_0123abcd...`.
+    pub instance: String,
+    /// Another instance of the same flow to compare the spine with.
+    pub against: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -287,6 +302,10 @@ pub(crate) fn call(
         NEXT | STATUS => {
             let a: FlowInstanceArgs = parse(crate::strip_auth_fields(args))?;
             Ok(read(paths, name, &a.instance).unwrap_or_else(|v| v))
+        }
+        SPINE => {
+            let a: FlowSpineArgs = parse(crate::strip_auth_fields(args))?;
+            Ok(spine(paths, &a.instance, a.against.as_deref()).unwrap_or_else(|v| v))
         }
         START => {
             let a: FlowStartArgs = parse(args.clone())?;
@@ -587,6 +606,33 @@ fn read(paths: &maestro_store::Paths, name: &str, instance: &str) -> Result<Valu
             kernel::adoption::landing(paths, &mut status.proposals);
             let relay = relay(&status.instance, status.owner.as_ref(), &status.nodes);
             json!({ "ok": true, "status": status, "relay": relay })
+        })
+    };
+    run().map_err(|e| refused(&e))
+}
+
+/// `spine`: an instance's accepting spine and, with `against`, the first difference from another's,
+/// both read under one shared lock, writing nothing. A difference is a result: `spine_differs`.
+fn spine(paths: &maestro_store::Paths, instance: &str, against: Option<&str>) -> Result<Value, Value> {
+    let root = flows_root(&paths.workspace)?;
+    let run = || -> Result<Value, KernelError> {
+        let instance = InstanceId::new(instance)?;
+        let against = against.map(InstanceId::new).transpose()?;
+        let guard = Reader::new(&root, Options::default())?.lock()?;
+        let mine = kernel::spine(&guard, &instance)?;
+        let Some(against) = against else {
+            return Ok(json!({ "ok": true, "spine": mine }));
+        };
+        let other = kernel::spine(&guard, &against)?;
+        Ok(match kernel::compare(&mine, &other) {
+            None => json!({ "ok": true, "equal": true, "spine": mine, "against": other }),
+            Some(difference) => {
+                let mut v = refusal("spine_differs", &difference, false);
+                v["difference"] = json!(difference);
+                v["spine"] = json!(mine);
+                v["against"] = json!(other);
+                v
+            }
         })
     };
     run().map_err(|e| refused(&e))

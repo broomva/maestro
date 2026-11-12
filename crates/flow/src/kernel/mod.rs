@@ -33,6 +33,9 @@
 //!   decisions: an agent proposes one through a Maestro ask filed and linked as a human node's
 //!   is, and the kernel applies it (`Adopted`, or `Retired` and the move to `retired/`) only once
 //!   the owner's approval has landed on main. Until then nothing changes. See [`adoption`].
+//! - **The accepting spine** ([`spine`], BRO-3636). One record per accepted (node, iteration),
+//!   with its edge and verify exit, in log order: what two runs of one flow are compared on
+//!   ([`compare`]), since their raw logs legitimately differ. A read, as `status` is.
 //! - **Events** ([`events`]) are typed bodies of the storage layer's generic event.
 
 pub mod adoption;
@@ -47,7 +50,12 @@ pub mod exec;
 pub mod guard;
 pub mod ir;
 mod jq;
+#[cfg(test)]
+mod piloted;
 mod replay;
+pub mod spine;
+#[cfg(test)]
+mod spined;
 mod write;
 
 pub use adoption::{
@@ -62,6 +70,7 @@ pub use ir::{Ir, Iteration};
 pub use replay::{
     Begun, Enabled, Next, NodeStatus, Reason, Rejected, RepeatState, RepeatStatus, State, Status, next, start, status,
 };
+pub use spine::{Difference, Side, Spine, SpineRecord, compare, spine};
 pub use write::{
     Beat, Choosing, Claim, Completion, DEFAULT_LEASE_SECS, MAX_ARGV, MAX_LEASE_SECS, MAX_OUTPUTS, MAX_TOKEN, Verdict,
     choose, claim, complete, heartbeat,

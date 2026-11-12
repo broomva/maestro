@@ -476,7 +476,7 @@ fn malformed(log: &Log, seq: u64, detail: impl Into<String>) -> KernelError {
     KernelError::Malformed { instance: log.instance.to_string(), seq, detail: detail.into() }
 }
 
-fn body<T: DeserializeOwned>(log: &Log, e: &Event) -> Result<T, KernelError> {
+pub(crate) fn body<T: DeserializeOwned>(log: &Log, e: &Event) -> Result<T, KernelError> {
     serde_json::from_value(e.body.clone())
         .map_err(|err| malformed(log, e.seq, format!("a {} body that does not parse ({err})", e.kind)))
 }
@@ -504,6 +504,12 @@ pub(crate) fn pinned(log: &Log) -> Result<Started, KernelError> {
         return Err(malformed(log, first.seq, format!("Started names {}, not its pinned IR", started.flow)));
     }
     Ok(started)
+}
+
+/// The positions of the node events replay set aside (see the module docs): what the accepting
+/// spine leaves out with them (`spine`). A function of the log alone, never of a clock.
+pub(crate) fn rejected(log: &Log, started: &Started) -> Result<BTreeSet<u64>, KernelError> {
+    Ok(Fold::replay(log, started)?.rejected.iter().map(|r| r.seq).collect())
 }
 
 /// A node at an iteration, inside replay: its id, borrowed from the IR, and its iteration index,

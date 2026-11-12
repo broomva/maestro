@@ -61,7 +61,7 @@ fn every_tool_is_a_read_or_an_agent_request() {
             "{name}"
         );
     }
-    for name in ["maestro_flow_next", "maestro_flow_status"] {
+    for name in ["maestro_flow_next", "maestro_flow_status", "maestro_flow_spine"] {
         let spec = TOOLS.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no tool {name}"));
         assert_eq!((spec.authority, spec.request, spec.scope), (Authority::Read, None, "read"), "{name}");
     }
@@ -176,6 +176,7 @@ fn a_read_tool_writes_nothing() {
             "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
             "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
             "maestro_flow_next" | "maestro_flow_status" => json!({ "instance": "fi_none" }),
+            "maestro_flow_spine" => json!({ "instance": "fi_none", "against": "fi_other" }),
             _ => json!({}),
         };
         call(&store, spec.name, args).unwrap_or_else(|e| panic!("{}: {}", spec.name, e.message));
@@ -510,6 +511,11 @@ fn a_flow_proposal_writes_its_instance_and_one_ask_and_takes_no_answer() {
         "{status}"
     );
     assert_eq!(status["status"]["owner"], json!({ "surface": "direct", "id": "d1" }));
+    // The spine of a live instance, and its comparison with itself, are reads too (BRO-3636).
+    let spine =
+        maestro_mcp::call_with_hosts(&store, &hosts, "maestro_flow_spine", json!({ "instance": fi, "against": fi }))
+            .unwrap();
+    assert_eq!((&spine["ok"], &spine["equal"]), (&json!(true), &json!(true)), "{spine}");
     assert!(tree(&root) == quiet, "a read wrote");
 }
 

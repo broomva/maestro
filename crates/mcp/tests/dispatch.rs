@@ -23,9 +23,10 @@ fn reads_say_read_only_and_requests_do_not() {
     }
 }
 
-/// The flow tools are the kernel's ten verbs and nothing else (BRO-3634; `ask` and the two
-/// proposals, BRO-3635): no raw append, no verb that adopts or retires (owner decisions the kernel
-/// applies only on the owner's answer to a proposal), no owner verb under a flow name.
+/// The flow tools are the kernel's ten verbs and the spine read, and nothing else (BRO-3634; `ask`
+/// and the two proposals, BRO-3635; `spine`, BRO-3636): no raw append, no verb that adopts or
+/// retires (owner decisions the kernel applies only on the owner's answer to a proposal), no owner
+/// verb under a flow name.
 #[test]
 fn the_flow_tools_are_the_kernel_verbs_alone() {
     let flow: Vec<(&str, Authority)> =
@@ -39,6 +40,7 @@ fn the_flow_tools_are_the_kernel_verbs_alone() {
             ("maestro_flow_complete", Authority::AgentWrite),
             ("maestro_flow_choose", Authority::AgentWrite),
             ("maestro_flow_status", Authority::Read),
+            ("maestro_flow_spine", Authority::Read),
             ("maestro_flow_heartbeat", Authority::AgentWrite),
             ("maestro_flow_ask", Authority::AgentWrite),
             ("maestro_flow_propose_adoption", Authority::AgentWrite),
@@ -88,7 +90,7 @@ fn every_tool_answers_on_the_fixture() {
         "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
         "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
         "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
-        "maestro_flow_next" | "maestro_flow_status" => json!({ "instance": "fi_none" }),
+        "maestro_flow_next" | "maestro_flow_status" | "maestro_flow_spine" => json!({ "instance": "fi_none" }),
         _ => json!({}),
     };
     for spec in TOOLS.iter().filter(|t| t.authority == Authority::Read) {

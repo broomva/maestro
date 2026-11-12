@@ -196,6 +196,32 @@ enum Command {
         #[command(subcommand)]
         command: FlowCommand,
     },
+    /// Dogfood receipts (BRO-3636): the verifier pilot's check, which the flow kernel runs as the
+    /// verify of verify@1's exercise node. Reads only, and needs no workspace.
+    Dogfood {
+        #[command(subcommand)]
+        command: DogfoodCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DogfoodCommand {
+    /// Check a dogfood-receipt@1 file: exit 0 only when it is well formed, is for --head and
+    /// --surface, says pass, and its evidence file hashes to the digest it records. Each failure
+    /// has its own exit status, 3 to 10 (missing, unreadable, malformed, wrong head, wrong
+    /// surface, not pass, evidence unreadable, evidence mismatch). Prints one JSON line; writes
+    /// nothing.
+    VerifyReceipt {
+        /// The receipt's path; a relative one is taken from the working directory.
+        #[arg(long)]
+        receipt: PathBuf,
+        /// The commit the receipt must be for.
+        #[arg(long)]
+        head: String,
+        /// The surface the receipt must be for.
+        #[arg(long)]
+        surface: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -251,6 +277,16 @@ enum FlowCommand {
     Status {
         #[arg(long)]
         instance: String,
+    },
+    /// The accepting spine: one record per accepted node and iteration, with its edge and verify
+    /// exit, in log order. With --against, exits 1 at the first difference from another instance's.
+    /// Writes nothing.
+    Spine {
+        #[arg(long)]
+        instance: String,
+        /// Another instance of the same flow to compare with.
+        #[arg(long)]
+        against: Option<String>,
     },
     /// Extend a claim's lease.
     Heartbeat {
@@ -478,11 +514,15 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    // The ports keep the Python's exit codes and need no workspace store.
+    // The ports keep the Python's exit codes and need no workspace store; nor does a receipt
+    // check, which the flow kernel runs with a cleared environment.
     match &cli.command {
         Command::Delegation { command } => return port::delegation(command, cli.json),
         Command::Economy { command } => return port::economy(command, cli.json),
         Command::ParityEval => return port::eval_stdin(),
+        Command::Dogfood { command: DogfoodCommand::VerifyReceipt { receipt, head, surface } } => {
+            return verify_receipt(receipt, head, surface);
+        }
         _ => {}
     }
 
@@ -620,6 +660,7 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
         }
         FlowCommand::Next { instance } => (f::NEXT, json!({ "instance": instance })),
         FlowCommand::Status { instance } => (f::STATUS, json!({ "instance": instance })),
+        FlowCommand::Spine { instance, against } => (f::SPINE, json!({ "instance": instance, "against": against })),
         FlowCommand::Claim { session, instance, node_id } => {
             (f::CLAIM, json!({ "session": session.session, "instance": instance, "node_id": node_id }))
         }
@@ -656,6 +697,25 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
         return Ok(());
     }
     bail!("{}: {}", s(&v["code"]), s(&v["reason"]))
+}
+
+/// `maestro dogfood verify-receipt`: the receipt's check (`maestro_flow::dogfood`). One JSON line
+/// on stdout either way; a failure's reason on stderr too, where the kernel hands it back to the
+/// performer, and its own exit status.
+fn verify_receipt(receipt: &std::path::Path, head: &str, surface: &str) -> std::process::ExitCode {
+    match maestro_flow::dogfood::verify(receipt, head, surface) {
+        Ok(accepted) => {
+            let mut v = json!(accepted);
+            v["ok"] = json!(true);
+            println!("{v}");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(failure) => {
+            println!("{}", json!({ "ok": false, "code": failure.code(), "reason": failure.to_string() }));
+            eprintln!("maestro: {}: {failure}", failure.code());
+            std::process::ExitCode::from(failure.exit())
+        }
+    }
 }
 
 fn doctor(cli: &Cli, store: &Store, bstack: Option<&std::path::Path>) -> Result<()> {

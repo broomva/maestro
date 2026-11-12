@@ -6,7 +6,7 @@ use maestro_core::session::PeerCredentials;
 use maestro_hosts::{CallerClaim, DirectRegistry, DirectSession, PaseoRegistry, SessionLiveness, SurfaceRegistry};
 use maestro_hosts::{NodeId, T3Registry};
 use maestro_mcp::call_with_hosts;
-use maestro_mcp::flow::{ASK, CHOOSE, CLAIM, COMPLETE, HEARTBEAT, MAX_NAME, NEXT, START, STATUS};
+use maestro_mcp::flow::{ASK, CHOOSE, CLAIM, COMPLETE, HEARTBEAT, MAX_NAME, NEXT, SPINE, START, STATUS};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -251,6 +251,7 @@ fn the_flows_root_is_the_main_checkouts_and_only_start_makes_it() {
     let before = f.tree();
     assert_eq!(code(&f.d1(START, start.clone())), "workspace_is_worktree");
     assert_eq!(code(&f.call(NEXT, json!({ "instance": "fi_x" }))), "workspace_is_worktree");
+    assert_eq!(code(&f.call(SPINE, json!({ "instance": "fi_x" }))), "workspace_is_worktree");
     assert!(f.tree() == before, "a worktree got a ledger");
     // The main checkout's .git is a folder: the ledger is made there, and only there.
     std::fs::remove_file(ws.join(".git")).unwrap();

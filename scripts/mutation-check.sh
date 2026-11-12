@@ -1449,8 +1449,8 @@ mutate $fg '    evaluate_within(code, input, timeout, own_deadline(timeout))' ' 
 mutate $fk/write.rs '        left -= filled.len();' ''
 mutate $fk/write.rs '        if out.len() > budget {' '        if out.len() >= budget {'
 mutate $fk/write.rs '        if out.len() > budget {' '        if false {'
-mutate $fk/write.rs '                .filter(|name| ir.params.contains_key(*name))' '                .filter(|_| true)'
-mutate $fk/write.rs '                Some(_) => return Err(format!("param {name} is not a string, number or boolean")),' '                Some(_) => {}'
+mutate $fk/write.rs '                    .filter(|name| values.ir.params.contains_key(*name))' '                    .filter(|_| true)'
+mutate $fk/write.rs '                    Some(_) => return Err(template(format!("param {name} is not a string, number or boolean"))),' '                    Some(_) => {}'
 mutate $fk/write.rs '    if !cwd.is_absolute() || !cwd.is_dir() {' '    if !cwd.is_dir() {'
 mutate $fk/write.rs '    if !cwd.is_absolute() || !cwd.is_dir() {' '    if !cwd.is_absolute() {'
 # Running: argv with no shell, a cleared environment but the allowed names, a process group
@@ -1513,7 +1513,21 @@ mutate $mf '                let flow = kernel::compile(&a.definition)?;
                 let flow = kernel::compile(&a.definition)?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
                 let begun = kernel::start(&mut ledger, &w.me, &flow, params)?;'
-mutate $mf '    let root = flows_root(&paths.workspace)?;' '    let root = paths.workspace.join(FLOWS);'
+mutate $mf '    let root = flows_root(&paths.workspace)?;
+    let run = || -> Result<Value, KernelError> {
+        let instance = InstanceId::new(instance)?;
+        let guard' '    let root = paths.workspace.join(FLOWS);
+    let run = || -> Result<Value, KernelError> {
+        let instance = InstanceId::new(instance)?;
+        let guard'
+# The spine reads the same ledger, or refuses as the other reads do (BRO-3636).
+mutate $mf '    let root = flows_root(&paths.workspace)?;
+    let run = || -> Result<Value, KernelError> {
+        let instance = InstanceId::new(instance)?;
+        let against' '    let root = paths.workspace.join(FLOWS);
+    let run = || -> Result<Value, KernelError> {
+        let instance = InstanceId::new(instance)?;
+        let against'
 mutate $mf '    if value.len() > MAX_NAME {' '    if false {'
 mutate $mf '    if value.len() > MAX_NAME {' '    if value.len() >= MAX_NAME {'
 mutate $mf '#[serde(deny_unknown_fields)]
@@ -1816,6 +1830,81 @@ mutate $mf '#[serde(deny_unknown_fields)]
 pub struct FlowProposeArgs {' 'pub struct FlowProposeArgs {'
 mutate $mf 'if name == PROPOSE_ADOPTION { kernel::propose_adoption } else { kernel::propose_retirement }' 'if name == PROPOSE_ADOPTION { kernel::propose_retirement } else { kernel::propose_adoption }'
 mutate $cli 'let body = json_arg("--ask", ask.as_deref())?;' 'let body: Option<Value> = None;'
+# The verifier pilot (BRO-3636). Only a work node's verify fills `{{outputs.<name>}}`, from the
+# outputs it judges, and one left out is the performer's to fix; no other command, and no workdir,
+# reads them.
+mutate $fk/write.rs '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, false),' '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, true),'
+mutate $fk/write.rs '        Some(Class::Work { verify, .. }) => (verify, Step::Command, true),' '        Some(Class::Work { verify, .. }) => (verify, Step::Command, false),'
+mutate $fk/write.rs '                        return Err(("outputs_invalid", detail));' '                        let _ = detail;'
+mutate $fk/write.rs '    let values = Values { outputs: None, ..values };
+' ''
+# The receipt verifier, dogfood-receipt@1: each failure its own code, in order; a regular file of
+# at most its bound; the schema, fields that are there, not empty and bounded, a lower-case sha256
+# and a timestamp, nothing unknown; bound to the head and surface it is asked about; pass only; the
+# evidence a regular file, from the receipt's folder when relative, that hashes to its digest.
+dog=crates/flow/src/dogfood.rs
+mutate $dog '        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {' '        Err(e) if false => {'
+mutate $dog '    if !meta.is_file() {' '    if false {'
+mutate $dog '    if bytes.len() > MAX_RECEIPT {' '    if false {'
+mutate $dog '    if bytes.len() > MAX_RECEIPT {' '    if bytes.len() >= MAX_RECEIPT {'
+mutate $dog '    if receipt.schema != SCHEMA {' '    if false {'
+mutate $dog '        if value.trim().is_empty() {' '        if false {'
+mutate $dog '        if value.len() > MAX_FIELD {' '        if false {'
+mutate $dog '        if value.len() > MAX_FIELD {' '        if value.len() >= MAX_FIELD {'
+mutate $dog '    if !is_digest(&receipt.evidence.sha256) {' '    if false {'
+mutate $dog 'b.is_ascii_digit() || (b'"'"'a'"'"'..=b'"'"'f'"'"').contains(&b)' 'b.is_ascii_hexdigit()'
+mutate $dog '    if receipt.at.parse::<jiff::Timestamp>().is_err() {' '    if false {'
+mutate $dog '#[serde(deny_unknown_fields)]
+pub struct Receipt {' 'pub struct Receipt {'
+mutate $dog '    if receipt.head != head {' '    if false {'
+mutate $dog '    if receipt.surface != surface {' '    if false {'
+mutate $dog '    if receipt.result != Outcome::Pass {' '    if false {'
+mutate $dog '        Some(dir) if evidence.is_relative() => dir.join(evidence),' '        Some(dir) if false => dir.join(evidence),'
+mutate $dog '    if !file.metadata().map_err(|e| e.to_string())?.is_file() {' '    if false {'
+mutate $dog '    if got != receipt.evidence.sha256 {' '    if false {'
+# The CLI exits with each failure's own status, which the kernel records in its refusal.
+mutate $cli '            std::process::ExitCode::from(failure.exit())' '            std::process::ExitCode::FAILURE'
+# verify@1 itself (V1 to V4). V1: pin compares HEAD with params.head, maps a moved one to `moved`,
+# and carries fresh_for. V2: check runs only on at_head, and its own command looks at HEAD before
+# and after the project's check and fails when it moved. V4: exercise only with a declared
+# surface, its receipt bound to the params' head, never one the performer names. The kernel guards
+# these rest on are anchored above and reused here: freshness by `fresh_for` (`age > secs(*f)`,
+# three mutants), a stale observation blocking its dependents (`Form::Open if !stale.is_empty()`),
+# write-time freshness in complete (`if !held.next.enabled.iter().any(..)`), a switch on the
+# recorded value (`e.value.as_deref() != Some(case.value.as_str())`), V3's exit status
+# (`_ => (exit != 0).then(`) and the exit_map (`!exit_map.iter().any(|m| m.exit == exit)`).
+vy=crates/flow/flows/verify.yaml
+mutate $vy 'test "$(git -C "$1" rev-parse HEAD)" = "$2"' 'true'
+mutate $vy 'exit_map: {0: at_head, 1: moved}' 'exit_map: {0: at_head, 1: at_head}'
+mutate $vy 'fresh_for: 10m' 'fresh_for: 1000000h'
+mutate $vy '    switch: {on: pin, case: at_head}
+' ''
+mutate $vy 'at "$1"; sh -c "$2"' 'sh -c "$2"'
+mutate $vy 's=$?; at "$1"; exit "$s"' 's=$?; exit "$s"'
+mutate $vy 'exit 125;' 'exit 0;'
+mutate $vy '    switch: {on: surface, case: declared}
+' ''
+mutate $vy '"--head={{params.head}}"' '"--head={{outputs.head}}"'
+# The accepting spine: receipts replay accepted only; one record per (node, iteration), at its
+# first place with its latest values; choices and answers on it; and the comparison: the flow and
+# its IR, a record missing on either side, skipped told from reordered, the edge, the exit.
+spn=$fk/spine.rs
+mutate $spn '    for e in log.events.iter().filter(|e| !set_aside.contains(&e.seq)) {' '    for e in log.events.iter().filter(|_| true) {'
+mutate $spn '            Some(&i) => records[i] = record,' '            Some(_) => records.push(record),'
+mutate $spn '            Some(&i) => records[i] = record,' '            Some(_) => {}'
+mutate $spn '            Chosen::KIND => {' '            "never" => {'
+mutate $spn '            Answered::KIND => {' '            "nor" => {'
+mutate $spn '    if instance.flow != against.flow || instance.ir_hash != against.ir_hash {' '    if instance.flow != against.flow {'
+mutate $spn '    if instance.flow != against.flow || instance.ir_hash != against.ir_hash {' '    if instance.ir_hash != against.ir_hash {'
+mutate $spn '            (Some(x), None) => return Some(skipped(x, index, Side::Against)),' '            (Some(_), None) => break,'
+mutate $spn '            (None, Some(y)) => return Some(skipped(y, index, Side::Instance)),' '            (None, Some(_)) => break,'
+mutate $spn '        if x.key() != y.key() {' '        if false {'
+mutate $spn '            let Some(against_index) = find(b, x) else {' '            let Some(against_index) = find(b, x).or(Some(0)) else {'
+mutate $spn '            if find(a, y).is_none() {' '            if false {'
+mutate $spn '        if x.edge != y.edge {' '        if false {'
+mutate $spn '        if x.exit != y.exit {' '        if false {'
+# A difference is a refusal the CLI exits 1 on, never an ok.
+mutate $mf '                let mut v = refusal("spine_differs", &difference, false);' '                let mut v = json!({ "ok": true, "code": "spine_differs" });'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
