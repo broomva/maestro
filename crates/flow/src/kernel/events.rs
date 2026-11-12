@@ -339,7 +339,9 @@ pub enum Unblockable {
 
 /// A stop the gate could not refuse, recorded on each open instance it left unfinished (flow
 /// kernel spec, "L4: gates"). It changes no node, claim, owner or receipt: replay lists it, and
-/// `status` reports it. Only the stop gate appends it, as the instance's owner (`stop`).
+/// `status` reports it. Only the stop gate appends it, as the instance's owner (`stop`). It adds
+/// no IR field, so `IR_VERSION` and every IR hash stand; a build from before it replays a log that
+/// holds it as `malformed_instance`, unread and never misread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StopUnblockable {
     /// The harness whose stop went through: `claude` or `codex`.
