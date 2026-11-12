@@ -7,8 +7,10 @@
 //!   claim does not verify `caller_refused`; both write nothing. `next`, `status` and `spine` are
 //!   reads: anyone may call them, and they write nothing.
 //! - **The accepting spine (BRO-3636).** `spine` returns an instance's accepting spine
-//!   (`maestro_flow::kernel::spine`) and, with `against`, compares it with another instance's: equal
-//!   is `ok`, and the first difference is a result, `{"ok": false, "code": "spine_differs",
+//!   (`maestro_flow::kernel::spine`) and, with `against`, compares it with another instance's. Two
+//!   instances of different definitions are not compared: `{"ok": false, "code":
+//!   "definition_mismatch", "definition_mismatch"}`, a precondition that failed. Of one definition,
+//!   equal is `ok`, and the first difference is a result, `{"ok": false, "code": "spine_differs",
 //!   "difference"}`. It is a tool, not only a CLI command, because every `maestro flow` subcommand
 //!   is the twin of one, so a conformance check gives the same JSON from any harness.
 //! - **Refusals are results.** Every kernel refusal comes back as `{"ok": false, "code", "reason",
@@ -612,7 +614,8 @@ fn read(paths: &maestro_store::Paths, name: &str, instance: &str) -> Result<Valu
 }
 
 /// `spine`: an instance's accepting spine and, with `against`, the first difference from another's,
-/// both read under one shared lock, writing nothing. A difference is a result: `spine_differs`.
+/// both read under one shared lock, writing nothing. Another definition is `definition_mismatch`,
+/// checked first; a difference is `spine_differs`. Both are results.
 fn spine(paths: &maestro_store::Paths, instance: &str, against: Option<&str>) -> Result<Value, Value> {
     let root = flows_root(&paths.workspace)?;
     let run = || -> Result<Value, KernelError> {
@@ -624,6 +627,13 @@ fn spine(paths: &maestro_store::Paths, instance: &str, against: Option<&str>) ->
             return Ok(json!({ "ok": true, "spine": mine }));
         };
         let other = kernel::spine(&guard, &against)?;
+        if let Some(mismatch) = kernel::definition_mismatch(&mine, &other) {
+            let mut v = refusal("definition_mismatch", &mismatch, false);
+            v["definition_mismatch"] = json!(mismatch);
+            v["spine"] = json!(mine);
+            v["against"] = json!(other);
+            return Ok(v);
+        }
         Ok(match kernel::compare(&mine, &other) {
             None => json!({ "ok": true, "equal": true, "spine": mine, "against": other }),
             Some(difference) => {

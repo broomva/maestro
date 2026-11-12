@@ -1,8 +1,9 @@
 # Pilot 1, the verifier (flow kernel spec, "Pilot 1: the verifier").
 #
 # pin (observe) -> check (pure) -> exercise (work, only when a surface is declared).
-# Placeholders such as {{params.head}}, and {{outputs.receipt}} in a work node's verify, are data
-# here: the kernel fills them when it runs a command, which replay never does. The spec's `uses: [verified-finish@1]` trait waits for
+# Placeholders such as {{params.head}} are data here: the kernel fills them when it runs a
+# command, which replay never does. `maestro`, `sh`, `git` and `test` are never taken from the
+# caller's PATH: the kernel runs its own executable and the system's root-owned files. The spec's `uses: [verified-finish@1]` trait waits for
 # phase 2 and is left out, since the compiler refuses traits.
 flow: verify
 version: 1
@@ -17,15 +18,16 @@ nodes:
     fresh_for: 10m
     inputs: [params.head]
     exit_map: {0: at_head, 1: moved}
-  # V2 and V3: the project's own check, run by the kernel, only against a pinned head that is
-  # still fresh. Its exit status is the result, as long as the repository is at params.head when
-  # the check starts and when it ends: a HEAD that moved while pin was still fresh fails it (125),
-  # so a check never passes against a head that has since moved.
+  # V2 and V3: the project's own check, run by the kernel, only while pin is fresh and at_head.
+  # It runs in a snapshot of params.head (one commit, in a new folder), never in the working tree,
+  # so its exit status is the result for that commit's content whatever the repository does
+  # meanwhile. It alone searches the caller's PATH, for the project's toolchain.
   check:
     class: pure
     needs: [pin]
     switch: {on: pin, case: at_head}
-    run: [sh, -c, 'at() { test "$(git rev-parse HEAD 2>/dev/null)" = "$1" || { echo "the repository is not at $1" >&2; exit 125; }; }; at "$1"; sh -c "$2"; s=$?; at "$1"; exit "$s"', check, "{{params.head}}", "{{params.check}}"]
+    snapshot: "{{params.head}}"
+    run: [sh, -c, "{{params.check}}"]
   # V4: whether a surface was declared, observed from the param itself (it never changes, so
   # the observation never goes stale).
   surface:
@@ -33,14 +35,16 @@ nodes:
     run: [test, -n, "{{params.surface}}"]
     inputs: [params.surface]
     exit_map: {0: declared, 1: none}
-  # V4: tried as a user, only when a surface is declared. Its verify checks the dogfood receipt
-  # the performer names in its outputs ({"receipt": "<path>"}) against the pinned head and the
-  # surface (`maestro_flow::dogfood`, dogfood-receipt@1). Each value is one word, after `=`, so
-  # none is read as a flag.
+  # V4: tried as a user, only when a surface is declared. The performer completes with
+  # {"receipt": "<path>", "receipt_sha256": "sha256:<hex>"}; the kernel hands those outputs to the
+  # verify as JSON on its standard input, never in its argv, and records them, so the log pins
+  # the receipt's content and the receipt pins its evidence. The verify checks the receipt against
+  # the pinned head and the surface (`maestro_flow::dogfood`, dogfood-receipt@1). Each param is
+  # one word, after `=`, so none is read as a flag.
   exercise:
     class: work
     needs: [check]
     switch: {on: surface, case: declared}
     performer: agent:verifier
     skill: dogfood
-    verify: [maestro, dogfood, verify-receipt, "--receipt={{outputs.receipt}}", "--head={{params.head}}", "--surface={{params.surface}}"]
+    verify: [maestro, dogfood, verify-receipt, "--head={{params.head}}", "--surface={{params.surface}}"]

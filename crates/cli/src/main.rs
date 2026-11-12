@@ -206,15 +206,13 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DogfoodCommand {
-    /// Check a dogfood-receipt@1 file: exit 0 only when it is well formed, is for --head and
-    /// --surface, says pass, and its evidence file hashes to the digest it records. Each failure
-    /// has its own exit status, 3 to 10 (missing, unreadable, malformed, wrong head, wrong
-    /// surface, not pass, evidence unreadable, evidence mismatch). Prints one JSON line; writes
-    /// nothing.
+    /// Check a dogfood-receipt@1 file. Reads the outputs a performer completed with on stdin,
+    /// `{"receipt": "<path>", "receipt_sha256": "sha256:<hex>"}` (a relative path is taken from
+    /// the working directory), as the flow kernel hands them to the verify. Exits 0 only when the
+    /// receipt hashes to receipt_sha256, is well formed, is for --head and --surface, says pass,
+    /// and its evidence file hashes to the digest it records. Each failure has its own exit
+    /// status, 3 to 14 (see maestro_flow::dogfood). Prints one JSON line; writes nothing.
     VerifyReceipt {
-        /// The receipt's path; a relative one is taken from the working directory.
-        #[arg(long)]
-        receipt: PathBuf,
         /// The commit the receipt must be for.
         #[arg(long)]
         head: String,
@@ -279,8 +277,8 @@ enum FlowCommand {
         instance: String,
     },
     /// The accepting spine: one record per accepted node and iteration, with its edge and verify
-    /// exit, in log order. With --against, exits 1 at the first difference from another instance's.
-    /// Writes nothing.
+    /// exit, in log order. With --against, exits 1 at the first difference from another instance's,
+    /// and 3 when the two run different definitions, which are not compared. Writes nothing.
     Spine {
         #[arg(long)]
         instance: String,
@@ -394,6 +392,19 @@ fn store(cli: &Cli) -> Result<Store> {
     let source: TreeSource = cli.tree.parse().map_err(|e: String| anyhow::anyhow!("--tree: {e}"))?;
     Ok(Store::new(paths, source))
 }
+
+/// Two instances `flow spine --against` does not compare, since they run different definitions:
+/// exit 3, apart from a difference (exit 1).
+#[derive(Debug)]
+struct DefinitionMismatch(String);
+
+impl std::fmt::Display for DefinitionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DefinitionMismatch {}
 
 /// A lock another writer held for the whole wait: exit 75 (EX_TEMPFAIL), as `ask_ledger.py` does, to retry.
 #[derive(Debug)]
@@ -520,8 +531,8 @@ fn main() -> std::process::ExitCode {
         Command::Delegation { command } => return port::delegation(command, cli.json),
         Command::Economy { command } => return port::economy(command, cli.json),
         Command::ParityEval => return port::eval_stdin(),
-        Command::Dogfood { command: DogfoodCommand::VerifyReceipt { receipt, head, surface } } => {
-            return verify_receipt(receipt, head, surface);
+        Command::Dogfood { command: DogfoodCommand::VerifyReceipt { head, surface } } => {
+            return verify_receipt(head, surface);
         }
         _ => {}
     }
@@ -532,6 +543,9 @@ fn main() -> std::process::ExitCode {
             eprintln!("maestro: {e:#}");
             if e.downcast_ref::<Busy>().is_some() {
                 return std::process::ExitCode::from(75);
+            }
+            if e.downcast_ref::<DefinitionMismatch>().is_some() {
+                return std::process::ExitCode::from(3);
             }
             std::process::ExitCode::FAILURE
         }
@@ -696,14 +710,22 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
     if v["ok"] == json!(true) {
         return Ok(());
     }
+    if v["code"] == "definition_mismatch" {
+        return Err(DefinitionMismatch(format!("definition_mismatch: {}", s(&v["reason"]))).into());
+    }
     bail!("{}: {}", s(&v["code"]), s(&v["reason"]))
 }
 
-/// `maestro dogfood verify-receipt`: the receipt's check (`maestro_flow::dogfood`). One JSON line
-/// on stdout either way; a failure's reason on stderr too, where the kernel hands it back to the
-/// performer, and its own exit status.
-fn verify_receipt(receipt: &std::path::Path, head: &str, surface: &str) -> std::process::ExitCode {
-    match maestro_flow::dogfood::verify(receipt, head, surface) {
+/// `maestro dogfood verify-receipt`: the receipt's check (`maestro_flow::dogfood`) over the outputs
+/// on stdin, read to one byte past their bound. One JSON line on stdout either way; a failure's
+/// reason on stderr too, where the kernel hands it back to the performer, and its own exit status.
+fn verify_receipt(head: &str, surface: &str) -> std::process::ExitCode {
+    let mut input = Vec::new();
+    let limit = maestro_flow::dogfood::MAX_OUTPUTS as u64 + 1;
+    if let Err(e) = std::io::stdin().lock().take(limit).read_to_end(&mut input) {
+        input = format!("stdin could not be read ({e})").into_bytes();
+    }
+    match maestro_flow::dogfood::verify(&input, head, surface) {
         Ok(accepted) => {
             let mut v = json!(accepted);
             v["ok"] = json!(true);

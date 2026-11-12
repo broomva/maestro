@@ -10,7 +10,7 @@ use maestro_core::session::VerifiedSession;
 use maestro_flow::clock;
 use maestro_flow::kernel::events::{Claimed, Completed, KernelEvent, Started};
 use maestro_flow::kernel::{
-    Completion, DEFAULT_LEASE_SECS, Limits, MAX_ARGV, State, claim, complete, heartbeat, next, start, status,
+    Completion, DEFAULT_LEASE_SECS, Limits, MAX_ARGV, State, claim, compile, complete, heartbeat, next, start, status,
 };
 use maestro_flow::{InstanceId, Ledger, NewEvent, Options, Reader};
 use serde_json::{Value, json};
@@ -341,38 +341,91 @@ fn a_command_is_refused_when_its_placeholders_name_no_param_or_it_fills_past_its
 }
 
 #[test]
-fn only_a_work_nodes_verify_reads_the_outputs_it_judges() {
-    // BRO-3636: `{{outputs.<name>}}` fills a work node's verify from the outputs being completed;
-    // one left out is the performer's to fix. Any other command is the pinned IR's and the params'
-    // alone, so there it names no param, outputs or not.
+fn only_a_work_nodes_verify_reads_the_outputs_it_judges_and_only_on_its_standard_input() {
+    // BRO-3636: a work node's verify reads the outputs it judges as JSON on its standard input,
+    // never in its argv; every other command reads an empty input.
     let mut f = fx(r#"
 flow: o
 version: 1
 params: [dir]
 workdir: "{{params.dir}}"
 nodes:
-  work: {class: work, verify: [sh, -c, 'test "$0" = shown', "{{outputs.word}}"]}
-  pure: {class: pure, run: [sh, -c, 'test "$0" = shown', "{{outputs.word}}"]}
-  observe: {class: observe, run: [sh, -c, 'test "$0" = shown', "{{outputs.word}}"], fresh_for: 1h, exit_map: {0: ok}}
+  work: {class: work, verify: [sh, -c, 'cat > seen-work; grep -q shown seen-work']}
+  pure: {class: pure, run: [sh, -c, 'cat > seen-pure; test ! -s seen-pure']}
+  observe: {class: observe, run: [sh, -c, 'cat > seen-observe; test ! -s seen-observe'], fresh_for: 1h, exit_map: {0: ok}}
 "#);
     let fi = f.begin();
     let c = f.claim(&fi, "work");
-    assert_eq!(outcome(&f.complete(&c.token, json!({}))), "outputs_invalid");
-    assert_eq!(outcome(&f.complete(&c.token, json!({ "word": { "nested": 1 } }))), "outputs_invalid");
     assert_eq!(outcome(&f.complete(&c.token, json!({ "word": "hidden" }))), "verify_failed");
     assert_eq!(outcome(&f.complete(&c.token, json!({ "word": "shown" }))), "completed");
-    assert_eq!(f.last_body(&fi)["verify"]["argv"][3], "shown", "the receipt names what was judged");
+    let seen: Value = serde_json::from_slice(&std::fs::read(f.dir.join("seen-work")).unwrap()).unwrap();
+    assert_eq!(seen, json!({ "word": "shown" }), "the outputs, whole, as JSON");
+    assert_eq!(f.last_body(&fi)["verify"]["argv"], json!(["sh", "-c", "cat > seen-work; grep -q shown seen-work"]));
     for node in ["pure", "observe"] {
         let c = f.claim(&fi, node);
-        assert_eq!(outcome(&f.complete(&c.token, json!({ "word": "shown" }))), "template_invalid", "{node}");
+        assert_eq!(outcome(&f.complete(&c.token, json!({ "word": "shown" }))), "completed", "{node}");
     }
-    // Nor does the workdir read them, even for a work node's verify.
-    let mut f =
-        fx("flow: o\nversion: 1\nnodes:\n  work: {class: work, verify: ['true']}\nworkdir: \"{{outputs.dir}}\"\n");
-    let fi = start(&mut f.ledger, &f.me, &f.flow, json!({})).unwrap().instance;
-    let c = f.claim(&fi, "work");
-    let dir = f.dir.to_str().unwrap().to_string();
-    assert_eq!(outcome(&f.complete(&c.token, json!({ "dir": dir }))), "workdir_invalid");
+}
+
+#[test]
+fn a_performers_text_is_never_read_as_code() {
+    // The injection BRO-3636 round 1 found: an outputs placeholder in a shell's argv. It is refused
+    // at compile time, in every command and the workdir.
+    let injectable = [
+        "nodes:\n  w: {class: work, verify: [sh, -c, \"test '{{outputs.value}}' = safe\"]}\n",
+        "nodes:\n  p: {class: pure, run: [echo, \"{{outputs.value}}\"]}\n",
+        "nodes:\n  o: {class: observe, run: [echo, \"{{outputs.value}}\"], fresh_for: 1h, exit_map: {0: ok}}\n",
+        "nodes:\n  e: {class: effect, run: ['true'], reconcile: [echo, \"{{outputs.value}}\"]}\n",
+        "nodes:\n  e: {class: effect, run: [echo, \"{{outputs.value}}\"], reconcile: ['true']}\n",
+        "nodes:\n  p: {class: pure, run: ['true'], snapshot: \"{{outputs.value}}\"}\n",
+        "workdir: \"{{outputs.value}}\"\nnodes:\n  p: {class: pure, run: ['true']}\n",
+    ];
+    for yaml in injectable {
+        let e = compile(&format!("flow: i\nversion: 1\n{yaml}")).unwrap_err();
+        assert_eq!(e.code(), "definition_invalid", "{yaml}");
+        assert!(e.to_string().contains("standard input"), "{e}");
+    }
+    // The same check, reading its input as data: the performer's text cannot end the test.
+    let mut f = fx(r#"
+flow: i
+version: 1
+params: [dir]
+workdir: "{{params.dir}}"
+nodes:
+  w: {class: work, verify: [sh, -c, 'cat > got; printf %s "$0" > want; cmp -s got want', '{"value":"safe"}']}
+"#);
+    let fi = f.begin();
+    let c = f.claim(&fi, "w");
+    assert_eq!(outcome(&f.complete(&c.token, json!({ "value": "'; exit 0; #" }))), "verify_failed");
+    assert_eq!(outcome(&f.complete(&c.token, json!({ "value": "safe" }))), "completed");
+}
+
+#[test]
+fn an_outputs_placeholder_pinned_before_the_rule_is_refused_as_it_was() {
+    // An IR pinned before the compile-time rule keeps what it did: its placeholder names no param,
+    // so the command is refused template_invalid before it runs, and the outputs fill nothing.
+    let mut f = fx(
+        "flow: o\nversion: 1\nparams: [dir]\nworkdir: \"{{params.dir}}\"\nnodes:\n  w: {class: work, verify: ['true']}\n",
+    );
+    let mut ir = f.flow.ir().clone();
+    let maestro_flow::kernel::ir::Class::Work { verify, .. } = &mut ir.nodes.get_mut("w").unwrap().class else {
+        panic!()
+    };
+    *verify = vec!["test".into(), "{{outputs.value}}".into(), "=".into(), "safe".into()];
+    let started = Started {
+        flow: "o@1".into(),
+        ir_hash: maestro_flow::kernel::ir::content_hash(&ir).unwrap(),
+        ir,
+        params: json!({ "dir": f.dir.to_str().unwrap() }),
+        owner: Some(maestro_flow::kernel::events::Owner {
+            session: "t3:-/owner".parse().unwrap(),
+            marker_sha256: maestro_flow::kernel::events::marker_digest("marker-1"),
+        }),
+    };
+    let fi = InstanceId::new("fi_pinned_outputs").unwrap();
+    f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
+    let c = f.claim(&fi, "w");
+    assert_eq!(outcome(&f.complete(&c.token, json!({ "value": "safe" }))), "template_invalid");
 }
 
 #[test]

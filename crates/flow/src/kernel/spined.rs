@@ -136,7 +136,7 @@ fn refusals_repairs_lost_leases_re_runs_and_performers_leave_the_spine_as_it_is(
 
 #[test]
 fn a_skipped_or_reordered_node_another_edge_or_another_exit_is_a_difference() {
-    let (mut f, test_clock) = (fx(SHAPE), TestClock::install());
+    let (mut f, _clock) = (fx(SHAPE), TestClock::install());
     let me = f.me.clone();
     let clean = Run::new(&mut f, me.clone()).clean("ship");
     let none = crate::kernel::ir::Iteration::new();
@@ -205,19 +205,50 @@ fn a_skipped_or_reordered_node_another_edge_or_another_exit_is_a_difference() {
             against: Some(1)
         })
     );
+}
 
-    // A re-run keeps the place of the first receipt and says what the latest one does: probe
-    // observed up, then down once it lapsed.
+#[test]
+fn a_re_run_keeps_the_first_place_and_the_latest_result() {
+    // The policy (spine's module docs): a node recorded again in its iteration is one record, at
+    // the place of its first receipt, holding its latest receipt's result. Lease and freshness
+    // re-runs are incidental, so a re-run that ends where the first run did is not a difference;
+    // one that ends elsewhere is, at the first place.
+    let (mut f, test_clock) = (fx(SHAPE), TestClock::install());
+    let me = f.me.clone();
+    let clean = Run::new(&mut f, me.clone()).clean("ship");
+
+    // probe, left, right, pick, then probe again once it lapsed, with the same result: the A, B,
+    // A collapse (the known limit) makes it equal to the clean run.
     let mut run = Run::new(&mut f, me.clone());
-    let rerun = run.clean("ship");
+    let same = run.clean("ship");
+    test_clock.set(clock::now() + secs(7200));
+    Run { f: &mut f, who: me.clone(), fi: same.clone() }.done("probe");
+    let kinds = f.kinds(&same);
+    assert_eq!(kinds.iter().filter(|k| *k == "Completed").count(), 4, "probe ran twice: {kinds:?}");
+    let records = spine_of(&f, &same).records;
+    assert_eq!(records.iter().map(|r| r.node.as_str()).collect::<Vec<_>>(), ["probe", "left", "right", "pick"]);
+    assert_eq!(differ(&f, &clean, &same), None);
+
+    // The same re-run ending down: the latest result, at the first place, is a difference there.
+    let mut run = Run::new(&mut f, me.clone());
+    let down = run.clean("ship");
     test_clock.set(clock::now() + secs(7200));
     std::fs::write(f.dir.join("probe"), "1").unwrap();
-    Run { f: &mut f, who: me.clone(), fi: rerun.clone() }.done("probe");
+    Run { f: &mut f, who: me.clone(), fi: down.clone() }.done("probe");
     std::fs::remove_file(f.dir.join("probe")).unwrap();
-    let records = spine_of(&f, &rerun).records;
+    let records = spine_of(&f, &down).records;
     assert_eq!(records.iter().map(|r| r.node.as_str()).collect::<Vec<_>>(), ["probe", "left", "right", "pick"]);
     assert_eq!(records[0].exit, Some(1));
-    assert!(matches!(differ(&f, &clean, &rerun), Some(Difference::Exit { index: 0, .. })));
+    assert_eq!(
+        differ(&f, &clean, &down),
+        Some(Difference::Exit {
+            node: "probe".into(),
+            iteration: crate::kernel::ir::Iteration::new(),
+            index: 0,
+            exit: Some(0),
+            against: Some(1)
+        })
+    );
 }
 
 #[test]

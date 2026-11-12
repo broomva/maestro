@@ -451,7 +451,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: flow::SPINE,
         title: "Flow spine",
-        description: "The accepting spine of a flow instance: one record per node and iteration the kernel accepted, with its chosen edge and the exit status of the verify it ran, in log order. Refusals, leases, attempts, performers and timestamps are left out. With against, compares it with another instance's spine: equal is ok; otherwise ok false, code spine_differs, and the first difference (another flow, a node skipped or reordered, another edge, another exit). Writes nothing.",
+        description: "The accepting spine of a flow instance: one record per node and iteration the kernel accepted, with its chosen edge and the exit status of the verify it ran, in log order. Refusals, leases, attempts, performers and timestamps are left out. With against, compares it with another instance's spine. Two instances of different definitions are not compared: ok false, code definition_mismatch. Otherwise equal is ok, and a difference is ok false, code spine_differs, with the first difference (a node skipped or reordered, another edge, another exit). Writes nothing.",
         authority: Authority::Read,
         request: None,
         scope: "read",

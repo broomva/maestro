@@ -53,9 +53,13 @@
 //! `complete` checks the claim, then that the node is still enabled now (everything it consumes
 //! current and fresh) and that the outputs fit, then runs the node's own command: a pure node's
 //! `run`, a work node's `verify`, an observe node's `run` (its value is its exit status through
-//! `exit_map`; any other status fails closed). A work node's verify may name the outputs it
-//! judges, `{{outputs.<name>}}`, which `complete` fills from the outputs it was given (BRO-3636);
-//! no other command, and no workdir, reads them. The flows lock is not held while the command runs:
+//! `exit_map`; any other status fails closed). A work node's verify reads the outputs it judges
+//! as JSON on its standard input (BRO-3636); no command's argv or workdir is ever filled from
+//! them, so a performer's text is never read as code. A pure node with a `snapshot` runs in a
+//! snapshot of that commit, never in the working tree (`snapshot`); a snapshot that cannot be made
+//! is refused `snapshot_failed`, never as an exit status of the project's command. The commands
+//! run as `exec` says: `maestro` is the kernel's own executable, `sh`, `git` and `test` the
+//! system's root-owned files, on a fixed `PATH`. The flows lock is not held while the command runs:
 //! it is dropped, and after the run everything is checked again under the lock, against the log
 //! as it is then and at a fresh read of the clock, before anything is appended. A pass appends
 //! `Completed`, the receipt, which spends the token. Anything else about the work appends
@@ -131,10 +135,11 @@ use super::events::{
     Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat, KernelEvent, Owner, Performer, Refused, Started,
     VerifyRecord, digest, marker_digest,
 };
-use super::exec::{self, Limits, Ran};
+use super::exec::{self, Feed, Limits, Ran, Search};
 use super::guard::{self, GUARD_TIMEOUT, Judged};
 use super::ir::{Class, Ir, Iteration, Node};
 use super::replay::{Awaiting, Next, Reason, State, awaiting, guard_input, next_of, pinned, secs};
+use super::snapshot;
 use crate::FlowError;
 use crate::clock;
 use crate::ids::InstanceId;
@@ -605,6 +610,10 @@ struct Plan {
     argv: Vec<String>,
     cwd: PathBuf,
     step: Step,
+    /// A work node's verify reads the outputs it judges here, as JSON, on its standard input.
+    stdin: Option<Vec<u8>>,
+    /// A pure node's `snapshot`, filled: the commit its command runs in a snapshot of.
+    snapshot: Option<String>,
 }
 
 /// What the command is to the node.
@@ -627,9 +636,11 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
     check_outputs(outputs)?;
     enabled(held)?;
     let ir = &held.started.ir;
-    // Only a work node's verify reads the outputs it judges; every other command is a function of
-    // the pinned IR and params, which no performer chooses.
-    let (words, step, judges) = match held.started.ir.nodes.get(&held.rec.node).map(|n| &n.class) {
+    let node = held.started.ir.nodes.get(&held.rec.node);
+    // Only a work node's verify reads the outputs it judges, and only as data on its standard
+    // input; every command's words are a function of the pinned IR and params, which no performer
+    // chooses.
+    let (words, step, judges) = match node.map(|n| &n.class) {
         Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, false),
         Some(Class::Work { verify, .. }) => (verify, Step::Command, true),
         Some(Class::Effect { reconcile, .. }) if held.effect_started => (reconcile, Step::Reconcile, false),
@@ -638,24 +649,35 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
         }
         _ => return Err(("not_claimable", format!("node {} has no command the kernel runs", held.rec.node))),
     };
-    let values = Values { ir, params: &held.started.params, outputs: judges.then_some(outputs) };
+    let params = &held.started.params;
     // The words share one budget, so a command is never built past MAX_ARGV.
     let mut argv = Vec::with_capacity(words.len());
     let mut left = MAX_ARGV;
     for word in words {
-        let filled = fill(&values, word, left)?;
+        let filled = fill(ir, params, word, left).map_err(|e| ("template_invalid", e))?;
         left -= filled.len();
         argv.push(filled);
     }
     let Some(dir) = &ir.workdir else {
         return Err(("workdir_invalid", "the flow declares no workdir".to_string()));
     };
-    let values = Values { outputs: None, ..values };
-    let cwd = PathBuf::from(fill(&values, dir, MAX_ARGV).map_err(|(_, e)| ("workdir_invalid", e))?);
+    let cwd = PathBuf::from(fill(ir, params, dir, MAX_ARGV).map_err(|e| ("workdir_invalid", e))?);
     if !cwd.is_absolute() || !cwd.is_dir() {
         return Err(("workdir_invalid", "the workdir is not an absolute path to a directory".to_string()));
     }
-    Ok(Plan { argv, cwd, step })
+    let stdin = judges.then(|| serde_json::to_vec(outputs).unwrap_or_default());
+    let snapshot = match node.and_then(|n| n.snapshot.as_deref()) {
+        Some(rev) => {
+            let commit = fill(ir, params, rev, MAX_ARGV).map_err(|e| ("snapshot_invalid", e))?;
+            if !snapshot::is_object_id(&commit) {
+                let detail = format!("the snapshot's commit {commit:?} is not a full object id");
+                return Err(("snapshot_invalid", detail));
+            }
+            Some(commit)
+        }
+        None => None,
+    };
+    Ok(Plan { argv, cwd, step, stdin, snapshot })
 }
 
 /// The node is enabled now, so everything it consumes is current and fresh: write-time freshness.
@@ -699,27 +721,11 @@ fn check_outputs(outputs: &Value) -> Result<(), Unfit> {
     Ok(())
 }
 
-/// What a command's placeholders are filled from: the params, and for a work node's verify the
-/// outputs it judges.
-struct Values<'a> {
-    ir: &'a Ir,
-    params: &'a Value,
-    outputs: Option<&'a Value>,
-}
-
 /// Fills each `{{params.<name>}}` in `text` with the param's value: a string as it is, a number
 /// or boolean as written, an absent or null optional param as nothing. Anything else in braces,
-/// an undeclared param or a param that is an array or object is refused `template_invalid`, and
-/// so is a result over `budget` bytes, as soon as it is (one param at most past it, never a whole
-/// command).
-///
-/// Where `values` has outputs (a work node's verify, BRO-3636), each `{{outputs.<name>}}` is filled
-/// with that output as a param is, except that one absent, null, an array or an object is the
-/// performer's to fix: refused `outputs_invalid`, which keeps the token. Anywhere else an outputs
-/// placeholder names no param, as it did before outputs were filled: no instance that could
-/// complete changes what its commands mean.
-fn fill(values: &Values, text: &str, budget: usize) -> Result<String, Unfit> {
-    let template = |detail: String| ("template_invalid", detail);
+/// an undeclared param or a param that is an array or object is refused, and so is a result
+/// over `budget` bytes, as soon as it is (one param at most past it, never a whole command).
+fn fill(ir: &Ir, params: &Value, text: &str, budget: usize) -> Result<String, String> {
     let mut out = String::new();
     let mut rest = Some(text);
     while let Some(text) = rest {
@@ -730,33 +736,21 @@ fn fill(values: &Values, text: &str, budget: usize) -> Result<String, Unfit> {
         out.push_str(literal);
         rest = None;
         if let Some(after) = after {
-            let (inner, tail) = after.split_once("}}").ok_or_else(|| template("a {{ with no }}".to_string()))?;
-            let output = inner.strip_prefix("outputs.").zip(values.outputs);
-            if let Some((name, outputs)) = output {
-                match outputs.get(name) {
-                    Some(Value::String(s)) => out.push_str(s),
-                    Some(v @ (Value::Number(_) | Value::Bool(_))) => out.push_str(&v.to_string()),
-                    _ => {
-                        let detail = format!("the verify needs outputs.{name}, a string, number or boolean");
-                        return Err(("outputs_invalid", detail));
-                    }
-                }
-            } else {
-                let name = inner
-                    .strip_prefix("params.")
-                    .filter(|name| values.ir.params.contains_key(*name))
-                    .ok_or_else(|| template(format!("{{{{{inner}}}}} names no param of this flow")))?;
-                match values.params.get(name) {
-                    None | Some(Value::Null) => {}
-                    Some(Value::String(s)) => out.push_str(s),
-                    Some(v @ (Value::Number(_) | Value::Bool(_))) => out.push_str(&v.to_string()),
-                    Some(_) => return Err(template(format!("param {name} is not a string, number or boolean"))),
-                }
+            let (inner, tail) = after.split_once("}}").ok_or_else(|| "a {{ with no }}".to_string())?;
+            let name = inner
+                .strip_prefix("params.")
+                .filter(|name| ir.params.contains_key(*name))
+                .ok_or_else(|| format!("{{{{{inner}}}}} names no param of this flow"))?;
+            match params.get(name) {
+                None | Some(Value::Null) => {}
+                Some(Value::String(s)) => out.push_str(s),
+                Some(v @ (Value::Number(_) | Value::Bool(_))) => out.push_str(&v.to_string()),
+                Some(_) => return Err(format!("param {name} is not a string, number or boolean")),
             }
             rest = Some(tail);
         }
         if out.len() > budget {
-            return Err(template(format!("the command fills past {MAX_ARGV} bytes")));
+            return Err(format!("the command fills past {MAX_ARGV} bytes"));
         }
     }
     Ok(out)
@@ -878,9 +872,14 @@ pub fn complete(
     // A claim's cancel deadline ends its command too: the run is no longer than what is left.
     let limits = &cancel_capped(limits, held.rec.cancel_at);
     // The command runs with the flows lock released, so other writers and readers go on.
+    // Every command but the project's own in a snapshot searches the system's PATH (`exec`).
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref() };
     drop(guard);
     let ran_at = clock::now();
-    let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    let ran = match &plan.snapshot {
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    };
     pause!("command_ran");
 
     // Everything again, under the lock, against the log as it is now and the clock read again.
@@ -1103,35 +1102,18 @@ mod tests {
         let flow = compile("flow: f\nversion: 1\nparams: [a, n?, o?]\nnodes:\n  x: {class: pure, run: [x]}\n").unwrap();
         let ir = flow.ir();
         let params = serde_json::json!({ "a": "A b", "n": 3, "o": [1] });
-        let values = Values { ir, params: &params, outputs: None };
         let all = usize::MAX;
-        assert_eq!(fill(&values, "<{{params.a}}|{{params.n}}>", all).unwrap(), "<A b|3>");
-        let short = serde_json::json!({ "a": "x" });
-        assert_eq!(fill(&Values { params: &short, ..values }, "[{{params.n}}]", all).unwrap(), "[]");
-        assert_eq!(fill(&values, "no braces", all).unwrap(), "no braces");
-        for bad in ["{{params.zz}}", "{{a}}", "{{params.a", "{{params.o}}", "{{outputs.a}}"] {
-            assert_eq!(fill(&values, bad, all).unwrap_err().0, "template_invalid", "{bad}");
+        assert_eq!(fill(ir, &params, "<{{params.a}}|{{params.n}}>", all).unwrap(), "<A b|3>");
+        assert_eq!(fill(ir, &serde_json::json!({ "a": "x" }), "[{{params.n}}]", all).unwrap(), "[]");
+        assert_eq!(fill(ir, &params, "no braces", all).unwrap(), "no braces");
+        for bad in ["{{params.zz}}", "{{a}}", "{{params.a", "{{params.o}}"] {
+            assert!(fill(ir, &params, bad, all).is_err(), "{bad}");
         }
         // The budget holds for literal text and for params, to the byte.
-        assert_eq!(fill(&values, "abc", 3).unwrap(), "abc");
-        assert!(fill(&values, "abcd", 3).is_err());
-        assert_eq!(fill(&values, "{{params.a}}", 3).unwrap(), "A b");
-        assert!(fill(&values, "x{{params.a}}", 3).is_err());
-
-        // With outputs (a work node's verify): each fills as a param does, and one the performer
-        // left out, null or not a scalar is theirs to fix.
-        let outputs = serde_json::json!({ "r": "/tmp/r.json", "n": 2, "b": true, "z": null, "o": {} });
-        let judging = Values { outputs: Some(&outputs), ..values };
-        assert_eq!(
-            fill(&judging, "--receipt={{outputs.r}}|{{outputs.n}}|{{outputs.b}}", all).unwrap(),
-            "--receipt=/tmp/r.json|2|true"
-        );
-        assert_eq!(fill(&judging, "{{params.a}}", all).unwrap(), "A b");
-        for bad in ["{{outputs.missing}}", "{{outputs.z}}", "{{outputs.o}}"] {
-            assert_eq!(fill(&judging, bad, all).unwrap_err().0, "outputs_invalid", "{bad}");
-        }
-        assert_eq!(fill(&judging, "{{outputs.r}}", 11).unwrap(), "/tmp/r.json");
-        assert_eq!(fill(&judging, "{{outputs.r}}", 10).unwrap_err().0, "template_invalid");
+        assert_eq!(fill(ir, &params, "abc", 3).unwrap(), "abc");
+        assert!(fill(ir, &params, "abcd", 3).is_err());
+        assert_eq!(fill(ir, &params, "{{params.a}}", 3).unwrap(), "A b");
+        assert!(fill(ir, &params, "x{{params.a}}", 3).is_err());
     }
 
     #[test]

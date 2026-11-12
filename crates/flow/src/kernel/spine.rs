@@ -4,9 +4,15 @@
 //! The spine is one record per (node, iteration) that has an accepted receipt, in log order: the
 //! node, its iteration, the chosen edge (a choice node's `Chosen`, none for any other) and the
 //! exit status of the verify the kernel ran (a `Completed`'s `verify.exit`, none for a choice or a
-//! human node's `Answered`). A node recorded again in its iteration (an observation re-run once
-//! stale, a receipt redone over new inputs) keeps one record, at the place of its first receipt,
-//! holding what its latest receipt says. Events replay set aside are not receipts and are left out.
+//! human node's `Answered`). Events replay set aside are not receipts and are left out.
+//!
+//! **Re-runs.** A node recorded again in its iteration keeps one record, at the place of its
+//! FIRST receipt, holding what its LATEST receipt says. A re-run is incidental to how a run went: an
+//! observation re-run once its `fresh_for` lapsed, or a receipt redone after an upstream re-run,
+//! happens as often as the clock and the leases make it, so it must not fail conformance; the
+//! result it ends with must. The known limit: receipts A, B, then A again collapse to A, B (A
+//! holding its second result), so a run whose A was redone after B compares equal to one whose
+//! A ran once, as long as A ended with the same result.
 //!
 //! Everything else in the log is left out: `Claimed`, `Heartbeat` and `Refused` events (leases,
 //! lost leases and re-claims, refusals and the repairs after them), attempt numbers, refusal
@@ -14,9 +20,12 @@
 //! were refused and repaired, or lost a lease and claimed again, a different number of times, or
 //! that ran under different sessions, have equal spines.
 //!
-//! [`compare`] finds the first difference between two spines: another flow (by name and IR hash),
-//! a record one has and the other lacks (a node skipped), a record at another place (reordered),
-//! another edge, or another exit status. [`spine`] reads under the shared lock and writes nothing.
+//! Two spines are compared only as runs of one definition, the spec's "same `verify@1` instance
+//! shape": [`definition_mismatch`] is that precondition (the flow's name and version, and the IR
+//! hash), reported on its own and never as a difference. [`compare`] then finds the first
+//! difference the spec names: a record one has and the other lacks (a node skipped), a record at
+//! another place (reordered), another edge, or another exit status. [`spine`] reads under the
+//! shared lock and writes nothing.
 
 use super::error::KernelError;
 use super::events::{Answered, Chosen, Completed, KernelEvent};
@@ -61,12 +70,29 @@ pub enum Side {
     Against,
 }
 
-/// The first difference between two spines.
+/// Two instances that do not run one definition: their spines are not compared.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DefinitionMismatch {
+    pub flow: String,
+    pub ir_hash: String,
+    pub against_flow: String,
+    pub against_ir_hash: String,
+}
+
+impl std::fmt::Display for DefinitionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the instance runs {} ({}) and the other {} ({}); only runs of one definition are compared",
+            self.flow, self.ir_hash, self.against_flow, self.against_ir_hash
+        )
+    }
+}
+
+/// The first difference between two spines of one definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "difference", rename_all = "snake_case")]
 pub enum Difference {
-    /// The instances run different flows, or different definitions of one.
-    Flow { flow: String, ir_hash: String, against_flow: String, against_ir_hash: String },
     /// A (node, iteration) one spine has at `index` and the other has nowhere.
     Skipped { node: String, iteration: Iteration, index: usize, missing_from: Side },
     /// A (node, iteration) both have, at `index` in the instance and `against_index` in the other.
@@ -82,9 +108,6 @@ impl std::fmt::Display for Difference {
         let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "none".to_string());
         let exit = |v: &Option<i32>| v.map_or_else(|| "none".to_string(), |e| e.to_string());
         match self {
-            Difference::Flow { flow, ir_hash, against_flow, against_ir_hash } => {
-                write!(f, "the instance runs {flow} ({ir_hash}), the other {against_flow} ({against_ir_hash})")
-            }
             Difference::Skipped { node, iteration, index, missing_from } => {
                 let (has, lacks) = match missing_from {
                     Side::Against => ("the instance", "the other"),
@@ -158,17 +181,24 @@ pub fn spine(guard: &ReadGuard, instance: &InstanceId) -> Result<Spine, KernelEr
     Ok(Spine { instance: instance.to_string(), flow: started.flow, ir_hash: started.ir_hash, records })
 }
 
-/// The first difference between the spines of `instance` and `against`, or none when they are
-/// equal. See the module docs.
+/// Whether `instance` and `against` run different definitions (by the flow's name and version,
+/// and the IR hash): the precondition of [`compare`], reported on its own. See the module docs.
+pub fn definition_mismatch(instance: &Spine, against: &Spine) -> Option<DefinitionMismatch> {
+    (instance.flow != against.flow || instance.ir_hash != against.ir_hash).then(|| DefinitionMismatch {
+        flow: instance.flow.clone(),
+        ir_hash: instance.ir_hash.clone(),
+        against_flow: against.flow.clone(),
+        against_ir_hash: against.ir_hash.clone(),
+    })
+}
+
+/// The first difference between the records of `instance` and `against`, two spines of one
+/// definition ([`definition_mismatch`] is none), or none when they are equal. See the module docs.
+///
+/// Where the records at one place name different nodes, a record one spine lacks entirely is
+/// reported `Skipped` (the instance's first, then the other's) before the pair is reported
+/// `Reordered`: `Reordered` means both spines hold the record, at different places.
 pub fn compare(instance: &Spine, against: &Spine) -> Option<Difference> {
-    if instance.flow != against.flow || instance.ir_hash != against.ir_hash {
-        return Some(Difference::Flow {
-            flow: instance.flow.clone(),
-            ir_hash: instance.ir_hash.clone(),
-            against_flow: against.flow.clone(),
-            against_ir_hash: against.ir_hash.clone(),
-        });
-    }
     let (a, b) = (&instance.records, &against.records);
     let find = |records: &[SpineRecord], r: &SpineRecord| records.iter().position(|x| x.key() == r.key());
     let skipped = |r: &SpineRecord, index: usize, missing_from: Side| Difference::Skipped {
@@ -238,14 +268,26 @@ mod tests {
     }
 
     #[test]
-    fn spines_compare_on_flow_records_edges_and_exits_in_order() {
+    fn another_definition_is_a_precondition_not_a_difference() {
+        let a = spine_of(vec![rec("pin", None, Some(0))]);
+        assert_eq!(definition_mismatch(&a, &a.clone()), None);
+        // Another instance id is neither.
+        let b = Spine { instance: "fi_b".into(), ..a.clone() };
+        assert_eq!((definition_mismatch(&a, &b), compare(&a, &b)), (None, None));
+        // Another flow or definition is a mismatch, whatever the records say; compare looks at
+        // records alone.
+        for other in [Spine { flow: "f@2".into(), ..a.clone() }, Spine { ir_hash: "sha256:b".into(), ..a.clone() }] {
+            let mismatch = definition_mismatch(&a, &other).unwrap();
+            assert_eq!((mismatch.flow.as_str(), mismatch.against_ir_hash.as_str()), ("f@1", other.ir_hash.as_str()));
+            assert_eq!(compare(&a, &other), None);
+        }
+    }
+
+    #[test]
+    fn spines_compare_on_records_edges_and_exits_in_order() {
         let base = vec![rec("pin", None, Some(0)), rec("pick", Some("ship"), None), rec("check", None, Some(0))];
         let a = spine_of(base.clone());
         assert_eq!(compare(&a, &spine_of(base.clone())), None);
-        // Another instance id is not a difference; another flow or definition is.
-        assert_eq!(compare(&a, &Spine { instance: "fi_b".into(), ..a.clone() }), None);
-        assert_eq!(kind(compare(&a, &Spine { flow: "f@2".into(), ..a.clone() })), "flow");
-        assert_eq!(kind(compare(&a, &Spine { ir_hash: "sha256:b".into(), ..a.clone() })), "flow");
 
         let mut edge = base.clone();
         edge[1].edge = Some("hold".into());

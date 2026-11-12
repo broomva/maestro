@@ -939,7 +939,7 @@ mutate $fk/ir.rs '    } else {
         2
     }
 }'
-mutate $fk/ir.rs '    if runs_effect {' '    if false {'
+mutate $fk/ir.rs '    } else if runs_effect {' '    } else if false {'
 mutate $fk/ir.rs 'Class::Effect { run, .. } if !run.is_empty()));' 'Class::Effect { .. }));'
 mutate $fk/ir.rs '                if ir.ir_version >= 3 {' '                if false {'
 mutate $fk/ir.rs '    if ir.nodes.len() > MAX_NODES {' '    if ir.nodes.len() >= MAX_NODES {'
@@ -1165,7 +1165,10 @@ mutate $fk/write.rs '    let now = wall(&log)?;
 mutate $fk/write.rs '    let ran_at = clock::now();' '    let ran_at = clock::now() + SignedDuration::from_secs(30);'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = wall(&log)? - SignedDuration::from_secs(30);'
 mutate $fk/write.rs '    let ran_at = clock::now();
-    let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    let ran = match &plan.snapshot {
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    };
     pause!("command_ran");
 
     // Everything again, under the lock, against the log as it is now and the clock read again.
@@ -1173,7 +1176,10 @@ mutate $fk/write.rs '    let ran_at = clock::now();
     let log = guard.log(&instance)?;
     let after = wall(&log)?;' '    let ran_at = clock::now();
     let began = std::time::Instant::now();
-    let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    let ran = match &plan.snapshot {
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    };
     pause!("command_ran");
 
     // Everything again, under the lock, against the log as it is now and the clock read again.
@@ -1253,8 +1259,14 @@ mutate $fk/write.rs '    if depth >= MAX_NESTING {' '    if false {'
 mutate $fk/write.rs '    if !held.next.enabled.iter().any(|e| e.node == held.rec.node) {' '    if false {'
 mutate $fk/write.rs '    drop(guard);
     let ran_at = clock::now();
-    let ran = exec::run(&plan.argv, &plan.cwd, limits);' '    let ran_at = clock::now();
-    let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    let ran = match &plan.snapshot {
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    };' '    let ran_at = clock::now();
+    let ran = match &plan.snapshot {
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    };
     drop(guard);'
 mutate $fk/write.rs '    let held = hold(log, session, &instance, &sha, after)?;' '    let _ = (log, after);
     let held = held;'
@@ -1449,17 +1461,16 @@ mutate $fg '    evaluate_within(code, input, timeout, own_deadline(timeout))' ' 
 mutate $fk/write.rs '        left -= filled.len();' ''
 mutate $fk/write.rs '        if out.len() > budget {' '        if out.len() >= budget {'
 mutate $fk/write.rs '        if out.len() > budget {' '        if false {'
-mutate $fk/write.rs '                    .filter(|name| values.ir.params.contains_key(*name))' '                    .filter(|_| true)'
-mutate $fk/write.rs '                    Some(_) => return Err(template(format!("param {name} is not a string, number or boolean"))),' '                    Some(_) => {}'
+mutate $fk/write.rs '                .filter(|name| ir.params.contains_key(*name))' '                .filter(|_| true)'
+mutate $fk/write.rs '                Some(_) => return Err(format!("param {name} is not a string, number or boolean")),' '                Some(_) => {}'
 mutate $fk/write.rs '    if !cwd.is_absolute() || !cwd.is_dir() {' '    if !cwd.is_dir() {'
 mutate $fk/write.rs '    if !cwd.is_absolute() || !cwd.is_dir() {' '    if !cwd.is_absolute() {'
 # Running: argv with no shell, a cleared environment but the allowed names, a process group
 # killed when the command exits, times out or floods, a byte cap kept to the byte, limits bounded.
 fx=crates/flow/src/kernel/exec.rs
-mutate $fx '    let mut cmd = Command::new(program);
-    cmd.args(args)' '    let mut cmd = Command::new("sh");
-    cmd.args(["-c".to_string(), argv.join(" ")])'
-mutate $fx '.current_dir(cwd).env_clear().stdin(' '.current_dir(cwd).stdin('
+mutate $fx '    cmd.args(args).current_dir(cwd).env_clear();' '    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c".to_string(), argv.join(" ")]).current_dir(cwd).env_clear();'
+mutate $fx '    cmd.args(args).current_dir(cwd).env_clear();' '    cmd.args(args).current_dir(cwd);'
 mutate $fx '            cmd.env(name, value);' ''
 mutate $fx '    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);' ''
 mutate $fx 'rustix::process::kill_process_group(' 'rustix::process::kill_process('
@@ -1585,10 +1596,10 @@ mutate $cli '    maestro_flow::kernel::guard_entry();
 mutate $cli '    if v["ok"] == json!(true) {
         return Ok(());
     }
-    bail!' '    if true {
+    if v["code"] == "definition_mismatch" {' '    if true {
         return Ok(());
     }
-    bail!'
+    if v["code"] == "definition_mismatch" {'
 
 # Human steps (BRO-3635; BRO-3624 items 1 and 7): a flow's ask, pinned, filed, linked, answered.
 asks=crates/flow/src/kernel/asks.rs
@@ -1830,21 +1841,57 @@ mutate $mf '#[serde(deny_unknown_fields)]
 pub struct FlowProposeArgs {' 'pub struct FlowProposeArgs {'
 mutate $mf 'if name == PROPOSE_ADOPTION { kernel::propose_adoption } else { kernel::propose_retirement }' 'if name == PROPOSE_ADOPTION { kernel::propose_retirement } else { kernel::propose_adoption }'
 mutate $cli 'let body = json_arg("--ask", ask.as_deref())?;' 'let body: Option<Value> = None;'
-# The verifier pilot (BRO-3636). Only a work node's verify fills `{{outputs.<name>}}`, from the
-# outputs it judges, and one left out is the performer's to fix; no other command, and no workdir,
-# reads them.
+# The verifier pilot (BRO-3636). Commands an agent's PATH cannot stand in for: `maestro` is the
+# kernel's own executable; `sh`, `git` and `test` the system's root-owned files at their real path,
+# under the name they were given; every command searches the fixed system PATH but the project's
+# own command in a snapshot, which searches the caller's for its toolchain.
+mutate $fx '    if name == "maestro" {' '    if false {'
+mutate $fx '        "git" => vec![maestro_store::tree::git()],' '        "never" => vec![maestro_store::tree::git()],'
+mutate $fx '        let checked = std::fs::canonicalize(c)' '        let checked = Ok::<_, std::io::Error>(PathBuf::from(c))'
+mutate $fx '            .and_then(|real| maestro_store::tree::check_root_owned(&real).map(|()| real));' '            .and_then(|real| Ok::<_, String>(real));'
+mutate $fx '            std::os::unix::process::CommandExt::arg0(&mut cmd, name);' ''
+mutate $fx '            cmd.env("PATH", maestro_store::tree::git_path());' '            cmd.env("PATH", std::env::var_os("PATH").unwrap_or_default());'
+mutate $fk/write.rs '    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref() };' '    let feed = Feed { search: Search::Caller, stdin: plan.stdin.as_deref() };'
+mutate $fk/snapshot.rs '    exec::run(argv, &snapshot.root, limits, Feed { search: Search::Caller, stdin: None })' '    exec::run(argv, &snapshot.root, limits, Feed { search: Search::Trusted, stdin: None })'
+# A work node's verify reads the outputs it judges as JSON on its standard input, from a file that
+# never blocks the kernel; no other command reads them, and `{{outputs.*}}` in any command, a
+# snapshot or the workdir is refused at compile time (an IR pinned before keeps its run-time
+# refusal).
+mutate $fx '        Some(Ok(file)) => cmd.stdin(Stdio::from(file)),' '        Some(Ok(_)) => cmd.stdin(Stdio::null()),'
+mutate $fk/write.rs '    let stdin = judges.then(|| serde_json::to_vec(outputs).unwrap_or_default());' '    let stdin = false.then(|| serde_json::to_vec(outputs).unwrap_or_default());'
 mutate $fk/write.rs '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, false),' '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, true),'
 mutate $fk/write.rs '        Some(Class::Work { verify, .. }) => (verify, Step::Command, true),' '        Some(Class::Work { verify, .. }) => (verify, Step::Command, false),'
-mutate $fk/write.rs '                        return Err(("outputs_invalid", detail));' '                        let _ = detail;'
-mutate $fk/write.rs '    let values = Values { outputs: None, ..values };
-' ''
-# The receipt verifier, dogfood-receipt@1: each failure its own code, in order; a regular file of
-# at most its bound; the schema, fields that are there, not empty and bounded, a lower-case sha256
-# and a timestamp, nothing unknown; bound to the head and surface it is asked about; pass only; the
-# evidence a regular file, from the receipt's folder when relative, that hashes to its digest.
+mutate $fk/compile.rs '    check_no_outputs_placeholders(&ir)?;' ''
+mutate $fk/compile.rs '    let mut words: Vec<(String, &String)> = ir.workdir.iter().map(|w| ("the workdir".to_string(), w)).collect();' '    let mut words: Vec<(String, &String)> = Vec::new();'
+mutate $fk/compile.rs '            Class::Effect { run, reconcile, .. } => vec![run, reconcile],' '            Class::Effect { run, .. } => vec![run],'
+mutate $fk/compile.rs '.chain(&n.snapshot)' '.chain(&None::<String>)'
+# The project's check runs in a snapshot of one commit (a full object id), never in the working
+# tree: one commit alone, so another cannot be checked out; removed whatever the command came to,
+# a read-only tree included. Only a pure node runs in one, in IR version 4.
+mutate $fk/write.rs '        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),' '        Some(_) => exec::run(&plan.argv, &plan.cwd, limits, Feed { search: Search::Caller, stdin: None }),'
+mutate $fk/write.rs '            if !snapshot::is_object_id(&commit) {' '            if false {'
+mutate $fk/snapshot.rs '    matches!(commit.len(), 40 | 64) && ' '    true && '
+mutate $fk/snapshot.rs '"-q", "--depth=1", "--no-tags", "--"];' '"-q", "--depth=2147483647", "--no-tags", "--"];'
+mutate $fk/snapshot.rs '        remove(&self.root);' ''
+mutate $fk/snapshot.rs '        let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));' '        let _ = &dir;'
+mutate $fk/ir.rs '        if n.snapshot.is_some() && !matches!(n.class, Class::Pure { .. }) {' '        if false {'
+mutate $fk/ir.rs '    if ir.nodes.values().any(|n| n.snapshot.is_some()) {' '    if false {'
+# The receipt verifier, dogfood-receipt@1: the outputs name the receipt and its digest, within
+# their bound; each file is opened without following a link and without blocking, and read only
+# when regular; the receipt hashes to the named digest (the log pins it), within its bound, well
+# formed, for the head and surface, says pass; its evidence, from the receipt's folder when
+# relative and within its bound, hashes to the receipt's digest. Each failure its own code.
 dog=crates/flow/src/dogfood.rs
-mutate $dog '        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {' '        Err(e) if false => {'
-mutate $dog '    if !meta.is_file() {' '    if false {'
+mutate $dog '    if input.len() > MAX_OUTPUTS {' '    if false {'
+mutate $dog '    if input.len() > MAX_OUTPUTS {' '    if input.len() >= MAX_OUTPUTS {'
+mutate $dog '    if named.receipt.is_empty() || named.receipt.len() > MAX_FIELD {' '    if false {'
+mutate $dog '    if !is_digest(&named.receipt_sha256) {' '    if false {'
+mutate $dog '    if receipt_sha256 != named.receipt_sha256 {' '    if false {'
+mutate $dog '    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC;' '    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;'
+mutate $dog '    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC;' '    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;'
+mutate $dog '        Err(Errno::NOENT) => return Err(Unopened::Missing),' '        Err(Errno::NOENT) => return Err(Unopened::Unreadable("gone".to_string())),'
+mutate $dog '        Err(Errno::LOOP) => return Err(Unopened::NotRegular("it is a symbolic link".to_string())),' '        Err(Errno::LOOP) => return Err(Unopened::Unreadable("a loop".to_string())),'
+mutate $dog '    if kind != FileType::RegularFile {' '    if false {'
 mutate $dog '    if bytes.len() > MAX_RECEIPT {' '    if false {'
 mutate $dog '    if bytes.len() > MAX_RECEIPT {' '    if bytes.len() >= MAX_RECEIPT {'
 mutate $dog '    if receipt.schema != SCHEMA {' '    if false {'
@@ -1860,16 +1907,15 @@ mutate $dog '    if receipt.head != head {' '    if false {'
 mutate $dog '    if receipt.surface != surface {' '    if false {'
 mutate $dog '    if receipt.result != Outcome::Pass {' '    if false {'
 mutate $dog '        Some(dir) if evidence.is_relative() => dir.join(evidence),' '        Some(dir) if false => dir.join(evidence),'
-mutate $dog '    if !file.metadata().map_err(|e| e.to_string())?.is_file() {' '    if false {'
+mutate $dog '    if read > limit {' '    if false {'
 mutate $dog '    if got != receipt.evidence.sha256 {' '    if false {'
 # The CLI exits with each failure's own status, which the kernel records in its refusal.
 mutate $cli '            std::process::ExitCode::from(failure.exit())' '            std::process::ExitCode::FAILURE'
 # verify@1 itself (V1 to V4). V1: pin compares HEAD with params.head, maps a moved one to `moved`,
-# and carries fresh_for. V2: check runs only on at_head, and its own command looks at HEAD before
-# and after the project's check and fails when it moved. V4: exercise only with a declared
-# surface, its receipt bound to the params' head, never one the performer names. The kernel guards
-# these rest on are anchored above and reused here: freshness by `fresh_for` (`age > secs(*f)`,
-# three mutants), a stale observation blocking its dependents (`Form::Open if !stale.is_empty()`),
+# and carries fresh_for. V2: check runs only on at_head, in a snapshot of params.head. V4: exercise
+# only with a declared surface, its receipt bound to the params' head. The kernel guards these
+# rest on are anchored above and reused here: freshness by `fresh_for` (`age > secs(*f)`, three
+# mutants), a stale observation blocking its dependents (`Form::Open if !stale.is_empty()`),
 # write-time freshness in complete (`if !held.next.enabled.iter().any(..)`), a switch on the
 # recorded value (`e.value.as_deref() != Some(case.value.as_str())`), V3's exit status
 # (`_ => (exit != 0).then(`) and the exit_map (`!exit_map.iter().any(|m| m.exit == exit)`).
@@ -1879,23 +1925,23 @@ mutate $vy 'exit_map: {0: at_head, 1: moved}' 'exit_map: {0: at_head, 1: at_head
 mutate $vy 'fresh_for: 10m' 'fresh_for: 1000000h'
 mutate $vy '    switch: {on: pin, case: at_head}
 ' ''
-mutate $vy 'at "$1"; sh -c "$2"' 'sh -c "$2"'
-mutate $vy 's=$?; at "$1"; exit "$s"' 's=$?; exit "$s"'
-mutate $vy 'exit 125;' 'exit 0;'
+mutate $vy '    snapshot: "{{params.head}}"
+' ''
 mutate $vy '    switch: {on: surface, case: declared}
 ' ''
-mutate $vy '"--head={{params.head}}"' '"--head={{outputs.head}}"'
+mutate $vy '"--head={{params.head}}"' '"--head={{params.repo}}"'
 # The accepting spine: receipts replay accepted only; one record per (node, iteration), at its
-# first place with its latest values; choices and answers on it; and the comparison: the flow and
-# its IR, a record missing on either side, skipped told from reordered, the edge, the exit.
+# first place with its latest result; choices and answers on it. Two runs are compared only as
+# runs of one definition (name and IR hash), a precondition reported on its own; then a record
+# missing on either side, skipped told from reordered, the edge, the exit.
 spn=$fk/spine.rs
 mutate $spn '    for e in log.events.iter().filter(|e| !set_aside.contains(&e.seq)) {' '    for e in log.events.iter().filter(|_| true) {'
 mutate $spn '            Some(&i) => records[i] = record,' '            Some(_) => records.push(record),'
 mutate $spn '            Some(&i) => records[i] = record,' '            Some(_) => {}'
 mutate $spn '            Chosen::KIND => {' '            "never" => {'
 mutate $spn '            Answered::KIND => {' '            "nor" => {'
-mutate $spn '    if instance.flow != against.flow || instance.ir_hash != against.ir_hash {' '    if instance.flow != against.flow {'
-mutate $spn '    if instance.flow != against.flow || instance.ir_hash != against.ir_hash {' '    if instance.ir_hash != against.ir_hash {'
+mutate $spn '    (instance.flow != against.flow || instance.ir_hash != against.ir_hash).then(' '    (instance.flow != against.flow).then('
+mutate $spn '    (instance.flow != against.flow || instance.ir_hash != against.ir_hash).then(' '    (instance.ir_hash != against.ir_hash).then('
 mutate $spn '            (Some(x), None) => return Some(skipped(x, index, Side::Against)),' '            (Some(_), None) => break,'
 mutate $spn '            (None, Some(y)) => return Some(skipped(y, index, Side::Instance)),' '            (None, Some(_)) => break,'
 mutate $spn '        if x.key() != y.key() {' '        if false {'
@@ -1903,8 +1949,11 @@ mutate $spn '            let Some(against_index) = find(b, x) else {' '         
 mutate $spn '            if find(a, y).is_none() {' '            if false {'
 mutate $spn '        if x.edge != y.edge {' '        if false {'
 mutate $spn '        if x.exit != y.exit {' '        if false {'
-# A difference is a refusal the CLI exits 1 on, never an ok.
+# The tool checks the definitions first, and a difference is a refusal the CLI exits 1 on, never
+# an ok; another definition exits 3.
+mutate $mf '        if let Some(mismatch) = kernel::definition_mismatch(&mine, &other) {' '        if let Some(mismatch) = None::<kernel::DefinitionMismatch> {'
 mutate $mf '                let mut v = refusal("spine_differs", &difference, false);' '                let mut v = json!({ "ok": true, "code": "spine_differs" });'
+mutate $cli '                return std::process::ExitCode::from(3);' '                return std::process::ExitCode::from(1);'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

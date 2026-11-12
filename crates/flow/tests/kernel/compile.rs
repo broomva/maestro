@@ -40,9 +40,12 @@ fn the_verifier_pilot_compiles_to_a_hashed_ir() {
 
 #[test]
 fn an_ir_is_written_in_the_lowest_version_that_expresses_it() {
-    // Version 2 added `workdir`: the pilot declares one; a flow without one is a version 1 IR,
-    // as it was before the field existed.
-    assert_eq!(compile(VERIFY).unwrap().ir().ir_version, 2);
+    // Version 4 added a pure node's `snapshot` (BRO-3636): the pilot's check runs in one.
+    assert_eq!(compile(VERIFY).unwrap().ir().ir_version, 4);
+    // Version 2 added `workdir`: a flow with one is version 2; one without, version 1, as it
+    // was before the field existed.
+    let workdir = compile("flow: f\nversion: 1\nworkdir: /tmp\nnodes:\n  a: {class: pure, run: [x]}\n").unwrap();
+    assert_eq!(workdir.ir().ir_version, 2);
     let bare = compile("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n").unwrap();
     assert_eq!(bare.ir().ir_version, 1);
     // Version 3 added an effect's `run`: any flow with an effect, with or without a workdir.
@@ -50,6 +53,28 @@ fn an_ir_is_written_in_the_lowest_version_that_expresses_it() {
     assert_eq!(compile(effect).unwrap().ir().ir_version, 3);
     let effect = format!("{effect}workdir: /tmp\n");
     assert_eq!(compile(&effect).unwrap().ir().ir_version, 3);
+    let snapshot = "flow: f\nversion: 1\nparams: [h]\nnodes:\n  a: {class: pure, run: [x], snapshot: '{{params.h}}'}\n";
+    assert_eq!(compile(snapshot).unwrap().ir().ir_version, 4);
+    assert_eq!(
+        compile(&format!("{snapshot}  e: {{class: effect, run: [x], reconcile: [y]}}\n")).unwrap().ir().ir_version,
+        4
+    );
+}
+
+#[test]
+fn only_a_pure_node_runs_in_a_snapshot() {
+    // BRO-3636: the project's own command, against one commit's content. A definition says so
+    // only on a pure node; an IR that says so elsewhere, pinned by hand, does not validate.
+    for class in ["observe, fresh_for: 1m, exit_map: {0: ok}", "work, verify: [x]"] {
+        let field = if class.starts_with("work") { "" } else { ", run: [x]" };
+        let yaml = format!("flow: f\nversion: 1\nnodes:\n  a: {{class: {class}{field}, snapshot: abc}}\n");
+        assert_eq!(code(&yaml), "definition_invalid", "{yaml}");
+    }
+    let mut ir = compile("flow: f\nversion: 1\nnodes:\n  a: {class: work, verify: [x]}\n").unwrap().ir().clone();
+    ir.nodes.get_mut("a").unwrap().snapshot = Some("abc".into());
+    ir.ir_version = 4;
+    let e = maestro_flow::kernel::ir::validate(&ir).unwrap_err();
+    assert!(e.to_string().contains("only a pure node"), "{e}");
 }
 
 #[test]
