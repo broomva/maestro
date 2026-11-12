@@ -1999,9 +1999,11 @@ mutate $agt '        if model.is_empty() || model.len() > MAX_MODEL || !ok {' ' 
 mutate $agt '        if !plain(skill) {' '        if false {'
 mutate $agt '        if s.skills[..i].contains(skill) {' '        if false {'
 mutate $agt '    if s.outputs.get("type") != Some(&Value::from("object")) {' '    if false {'
-mutate $agt '                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => DriftKind::Missing,' '                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,'
+mutate $agt '            Some(folder) => match folder.kind(file)? {
+                None => DriftKind::Missing,' '            Some(folder) => match folder.kind(file)? {
+                None => continue,'
 mutate $agt '            Some(bytes) if bytes != r.text.as_bytes() => DriftKind::Differs,' '            Some(_) if false => DriftKind::Differs,'
-mutate $agt 'Ok(_) => match read(&path, r.text.len())? {' 'Ok(_) => match read(&path, r.text.len() - 1)? {'
+mutate $agt 'match folder.read(file, r.text.len())? {' 'match folder.read(file, r.text.len() - 1)? {'
 mutate $agt '            if agents.iter().any(|a| a.name == stem) {' '            if false {'
 mutate $agt '.is_some_and(|line| line.starts_with(MARKER.as_bytes()))' '.is_some()'
 mutate $agt '            if generated {' '            if false {'
@@ -2031,10 +2033,10 @@ mutate $cli '            if on_disk.as_deref() != Some(skill.as_bytes()) {' '   
 # refused, a render goes in by rename (which replaces a link), --check reads a link at a render
 # path as drift, and only a regular file is taken for an orphan. A repeated key in outputs is
 # refused at any level.
-mutate $agt '        match std::fs::symlink_metadata(&dir) {' '        match std::fs::metadata(&dir) {'
-mutate $agt '        .and_then(|()| std::fs::rename(&tmp, &dest));' '        .and_then(|()| std::fs::copy(&tmp, &dest).map(|_| ()));'
-mutate $agt '                match std::fs::symlink_metadata(&path) {' '                match std::fs::metadata(&path) {'
-mutate $agt '            if !std::fs::symlink_metadata(&file).map_err(|e| io(&file, e))?.is_file() {' '            if !std::fs::metadata(&file).map_err(|e| io(&file, e))?.is_file() {'
+mutate $agt 'const WALK: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);' 'const WALK: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);'
+mutate $agt 'rustix::fs::renameat(&self.fd, tmp.as_str(), &self.fd, name).map_err(|e| self.io(name, e))' 'std::fs::rename(self.path.join(&tmp), self.path.join(name)).map_err(|e| self.io(name, e))'
+mutate $agt '                Some(FileType::Symlink) => DriftKind::Link,' '                Some(FileType::Symlink) if false => DriftKind::Link,'
+mutate $agt 'const READ: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::NONBLOCK).union(OFlags::CLOEXEC);' 'const READ: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::CLOEXEC);'
 mutate $agt '            if out.insert(key.clone(), value).is_some() {' '            if out.insert(key.clone(), value).is_some() && false {'
 mutate $agt '    #[serde(deserialize_with = "strict_json")]
 ' ''
@@ -2069,6 +2071,12 @@ mutate $drv 'After {VERDICT_RETRIES} such claims' 'After many such claims'
 mutate $agt '                tool: GEMINI_AGENT_TOOL.into(),' '                tool: self.name.clone(),'
 mutate $agt '    name.len() <= MAX_NAME' '    name.len() <= MAX_NAME + 1'
 mutate $agt 'model.len() > MAX_MODEL' 'model.len() > MAX_MODEL + 1'
+# Round 3 (BRO-3636). The check and the write are bound to one open folder: a render's temporary
+# file is made new, never through a link (O_EXCL, O_NOFOLLOW); an orphan is removed through the
+# descriptor it was found by, and only while it is still a regular file.
+mutate $agt 'let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;' 'let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC;'
+mutate $agt 'rustix::fs::unlinkat(&self.fd, name, AtFlags::empty()).map_err(|e| self.io(name, e))?;' 'std::fs::remove_file(self.path.join(name)).map_err(|e| self.io(name, e))?;'
+mutate $agt '        if self.kind(name)? != Some(FileType::RegularFile) {' '        if false {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

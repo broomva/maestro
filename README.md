@@ -188,10 +188,14 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
   renders whose source is gone (a file whose second line is not the render marker is never
   touched); the Codex `spawn_agent` brief is not a file but part of the driver skill and of the
   launch spec. `--check` writes nothing and exits 1 naming the first render that is missing,
-  differs, is a symbolic link, or has no source: what `bstack doctor` will call. No link is
-  followed: a render folder that is a link (or any folder between the root and it) is refused,
-  each render is written to a new file and renamed into place (which replaces a link at that
-  path), and only regular files are removed as orphans. Each harness gets only the fields
+  differs, is a symbolic link, or has no source: what `bstack doctor` will call. No link under
+  the root is followed: each render folder is opened component by component with `O_NOFOLLOW`
+  (a link or a non-folder on the way is refused, `render_path_unsafe`), and every later step goes
+  through that open folder, not its path: a new temporary file (`O_EXCL`, `O_NOFOLLOW`) renamed
+  into place in the same folder, reads with `O_NOFOLLOW`, and orphan removal (regular files only,
+  checked again just before) through the folder they were found in. A folder moved or swapped for
+  a link after it is opened redirects nothing: the write lands in the folder that was opened. The
+  root itself may be reached through a link, and the sources are read by path. Each harness gets only the fields
   its docs define: Claude Code `name`, `description`, `tools`, `model`, `skills`; Gemini CLI
   `name`, `description`, `kind: local`, `tools`, `model`; Grok `name`, `description`, `tools`,
   `model`. **Gemini CLI's docs and runtime disagree:** the docs bundled with 0.66.0 call each agent

@@ -78,13 +78,21 @@
 //! exits 1 on it, which is what a `bstack doctor` check will call. [`write`] makes the renders and
 //! removes renders whose source is gone, and touches no other file.
 //!
-//! **Links.** A repository can hold a symbolic link where a render goes, so neither writes nor
-//! removals follow one. Every folder from the root down to a render folder is checked to be a real
-//! folder, never a link (a link, or anything not a folder, is [`AgentError::Unsafe`], and nothing
-//! is written through it). Each render is written whole to a new file beside its place and renamed
-//! over it, and a rename replaces a link without following it. Only regular files are taken for
-//! orphans and removed. This holds against links the tree holds, not against a process changing the
-//! tree while a render runs.
+//! **Links.** A repository can hold a symbolic link where a render goes, so no render, read or
+//! removal under the root follows one. The root is the caller's choice and may be reached through
+//! a link. Below it, each render folder is opened one component at a time from the folder above
+//! (`openat` with `O_NOFOLLOW`), so a link, or anything not a folder, on the way is
+//! [`AgentError::Unsafe`] and nothing is written. Everything after that goes through the open
+//! folder's descriptor, never its path: a render is written to a new file made there
+//! (`O_CREAT | O_EXCL | O_NOFOLLOW`) and renamed over its place in the same folder (`renameat`,
+//! which replaces a link and follows none); a render or an orphan is looked at with `statat`
+//! (`AT_SYMLINK_NOFOLLOW`) and read with `O_NOFOLLOW`; an orphan is removed with `unlinkat`
+//! through the descriptor it was found by, and only if it is still a regular file just before.
+//! So a folder moved, or swapped for a link, after it is opened redirects nothing: the write or
+//! removal lands in the folder that was opened, wherever that folder has since been moved, and
+//! never in a link's target. What is not guaranteed: a process that moves the opened folder itself
+//! out of the root before the write still receives the render in it, and the sources under
+//! `agents/` are read by path.
 //!
 //! # The kernel's agents
 //!
@@ -107,10 +115,13 @@
 //! its built-in tools only, and every consequential check is the kernel's verify.
 
 use crate::kernel::ir::Launch;
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Read as _;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -687,30 +698,141 @@ pub struct Drift {
     pub kind: DriftKind,
 }
 
-/// The render folder `rel` under `root`, every folder below the root checked to be a real
-/// folder, never a symbolic link (`symlink_metadata`), so no render or removal is redirected out
-/// of the root by a link the repository holds. The root is the caller's choice and may be reached
-/// through one. A missing folder is made when `create`, and is otherwise `None`.
-fn render_dir(root: &Path, rel: &str, create: bool) -> Result<Option<PathBuf>, AgentError> {
-    if !std::fs::metadata(root).map_err(|e| io(root, e))?.is_dir() {
-        return Err(unsafe_path(root, "is not a folder"));
+/// Opens a render folder's components without following a link.
+const WALK: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);
+
+/// Opens a render, or a file taken for an orphan: never through a link, never blocking on a FIFO.
+const READ: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::NONBLOCK).union(OFlags::CLOEXEC);
+
+/// A render folder, open. Every check, read, write, rename and removal under it goes through this
+/// descriptor (`statat`, `openat`, `renameat`, `unlinkat`), never through its path, which is kept
+/// for messages only: once it is open, moving the folder or putting a link where it was changes
+/// nothing about where a render goes.
+struct Folder {
+    fd: OwnedFd,
+    path: PathBuf,
+}
+
+impl Folder {
+    fn io(&self, name: &str, e: impl std::fmt::Display) -> AgentError {
+        io(&self.path.join(name), e)
     }
-    let mut dir = root.to_path_buf();
-    for part in Path::new(rel).components() {
-        dir.push(part);
-        match std::fs::symlink_metadata(&dir) {
-            Ok(m) if m.file_type().is_symlink() => return Err(unsafe_path(&dir, "is a symbolic link")),
-            Ok(m) if m.is_dir() => {}
-            Ok(_) => return Err(unsafe_path(&dir, "is not a folder")),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
-                // `create_dir` makes nothing where anything, a link included, already is.
-                std::fs::create_dir(&dir).map_err(|e| io(&dir, e))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(io(&dir, e)),
+
+    /// What `name` is, without following it; `None` when nothing is there.
+    fn kind(&self, name: &str) -> Result<Option<FileType>, AgentError> {
+        match rustix::fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) => Ok(Some(FileType::from_raw_mode(st.st_mode as _))),
+            Err(Errno::NOENT) => Ok(None),
+            Err(e) => Err(self.io(name, e)),
         }
     }
-    Ok(Some(dir))
+
+    /// The bytes of the regular file `name`, read to one byte past `limit`; `None` when it is not
+    /// there or not a regular file (a link, a FIFO, a folder).
+    fn read(&self, name: &str, limit: usize) -> Result<Option<Vec<u8>>, AgentError> {
+        let fd = match rustix::fs::openat(&self.fd, name, READ, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR | Errno::NXIO) => return Ok(None),
+            Err(e) => return Err(self.io(name, e)),
+        };
+        let st = rustix::fs::fstat(&fd).map_err(|e| self.io(name, e))?;
+        if FileType::from_raw_mode(st.st_mode as _) != FileType::RegularFile {
+            return Ok(None);
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::from(fd).take(limit as u64 + 1).read_to_end(&mut bytes).map_err(|e| self.io(name, e))?;
+        Ok(Some(bytes))
+    }
+
+    /// A new file `name`, made here and never through a link: it fails if anything is there.
+    fn create_new(&self, name: &str) -> Result<std::fs::File, AgentError> {
+        let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(&self.fd, name, flags, Mode::from_raw_mode(0o644)).map_err(|e| self.io(name, e))?;
+        Ok(fd.into())
+    }
+
+    /// Puts `bytes` at `name`: written whole to a new file here, then renamed over `name` in this
+    /// same folder. The rename replaces whatever is at `name`, a link included, and follows none.
+    fn replace(&self, name: &str, bytes: &[u8]) -> Result<(), AgentError> {
+        use std::io::Write as _;
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let tmp = format!(".{name}.{}-{nanos}.tmp", std::process::id());
+        let mut file = self.create_new(&tmp)?;
+        let done =
+            file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|e| self.io(&tmp, e)).and_then(|()| {
+                rustix::fs::renameat(&self.fd, tmp.as_str(), &self.fd, name).map_err(|e| self.io(name, e))
+            });
+        if done.is_err() {
+            let _ = rustix::fs::unlinkat(&self.fd, tmp.as_str(), AtFlags::empty());
+        }
+        done
+    }
+
+    /// Removes `name` if it is still a regular file, through this descriptor; `false` when it is
+    /// not (a link put there since, say), and then it is left alone.
+    fn remove_regular(&self, name: &str) -> Result<bool, AgentError> {
+        if self.kind(name)? != Some(FileType::RegularFile) {
+            return Ok(false);
+        }
+        rustix::fs::unlinkat(&self.fd, name, AtFlags::empty()).map_err(|e| self.io(name, e))?;
+        Ok(true)
+    }
+
+    /// The names here, sorted, read through this descriptor.
+    fn names(&self) -> Result<Vec<String>, AgentError> {
+        let mut out = Vec::new();
+        let entries = rustix::fs::Dir::read_from(&self.fd).map_err(|e| io(&self.path, e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| io(&self.path, e))?;
+            if let Ok(name) = entry.file_name().to_str()
+                && name != "."
+                && name != ".."
+            {
+                out.push(name.to_string());
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+}
+
+/// The render folder `rel` under `root`, open ([`Folder`]). The root is the caller's choice and
+/// may be reached through a link; below it, each folder is opened from the one above with
+/// `O_NOFOLLOW`, so a link, or anything that is not a folder, is refused
+/// ([`AgentError::Unsafe`]). A missing folder is made with `mkdirat` when `create`, and is
+/// otherwise `None`.
+fn render_dir(root: &Path, rel: &str, create: bool) -> Result<Option<Folder>, AgentError> {
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let mut fd = rustix::fs::open(root, flags, Mode::empty()).map_err(|e| match e {
+        Errno::NOTDIR => unsafe_path(root, "is not a folder"),
+        e => io(root, e),
+    })?;
+    let mut path = root.to_path_buf();
+    for part in rel.split('/') {
+        path.push(part);
+        let opened = match rustix::fs::openat(&fd, part, WALK, Mode::empty()) {
+            Err(Errno::NOENT) if create => {
+                match rustix::fs::mkdirat(&fd, part, Mode::from_raw_mode(0o755)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(e) => return Err(io(&path, e)),
+                }
+                rustix::fs::openat(&fd, part, WALK, Mode::empty())
+            }
+            other => other,
+        };
+        fd = match opened {
+            Ok(next) => next,
+            Err(Errno::NOENT) => return Ok(None),
+            // Linux says `ELOOP` and macOS `ENOTDIR` for a link opened this way: ask the entry.
+            Err(Errno::LOOP | Errno::NOTDIR) => {
+                let link = rustix::fs::statat(&fd, part, AtFlags::SYMLINK_NOFOLLOW)
+                    .is_ok_and(|st| FileType::from_raw_mode(st.st_mode as _) == FileType::Symlink);
+                return Err(unsafe_path(&path, if link { "is a symbolic link" } else { "is not a folder" }));
+            }
+            Err(e) => return Err(io(&path, e)),
+        };
+    }
+    Ok(Some(Folder { fd, path }))
 }
 
 fn unsafe_path(path: &Path, what: &str) -> AgentError {
@@ -722,84 +844,79 @@ fn split(path: &str) -> (&str, &str) {
     path.rsplit_once('/').unwrap_or(("", path))
 }
 
-/// Puts `bytes` at `dir/file`: written whole to a new file beside it, then renamed over it. The
-/// rename replaces whatever is at `dir/file`, a symbolic link included, and never follows one.
-fn replace(dir: &Path, file: &str, bytes: &[u8]) -> Result<(), AgentError> {
-    use std::io::Write as _;
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let tmp = dir.join(format!(".{file}.{}-{nanos}.tmp", std::process::id()));
-    let dest = dir.join(file);
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
-        .and_then(|()| std::fs::rename(&tmp, &dest));
-    written.map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        io(&dest, e)
-    })
+/// The renders in one render folder whose source is gone, and the folder they were found in.
+struct Orphans {
+    /// The folder, relative to the root.
+    dir: &'static str,
+    folder: Folder,
+    names: Vec<String>,
 }
 
-/// The renders under `root` whose source is gone: `*.md` regular files (never a link) in a
-/// verified render folder, whose second line is [`MARKER`] and whose name no source has. Only such
-/// files: a hand-written agent, and anything that is not a regular file, is left alone.
-fn orphans(root: &Path, agents: &[Agent]) -> Result<Vec<String>, AgentError> {
+/// The renders under `root` whose source is gone: in each render folder that exists, the `*.md`
+/// regular files (never a link) whose second line is [`MARKER`] and whose name no source has, each
+/// found and read through the folder's descriptor. Only such files: a hand-written agent, and
+/// anything that is not a regular file, is left alone.
+fn orphans(root: &Path, agents: &[Agent]) -> Result<Vec<Orphans>, AgentError> {
     let mut out = Vec::new();
     for dir in RENDER_DIRS {
-        let Some(path) = render_dir(root, dir, false)? else { continue };
+        let Some(folder) = render_dir(root, dir, false)? else { continue };
         let mut names = Vec::new();
-        for entry in std::fs::read_dir(&path).map_err(|e| io(&path, e))? {
-            names.push(entry.map_err(|e| io(&path, e))?.file_name().to_string_lossy().into_owned());
-        }
-        names.sort();
-        for name in names {
+        for name in folder.names()? {
             let Some(stem) = name.strip_suffix(".md") else { continue };
             if agents.iter().any(|a| a.name == stem) {
                 continue;
             }
-            let file = path.join(&name);
-            if !std::fs::symlink_metadata(&file).map_err(|e| io(&file, e))?.is_file() {
-                continue;
-            }
-            let generated = read(&file, MAX_SOURCE * 2)?.is_some_and(|text| {
+            let generated = folder.read(&name, MAX_SOURCE * 2)?.is_some_and(|text| {
                 text.split(|b| *b == b'\n').nth(1).is_some_and(|line| line.starts_with(MARKER.as_bytes()))
             });
             if generated {
-                out.push(format!("{dir}/{name}"));
+                names.push(name);
             }
         }
+        out.push(Orphans { dir, folder, names });
     }
     Ok(out)
 }
 
+/// Removes the orphans [`orphans`] found, each through the descriptor of the folder it was found
+/// in, and only while it is still a regular file; the paths removed, relative to the root.
+fn remove(found: Vec<Orphans>) -> Result<Vec<String>, AgentError> {
+    let mut removed = Vec::new();
+    for o in found {
+        for name in o.names {
+            if o.folder.remove_regular(&name)? {
+                removed.push(format!("{}/{name}", o.dir));
+            }
+        }
+    }
+    Ok(removed)
+}
+
 /// The first render under `root` that drifts from its source, in [`render_all`]'s order, then
-/// the orphans; `None` when every render matches. A render folder that is a link is an error
-/// ([`AgentError::Unsafe`]); a render that is a link is drift, however its target reads.
+/// the orphans; `None` when every render matches. Each render is looked at and read through its
+/// folder's descriptor. A render folder that is a link is an error ([`AgentError::Unsafe`]); a
+/// render that is a link is drift, however its target reads.
 pub fn check(root: &Path) -> Result<Option<Drift>, AgentError> {
     let agents = load(root)?;
     for r in render_all(&agents) {
         let (dir, file) = split(&r.path);
         let kind = match render_dir(root, dir, false)? {
             None => DriftKind::Missing,
-            Some(dir) => {
-                let path = dir.join(file);
-                match std::fs::symlink_metadata(&path) {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => DriftKind::Missing,
-                    Err(e) => return Err(io(&path, e)),
-                    Ok(m) if m.file_type().is_symlink() => DriftKind::Link,
-                    Ok(m) if !m.is_file() => DriftKind::Differs,
-                    Ok(_) => match read(&path, r.text.len())? {
-                        None => DriftKind::Missing,
-                        Some(bytes) if bytes != r.text.as_bytes() => DriftKind::Differs,
-                        Some(_) => continue,
-                    },
-                }
-            }
+            Some(folder) => match folder.kind(file)? {
+                None => DriftKind::Missing,
+                Some(FileType::Symlink) => DriftKind::Link,
+                Some(FileType::RegularFile) => match folder.read(file, r.text.len())? {
+                    None => DriftKind::Missing,
+                    Some(bytes) if bytes != r.text.as_bytes() => DriftKind::Differs,
+                    Some(_) => continue,
+                },
+                Some(_) => DriftKind::Differs,
+            },
         };
         return Ok(Some(Drift { file: r.path, kind }));
     }
-    Ok(orphans(root, &agents)?.into_iter().next().map(|file| Drift { file, kind: DriftKind::Orphan }))
+    let first = orphans(root, &agents)?.into_iter().find_map(|o| o.names.first().map(|n| format!("{}/{n}", o.dir)));
+    Ok(first.map(|file| Drift { file, kind: DriftKind::Orphan }))
 }
 
 /// What [`write`] did, each path relative to the root.
@@ -809,21 +926,96 @@ pub struct Written {
     pub removed: Vec<String>,
 }
 
-/// Writes every render under `root`, each through [`replace`] into a verified folder
-/// ([`render_dir`]), and removes the renders whose source is gone (regular files only).
+/// Writes every render under `root`, each into its folder opened by [`render_dir`] and through
+/// that descriptor ([`Folder::replace`]), and removes the renders whose source is gone (regular
+/// files only, through the descriptor they were found by).
 pub fn write(root: &Path) -> Result<Written, AgentError> {
     let agents = load(root)?;
     let mut written = Vec::new();
     for r in render_all(&agents) {
         let (dir, file) = split(&r.path);
-        let dir = render_dir(root, dir, true)?.ok_or_else(|| unsafe_path(&root.join(dir), "was not made"))?;
-        replace(&dir, file, r.text.as_bytes())?;
+        let folder = render_dir(root, dir, true)?.ok_or_else(|| unsafe_path(&root.join(dir), "was not made"))?;
+        folder.replace(file, r.text.as_bytes())?;
         written.push(r.path);
     }
-    let removed = orphans(root, &agents)?;
-    for file in &removed {
-        let path = root.join(file);
-        std::fs::remove_file(&path).map_err(|e| io(&path, e))?;
-    }
+    let removed = remove(orphans(root, &agents)?)?;
     Ok(Written { written, removed })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    const VERIFIER: &str = include_str!("../../../agents/verifier.agent.yaml");
+
+    /// A root holding the verifier's source, and a folder outside it.
+    fn root() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(root.join("agents")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("agents/verifier.agent.yaml"), VERIFIER).unwrap();
+        (tmp, root, outside)
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_link_after_it_is_opened_redirects_no_render() {
+        let (_tmp, root, outside) = root();
+        let folder = render_dir(&root, ".claude/agents", true).unwrap().unwrap();
+        // The checked folder moves away and a link to a folder outside takes its place.
+        std::fs::rename(root.join(".claude/agents"), root.join(".claude/moved")).unwrap();
+        symlink(&outside, root.join(".claude/agents")).unwrap();
+        folder.replace("verifier.md", b"render\n").unwrap();
+        // The render lands in the real folder that was opened, now `.claude/moved`, never outside.
+        assert!(!outside.join("verifier.md").exists(), "a render went through the link");
+        assert_eq!(std::fs::read(root.join(".claude/moved/verifier.md")).unwrap(), b"render\n");
+        let leftovers: Vec<_> = std::fs::read_dir(root.join(".claude/moved")).unwrap().collect();
+        assert_eq!(leftovers.len(), 1, "no temporary file is left");
+        // A write that opens the folder afresh finds the link and refuses it.
+        assert_eq!(write(&root).unwrap_err().code(), "render_path_unsafe");
+        assert!(!outside.join("verifier.md").exists());
+    }
+
+    #[test]
+    fn an_orphan_folder_swapped_for_a_link_after_the_scan_removes_nothing_outside() {
+        let (_tmp, root, outside) = root();
+        let checker = VERIFIER.replace("name: verifier", "name: checker");
+        std::fs::write(root.join("agents/checker.agent.yaml"), &checker).unwrap();
+        write(&root).unwrap();
+        std::fs::remove_file(root.join("agents/checker.agent.yaml")).unwrap();
+        let agents = load(&root).unwrap();
+        let found = orphans(&root, &agents).unwrap();
+        assert_eq!(found.iter().map(|o| o.names.len()).sum::<usize>(), 3);
+        // After the scan, the folder moves away and a link to a folder outside takes its place,
+        // where a file of the same name waits.
+        std::fs::rename(root.join(".claude/agents"), root.join(".claude/moved")).unwrap();
+        symlink(&outside, root.join(".claude/agents")).unwrap();
+        std::fs::write(outside.join("checker.md"), "outside, keep me\n").unwrap();
+        // And in another folder, the orphan itself is replaced by a link after the scan.
+        let target = outside.join("victim.md");
+        std::fs::write(&target, "keep me too\n").unwrap();
+        std::fs::remove_file(root.join(".gemini/agents/checker.md")).unwrap();
+        symlink(&target, root.join(".gemini/agents/checker.md")).unwrap();
+
+        let removed = remove(found).unwrap();
+        assert_eq!(removed, [".claude/agents/checker.md", ".grok/agents/checker.md"]);
+        assert_eq!(std::fs::read_to_string(outside.join("checker.md")).unwrap(), "outside, keep me\n");
+        assert!(!root.join(".claude/moved/checker.md").exists(), "the orphan scanned is the one removed");
+        let link = std::fs::symlink_metadata(root.join(".gemini/agents/checker.md")).unwrap();
+        assert!(link.file_type().is_symlink(), "a link put in an orphan's place is left alone");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me too\n");
+    }
+
+    #[test]
+    fn a_temporary_file_is_made_new_never_through_a_link() {
+        let (_tmp, root, outside) = root();
+        let folder = render_dir(&root, ".claude/agents", true).unwrap().unwrap();
+        let target = outside.join("victim");
+        std::fs::write(&target, "keep\n").unwrap();
+        symlink(&target, root.join(".claude/agents/.x.tmp")).unwrap();
+        assert!(folder.create_new(".x.tmp").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep\n");
+    }
 }
