@@ -2081,6 +2081,52 @@ mutate $agt '        if self.kind(name)? != Some(FileType::RegularFile) {' '    
 # bullet; an agent flow with no params says none.
 mutate $drv 'do that node as step 2 says, then go back to 1. A refusal' 'do that node as step 2 says. A refusal'
 mutate $drv 'if ir.params.is_empty() { "none".to_string() }' 'if false { "none".to_string() }'
+# Slice 6b-2 (BRO-3636): the Stop-hook gate. The kernel's one predicate: an enabled node, a
+# pending verdict, an unfiled ask and a landed answer are work; a former owner's live claim and an
+# answer not landed are someone else's; only work refuses a stop. The open instances are the
+# session's own and unfinished. StopUnblockable replays as a record that changes no node, is
+# written only by the owner and not again until the instance moves. The loop bound refuses one
+# position three times, then lets the stop through, and starts again when the instance moves.
+stp=$fk/stop.rs
+gt=crates/mcp/src/stop.rs
+mutate $stp '        !self.work.is_empty()' '        true'
+mutate $stp '            Some(c) if c.seq < since => waiting.push(Waiting::Lease {' '            Some(c) if false => waiting.push(Waiting::Lease {'
+mutate $stp '        if let (true, Some(node)) = (r.awaiting_verdict, first) {' '        if let (true, Some(node)) = (false, first) {'
+mutate $stp '                Reason::Unfiled { .. } => work.push(Work::Ask { node: id.clone(), iteration }),' '                Reason::Unfiled { .. } => {}'
+mutate $stp '                        AnswerSeen::Landed => work.push(Work::Answer { node, iteration, ask_id, ledger }),' '                        AnswerSeen::Landed => waiting.push(Waiting::Owner { node, iteration, ask_id, ledger, landing: None }),'
+mutate $stp '            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {' '            if owners.retired.is_some() {'
+mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| !a.terminal))' '            Ok(Some(assess(&log, &started, now, seen)?))'
+mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'
+mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
+mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
+mutate $replay '            self.unblockable.push(record);' ''
+mutate $asks '        return AnswerSeen::Landed;' '        return AnswerSeen::Open;'
+# The driver skill stops on the kernel's work list, which next and status carry.
+mutate $drv 'If `{work}` (beside `next` in step 2' 'If `next.enabled` (beside `next` in step 2'
+mutate $mf '        out[kernel::stop::WORK] = work;' ''
+# The gate: the harness's own block format; a turn-end program that cannot block records and
+# alerts; the fourth stop goes through recorded; it fails open on stdin that is not a Stop hook's
+# (and past its bound), on an instance that does not read and on counts it cannot keep, and
+# alerts; no ledger is no flow; one alert per subject; the install check reads only a maestro
+# Stop hook; a command line that does not parse exits 0.
+mutate $gt '            Harness::Claude => json!({ "decision": "block", "reason": reason }).to_string(),' '            Harness::Claude => json!({ "decision": "deny", "reason": reason }).to_string(),'
+mutate $gt '            Harness::Codex => json!({ "decision": "block", "reason": reason }).to_string(),' '            Harness::Codex => json!({ "decision": "block", "reason": reason, "continue": true }).to_string(),'
+mutate $gt '        if self.gate.cannot_block {' '        if false {'
+mutate $gt '        if tally.refused.is_empty() {' '        if false {'
+mutate $gt '        Some("Stop") => {}' '        Some(_) => {}'
+mutate $gt '        if let Err(e) = payload(input) {' '        if let (true, Err(e)) = (false, payload(input)) {'
+mutate $gt '    if input.len() > MAX_INPUT {' '    if false {'
+mutate $gt '            if let Some(u) = open.unread.first() {' '            if let Some(u) = open.unread.first().filter(|_| false) {'
+mutate $gt '        if let Err(e) = counts.save(&me) {' '        if let (true, Err(e)) = (false, counts.save(&me)) {'
+mutate $gt '        if std::fs::symlink_metadata(&root).is_err() {' '        if false {'
+mutate $gt '                self.alert(s, &key, UNCHECKED, &words);' ''
+mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words);' ''
+mutate $gt '            Err(e) if e.message.contains("already has an ask") => {' '            Err(e) if false => {'
+mutate $gt 'let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));' 'let maestro = words.next().is_some();'
+mutate $gt '    maestro && verb && flag && !words.contains(&"--check-install")' '    maestro && verb && flag'
+mutate $cli '        Err(e) if gate => {' '        Err(e) if false => {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

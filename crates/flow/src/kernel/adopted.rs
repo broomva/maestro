@@ -929,3 +929,34 @@ fn asking_again_replaces_a_stale_unlinked_pin() {
         s.proposals.iter().filter(|p| p.by.to_string() == "t3:-/other").map(|p| (p.ask_id.as_str(), p.state)).collect();
     assert_eq!(mine, [(id.as_str(), "owner")]);
 }
+
+/// The stop gate (BRO-3636): a node the former owner's live claim holds is the new owner's to wait
+/// on, not work, so the new owner may stop; once the lease ends, the node is its work again.
+#[test]
+fn a_former_owners_live_claim_is_waited_on_not_work() {
+    let (mut f, fi, clock) = started();
+    let me = f.me.clone();
+    claim(&mut f.ledger, &me, &fi, "one").unwrap();
+    push_adoption(&mut f.ledger, &fi, &me, &other(), 0, "flow-adopt-1");
+    let judge = |f: &Fx| {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        crate::kernel::stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| {
+            crate::kernel::AnswerSeen::Open
+        })
+        .unwrap()
+    };
+    let a = judge(&f);
+    assert!(a.work.is_empty() && !a.refuses_stop(), "{a:?}");
+    assert!(matches!(&a.waiting[..], [crate::kernel::stop::Waiting::Lease { node, .. }] if node == "one"), "{a:?}");
+    clock.shift(SignedDuration::from_secs(DEFAULT_LEASE_SECS as i64 + 1));
+    let a = judge(&f);
+    assert_eq!(
+        a.work,
+        [crate::kernel::stop::Work::Node {
+            node: "one".into(),
+            iteration: crate::kernel::Iteration::default(),
+            held: false
+        }]
+    );
+    assert!(a.waiting.is_empty() && a.refuses_stop());
+}

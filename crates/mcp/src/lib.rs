@@ -33,6 +33,7 @@ use std::sync::Arc;
 
 pub mod flow;
 pub mod http;
+pub mod stop;
 pub mod web;
 
 /// One tool: its name, what it may do, and its argument type.
@@ -459,6 +460,16 @@ pub const TOOLS: &[ToolSpec] = &[
         schema: schema_of::<flow::FlowSpineArgs>,
     },
     ToolSpec {
+        name: flow::OPEN,
+        title: "Your open flows",
+        description: "The flow instances your verified session owns that are not finished, each with work (what you can do now: an enabled node, a pending verdict, an ask to file or an answer to take) and waiting (whom it waits on: the owner's answer, or a former owner's claim). refuses_stop is true while any has work: Maestro's Stop-hook gate then refuses your final message. Needs a verified session; writes nothing.",
+        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::None,
+        schema: schema_of::<flow::FlowOpenArgs>,
+    },
+    ToolSpec {
         name: flow::HEARTBEAT,
         title: "Extend a flow claim",
         description: "Extend the lease of your claim on a flow node. After the lease ends the claim is void and the node is claimed again.",
@@ -767,7 +778,8 @@ fn dispatch(
         | flow::HEARTBEAT
         | flow::ASK
         | flow::PROPOSE_ADOPTION
-        | flow::PROPOSE_RETIREMENT => flow::call(&store.paths, hosts, ambient, name, args),
+        | flow::PROPOSE_RETIREMENT
+        | flow::OPEN => flow::call(&store.paths, hosts, ambient, name, args),
         other => match request_of(other) {
             Some(kind) => agent_request_in(store, hosts, ambient, kind, args),
             None => Err(McpError::invalid_params(format!("unknown tool `{other}`"), None)),
@@ -799,7 +811,7 @@ fn resolve_caller(
 /// caller's own process, the `MAESTRO_*` caller variables). `None` when its surface has no
 /// registry here and it makes no claim: an unverified caller. A claim that does not verify is an
 /// error.
-fn verified_caller(
+pub(crate) fn verified_caller(
     hosts: &maestro_hosts::SurfaceRegistry,
     session: &maestro_core::session::SessionRef,
     args: &Value,
@@ -896,7 +908,7 @@ pub fn agent_request_with_hosts(
     agent_request_in(store, hosts, Ambient::Caller, kind, args)
 }
 
-fn agent_request_in(
+pub(crate) fn agent_request_in(
     store: &Store,
     hosts: &maestro_hosts::SurfaceRegistry,
     ambient: Ambient,

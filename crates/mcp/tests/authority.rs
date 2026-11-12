@@ -61,7 +61,7 @@ fn every_tool_is_a_read_or_an_agent_request() {
             "{name}"
         );
     }
-    for name in ["maestro_flow_next", "maestro_flow_status", "maestro_flow_spine"] {
+    for name in ["maestro_flow_next", "maestro_flow_status", "maestro_flow_spine", "maestro_flow_open"] {
         let spec = TOOLS.iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no tool {name}"));
         assert_eq!((spec.authority, spec.request, spec.scope), (Authority::Read, None, "read"), "{name}");
     }
@@ -177,6 +177,7 @@ fn a_read_tool_writes_nothing() {
             "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
             "maestro_flow_next" | "maestro_flow_status" => json!({ "instance": "fi_none" }),
             "maestro_flow_spine" => json!({ "instance": "fi_none", "against": "fi_other" }),
+            "maestro_flow_open" => json!({ "session": "paseo:-/a1" }),
             _ => json!({}),
         };
         call(&store, spec.name, args).unwrap_or_else(|e| panic!("{}: {}", spec.name, e.message));

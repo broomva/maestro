@@ -437,6 +437,34 @@ impl Claims {
     }
 }
 
+/// A claim that holds its node at `now`, as [`claim`] judges `already_claimed`: the latest claim of
+/// its node and iteration, not spent, its lease not ended.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Live {
+    pub node: String,
+    pub iteration: Iteration,
+    /// Its `Claimed` event's position: a claim before the owner's epoch is a former owner's.
+    pub seq: u64,
+    pub lease_until: Timestamp,
+    pub inputs: BTreeMap<String, String>,
+}
+
+/// Every claim that holds its node at `now` (see [`Live`]).
+pub(crate) fn live_claims(log: &Log, now: Timestamp) -> Result<Vec<Live>, KernelError> {
+    let claims = Claims::fold(log)?;
+    let live =
+        claims.latest.values().filter_map(|sha| claims.recs.get(sha)).filter(|r| !r.spent && now < r.lease_until);
+    Ok(live
+        .map(|r| Live {
+            node: r.node.clone(),
+            iteration: r.iteration.clone(),
+            seq: r.seq,
+            lease_until: r.lease_until,
+            inputs: r.inputs.clone(),
+        })
+        .collect())
+}
+
 /// A node's current iteration and inputs as `next` reports them, and its state when it is not
 /// enabled. `None` when the node is done.
 fn current<'n>(next: &'n Next, node: &str) -> Option<(&'n Iteration, &'n BTreeMap<String, String>, Option<State>)> {

@@ -186,7 +186,8 @@ fn step_4_takes_a_terminal_next_as_done_before_anything_else() {
     let step4 = section(&skill, "\n4. Then, in this order:");
     let done = step4.find("If `next.terminal` is `true`, the flow is done").unwrap_or_else(|| panic!("{step4}"));
     let verdict = step4.find("has `awaiting_verdict: true`").unwrap_or_else(|| panic!("{step4}"));
-    let wait = step4.find("If `next.enabled` was empty").unwrap_or_else(|| panic!("{step4}"));
+    let wait =
+        step4.find("If `work` (beside `next` in step 2's result) was empty").unwrap_or_else(|| panic!("{step4}"));
     assert!(done < verdict && verdict < wait, "{step4}");
 }
 
