@@ -92,6 +92,7 @@ use super::events::{
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
 use super::write;
+use crate::agents::{self, LaunchSpec};
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, ReadGuard, random_epoch};
 use crate::log::{Event, Log};
@@ -269,6 +270,10 @@ pub struct Enabled {
     /// The digests its receipt must record as `inputs`.
     pub inputs: BTreeMap<String, String>,
     pub launch: Launch,
+    /// For a performer `agent:<name>`, how each harness launches the agent
+    /// (`crate::agents::launch_spec`); left out for any other node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_spec: Option<LaunchSpec>,
     pub wait: Option<Wait>,
 }
 
@@ -374,6 +379,7 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
             enabled.push(Enabled {
                 inputs: s.inputs,
                 launch: class.and_then(Class::launch).cloned().unwrap_or_default(),
+                launch_spec: class.and_then(Class::launch).and_then(agents::launch_spec),
                 wait: class.and_then(Class::wait).cloned(),
                 node: id,
                 class: s.class,

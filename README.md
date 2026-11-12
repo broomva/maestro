@@ -97,6 +97,8 @@ maestro flow propose-adoption --instance I [--ledger L.yaml --ask '<json>']    #
 maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  # ask the owner to retire an instance
 maestro flow spine --instance I [--against J]                # the accepting spine; exit 1 at the first difference from J's
 maestro dogfood verify-receipt --head=H --surface=S < outputs.json   # check a dogfood receipt (verify@1's exercise verify)
+maestro flow driver-skill --definition F.yaml [--out SKILL.md] [--check]   # the flow's driver skill, generated from its IR (no tool's twin)
+maestro agents render [--root DIR] [--check]                 # agents/*.agent.yaml to each harness's agent file; --check exits 1 at the first drift
 ```
 
 - **Human steps (BRO-3635).** A waiting `human` node is the owner's. `flow ask` (MCP
@@ -173,6 +175,47 @@ maestro dogfood verify-receipt --head=H --surface=S < outputs.json   # check a d
   unreadable, 10 evidence mismatch, 11 outputs invalid, 12 receipt changed, 13 receipt not a
   regular file, 14 evidence not a regular file. `{{outputs.<name>}}` in any command or the
   workdir is refused when a definition compiles.
+- **Specialist agents (BRO-3636).** One source per specialist, `agents/<name>.agent.yaml`
+  (`agent@1`: `schema`, `name`, `description`, `role`, `posture` (`read_only` or `execute`),
+  `model` per provider (`claude`, `codex`, `gemini`, `grok`), `skills`, and `outputs`, a JSON
+  Schema of type object), parsed strictly: an unknown or repeated field at any level is refused,
+  and so is a name its file does not have (see `maestro_flow::agents`). `agents/verifier.agent.yaml`
+  performs verify@1's `exercise`. `maestro agents render` writes `.claude/agents/<name>.md`,
+  `.gemini/agents/<name>.md` and `.grok/agents/<name>.md` from every source and removes the
+  renders whose source is gone (a file whose second line is not the render marker is never
+  touched); the Codex `spawn_agent` brief is not a file but part of the driver skill and of the
+  launch spec. `--check` writes nothing and exits 1 naming the first render that is missing,
+  differs, or has no source: what `bstack doctor` will call. Each harness gets only the fields
+  its docs define: Claude Code `name`, `description`, `tools`, `model`, `skills`; Gemini CLI
+  `name`, `description`, `kind: local`, `tools`, `model`; Grok `name`, `description`, `tools`,
+  `model`. **Not confirmed:** that Claude Code's `subagent_type` is the agent's `name` (inferred
+  from its docs, not stated); any Grok field beyond those (its built-in agents use
+  `prompt_mode`, `permission_mode` and `agents_md`, which no page defines, so none is set), how
+  Grok skills reach an agent, and which of two same-named agents Grok takes (it reads
+  `.claude/agents/` too); and Codex's `spawn_agent` arguments, read from its source, not its
+  docs (`task_name` is only in its second version, and a Codex subagent always takes its
+  parent's sandbox, so the posture is a sentence in the brief). Agent files shape behaviour; they
+  are not a security boundary: the kernel's verify is the check.
+- **Launch specs (BRO-3636).** `flow next` (and `maestro_flow_next`) gives each enabled node whose
+  performer is `agent:<name>` a `launch_spec`: `kind: agent`, the agent, the node's skill, its
+  source and digest, its output schema, `claude`, `gemini` and `grok` (each `{file, tool,
+  subagent_type?}`: the `Agent` tool, the tool named after the agent, `spawn_subagent`) and
+  `codex` (`{tool: spawn_agent, task_name, model, message}`). Other nodes have none, so their
+  shape is unchanged. The kernel knows the sources it was built with, so a definition naming an
+  agent with no source does not compile (`unknown_agent`): it is a reference to nothing, refused
+  where the compiler refuses unknown references, before an instance that could never be launched
+  is started, and with no file read at compile time. An instance pinned by a build that had the
+  agent replays as it did, and `next` gives that node `kind: unknown_agent`, never no spec.
+- **Driver skills (BRO-3636).** `maestro flow driver-skill` generates a flow's `SKILL.md` (Agent
+  Skills format, named `flow-<flow>-v<version>`) from its compiled IR: loop `flow next`, do each
+  enabled node with its own skill (an agent performer through the harness's own subagent, or
+  Codex's brief), `flow complete`, and stop when `flow status` has no node `ready`, `stale` or
+  `waiting`. Its steps put each node after everything it waits on (needs, the node its switch
+  reads, a needed repeat's body), by id within a step; the loop's text is fixed, and nothing in
+  the order is written by hand. `skills/flow-verify-v1/SKILL.md` is verify@1's, regenerated with
+  `maestro flow driver-skill --definition crates/flow/flows/verify.yaml --out
+  skills/flow-verify-v1/SKILL.md`; tests hold it, and the committed renders, to a fresh
+  generation.
 - **Commands an agent's `PATH` cannot stand in for (BRO-3636).** The kernel runs a command's
   first word `maestro` as its own executable, and `sh`, `git` and `test` as the system's files at
   their real path, owned by root and writable by no one else, as is every folder above them.

@@ -401,7 +401,7 @@ pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: flow::NEXT,
         title: "Next flow steps",
-        description: "The nodes of a flow instance you can claim now, each with its launch hint, and why every other node is not ready. Replays the instance's log and writes nothing.",
+        description: "The nodes of a flow instance you can claim now, each with its launch hint, and why every other node is not ready. A node whose performer is agent:<name> also has a launch_spec: how Claude Code, Gemini CLI and Grok launch that agent (its file, tool and subagent_type) and Codex's spawn_agent brief, or kind unknown_agent when this maestro has no source for it. Replays the instance's log and writes nothing.",
         authority: Authority::Read,
         request: None,
         scope: "read",

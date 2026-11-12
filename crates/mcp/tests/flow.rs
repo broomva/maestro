@@ -483,3 +483,35 @@ fn a_waiting_human_node_is_relayed_toward_its_t3_thread() {
     assert!(none("t3:env-1/thread-1", owner("flow-owner-1", "a\nb.yaml")), "a line break");
     assert!(none("t3:env-1/thread-1", owner(&"f".repeat(9000), "arc.yaml")), "over T3's link limit");
 }
+
+#[test]
+fn next_returns_a_launch_spec_for_an_agent_performer_and_start_refuses_an_unknown_agent() {
+    let f = fx();
+    // A node whose performer names no agent has no launch spec: the shape is as before.
+    let fi = f.begin();
+    let next = f.call(NEXT, json!({ "instance": fi }));
+    assert!(next["next"]["enabled"][0].get("launch_spec").is_none(), "{next}");
+
+    let flow = |performer: &str| {
+        format!(
+            "flow: agentic\nversion: 1\nparams: [dir]\nworkdir: \"{{{{params.dir}}}}\"\nnodes:\n  try: {{class: work, verify: ['true'], performer: '{performer}', skill: dogfood}}\n"
+        )
+    };
+    let v = f.d1(START, json!({ "definition": flow("agent:verifier"), "params": { "dir": f.work } }));
+    assert_eq!(v["ok"], true, "{v}");
+    let next = f.call(NEXT, json!({ "instance": v["instance"] }));
+    let spec = &next["next"]["enabled"][0]["launch_spec"];
+    assert_eq!(
+        (&spec["kind"], &spec["agent"], &spec["skill"]),
+        (&json!("agent"), &json!("verifier"), &json!("dogfood"))
+    );
+    assert_eq!(spec["claude"]["file"], ".claude/agents/verifier.md");
+    assert_eq!(spec["codex"]["tool"], "spawn_agent");
+    assert_eq!(spec["outputs"]["required"], json!(["receipt", "receipt_sha256"]));
+
+    // An agent with no source never starts: the refusal is a result, and nothing is written.
+    let before = f.tree();
+    let v = f.d1(START, json!({ "definition": flow("agent:ghost"), "params": { "dir": f.work } }));
+    assert_eq!((&v["ok"], &v["code"]), (&json!(false), &json!("unknown_agent")), "{v}");
+    assert_eq!(f.tree(), before);
+}

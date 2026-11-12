@@ -4,10 +4,12 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod agents;
 mod claiming;
 mod claims;
 mod compile;
 mod deciding;
+mod driver;
 mod schedule;
 
 /// Not a test: the guard evaluator's entry, which the kernel runs when it starts this binary again

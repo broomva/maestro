@@ -5,6 +5,7 @@
 
 use crate::common::*;
 use jiff::{SignedDuration, Timestamp};
+use maestro_flow::agents::LaunchSpec;
 use maestro_flow::kernel::events::{Chosen, Completed, Guarded, KernelEvent, Refused, Started, VerifyRecord};
 use maestro_flow::kernel::ir::{IR_VERSION, MAX_DEPTH, Need, content_hash};
 use maestro_flow::kernel::{
@@ -260,9 +261,9 @@ fn a_fork_join_waits_for_every_branch() {
 const SWITCH: &str = "flow: f
 version: 1
 nodes:
-  depth: {class: choice, edges: {quick: {guard: 'true'}, deep: {guard: '.params != null'}}, performer: agent:researcher}
+  depth: {class: choice, edges: {quick: {guard: 'true'}, deep: {guard: '.params != null'}}, performer: agent:verifier}
   skim: {class: work, verify: [x], switch: {on: depth, case: quick}}
-  dig: {class: work, verify: [x], switch: {on: depth, case: deep}, performer: agent:researcher, skill: deep-research, routing: {provider: codex}}
+  dig: {class: work, verify: [x], switch: {on: depth, case: deep}, performer: agent:verifier, skill: deep-research, routing: {provider: codex}}
   summary: {class: work, verify: [x], needs: [skim]}
 ";
 
@@ -287,7 +288,7 @@ fn a_switch_follows_only_the_chosen_edge() {
     let n = f.next(&fi, now);
     assert_eq!(enabled(&n), vec!["dig"]);
     let launch = &n.enabled[0].launch;
-    assert_eq!(launch.performer.as_deref(), Some("agent:researcher"));
+    assert_eq!(launch.performer.as_deref(), Some("agent:verifier"));
     assert_eq!(launch.skill.as_deref(), Some("deep-research"));
     assert_eq!(launch.routing.get("provider").map(String::as_str), Some("codex"));
 }
@@ -613,6 +614,53 @@ fn exercise_applies_only_when_a_surface_is_declared() {
     assert_eq!(enabled(&n), vec!["exercise"]);
     assert_eq!(n.enabled[0].launch.skill.as_deref(), Some("dogfood"));
     assert_eq!(n.enabled[0].launch.performer.as_deref(), Some("agent:verifier"));
+    // The launch spec: the verifier agent, as each harness launches it, for the node's skill.
+    let verifier = maestro_flow::agents::find("verifier").unwrap();
+    assert_eq!(n.enabled[0].launch_spec, Some(LaunchSpec::Agent(Box::new(verifier.launch(Some("dogfood"))))));
+    let json = serde_json::to_value(&n.enabled[0]).unwrap();
+    assert_eq!(json["launch_spec"]["kind"], "agent");
+    assert_eq!(
+        json["launch_spec"]["claude"],
+        json!({ "file": ".claude/agents/verifier.md", "tool": "Agent", "subagent_type": "verifier" })
+    );
+    assert_eq!(json["launch_spec"]["codex"]["tool"], "spawn_agent");
+    assert_eq!(json["launch_spec"]["skill"], "dogfood");
+}
+
+#[test]
+fn a_node_with_no_agent_performer_has_no_launch_spec() {
+    let mut f = fx(VERIFY);
+    let fi = f.begin(verify_params(true));
+    let n = f.next(&fi, Timestamp::now());
+    assert_eq!(enabled(&n), vec!["pin", "surface"]);
+    assert!(n.enabled.iter().all(|e| e.launch_spec.is_none()));
+    let json = serde_json::to_value(&n).unwrap();
+    assert!(json["enabled"].as_array().unwrap().iter().all(|e| e.get("launch_spec").is_none()), "{json}");
+}
+
+#[test]
+fn an_agent_this_build_lacks_is_an_unknown_agent_launch_spec_never_none() {
+    // An instance a build with the agent started: its pinned IR names `agent:ghost`.
+    let mut f = fx(SWITCH);
+    let mut ir = f.flow.ir().clone();
+    for node in ir.nodes.values_mut() {
+        if let maestro_flow::kernel::ir::Class::Choice { launch, .. } = &mut node.class {
+            launch.performer = Some("agent:ghost".into());
+        }
+    }
+    let started =
+        Started { flow: f.flow.name(), ir_hash: content_hash(&ir).unwrap(), ir, params: json!({}), owner: None };
+    let fi = id("fi_ghost");
+    f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
+    let n = f.next(&fi, Timestamp::now());
+    assert_eq!(enabled(&n), vec!["depth"]);
+    assert_eq!(
+        n.enabled[0].launch_spec,
+        Some(LaunchSpec::UnknownAgent {
+            agent: "ghost".into(),
+            reason: "this maestro has no agent source agents/ghost.agent.yaml".into()
+        })
+    );
 }
 
 #[test]

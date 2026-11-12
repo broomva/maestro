@@ -23,6 +23,10 @@
 //!   writer of record and, called again, records the owner's answer once it has landed on main
 //!   (`maestro_flow::kernel::asks`). `next` and `status` add `relay`: each waiting human node's
 //!   question, its ask once filed, and for a T3 owner prompt links to its thread ([`relay`]).
+//! - **Launch specs (BRO-3636).** `next` gives each enabled node whose performer is
+//!   `agent:<name>` a `launch_spec` (`maestro_flow::agents`): the agent's file, tool and type on
+//!   each harness with an agent file, and Codex's `spawn_agent` brief. `start` refuses a
+//!   definition naming an agent with no source, `unknown_agent`.
 //! - **Adoption and retirement (BRO-3635).** `propose_adoption` and `propose_retirement` put a
 //!   change of owner, or a retirement, to the owner as a Maestro ask filed the same way, and carry
 //!   it out only once the owner's approval has landed on main (`maestro_flow::kernel::adoption`).

@@ -1978,6 +1978,56 @@ mutate $spn '        if x.exit != y.exit {' '        if false {'
 mutate $mf '        if let Some(mismatch) = kernel::definition_mismatch(&mine, &other) {' '        if let Some(mismatch) = None::<kernel::DefinitionMismatch> {'
 mutate $mf '                let mut v = refusal("spine_differs", &difference, false);' '                let mut v = json!({ "ok": true, "code": "spine_differs" });'
 mutate $cli '                return std::process::ExitCode::from(3);' '                return std::process::ExitCode::from(1);'
+# Specialist agents (BRO-3636): the source parses strictly, field by field; drift between a source
+# and its renders is named (a render missing, differing, longer by a byte, or left by a source
+# that is gone, and only a render is ever taken for one); a root without sources is unread.
+agt=$fl/agents.rs
+mutate $agt '#[serde(deny_unknown_fields)]
+struct Source {' 'struct Source {'
+mutate $agt '#[serde(deny_unknown_fields)]
+pub struct Models {' 'pub struct Models {'
+mutate $agt '    if text.len() > MAX_SOURCE {' '    if false {'
+mutate $agt '    if s.schema != SCHEMA {' '    if false {'
+mutate $agt '    if !plain(&s.name) {' '    if false {'
+mutate $agt '            .all(|run| !run.is_empty() && run.bytes()' '            .all(|run| run.bytes()'
+mutate $agt '    if file != format!("{}{SUFFIX}", s.name) {' '    if false {'
+mutate $agt '    if s.description.trim().is_empty() || s.description.len() > MAX_DESCRIPTION {' '    if s.description.len() > MAX_DESCRIPTION {'
+mutate $agt '    if s.description.trim().is_empty() || s.description.len() > MAX_DESCRIPTION {' '    if s.description.trim().is_empty() {'
+mutate $agt '    if s.role.trim().is_empty() {' '    if false {'
+mutate $agt '        if model.is_empty() || model.len() > MAX_MODEL || !ok {' '        if model.is_empty() || model.len() > MAX_MODEL {'
+mutate $agt '        if model.is_empty() || model.len() > MAX_MODEL || !ok {' '        if model.len() > MAX_MODEL || !ok {'
+mutate $agt '        if !plain(skill) {' '        if false {'
+mutate $agt '        if s.skills[..i].contains(skill) {' '        if false {'
+mutate $agt '    if s.outputs.get("type") != Some(&Value::from("object")) {' '    if false {'
+mutate $agt '            None => DriftKind::Missing,' '            None => continue,'
+mutate $agt '            Some(bytes) if bytes != r.text.as_bytes() => DriftKind::Differs,' '            Some(_) if false => DriftKind::Differs,'
+mutate $agt 'read(&root.join(&r.path), r.text.len())?' 'read(&root.join(&r.path), r.text.len() - 1)?'
+mutate $agt '            if agents.iter().any(|a| a.name == stem) {' '            if false {'
+mutate $agt '.is_some_and(|line| line.starts_with(MARKER.as_bytes()))' '.is_some()'
+mutate $agt '            if generated {' '            if false {'
+mutate $agt '    for entry in std::fs::read_dir(&dir).map_err(|e| io(&dir, e))? {' '    for entry in std::fs::read_dir(&dir).into_iter().flatten() {'
+mutate $cli '        if let Some(drift) = agents::check(root)? {' '        if let Some(drift) = None::<agents::Drift> {'
+# An unknown agent: only an `agent:` performer names one; a definition naming one with no source
+# does not compile, at any call; `next` gives an agent performer its launch spec, and an agent a
+# pinned IR names that this build lacks is an unknown_agent spec, never none.
+mutate $agt '    performer.strip_prefix(PERFORMER)' '    Some(performer)'
+mutate $fk/compile.rs '            && crate::agents::find(agent).is_none()' '            && false'
+mutate $fk/compile.rs '    check_agents(&ir)?;
+' ''
+mutate $replay '                launch_spec: class.and_then(Class::launch).and_then(agents::launch_spec),' '                launch_spec: None,'
+mutate $agt '    Some(match find(name) {' '    find(name)?;
+    Some(match find(name) {'
+# The driver skill's order is the IR's: a node after everything it waits on, its switch's subject
+# and a needed repeat's body included; a skill name past the spec's length is refused; --check
+# exits 1 on a skill that is not what the IR generates.
+drv=$fl/driver.rs
+mutate $drv '.map(|d| at(ir, d, memo) + 1).max().unwrap_or(0);' '.map(|d| at(ir, d, memo) * 0).max().unwrap_or(0);'
+mutate $drv '    out.extend(node.switch.as_ref().map(|c| c.on.as_str()));
+' ''
+mutate $drv '                out.extend(ir.repeats.get(repeat).into_iter().flat_map(|r| r.body.iter().map(String::as_str)));
+' ''
+mutate $drv '    if name.len() > agents::MAX_NAME {' '    if false {'
+mutate $cli '            if on_disk.as_deref() != Some(skill.as_bytes()) {' '            if false {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

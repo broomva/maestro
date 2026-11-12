@@ -189,6 +189,7 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
     ir::validate(&ir)?;
     check_guards(&ir)?;
     check_no_outputs_placeholders(&ir)?;
+    check_agents(&ir)?;
     let bytes = serde_json::to_vec(&ir).map(|b| b.len()).unwrap_or(usize::MAX);
     if bytes > ir::MAX_IR {
         return Err(CompileError::invalid(format!("the IR is {bytes} bytes, more than {}", ir::MAX_IR)));
@@ -263,6 +264,22 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
         cancel_after: n.cancel.map(|c| seconds(&format!("node {id} cancel.after"), &c.after)).transpose()?,
         snapshot,
     })
+}
+
+/// Refuses a performer `agent:<name>` this build has no source for (`crate::agents`, BRO-3636):
+/// such a node could never be launched, so its flow never starts. Compile time only, as the
+/// placeholder rule is: an IR pinned by a build that had the agent replays as it did, and `next`
+/// reports its node's launch spec as `unknown_agent`.
+fn check_agents(ir: &Ir) -> Result<(), CompileError> {
+    for (id, n) in &ir.nodes {
+        let named = n.class.launch().and_then(|l| l.performer.as_deref()).and_then(crate::agents::performer_agent);
+        if let Some(agent) = named
+            && crate::agents::find(agent).is_none()
+        {
+            return Err(CompileError::UnknownAgent { node: id.clone(), agent: agent.to_string() });
+        }
+    }
+    Ok(())
 }
 
 /// Refuses an `{{outputs.<name>}}` placeholder in any command or the workdir (BRO-3636): the
