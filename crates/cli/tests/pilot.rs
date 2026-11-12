@@ -206,7 +206,11 @@ fn verify_receipt(p: &Pilot, input: &[u8], head: &str) -> (Option<i32>, Value, S
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input).unwrap();
+    // The verifier reads to one byte past its bound and no further, so input longer than that may
+    // meet a closed pipe; what it read is what the test judges.
+    if let Err(e) = child.stdin.take().unwrap().write_all(input) {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+    }
     let out = child.wait_with_output().unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     (out.status.code(), v, String::from_utf8(out.stderr).unwrap())
@@ -463,7 +467,10 @@ fn verify_receipt_exits_with_each_failures_own_status() {
 
     let malformed = p.receipt("malformed", |v| v["at"] = json!("soon"));
     let gone = p.receipt("gone", |v| v["evidence"]["path"] = json!("missing.log"));
-    let over = vec![b' '; dogfood::MAX_OUTPUTS + 1];
+    // Valid outputs naming the good receipt, padded to one byte past the bound: only the size
+    // refuses them, so a cap that read one byte less would take them and pass.
+    let mut over = named(&good).to_string().into_bytes();
+    over.resize(dogfood::MAX_OUTPUTS + 1, b' ');
     for (input, head, want, code_name) in [
         (b"not json".to_vec(), p.head.as_str(), 11, "outputs_invalid"),
         (over, p.head.as_str(), 11, "outputs_invalid"),

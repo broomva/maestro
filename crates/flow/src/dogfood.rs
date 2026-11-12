@@ -586,9 +586,10 @@ mod tests {
 
     #[test]
     fn a_receipt_that_is_not_well_formed_is_malformed() {
-        let cases: [(&str, Edit); 11] = [
+        let cases: [(&str, Edit); 12] = [
             ("not json", Box::new(|v| *v = json!("receipt"))),
             ("unknown field", Box::new(|v| v["verdict"] = json!("pass"))),
+            ("unknown evidence field", Box::new(|v| v["evidence"]["extra"] = json!(1))),
             ("no head", Box::new(|v| drop(v.as_object_mut().unwrap().remove("head")))),
             ("empty entry", Box::new(|v| v["entry"] = json!(" "))),
             ("empty driver", Box::new(|v| v["driver"] = json!(""))),

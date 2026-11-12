@@ -1921,6 +1921,8 @@ mutate $dog 'b.is_ascii_digit() || (b'"'"'a'"'"'..=b'"'"'f'"'"').contains(&b)' '
 mutate $dog '    if receipt.at.parse::<jiff::Timestamp>().is_err() {' '    if false {'
 mutate $dog '#[serde(deny_unknown_fields)]
 pub struct Receipt {' 'pub struct Receipt {'
+mutate $dog '#[serde(deny_unknown_fields)]
+pub struct Evidence {' 'pub struct Evidence {'
 mutate $dog '    if receipt.head != head {' '    if false {'
 mutate $dog '    if receipt.surface != surface {' '    if false {'
 mutate $dog '    if receipt.result != Outcome::Pass {' '    if false {'
@@ -1929,6 +1931,9 @@ mutate $dog '    if read > limit {' '    if false {'
 mutate $dog '    if got != receipt.evidence.sha256 {' '    if false {'
 # The CLI exits with each failure's own status, which the kernel records in its refusal.
 mutate $cli '            std::process::ExitCode::from(failure.exit())' '            std::process::ExitCode::FAILURE'
+# The CLI reads its input to one byte past the verifier's bound, so outputs one byte too long are
+# refused for their size, never cut to fit.
+mutate $cli '    let limit = maestro_flow::dogfood::MAX_OUTPUTS as u64 + 1;' '    let limit = maestro_flow::dogfood::MAX_OUTPUTS as u64;'
 # verify@1 itself (V1 to V4). V1: pin compares HEAD with params.head, maps a moved one to `moved`,
 # and carries fresh_for. V2: check runs only on at_head, in a snapshot of params.head. V4: exercise
 # only with a declared surface (the surface node's own `test -n`), its receipt bound to the params'
