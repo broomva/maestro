@@ -512,6 +512,12 @@ fn next_returns_a_launch_spec_for_an_agent_performer_and_start_refuses_an_unknow
     assert_eq!(spec["claude"]["file"], ".claude/agents/verifier.md");
     assert_eq!(spec["codex"]["tool"], "spawn_agent");
     assert_eq!(spec["outputs"]["required"], json!(["receipt", "receipt_sha256"]));
+    // The tool's description names how each harness's spec names the agent.
+    let tools = maestro_mcp::MaestroServer::tools();
+    let tool = tools.iter().find(|t| t.name == NEXT).unwrap();
+    let description = tool.description.as_deref().unwrap_or_default();
+    assert!(description.contains("(its file, tool, and subagent_type or agent_name)"), "{description}");
+    assert_eq!(spec["gemini"]["agent_name"], "verifier");
 
     // An agent with no source never starts: the refusal is a result, and nothing is written.
     let before = f.tree();

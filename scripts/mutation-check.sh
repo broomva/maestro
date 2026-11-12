@@ -2077,6 +2077,10 @@ mutate $agt 'model.len() > MAX_MODEL' 'model.len() > MAX_MODEL + 1'
 mutate $agt 'let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;' 'let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC;'
 mutate $agt 'rustix::fs::unlinkat(&self.fd, name, AtFlags::empty()).map_err(|e| self.io(name, e))?;' 'std::fs::remove_file(self.path.join(name)).map_err(|e| self.io(name, e))?;'
 mutate $agt '        if self.kind(name)? != Some(FileType::RegularFile) {' '        if false {'
+# Round 3 nits (BRO-3636): a claim token in the verdict retry goes back to 1, never on to a stop
+# bullet; an agent flow with no params says none.
+mutate $drv 'do that node as step 2 says, then go back to 1. A refusal' 'do that node as step 2 says. A refusal'
+mutate $drv 'if ir.params.is_empty() { "none".to_string() }' 'if false { "none".to_string() }'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

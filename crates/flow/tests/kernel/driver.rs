@@ -211,5 +211,18 @@ fn a_repeat_awaiting_its_verdict_is_retried_by_a_claim_a_bounded_number_of_times
     let bound = format!("After {} such claims with the repeat still awaiting its verdict", driver::VERDICT_RETRIES);
     assert!(step4.contains(&bound), "{step4}");
     assert!(step4.contains("`maestro_flow::driver::VERDICT_RETRIES`"), "{step4}");
+    // A claim token never falls through to the stop bullets that follow.
+    assert!(step4.contains("do that node as step 2 says, then go back to 1. A refusal: go back to 1."), "{step4}");
     assert_eq!(driver::VERDICT_RETRIES, 3);
+}
+
+#[test]
+fn an_agent_flow_with_no_params_names_none() {
+    let flow = compile("flow: bare\nversion: 1\nnodes:\n  a: {class: work, verify: [x], performer: agent:verifier}\n")
+        .unwrap();
+    let skill = driver::generate(&flow).unwrap();
+    let agents = section(&skill, "## Agents");
+    assert!(agents.contains("the node and the instance's params (none)."), "{agents}");
+    assert!(!skill.contains("params ()"), "an empty list reads as nothing");
+    assert!(skill.contains("- Params: none."));
 }

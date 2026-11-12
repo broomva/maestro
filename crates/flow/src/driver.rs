@@ -378,7 +378,7 @@ pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
     let _ = writeln!(out, "   - If `next.terminal` is `true`, the flow is done: stop and report, as step 1 says.");
     let _ = writeln!(
         out,
-        "   - If a repeat in `status.repeats` has `awaiting_verdict: true`, its `until` could not be judged when its body settled (an error or a timeout). Retry it with `flow claim --instance <I> --node-id <the first node of its body, as Repeats lists it>`: a claim judges every pending verdict before anything else. A `claim_token` means the verdict moved the repeat on: do that node as step 2 says. A refusal: go back to 1. After {VERDICT_RETRIES} such claims with the repeat still awaiting its verdict at the same iteration, stop and report: its `until` fails over that input every time. ({VERDICT_RETRIES} is this skill's bound, `maestro_flow::driver::VERDICT_RETRIES`: an `until` is jq over the same input each time, so an error repeats, and only a timeout under load, at the kernel's 1 s guard timeout, can pass on a later try.)"
+        "   - If a repeat in `status.repeats` has `awaiting_verdict: true`, its `until` could not be judged when its body settled (an error or a timeout). Retry it with `flow claim --instance <I> --node-id <the first node of its body, as Repeats lists it>`: a claim judges every pending verdict before anything else. A `claim_token` means the verdict moved the repeat on: do that node as step 2 says, then go back to 1. A refusal: go back to 1. After {VERDICT_RETRIES} such claims with the repeat still awaiting its verdict at the same iteration, stop and report: its `until` fails over that input every time. ({VERDICT_RETRIES} is this skill's bound, `maestro_flow::driver::VERDICT_RETRIES`: an `until` is jq over the same input each time, so an error repeats, and only a timeout under load, at the kernel's 1 s guard timeout, can pass on a later try.)"
     );
     let _ = writeln!(
         out,
@@ -425,7 +425,8 @@ pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
 
     if !agents.is_empty() {
         let _ = writeln!(out, "## Agents\n");
-        let params = codes(ir.params.keys().map(String::as_str));
+        let params =
+            if ir.params.is_empty() { "none".to_string() } else { codes(ir.params.keys().map(String::as_str)) };
         let _ = writeln!(
             out,
             "Give the agent the node's task: the flow ({flow_name}), the instance, the node and the instance's params ({params}). It returns the node's outputs; you claim and complete the node, never the agent.\n"
