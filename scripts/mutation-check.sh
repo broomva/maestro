@@ -2126,6 +2126,12 @@ mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words);' ''
 mutate $gt '            Err(e) if e.message.contains("already has an ask") => {' '            Err(e) if false => {'
 mutate $gt 'let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));' 'let maestro = words.next().is_some();'
 mutate $gt '    maestro && verb && flag && !words.contains(&"--check-install")' '    maestro && verb && flag'
+mutate $gt '            if hook.get("type").and_then(Value::as_str) == Some("command") && runs_gate(command, harness) {' '            if runs_gate(command, harness) {'
+# Review round 1 (BRO-3636): a choice node's next step is choose, never complete; a record whose
+# alert was not filed is alerted by the next stop that finds it; a record that failed is alerted.
+mutate $stp '    if class == "choice" {' '    if false {'
+mutate $gt '                    already.push((a.instance.clone(), seq));' ''
+mutate $gt '        if made.is_empty() && already.is_empty() && failed.is_empty() {' '        if made.is_empty() && already.is_empty() {'
 mutate $cli '        Err(e) if gate => {' '        Err(e) if false => {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }

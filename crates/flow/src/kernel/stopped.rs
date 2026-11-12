@@ -64,7 +64,10 @@ fn record(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId, reason: Unblockabl
 fn an_enabled_node_is_work_and_a_stop_is_refused_over_it() {
     let (f, fi) = with(RELAY);
     let a = judge(&f, &fi);
-    assert_eq!(a.work, [Work::Node { node: "one".into(), iteration: Iteration::default(), held: false }]);
+    assert_eq!(
+        a.work,
+        [Work::Node { node: "one".into(), class: "pure".into(), iteration: Iteration::default(), held: false }]
+    );
     assert!(a.waiting.is_empty() && !a.terminal);
     assert!(a.refuses_stop());
     let steps = a.next_steps().join(" ");
@@ -77,7 +80,10 @@ fn a_claim_the_owner_holds_is_work_it_finishes() {
     let me = f.me.clone();
     claim(&mut f.ledger, &me, &fi, "one").unwrap();
     let a = judge(&f, &fi);
-    assert_eq!(a.work, [Work::Node { node: "one".into(), iteration: Iteration::default(), held: true }]);
+    assert_eq!(
+        a.work,
+        [Work::Node { node: "one".into(), class: "pure".into(), iteration: Iteration::default(), held: true }]
+    );
     assert!(a.next_steps()[0].contains("you hold a live claim on node one"), "{:?}", a.next_steps());
 }
 
@@ -197,7 +203,10 @@ fn stop_unblockable_is_listed_and_changes_no_node() {
     );
     // Its claim still holds: completing it after the record is accepted.
     let a = judge(&f, &fi);
-    assert_eq!(a.work, [Work::Node { node: "one".into(), iteration: Iteration::default(), held: true }]);
+    assert_eq!(
+        a.work,
+        [Work::Node { node: "one".into(), class: "pure".into(), iteration: Iteration::default(), held: true }]
+    );
 }
 
 #[test]
@@ -249,7 +258,12 @@ fn at(instance: &str, seq: u64) -> Assessment {
         ir_hash: "sha256:x".into(),
         seq,
         terminal: false,
-        work: vec![Work::Node { node: "one".into(), iteration: Iteration::default(), held: false }],
+        work: vec![Work::Node {
+            node: "one".into(),
+            class: "pure".into(),
+            iteration: Iteration::default(),
+            held: false,
+        }],
         waiting: vec![],
     }
 }
@@ -300,4 +314,28 @@ fn the_driver_skill_stops_on_the_kernels_work_list() {
     let rule = step4.lines().find(|l| l.contains("nothing is yours to do now")).unwrap();
     assert!(rule.contains(&format!("If `{}` (beside `next` in step 2's result) was empty", stop::WORK)), "{rule}");
     assert!(rule.contains(&format!("as `{}` names", stop::WAITING)), "{rule}");
+}
+
+/// A choice node takes an edge: its next step is `choose`, never `complete`, which refuses it.
+const PICK: &str = "flow: pick\nversion: 1\nworkdir: {dir}\nnodes:\n  pick: {class: choice, edges: {ship: {guard: 'true'}, hold: {guard: 'true'}}}\n";
+
+#[test]
+fn a_choice_node_is_finished_with_choose() {
+    let (mut f, fi) = with(PICK);
+    let a = judge(&f, &fi);
+    assert_eq!(
+        a.work,
+        [Work::Node { node: "pick".into(), class: "choice".into(), iteration: Iteration::default(), held: false }]
+    );
+    let step = &a.next_steps()[0];
+    assert!(step.contains("choose one of its edges with `maestro flow choose --claim-token"), "{step}");
+    assert!(!step.contains("maestro flow complete"), "{step}");
+    let me = f.me.clone();
+    claim(&mut f.ledger, &me, &fi, "pick").unwrap();
+    let step = &judge(&f, &fi).next_steps()[0];
+    assert!(step.contains("you hold a live claim on node pick: choose one of its edges"), "{step}");
+    assert!(!step.contains("maestro flow complete"), "{step}");
+    // Any other class is completed.
+    let (f, fi) = with(RELAY);
+    assert!(judge(&f, &fi).next_steps()[0].contains("complete it with `maestro flow complete --claim-token"));
 }

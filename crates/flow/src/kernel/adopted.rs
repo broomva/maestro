@@ -953,6 +953,7 @@ fn a_former_owners_live_claim_is_waited_on_not_work() {
     assert_eq!(
         a.work,
         [crate::kernel::stop::Work::Node {
+            class: "pure".into(),
             node: "one".into(),
             iteration: crate::kernel::Iteration::default(),
             held: false

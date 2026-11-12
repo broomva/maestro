@@ -315,25 +315,34 @@ impl Run<'_> {
             Ok(l) => l,
             Err(e) => return self.fail_open(Some(&session), "ledger_unopened", &e),
         };
-        let mut made = Vec::new();
+        // Appended now; recorded by an earlier stop (its alert is filed again, idempotently, since
+        // that stop may have failed to file it); and not recorded at all.
+        let (mut made, mut already, mut failed) = (Vec::new(), Vec::new(), Vec::new());
         for a in on {
             let instance = match maestro_flow::InstanceId::new(&a.instance) {
                 Ok(i) => i,
                 Err(e) => {
                     self.note(format!("{} is not an instance id ({e}); nothing recorded on it.", a.instance));
+                    failed.push(format!("{} (invalid)", a.instance));
                     continue;
                 }
             };
             match kstop::record(&mut ledger, me, &instance, self.gate.harness.name(), reason, open_instances) {
                 Ok(Recorded::Appended(appended)) => made.push((a.instance.clone(), appended.event.seq)),
-                Ok(Recorded::Already { seq }) => self.note(format!(
-                    "{} has not moved since this session's record at event {seq}; not recorded again.",
-                    a.instance
-                )),
-                Err(e) => self.note(format!("StopUnblockable was not recorded on {} ({}: {e}).", a.instance, e.code())),
+                Ok(Recorded::Already { seq }) => {
+                    self.note(format!(
+                        "{} has not moved since this session's record at event {seq}; not recorded again.",
+                        a.instance
+                    ));
+                    already.push((a.instance.clone(), seq));
+                }
+                Err(e) => {
+                    self.note(format!("StopUnblockable was not recorded on {} ({}: {e}).", a.instance, e.code()));
+                    failed.push(format!("{} ({})", a.instance, e.code()));
+                }
             }
         }
-        if made.is_empty() {
+        if made.is_empty() && already.is_empty() && failed.is_empty() {
             return;
         }
         let what = match reason {
@@ -346,9 +355,22 @@ impl Run<'_> {
                 kstop::MAX_REFUSALS
             ),
         };
-        let list: Vec<String> = made.iter().map(|(i, seq)| format!("{i} (event {seq})")).collect();
-        let words = format!("{what} Recorded as StopUnblockable on: {}.", list.join(", "));
-        let key = format!("unblockable\n{}", list.join("\n"));
+        let list: Vec<String> = made.iter().chain(&already).map(|(i, seq)| format!("{i} (event {seq})")).collect();
+        let mut words = what;
+        // The key names the records alone, so a record's alert has one id whichever stop files it.
+        let mut key = format!("unblockable\n{}", list.join("\n"));
+        if !list.is_empty() {
+            words.push_str(&format!(" Recorded as StopUnblockable on: {}.", list.join(", ")));
+        }
+        if !failed.is_empty() {
+            words.push_str(&format!(
+                " StopUnblockable could not be recorded on: {}; the stop went through all the same (the gate fails open).",
+                failed.join(", ")
+            ));
+            let day = maestro_flow::clock::now().to_string();
+            let day = day.get(..10).unwrap_or_default();
+            key.push_str(&format!("\nunrecorded\n{session}\n{reason:?}\n{}\n{day}", failed.join("\n")));
+        }
         self.out.recorded.extend(made);
         self.alert(&session, &key, LEFT_WORK, &words);
     }

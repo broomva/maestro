@@ -117,8 +117,11 @@ impl Fx {
     }
 
     fn gate_with(&self, id: &str, harness: Harness, cannot_block: bool, input: &[u8]) -> Outcome {
-        let gate =
-            Gate { harness, cannot_block, session: Some(format!("direct:-/{id}")), alert_ledger: "ledger.yaml".into() };
+        self.gate_into(id, harness, cannot_block, "ledger.yaml", input)
+    }
+
+    fn gate_into(&self, id: &str, harness: Harness, cannot_block: bool, ledger: &str, input: &[u8]) -> Outcome {
+        let gate = Gate { harness, cannot_block, session: Some(format!("direct:-/{id}")), alert_ledger: ledger.into() };
         stop::gate(&self.paths, &self.hosts, Ambient::Shared, &self.claim_of(id), &gate, input)
     }
 
@@ -245,11 +248,51 @@ fn a_harness_that_cannot_block_records_once_and_alerts_once() {
     assert_eq!(kinds(&f.events(&fi)), ["Started", "StopUnblockable"]);
     assert_eq!(f.events(&fi)[1]["body"]["reason"], "harness_cannot_block");
     assert_eq!(out.alerts.len(), 1);
-    // Nothing moved since: no second record, no second alert.
+    // Nothing moved since: no second record, and the same alert, filed before, not a second one.
     let again = f.gate_with("d1", Harness::Codex, true, &codex_stop());
     allowed(&again);
-    assert!(again.recorded.is_empty() && again.alerts.is_empty(), "{again:?}");
+    assert!(again.recorded.is_empty(), "{again:?}");
+    assert_eq!(again.alerts, out.alerts);
+    assert!(again.notes.iter().any(|n| n.contains("was filed before")), "{again:?}");
     assert_eq!(f.events(&fi).len(), 2);
+    assert_eq!(f.ledger().matches(&format!("id: \"{}\"", out.alerts[0])).count(), 1);
+}
+
+/// A record whose alert was not filed (its ledger did not take it) is alerted by the next stop at
+/// the same position, which finds the record already there.
+#[test]
+fn an_alert_that_failed_after_its_record_is_filed_by_the_next_stop() {
+    let f = fx();
+    let fi = f.begin("d1");
+    let out = f.gate_into("d1", Harness::Codex, true, "missing.yaml", &codex_stop());
+    allowed(&out);
+    assert_eq!(out.recorded, [(fi.clone(), 2)]);
+    assert!(out.alerts.is_empty() && out.notes.iter().any(|n| n.contains("the alert was not filed")), "{out:?}");
+    let again = f.gate_with("d1", Harness::Codex, true, &codex_stop());
+    allowed(&again);
+    assert!(again.recorded.is_empty(), "only new records are recorded: {again:?}");
+    assert_eq!(again.alerts.len(), 1, "{again:?}");
+    let ledger = f.ledger();
+    assert!(ledger.contains(&format!("id: \"{}\"", again.alerts[0])), "{ledger}");
+    assert!(ledger.contains(&format!("{fi} (event 2)")), "{ledger}");
+    assert_eq!(f.events(&fi).len(), 2);
+}
+
+/// A record that could not be appended still lets the stop through, and the alert names it.
+#[test]
+fn a_record_that_failed_is_still_alerted() {
+    let f = fx();
+    let fi = f.begin("d1");
+    let log = f.root.join("workspace/.broomva/flows/instances").join(&fi).join("events.jsonl");
+    std::fs::set_permissions(&log, std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
+    let out = f.gate_with("d1", Harness::Codex, true, &codex_stop());
+    std::fs::set_permissions(&log, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    allowed(&out);
+    assert!(out.recorded.is_empty(), "{out:?}");
+    assert_eq!(f.events(&fi).len(), 1, "nothing was appended");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    let ledger = f.ledger();
+    assert!(ledger.contains("StopUnblockable could not be recorded on:") && ledger.contains(&fi), "{ledger}");
 }
 
 /// Each error class lets the stop through, says why, and files the alert when it can.
@@ -359,7 +402,10 @@ fn open_and_next_carry_the_gates_own_judgment() {
     let next = f.call(NEXT, json!({ "instance": fi }));
     assert_eq!(next["work"], listed["work"], "{next}");
     assert_eq!(next["waiting"], listed["waiting"]);
-    assert_eq!(next["work"][0], json!({ "kind": "node", "node": "one", "iteration": {}, "held": false }));
+    assert_eq!(
+        next["work"][0],
+        json!({ "kind": "node", "node": "one", "class": "work", "iteration": {}, "held": false })
+    );
     let status = f.call(STATUS, json!({ "instance": fi }));
     assert_eq!(status["work"], listed["work"]);
     // Another session owns none of it; an unverified one is refused.

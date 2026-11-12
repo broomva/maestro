@@ -10,7 +10,8 @@
 //! (`driver`). So the gate and the skill never judge it apart. The work its owner can do now:
 //!
 //! - an enabled node, unless a former owner's claim holds it until its lease ends: claim it and
-//!   complete it, or complete (or heartbeat) the claim it already holds;
+//!   finish it (`choose` for a choice node, `complete` for any other), or finish (or heartbeat)
+//!   the claim it already holds;
 //! - a repeat whose `until` verdict is pending: a claim judges it again;
 //! - a human node whose ask is not filed: `flow ask` files it;
 //! - a human node whose answer this clone sees on `origin/main`: `flow ask` takes it.
@@ -86,8 +87,9 @@ pub const MAX_NAMED: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Work {
-    /// An enabled node. `held` when its owner holds a live claim on it: complete that claim.
-    Node { node: String, iteration: Iteration, held: bool },
+    /// An enabled node, of `class` (its IR class's name). `held` when its owner holds a live claim
+    /// on it: finish that claim, with `choose` for a choice node and `complete` for any other.
+    Node { node: String, class: String, iteration: Iteration, held: bool },
     /// A repeat awaiting its `until` verdict: a claim of `node`, its body's first node, judges it.
     Verdict { repeat: String, iteration: u32, node: String },
     /// A human node whose ask is not filed.
@@ -137,11 +139,13 @@ impl Assessment {
         self.work
             .iter()
             .map(|w| match w {
-                Work::Node { node, held: false, .. } => format!(
-                    "node {node} is enabled: claim it with `maestro flow claim --instance {i} --node-id {node}` and complete it (`maestro flow next --instance {i} --json` says how)"
+                Work::Node { node, class, held: false, .. } => format!(
+                    "node {node} is enabled: claim it with `maestro flow claim --instance {i} --node-id {node}` and {} (`maestro flow next --instance {i} --json` says how)",
+                    finish(class, "the claim token it returns")
                 ),
-                Work::Node { node, held: true, .. } => format!(
-                    "you hold a live claim on node {node}: finish it with `maestro flow complete --claim-token <its token>`, or heartbeat it while the work runs"
+                Work::Node { node, class, held: true, .. } => format!(
+                    "you hold a live claim on node {node}: {}, or heartbeat it while the work runs",
+                    finish(class, "its token")
                 ),
                 Work::Verdict { repeat, node, .. } => format!(
                     "repeat {repeat} awaits its until verdict: retry it with `maestro flow claim --instance {i} --node-id {node}`"
@@ -154,6 +158,16 @@ impl Assessment {
                 ),
             })
             .collect()
+    }
+}
+
+/// How a claim on a node of `class` is finished: a choice node takes one of its edges with
+/// `choose` (`complete` refuses it, `wrong_verb`); every other class is completed.
+fn finish(class: &str, token: &str) -> String {
+    if class == "choice" {
+        format!("choose one of its edges with `maestro flow choose --claim-token <{token}> --edge <edge>`")
+    } else {
+        format!("complete it with `maestro flow complete --claim-token <{token}>`")
     }
 }
 
@@ -179,9 +193,12 @@ pub(crate) fn assess(
                 iteration: e.iteration.clone(),
                 lease_until: c.lease_until.to_string(),
             }),
-            held => {
-                work.push(Work::Node { node: e.node.clone(), iteration: e.iteration.clone(), held: held.is_some() })
-            }
+            held => work.push(Work::Node {
+                node: e.node.clone(),
+                class: e.class.clone(),
+                iteration: e.iteration.clone(),
+                held: held.is_some(),
+            }),
         }
     }
     for (rid, r) in &status.repeats {
