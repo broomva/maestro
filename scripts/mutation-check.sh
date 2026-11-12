@@ -1118,8 +1118,8 @@ mutate $fk/replay.rs '                if let Some(judged) = self.fold.verdicts.g
                     && *judged == self.body_digest(rid, i)
                 {' '                if self.fold.ir.repeats.get(rid).and_then(|r| r.until.as_deref()).is_some_and(|g| super::jq::check(g).is_ok()) {'
 mutate $fk/replay.rs '            seq: log.seq(),
-            nodes,' '            seq: jiff::Timestamp::now().as_nanosecond() as u64,
-            nodes,'
+            terminal,' '            seq: jiff::Timestamp::now().as_nanosecond() as u64,
+            terminal,'
 # Flow writers (BRO-3633 PR 3b2a): ownership, claims, tokens, leases, receipts.
 # Ownership: a marker (non-empty) to write anything, start included; only the owner's session
 # and marker together; an instance with no recorded owner takes no write.
@@ -1978,6 +1978,109 @@ mutate $spn '        if x.exit != y.exit {' '        if false {'
 mutate $mf '        if let Some(mismatch) = kernel::definition_mismatch(&mine, &other) {' '        if let Some(mismatch) = None::<kernel::DefinitionMismatch> {'
 mutate $mf '                let mut v = refusal("spine_differs", &difference, false);' '                let mut v = json!({ "ok": true, "code": "spine_differs" });'
 mutate $cli '                return std::process::ExitCode::from(3);' '                return std::process::ExitCode::from(1);'
+# Specialist agents (BRO-3636): the source parses strictly, field by field; drift between a source
+# and its renders is named (a render missing, differing, longer by a byte, or left by a source
+# that is gone, and only a render is ever taken for one); a root without sources is unread.
+agt=$fl/agents.rs
+mutate $agt '#[serde(deny_unknown_fields)]
+struct Source {' 'struct Source {'
+mutate $agt '#[serde(deny_unknown_fields)]
+pub struct Models {' 'pub struct Models {'
+mutate $agt '    if text.len() > MAX_SOURCE {' '    if false {'
+mutate $agt '    if s.schema != SCHEMA {' '    if false {'
+mutate $agt '    if !plain(&s.name) {' '    if false {'
+mutate $agt '            .all(|run| !run.is_empty() && run.bytes()' '            .all(|run| run.bytes()'
+mutate $agt '    if file != format!("{}{SUFFIX}", s.name) {' '    if false {'
+mutate $agt '    if s.description.trim().is_empty() || s.description.len() > MAX_DESCRIPTION {' '    if s.description.len() > MAX_DESCRIPTION {'
+mutate $agt '    if s.description.trim().is_empty() || s.description.len() > MAX_DESCRIPTION {' '    if s.description.trim().is_empty() {'
+mutate $agt '    if s.role.trim().is_empty() {' '    if false {'
+mutate $agt '        if model.is_empty() || model.len() > MAX_MODEL || !ok {' '        if model.is_empty() || model.len() > MAX_MODEL {'
+mutate $agt '        if model.is_empty() || model.len() > MAX_MODEL || !ok {' '        if model.len() > MAX_MODEL || !ok {'
+mutate $agt '        if !plain(skill) {' '        if false {'
+mutate $agt '        if s.skills[..i].contains(skill) {' '        if false {'
+mutate $agt '    if s.outputs.get("type") != Some(&Value::from("object")) {' '    if false {'
+mutate $agt '            Some(folder) => match folder.kind(file)? {
+                None => DriftKind::Missing,' '            Some(folder) => match folder.kind(file)? {
+                None => continue,'
+mutate $agt '            Some(bytes) if bytes != r.text.as_bytes() => DriftKind::Differs,' '            Some(_) if false => DriftKind::Differs,'
+mutate $agt 'match folder.read(file, r.text.len())? {' 'match folder.read(file, r.text.len() - 1)? {'
+mutate $agt '            if agents.iter().any(|a| a.name == stem) {' '            if false {'
+mutate $agt '.is_some_and(|line| line.starts_with(MARKER.as_bytes()))' '.is_some()'
+mutate $agt '            if generated {' '            if false {'
+mutate $agt '    for entry in std::fs::read_dir(&dir).map_err(|e| io(&dir, e))? {' '    for entry in std::fs::read_dir(&dir).into_iter().flatten() {'
+mutate $cli '        if let Some(drift) = agents::check(root)? {' '        if let Some(drift) = None::<agents::Drift> {'
+# An unknown agent: only an `agent:` performer names one; a definition naming one with no source
+# does not compile, at any call; `next` gives an agent performer its launch spec, and an agent a
+# pinned IR names that this build lacks is an unknown_agent spec, never none.
+mutate $agt '    performer.strip_prefix(PERFORMER)' '    Some(performer)'
+mutate $fk/compile.rs '            && crate::agents::find(agent).is_none()' '            && false'
+mutate $fk/compile.rs '    check_agents(&ir)?;
+' ''
+mutate $replay '                launch_spec: class.and_then(Class::launch).and_then(agents::launch_spec),' '                launch_spec: None,'
+mutate $agt '    Some(match find(name) {' '    find(name)?;
+    Some(match find(name) {'
+# The driver skill's order is the IR's: a node after everything it waits on, its switch's subject
+# and a needed repeat's body included; a skill name past the spec's length is refused; --check
+# exits 1 on a skill that is not what the IR generates.
+drv=$fl/driver.rs
+mutate $drv '.map(|d| at(ir, d, memo) + 1).max().unwrap_or(0);' '.map(|d| at(ir, d, memo) * 0).max().unwrap_or(0);'
+mutate $drv '    on.extend(node.switch.as_ref().map(|c| c.on.as_str()));
+' ''
+mutate $drv 'Need::Repeat { repeat } | Need::Exhausted { repeat } => on.extend(body(repeat)),' 'Need::Repeat { .. } | Need::Exhausted { .. } => {}'
+mutate $drv '    if name.len() > agents::MAX_NAME {' '    if false {'
+mutate $cli '            if on_disk.as_deref() != Some(skill.as_bytes()) {' '            if false {'
+# Round 1 (BRO-3636). No link is followed under the render root: a folder that is a link is
+# refused, a render goes in by rename (which replaces a link), --check reads a link at a render
+# path as drift, and only a regular file is taken for an orphan. A repeated key in outputs is
+# refused at any level.
+mutate $agt 'const WALK: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::NOFOLLOW).union(OFlags::CLOEXEC);' 'const WALK: OFlags = OFlags::RDONLY.union(OFlags::DIRECTORY).union(OFlags::CLOEXEC);'
+mutate $agt 'rustix::fs::renameat(&self.fd, tmp.as_str(), &self.fd, name).map_err(|e| self.io(name, e))' 'std::fs::rename(self.path.join(&tmp), self.path.join(name)).map_err(|e| self.io(name, e))'
+mutate $agt '                Some(FileType::Symlink) => DriftKind::Link,' '                Some(FileType::Symlink) if false => DriftKind::Link,'
+mutate $agt 'const READ: OFlags = OFlags::RDONLY.union(OFlags::NOFOLLOW).union(OFlags::NONBLOCK).union(OFlags::CLOEXEC);' 'const READ: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::CLOEXEC);'
+mutate $agt '            if out.insert(key.clone(), value).is_some() {' '            if out.insert(key.clone(), value).is_some() && false {'
+mutate $agt '    #[serde(deserialize_with = "strict_json")]
+' ''
+# The kernel's stop decision: terminal while no node is ready, stale or waiting, and next says
+# what status says; the driver skill's loop stops on it.
+mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)' 'matches!(n.state, State::Ready | State::Stale)'
+mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)' 'matches!(n.state, State::Ready | State::Waiting)'
+mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)' 'matches!(n.state, State::Stale | State::Waiting)'
+mutate $replay '        terminal: status.terminal,' '        terminal: false,'
+mutate $drv 'Then, if `status.terminal` is `true`, stop' 'Then, if every node is done, stop'
+# The driver skill: a node outside a repeat waits on the whole body it reaches into; Waits on
+# names a switch's subject; the description stays within the spec's limit; a control character
+# in a flow's name never ends a line of the frontmatter.
+mutate $drv '            Some(r) if repeat_of(id) != Some(r) => out.extend(body(r)),' '            Some(r) if false => out.extend(body(r)),'
+mutate $drv '        waits.push(format!("{} (its switch reads it)", code(&case.on)));
+' ''
+mutate $drv 'if full.chars().count() > MAX_DESCRIPTION { say(skill) } else { full }' 'full'
+mutate $drv 'if c.is_control() { '"' '"' } else { c }' 'c'
+# --out naming the definition itself, by any path, is refused before anything is written.
+mutate $cli '        && same_file(path, definition)' '        && false'
+# Round 2 (BRO-3636). A repeat awaiting its until verdict keeps an instance from being terminal.
+# The driver skill checks a resumed instance's ir_hash before anything else, takes a terminal
+# next as done first, asks a filed ask again (only flow ask reads the answer from main), and
+# retries a pending verdict through flow claim a bounded number of times. Gemini CLI launches an
+# agent through invoke_agent. The name and model bounds are held.
+mutate $replay '                && !repeats.values().any(|r| r.awaiting_verdict);' '                && true;'
+mutate $drv 'First, `status.ir_hash` must be `{hash}`' 'First, `status.ir_hash` names the definition'
+mutate $drv 'If `next.terminal` is `true`, the flow is done' 'If nothing is enabled, the flow is done'
+mutate $drv 'An `owner` or `answer_waiting_to_land` entry needs nothing more' 'Skip an `owner` or `answer_waiting_to_land` entry; it needs nothing more'
+mutate $drv 'Retry it with `flow claim --instance <I> --node-id <the first node of its body' 'Wait for it, never `flow claim --instance <I> --node-id <the first node of its body'
+mutate $drv 'After {VERDICT_RETRIES} such claims' 'After many such claims'
+mutate $agt '                tool: GEMINI_AGENT_TOOL.into(),' '                tool: self.name.clone(),'
+mutate $agt '    name.len() <= MAX_NAME' '    name.len() <= MAX_NAME + 1'
+mutate $agt 'model.len() > MAX_MODEL' 'model.len() > MAX_MODEL + 1'
+# Round 3 (BRO-3636). The check and the write are bound to one open folder: a render's temporary
+# file is made new, never through a link (O_EXCL, O_NOFOLLOW); an orphan is removed through the
+# descriptor it was found by, and only while it is still a regular file.
+mutate $agt 'let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;' 'let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC;'
+mutate $agt 'rustix::fs::unlinkat(&self.fd, name, AtFlags::empty()).map_err(|e| self.io(name, e))?;' 'std::fs::remove_file(self.path.join(name)).map_err(|e| self.io(name, e))?;'
+mutate $agt '        if self.kind(name)? != Some(FileType::RegularFile) {' '        if false {'
+# Round 3 nits (BRO-3636): a claim token in the verdict retry goes back to 1, never on to a stop
+# bullet; an agent flow with no params says none.
+mutate $drv 'do that node as step 2 says, then go back to 1. A refusal' 'do that node as step 2 says. A refusal'
+mutate $drv 'if ir.params.is_empty() { "none".to_string() }' 'if false { "none".to_string() }'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

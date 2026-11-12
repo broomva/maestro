@@ -21,6 +21,35 @@ fn all_refused(want: &str, cases: &[(&str, &str)]) {
 }
 
 #[test]
+fn a_performer_naming_an_agent_with_no_source_does_not_compile() {
+    let flow = |performer: &str| {
+        format!("flow: f\nversion: 1\nnodes:\n  a: {{class: work, verify: [x], performer: '{performer}'}}\n")
+    };
+    let e = compile(&flow("agent:ghost")).unwrap_err();
+    assert_eq!(e.code(), "unknown_agent");
+    assert_eq!(e.to_string(), "Node a's performer is agent:ghost, which has no source agents/ghost.agent.yaml.");
+    assert_eq!(code(&flow("agent:")), "unknown_agent");
+    // Every class that takes a performer is checked.
+    all_refused(
+        "unknown_agent",
+        &[
+            (
+                "choice",
+                "flow: f\nversion: 1\nnodes:\n  a: {class: choice, edges: {e: {guard: 'true'}}, performer: agent:ghost}\n",
+            ),
+            (
+                "effect",
+                "flow: f\nversion: 1\nnodes:\n  a: {class: effect, run: [x], reconcile: [x], performer: agent:ghost}\n",
+            ),
+        ],
+    );
+    // A known agent compiles, and so does a performer that names no agent.
+    assert_eq!(code(&flow("agent:verifier")), "ok");
+    assert_eq!(code(&flow("human:owner")), "ok");
+    assert_eq!(code(VERIFY), "ok");
+}
+
+#[test]
 fn the_verifier_pilot_compiles_to_a_hashed_ir() {
     let flow = compile(VERIFY).unwrap();
     assert_eq!(flow.name(), "verify@1");

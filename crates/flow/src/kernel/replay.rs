@@ -92,6 +92,7 @@ use super::events::{
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
 use super::write;
+use crate::agents::{self, LaunchSpec};
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, ReadGuard, random_epoch};
 use crate::log::{Event, Log};
@@ -255,6 +256,13 @@ pub struct Status {
     pub retired: Option<String>,
     /// The last event replayed.
     pub seq: u64,
+    /// No node is `ready`, `stale` or `waiting` at the read's clock, and no repeat awaits its
+    /// `until` verdict: nothing in the flow can be done now, so a driver stops (BRO-3636). Every
+    /// other node is done, failed, exhausted, or blocked on one of those or on a branch not taken.
+    /// A repeat awaiting a verdict (its `until` erred or timed out after its body settled) is not
+    /// terminal: the next write (`claim` first of all) judges it again. It holds at the read's
+    /// clock: an observation that goes stale later makes the instance not terminal again.
+    pub terminal: bool,
     pub nodes: BTreeMap<String, NodeStatus>,
     pub repeats: BTreeMap<String, RepeatStatus>,
     pub rejected: Vec<Rejected>,
@@ -269,6 +277,10 @@ pub struct Enabled {
     /// The digests its receipt must record as `inputs`.
     pub inputs: BTreeMap<String, String>,
     pub launch: Launch,
+    /// For a performer `agent:<name>`, how each harness launches the agent
+    /// (`crate::agents::launch_spec`); left out for any other node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_spec: Option<LaunchSpec>,
     pub wait: Option<Wait>,
 }
 
@@ -288,6 +300,8 @@ pub struct Next {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retired: Option<String>,
     pub seq: u64,
+    /// As [`Status::terminal`].
+    pub terminal: bool,
     pub enabled: Vec<Enabled>,
     pub pending: BTreeMap<String, NodeStatus>,
 }
@@ -374,6 +388,7 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
             enabled.push(Enabled {
                 inputs: s.inputs,
                 launch: class.and_then(Class::launch).cloned().unwrap_or_default(),
+                launch_spec: class.and_then(Class::launch).and_then(agents::launch_spec),
                 wait: class.and_then(Class::wait).cloned(),
                 node: id,
                 class: s.class,
@@ -391,6 +406,7 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
         proposals: status.proposals,
         retired: status.retired,
         seq: status.seq,
+        terminal: status.terminal,
         enabled,
         pending,
     })
@@ -991,7 +1007,7 @@ impl<'a> Fold<'a> {
             nodes.insert(id.clone(), status);
             stale.insert(id.clone(), set);
         }
-        let repeats = ir
+        let repeats: BTreeMap<String, RepeatStatus> = ir
             .repeats
             .keys()
             .map(|rid| {
@@ -1008,6 +1024,11 @@ impl<'a> Fold<'a> {
             .collect();
         let mut rejected: Vec<Rejected> = self.rejected.iter().chain(&self.owners.rejected).cloned().collect();
         rejected.sort_by_key(|r| r.seq);
+        // A repeat whose `until` could not be judged (an error, a timeout) after its body settled
+        // stays running and awaits its verdict, which the next write tries again: not terminal.
+        let terminal =
+            !nodes.values().any(|n: &NodeStatus| matches!(n.state, State::Ready | State::Stale | State::Waiting))
+                && !repeats.values().any(|r| r.awaiting_verdict);
         let status = Status {
             instance: log.instance.to_string(),
             flow: started.flow.clone(),
@@ -1016,6 +1037,7 @@ impl<'a> Fold<'a> {
             proposals: self.owners.report(),
             retired: self.owners.retired.clone(),
             seq: log.seq(),
+            terminal,
             nodes,
             repeats,
             rejected,
@@ -1134,9 +1156,8 @@ thread_local! {
 /// Whether evaluations are kept across events (always, outside the differential tests).
 fn keep() -> bool {
     #[cfg(test)]
-    if NO_CACHE.with(Cell::get) {
-        return false;
-    }
+    return !NO_CACHE.with(Cell::get);
+    #[cfg(not(test))]
     true
 }
 

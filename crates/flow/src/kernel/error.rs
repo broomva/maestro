@@ -31,6 +31,10 @@ pub enum CompileError {
     /// A jq guard that does not parse, or that uses a filter the kernel does not allow.
     #[error("The guard at {at} is not valid: {detail}.")]
     InvalidGuard { at: String, detail: String },
+    /// A performer `agent:<name>` with no source `agents/<name>.agent.yaml` in this build
+    /// (`crate::agents`), so nothing could launch the node.
+    #[error("Node {node}'s performer is agent:{agent}, which has no source agents/{agent}.agent.yaml.")]
+    UnknownAgent { node: String, agent: String },
 }
 
 impl CompileError {
@@ -44,6 +48,7 @@ impl CompileError {
             CompileError::UndeclaredEdge { .. } => "undeclared_edge",
             CompileError::EffectWithoutReconcile { .. } => "effect_without_reconcile",
             CompileError::InvalidGuard { .. } => "invalid_guard",
+            CompileError::UnknownAgent { .. } => "unknown_agent",
         }
     }
 

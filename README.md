@@ -87,7 +87,7 @@ the CLI exits 1 on it:
 ```bash
 maestro flow start --definition F.yaml [--params '<json>']   # start an instance, owned by this session
 maestro flow next --instance I                               # the nodes to claim now, and why not the rest
-maestro flow status --instance I                             # every node's state
+maestro flow status --instance I                             # every node's state, and terminal: nothing left to do now
 maestro flow claim --instance I --node-id N                  # take a node: a claim token and a lease
 maestro flow heartbeat --claim-token T                       # extend the lease
 maestro flow complete --claim-token T [--outputs '<json>']   # the kernel runs the node's command
@@ -97,6 +97,8 @@ maestro flow propose-adoption --instance I [--ledger L.yaml --ask '<json>']    #
 maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  # ask the owner to retire an instance
 maestro flow spine --instance I [--against J]                # the accepting spine; exit 1 at the first difference from J's
 maestro dogfood verify-receipt --head=H --surface=S < outputs.json   # check a dogfood receipt (verify@1's exercise verify)
+maestro flow driver-skill --definition F.yaml [--out SKILL.md] [--check]   # the flow's driver skill, generated from its IR (no tool's twin)
+maestro agents render [--root DIR] [--check]                 # agents/*.agent.yaml to each harness's agent file; --check exits 1 at the first drift
 ```
 
 - **Human steps (BRO-3635).** A waiting `human` node is the owner's. `flow ask` (MCP
@@ -173,6 +175,72 @@ maestro dogfood verify-receipt --head=H --surface=S < outputs.json   # check a d
   unreadable, 10 evidence mismatch, 11 outputs invalid, 12 receipt changed, 13 receipt not a
   regular file, 14 evidence not a regular file. `{{outputs.<name>}}` in any command or the
   workdir is refused when a definition compiles.
+- **Specialist agents (BRO-3636).** One source per specialist, `agents/<name>.agent.yaml`
+  (`agent@1`: `schema`, `name`, `description`, `role`, `posture` (`read_only` or `execute`),
+  `model` per provider (`claude`, `codex`, `gemini`, `grok`), `skills`, and `outputs`, a JSON
+  Schema of type object), parsed strictly: an unknown or repeated field of the source (at the top
+  and in `model`) is refused, and so is a name its file does not have (see `maestro_flow::agents`).
+  `outputs` is checked less: its keys must be unique at every level and its `type` must be
+  `object`, but its keywords are not validated as JSON Schema (Maestro has no schema validator),
+  so an unknown keyword there is kept as written. `agents/verifier.agent.yaml`
+  performs verify@1's `exercise`. `maestro agents render` writes `.claude/agents/<name>.md`,
+  `.gemini/agents/<name>.md` and `.grok/agents/<name>.md` from every source and removes the
+  renders whose source is gone (a file whose second line is not the render marker is never
+  touched); the Codex `spawn_agent` brief is not a file but part of the driver skill and of the
+  launch spec. `--check` writes nothing and exits 1 naming the first render that is missing,
+  differs, is a symbolic link, or has no source: what `bstack doctor` will call. No link under
+  the root is followed: each render folder is opened component by component with `O_NOFOLLOW`
+  (a link or a non-folder on the way is refused, `render_path_unsafe`), and every later step goes
+  through that open folder, not its path: a new temporary file (`O_EXCL`, `O_NOFOLLOW`) renamed
+  into place in the same folder, reads with `O_NOFOLLOW`, and orphan removal (regular files only,
+  checked again just before) through the folder they were found in. A folder moved or swapped for
+  a link after it is opened redirects nothing: the write lands in the folder that was opened. The
+  root itself may be reached through a link, and the sources are read by path. Each harness gets only the fields
+  its docs define: Claude Code `name`, `description`, `tools`, `model`, `skills`; Gemini CLI
+  `name`, `description`, `kind: local`, `tools`, `model`; Grok `name`, `description`, `tools`,
+  `model`. **Gemini CLI's docs and runtime disagree:** the docs bundled with 0.66.0 call each agent
+  as a tool named after it, but the 0.66.0 runtime registers one tool, `invoke_agent`, taking
+  `agent_name` and `prompt` (read from its bundle, not from a live run); the launch spec follows
+  the runtime. **Not confirmed:** that Claude Code's `subagent_type` is the agent's `name` (inferred
+  from its docs, not stated); any Grok field beyond those (its built-in agents use
+  `prompt_mode`, `permission_mode` and `agents_md`, which no page defines, so none is set), how
+  Grok skills reach an agent, and which of two same-named agents Grok takes (it reads
+  `.claude/agents/` too); and Codex's `spawn_agent` arguments, read from its source, not its
+  docs (`task_name` is only in its second version, and a Codex subagent always takes its
+  parent's sandbox, so the posture is a sentence in the brief). Agent files shape behaviour; they
+  are not a security boundary: the kernel's verify is the check.
+- **Launch specs (BRO-3636).** `flow next` (and `maestro_flow_next`) gives each enabled node whose
+  performer is `agent:<name>` a `launch_spec`: `kind: agent`, the agent, the node's skill, its
+  source and digest, its output schema, `claude`, `gemini` and `grok` (each `{file, tool,
+  subagent_type?, agent_name?}`: the `Agent` tool with `subagent_type`, `invoke_agent` with
+  `agent_name`, `spawn_subagent` with `subagent_type`) and
+  `codex` (`{tool: spawn_agent, task_name, model, message}`). Other nodes have none, so their
+  shape is unchanged. The kernel knows the sources it was built with, so a definition naming an
+  agent with no source does not compile (`unknown_agent`): it is a reference to nothing, refused
+  where the compiler refuses unknown references, before an instance that could never be launched
+  is started, and with no file read at compile time. An instance pinned by a build that had the
+  agent replays as it did, and `next` gives that node `kind: unknown_agent`, never no spec. **A
+  running instance takes the current build's agent** (owner decision, BRO-3636): the IR pins the
+  performer's name, not its source, so `next` launches the source this build has, and
+  `source_sha256` in the launch spec says which one applied.
+- **Driver skills (BRO-3636).** `maestro flow driver-skill` (with `--json`, `{"skill", "path"}`)
+  generates a flow's `SKILL.md` (Agent
+  Skills format, named `flow-<flow>-v<version>`) from its compiled IR: loop `flow next`, do each
+  enabled node with its own skill (an agent performer through the harness's own subagent, or
+  Codex's brief), `flow complete`, and stop when `flow status` says `terminal` (a field of
+  `status` and `next`, decided by the kernel: no node `ready`, `stale` or `waiting`, and no repeat
+  awaiting its `until` verdict) or nothing is enabled for the driver. The loop first checks that
+  `status.ir_hash` is the hash the skill was generated from, and stops on another; it calls `flow
+  ask` for a filed ask as well as an unfiled one, since only that verb reads the owner's answer
+  from main; and it retries a repeat awaiting its verdict through `flow claim` (which judges
+  every pending verdict first), at most `driver::VERDICT_RETRIES` (3) times, then stops and
+  reports. Its steps put each node after everything it waits on (needs, the node
+  its switch reads, a needed repeat's body, and the whole body of a repeat it reaches into from
+  outside), by id within a step; the loop's text is fixed, and nothing in
+  the order is written by hand. `skills/flow-verify-v1/SKILL.md` is verify@1's, regenerated with
+  `maestro flow driver-skill --definition crates/flow/flows/verify.yaml --out
+  skills/flow-verify-v1/SKILL.md`; tests hold it, and the committed renders, to a fresh
+  generation.
 - **Commands an agent's `PATH` cannot stand in for (BRO-3636).** The kernel runs a command's
   first word `maestro` as its own executable, and `sh`, `git` and `test` as the system's files at
   their real path, owned by root and writable by no one else, as is every folder above them.

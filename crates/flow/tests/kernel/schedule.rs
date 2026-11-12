@@ -5,6 +5,7 @@
 
 use crate::common::*;
 use jiff::{SignedDuration, Timestamp};
+use maestro_flow::agents::LaunchSpec;
 use maestro_flow::kernel::events::{Chosen, Completed, Guarded, KernelEvent, Refused, Started, VerifyRecord};
 use maestro_flow::kernel::ir::{IR_VERSION, MAX_DEPTH, Need, content_hash};
 use maestro_flow::kernel::{
@@ -260,9 +261,9 @@ fn a_fork_join_waits_for_every_branch() {
 const SWITCH: &str = "flow: f
 version: 1
 nodes:
-  depth: {class: choice, edges: {quick: {guard: 'true'}, deep: {guard: '.params != null'}}, performer: agent:researcher}
+  depth: {class: choice, edges: {quick: {guard: 'true'}, deep: {guard: '.params != null'}}, performer: agent:verifier}
   skim: {class: work, verify: [x], switch: {on: depth, case: quick}}
-  dig: {class: work, verify: [x], switch: {on: depth, case: deep}, performer: agent:researcher, skill: deep-research, routing: {provider: codex}}
+  dig: {class: work, verify: [x], switch: {on: depth, case: deep}, performer: agent:verifier, skill: deep-research, routing: {provider: codex}}
   summary: {class: work, verify: [x], needs: [skim]}
 ";
 
@@ -287,7 +288,7 @@ fn a_switch_follows_only_the_chosen_edge() {
     let n = f.next(&fi, now);
     assert_eq!(enabled(&n), vec!["dig"]);
     let launch = &n.enabled[0].launch;
-    assert_eq!(launch.performer.as_deref(), Some("agent:researcher"));
+    assert_eq!(launch.performer.as_deref(), Some("agent:verifier"));
     assert_eq!(launch.skill.as_deref(), Some("deep-research"));
     assert_eq!(launch.routing.get("provider").map(String::as_str), Some("codex"));
 }
@@ -613,6 +614,53 @@ fn exercise_applies_only_when_a_surface_is_declared() {
     assert_eq!(enabled(&n), vec!["exercise"]);
     assert_eq!(n.enabled[0].launch.skill.as_deref(), Some("dogfood"));
     assert_eq!(n.enabled[0].launch.performer.as_deref(), Some("agent:verifier"));
+    // The launch spec: the verifier agent, as each harness launches it, for the node's skill.
+    let verifier = maestro_flow::agents::find("verifier").unwrap();
+    assert_eq!(n.enabled[0].launch_spec, Some(LaunchSpec::Agent(Box::new(verifier.launch(Some("dogfood"))))));
+    let json = serde_json::to_value(&n.enabled[0]).unwrap();
+    assert_eq!(json["launch_spec"]["kind"], "agent");
+    assert_eq!(
+        json["launch_spec"]["claude"],
+        json!({ "file": ".claude/agents/verifier.md", "tool": "Agent", "subagent_type": "verifier" })
+    );
+    assert_eq!(json["launch_spec"]["codex"]["tool"], "spawn_agent");
+    assert_eq!(json["launch_spec"]["skill"], "dogfood");
+}
+
+#[test]
+fn a_node_with_no_agent_performer_has_no_launch_spec() {
+    let mut f = fx(VERIFY);
+    let fi = f.begin(verify_params(true));
+    let n = f.next(&fi, Timestamp::now());
+    assert_eq!(enabled(&n), vec!["pin", "surface"]);
+    assert!(n.enabled.iter().all(|e| e.launch_spec.is_none()));
+    let json = serde_json::to_value(&n).unwrap();
+    assert!(json["enabled"].as_array().unwrap().iter().all(|e| e.get("launch_spec").is_none()), "{json}");
+}
+
+#[test]
+fn an_agent_this_build_lacks_is_an_unknown_agent_launch_spec_never_none() {
+    // An instance a build with the agent started: its pinned IR names `agent:ghost`.
+    let mut f = fx(SWITCH);
+    let mut ir = f.flow.ir().clone();
+    for node in ir.nodes.values_mut() {
+        if let maestro_flow::kernel::ir::Class::Choice { launch, .. } = &mut node.class {
+            launch.performer = Some("agent:ghost".into());
+        }
+    }
+    let started =
+        Started { flow: f.flow.name(), ir_hash: content_hash(&ir).unwrap(), ir, params: json!({}), owner: None };
+    let fi = id("fi_ghost");
+    f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
+    let n = f.next(&fi, Timestamp::now());
+    assert_eq!(enabled(&n), vec!["depth"]);
+    assert_eq!(
+        n.enabled[0].launch_spec,
+        Some(LaunchSpec::UnknownAgent {
+            agent: "ghost".into(),
+            reason: "this maestro has no agent source agents/ghost.agent.yaml".into()
+        })
+    );
 }
 
 #[test]
@@ -1246,4 +1294,68 @@ fn params_and_outputs_nested_too_deep_to_read_back_are_refused_before_anything_i
     assert_eq!(guard.append(&fi, seq, c.to_event().unwrap()).unwrap_err().code(), "too_deep");
     drop(guard);
     assert_eq!(f.try_status(&fi).unwrap().seq, 1, "nothing was appended");
+}
+
+#[test]
+fn terminal_is_the_kernels_no_node_ready_stale_or_waiting() {
+    // verify@1 without a surface: terminal only once pin, surface and check are done, exercise
+    // blocked by the branch not taken.
+    let mut f = fx(VERIFY);
+    let fi = f.begin(verify_params(false));
+    let s = f.status(&fi, Timestamp::now());
+    assert!(!s.terminal, "every root is ready");
+    f.observe(&fi, "surface", &[], 1);
+    let t = f.observe(&fi, "pin", &[], 0);
+    assert!(!f.status(&fi, t).terminal, "check is ready");
+    f.complete(&fi, "check", &[], json!({}));
+    let s = f.status(&fi, t);
+    assert_eq!(state(&s, "exercise"), State::Blocked);
+    assert!(s.terminal, "{s:?}");
+    assert!(f.next(&fi, t).terminal, "next says what status says");
+    // The field the driver skill reads is `terminal`, in both.
+    assert_eq!(serde_json::to_value(&s).unwrap()["terminal"], true);
+    assert_eq!(serde_json::to_value(f.next(&fi, t)).unwrap()["terminal"], true);
+    // Once pin is stale it can be run again: no longer terminal.
+    let later = t.checked_add(SignedDuration::from_mins(11)).unwrap();
+    assert_eq!(state(&f.status(&fi, later), "pin"), State::Stale);
+    assert!(!f.status(&fi, later).terminal);
+    assert!(!f.next(&fi, later).terminal);
+
+    // A human node waiting on the owner is not terminal.
+    let mut f = fx("flow: h\nversion: 1\nnodes:\n  q: {class: human, ask: Go?}\n");
+    let fi = f.begin(json!({}));
+    let s = f.status(&fi, Timestamp::now());
+    assert_eq!(state(&s, "q"), State::Waiting);
+    assert!(!s.terminal);
+    // A repeat that runs out routes on: its on_exhausted node is ready, so not terminal.
+    let mut f = fx("flow: r
+version: 1
+nodes:
+  ci: {class: observe, run: [x], fresh_for: 1h, exit_map: {0: green, 1: red}}
+  give_up: {class: work, verify: [x]}
+repeats:
+  poll: {body: [ci], max: 1, until: '.nodes.ci.value == \"green\"', on_exhausted: give_up}
+");
+    let fi = f.begin(json!({}));
+    let t = f.observe(&fi, "ci", &[("poll", 0)], 1);
+    f.verdict(&fi, "poll", 0, false);
+    let s = f.status(&fi, t);
+    assert_eq!(state(&s, "give_up"), State::Ready, "{s:?}");
+    assert!(!s.terminal);
+    f.complete(&fi, "give_up", &[], json!({}));
+    assert!(f.status(&fi, t).terminal);
+}
+
+#[test]
+fn a_launch_spec_carries_the_digest_of_the_current_agent_source() {
+    let mut f = fx(VERIFY);
+    let fi = f.begin(verify_params(true));
+    f.observe(&fi, "surface", &[], 0);
+    let t = f.observe(&fi, "pin", &[], 0);
+    f.complete(&fi, "check", &[], json!({}));
+    let n = f.next(&fi, t);
+    let Some(LaunchSpec::Agent(spec)) = &n.enabled[0].launch_spec else { panic!("{n:?}") };
+    let source = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../agents/verifier.agent.yaml")).unwrap();
+    assert_eq!(spec.source_sha256, maestro_flow::dogfood::sha256(&source));
+    assert_eq!(spec.source, "agents/verifier.agent.yaml");
 }

@@ -202,6 +202,26 @@ enum Command {
         #[command(subcommand)]
         command: DogfoodCommand,
     },
+    /// Specialist agents (BRO-3636): agents/<name>.agent.yaml, rendered for each harness. Needs no
+    /// workspace.
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentsCommand {
+    /// Write .claude/agents/<name>.md, .gemini/agents/<name>.md and .grok/agents/<name>.md from
+    /// every agents/<name>.agent.yaml under --root, and remove the renders whose source is gone.
+    /// With --check, write nothing and exit 1 naming the first render that drifts from its source.
+    Render {
+        /// The folder holding agents/ and the render folders.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -285,6 +305,20 @@ enum FlowCommand {
         /// Another instance of the same flow to compare with.
         #[arg(long)]
         against: Option<String>,
+    },
+    /// The flow's driver skill (a SKILL.md), generated from its compiled IR: printed, or written
+    /// to --out. With --check, write nothing and exit 1 when --out is not what it generates. An
+    /// --out that is the definition itself is refused. With --json, prints {"ok", "skill",
+    /// "path"}. Needs no workspace, and is the one flow command that is no MCP tool's twin.
+    DriverSkill {
+        /// The definition's YAML file.
+        #[arg(long)]
+        definition: PathBuf,
+        /// The SKILL.md to write, or to check with --check.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long, requires = "out")]
+        check: bool,
     },
     /// Extend a claim's lease.
     Heartbeat {
@@ -534,6 +568,12 @@ fn main() -> std::process::ExitCode {
         Command::Dogfood { command: DogfoodCommand::VerifyReceipt { head, surface } } => {
             return verify_receipt(head, surface);
         }
+        Command::Agents { command: AgentsCommand::Render { root, check } } => {
+            return exit(render_agents(cli.json, root, *check));
+        }
+        Command::Flow { command: FlowCommand::DriverSkill { definition, out, check } } => {
+            return exit(driver_skill(cli.json, definition, out.as_deref(), *check));
+        }
         _ => {}
     }
 
@@ -672,6 +712,7 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
             let params = json_arg("--params", params.as_deref())?;
             (f::START, json!({ "session": session.session, "definition": text, "params": params }))
         }
+        FlowCommand::DriverSkill { .. } => bail!("flow driver-skill is not a tool"),
         FlowCommand::Next { instance } => (f::NEXT, json!({ "instance": instance })),
         FlowCommand::Status { instance } => (f::STATUS, json!({ "instance": instance })),
         FlowCommand::Spine { instance, against } => (f::SPINE, json!({ "instance": instance, "against": against })),
@@ -714,6 +755,111 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
         return Err(DefinitionMismatch(format!("definition_mismatch: {}", s(&v["reason"]))).into());
     }
     bail!("{}: {}", s(&v["code"]), s(&v["reason"]))
+}
+
+fn exit(result: Result<()>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("maestro: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// `maestro agents render`: every source's renders under `root`, written, or with `check`
+/// compared, failing on the first that drifts (`maestro_flow::agents::check`).
+fn render_agents(json: bool, root: &std::path::Path, check: bool) -> Result<()> {
+    use maestro_flow::agents;
+    if check {
+        if let Some(drift) = agents::check(root)? {
+            if json {
+                println!("{}", json!({ "ok": false, "code": "drift", "drift": drift }));
+            }
+            bail!("{drift}");
+        }
+        if json {
+            println!("{}", json!({ "ok": true }));
+        } else {
+            println!("every render matches its source");
+        }
+        return Ok(());
+    }
+    let written = agents::write(root)?;
+    if json {
+        println!("{}", json!({ "ok": true, "written": written.written, "removed": written.removed }));
+    } else {
+        for file in &written.written {
+            println!("wrote   {file}");
+        }
+        for file in &written.removed {
+            println!("removed {file}");
+        }
+    }
+    Ok(())
+}
+
+/// Whether `a` and `b` name one file: the same device and inode when both exist (so a link or a
+/// second path to it counts), and otherwise never, since a file that is not there is not `a`.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        #[cfg(unix)]
+        (Ok(x), Ok(y)) => {
+            use std::os::unix::fs::MetadataExt as _;
+            (x.dev(), x.ino()) == (y.dev(), y.ino())
+        }
+        #[cfg(not(unix))]
+        (Ok(_), Ok(_)) => std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok(),
+        _ => false,
+    }
+}
+
+/// `maestro flow driver-skill`: the driver skill generated from a definition
+/// (`maestro_flow::driver`), printed, written to `out`, or with `check` compared with `out`. An
+/// `out` that is the definition itself, by any path, is refused before anything is written.
+fn driver_skill(json: bool, definition: &std::path::Path, out: Option<&std::path::Path>, check: bool) -> Result<()> {
+    if let Some(path) = out
+        && same_file(path, definition)
+    {
+        bail!("--out {} is the definition itself; nothing was written", path.display());
+    }
+    let text = std::fs::File::open(definition)
+        .map_err(anyhow::Error::from)
+        .and_then(read_definition)
+        .with_context(|| format!("reading {}", definition.display()))?;
+    let flow = maestro_flow::kernel::compile(&text).map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
+    let skill = maestro_flow::driver::generate(&flow).map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
+    let shown = out.map(|p| p.display().to_string());
+    match out {
+        None if json => println!("{}", json!({ "ok": true, "skill": skill, "path": null })),
+        None => print!("{skill}"),
+        Some(path) if check => {
+            let on_disk = std::fs::read(path).ok();
+            if on_disk.as_deref() != Some(skill.as_bytes()) {
+                if json {
+                    println!("{}", json!({ "ok": false, "code": "drift", "path": shown }));
+                }
+                bail!(
+                    "{} drifts from the driver skill {} generates: run maestro flow driver-skill --out",
+                    path.display(),
+                    flow.name()
+                );
+            }
+            if json {
+                println!("{}", json!({ "ok": true, "skill": skill, "path": shown }));
+            }
+        }
+        Some(path) => {
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+            }
+            std::fs::write(path, &skill).with_context(|| format!("writing {}", path.display()))?;
+            if json {
+                println!("{}", json!({ "ok": true, "skill": skill, "path": shown }));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `maestro dogfood verify-receipt`: the receipt's check (`maestro_flow::dogfood`) over the outputs

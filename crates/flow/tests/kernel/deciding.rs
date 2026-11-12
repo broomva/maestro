@@ -394,3 +394,62 @@ fn every_precondition_of_an_effect_must_hold() {
     assert_eq!(runs(&f), 0, "the effect did not run");
     assert!(!f.kinds(&fi).contains(&"EffectStarted".to_string()));
 }
+
+/// try (in a repeat whose `until` reads try's outputs) -> after. The `until` is cheap over an
+/// empty `xs` and runs for minutes over a long one, so it times out at the writers' 1 s.
+const SLOW_UNTIL: &str = r#"
+flow: slow
+version: 1
+params: [dir]
+workdir: "{{params.dir}}"
+nodes:
+  try: {class: work, verify: ['true']}
+  after: {class: work, verify: ['true'], needs: [rounds]}
+repeats:
+  rounds: {body: [try], max: 2, until: '(reduce (.nodes.try.outputs.xs[] as $a | .nodes.try.outputs.xs[] as $b | .nodes.try.outputs.xs[]) as $x (0; . + $x)) >= 0'}
+"#;
+
+#[test]
+fn a_repeat_awaiting_its_verdict_is_not_terminal_and_a_claim_retries_it() {
+    // The until times out after the body completes: no verdict is written, the repeat awaits it,
+    // nothing after it is enabled, and the instance is not terminal.
+    let mut f = fx(SLOW_UNTIL);
+    let fi = f.begin();
+    let xs: Vec<u32> = (0..2000).collect();
+    let c = f.claim(&fi, "try");
+    let Completion::Completed { verdicts, .. } = f.complete(&c.token, json!({ "xs": xs })) else { panic!() };
+    assert!(matches!(&verdicts[..], [Verdict::Unrecorded { code: "guard_timeout", .. }]), "{verdicts:?}");
+    let s = f.status(&fi, maestro_flow::clock::now());
+    assert!(s.repeats["rounds"].awaiting_verdict);
+    assert_eq!((s.nodes["try"].state, s.nodes["after"].state), (State::Done, State::Blocked));
+    assert!(!s.terminal, "a repeat awaiting its verdict is not terminal: {s:?}");
+    // A retry is a claim: it judges the verdict again first. Timing out again, it writes nothing,
+    // and the repeat still awaits it.
+    assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "try")), "not_enabled");
+    assert_eq!(f.kinds(&fi), ["Started", "Claimed", "Completed"]);
+    assert!(!f.status(&fi, maestro_flow::clock::now()).terminal);
+
+    // The same repeat whose verdict a retry can have: a receipt over an empty xs, its verdict
+    // unwritten. Not terminal until a claim writes the verdict; then the flow runs to its end.
+    let fi = f.begin();
+    let receipt = Completed {
+        node: "try".into(),
+        iteration: [("rounds".to_string(), 0)].into(),
+        attempt: 1,
+        inputs: Default::default(),
+        outputs: json!({ "xs": [] }),
+        verify: None,
+        performer: None,
+        tool_use_id: None,
+    };
+    f.append(&fi, receipt.to_event().unwrap());
+    let s = f.status(&fi, maestro_flow::clock::now());
+    assert!(s.repeats["rounds"].awaiting_verdict && !s.terminal, "{s:?}");
+    assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "try")), "not_enabled", "the verdict holds, so try is done");
+    assert_eq!(f.kinds(&fi), ["Started", "Completed", "Guarded"]);
+    let s = f.status(&fi, maestro_flow::clock::now());
+    assert_eq!((s.repeats["rounds"].state, s.repeats["rounds"].awaiting_verdict), (RepeatState::Done, false));
+    assert!(!s.terminal, "after is ready now");
+    f.pass(&fi, "after", json!({}));
+    assert!(f.status(&fi, maestro_flow::clock::now()).terminal);
+}
