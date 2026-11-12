@@ -178,8 +178,11 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
 - **Specialist agents (BRO-3636).** One source per specialist, `agents/<name>.agent.yaml`
   (`agent@1`: `schema`, `name`, `description`, `role`, `posture` (`read_only` or `execute`),
   `model` per provider (`claude`, `codex`, `gemini`, `grok`), `skills`, and `outputs`, a JSON
-  Schema of type object), parsed strictly: an unknown or repeated field at any level is refused,
-  and so is a name its file does not have (see `maestro_flow::agents`). `agents/verifier.agent.yaml`
+  Schema of type object), parsed strictly: an unknown or repeated field of the source (at the top
+  and in `model`) is refused, and so is a name its file does not have (see `maestro_flow::agents`).
+  `outputs` is checked less: its keys must be unique at every level and its `type` must be
+  `object`, but its keywords are not validated as JSON Schema (Maestro has no schema validator),
+  so an unknown keyword there is kept as written. `agents/verifier.agent.yaml`
   performs verify@1's `exercise`. `maestro agents render` writes `.claude/agents/<name>.md`,
   `.gemini/agents/<name>.md` and `.grok/agents/<name>.md` from every source and removes the
   renders whose source is gone (a file whose second line is not the render marker is never
@@ -191,7 +194,10 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
   path), and only regular files are removed as orphans. Each harness gets only the fields
   its docs define: Claude Code `name`, `description`, `tools`, `model`, `skills`; Gemini CLI
   `name`, `description`, `kind: local`, `tools`, `model`; Grok `name`, `description`, `tools`,
-  `model`. **Not confirmed:** that Claude Code's `subagent_type` is the agent's `name` (inferred
+  `model`. **Gemini CLI's docs and runtime disagree:** the docs bundled with 0.66.0 call each agent
+  as a tool named after it, but the 0.66.0 runtime registers one tool, `invoke_agent`, taking
+  `agent_name` and `prompt` (read from its bundle, not from a live run); the launch spec follows
+  the runtime. **Not confirmed:** that Claude Code's `subagent_type` is the agent's `name` (inferred
   from its docs, not stated); any Grok field beyond those (its built-in agents use
   `prompt_mode`, `permission_mode` and `agents_md`, which no page defines, so none is set), how
   Grok skills reach an agent, and which of two same-named agents Grok takes (it reads
@@ -202,7 +208,8 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
 - **Launch specs (BRO-3636).** `flow next` (and `maestro_flow_next`) gives each enabled node whose
   performer is `agent:<name>` a `launch_spec`: `kind: agent`, the agent, the node's skill, its
   source and digest, its output schema, `claude`, `gemini` and `grok` (each `{file, tool,
-  subagent_type?}`: the `Agent` tool, the tool named after the agent, `spawn_subagent`) and
+  subagent_type?, agent_name?}`: the `Agent` tool with `subagent_type`, `invoke_agent` with
+  `agent_name`, `spawn_subagent` with `subagent_type`) and
   `codex` (`{tool: spawn_agent, task_name, model, message}`). Other nodes have none, so their
   shape is unchanged. The kernel knows the sources it was built with, so a definition naming an
   agent with no source does not compile (`unknown_agent`): it is a reference to nothing, refused
@@ -217,8 +224,13 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
   Skills format, named `flow-<flow>-v<version>`) from its compiled IR: loop `flow next`, do each
   enabled node with its own skill (an agent performer through the harness's own subagent, or
   Codex's brief), `flow complete`, and stop when `flow status` says `terminal` (a field of
-  `status` and `next`: no node `ready`, `stale` or `waiting`, decided by the kernel) or nothing is
-  enabled for the driver. Its steps put each node after everything it waits on (needs, the node
+  `status` and `next`, decided by the kernel: no node `ready`, `stale` or `waiting`, and no repeat
+  awaiting its `until` verdict) or nothing is enabled for the driver. The loop first checks that
+  `status.ir_hash` is the hash the skill was generated from, and stops on another; it calls `flow
+  ask` for a filed ask as well as an unfiled one, since only that verb reads the owner's answer
+  from main; and it retries a repeat awaiting its verdict through `flow claim` (which judges
+  every pending verdict first), at most `driver::VERDICT_RETRIES` (3) times, then stops and
+  reports. Its steps put each node after everything it waits on (needs, the node
   its switch reads, a needed repeat's body, and the whole body of a repeat it reaches into from
   outside), by id within a step; the loop's text is fixed, and nothing in
   the order is written by hand. `skills/flow-verify-v1/SKILL.md` is verify@1's, regenerated with

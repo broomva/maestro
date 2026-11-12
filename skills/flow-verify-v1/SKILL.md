@@ -20,12 +20,16 @@ Every verb is a `maestro flow` subcommand with `--json`, and the MCP tool `maest
 
 ## The loop
 
-Whether to stop is decided by the kernel, in step 1 and step 4, never by reading node states yourself.
+Whether to stop is decided by the kernel (`terminal`, in step 1 and step 4), never by reading node states yourself.
 
-1. Run `maestro flow status --instance <I> --json` (`maestro_flow_status`). If `status.terminal` is `true`, stop: report each node's state and the accepting spine, `flow spine --instance <I>` (`maestro_flow_spine`). The flow is done; a node blocked by a branch not taken never runs, and that is not a failure.
+1. Run `maestro flow status --instance <I> --json` (`maestro_flow_status`). First, `status.ir_hash` must be `sha256:1157788fc938603b8d1f6e3756cd276d3236ba8972da3d2d9a57dc0eb57b86f4`: an instance whose hash is another runs another definition, so stop and report it, and apply none of this skill's nodes to it. Then, if `status.terminal` is `true`, stop: report each node's state and the accepting spine, `flow spine --instance <I>` (`maestro_flow_spine`). The flow is done; a node blocked by a branch not taken never runs, and that is not a failure.
 2. Run `maestro flow next --instance <I> --json` (`maestro_flow_next`). Do each node in `next.enabled` as The nodes below says, in any order: `flow claim --instance <I> --node-id <N>` (`maestro_flow_claim`) gives a `claim_token`; finish with `flow complete --claim-token <T>` (`maestro_flow_complete`, `--outputs '<json>'` for a performer's work) or, for a choice, `flow choose --claim-token <T> --edge <E>` (`maestro_flow_choose`). Heartbeat a long claim with `flow heartbeat --claim-token <T>` (`maestro_flow_heartbeat`). An enabled node's `launch_spec` of `kind: agent` says how your harness launches its agent; one of `kind: unknown_agent` cannot be launched, so stop and report it.
-3. For each `relay` entry `flow next` returned whose state is `unfiled`, file its ask with `flow ask` (`maestro_flow_ask`).
-4. If `next.enabled` was empty and step 3 filed nothing, nothing is yours to do now: the instance waits on someone else (the owner's answer to a `relay` ask, or another claim's lease). Stop and report what `relay` and `next.pending` name; the instance stays open. Otherwise go back to 1.
+3. For each `relay` entry `flow next` returned, run `flow ask --instance <I> --node-id <N>` (`maestro_flow_ask`). An `unfiled` entry needs `--ledger` and `--ask` the first time, to file its ask. An `owner` or `answer_waiting_to_land` entry needs nothing more: only `flow ask` reads main, so it is what takes an answer that has landed there. `state: answered` means the node is done; `state: waiting` means the owner has not answered on main yet.
+4. Then, in this order:
+   - If `next.terminal` is `true`, the flow is done: stop and report, as step 1 says.
+   - If a repeat in `status.repeats` has `awaiting_verdict: true`, its `until` could not be judged when its body settled (an error or a timeout). Retry it with `flow claim --instance <I> --node-id <the first node of its body, as Repeats lists it>`: a claim judges every pending verdict before anything else. A `claim_token` means the verdict moved the repeat on: do that node as step 2 says. A refusal: go back to 1. After 3 such claims with the repeat still awaiting its verdict at the same iteration, stop and report: its `until` fails over that input every time. (3 is this skill's bound, `maestro_flow::driver::VERDICT_RETRIES`: an `until` is jq over the same input each time, so an error repeats, and only a timeout under load, at the kernel's 1 s guard timeout, can pass on a later try.)
+   - If `next.enabled` was empty and step 3 filed no ask and took no answer, nothing is yours to do now: the instance waits on someone else (the owner's answer to a `relay` ask, or another claim's lease). Stop and report what `relay` and `next.pending` name; the instance stays open.
+   - Otherwise, go back to 1.
 
 A refusal is a result, not an error: read its `code`. After `lease_expired` or `cancelled`, claim the node again; after `not_enabled`, go back to 1. A pure node's `verify_failed` means its command failed, and a pure command fails the same way again: stop and report it, never retry it. A human node's answer comes from the owner through the asks ledger, never from you.
 
@@ -73,7 +77,7 @@ Exercises a declared surface of a repository at a pinned commit the way a user w
 Its source is `agents/verifier.agent.yaml`. Launch it through your harness:
 
 - Claude Code: the `Agent` tool with `subagent_type: "verifier"` (`.claude/agents/verifier.md`).
-- Gemini CLI: the `verifier` tool (`.gemini/agents/verifier.md`).
+- Gemini CLI: the `invoke_agent` tool with `agent_name: "verifier"` and the node's task as `prompt` (`.gemini/agents/verifier.md`).
 - Grok: the `spawn_subagent` tool with `subagent_type: "verifier"` (`.grok/agents/verifier.md`).
 - Codex: the `spawn_agent` tool with these arguments, the node's task appended to `message` (`task_name` only where your `spawn_agent` takes one):
 

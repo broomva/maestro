@@ -2044,7 +2044,7 @@ mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)'
 mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)' 'matches!(n.state, State::Ready | State::Waiting)'
 mutate $replay 'matches!(n.state, State::Ready | State::Stale | State::Waiting)' 'matches!(n.state, State::Stale | State::Waiting)'
 mutate $replay '        terminal: status.terminal,' '        terminal: false,'
-mutate $drv 'If `status.terminal` is `true`, stop' 'If every node is done, stop'
+mutate $drv 'Then, if `status.terminal` is `true`, stop' 'Then, if every node is done, stop'
 # The driver skill: a node outside a repeat waits on the whole body it reaches into; Waits on
 # names a switch's subject; the description stays within the spec's limit; a control character
 # in a flow's name never ends a line of the frontmatter.
@@ -2055,6 +2055,20 @@ mutate $drv 'if full.chars().count() > MAX_DESCRIPTION { say(skill) } else { ful
 mutate $drv 'if c.is_control() { '"' '"' } else { c }' 'c'
 # --out naming the definition itself, by any path, is refused before anything is written.
 mutate $cli '        && same_file(path, definition)' '        && false'
+# Round 2 (BRO-3636). A repeat awaiting its until verdict keeps an instance from being terminal.
+# The driver skill checks a resumed instance's ir_hash before anything else, takes a terminal
+# next as done first, asks a filed ask again (only flow ask reads the answer from main), and
+# retries a pending verdict through flow claim a bounded number of times. Gemini CLI launches an
+# agent through invoke_agent. The name and model bounds are held.
+mutate $replay '                && !repeats.values().any(|r| r.awaiting_verdict);' '                && true;'
+mutate $drv 'First, `status.ir_hash` must be `{hash}`' 'First, `status.ir_hash` names the definition'
+mutate $drv 'If `next.terminal` is `true`, the flow is done' 'If nothing is enabled, the flow is done'
+mutate $drv 'An `owner` or `answer_waiting_to_land` entry needs nothing more' 'Skip an `owner` or `answer_waiting_to_land` entry; it needs nothing more'
+mutate $drv 'Retry it with `flow claim --instance <I> --node-id <the first node of its body' 'Wait for it, never `flow claim --instance <I> --node-id <the first node of its body'
+mutate $drv 'After {VERDICT_RETRIES} such claims' 'After many such claims'
+mutate $agt '                tool: GEMINI_AGENT_TOOL.into(),' '                tool: self.name.clone(),'
+mutate $agt '    name.len() <= MAX_NAME' '    name.len() <= MAX_NAME + 1'
+mutate $agt 'model.len() > MAX_MODEL' 'model.len() > MAX_MODEL + 1'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

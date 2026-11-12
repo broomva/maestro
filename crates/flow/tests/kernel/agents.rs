@@ -349,3 +349,42 @@ fn a_link_is_never_taken_for_an_orphan_or_removed() {
     assert!(std::fs::symlink_metadata(&at).unwrap().file_type().is_symlink(), "the link stays");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), checker.renders()[0].text, "its target stays");
 }
+
+#[test]
+fn bounds_are_enforced() {
+    let f = |name: &str| format!("{name}.agent.yaml");
+    let named = |name: &str| VERIFIER.replace("name: verifier", &format!("name: {name}"));
+    let at = "a".repeat(agents::MAX_NAME);
+    assert!(agents::parse(&f(&at), &named(&at)).is_ok(), "a name of {} bytes", agents::MAX_NAME);
+    let over = "a".repeat(agents::MAX_NAME + 1);
+    assert!(refused(&f(&over), &named(&over)).contains("must be lower-case"), "a name past the bound");
+    let model = |m: &str| VERIFIER.replace("codex: gpt-6.1-terra", &format!("codex: {m}"));
+    let at = "m".repeat(agents::MAX_MODEL);
+    assert!(agents::parse("verifier.agent.yaml", &model(&at)).is_ok(), "a model of {} bytes", agents::MAX_MODEL);
+    let over = "m".repeat(agents::MAX_MODEL + 1);
+    assert!(refused("verifier.agent.yaml", &model(&over)).contains("the codex model"), "a model past the bound");
+}
+
+#[test]
+fn outputs_keywords_are_kept_as_written_not_validated_as_json_schema() {
+    // What the docs say: keys are unique and the type is object, and nothing more is checked.
+    let text = VERIFIER.replace("  type: object\n  required", "  type: object\n  typo_keyword: 1\n  required");
+    let a = agents::parse("verifier.agent.yaml", &text).unwrap();
+    assert_eq!(a.outputs["typo_keyword"], 1);
+}
+
+#[test]
+fn gemini_launches_an_agent_through_invoke_agent_by_agent_name() {
+    let spec = verifier().launch(Some("dogfood"));
+    assert_eq!(spec.gemini.tool, agents::GEMINI_AGENT_TOOL);
+    assert_eq!(agents::GEMINI_AGENT_TOOL, "invoke_agent");
+    assert_eq!((spec.gemini.agent_name.as_deref(), spec.gemini.subagent_type.as_deref()), (Some("verifier"), None));
+    let json = serde_json::to_value(&spec.gemini).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({ "file": ".gemini/agents/verifier.md", "tool": "invoke_agent", "agent_name": "verifier" })
+    );
+    // Claude Code and Grok name it by subagent_type.
+    assert_eq!(spec.claude.agent_name, None);
+    assert_eq!(spec.grok.subagent_type.as_deref(), Some("verifier"));
+}

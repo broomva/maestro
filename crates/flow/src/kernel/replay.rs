@@ -256,10 +256,12 @@ pub struct Status {
     pub retired: Option<String>,
     /// The last event replayed.
     pub seq: u64,
-    /// No node is `ready`, `stale` or `waiting` at the read's clock: nothing in the flow can be
-    /// done now, so a driver stops (BRO-3636). Every other node is done, failed, exhausted, or
-    /// blocked on one of those or on a branch not taken. It holds at the read's clock: an
-    /// observation that goes stale later makes the instance not terminal again.
+    /// No node is `ready`, `stale` or `waiting` at the read's clock, and no repeat awaits its
+    /// `until` verdict: nothing in the flow can be done now, so a driver stops (BRO-3636). Every
+    /// other node is done, failed, exhausted, or blocked on one of those or on a branch not taken.
+    /// A repeat awaiting a verdict (its `until` erred or timed out after its body settled) is not
+    /// terminal: the next write (`claim` first of all) judges it again. It holds at the read's
+    /// clock: an observation that goes stale later makes the instance not terminal again.
     pub terminal: bool,
     pub nodes: BTreeMap<String, NodeStatus>,
     pub repeats: BTreeMap<String, RepeatStatus>,
@@ -1005,7 +1007,7 @@ impl<'a> Fold<'a> {
             nodes.insert(id.clone(), status);
             stale.insert(id.clone(), set);
         }
-        let repeats = ir
+        let repeats: BTreeMap<String, RepeatStatus> = ir
             .repeats
             .keys()
             .map(|rid| {
@@ -1022,8 +1024,11 @@ impl<'a> Fold<'a> {
             .collect();
         let mut rejected: Vec<Rejected> = self.rejected.iter().chain(&self.owners.rejected).cloned().collect();
         rejected.sort_by_key(|r| r.seq);
+        // A repeat whose `until` could not be judged (an error, a timeout) after its body settled
+        // stays running and awaits its verdict, which the next write tries again: not terminal.
         let terminal =
-            !nodes.values().any(|n: &NodeStatus| matches!(n.state, State::Ready | State::Stale | State::Waiting));
+            !nodes.values().any(|n: &NodeStatus| matches!(n.state, State::Ready | State::Stale | State::Waiting))
+                && !repeats.values().any(|r| r.awaiting_verdict);
         let status = Status {
             instance: log.instance.to_string(),
             flow: started.flow.clone(),
@@ -1151,9 +1156,8 @@ thread_local! {
 /// Whether evaluations are kept across events (always, outside the differential tests).
 fn keep() -> bool {
     #[cfg(test)]
-    if NO_CACHE.with(Cell::get) {
-        return false;
-    }
+    return !NO_CACHE.with(Cell::get);
+    #[cfg(not(test))]
     true
 }
 

@@ -90,8 +90,8 @@ fn the_loop_stops_on_the_kernels_terminal_never_on_node_states() {
     let the_loop = section(&skill, "## The loop");
     // The stop decision is a step of the loop, and it reads the kernel's field.
     assert!(the_loop.contains("\n1. Run `maestro flow status --instance <I> --json`"), "{the_loop}");
-    assert!(the_loop.contains("If `status.terminal` is `true`, stop"), "{the_loop}");
-    assert!(the_loop.contains("\n4. If `next.enabled` was empty and step 3 filed nothing"), "{the_loop}");
+    assert!(the_loop.contains("Then, if `status.terminal` is `true`, stop"), "{the_loop}");
+    assert!(the_loop.contains("\n4. Then, in this order:"), "{the_loop}");
     assert!(
         the_loop.find("1. Run `maestro flow status").unwrap() < the_loop.find("2. Run `maestro flow next").unwrap()
     );
@@ -166,4 +166,50 @@ fn start_tells_the_cli_path_from_the_mcp_text_and_names_the_auth_arguments() {
     ] {
         assert!(skill.contains(arg), "{arg}");
     }
+}
+
+#[test]
+fn a_resumed_instance_of_another_ir_is_never_driven() {
+    let flow = compile(VERIFY).unwrap();
+    let skill = driver::generate(&flow).unwrap();
+    let step1 = section(&skill, "\n1. Run `maestro flow status");
+    let check = format!("First, `status.ir_hash` must be `{}`", flow.hash());
+    assert!(step1.contains(&check), "{step1}");
+    assert!(step1.contains("stop and report it, and apply none of this skill's nodes to it"), "{step1}");
+    // The hash is checked before anything is acted on or reported.
+    assert!(step1.find(&check).unwrap() < step1.find("if `status.terminal` is `true`").unwrap(), "{step1}");
+}
+
+#[test]
+fn step_4_takes_a_terminal_next_as_done_before_anything_else() {
+    let skill = driver::generate(&compile(VERIFY).unwrap()).unwrap();
+    let step4 = section(&skill, "\n4. Then, in this order:");
+    let done = step4.find("If `next.terminal` is `true`, the flow is done").unwrap_or_else(|| panic!("{step4}"));
+    let verdict = step4.find("has `awaiting_verdict: true`").unwrap_or_else(|| panic!("{step4}"));
+    let wait = step4.find("If `next.enabled` was empty").unwrap_or_else(|| panic!("{step4}"));
+    assert!(done < verdict && verdict < wait, "{step4}");
+}
+
+#[test]
+fn a_filed_ask_is_asked_again_so_a_landed_answer_is_taken() {
+    let skill = driver::generate(&compile(VERIFY).unwrap()).unwrap();
+    let step3 = section(&skill, "\n3. For each `relay` entry");
+    assert!(step3.contains("run `flow ask --instance <I> --node-id <N>`"), "{step3}");
+    assert!(step3.contains("An `owner` or `answer_waiting_to_land` entry needs nothing more"), "{step3}");
+    assert!(step3.contains("only `flow ask` reads main"), "{step3}");
+    assert!(!skill.contains("whose state is `unfiled`, file its ask"), "only unfiled entries are asked");
+}
+
+#[test]
+fn a_repeat_awaiting_its_verdict_is_retried_by_a_claim_a_bounded_number_of_times() {
+    let skill = driver::generate(&compile(VERIFY).unwrap()).unwrap();
+    let step4 = section(&skill, "\n4. Then, in this order:");
+    assert!(
+        step4.contains("Retry it with `flow claim --instance <I> --node-id <the first node of its body"),
+        "{step4}"
+    );
+    let bound = format!("After {} such claims with the repeat still awaiting its verdict", driver::VERDICT_RETRIES);
+    assert!(step4.contains(&bound), "{step4}");
+    assert!(step4.contains("`maestro_flow::driver::VERDICT_RETRIES`"), "{step4}");
+    assert_eq!(driver::VERDICT_RETRIES, 3);
 }

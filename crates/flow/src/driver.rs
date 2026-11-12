@@ -4,7 +4,12 @@
 //! `agent:<name>` performer through the harness's own subagent), call `flow complete`, and stop
 //! when `flow status` says `terminal` (`kernel::Status::terminal`). The kernel decides when to
 //! stop: the skill's loop reads that field, or finds nothing enabled for the driver, and never
-//! judges node states itself.
+//! judges node states itself. Before it acts on an instance, the loop checks that `status.ir_hash`
+//! is the hash the skill was generated from, so a resumed instance of another definition is never
+//! driven by this one's nodes. A human node's `flow ask` is called for a filed ask too, since only
+//! that verb reads the owner's answer from main. A repeat that awaits its `until` verdict is
+//! retried through `flow claim`, which judges every pending verdict first (`kernel::write`), at
+//! most [`VERDICT_RETRIES`] times.
 //!
 //! The loop, the verbs and what to do for each class of node are this module's fixed text. The
 //! steps (which nodes, in which order, what each waits on and when it applies), each performer's
@@ -259,8 +264,10 @@ fn agent_section(out: &mut String, agent: &agents::Agent) {
     let _ = writeln!(out, "### {}\n", code(&agent.name));
     let _ = writeln!(out, "{}\n", agent.description.trim());
     let _ = writeln!(out, "Its source is `{}`. Launch it through your harness:\n", agent.source);
-    let subagent = |n: &agents::NativeLaunch| {
-        n.subagent_type.as_deref().map(|t| format!(" with `subagent_type: \"{t}\"`")).unwrap_or_default()
+    let subagent = |n: &agents::NativeLaunch| match (&n.subagent_type, &n.agent_name) {
+        (Some(t), _) => format!(" with `subagent_type: \"{t}\"`"),
+        (None, Some(a)) => format!(" with `agent_name: \"{a}\"` and the node's task as `prompt`"),
+        (None, None) => String::new(),
     };
     let (c, g, x) = (&spec.claude, &spec.gemini, &spec.grok);
     let _ = writeln!(out, "- Claude Code: the `{}` tool{} (`{}`).", c.tool, subagent(c), c.file);
@@ -279,6 +286,12 @@ fn agent_section(out: &mut String, agent: &agents::Agent) {
     let brief = serde_json::to_string_pretty(&brief).unwrap_or_default();
     let _ = writeln!(out, "```json\n{brief}\n```\n");
 }
+
+/// The most claims the driver skill makes to retry one repeat's `until` verdict before it stops
+/// and reports. An `until` is jq over the same input each try, so an error repeats; only a
+/// timeout under load (the kernel's 1 s guard timeout) can pass on a later one, and three tries
+/// bound that wait to a few seconds of evaluation.
+pub const VERDICT_RETRIES: u32 = 3;
 
 /// The most characters a skill's description may have (the Agent Skills spec).
 pub const MAX_DESCRIPTION: usize = 1024;
@@ -347,11 +360,11 @@ pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
     let _ = writeln!(out, "## The loop\n");
     let _ = writeln!(
         out,
-        "Whether to stop is decided by the kernel, in step 1 and step 4, never by reading node states yourself.\n"
+        "Whether to stop is decided by the kernel (`terminal`, in step 1 and step 4), never by reading node states yourself.\n"
     );
     let _ = writeln!(
         out,
-        "1. Run `maestro flow status --instance <I> --json` (`maestro_flow_status`). If `status.terminal` is `true`, stop: report each node's state and the accepting spine, `flow spine --instance <I>` (`maestro_flow_spine`). The flow is done; a node blocked by a branch not taken never runs, and that is not a failure."
+        "1. Run `maestro flow status --instance <I> --json` (`maestro_flow_status`). First, `status.ir_hash` must be `{hash}`: an instance whose hash is another runs another definition, so stop and report it, and apply none of this skill's nodes to it. Then, if `status.terminal` is `true`, stop: report each node's state and the accepting spine, `flow spine --instance <I>` (`maestro_flow_spine`). The flow is done; a node blocked by a branch not taken never runs, and that is not a failure."
     );
     let _ = writeln!(
         out,
@@ -359,12 +372,19 @@ pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
     );
     let _ = writeln!(
         out,
-        "3. For each `relay` entry `flow next` returned whose state is `unfiled`, file its ask with `flow ask` (`maestro_flow_ask`)."
+        "3. For each `relay` entry `flow next` returned, run `flow ask --instance <I> --node-id <N>` (`maestro_flow_ask`). An `unfiled` entry needs `--ledger` and `--ask` the first time, to file its ask. An `owner` or `answer_waiting_to_land` entry needs nothing more: only `flow ask` reads main, so it is what takes an answer that has landed there. `state: answered` means the node is done; `state: waiting` means the owner has not answered on main yet."
+    );
+    let _ = writeln!(out, "4. Then, in this order:");
+    let _ = writeln!(out, "   - If `next.terminal` is `true`, the flow is done: stop and report, as step 1 says.");
+    let _ = writeln!(
+        out,
+        "   - If a repeat in `status.repeats` has `awaiting_verdict: true`, its `until` could not be judged when its body settled (an error or a timeout). Retry it with `flow claim --instance <I> --node-id <the first node of its body, as Repeats lists it>`: a claim judges every pending verdict before anything else. A `claim_token` means the verdict moved the repeat on: do that node as step 2 says. A refusal: go back to 1. After {VERDICT_RETRIES} such claims with the repeat still awaiting its verdict at the same iteration, stop and report: its `until` fails over that input every time. ({VERDICT_RETRIES} is this skill's bound, `maestro_flow::driver::VERDICT_RETRIES`: an `until` is jq over the same input each time, so an error repeats, and only a timeout under load, at the kernel's 1 s guard timeout, can pass on a later try.)"
     );
     let _ = writeln!(
         out,
-        "4. If `next.enabled` was empty and step 3 filed nothing, nothing is yours to do now: the instance waits on someone else (the owner's answer to a `relay` ask, or another claim's lease). Stop and report what `relay` and `next.pending` name; the instance stays open. Otherwise go back to 1.\n"
+        "   - If `next.enabled` was empty and step 3 filed no ask and took no answer, nothing is yours to do now: the instance waits on someone else (the owner's answer to a `relay` ask, or another claim's lease). Stop and report what `relay` and `next.pending` name; the instance stays open."
     );
+    let _ = writeln!(out, "   - Otherwise, go back to 1.\n");
     let _ = writeln!(
         out,
         "A refusal is a result, not an error: read its `code`. After `lease_expired` or `cancelled`, claim the node again; after `not_enabled`, go back to 1. A pure node's `verify_failed` means its command failed, and a pure command fails the same way again: stop and report it, never retry it. A human node's answer comes from the owner through the asks ledger, never from you.\n"

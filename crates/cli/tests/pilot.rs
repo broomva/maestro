@@ -314,7 +314,10 @@ fn v4_exercise_completes_only_with_a_passing_receipt_for_the_pinned_head_and_sur
         (&spec["kind"], &spec["agent"], &spec["skill"]),
         (&json!("agent"), &json!("verifier"), &json!("dogfood"))
     );
-    assert_eq!(spec["gemini"], json!({ "file": ".gemini/agents/verifier.md", "tool": "verifier" }));
+    assert_eq!(
+        spec["gemini"],
+        json!({ "file": ".gemini/agents/verifier.md", "tool": "invoke_agent", "agent_name": "verifier" })
+    );
     assert_eq!(spec["grok"]["subagent_type"], "verifier");
     let verifier = maestro_flow::agents::find("verifier").unwrap();
     assert_eq!(spec["codex"]["message"], verifier.body());

@@ -4,9 +4,11 @@
 //!
 //! # The source, `agent@1`
 //!
-//! One YAML mapping, at most [`MAX_SOURCE`] bytes, with exactly these fields. Any other field, at
-//! any level, is refused, and so is a repeated one ([`parse`]), a repeated key inside `outputs`
-//! included.
+//! One YAML mapping, at most [`MAX_SOURCE`] bytes, with exactly these fields. Any other field of
+//! the source, at the top and in `model`, is refused, and so is a repeated one ([`parse`]).
+//! `outputs` is held to less: its keys are unique at every level and its `type` is `object`, but
+//! its keywords are not validated as JSON Schema (the crate has no schema validator), so an
+//! unknown keyword inside it is kept as written.
 //!
 //! | Field | What it holds |
 //! |---|---|
@@ -29,7 +31,7 @@
 //! | Harness | File | Frontmatter | Launched by |
 //! |---|---|---|---|
 //! | Claude Code | `.claude/agents/<name>.md` | `name`, `description`, `tools` (a comma-separated string), `model`, `skills` (when there are any) | the `Agent` tool with `subagent_type: <name>` |
-//! | Gemini CLI | `.gemini/agents/<name>.md` | `name`, `description`, `kind: local`, `tools` (a list), `model` | the tool named `<name>` |
+//! | Gemini CLI | `.gemini/agents/<name>.md` | `name`, `description`, `kind: local`, `tools` (a list), `model` | `invoke_agent` with `agent_name: <name>` (and `prompt`) |
 //! | Grok | `.grok/agents/<name>.md` | `name`, `description`, `tools` (a list), `model` | `spawn_subagent` with `subagent_type: <name>` |
 //! | Codex | none: the brief is embedded in the driver skill and in `flow next`'s launch spec | | `spawn_agent` with `message` (the body) and `model`, and `task_name` where the tool asks for one |
 //!
@@ -49,6 +51,13 @@
 //!
 //! Gemini CLI also gets `activate_skill` when the agent names skills, since its subagents load a
 //! skill through that tool; Claude Code preloads them through `skills`.
+//!
+//! **Gemini CLI: its docs and its runtime disagree.** The `docs/core/subagents.md` bundled with
+//! Gemini CLI 0.66.0 says each agent is a tool named after it. The 0.66.0 runtime registers one
+//! tool for every subagent instead, `invoke_agent` (`AGENT_TOOL_NAME` in the bundle's
+//! `chunk-*.js`, the `AgentTool` class), whose required arguments are `agent_name` and `prompt`,
+//! and registers no tool per agent. The launch spec follows the runtime ([`GEMINI_AGENT_TOOL`]);
+//! this was read from the bundle on the nuc, not from a live run.
 //!
 //! **Not confirmed, so not relied on.** No document says Claude Code's `subagent_type` is the
 //! agent's `name`; it is inferred from the docs' "identity comes only from `name`". Grok documents
@@ -116,6 +125,10 @@ pub const SOURCES: &str = "agents";
 
 /// A source's file name is `<name>` and this.
 pub const SUFFIX: &str = ".agent.yaml";
+
+/// The tool Gemini CLI launches a subagent with, taking `agent_name` and `prompt`: its runtime's
+/// `AGENT_TOOL_NAME` (0.66.0), not the tool named after the agent its bundled docs describe.
+pub const GEMINI_AGENT_TOOL: &str = "invoke_agent";
 
 /// A performer naming an agent is this and the agent's name.
 pub const PERFORMER: &str = "agent:";
@@ -510,9 +523,25 @@ impl Agent {
             source: self.source.clone(),
             source_sha256: self.source_sha256.clone(),
             outputs: self.outputs.clone(),
-            claude: NativeLaunch { file: file(c), tool: "Agent".into(), subagent_type: Some(self.name.clone()) },
-            gemini: NativeLaunch { file: file(g), tool: self.name.clone(), subagent_type: None },
-            grok: NativeLaunch { file: file(x), tool: "spawn_subagent".into(), subagent_type: Some(self.name.clone()) },
+            claude: NativeLaunch {
+                file: file(c),
+                tool: "Agent".into(),
+                subagent_type: Some(self.name.clone()),
+                agent_name: None,
+            },
+            // Gemini CLI 0.66.0's runtime, not its bundled docs (see the module docs).
+            gemini: NativeLaunch {
+                file: file(g),
+                tool: GEMINI_AGENT_TOOL.into(),
+                subagent_type: None,
+                agent_name: Some(self.name.clone()),
+            },
+            grok: NativeLaunch {
+                file: file(x),
+                tool: "spawn_subagent".into(),
+                subagent_type: Some(self.name.clone()),
+                agent_name: None,
+            },
             codex: self.codex(),
         }
     }
@@ -528,14 +557,17 @@ pub struct CodexBrief {
     pub message: String,
 }
 
-/// How a harness with an agent file launches it: the file, the tool to call and, where the tool
-/// takes one, the agent's type.
+/// How a harness with an agent file launches it: the file, the tool to call, and the argument
+/// that names the agent in that tool (`subagent_type` for Claude Code and Grok, `agent_name` for
+/// Gemini CLI).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NativeLaunch {
     pub file: String,
     pub tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 /// What `flow next` returns for an enabled node whose performer is `agent:<name>`.
