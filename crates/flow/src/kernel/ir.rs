@@ -12,17 +12,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The IR's newest version. A change to its shape or meaning bumps it. Version 2 added
-/// `workdir`; version 3 added an effect's `run`.
-pub const IR_VERSION: u32 = 3;
+/// `workdir`; version 3 added an effect's `run`; version 4 a pure node's `snapshot` (BRO-3636).
+pub const IR_VERSION: u32 = 4;
 
-/// The version an IR is written in: the lowest that expresses it, so 3 for an IR with an effect
-/// that has a `run`, 2 for one that carries a `workdir` and 1 for neither. An IR, and its hash,
-/// are what they were under the version that expresses it, and an instance started under an
-/// earlier version keeps replaying.
+/// The version an IR is written in: the lowest that expresses it, so 4 for an IR with a node that
+/// runs in a snapshot, 3 for one with an effect that has a `run`, 2 for one that carries a
+/// `workdir` and 1 for none of them. An IR, and its hash, are what they were under the version
+/// that expresses it, and an instance started under an earlier version keeps replaying.
 pub fn version_for(ir: &Ir) -> u32 {
     let runs_effect = ir.nodes.values().any(|n| matches!(&n.class, Class::Effect { run, .. } if !run.is_empty()));
-    if runs_effect {
+    if ir.nodes.values().any(|n| n.snapshot.is_some()) {
         IR_VERSION
+    } else if runs_effect {
+        3
     } else if ir.workdir.is_some() {
         2
     } else {
@@ -93,6 +95,11 @@ pub struct Node {
     pub retry: Option<u32>,
     /// Seconds an attempt may run, heartbeats or not, before it counts as ended.
     pub cancel_after: Option<u64>,
+    /// A pure node's: the commit (`{{params.<name>}}` filled in) of the workdir's repository its
+    /// `run` runs in a snapshot of, never in the working tree (`kernel::snapshot`). New in IR
+    /// version 4 and left out of the JSON when absent, so earlier IRs keep their hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,7 +226,8 @@ fn unknown(from: impl Into<String>, name: &str) -> CompileError {
 
 /// The rules every IR passes, at compile time and again on the copy a `Started` event pins. Its
 /// version must be [`version_for`] it: version 1 has no `workdir`, version 2 has one, version 3
-/// has an effect with a `run` (and then every effect has one), and any other version is refused.
+/// has an effect with a `run` (and then every effect has one), version 4 a pure node that runs in
+/// a snapshot (only a pure node does), and any other version is refused.
 pub fn validate(ir: &Ir) -> Result<(), CompileError> {
     let want = version_for(ir);
     if ir.ir_version != want {
@@ -303,6 +311,9 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
         }
         if n.retry == Some(0) {
             return Err(CompileError::invalid(format!("node {id} allows 0 attempts")));
+        }
+        if n.snapshot.is_some() && !matches!(n.class, Class::Pure { .. }) {
+            return Err(CompileError::invalid(format!("node {id} runs in a snapshot, which only a pure node does")));
         }
         if let Some(case) = &n.switch {
             let declared = match &node(&from, &case.on)?.class {

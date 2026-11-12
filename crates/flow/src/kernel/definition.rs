@@ -65,6 +65,8 @@ pub(crate) struct NodeDef {
     pub cancel: Option<CancelDef>,
     // Fields that belong to some classes only (`compile::CLASS_FIELDS`).
     pub run: Option<Vec<String>>,
+    /// A pure node's: the commit its `run` runs in a snapshot of (`kernel::snapshot`).
+    pub snapshot: Option<String>,
     pub verify: Option<Vec<String>>,
     pub performer: Option<String>,
     pub skill: Option<String>,
@@ -88,6 +90,7 @@ impl NodeDef {
     pub(crate) fn class_fields(&self) -> Vec<&'static str> {
         let set = [
             ("run", self.run.is_some()),
+            ("snapshot", self.snapshot.is_some()),
             ("verify", self.verify.is_some()),
             ("performer", self.performer.is_some()),
             ("skill", self.skill.is_some()),

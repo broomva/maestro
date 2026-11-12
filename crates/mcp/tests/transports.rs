@@ -169,7 +169,7 @@ async fn every_tool_scenario_is_identical_over_stdio_and_http() {
             "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
             "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
             // A flow read with no ledger is a result: ok false, no_ledger.
-            "maestro_flow_next" | "maestro_flow_status" => json!({ "instance": "fi_none" }),
+            "maestro_flow_next" | "maestro_flow_status" | "maestro_flow_spine" => json!({ "instance": "fi_none" }),
             _ => json!({}),
         };
         let got = agree(&t, &store, spec.name, args).await;

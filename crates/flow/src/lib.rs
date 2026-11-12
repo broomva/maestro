@@ -98,6 +98,9 @@
 //! [`kernel`]. The kernel's writers are the only part of the crate that
 //! starts a process: `kernel::complete` runs a node's command, and every write that evaluates a
 //! jq guard runs it in a child process (`kernel::guard`).
+//!
+//! [`dogfood`] is the verifier pilot's dogfood receipt and its read-only check, the verify of
+//! `verify@1`'s `exercise` node (BRO-3636). It reads a receipt and its evidence, never the ledger.
 
 /// A pause point for the crate's own unit tests (`hooks`). Outside `cfg(test)` it expands to
 /// nothing, so no other build, binary or dependent crate can reach one.
@@ -110,6 +113,7 @@ macro_rules! pause {
 
 mod at;
 pub mod clock;
+pub mod dogfood;
 mod error;
 #[cfg(test)]
 extern crate self as maestro_flow;

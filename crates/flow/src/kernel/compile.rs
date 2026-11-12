@@ -38,7 +38,7 @@ impl CompiledFlow {
 /// The class-specific fields each class accepts. `needs`, `switch`, `retry` and `cancel` apply to
 /// every class.
 const CLASS_FIELDS: &[(ClassDef, &[&str])] = &[
-    (ClassDef::Pure, &["run"]),
+    (ClassDef::Pure, &["run", "snapshot"]),
     (ClassDef::Observe, &["run", "fresh_for", "inputs", "exit_map"]),
     (ClassDef::Work, &["verify", "performer", "skill", "routing", "wait"]),
     (ClassDef::Choice, &["edges", "performer", "skill", "routing"]),
@@ -188,6 +188,7 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
     ir.ir_version = ir::version_for(&ir);
     ir::validate(&ir)?;
     check_guards(&ir)?;
+    check_no_outputs_placeholders(&ir)?;
     let bytes = serde_json::to_vec(&ir).map(|b| b.len()).unwrap_or(usize::MAX);
     if bytes > ir::MAX_IR {
         return Err(CompileError::invalid(format!("the IR is {bytes} bytes, more than {}", ir::MAX_IR)));
@@ -204,6 +205,7 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
         }
         None => None,
     };
+    let snapshot = n.snapshot;
     let class = match n.class {
         ClassDef::Pure => Class::Pure { run: n.run.unwrap_or_default() },
         ClassDef::Observe => Class::Observe {
@@ -259,5 +261,30 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
         switch: n.switch.map(|s| Case { on: s.on, value: s.case }),
         retry: n.retry.map(|r| r.attempts),
         cancel_after: n.cancel.map(|c| seconds(&format!("node {id} cancel.after"), &c.after)).transpose()?,
+        snapshot,
     })
+}
+
+/// Refuses an `{{outputs.<name>}}` placeholder in any command or the workdir (BRO-3636): the
+/// kernel fills placeholders from the params alone, and a work node's verify reads the outputs it
+/// judges as JSON on its standard input, never in its argv, where a performer's text could be
+/// read as code. Compile time only: an IR pinned before this rule replays and runs as it did (its
+/// placeholder is refused `template_invalid` when the command is built).
+fn check_no_outputs_placeholders(ir: &Ir) -> Result<(), CompileError> {
+    let mut words: Vec<(String, &String)> = ir.workdir.iter().map(|w| ("the workdir".to_string(), w)).collect();
+    for (id, n) in &ir.nodes {
+        let commands: Vec<&Vec<String>> = match &n.class {
+            Class::Pure { run } | Class::Observe { run, .. } => vec![run],
+            Class::Work { verify, .. } => vec![verify],
+            Class::Effect { run, reconcile, .. } => vec![run, reconcile],
+            Class::Choice { .. } | Class::Human { .. } => vec![],
+        };
+        words.extend(commands.into_iter().flatten().chain(&n.snapshot).map(|w| (format!("node {id}"), w)));
+    }
+    if let Some((at, _)) = words.iter().find(|(_, w)| w.contains("{{outputs.")) {
+        return Err(CompileError::invalid(format!(
+            "{at} names {{{{outputs...}}}}: a work node's verify reads its outputs as JSON on standard input"
+        )));
+    }
+    Ok(())
 }

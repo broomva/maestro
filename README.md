@@ -95,6 +95,8 @@ maestro flow choose --claim-token T --edge E                 # take a choice nod
 maestro flow ask --instance I --node-id N [--ledger L.yaml --ask '<json>']   # a human node: file its ask, then take the answer
 maestro flow propose-adoption --instance I [--ledger L.yaml --ask '<json>']    # ask the owner to hand you an instance
 maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  # ask the owner to retire an instance
+maestro flow spine --instance I [--against J]                # the accepting spine; exit 1 at the first difference from J's
+maestro dogfood verify-receipt --head=H --surface=S < outputs.json   # check a dogfood receipt (verify@1's exercise verify)
 ```
 
 - **Human steps (BRO-3635).** A waiting `human` node is the owner's. `flow ask` (MCP
@@ -148,6 +150,45 @@ maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  #
   and `--again` proposes anew. One session pins at most eight proposals on an instance
   (`proposals_exhausted`). `flow next` and `flow status` list each standing
   proposal (`proposals`: kind, ask, proposer, state) and the current `owner`.
+- **The verifier pilot (BRO-3636).** `crates/flow/flows/verify.yaml` is `verify@1`: `pin`
+  observes that the repository is at `params.head` (fresh for 10 minutes); `check` runs
+  `params.check` in a snapshot of `params.head`, never in the working tree; and `exercise`, only
+  when `params.surface` is set, takes the dogfood receipt its performer names. The snapshot is a
+  new repository in a private temporary folder, a `git clone --shared --no-checkout` of the
+  repository (read only, its objects shared, its history and tags kept) with the head checked out
+  detached, removed once the check ends, whatever it came to, so the result depends on the head's
+  content alone. Setup and the check share the run's one timeout. A snapshot that cannot be made
+  is `snapshot_failed`, a check that moved the snapshot's HEAD off the head (even and back)
+  `snapshot_moved`, and a snapshot commit that is not a full object id `snapshot_invalid`, never
+  an exit status of the project's. The performer completes `exercise` with `--outputs '{"receipt": "<path>",
+  "receipt_sha256": "sha256:<hex>"}'`. The kernel hands those outputs to the verify as JSON on its
+  standard input, never in its argv, and records them, so the log pins the receipt's content and
+  the receipt pins its evidence. The verify is `maestro dogfood verify-receipt --head=H
+  --surface=S`, which reads a `dogfood-receipt@1` (`schema`, `head`, `surface`, `entry`, `driver`,
+  `evidence` `{path, sha256}`, `result`, `at`; see `maestro_flow::dogfood`). It opens the receipt
+  and the evidence without following a link and without blocking, and takes regular files only.
+  It exits 0 only for a receipt that hashes to `receipt_sha256` and passes for that head and
+  surface, with evidence that hashes to the receipt's digest. Each failure has its own exit status:
+  3 missing, 4 unreadable, 5 malformed, 6 wrong head, 7 wrong surface, 8 not pass, 9 evidence
+  unreadable, 10 evidence mismatch, 11 outputs invalid, 12 receipt changed, 13 receipt not a
+  regular file, 14 evidence not a regular file. `{{outputs.<name>}}` in any command or the
+  workdir is refused when a definition compiles.
+- **Commands an agent's `PATH` cannot stand in for (BRO-3636).** The kernel runs a command's
+  first word `maestro` as its own executable, and `sh`, `git` and `test` as the system's files at
+  their real path, owned by root and writable by no one else, as is every folder above them.
+  Every command searches a fixed system `PATH`. The one exception is the project's own command in
+  a snapshot, which needs the project's toolchain (cargo, bun, ...) and so searches the caller's
+  `PATH`. Faking that toolchain takes the user-level write that can already replace Maestro's own
+  binary, the residual risk the owner accepted in BRO-3635.
+- **The accepting spine (BRO-3636).** `flow spine` (MCP `maestro_flow_spine`) is one record per
+  node and iteration the kernel accepted, with the edge chosen and the exit status of the verify it
+  ran, in log order. Refusals, repairs, leases, re-claims, attempts, performers and timestamps are
+  left out, so two runs of one flow compare equal on it however often their agents were refused.
+  A node re-run in its iteration (a lapsed observation, say) is one record, at the place of its
+  first receipt, holding its latest result; so receipts A, B, then A again read as A, B.
+  `--against` compares two runs of one definition and exits 1 with `spine_differs` and the first
+  difference: a node skipped or reordered, another edge, or another exit. Two instances of
+  different definitions are not compared: `definition_mismatch`, exit 3. It writes nothing.
 - **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
   Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential
   (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP it is the arguments `cwd`, `token`, `node` and
@@ -157,7 +198,7 @@ maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  #
   daemon (`maestro serve --http`) serves every caller on the machine, so it reads a claim only from
   the call's arguments, never from its own environment, for every agent tool. An unverified
   caller is refused (`caller_unverified`), and a claim that does not verify too (`caller_refused`).
-  `next` and `status` read for anyone and write nothing.
+  `next`, `status` and `spine` read for anyone and write nothing.
 - **Where.** The ledger is `.broomva/flows` in the workspace (the same root every reader uses). A
   workspace with no `.broomva` folder (`workspace_unready`) or that is a linked git worktree
   (`workspace_is_worktree`) is refused, and only `start` makes the ledger; the other verbs say

@@ -53,7 +53,14 @@
 //! `complete` checks the claim, then that the node is still enabled now (everything it consumes
 //! current and fresh) and that the outputs fit, then runs the node's own command: a pure node's
 //! `run`, a work node's `verify`, an observe node's `run` (its value is its exit status through
-//! `exit_map`; any other status fails closed). The flows lock is not held while the command runs:
+//! `exit_map`; any other status fails closed). A work node's verify reads the outputs it judges
+//! as JSON on its standard input (BRO-3636); no command's argv or workdir is ever filled from
+//! them, so a performer's text is never read as code. A pure node with a `snapshot` runs in a
+//! snapshot of that commit, never in the working tree (`snapshot`); a snapshot that cannot be made
+//! is refused `snapshot_failed`, and a run that moved the snapshot's HEAD `snapshot_moved`, never
+//! as an exit status of the project's command. The commands
+//! run as `exec` says: `maestro` is the kernel's own executable, `sh`, `git` and `test` the
+//! system's root-owned files, on a fixed `PATH`. The flows lock is not held while the command runs:
 //! it is dropped, and after the run everything is checked again under the lock, against the log
 //! as it is then and at a fresh read of the clock, before anything is appended. A pass appends
 //! `Completed`, the receipt, which spends the token. Anything else about the work appends
@@ -129,10 +136,11 @@ use super::events::{
     Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat, KernelEvent, Owner, Performer, Refused, Started,
     VerifyRecord, digest, marker_digest,
 };
-use super::exec::{self, Limits, Ran};
+use super::exec::{self, Feed, Limits, Ran, Search};
 use super::guard::{self, GUARD_TIMEOUT, Judged};
 use super::ir::{Class, Ir, Iteration, Node};
 use super::replay::{Awaiting, Next, Reason, State, awaiting, guard_input, next_of, pinned, secs};
+use super::snapshot;
 use crate::FlowError;
 use crate::clock;
 use crate::ids::InstanceId;
@@ -603,6 +611,10 @@ struct Plan {
     argv: Vec<String>,
     cwd: PathBuf,
     step: Step,
+    /// A work node's verify reads the outputs it judges here, as JSON, on its standard input.
+    stdin: Option<Vec<u8>>,
+    /// A pure node's `snapshot`, filled: the commit its command runs in a snapshot of.
+    snapshot: Option<String>,
 }
 
 /// What the command is to the node.
@@ -625,12 +637,16 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
     check_outputs(outputs)?;
     enabled(held)?;
     let ir = &held.started.ir;
-    let (words, step) = match held.started.ir.nodes.get(&held.rec.node).map(|n| &n.class) {
-        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command),
-        Some(Class::Work { verify, .. }) => (verify, Step::Command),
-        Some(Class::Effect { reconcile, .. }) if held.effect_started => (reconcile, Step::Reconcile),
+    let node = held.started.ir.nodes.get(&held.rec.node);
+    // Only a work node's verify reads the outputs it judges, and only as data on its standard
+    // input; every command's words are a function of the pinned IR and params, which no performer
+    // chooses.
+    let (words, step, judges) = match node.map(|n| &n.class) {
+        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, false),
+        Some(Class::Work { verify, .. }) => (verify, Step::Command, true),
+        Some(Class::Effect { reconcile, .. }) if held.effect_started => (reconcile, Step::Reconcile, false),
         Some(Class::Effect { run, preconditions, .. }) if !run.is_empty() => {
-            (run, Step::Effect { preconditions: preconditions.clone() })
+            (run, Step::Effect { preconditions: preconditions.clone() }, false)
         }
         _ => return Err(("not_claimable", format!("node {} has no command the kernel runs", held.rec.node))),
     };
@@ -650,7 +666,19 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
     if !cwd.is_absolute() || !cwd.is_dir() {
         return Err(("workdir_invalid", "the workdir is not an absolute path to a directory".to_string()));
     }
-    Ok(Plan { argv, cwd, step })
+    let stdin = judges.then(|| serde_json::to_vec(outputs).unwrap_or_default());
+    let snapshot = match node.and_then(|n| n.snapshot.as_deref()) {
+        Some(rev) => {
+            let commit = fill(ir, params, rev, MAX_ARGV).map_err(|e| ("snapshot_invalid", e))?;
+            if !snapshot::is_object_id(&commit) {
+                let detail = format!("the snapshot's commit {commit:?} is not a full object id");
+                return Err(("snapshot_invalid", detail));
+            }
+            Some(commit)
+        }
+        None => None,
+    };
+    Ok(Plan { argv, cwd, step, stdin, snapshot })
 }
 
 /// The node is enabled now, so everything it consumes is current and fresh: write-time freshness.
@@ -845,9 +873,14 @@ pub fn complete(
     // A claim's cancel deadline ends its command too: the run is no longer than what is left.
     let limits = &cancel_capped(limits, held.rec.cancel_at);
     // The command runs with the flows lock released, so other writers and readers go on.
+    // Every command but the project's own in a snapshot searches the system's PATH (`exec`).
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref() };
     drop(guard);
     let ran_at = clock::now();
-    let ran = exec::run(&plan.argv, &plan.cwd, limits);
+    let ran = match &plan.snapshot {
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    };
     pause!("command_ran");
 
     // Everything again, under the lock, against the log as it is now and the clock read again.

@@ -22,7 +22,10 @@
 //!   and owner marker, recorded in `Started`) writes it. `complete` runs the node's own command
 //!   ([`exec`], bounded in time, output and environment, with the flows lock released) and appends
 //!   the receipt or a refusal; an effect's command runs at most once per iteration, and after a
-//!   run with no receipt its `reconcile` runs instead. `choose` appends a choice node's edge when
+//!   run with no receipt its `reconcile` runs instead. `maestro`, `sh`, `git` and `test` are never
+//!   taken from the caller's `PATH`, a work node's verify reads the outputs it judges on its
+//!   standard input, and a pure node with a `snapshot` runs in a snapshot of one commit, never in
+//!   the working tree (`snapshot`, BRO-3636). `choose` appends a choice node's edge when
 //!   its guard holds. Both write a repeat's `until` verdict when their receipt settles an
 //!   iteration. See `write`'s module docs for ownership, tokens, leases, retry and cancel.
 //! - **Human steps** ([`ask`], BRO-3635). A `human` node's ask is filed through the asks ledger's
@@ -33,6 +36,9 @@
 //!   decisions: an agent proposes one through a Maestro ask filed and linked as a human node's
 //!   is, and the kernel applies it (`Adopted`, or `Retired` and the move to `retired/`) only once
 //!   the owner's approval has landed on main. Until then nothing changes. See [`adoption`].
+//! - **The accepting spine** ([`spine`], BRO-3636). One record per accepted (node, iteration),
+//!   with its edge and verify exit, in log order: what two runs of one flow are compared on
+//!   ([`compare`]), since their raw logs legitimately differ. A read, as `status` is.
 //! - **Events** ([`events`]) are typed bodies of the storage layer's generic event.
 
 pub mod adoption;
@@ -47,7 +53,13 @@ pub mod exec;
 pub mod guard;
 pub mod ir;
 mod jq;
+#[cfg(test)]
+mod piloted;
 mod replay;
+mod snapshot;
+pub mod spine;
+#[cfg(test)]
+mod spined;
 mod write;
 
 pub use adoption::{
@@ -62,6 +74,7 @@ pub use ir::{Ir, Iteration};
 pub use replay::{
     Begun, Enabled, Next, NodeStatus, Reason, Rejected, RepeatState, RepeatStatus, State, Status, next, start, status,
 };
+pub use spine::{DefinitionMismatch, Difference, Side, Spine, SpineRecord, compare, definition_mismatch, spine};
 pub use write::{
     Beat, Choosing, Claim, Completion, DEFAULT_LEASE_SECS, MAX_ARGV, MAX_LEASE_SECS, MAX_OUTPUTS, MAX_TOKEN, Verdict,
     choose, claim, complete, heartbeat,

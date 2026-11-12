@@ -7,8 +7,9 @@
 //! at a pause point (`hooks`) are here too, for the same reason. The fixture is the integration
 //! tests' own (`tests/kernel/claiming.rs`).
 
+// `piloted` and `spined` use it from here: a file is loaded as one module only.
 #[path = "../../tests/kernel/claiming.rs"]
-mod claiming;
+pub(super) mod claiming;
 
 use crate::clock::{self, TestClock};
 // The shared helpers, loaded once in this binary (`hooked`); `claiming` re-exports them.
