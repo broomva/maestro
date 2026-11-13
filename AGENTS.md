@@ -45,9 +45,13 @@ from this checkout's `.control/rcs-parameters.toml`, passed by path, and fails o
 `l3-rate-gate.sh` reports the L3 rate. It runs `scripts/governance-check.py`: `CLAUDE.md` points
 to this file, the shard count above equals the `ci.yml` mutants matrix, all eight paths trigger
 the job and count toward the rate, and the files `CLAUDE.md` names trigger it too. The workspace
-policy's governance tier needs this check to pass before p9 merges such a PR. The checker reads YAML with
-mikefarah yq v4. After changing it, run `python3 scripts/governance-check.py --selftest` and
-`--mutation-proof`, which removes each guard in turn and requires its own case to fail.
+policy's governance tier needs this check to pass before p9 merges such a PR. The checker reads
+YAML with mikefarah yq v4. Every refusal in it is a guard in one registry, with its own cases,
+except the input readers' (a file, a count or a TOML or YAML document it cannot read). After
+changing it, run `python3 scripts/governance-check.py --selftest`, which also fails when a refusal
+bypasses the registry or a registered guard is never evaluated, and `--mutation-proof`, which
+disables each guard alone and requires its own cases to change outcome and every other case to
+keep its outcome.
 
 ## Copy
 

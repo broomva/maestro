@@ -101,8 +101,9 @@ jobs:
           out=$(python3 -I scripts/governance-check.py 2>&1)
           status=$?
           # The selftest seeds breaks into a tree that holds: on a broken tree it would only bury
-          # the break under its own failures. The mutation proof then removes each guard in turn
-          # and requires that guard's own selftest case to fail.
+          # the break under its own failures. The mutation proof then disables each registered
+          # guard alone and requires its own cases to change outcome and every other case to keep
+          # its outcome.
           self="selftest: skipped, the contract does not hold"
           if [ "$status" = 0 ]; then
             self=$(python3 -I scripts/governance-check.py --selftest 2>&1)

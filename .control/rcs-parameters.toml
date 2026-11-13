@@ -34,11 +34,11 @@
 #   - stability-check runs compute-lambda.sh --strict, which fails when a
 #     cached [derived.lambda] value drifts from its recomputed value by more
 #     than 1e-4. scripts/governance-check.py (rcs-levels) requires exactly
-#     the levels L0 to L3, each with finite numeric parameters and a cached
-#     lambda.
-#   - Run `bash <bstack checkout>/scripts/compute-lambda.sh --strict --human`
-#     from this repository's root after edits to see the per-level impact
-#     before committing.
+#     the levels L0 to L3, each parameter a finite number, and a finite
+#     cached lambda for each.
+#   - Run `bash <bstack checkout>/scripts/compute-lambda.sh --strict --human
+#     --config=.control/rcs-parameters.toml` from this repository's root
+#     after edits to see the per-level impact before committing.
 
 schema_version = 1
 
