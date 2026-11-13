@@ -50,9 +50,12 @@ YAML with mikefarah yq v4 and checks that the pinned `compute-lambda.sh` reads e
 parameters it holds (locally, set `BSTACK` to a bstack checkout at the pin). Every refusal is a
 registered guard, except the input readers' (a file or document the checker cannot read). Each
 guard, disabled alone, fails its own case built from the live values. A completeness scan fails on
-any refusal outside the registry. A guard's predicate logic is verified by review, not proven
-correct for all inputs. After changing the checker, run `python3 scripts/governance-check.py
---selftest` (the scan, then every case) and `--mutation-proof` (each guard disabled alone).
+any refusal outside the registry. Its data tables (the governance paths, the refused characters and
+byte classes, the mutants job's keys, the step order) are part of the reviewed contract: deleting
+an entry removes its guard and its case together. A guard's predicate logic is verified by review,
+not proven correct for all inputs. After changing the checker, run
+`python3 scripts/governance-check.py --selftest` (the scan, then every case) and `--mutation-proof`
+(the scan, then each guard disabled alone).
 
 ## Copy
 

@@ -8,7 +8,7 @@
 # (broomva/workspace .github/workflows/l3-stability.yml), changed so that:
 #   - the job runs scripts/governance-check.py, its selftest and its mutation proof;
 #   - bstack is fetched at a pinned commit, not its default branch, and runs in a cleared
-#     environment bound to this checkout;
+#     environment with a fixed PATH bound to this checkout, before any of the PR's code;
 #   - compute-lambda.sh runs with --strict, so a drifting cached lambda fails the job;
 #   - the triggers add the files CLAUDE.md names and the checks' own inputs;
 #   - the report goes to the job summary, not a PR comment, so the token stays read-only;
@@ -70,18 +70,22 @@ jobs:
           yq --version | grep -q 'mikefarah/yq.* version v4\.' \
             || { echo "::error::mikefarah yq v4 not found"; exit 1; }
 
+      # bstack is fetched and its scripts run before any of the PR's code: the contract step comes
+      # after compute and rate, and the directory is handed on as a step output, not through
+      # GITHUB_ENV, which a step could rewrite.
       - name: Install bstack (pinned, never from the PR)
+        id: install
         env:
           # The bstack commit that judges this PR, by full SHA. The scripts that judge a PR must
           # not come from it (BRO-2651), and a branch or tag can move under a reviewed workflow.
           # Bumping the pin is a reviewed change to this file (a P20 pass, and this gate runs on
           # it); scripts/governance-check.py (bstack-calls) fails on anything but a full SHA and
-          # this exact recipe. git runs in a cleared environment (g), so an inherited GIT_DIR or
-          # GIT_WORK_TREE cannot redirect it. A failed fetch fails the job.
+          # this exact recipe. git runs in a cleared environment with a fixed PATH (g), so an
+          # inherited GIT_DIR, GIT_WORK_TREE or PATH cannot redirect it. A failed fetch fails the job.
           BSTACK_REV: 77c24fc40c46771ad7236c3d9af447a28f200f28
         run: |
           set -euo pipefail
-          g() { env -i PATH="$PATH" HOME="$HOME" git "$@"; }
+          g() { env -i PATH=/usr/bin:/bin HOME="$HOME" git "$@"; }
           DEST="$RUNNER_TEMP/bstack-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           rm -rf "$DEST"
           g init -q "$DEST"
@@ -89,16 +93,51 @@ jobs:
           g -C "$DEST" checkout -q --detach FETCH_HEAD
           test "$(g -C "$DEST" rev-parse HEAD)" = "$BSTACK_REV"
           echo "bstack $BSTACK_REV"
-          echo "BSTACK=$DEST" >> "$GITHUB_ENV"
+          echo "dir=$DEST" >> "$GITHUB_OUTPUT"
 
       # Each step below records its output and exit status and continues, so the summary reports
-      # all three. The last step judges them. bstack's scripts run with a cleared environment
-      # (env -i) and this checkout bound explicitly: they read BROOMVA_WORKSPACE, GIT_DIR and
-      # BSTACK_L3_CORRECTION, which a self-hosted runner could otherwise supply, pointing them at
-      # another checkout. scripts/governance-check.py (bstack-calls) holds every call to this.
+      # all three. The last step judges them. bstack's scripts run in a cleared environment with a
+      # fixed PATH (env -i) and this checkout bound explicitly: they read BROOMVA_WORKSPACE,
+      # GIT_DIR and BSTACK_L3_CORRECTION, which a self-hosted runner could otherwise supply.
+      # scripts/governance-check.py (bstack-calls) holds every call to this, and the step order.
+      - name: Compute lambda (RCS stability budget)
+        id: compute
+        run: |
+          set +e
+          # --strict: exit 3 when a cached lambda drifts from its recomputed value by over 1e-4.
+          out=$(env -i PATH=/usr/bin:/bin HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "${{ steps.install.outputs.dir }}"/scripts/compute-lambda.sh --strict --human --config="$PWD/.control/rcs-parameters.toml" 2>&1)
+          status=$?
+          echo "$out"
+          delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "result<<$delim"
+            echo "$out"
+            echo "$delim"
+            echo "status=$status"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Run L3 rate gate
+        id: rate
+        run: |
+          set +e
+          out=$(env -i PATH=/usr/bin:/bin HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "${{ steps.install.outputs.dir }}"/scripts/l3-rate-gate.sh 2>&1)
+          status=$?
+          echo "$out"
+          delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "result<<$delim"
+            echo "$out"
+            echo "$delim"
+            echo "status=$status"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
       - name: Governance contract (scripts/governance-check.py)
         id: contract
+        # The checker's bstack-parameters check reads the pinned compute-lambda.sh.
         run: |
+          export BSTACK="${{ steps.install.outputs.dir }}"
           set +e
           out=$(python3 -I scripts/governance-check.py 2>&1)
           status=$?
@@ -124,39 +163,6 @@ jobs:
             echo "result<<$delim"
             echo "$out"
             echo "$self"
-            echo "$delim"
-            echo "status=$status"
-          } >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Compute lambda (RCS stability budget)
-        id: compute
-        run: |
-          set +e
-          # --strict: exit 3 when a cached lambda drifts from its recomputed value by over 1e-4.
-          out=$(env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/compute-lambda.sh --strict --human --config="$PWD/.control/rcs-parameters.toml" 2>&1)
-          status=$?
-          echo "$out"
-          delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-          {
-            echo "result<<$delim"
-            echo "$out"
-            echo "$delim"
-            echo "status=$status"
-          } >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Run L3 rate gate
-        id: rate
-        run: |
-          set +e
-          out=$(env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/l3-rate-gate.sh 2>&1)
-          status=$?
-          echo "$out"
-          delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-          {
-            echo "result<<$delim"
-            echo "$out"
             echo "$delim"
             echo "status=$status"
           } >> "$GITHUB_OUTPUT"
