@@ -1,8 +1,9 @@
 # bstack Gate G2 (BRO-3702): the RCS stability budget, the L3 rate report and Maestro's
 # governance contract on every PR that touches a governance path. p9 judges this repository's PRs
 # by the workspace policy, whose governance tier (auto_merge.gates.governance) needs a passing
-# check named exactly `stability-check` on a PR touching CLAUDE.md, AGENTS.md or
-# .control/rcs-parameters.toml (the tier's paths that exist here).
+# check named exactly `stability-check` on a PR touching any of its eight paths. Three exist
+# here (CLAUDE.md, AGENTS.md, .control/rcs-parameters.toml); all eight trigger the job, so a PR
+# that adds one of the other five gets the check too.
 # From bstack's assets/templates/gh-workflow-l3-stability.yml.template, as the workspace runs it
 # (broomva/workspace .github/workflows/l3-stability.yml), with four changes: the job also runs
 # scripts/governance-check.py; bstack is pinned to a commit, not its default branch; the report
@@ -13,12 +14,17 @@ on:
   pull_request:
     branches: [main]
     # The shape is fixed, exactly on.pull_request with branches [main] and paths:
-    # scripts/governance-check.py fails on another event, paths-ignore or types, and when a
-    # governance path present in the repository, or an input of its checks, is missing here.
+    # scripts/governance-check.py fails on another event, paths-ignore, types or a `!` entry,
+    # and when one of the policy's governance paths, or an input of its checks, is missing here.
     paths:
       - 'CLAUDE.md'
       - 'AGENTS.md'
+      - '.control/policy.yaml'
       - '.control/rcs-parameters.toml'
+      - 'METALAYER.md'
+      - 'docs/references/agent-operating-protocols.md'
+      - 'docs/references/current-work.md'
+      - 'docs/references/workspace-context.md'
       - '.github/workflows/l3-stability.yml'
       - '.github/workflows/ci.yml'
       - 'scripts/governance-check.py'
@@ -43,9 +49,10 @@ jobs:
       - name: Python floor
         run: |
           set -euo pipefail
-          # The runner's own python3, as the workspace's gate does: no setup-python, which cannot
-          # create its tool cache on a self-hosted runner. 3.11 for tomllib, which
-          # compute-lambda.sh and governance-check.py read the parameters with.
+          # The runner's own python3, as the workspace's gate does. The checks need only the
+          # standard library, so the job installs nothing and runs on any runner's python3 (the
+          # workspace's self-hosted macOS runners cannot run setup-python). 3.11 for tomllib,
+          # which compute-lambda.sh and governance-check.py read the parameters with.
           python3 -VV
           python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
             || { echo "::error::python3 older than 3.11"; exit 1; }
@@ -159,7 +166,7 @@ jobs:
           elif rate == "1":
               verdict = "**L3 rate exceeded**: the budget assumes one governance commit per tau_a_3 (p9's l3_rate gate enforces it)"
           else:
-              verdict = "**All gates pass**: contract holds, composite stable, rate within budget"
+              verdict = "**All gates pass**: contract holds, composite stable, no drift, rate within budget"
           def block(title, text):
               # A fence longer than any backtick run inside, so quoted text cannot close it.
               run = max([len(r) for r in re.findall("`+", text)] or [0])
@@ -178,9 +185,9 @@ jobs:
           COMPUTE_STATUS: ${{ steps.compute.outputs.status }}
           RATE_STATUS: ${{ steps.rate.outputs.status }}
         run: |
-          # The contract, lambda > 0 and no drift are the gate. L3 rate exceeded (exit 1) is reported, not
-          # failed: p9's l3_rate gate enforces it at merge. Any other status, empty included, is
-          # no verdict and fails closed.
+          # The contract, lambda > 0 and no drift are the gate. L3 rate exceeded (exit 1) is
+          # reported, not failed: p9's l3_rate gate enforces it at merge. Any other status, empty
+          # included, is no verdict and fails closed.
           if [ "$CONTRACT_STATUS" != "0" ]; then
             echo "FAIL: governance contract broken (exit '$CONTRACT_STATUS')"
             exit 1

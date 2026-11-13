@@ -8,6 +8,7 @@ Exit 0 when every check holds, 1 when one does not, 2 on usage. A file that cann
 phrase that cannot be found, is a failure, never a pass. Standard library only (tomllib: Python
 3.11+), because the job runs the runner's own python3, with no setup-python.
 """
+import math
 import os
 import re
 import shutil
@@ -18,7 +19,8 @@ from pathlib import Path
 
 # The workspace policy's governance tier (broomva/workspace .control/policy.yaml,
 # auto_merge.gates.governance.paths). p9 needs a passing `stability-check` on a PR touching any of
-# them. The ones present in this repository must trigger the job and be counted by the rate gate.
+# them. All eight must trigger the job and be counted by the rate gate, present here or not: a PR
+# that adds one is governance-class too.
 GOVERNANCE_PATHS = (
     "CLAUDE.md",
     "AGENTS.md",
@@ -35,6 +37,8 @@ PARAMETERS = ".control/rcs-parameters.toml"
 SELF = "scripts/governance-check.py"
 # The levels of bstack's rcs-parameters.toml template, in its order.
 LEVELS = ("L0", "L1", "L2", "L3")
+# The parameters bstack's compute-lambda.sh reads for each level.
+LEVEL_PARAMETERS = ("gamma", "L_theta", "rho", "L_d", "eta", "beta", "tau_bar", "nu", "tau_a")
 # Besides the governance paths, a change to any input of a check must run the job.
 CONTRACT_INPUTS = (WORKFLOW, CI, SELF)
 
@@ -164,16 +168,23 @@ def scalars(lines, entry, where):
     return [unquote(x) for x in items]
 
 
+def claude_paths(text):
+    """The repository paths CLAUDE.md names: backticked, with a slash or a file extension."""
+    named = re.findall(r"`([^`\s]+)`", text)
+    return named, [p for p in named if "/" in p or re.search(r"\.(md|html|ya?ml|toml|sh|py|rs)$", p)]
+
+
 def check_claude_pointer(root):
-    """CLAUDE.md is a pointer file (not a copy, not a symlink) that sends agents to AGENTS.md, and
-    every repository path it names exists."""
+    """CLAUDE.md is a pointer file, neither a symlink nor a copy of AGENTS.md, that names
+    `AGENTS.md`, and every repository path it names exists."""
     if (root / "CLAUDE.md").is_symlink():
         raise Broken("CLAUDE.md is a symlink; it is a pointer file that names AGENTS.md")
     text = read(root, "CLAUDE.md")
-    named = re.findall(r"`([^`\s]+)`", text)
+    if text == read(root, "AGENTS.md"):
+        raise Broken("CLAUDE.md is a copy of AGENTS.md; it is a pointer file that names AGENTS.md")
+    named, paths = claude_paths(text)
     if "AGENTS.md" not in named:
         raise Broken("CLAUDE.md does not point to `AGENTS.md`")
-    paths = [p for p in named if "/" in p or re.search(r"\.(md|html|ya?ml|toml|sh|py|rs)$", p)]
     missing = [p for p in paths if not (root / p).is_file()]
     if missing:
         raise Broken("CLAUDE.md names paths that do not exist: " + ", ".join(missing))
@@ -234,7 +245,7 @@ def check_triggers(root):
         triggers = set(paths)
     except Broken as e:
         raise Broken(f"unsupported trigger shape in {WORKFLOW}: {e}")
-    want = [p for p in GOVERNANCE_PATHS if (root / p).exists()] + list(CONTRACT_INPUTS)
+    want = list(GOVERNANCE_PATHS) + list(CONTRACT_INPUTS)
     missing = [p for p in want if p not in triggers]
     if missing:
         raise Broken(f"{WORKFLOW} does not run on: " + ", ".join(missing))
@@ -258,10 +269,10 @@ def check_rate_paths(root):
     magic = [x for x in patterns if x.startswith(":")]
     if magic:
         raise Broken(f"{PARAMETERS} [gates.l3_paths] uses pathspec magic: " + ", ".join(magic))
-    missing = [p for p in GOVERNANCE_PATHS if (root / p).exists() and p not in patterns]
+    missing = [p for p in GOVERNANCE_PATHS if p not in patterns]
     if missing:
         raise Broken(f"{PARAMETERS} [gates.l3_paths] does not count: " + ", ".join(missing))
-    return f"{len(patterns)} patterns count every governance path present"
+    return f"{len(patterns)} patterns count every governance path"
 
 
 def check_levels(root):
@@ -279,7 +290,14 @@ def check_levels(root):
     if not isinstance(cached, dict) or sorted(cached) != sorted(LEVELS):
         raise Broken(f"{PARAMETERS} [derived.lambda] caches "
                      f"{sorted(cached) if isinstance(cached, dict) else 'nothing'}, not {list(LEVELS)}")
-    return "levels " + ", ".join(LEVELS) + ", each with a cached lambda"
+    # A non-finite value computes a non-finite lambda (gamma = inf gives omega = inf, exit 0).
+    def finite(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    bad = [f"{lvl['id']}.{k}" for lvl in levels for k in LEVEL_PARAMETERS if not finite(lvl.get(k))]
+    bad += [f"derived.lambda.{k}" for k in LEVELS if not finite(cached[k])]
+    if bad:
+        raise Broken(f"{PARAMETERS} has missing or non-finite numbers: " + ", ".join(bad))
+    return "levels " + ", ".join(LEVELS) + ", finite, each with a cached lambda"
 
 
 def check_lambda_strict(root):
@@ -381,7 +399,7 @@ def matrix(shards, style="flow"):
     return apply
 
 
-def selftest(root):
+def selftest(root, quiet=False):
     """Each seeded break fails exactly the check that guards it; each benign rewrite passes."""
     count = re.search(r"\bafter\s+(\S+(?:[ -]\S+)??)\s+`mutants`\s+jobs\b", read(root, "AGENTS.md"))
     if not count:
@@ -401,7 +419,10 @@ def selftest(root):
         ("CLAUDE.md no longer names AGENTS.md", edit("CLAUDE.md", "`AGENTS.md`", "`RULES.md`"),
          ["claude-points-to-agents"]),
         ("CLAUDE.md is a symlink to AGENTS.md", to_symlink, ["claude-points-to-agents"]),
-        ("a path CLAUDE.md names is gone", lambda r: (r / "README.md").unlink(),
+        ("CLAUDE.md names a path that does not exist", edit("CLAUDE.md", "`AGENTS.md`",
+                                                            "`AGENTS.md` and `docs/missing.md`"),
+         ["claude-points-to-agents"]),
+        ("CLAUDE.md is a copy of AGENTS.md", lambda r: shutil.copyfile(r / "AGENTS.md", r / "CLAUDE.md"),
          ["claude-points-to-agents"]),
         ("AGENTS.md names one shard more", edit("AGENTS.md", phrase,
                                                 f"after {n + 1} `mutants` jobs"), ["shard-count"]),
@@ -420,6 +441,14 @@ def selftest(root):
         ("the workflow stops running on ci.yml", edit(WORKFLOW, f"      - '{CI}'\n", ""),
          ["trigger-paths"]),
         ("the rate gate stops counting AGENTS.md", edit(PARAMETERS, '    "AGENTS.md",\n', ""),
+         ["rate-paths"]),
+        # A governance path the repository lacks still triggers the job and counts: adding it is a
+        # governance change.
+        ("the workflow stops running on METALAYER.md", edit(WORKFLOW, "      - 'METALAYER.md'\n", ""),
+         ["trigger-paths"]),
+        ("the workflow stops running on a docs reference", edit(
+            WORKFLOW, "      - 'docs/references/current-work.md'\n", ""), ["trigger-paths"]),
+        ("the rate gate stops counting METALAYER.md", edit(PARAMETERS, '    "METALAYER.md",\n', ""),
          ["rate-paths"]),
         ("rcs-parameters.toml is unreadable", lambda r: (r / PARAMETERS).unlink(),
          ["rate-paths", "rcs-levels"]),
@@ -471,6 +500,15 @@ def selftest(root):
         ("every level is removed", lambda r: [resub(PARAMETERS, LEVEL.format(x), "")(r) for x in LEVELS],
          ["rcs-levels"]),
         ("a cached lambda is removed", resub(PARAMETERS, r"^L3 = .*\n", ""), ["rcs-levels"]),
+        ("a gamma is infinite", resub(PARAMETERS, r"^gamma( *)= .*$", r"gamma\1= inf"), ["rcs-levels"]),
+        ("a tau_a is not a number", resub(PARAMETERS, r"^tau_a( *)= .*$", r"tau_a\1= nan"),
+         ["rcs-levels"]),
+        ("a rho is a string", resub(PARAMETERS, r"^rho( *)= (.*)$", r'rho\1= "\2"'), ["rcs-levels"]),
+        ("a cached lambda is infinite", resub(PARAMETERS, r"^L3 = .*$", "L3 = inf"), ["rcs-levels"]),
+        # inf - inf is nan, and nan > 1e-4 is false: compute-lambda.sh --strict exits 0 on this.
+        ("a gamma and its cached lambda are both infinite", lambda r: (
+            resub(PARAMETERS, r"^gamma( *)= .*$", r"gamma\1= inf")(r),
+            resub(PARAMETERS, r"^L0 = .*$", "L0 = inf")(r)), ["rcs-levels"]),
         # Pathspec magic in the rate gate's list removes paths from its count.
         ("the rate list excludes AGENTS.md", edit(PARAMETERS, '    "AGENTS.md",\n',
                                                   '    "AGENTS.md",\n    ":(exclude)AGENTS.md",\n'),
@@ -490,23 +528,37 @@ def selftest(root):
          []),
         ("trigger paths unquoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", "      - AGENTS.md\n"), []),
     ]
-    inputs = set(GOVERNANCE_PATHS) | set(CONTRACT_INPUTS) | {"README.md"}
-    inputs |= set(re.findall(r"`([^`\s]+/[^`\s]+)`", read(root, "CLAUDE.md")))
+    # Every file a check reads: the governance paths, the checks' inputs, and every path CLAUDE.md
+    # names, whatever directory it is in.
+    inputs = set(GOVERNANCE_PATHS) | set(CONTRACT_INPUTS) | set(claude_paths(read(root, "CLAUDE.md"))[1])
+
+    def nested(copy):
+        """The selftest of a tree whose CLAUDE.md also names another root file: it must pass."""
+        edit("CLAUDE.md", "`AGENTS.md`", "`AGENTS.md` and `NOTES.md`")(copy)
+        (copy / "NOTES.md").write_text("notes\n", encoding="utf-8")
+        return selftest(copy, quiet=True)
+
     bad = 0
-    for desc, seed, want in cases:
+    for desc, seed, want in cases + ([] if quiet else [
+            ("the selftest of a tree whose CLAUDE.md names another root file", nested, None)]):
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp)
             for rel in inputs:
                 if (root / rel).is_file():
                     (copy / rel).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(root / rel, copy / rel)
-            seed(copy)
-            got = run(copy, quiet=True)
+            if want is None:
+                failed = seed(copy)
+                got, want = ([f"{failed} selftest cases"] if failed else []), []
+            else:
+                seed(copy)
+                got = run(copy, quiet=True)
         ok = got == want
         bad += not ok
-        print(f"{'ok  ' if ok else 'FAIL'} selftest: {desc}: "
-              f"{'fails ' + ', '.join(got) if got else 'passes'}"
-              + ("" if ok else f" (want {'fails ' + ', '.join(want) if want else 'passes'})"))
+        if not quiet:
+            print(f"{'ok  ' if ok else 'FAIL'} selftest: {desc}: "
+                  f"{'fails ' + ', '.join(got) if got else 'passes'}"
+                  + ("" if ok else f" (want {'fails ' + ', '.join(want) if want else 'passes'})"))
     return bad
 
 

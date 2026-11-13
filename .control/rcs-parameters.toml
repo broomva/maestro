@@ -3,8 +3,9 @@
 # =============================================================================
 #
 # Per-level parameters for the Recursive Controlled Systems (RCS) stability
-# budget. These values are read by bstack/scripts/compute-lambda.sh and by
-# bstack doctor §14 to verify the composite system is exponentially stable.
+# budget. In this repository the `stability-check` job (.github/workflows/
+# l3-stability.yml) reads them with bstack's scripts/compute-lambda.sh and
+# scripts/l3-rate-gate.sh, at the bstack commit the workflow pins.
 #
 # Formula (papers/p0-foundations/main.tex, Theorem 1):
 #
@@ -25,13 +26,19 @@
 #   - L3 (governance): KEEP CONSERVATIVE — tau_a = 86400s (1 day) is the
 #     stability budget's load-bearing assumption. Faster governance churn
 #     destabilizes the whole hierarchy.
+# Maestro keeps the template's defaults unchanged (bstack 77c24fc, BRO-3702);
+# the workspace's lambda values are the same.
 #
 # Editing rules:
 #   - Bump schema_version below when adding/removing fields.
-#   - bstack doctor --strict verifies the cached [derived.lambda] block
-#     matches recomputed values; CI will fail if they drift.
-#   - Run `bash scripts/compute-lambda.sh --human` after edits to see the
-#     per-level impact before committing.
+#   - stability-check runs compute-lambda.sh --strict, which fails when a
+#     cached [derived.lambda] value drifts from its recomputed value by more
+#     than 1e-4. scripts/governance-check.py (rcs-levels) requires exactly
+#     the levels L0 to L3, each with finite numeric parameters and a cached
+#     lambda.
+#   - Run `bash <bstack checkout>/scripts/compute-lambda.sh --strict --human`
+#     from this repository's root after edits to see the per-level impact
+#     before committing.
 
 schema_version = 1
 
@@ -102,9 +109,11 @@ display_digits = 3
 # Days timescale: CLAUDE.md / AGENTS.md / .control/policy.yaml mutations.
 #
 # CRITICAL: tau_a = 86400s (1 day) is the load-bearing assumption. Faster
-# governance churn destabilizes the entire RCS hierarchy. The bstack pre-commit
-# hook (`githook-pre-commit-l3-rate.sh`) enforces this rate by counting L3-class
-# commits in the last tau_a window.
+# governance churn destabilizes the entire RCS hierarchy. In this repository,
+# p9's l3_rate gate enforces this rate at merge (one governance landing on
+# main per window); stability-check only reports bstack's l3-rate-gate.sh,
+# which counts L3-class commits in the last tau_a window. Maestro installs no
+# pre-commit hook.
 
 [[levels]]
 id             = "L3"
@@ -122,9 +131,10 @@ tau_a          = 86400.0
 display_digits = 4
 
 # -----------------------------------------------------------------------------
-# Derived values — cached for human readers, verified by compute-lambda.sh
+# Derived values: cached for human readers, verified by compute-lambda.sh
 # -----------------------------------------------------------------------------
-# scripts/compute-lambda.sh --strict recomputes these and fails if drift > 1e-4.
+# bstack's compute-lambda.sh --strict, run by stability-check, recomputes these
+# and fails if drift > 1e-4.
 
 [derived.lambda]
 L0 = 1.455357
@@ -139,11 +149,12 @@ level = "L3"
 # -----------------------------------------------------------------------------
 # Governance path patterns (read by l3-rate-gate.sh)
 # -----------------------------------------------------------------------------
-# Files that match these git-pathspec patterns count as L3 mutations.
-# Used by:
-#   - .githooks/pre-commit (pre-commit gate G1)
-#   - .github/workflows/l3-stability.yml (CI gate G2)
-#   - .claude/settings.json PreToolUse hook (Claude Code gate G0)
+# Files that match these git-pathspec patterns count as L3 mutations: the
+# workspace policy's eight governance paths, as the workspace lists them.
+# Used here by .github/workflows/l3-stability.yml (CI gate G2) only: Maestro
+# installs neither the pre-commit gate (G1) nor the Claude Code hook (G0).
+# scripts/governance-check.py (rate-paths) requires all eight and refuses
+# pathspec magic such as :(exclude).
 
 [gates.l3_paths]
 patterns = [
@@ -152,4 +163,7 @@ patterns = [
     ".control/policy.yaml",
     ".control/rcs-parameters.toml",
     "METALAYER.md",
+    "docs/references/agent-operating-protocols.md",
+    "docs/references/current-work.md",
+    "docs/references/workspace-context.md",
 ]
