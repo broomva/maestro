@@ -29,12 +29,40 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
 
 ```bash
 bash scripts/ci.sh   # fmt, clippy, tests, mutation check, plugin parity; CI runs it as the `ci` check,
-                     # after sixteen `mutants` jobs split the mutation check (MUTANT_SHARD=i/N)
+                     # after twenty-four `mutants` jobs split the mutation check (MUTANT_SHARD=i/N)
 ```
 
 A behaviour change ships with a test. A guard, such as an authority check, a drift rule or a
 degraded-source rule, ships with a test that fails when the guard is removed, and a line in
 `scripts/mutation-check.sh` that proves it.
+
+A PR touching one of the workspace policy's eight governance paths (here `CLAUDE.md`, `AGENTS.md`
+and `.control/rcs-parameters.toml`; also `METALAYER.md`, `.control/policy.yaml` and three
+`docs/references/` files, should a PR add one) runs the `stability-check` job
+(`.github/workflows/l3-stability.yml`, BRO-3702). It runs bstack's scripts, pinned to one commit, in
+a cleared environment bound to this checkout: `compute-lambda.sh` recomputes the RCS lambda from
+this checkout's `.control/rcs-parameters.toml`, passed by path, and fails on drift, and
+`l3-rate-gate.sh` reports the L3 rate. It runs `scripts/governance-check.py`: `CLAUDE.md` points to
+this file, the shard count above equals the length of the `ci.yml` shard list (3 to 83 shards, the
+range its selftest models), all eight paths trigger the job and count toward the rate when a commit
+modifies them (the pinned `l3-rate-gate.sh` does not count additions or deletions), and the
+backticked paths in `CLAUDE.md` (a token with a slash or a file extension) exist in exact case and
+trigger it too; prose and links in `CLAUDE.md` are not read. The shard check is count consistency
+only: whether `ci.yml` actually runs the mutation check (its job and step conditions,
+`MUTANT_SHARD`, `continue-on-error`, the `ci` job's needs) is guarded by the required `ci` check and
+by P20 review of `ci.yml` changes, not by this check. The workspace policy's governance tier needs
+this check to pass before p9 merges such a PR. The checker reads YAML with mikefarah yq v4 and
+checks that the pinned `compute-lambda.sh` reads exactly the level parameters it holds (locally, set
+`BSTACK` to a bstack checkout at the pin). Every refusal is a registered guard, except the input
+readers' (a file or document the checker cannot read). Each guard, disabled alone, fails its own
+case built from the live values. A completeness scan is registry hygiene: it fails on any refusal
+outside the registry, and it runs before any check, in every mode. Its data tables (the governance
+paths, the refused characters and byte classes, the step order) are part of the reviewed contract:
+deleting an entry removes its guard and its case together. The checker and the workflow come from
+the PR they judge; they catch mistakes, not a PR that rewrites them, which is P20 review's job. A
+guard's predicate logic is verified by review, not proven correct for all inputs. After changing the
+checker, run `python3 scripts/governance-check.py --selftest` (the scan, then every case) and
+`--mutation-proof` (the scan, then each guard disabled alone).
 
 ## Copy
 
