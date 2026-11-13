@@ -5,8 +5,10 @@
     python3 -I scripts/governance-check.py --selftest        # every case, the runner and completeness
     python3 -I scripts/governance-check.py --mutation-proof  # disable each guard alone
 
-What it checks: CLAUDE.md is a pointer to AGENTS.md whose named files exist; the `mutants` job
-count AGENTS.md names equals the length of ci.yml's shard list; the stability workflow's triggers;
+What it checks: CLAUDE.md is a pointer to AGENTS.md whose backticked paths (a token with a slash
+or a file extension) exist, in exact case, and trigger the job; prose and links in CLAUDE.md are
+not read. The `mutants` job count AGENTS.md names equals the length of ci.yml's shard list, of 2 to
+91 shards (the range the selftest models); the stability workflow's triggers;
 the rate gate's paths; the RCS levels; how the workflow fetches and calls the pinned bstack; and
 that the pinned compute-lambda.sh reads the level parameters held here.
 
@@ -22,9 +24,9 @@ What it claims, exactly:
 - A completeness scan is registry hygiene. Statically, above the mutation-proof marker and outside
   refuse(), the runner and the readers: no raise, assert, try or with, no use of Broken, no name
   defined below the marker, no gid at two refuse() call sites, and, as hygiene only, none of the
-  names in HYGIENE_NAMES or attributes in HYGIENE_ATTRIBUTES. --selftest and --mutation-proof
-  report these static findings and stop before running any check. Then the unchanged fixture must
-  evaluate every registered guard.
+  names in HYGIENE_NAMES or attributes in HYGIENE_ATTRIBUTES. Every mode (the plain check,
+  --selftest, --mutation-proof) runs this static scan first and stops on a finding before running
+  any check. Then, in --selftest, the unchanged fixture must evaluate every registered guard.
 - The data tables (GOVERNANCE_PATHS, CONTRACT_INPUTS, PLAIN, GLOB_CHARS, BYTE_CLASSES, STEPS, LEVELS)
   are part of the reviewed contract: deleting an entry removes its guard and its case together.
   LEVEL_PARAMETERS is the only table cross-checked, against the pinned bstack.
@@ -278,16 +280,32 @@ def claude_paths(text):
     return named, paths
 
 
+def exists_exactly(root, rel):
+    """rel is a file under root, each part named in exact case (GitHub's path filters are
+    case-sensitive; Path.is_file is not, on a case-insensitive file system)."""
+    here = Path("/") if rel.startswith("/") else root
+    for part in rel.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            here = here.parent
+            continue
+        if not here.is_dir() or part not in os.listdir(here):
+            return False
+        here = here / part
+    return here.is_file()
+
+
 def check_claude_pointer(root):
     """CLAUDE.md is a pointer file, neither a symlink nor a copy of AGENTS.md, that names
-    `AGENTS.md`, and every repository path it names exists."""
+    `AGENTS.md`, and every backticked path it names exists in exact case."""
     refuse("claude.not-symlink", (root / "CLAUDE.md").is_symlink(), "CLAUDE.md is a symlink")
     text = read(root, "CLAUDE.md")
     refuse("claude.not-copy", text == read(root, "AGENTS.md"), "CLAUDE.md is a copy of AGENTS.md")
     named, paths = claude_paths(text)
     refuse("claude.names-agents", "AGENTS.md" not in named, "CLAUDE.md does not point to `AGENTS.md`")
-    missing = [p for p in paths if not (root / p).is_file()]
-    refuse("claude.paths-exist", missing, lambda: "CLAUDE.md names paths that do not exist: " + ", ".join(missing))
+    missing = [p for p in paths if not exists_exactly(root, p)]
+    refuse("claude.paths-exist", missing, lambda: "CLAUDE.md names paths that do not exist in exact case: " + ", ".join(missing))
     return "points to " + ", ".join(paths)
 
 
@@ -326,6 +344,8 @@ def check_shard_count(root):
     items = shards if isinstance(shards, list) else []
     refuse("matrix.shard-range", not isinstance(shards, list) or [type(x) for x in items] != [int] * len(items)
            or items != list(range(len(items))), "unsupported matrix shape: shard is not the integers 0..n-1")
+    refuse("matrix.shard-count-range", isinstance(shards, list) and not 2 <= len(items) <= 91,
+           f"{len(items)} shards: the selftest models 2 to 91")
     refuse("count.matches", named is not None and named != len(items),
            lambda: f"AGENTS.md says {found[0]} ({named}) `mutants` jobs, but the matrix has {len(items)} shards")
     return f"AGENTS.md and {CI} both run {named} shards"
@@ -345,6 +365,8 @@ def check_triggers(root):
     refuse("on.paths-strings", not isinstance(paths, list) or any(not isinstance(x, str) for x in paths),
            "on.pull_request.paths is not a list of strings")
     strings = [x for x in paths if isinstance(x, str)] if isinstance(paths, list) else []
+    repeated = sorted({x for x in strings if strings.count(x) > 1})
+    refuse("on.paths-once", repeated, lambda: "on.pull_request.paths repeats " + ", ".join(repeated))
     negated = [x for x in strings if x.startswith("!")]
     refuse("on.paths-no-negation", negated, lambda: "on.pull_request.paths negates " + ", ".join(negated))
     for p in GOVERNANCE_PATHS + CONTRACT_INPUTS:
@@ -364,6 +386,8 @@ def check_rate_paths(root):
     strings = [x for x in patterns if isinstance(x, str)] if isinstance(patterns, list) else []
     unplain = [x for x in strings if not (x.isascii() and x.isprintable())]
     refuse("rate.printable-ascii", unplain, lambda: f"[gates.l3_paths] has unprintable patterns {unplain!r}")
+    repeated = sorted({x for x in strings if strings.count(x) > 1})
+    refuse("rate.once", repeated, lambda: "[gates.l3_paths] repeats " + ", ".join(repeated))
     magic = [x for x in strings if x.startswith(":")]
     refuse("rate.no-pathspec-magic", magic, lambda: "[gates.l3_paths] uses pathspec magic: " + ", ".join(magic))
     for name, test in PLAIN.items():
@@ -782,7 +806,9 @@ register("claude.names-agents", ["claude-points-to-agents"], ("CLAUDE.md names e
 register("claude.paths-exist", ["claude-points-to-agents"],
          *ends(lambda last: ("CLAUDE.md names a missing file", with_fresh(
              "missing.md", lambda p: seq(named(p, last), triggered(p))))),
-         ("CLAUDE.md names a missing .txt file", with_fresh("RULES.txt", lambda p: seq(named(p), triggered(p)))))
+         ("CLAUDE.md names a missing .txt file", with_fresh("RULES.txt", lambda p: seq(named(p), triggered(p)))),
+         ("CLAUDE.md names a file in another case", lambda r, t: seq(
+             named(fresh(t, "case.md").upper()), triggered(fresh(t, "case.md").upper()), write(fresh(t, "case.md"), "x\n"))(r, t)))
 register("claude.path.not-absolute", CC, *ends(absolute))
 register("claude.path.no-dot-slash", CC, *unplain("./AGENTS.md"))
 register("claude.path.no-dot-dot", CC, *unplain("x/../AGENTS.md", "x/keep"))
@@ -806,6 +832,8 @@ register("matrix.shard-range", SC,
          ("the shard list repeats a value", matrix(lambda t: live(t)[:-1] + live(t)[:1])),
          ("a shard is a string", matrix(lambda t: ['"0"'] + live(t)[1:])),
          ("a shard is a boolean", matrix(lambda t: live(t)[:-1] + ["true"])))
+register("matrix.shard-count-range", SC, ("one shard, named one", seq(
+    edit("AGENTS.md", lambda t: t.phrase, "after one `mutants` jobs"), matrix(lambda t: ["0"]))))
 register("count.matches", SC, ("ci.yml drops a shard", matrix(lambda t: live(t)[:-1])),
          ("AGENTS.md names one shard more", edit("AGENTS.md", lambda t: t.phrase, lambda t: f"after {t.n + 1} `mutants` jobs")))
 # trigger-paths
@@ -818,6 +846,7 @@ register("on.exactly-branches-paths", WF[:1],
 register("on.branches-main", WF[:1], ("branches widens past main", edit(WORKFLOW, "branches: [main]", "branches: [main, dev]")))
 register("on.paths-strings", WF[:1], *ends(lambda last: ("a trigger path is a mapping", edit(
     WORKFLOW, "concurrency:", "      - x: y\nconcurrency:") if last else edit(WORKFLOW, "    paths:\n", "    paths:\n      - x: y\n"))))
+register("on.paths-once", WF[:1], ("the trigger list repeats AGENTS.md", triggered("AGENTS.md", last=True)))
 register("on.paths-no-negation", WF[:1], *ends(lambda last: ("the trigger list negates AGENTS.md", triggered("!AGENTS.md", last))))
 for p in GOVERNANCE_PATHS + CONTRACT_INPUTS:
     register(f"trigger.{p}", WF[:1], (f"the workflow stops running on {p}", edit(WORKFLOW, f"      - '{p}'\n", "")))
@@ -830,6 +859,7 @@ register("trigger.claude-paths", WF[:1],
 register("rate.strings", RP, *ends(lambda last: ("a rate pattern is a number", edit(
     PARAMETERS, "\n]\n", "\n    1,\n]\n") if last else edit(PARAMETERS, "patterns = [\n", "patterns = [\n    1,\n"))))
 register("rate.printable-ascii", RP, *ends(lambda last: ("a rate pattern has a non-breaking space", rated("AGENTS.md ", last))))
+register("rate.once", RP, ("the rate list repeats AGENTS.md", rated("AGENTS.md", last=True)))
 register("rate.no-pathspec-magic", RP, *ends(lambda last: ("the rate list excludes AGENTS.md", rated(":(exclude)AGENTS.md", last))),
          ("the rate list excludes with :!", rated(":!AGENTS.md")), ("the rate list excludes with :^", rated(":^AGENTS.md")))
 for name, bad in (("not-absolute", "/x"), ("no-dot-slash", "./x"), ("no-dot-dot", "../x"),
@@ -913,7 +943,7 @@ BENIGN = [
         edit("AGENTS.md", t.phrase, f"after {t.n + 8} `mutants` jobs"),
         matrix(lambda t: live(t) + [str(t.n + i) for i in range(8)]))(r, t)),
     ("every trigger path double-quoted", resub(WORKFLOW, r"^(      - )'(.*)'$", r'\1"\2"', count=0)),
-    ("every trigger path unquoted", resub(WORKFLOW, r"^(      - )'(.*)'$", r"\1\2", count=0)),
+    ("every trigger path unquoted, but a leading *", resub(WORKFLOW, r"^(      - )'([^*].*)'$", r"\1\2", count=0)),
 ]
 
 
@@ -1056,6 +1086,9 @@ def main(argv):
     if len(argv) > 1 or (argv and argv[0].startswith("-")):
         print("\n".join(__doc__.strip().splitlines()[2:5]), file=sys.stderr)
         return 2
+    # The plain check scans first too, so the scan runs before any check in every mode.
+    if scanned():
+        return 1
     return 1 if run(Path(argv[0]) if argv else here) else 0
 
 
