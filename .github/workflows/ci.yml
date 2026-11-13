@@ -21,13 +21,15 @@ jobs:
     # 2026-10-29 and two timed out once BRO-3588 added 13, so there were six. Six ran 47-60 min
     # with the flow kernel's mutants and two timed out on 2026-11-08 (BRO-3633), so there were ten
     # (BRO-3647, owner-approved). Ten ran 42-59 min with the human-step mutants and one timed out
-    # twice on 2026-11-09 (BRO-3635), so there are sixteen (BRO-3653, owner-approved).
+    # twice on 2026-11-09 (BRO-3635), so there were sixteen (BRO-3653, owner-approved). Sixteen
+    # ran 44-59 min on main with the agent renderer's mutants, and seven timed out on 2026-11-13
+    # with the stop gate's (BRO-3636), so there are twenty-four (BRO-3697, owner-approved).
     # Add shards by growing the list; the split follows it.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     env:
       CARGO_TERM_COLOR: always
       # Derived from the matrix, so the shards always cover every mutant.
