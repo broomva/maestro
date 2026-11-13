@@ -449,6 +449,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_writer_timeout_ends_an_evaluator_before_its_own_deadline() {
+        // Give the child ample time to enforce its own deadline, so the writer must stop it.
+        guard_entry();
+        let started = Instant::now();
+        let evaluated = evaluate_within("last(range(1e15))", b"null", GUARD_TIMEOUT, Duration::from_secs(30));
+        let elapsed = started.elapsed();
+        assert_eq!(evaluated.outcome.unwrap_err(), ("guard_timeout", "the guard ran past 1000 ms".into()));
+        assert!(elapsed >= GUARD_TIMEOUT && elapsed < Duration::from_secs(8), "{elapsed:?}");
+        assert!(gone(evaluated.pid.unwrap()), "the evaluator outlived the writer's timeout");
+    }
+
+    #[test]
     fn an_evaluator_its_kernel_never_kills_ends_itself_at_its_default_deadline() {
         // As after a kernel crash: the kernel's timeout is far off, and the child has the deadline
         // the writers give it, their timeout plus the grace (1.5 s).

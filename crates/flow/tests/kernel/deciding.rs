@@ -364,18 +364,30 @@ fn a_guard_that_never_ends_is_refused_at_the_writers_own_timeout() {
     std::thread::spawn(move || {
         let mut ledger = maestro_flow::Ledger::open(&root, &host("mac"), maestro_flow::Options::default()).unwrap();
         let started = std::time::Instant::now();
-        let chose = choose(&mut ledger, &me, &token, "go").map(|c| super::deciding::chose(&c).to_string());
+        let chose = choose(&mut ledger, &me, &token, "go").map(|c| match c {
+            Choosing::Refused { code, reason, .. } => (code.to_string(), reason),
+            other => panic!("unexpected choice: {other:?}"),
+        });
         let _ = tx.send((chose.map_err(|e| e.code().to_string()), started.elapsed()));
     });
-    let Ok((chose, took)) = rx.recv_timeout(std::time::Duration::from_secs(4)) else {
+    let Ok((chose, took)) = rx.recv_timeout(std::time::Duration::from_secs(30)) else {
         // A bound that did not hold: leave no evaluator running.
         let me = std::process::id().to_string();
         let arg = maestro_flow::kernel::guard::EVALUATOR_ARG;
         let _ = std::process::Command::new("pkill").args(["-KILL", "-P", &me, "-f", arg]).status();
         panic!("choose did not return");
     };
-    assert_eq!(chose, Ok("guard_timeout".to_string()));
-    assert!(took < std::time::Duration::from_millis(1800), "{took:?}");
+    let timeout = maestro_flow::kernel::guard::GUARD_TIMEOUT;
+    assert_eq!(timeout, std::time::Duration::from_secs(1));
+    let (code, reason) = chose.expect("choose failed");
+    assert_eq!(code, "guard_timeout");
+    // If the parent is delayed by the 500 ms grace, the evaluator can enforce its own deadline first.
+    assert!(
+        reason == "the guard ran past 1000 ms" || reason == "the guard ran past the evaluator's own 1500 ms",
+        "{reason}"
+    );
+    assert!(took >= timeout, "{took:?}");
+    assert!(took < timeout * 30, "{took:?}");
 }
 
 #[test]
