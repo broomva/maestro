@@ -7,10 +7,11 @@
 
 Every refusal goes through refuse(), against one registry of guards (GUARDS). Each registered guard
 has its own cases, and data-driven guards register one guard per entry. --selftest seeds every
-case into a copy of the tree and checks its outcome, then checks completeness: no code above the
-mutation-proof marker refuses outside refuse() and the input readers, and the unchanged tree
-evaluates every registered guard. --mutation-proof disables each guard alone and requires its own
-cases to change outcome and every other case to keep its outcome.
+case into a copy of a canonical fixture tree (Tree), never this repository's own files, and checks
+its outcome; then it checks completeness: no code above the mutation-proof marker refuses outside
+refuse() and the input readers, and the unchanged fixture evaluates every registered guard.
+--mutation-proof disables each guard alone and requires its own cases to change outcome and every
+other case to keep its outcome.
 
 Exit 0 when everything holds, 1 when something does not, 2 on usage. Needs Python 3.11 (tomllib)
 and mikefarah yq v4, which reads the YAML; GitHub's ubuntu images ship both.
@@ -225,10 +226,11 @@ def at(x, where, *keys):
 
 
 def claude_paths(text):
-    """The repository paths CLAUDE.md names: backticked, with a slash or a file extension. Each must
-    be a plain relative path, read the same way by git and by GitHub's path filters."""
+    """The repository paths CLAUDE.md names: every backticked token with a slash or a file
+    extension, whatever the extension. Each must be a plain relative path, read the same way by git
+    and by GitHub's path filters."""
     named = re.findall(r"`([^` \t\n]+)`", text)
-    paths = list(dict.fromkeys(p for p in named if "/" in p or re.search(r"\.(md|html|ya?ml|toml|sh|py|rs)$", p)))
+    paths = list(dict.fromkeys(p for p in named if "/" in p or re.search(r"\.[^./]+$", p)))
     for gid, test in (("claude.path.not-absolute", lambda p: p.startswith("/")),
                       ("claude.path.no-dot-slash", lambda p: p.startswith("./")),
                       ("claude.path.no-dot-dot", lambda p: ".." in p.split("/")),
@@ -422,16 +424,49 @@ NOT_GUARDS = {"register", "refuse", "run", "read", "read_bytes", "number", "yq",
 # mutation proof below: the selftest, the seeds that make every guard's cases, and the proof.
 
 
+RATE = '    "{}",\n'
+FIXTURE_SHARDS = 3
+
+
 class Tree:
-    """What seeds need to know about the tree they change."""
-    def __init__(self, root):
-        count = COUNT.search(read(root, "AGENTS.md"))
-        if not count:
-            raise Broken("AGENTS.md has no shard count to seed")
-        self.n, self.word = number(count[1]), count[1]
-        self.phrase = f"after {self.word} `mutants` jobs"
-        self.claude = read(root, "CLAUDE.md")
-        self.inputs = set(GOVERNANCE_PATHS) | set(CONTRACT_INPUTS) | set(claude_paths(self.claude)[1])
+    """The canonical fixture: a small tree that passes every check, generated from the constants
+    above. The selftest and the proof seed every case into a fresh copy of it, so no case depends
+    on how this repository's own files are written or quoted; run() is what checks those."""
+    n = FIXTURE_SHARDS
+    word = UNITS[FIXTURE_SHARDS]
+    phrase = f"after {UNITS[FIXTURE_SHARDS]} `mutants` jobs"
+    claude = "Read `AGENTS.md` (rules), `README.md` (commands) and `docs/spec.html` (design).\n"
+
+    def files(self):
+        paths = [*GOVERNANCE_PATHS, *CONTRACT_INPUTS, "README.md", "docs/spec.html"]
+
+        def run_block(text):
+            return "        run: |\n" + "".join(f"          {line}\n" for line in text.splitlines())
+
+        workflow = ("name: stability\non:\n  pull_request:\n    branches: [main]\n    paths:\n"
+                    + "".join(f"      - '{x}'\n" for x in paths)
+                    + "concurrency:\n  group: stability\njobs:\n  stability-check:\n    name: stability-check\n    steps:\n"
+                    + f"      - name: {INSTALL_STEP}\n        env:\n          BSTACK_REV: {'ab' * 20}\n" + run_block(INSTALL_RUN)
+                    + "".join(f"\n      - name: {i}\n        id: {i}\n" + run_block(f"set +e\n{call}") for i, call in BSTACK_CALLS)
+                    + "\n      - name: Report\n        run: echo done\n")
+        levels = "".join(f'\n[[levels]]\nid = "{level}"\n' + "".join(f"{p} = 1.5\n" for p in LEVEL_PARAMETERS)
+                         for level in LEVELS)
+        parameters = ("schema_version = 1\n" + levels + "\n[derived.lambda]\n" + "".join(f"{x} = 0.5\n" for x in LEVELS)
+                      + '\n[derived.omega]\nvalue = 0.5\nlevel = "L3"\n\n[gates.l3_paths]\npatterns = [\n'
+                      + "".join(RATE.format(x) for x in GOVERNANCE_PATHS) + "]\n")
+        return {
+            "CLAUDE.md": self.claude,
+            "AGENTS.md": f"# Rules\n\nCI runs the `ci` check {self.phrase} split the mutation check.\n",
+            "README.md": "# Readme\n",
+            "docs/spec.html": "<p>spec</p>\n",
+            CI: "name: ci\njobs:\n  mutants:\n    strategy:\n      fail-fast: false\n      matrix:\n"
+                f"        shard: [{', '.join(map(str, range(self.n)))}]\n",
+            WORKFLOW: workflow,
+            PARAMETERS: parameters,
+        }
+
+
+TREE = Tree()
 
 
 def words(k):
@@ -519,7 +554,6 @@ STRATEGY = r"^( *)strategy:$"
 FAIL_FAST = r"^( *)fail-fast: false$"
 BRANCHES = r"^( *)branches: \[main\]$"
 LEVEL = r'^\[\[levels\]\]\nid *= *"{}"\n(?:\w+ *=.*\n)*'
-RATE = '    "{}",\n'
 WHY = ("inf", "-inf", "nan")
 
 
@@ -572,7 +606,8 @@ register("claude.not-copy", ["claude-points-to-agents"], ("CLAUDE.md is a copy o
     write("CLAUDE.md", lambda t: f"Rules are in `AGENTS.md`, {t.phrase}.\n"))))
 register("claude.names-agents", ["claude-points-to-agents"], ("CLAUDE.md names only README.md", write("CLAUDE.md", "Read `README.md`.\n")))
 register("claude.paths-exist", ["claude-points-to-agents"],
-         ("CLAUDE.md names a path that does not exist", seq(named("docs/missing.md"), triggered("docs/missing.md"))))
+         ("CLAUDE.md names a path that does not exist", seq(named("docs/missing.md"), triggered("docs/missing.md"))),
+         ("CLAUDE.md names a .txt file that does not exist", seq(named("RULES.txt"), triggered("RULES.txt"))))
 register("claude.path.not-absolute", CC, ("CLAUDE.md names an absolute path", absolute))
 register("claude.path.no-dot-slash", CC, ("CLAUDE.md names a ./ path", seq(named("./README.md"), triggered("./README.md"))))
 register("claude.path.no-dot-dot", CC,
@@ -615,7 +650,8 @@ register("on.paths-no-negation", WF[:1],
 for p in GOVERNANCE_PATHS + CONTRACT_INPUTS:
     register(f"trigger.{p}", WF[:1], (f"the workflow stops running on {p}", edit(WORKFLOW, f"      - '{p}'\n", "")))
 register("trigger.claude-paths", WF[:1],
-         ("CLAUDE.md names a file the workflow does not run on", seq(named("UNRUN.md"), write("UNRUN.md", "x\n"))))
+         ("CLAUDE.md names a file the workflow does not run on", seq(named("UNRUN.md"), write("UNRUN.md", "x\n"))),
+         ("CLAUDE.md names a .txt file the workflow does not run on", seq(named("RULES.txt"), write("RULES.txt", "x\n"))))
 # rate-paths
 register("rate.strings", ["rate-paths"],
          ("a rate pattern is a number", edit(PARAMETERS, RATE.format("AGENTS.md"), RATE.format("AGENTS.md") + "    1,\n")))
@@ -683,8 +719,8 @@ BENIGN = [
         edit("AGENTS.md", t.phrase, f"after {words(t.n + 8)} `mutants` jobs"), matrix(lambda t: range(t.n + 8)))(r, t)),
     ("both sides grow by eight, in digits", lambda r, t: seq(
         edit("AGENTS.md", t.phrase, f"after {t.n + 8} `mutants` jobs"), matrix(lambda t: range(t.n + 8)))(r, t)),
-    ("trigger paths double-quoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", '      - "AGENTS.md"\n')),
-    ("trigger paths unquoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", "      - AGENTS.md\n")),
+    ("every trigger path double-quoted", resub(WORKFLOW, r"^(      - )'(.*)'$", r'\1"\2"', count=0)),
+    ("every trigger path unquoted", resub(WORKFLOW, r"^(      - )'(.*)'$", r"\1\2", count=0)),
 ]
 
 
@@ -694,20 +730,20 @@ def cases():
            [(d, s, [], None) for d, s in BENIGN]
 
 
-def seeded(root, tree, seed, tmp):
-    for rel in tree.inputs:
-        if (root / rel).is_file():
-            (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(root / rel, tmp / rel)
-    seed(tmp, tree)
+def seeded(seed, tmp):
+    """A copy of the fixture at tmp, with seed applied."""
+    for rel, text in TREE.files().items():
+        (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp / rel).write_text(text, encoding="utf-8")
+    seed(tmp, TREE)
     return tmp
 
 
-def completeness(root):
+def completeness(fixture):
     """The failures that make the registry incomplete: code above the marker that raises, asserts,
-    catches, exits or names Broken outside NOT_GUARDS, and registered guards the unchanged tree
+    catches, exits or names Broken outside NOT_GUARDS, and registered guards the unchanged fixture
     never evaluates."""
-    source = (root / SELF).read_text(encoding="utf-8")
+    source = Path(__file__).read_text(encoding="utf-8")
     checks = ast.parse(source.split("# mutation proof " + "below", 1)[0])
     found = []
     for fn in (n for n in ast.walk(checks) if isinstance(n, ast.FunctionDef) and n.name not in NOT_GUARDS):
@@ -717,45 +753,36 @@ def completeness(root):
                     isinstance(node, ast.Attribute) and node.attr in ("exit", "_exit")):
                 found.append(f"{fn.name} line {node.lineno}: {type(node).__name__} outside refuse()")
     EVALUATED.clear()
-    run(root, quiet=True)
+    run(fixture, quiet=True)
     found += [f"guard {g} is registered but never evaluated" for g in GUARDS if g not in EVALUATED]
     return found
 
 
-def selftest(root, quiet=False):
-    """The number of cases whose outcome is not their want, plus completeness failures."""
-    tree, bad = Tree(root), 0
-    for desc, seed, want, gid in cases():
-        with tempfile.TemporaryDirectory() as tmp:
-            got = run(seeded(root, tree, seed, Path(tmp)), quiet=True)
-        bad += got != want
-        if not quiet:
+def selftest():
+    """Every case's outcome on a seeded copy of the fixture, then completeness; the failures."""
+    bad = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, (desc, seed, want, gid) in enumerate(cases()):
+            got = run(seeded(seed, Path(tmp) / str(i)), quiet=True)
+            bad += got != want
             print(f"{'ok  ' if got == want else 'FAIL'} selftest: {desc}: {'fails ' + ', '.join(got) if got else 'passes'}"
                   + ("" if got == want else f" (want {'fails ' + ', '.join(want) if want else 'passes'})"))
-    if not quiet:
-        with tempfile.TemporaryDirectory() as tmp:
-            copy = seeded(root, tree, seq(named("NOTES.md"), triggered("NOTES.md"), write("NOTES.md", "notes\n")), Path(tmp))
-            nested = selftest(copy, quiet=True)
-        bad += nested != 0
-        print(f"{'ok  ' if not nested else 'FAIL'} selftest: the selftest of a tree whose CLAUDE.md names another root "
-              f"file: {nested} cases fail")
-        incomplete = completeness(root)
-        bad += len(incomplete)
-        for line in incomplete:
-            print(f"FAIL completeness: {line}")
-        print(f"{'ok  ' if not incomplete else 'FAIL'} completeness: {len(GUARDS)} guards, every refusal goes through "
-              "refuse(), and the unchanged tree evaluates every guard")
-    return bad
+        incomplete = completeness(seeded(lambda r, t: None, Path(tmp) / "fixture"))
+    for line in incomplete:
+        print(f"FAIL completeness: {line}")
+    print(f"{'ok  ' if not incomplete else 'FAIL'} completeness: {len(GUARDS)} guards, every refusal goes through "
+          "refuse(), and the unchanged fixture evaluates every guard")
+    return bad + len(incomplete)
 
 
-def mutation_proof(root):
+def mutation_proof():
     """Disable each guard alone: its own cases must change outcome, and every other case must keep
     its outcome. The baseline (no guard disabled) must give every case its want."""
-    tree, rows, crashed = Tree(root), [], 0
+    rows, crashed = [], 0
     with tempfile.TemporaryDirectory() as tmp:
         built = []
         for i, (desc, seed, want, gid) in enumerate(cases()):
-            path = seeded(root, tree, seed, Path(tmp) / str(i))
+            path = seeded(seed, Path(tmp) / str(i))
             built.append((desc, path, want, gid, run(path, quiet=True)))
         baseline = [d for d, _, want, _, got in built if got != want]
         for gid in GUARDS:
@@ -788,9 +815,9 @@ def main(argv):
     here = Path(__file__).resolve().parent.parent
     try:
         if argv == ["--selftest"]:
-            return 1 if selftest(here) else 0
+            return 1 if selftest() else 0
         if argv == ["--mutation-proof"]:
-            return 1 if mutation_proof(here) else 0
+            return 1 if mutation_proof() else 0
     except Broken as e:
         print(f"FAIL selftest: {e}")
         return 1
