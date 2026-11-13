@@ -7,14 +7,15 @@
 # From bstack's assets/templates/gh-workflow-l3-stability.yml.template, as the workspace runs it
 # (broomva/workspace .github/workflows/l3-stability.yml), changed so that:
 #   - the job runs scripts/governance-check.py, its selftest and its mutation proof;
-#   - bstack is fetched at a pinned commit, not its default branch, and runs in a cleared
-#     environment with a fixed PATH bound to this checkout, before any of the PR's code;
+#   - bstack is fetched at a pinned commit, not its default branch, and its scripts run in a
+#     cleared environment with a fixed PATH bound to this checkout, before the PR's checker;
 #   - compute-lambda.sh runs with --strict, so a drifting cached lambda fails the job;
 #   - the triggers add the files CLAUDE.md names and the checks' own inputs;
 #   - the report goes to the job summary, not a PR comment, so the token stays read-only;
 #   - the runner guard is ci.yml's.
-# scripts/governance-check.py comes from the PR like this file: it catches mistakes, and review
-# of .github/workflows/** and scripts/** (p9's P20 floor) catches intent.
+# This workflow and scripts/governance-check.py come from the PR they judge. The checker catches
+# mistakes in this file's shape; it does not defend this file against a PR that rewrites it. That
+# is review's job: .github/workflows/** and scripts/** need a P20 pass (p9's floor).
 name: L3 stability gate
 on:
   pull_request:
@@ -60,19 +61,21 @@ jobs:
         run: |
           set -euo pipefail
           # The runner's own python3 and yq: the job installs nothing, as the workspace's gate does
-          # (its self-hosted macOS runners cannot run setup-python). Python 3.11 for tomllib,
-          # which reads the parameters; mikefarah yq v4, preinstalled on GitHub's ubuntu images,
-          # which reads the YAML for scripts/governance-check.py.
-          python3 -VV
-          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
-            || { echo "::error::python3 older than 3.11"; exit 1; }
+          # (its self-hosted macOS runners cannot run setup-python). Python 3.11 for tomllib, in
+          # both interpreters used: the runner's python3, which runs scripts/governance-check.py,
+          # and /usr/bin/python3, which the compute and rate steps find under their fixed PATH. yq
+          # (mikefarah v4), preinstalled on GitHub's ubuntu images, reads the YAML for the checker.
+          for py in python3 /usr/bin/python3; do
+            "$py" -VV
+            "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+              || { echo "::error::$py is older than 3.11"; exit 1; }
+          done
           yq --version
           yq --version | grep -q 'mikefarah/yq.* version v4\.' \
             || { echo "::error::mikefarah yq v4 not found"; exit 1; }
 
-      # bstack is fetched and its scripts run before any of the PR's code: the contract step comes
-      # after compute and rate, and the directory is handed on as a step output, not through
-      # GITHUB_ENV, which a step could rewrite.
+      # The pinned bstack's scripts run before the PR's checker (the contract step comes after
+      # compute and rate), and its directory is handed on as a step output.
       - name: Install bstack (pinned, never from the PR)
         id: install
         env:
@@ -80,8 +83,8 @@ jobs:
           # not come from it (BRO-2651), and a branch or tag can move under a reviewed workflow.
           # Bumping the pin is a reviewed change to this file (a P20 pass, and this gate runs on
           # it); scripts/governance-check.py (bstack-calls) fails on anything but a full SHA and
-          # this exact recipe. git runs in a cleared environment with a fixed PATH (g), so an
-          # inherited GIT_DIR, GIT_WORK_TREE or PATH cannot redirect it. A failed fetch fails the job.
+          # this exact recipe. git runs in a cleared environment with a fixed PATH (g), so a
+          # runner's GIT_DIR, GIT_WORK_TREE or PATH does not redirect it. A failed fetch fails the job.
           BSTACK_REV: 77c24fc40c46771ad7236c3d9af447a28f200f28
         run: |
           set -euo pipefail
@@ -99,7 +102,7 @@ jobs:
       # all three. The last step judges them. bstack's scripts run in a cleared environment with a
       # fixed PATH (env -i) and this checkout bound explicitly: they read BROOMVA_WORKSPACE,
       # GIT_DIR and BSTACK_L3_CORRECTION, which a self-hosted runner could otherwise supply.
-      # scripts/governance-check.py (bstack-calls) holds every call to this, and the step order.
+      # scripts/governance-check.py (bstack-calls) checks these calls and the step order.
       - name: Compute lambda (RCS stability budget)
         id: compute
         run: |
@@ -215,10 +218,14 @@ jobs:
           CONTRACT_STATUS: ${{ steps.contract.outputs.status }}
           COMPUTE_STATUS: ${{ steps.compute.outputs.status }}
           RATE_STATUS: ${{ steps.rate.outputs.status }}
+        # The contract, lambda > 0 and no drift are the gate. L3 rate exceeded (exit 1) is reported,
+        # not failed: p9's l3_rate gate enforces it at merge. Any other status, empty included, is
+        # no verdict and fails closed. The verdict runs in a cleared environment with a fixed PATH,
+        # reading only the three statuses, so nothing an earlier step left in the environment
+        # (GITHUB_ENV, GITHUB_PATH) reaches it by accident.
         run: |
-          # The contract, lambda > 0 and no drift are the gate. L3 rate exceeded (exit 1) is
-          # reported, not failed: p9's l3_rate gate enforces it at merge. Any other status, empty
-          # included, is no verdict and fails closed.
+          exec env -i PATH=/usr/bin:/bin CONTRACT_STATUS="$CONTRACT_STATUS" COMPUTE_STATUS="$COMPUTE_STATUS" \
+            RATE_STATUS="$RATE_STATUS" bash --noprofile --norc -eu <<'SH'
           if [ "$CONTRACT_STATUS" != "0" ]; then
             echo "FAIL: governance contract broken (exit '$CONTRACT_STATUS')"
             exit 1
@@ -236,3 +243,4 @@ jobs:
               exit 1 ;;
           esac
           echo "OK: contract holds, all lambda_i > 0, no cached lambda drifts"
+          SH

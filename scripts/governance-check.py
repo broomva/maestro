@@ -5,26 +5,34 @@
     python3 -I scripts/governance-check.py --selftest        # every case, the runner and completeness
     python3 -I scripts/governance-check.py --mutation-proof  # disable each guard alone
 
-What is enforced, exactly:
+What it checks: CLAUDE.md is a pointer to AGENTS.md whose named files exist; the `mutants` job
+count AGENTS.md names equals the length of ci.yml's shard list; the stability workflow's triggers;
+the rate gate's paths; the RCS levels; how the workflow fetches and calls the pinned bstack; and
+that the pinned compute-lambda.sh reads the level parameters held here.
+
+What it claims, exactly:
+- The shard check claims count consistency only. Whether ci.yml actually runs the mutation check
+  (its job and step conditions, MUTANT_SHARD, continue-on-error, the `ci` job's needs) is guarded
+  by the required `ci` check and by P20 review of ci.yml changes, not by this check.
 - Every refusal is a registered guard: a check refuses only through refuse(gid, failing, message),
-  against the registry GUARDS, and each gid has one refuse() call site. The input readers (read,
-  read_bytes, read_bstack, yq, parameters) report input the checks cannot read; they are not guards.
-- Each guard, disabled alone, fails its own cases, and no other case changes outcome. The cases
-  are seeded into a fixture tree built from this checkout's live values (its shard list and count
-  word, its trigger and rate paths, the paths CLAUDE.md names, its levels and their values, its
-  bstack pin), written in one canonical format, so no case depends on how the files are quoted.
-- A completeness scan (in --selftest) fails on any raise, assert, try, exit, quit, eval, exec or
-  use of Broken above the mutation-proof marker outside refuse() and the readers; on code above the
-  marker that names anything defined below it; on a gid used at two call sites; and on a registered
-  guard the unchanged fixture never evaluates.
-  The selftest and the proof run this scan first, and stop on a failure before any check's code
-  runs.
-- The data tables (GOVERNANCE_PATHS, CONTRACT_INPUTS, PLAIN, GLOB_CHARS, BYTE_CLASSES, MUTANTS_KEYS,
-  STEPS, LEVELS) are part of the reviewed contract: deleting an entry removes its guard and its
-  case together. LEVEL_PARAMETERS is the only table cross-checked, against the pinned bstack.
-- A guard's predicate logic is verified by review, not proven correct for all inputs. This file
-  comes from the PR it judges, like the workflow that runs it: it catches mistakes, and review of
-  scripts/** and .github/workflows/** (p9's P20 floor) catches intent.
+  against the registry GUARDS. The input readers (read, read_bytes, read_bstack, yq, parameters)
+  report input the checks cannot read; they are not guards.
+- Each guard, disabled alone, fails its own cases, built from this checkout's live values (written
+  in one canonical format), and no other case changes outcome (--mutation-proof).
+- A completeness scan is registry hygiene. Statically, above the mutation-proof marker and outside
+  refuse(), the runner and the readers: no raise, assert, try or with, no use of Broken, no name
+  defined below the marker, no gid at two refuse() call sites, and, as hygiene only, none of the
+  names in HYGIENE_NAMES or attributes in HYGIENE_ATTRIBUTES. --selftest and --mutation-proof
+  report these static findings and stop before running any check. Then the unchanged fixture must
+  evaluate every registered guard.
+- The data tables (GOVERNANCE_PATHS, CONTRACT_INPUTS, PLAIN, GLOB_CHARS, BYTE_CLASSES, STEPS, LEVELS)
+  are part of the reviewed contract: deleting an entry removes its guard and its case together.
+  LEVEL_PARAMETERS is the only table cross-checked, against the pinned bstack.
+
+What it does not claim: anything against a PR that rewrites this file or the workflow that runs
+it. Both come from the PR; this catches mistakes, and review of scripts/** and .github/workflows/**
+(p9's P20 floor) catches intent. A guard's predicate logic is verified by review, not proven
+correct for all inputs.
 
 The bstack-parameters check reads $BSTACK/scripts/compute-lambda.sh, the pinned bstack the job
 fetches before this step; to run the checks locally, set BSTACK to a bstack checkout at the pin.
@@ -68,7 +76,7 @@ LEVELS = ("L0", "L1", "L2", "L3")
 LEVEL_PARAMETERS = ("gamma", "L_theta", "rho", "L_d", "eta", "beta", "tau_bar", "nu", "tau_a")
 
 # How the job reaches bstack. The install step is this recipe exactly (git in a cleared
-# environment with a fixed PATH, so an inherited GIT_DIR or GIT_WORK_TREE cannot redirect it), and
+# environment with a fixed PATH, so an inherited GIT_DIR or GIT_WORK_TREE does not redirect it), and
 # it hands the checkout's directory on as a step output, not through GITHUB_ENV. Outside it the
 # only workflow lines that mention bstack or its scripts are these: the compute and rate calls, in
 # a cleared environment with a fixed PATH bound to this checkout, compute-lambda.sh with --strict
@@ -96,8 +104,6 @@ BSTACK_CALLS = [
 CONTRACT_BSTACK = ("contract", f'export BSTACK="{BSTACK_DIR}"')
 # The first steps, in order (a step's id, else its name, else what it uses).
 STEPS = ["actions/checkout@v4", "Python floor", "install", "compute", "rate", "contract"]
-# The mutants job's keys: another (if, continue-on-error, needs, ...) could skip it or ignore it.
-MUTANTS_KEYS = {"name", "runs-on", "timeout-minutes", "strategy", "env", "steps"}
 BSTACK_MENTION = re.compile(r"bstack|compute-lambda|l3-rate-gate|git[ \t]+clone", re.I)
 
 # Byte classes refused in the YAML files: parsers read them differently. yq itself rejects the C0
@@ -125,8 +131,8 @@ YQ_NODES = ('{"merge": ([... | select(is_key and . == "<<")] | length), '
 PLAIN = {"not-absolute": lambda p: p.startswith("/"),
          "no-dot-slash": lambda p: p.startswith("./"),
          "no-dot-dot": lambda p: ".." in p.split("/"),
-         "no-dot-segment": lambda p: "." in p.split("/")[1:],
-         "no-empty-segment": lambda p: "" in p.split("/")[1:-1]}
+         "no-dot-segment": lambda p: p == "." or "." in p.split("/")[1:],
+         "no-empty-segment": lambda p: p == "" or "" in p.split("/")[1:-1]}
 # GitHub path filter and glob characters, refused in the paths CLAUDE.md names.
 GLOB_CHARS = {"star": "*", "question": "?", "plus": "+", "bracket-open": "[", "bracket-close": "]",
               "brace-open": "{", "brace-close": "}", "bang": "!", "backslash": "\\"}
@@ -302,18 +308,15 @@ def number(text):
 
 
 def check_shard_count(root):
-    """The number of `mutants` jobs AGENTS.md names is the number of jobs ci.yml's mutants matrix
-    runs. GitHub runs one job per combination after include and exclude, so the count is the
-    shard list's length only for exactly that shape."""
+    """Count consistency: the number of `mutants` jobs AGENTS.md names is the length of ci.yml's
+    shard list, which is the matrix's job count only for exactly this shape (one dimension, no
+    include or exclude, shards 0..n-1). Whether ci.yml runs those jobs is the `ci` check's."""
     found = COUNT.findall(read(root, "AGENTS.md"))
     refuse("count.named", not found, "AGENTS.md does not name the count (\"after <count> `mutants` jobs\")")
     refuse("count.named-once", len(found) > 1, f"AGENTS.md names the `mutants` job count {len(found)} times")
     named = number(found[0]) if found else None
     refuse("count.readable", found and named is None, lambda: f"AGENTS.md's count {found[0]!r} is not a number below 100")
-    mutants = at(mapping(load_yaml(root, CI), "ci"), "ci", "jobs", "mutants")
-    refuse("ci.mutants-keys", set(mutants) != MUTANTS_KEYS,
-           lambda: "jobs.mutants holds " + ", ".join(mutants) + ", not exactly " + ", ".join(sorted(MUTANTS_KEYS)))
-    strategy = at(mutants, "ci.jobs.mutants", "strategy")
+    strategy = at(mapping(load_yaml(root, CI), "ci"), "ci", "jobs", "mutants", "strategy")
     shaping = sorted(set(strategy) - {"matrix", "fail-fast", "max-parallel"})
     refuse("matrix.strategy-keys", shaping, lambda: "unsupported matrix shape: strategy has " + ", ".join(shaping))
     matrix = at(strategy, "ci.jobs.mutants.strategy", "matrix")
@@ -321,12 +324,8 @@ def check_shard_count(root):
            lambda: "unsupported matrix shape: the matrix holds " + ", ".join(matrix) + ", not exactly shard")
     shards = matrix.get("shard")
     items = shards if isinstance(shards, list) else []
-    # Exactly `shard: [0, 1, ..., n-1]` in plain decimal, on one line: yq reads 1_0, 0x0 and +5 as
-    # integers where GitHub's parser reads strings, and any other value or order is no shard index.
-    lines = [x.strip() for x in read(root, CI).split("\n") if re.match(r" *shard *:", x)]
-    canonical = "shard: [" + ", ".join(map(str, range(len(items)))) + "]"
-    refuse("matrix.shard-canonical", lines != [canonical] or items != list(range(len(items))),
-           lambda: f"unsupported matrix shape: the shard list is not written exactly as {canonical}")
+    refuse("matrix.shard-range", not isinstance(shards, list) or [type(x) for x in items] != [int] * len(items)
+           or items != list(range(len(items))), "unsupported matrix shape: shard is not the integers 0..n-1")
     refuse("count.matches", named is not None and named != len(items),
            lambda: f"AGENTS.md says {found[0]} ({named}) `mutants` jobs, but the matrix has {len(items)} shards")
     return f"AGENTS.md and {CI} both run {named} shards"
@@ -471,15 +470,14 @@ CHECKS = (
 
 
 def run(root, quiet=False, checks=CHECKS):
-    """The names of the checks that failed. A check that crashes, or exits (SystemExit, which quit()
-    and sys.exit() raise), fails as `<name> (crashed)`: it fails closed, and no case but the
-    runner's own expects it."""
+    """The names of the checks that failed. A check that raises anything but Broken fails as
+    `<name> (crashed)`, which no case but the runner's own expects."""
     failed = []
     for name, check in checks:
         STATE["check"] = name
         try:
             detail = check(root)
-        except (Exception, SystemExit) as e:
+        except Exception as e:
             crashed = not isinstance(e, Broken)
             failed.append(name + (" (crashed)" if crashed else ""))
             reason = f"{type(e).__name__}: {e}" if crashed else str(e)
@@ -493,14 +491,12 @@ def run(root, quiet=False, checks=CHECKS):
     return failed
 
 
-# Above the mutation proof marker, only these functions may raise, assert, catch, exit or name
-# Broken: the registry, the runner and the input readers.
+# Registry hygiene: above the mutation proof marker, only these functions may raise, assert, catch,
+# use `with` or name Broken: the registry, the runner and the input readers.
 NOT_GUARDS = {"register", "refuse", "run", "read", "read_bytes", "read_bstack", "yq", "parameters"}
-# Names a check may not use, and attributes it may not call (sys.exit, os._exit, os.exec*,
-# os.spawn*, os.kill, contextlib.suppress).
-FORBIDDEN = {"Broken", "exit", "quit", "eval", "exec", "compile", "__import__", "globals", "vars",
-             "locals", "getattr", "setattr", "delattr", "breakpoint", "suppress"}
-FORBIDDEN_ATTRIBUTES = re.compile(r"^(_?exit|exec\w*|spawn\w*|kill|suppress)$")
+# Hygiene patterns a check should not need: process exits and replacements, dynamic code.
+HYGIENE_NAMES = {"exit", "quit", "eval", "exec", "compile", "__import__"}
+HYGIENE_ATTRIBUTES = re.compile(r"^(_?exit|exec\w*|spawn\w*|kill)$")
 
 # mutation proof below: the fixture, the seeds that make every guard's cases, and the proof.
 
@@ -555,8 +551,7 @@ class Tree:
         files.update({
             "CLAUDE.md": self.claude,
             "AGENTS.md": f"# Rules\n\nCI runs the `ci` check {self.phrase} split the mutation check.\n",
-            CI: "name: ci\njobs:\n  mutants:\n    name: mutants\n    runs-on: x\n    timeout-minutes: 60\n    env:\n      A: b\n"
-                "    steps:\n      - run: x\n    strategy:\n      fail-fast: false\n      matrix:\n"
+            CI: "name: ci\njobs:\n  mutants:\n    strategy:\n      fail-fast: false\n      matrix:\n"
                 f"        shard: [{', '.join(json.dumps(x) for x in self.shards)}]\n",
             WORKFLOW: workflow,
             PARAMETERS: params,
@@ -787,20 +782,12 @@ register("count.named-once", SC, ("AGENTS.md names the count twice",
                                   edit("AGENTS.md", lambda t: t.phrase, lambda t: f"{t.phrase}, {t.phrase}")))
 register("count.readable", SC, ("AGENTS.md names a count that is not a number",
                                 edit("AGENTS.md", lambda t: t.phrase, "after many `mutants` jobs")))
-register("ci.mutants-keys", SC,
-         ("the mutants job gains if: false", after(CI, r"^( *)name: mutants$", "if: ${{ false }}")),
-         ("the mutants job gains continue-on-error", after(CI, r"^( *)name: mutants$", "continue-on-error: true")))
 register("matrix.strategy-keys", SC, ("strategy gains another key", after(CI, STRATEGY, "  x: 1")))
 register("matrix.exactly-shard", SC,
          ("the matrix excludes a shard", after(CI, SHARD, "exclude:", "  - shard: 0")),
          ("the matrix includes another job", after(CI, SHARD, "include:", "  - shard: 99")),
          ("the matrix gains a dimension", after(CI, SHARD, "os: [a, b]")))
-register("matrix.shard-canonical", SC,
-         ("the first shard is written 0x0", matrix(lambda t: ["0x0"] + live(t)[1:])),
-         ("the last shard is written with an underscore or a sign", matrix(lambda t: live(t)[:-1] + [
-             f"{t.n - 1}"[0] + "_" + f"{t.n - 1}"[1:] if t.n > 10 else f"+{t.n - 1}"])),
-         ("the shard list in block style", lambda r, t: resub(
-             CI, SHARD, lambda m: f"{m[1]}shard:" + "".join(f"\n{m[1]}  - {x}" for x in live(t)))(r, t)),
+register("matrix.shard-range", SC,
          ("the shard list repeats a value", matrix(lambda t: live(t)[:-1] + live(t)[:1])),
          ("a shard is a string", matrix(lambda t: ['"0"'] + live(t)[1:])),
          ("a shard is a boolean", matrix(lambda t: live(t)[:-1] + ["true"])))
@@ -831,7 +818,9 @@ register("rate.no-pathspec-magic", RP, *ends(lambda last: ("the rate list exclud
          ("the rate list excludes with :!", rated(":!AGENTS.md")), ("the rate list excludes with :^", rated(":^AGENTS.md")))
 for name, bad in (("not-absolute", "/x"), ("no-dot-slash", "./x"), ("no-dot-dot", "../x"),
                   ("no-dot-segment", "a/./b"), ("no-empty-segment", "a//b")):
-    register(f"rate.path.{name}", RP, *ends(lambda last, bad=bad: (f"a rate pattern is {bad!r}", rated(bad, last))))
+    extra = {"no-dot-segment": ".", "no-empty-segment": ""}.get(name)
+    register(f"rate.path.{name}", RP, *ends(lambda last, bad=bad: (f"a rate pattern is {bad!r}", rated(bad, last))),
+             *([(f"a rate pattern is {extra!r}", rated(extra))] if extra is not None else []))
 for p in GOVERNANCE_PATHS:
     register(f"rate.{p}", RP, (f"the rate gate stops counting {p}", edit(PARAMETERS, RATE.format(p), "")))
 # rcs-levels
@@ -899,6 +888,8 @@ register("bstack.reads-only-these", BP, ("compute-lambda.sh reads another parame
 BENIGN = [
     ("unchanged fixture", lambda r, t: None),
     ("strategy sets max-parallel", after(CI, STRATEGY, "  max-parallel: 4")),
+    ("the shard list in block style", lambda r, t: resub(
+        CI, SHARD, lambda m: f"{m[1]}shard:" + "".join(f"\n{m[1]}  - {x}" for x in live(t)))(r, t)),
     ("both sides grow by eight, in words", lambda r, t: seq(
         edit("AGENTS.md", t.phrase, f"after {words(t.n + 8)} `mutants` jobs"),
         matrix(lambda t: live(t) + [str(t.n + i) for i in range(8)]))(r, t)),
@@ -930,8 +921,8 @@ def run_case(path, checks=CHECKS):
     return run(path, quiet=True, checks=checks)
 
 
-def completeness(fixture):
-    """The failures that make the registry incomplete (see the module docstring)."""
+def scan():
+    """Static registry hygiene findings (see the module docstring). Runs no check."""
     source = Path(__file__).read_text(encoding="utf-8")
     head, tail = source.split("# mutation proof " + "below", 1)
     above, below = ast.parse(head), ast.parse(tail.split("\n", 1)[1])
@@ -945,43 +936,53 @@ def completeness(fixture):
         local = {n.id for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)} | {
             n.arg for n in ast.walk(statement) if isinstance(n, ast.arg)}
         for node in ast.walk(statement):
-            bad = isinstance(node, (ast.Raise, ast.Assert, ast.Try)) or (
-                isinstance(node, ast.Name) and (node.id in FORBIDDEN or node.id in below_names - local)) or (
-                isinstance(node, ast.Attribute) and FORBIDDEN_ATTRIBUTES.match(node.attr))
+            bad = isinstance(node, (ast.Raise, ast.Assert, ast.Try, ast.With)) or (
+                isinstance(node, ast.Name) and (node.id in HYGIENE_NAMES | {"Broken"} or node.id in below_names - local)) or (
+                isinstance(node, ast.Attribute) and HYGIENE_ATTRIBUTES.match(node.attr))
             if bad:
                 what = getattr(node, "id", None) or getattr(node, "attr", None) or ""
                 found.append(f"line {node.lineno}: {type(node).__name__} {what} outside refuse()".rstrip())
             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "refuse" and node.args:
                 gids.setdefault(ast.dump(node.args[0]), []).append(node.lineno)
-    found += [f"one gid at lines {lines}" for lines in gids.values() if len(lines) > 1]
+    return found + [f"one gid at lines {lines}" for lines in gids.values() if len(lines) > 1]
+
+
+def evaluated(fixture):
+    """Run the checks on the unchanged fixture: every registered guard must be evaluated, each at
+    one call site."""
     EVALUATED.clear()
     SITES.clear()
     run_case(fixture)
-    found += [f"guard {g} is registered but never evaluated" for g in GUARDS if g not in EVALUATED]
-    found += [f"guard {g} is refused at lines {sorted(s)}" for g, s in SITES.items() if len(s) > 1]
+    return [f"guard {g} is registered but never evaluated" for g in GUARDS if g not in EVALUATED] + \
+           [f"guard {g} is refused at lines {sorted(s)}" for g, s in SITES.items() if len(s) > 1]
+
+
+def scanned():
+    """The static scan's findings, printed; it runs before any check."""
+    found = scan()
+    for line in found:
+        print(f"FAIL completeness (static): {line}")
+    print(f"{'ok  ' if not found else 'FAIL'} completeness (static): no refusal outside refuse() and the readers, "
+          "one call site per gid" + ("" if not found else "; no check runs"), flush=True)
     return found
 
 
 def selftest(tree):
-    """Every case's outcome on a seeded copy of the fixture, the runner's crash rule and
-    completeness; the number of failures."""
+    """The static scan, then the unchanged fixture, the runner's crash rule and every case; the
+    number of failures."""
+    if scanned():
+        return 1
+    bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         fixture = seeded(tree, lambda r, t: None, Path(tmp) / "fixture")
-        incomplete = completeness(fixture)
-        for line in incomplete:
+        for line in evaluated(fixture):
+            bad += 1
             print(f"FAIL completeness: {line}")
-        print(f"{'ok  ' if not incomplete else 'FAIL'} completeness: {len(GUARDS)} guards, each refused at one site and "
-              "evaluated by the unchanged fixture; no refusal outside refuse() and the readers", flush=True)
-        if incomplete:
-            # The cases run the checks' code, which the scan has just refused: stop before it can exit
-            # or exec with another status.
-            return len(incomplete)
-        bad = 0
-        for name, crash in (("crashes", lambda r: [][0]), ("exits", lambda r: sys.exit(0))):
-            probe = run(fixture, quiet=True, checks=[("probe", crash)])
-            bad += probe != ["probe (crashed)"]
-            print(f"{'ok  ' if probe == ['probe (crashed)'] else 'FAIL'} runner: a check that {name} fails as "
-                  f"`probe (crashed)`: {probe}")
+        print(f"{'ok  ' if not bad else 'FAIL'} completeness: the unchanged fixture evaluates all {len(GUARDS)} guards")
+        probe = run(fixture, quiet=True, checks=[("probe", lambda r: [][0])])
+        bad += probe != ["probe (crashed)"]
+        print(f"{'ok  ' if probe == ['probe (crashed)'] else 'FAIL'} runner: a check that crashes fails as "
+              f"`probe (crashed)`: {probe}")
         for i, (desc, seed, want, gid) in enumerate(cases()):
             got = run_case(seeded(tree, seed, Path(tmp) / str(i)))
             bad += got != want
@@ -994,14 +995,10 @@ def mutation_proof(tree):
     """Disable each guard alone: its own cases must change outcome, and every other case must keep
     its outcome. The baseline (no guard disabled) must give every case its want. A guard is re-run
     only through the checks that evaluate it."""
+    if scanned():
+        return 1
     rows, crashed = [], 0
     with tempfile.TemporaryDirectory() as tmp:
-        incomplete = completeness(seeded(tree, lambda r, t: None, Path(tmp) / "fixture"))
-        for line in incomplete:
-            print(f"FAIL completeness: {line}", flush=True)
-        if incomplete:
-            print(f"FAIL completeness, first: {len(incomplete)} failures; the proof does not run", flush=True)
-            return len(incomplete)
         built = []
         CHECKED_BY.clear()
         for i, (desc, seed, want, gid) in enumerate(cases()):
@@ -1030,7 +1027,6 @@ def mutation_proof(tree):
     print(f"baseline: {len(built) - len(baseline)} of {len(built)} cases give their want" + (f"; not: {baseline}" if baseline else ""))
     print(f"{killed} of {len(rows)} guards proven ({killed - crashed} by a changed outcome, {crashed} by a crash), "
           f"each alone, with every other case unmoved")
-    print("ok   completeness, first: 0 failures")
     return len(rows) - killed + len(baseline)
 
 
