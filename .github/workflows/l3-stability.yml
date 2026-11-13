@@ -76,16 +76,18 @@ jobs:
           # not come from it (BRO-2651), and a branch or tag can move under a reviewed workflow.
           # Bumping the pin is a reviewed change to this file (a P20 pass, and this gate runs on
           # it); scripts/governance-check.py (bstack-calls) fails on anything but a full SHA and
-          # this exact recipe. A failed fetch fails the job.
+          # this exact recipe. git runs in a cleared environment (g), so an inherited GIT_DIR or
+          # GIT_WORK_TREE cannot redirect it. A failed fetch fails the job.
           BSTACK_REV: 77c24fc40c46771ad7236c3d9af447a28f200f28
         run: |
           set -euo pipefail
+          g() { env -i PATH="$PATH" HOME="$HOME" git "$@"; }
           DEST="$RUNNER_TEMP/bstack-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           rm -rf "$DEST"
-          git init -q "$DEST"
-          git -C "$DEST" fetch -q --depth 1 https://github.com/broomva/bstack.git "$BSTACK_REV"
-          git -C "$DEST" checkout -q --detach FETCH_HEAD
-          test "$(git -C "$DEST" rev-parse HEAD)" = "$BSTACK_REV"
+          g init -q "$DEST"
+          g -C "$DEST" fetch -q --depth 1 https://github.com/broomva/bstack.git "$BSTACK_REV"
+          g -C "$DEST" checkout -q --detach FETCH_HEAD
+          test "$(g -C "$DEST" rev-parse HEAD)" = "$BSTACK_REV"
           echo "bstack $BSTACK_REV"
           echo "BSTACK=$DEST" >> "$GITHUB_ENV"
 

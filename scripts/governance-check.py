@@ -2,29 +2,35 @@
 """Maestro's governance contract, run by the `stability-check` job (BRO-3702).
 
     python3 -I scripts/governance-check.py [ROOT]            # check the tree at ROOT (default: this checkout)
-    python3 -I scripts/governance-check.py --selftest        # every case, and the completeness checks
-    python3 -I scripts/governance-check.py --mutation-proof  # disable each guard alone; see main()
+    python3 -I scripts/governance-check.py --selftest        # every case, the runner and completeness
+    python3 -I scripts/governance-check.py --mutation-proof  # disable each guard alone
 
-Every refusal goes through refuse(), against one registry of guards (GUARDS). Each registered guard
-has its own cases, and data-driven guards register one guard per entry. --selftest seeds every
-case into a copy of a canonical fixture tree (Tree), never this repository's own files, and checks
-its outcome; then it checks completeness: no code above the mutation-proof marker refuses outside
-refuse() and the input readers, and the unchanged fixture evaluates every registered guard.
---mutation-proof disables each guard alone and requires its own cases to change outcome and every
-other case to keep its outcome.
+What is enforced, exactly:
+- Every refusal is a registered guard: a check refuses only through refuse(gid, failing, message),
+  against the registry GUARDS, and each gid has one refuse() call site. The input readers (read,
+  read_bytes, read_bstack, yq, parameters) report input the checks cannot read; they are not guards.
+- Each guard, disabled alone, fails its own cases, and no other case changes outcome. The cases
+  are seeded into a fixture tree built from this checkout's live values (its shard list and count
+  word, its trigger and rate paths, the paths CLAUDE.md names, its levels and their values, its
+  bstack pin), written in one canonical format, so no case depends on how the files are quoted.
+- A completeness scan (in --selftest) fails on any raise, assert, try, exit, quit, eval, exec or
+  use of Broken above the mutation-proof marker outside refuse() and the readers; on code above the
+  marker that names anything defined below it; on a gid used at two call sites; and on a registered
+  guard the unchanged fixture never evaluates.
+- A guard's predicate logic is verified by review, not proven correct for all inputs. This file
+  comes from the PR it judges, like the workflow that runs it: it catches mistakes, and review of
+  scripts/** and .github/workflows/** (p9's P20 floor) catches intent.
 
+The bstack-parameters check reads $BSTACK/scripts/compute-lambda.sh, the pinned bstack the job
+fetches before this step; to run the checks locally, set BSTACK to a bstack checkout at the pin.
 Exit 0 when everything holds, 1 when something does not, 2 on usage. Needs Python 3.11 (tomllib)
-and mikefarah yq v4, which reads the YAML; GitHub's ubuntu images ship both.
-
-This file comes from the PR it judges, like the workflow that runs it: it catches mistakes, and
-review of scripts/** and .github/workflows/** (p9's P20 floor) catches intent.
+and mikefarah yq v4; GitHub's ubuntu images ship both.
 """
 import ast
 import json
 import math
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,21 +58,23 @@ SELF = "scripts/governance-check.py"
 # Besides the governance paths, a change to any input of a check must run the job.
 CONTRACT_INPUTS = (WORKFLOW, CI, SELF)
 # The levels of bstack's rcs-parameters.toml template, and the parameters its compute-lambda.sh
-# reads for each.
+# reads for each (the bstack-parameters check holds this list to the pinned script).
 LEVELS = ("L0", "L1", "L2", "L3")
 LEVEL_PARAMETERS = ("gamma", "L_theta", "rho", "L_d", "eta", "beta", "tau_bar", "nu", "tau_a")
 
-# How the job reaches bstack. The install step is this recipe exactly, and outside it the only
-# workflow lines that mention bstack or its scripts are these two calls: a cleared environment
-# bound to this checkout, and compute-lambda.sh with --strict and the checkout's parameters.
+# How the job reaches bstack. The install step is this recipe exactly (git in a cleared
+# environment, so an inherited GIT_DIR or GIT_WORK_TREE cannot redirect it), and outside it the
+# only workflow lines that mention bstack or its scripts are these two calls: a cleared
+# environment bound to this checkout, and compute-lambda.sh with --strict and its parameters.
 INSTALL_STEP = "Install bstack (pinned, never from the PR)"
 INSTALL_RUN = """set -euo pipefail
+g() { env -i PATH="$PATH" HOME="$HOME" git "$@"; }
 DEST="$RUNNER_TEMP/bstack-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 rm -rf "$DEST"
-git init -q "$DEST"
-git -C "$DEST" fetch -q --depth 1 https://github.com/broomva/bstack.git "$BSTACK_REV"
-git -C "$DEST" checkout -q --detach FETCH_HEAD
-test "$(git -C "$DEST" rev-parse HEAD)" = "$BSTACK_REV"
+g init -q "$DEST"
+g -C "$DEST" fetch -q --depth 1 https://github.com/broomva/bstack.git "$BSTACK_REV"
+g -C "$DEST" checkout -q --detach FETCH_HEAD
+test "$(g -C "$DEST" rev-parse HEAD)" = "$BSTACK_REV"
 echo "bstack $BSTACK_REV"
 echo "BSTACK=$DEST" >> "$GITHUB_ENV"
 """
@@ -78,22 +86,29 @@ BSTACK_CALLS = [
 ]
 BSTACK_MENTION = re.compile(r"bstack|compute-lambda|l3-rate-gate|git[ \t]+clone", re.I)
 
-# Byte classes refused in the YAML files: parsers read them differently. yq itself rejects the other
-# C0 controls, so DEL is the one control byte only this guard can refuse.
+# Byte classes refused in the YAML files: parsers read them differently. yq itself rejects the C0
+# controls other than tab, LF and CR, so DEL is the control byte only this guard can refuse.
 BYTE_CLASSES = {
     "tab": rb"\t",
     "carriage-return": rb"\r",
     "control": rb"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]",
     "non-ascii": rb"[\x80-\xff]",
 }
-# A merge key in any quoting: yq merges a quoted "<<" too, and tags it a plain string.
-MERGE_KEY = re.compile(rb"""<<["']?[ \t]*:""")
-# Per document: keys and values (yq's `...`) with an anchor, and with a tag outside the core
-# schema. An alias has an empty tag and needs an anchor; a merge key is refused by MERGE_KEY.
-YQ_EXOTIC = ('{"anchor": ([... | select(anchor != "")] | length), "tag": ([... | select(tag | '
-             'test("^(!!(map|seq|str|int|float|bool|null|merge))?$") | not)] | length)}')
+# A directive line (GitHub's parser honours %YAML 1.1, where yes, no and on are booleans; yq
+# ignores it) and a document marker line (yq skips a leading empty document).
+DIRECTIVE = re.compile(rb"^%", re.M)
+DOCUMENT_MARKER = re.compile(rb"^(---|\.\.\.)([ \t]|$)", re.M)
+# yq's decoded node tree, before it builds the JSON: a key whose value is `<<` in any spelling
+# (yq merges it and drops it from the output; GitHub keeps it as a key), a key that is not a
+# string, an anchor (an alias needs one), and a value tag outside the core schema.
+YQ_NODES = ('{"merge": ([... | select(is_key and . == "<<")] | length), '
+            '"key-tag": ([... | select(is_key and tag != "!!str")] | length), '
+            '"anchor": ([... | select(anchor != "")] | length), '
+            '"value-tag": ([... | select((is_key | not) and (tag | test("^(!!(map|seq|str|int|float|bool|null))?$")'
+            ' | not))] | length)}')
 # GitHub path filter and glob characters, refused in the paths CLAUDE.md names.
-GLOB = re.compile(r"[*?+\[\]{}!\\]")
+GLOB_CHARS = {"star": "*", "question": "?", "plus": "+", "bracket-open": "[", "bracket-close": "]",
+              "brace-open": "{", "brace-close": "}", "bang": "!", "backslash": "\\"}
 
 UNITS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
          "fifteen sixteen seventeen eighteen nineteen").split()
@@ -106,11 +121,11 @@ class Broken(Exception):
     pass
 
 
-# The registry. register() is called for every guard below the mutation-proof marker; refuse()
-# is the only way a check refuses.
-GUARDS = {}      # id -> (the checks its cases fail, [(description, seed)])
+# The registry. register() is called for every guard below the mutation-proof marker; refuse() is
+# the only way a check refuses. SITES and CHECKED_BY record where each guard is evaluated.
+GUARDS = {}       # id -> (the checks its cases fail, [(description, seed)])
 DISABLED = set()  # the guard the mutation proof has disabled
-EVALUATED = set()
+EVALUATED, SITES, CHECKED_BY, STATE = set(), {}, {}, {"check": None}
 
 
 def register(gid, checks, *cases):
@@ -123,6 +138,8 @@ def refuse(gid, failing, message):
     if gid not in GUARDS:
         raise RuntimeError(f"guard {gid!r} is not registered")
     EVALUATED.add(gid)
+    SITES.setdefault(gid, set()).add(sys._getframe(1).f_lineno)
+    CHECKED_BY.setdefault(gid, set()).add(STATE["check"])
     if failing and gid not in DISABLED:
         raise Broken(f"{message() if callable(message) else message} [{gid}]")
 
@@ -144,23 +161,16 @@ def read_bytes(root, rel):
         raise Broken(f"cannot read {rel}: {e.strerror or e}")
 
 
-def number(text):
-    """A count written as digits or English words below one hundred ("sixteen", "twenty-four")."""
-    t = text.lower()
-    if re.fullmatch(r"[0-9]+", t):
-        return int(t)
-    parts = re.split(r"[ -]", t)
-    if len(parts) == 1 and parts[0] in UNITS:
-        return UNITS.index(parts[0])
-    if len(parts) == 1 and parts[0] in TENS:
-        return TENS[parts[0]]
-    if len(parts) == 2 and parts[0] in TENS and parts[1] in UNITS[1:10]:
-        return TENS[parts[0]] + UNITS.index(parts[1])
-    raise Broken(f"not a count below one hundred: {text!r}")
+def read_bstack():
+    if not os.environ.get("BSTACK"):
+        raise Broken("BSTACK is not set: the job sets it after fetching the pinned bstack; locally, "
+                     "set it to a bstack checkout at the pin")
+    return read(Path(os.environ["BSTACK"]), "scripts/compute-lambda.sh")
 
 
 def yq(root, rel, query):
-    """yq's reading of rel under query: one JSON value per document, and the duplicated keys."""
+    """yq's reading of rel under query: one JSON value per document, and the keys repeated within
+    one mapping, compared case-insensitively (GitHub's parser does)."""
     try:
         out = subprocess.run(["yq", "-o=json", "-I=0", query, str(root / rel)],
                              capture_output=True, text=True, timeout=60)
@@ -171,8 +181,8 @@ def yq(root, rel, query):
     dups = []
 
     def pairs(items):
-        keys = [k for k, _ in items]
-        dups.extend(k for k in set(keys) if keys.count(k) > 1)
+        keys = [k.casefold() for k, _ in items]
+        dups.extend(k for k, _ in items if keys.count(k.casefold()) > 1)
         return dict(items)
 
     decoder, text, docs, i = json.JSONDecoder(object_pairs_hook=pairs), out.stdout, [], 0
@@ -183,7 +193,7 @@ def yq(root, rel, query):
             docs.append(value)
     except json.JSONDecodeError as e:
         raise Broken(f"yq's reading of {rel} is not JSON: {e}")
-    return docs, sorted(dups)
+    return docs, sorted(set(dups))
 
 
 def parameters(root):
@@ -201,41 +211,43 @@ def load_yaml(root, rel):
     raw = read_bytes(root, rel)
     for name, pattern in BYTE_CLASSES.items():
         refuse(f"yaml.bytes.{name}", re.search(pattern, raw), f"{rel} has {name} bytes")
-    refuse("yaml.no-merge-keys", MERGE_KEY.search(raw), f"{rel} has a merge key")
+    refuse("yaml.no-directive", DIRECTIVE.search(raw), f"{rel} has a % directive line")
+    refuse("yaml.no-document-marker", DOCUMENT_MARKER.search(raw), f"{rel} has a --- or ... document marker line")
     if raw not in _YAML:
-        _YAML[raw] = yq(root, rel, "."), yq(root, rel, YQ_EXOTIC)[0]
-    (docs, dups), exotic = _YAML[raw]
-    refuse("yaml.one-document", len(docs) != 1, f"{rel} holds {len(docs)} documents, not one")
-    refuse("yaml.no-duplicate-keys", dups, lambda: f"{rel} repeats keys {', '.join(dups)}")
-    refuse("yaml.no-anchors", any(e["anchor"] for e in exotic), f"{rel} uses anchors or aliases")
-    refuse("yaml.no-custom-tags", any(e["tag"] for e in exotic), f"{rel} uses tags outside the core schema")
+        _YAML[raw] = yq(root, rel, "."), yq(root, rel, YQ_NODES)[0]
+    (docs, dups), nodes = _YAML[raw]
+    refuse("yaml.no-duplicate-keys", dups, lambda: f"{rel} repeats keys, ignoring case: {', '.join(dups)}")
+    for name, what in (("merge", "a merge key `<<`, in some spelling"), ("key-tag", "a key that is not a string"),
+                       ("anchor", "anchors or aliases"), ("value-tag", "tags outside the core schema")):
+        refuse(f"yaml.no-{name}", any(n[name] for n in nodes), f"{rel} uses {what}")
     return docs[0] if docs else None
 
 
 def mapping(x, where):
-    refuse("shape.mapping", not isinstance(x, dict), f"{where} is not a mapping")
+    refuse(f"shape.{where}", not isinstance(x, dict), f"{where} is not a mapping")
     return x
 
 
 def at(x, where, *keys):
-    """The value at keys, each level of which must be a mapping."""
+    """The value at keys below the mapping x, each step of which must be a mapping."""
     for key in keys:
-        x = mapping(x, where).get(key)
         where = f"{where}.{key}"
+        x = mapping(x.get(key), where)
     return x
 
 
 def claude_paths(text):
     """The repository paths CLAUDE.md names: every backticked token with a slash or a file
-    extension, whatever the extension. Each must be a plain relative path, read the same way by git
-    and by GitHub's path filters."""
+    extension, whatever the extension. Each must be a plain relative path, read the same way by
+    git and by GitHub's path filters."""
     named = re.findall(r"`([^` \t\n]+)`", text)
     paths = list(dict.fromkeys(p for p in named if "/" in p or re.search(r"\.[^./]+$", p)))
-    for gid, test in (("claude.path.not-absolute", lambda p: p.startswith("/")),
-                      ("claude.path.no-dot-slash", lambda p: p.startswith("./")),
-                      ("claude.path.no-dot-dot", lambda p: ".." in p.split("/")),
-                      ("claude.path.no-glob", lambda p: GLOB.search(p)),
-                      ("claude.path.printable-ascii", lambda p: not (p.isascii() and p.isprintable()))):
+    tests = {"claude.path.not-absolute": lambda p: p.startswith("/"),
+             "claude.path.no-dot-slash": lambda p: p.startswith("./"),
+             "claude.path.no-dot-dot": lambda p: ".." in p.split("/"),
+             "claude.path.printable-ascii": lambda p: not (p.isascii() and p.isprintable())}
+    tests.update({f"claude.path.no-glob.{name}": (lambda c: lambda p: c in p)(c) for name, c in GLOB_CHARS.items()})
+    for gid, test in tests.items():
         bad = [p for p in paths if test(p)]
         refuse(gid, bad, lambda: "CLAUDE.md names paths that are not plain repository paths: " + ", ".join(bad))
     return named, paths
@@ -254,6 +266,22 @@ def check_claude_pointer(root):
     return "points to " + ", ".join(paths)
 
 
+def number(text):
+    """A count written as digits or English words below one hundred ("sixteen", "twenty-four"), or
+    None when it is neither."""
+    t = text.lower()
+    parts = re.split(r"[ -]", t)
+    if re.fullmatch(r"[0-9]+", t):
+        return int(t)
+    if len(parts) == 1 and parts[0] in UNITS:
+        return UNITS.index(parts[0])
+    if len(parts) == 1 and parts[0] in TENS:
+        return TENS[parts[0]]
+    if len(parts) == 2 and parts[0] in TENS and parts[1] in UNITS[1:10]:
+        return TENS[parts[0]] + UNITS.index(parts[1])
+    return None
+
+
 def check_shard_count(root):
     """The number of `mutants` jobs AGENTS.md names is the number of jobs ci.yml's mutants matrix
     runs. GitHub runs one job per combination after include and exclude, so the count is the
@@ -262,10 +290,11 @@ def check_shard_count(root):
     refuse("count.named", not found, "AGENTS.md does not name the count (\"after <count> `mutants` jobs\")")
     refuse("count.named-once", len(found) > 1, f"AGENTS.md names the `mutants` job count {len(found)} times")
     named = number(found[0]) if found else None
-    strategy = mapping(at(load_yaml(root, CI), CI, "jobs", "mutants", "strategy"), "jobs.mutants.strategy")
+    refuse("count.readable", found and named is None, lambda: f"AGENTS.md's count {found[0]!r} is not a number below 100")
+    strategy = at(mapping(load_yaml(root, CI), "ci"), "ci", "jobs", "mutants", "strategy")
     shaping = sorted(set(strategy) - {"matrix", "fail-fast", "max-parallel"})
     refuse("matrix.strategy-keys", shaping, lambda: "unsupported matrix shape: strategy has " + ", ".join(shaping))
-    matrix = mapping(strategy.get("matrix"), "jobs.mutants.strategy.matrix")
+    matrix = at(strategy, "ci.jobs.mutants.strategy", "matrix")
     refuse("matrix.exactly-shard", set(matrix) != {"shard"},
            lambda: "unsupported matrix shape: the matrix holds " + ", ".join(matrix) + ", not exactly shard")
     shards = matrix.get("shard")
@@ -283,10 +312,10 @@ def check_shard_count(root):
 def check_triggers(root):
     """The workflow runs on exactly on.pull_request, on main, with paths that hold every governance
     path, every input of these checks and every path CLAUDE.md names."""
-    on = mapping(at(load_yaml(root, WORKFLOW), WORKFLOW, "on"), "on")
+    on = at(mapping(load_yaml(root, WORKFLOW), "workflow"), "workflow", "on")
     refuse("on.exactly-pull_request", set(on) != {"pull_request"},
            lambda: "`on` holds " + ", ".join(on) + ", not exactly pull_request")
-    pr = mapping(on.get("pull_request"), "on.pull_request")
+    pr = at(on, "workflow.on", "pull_request")
     refuse("on.exactly-branches-paths", set(pr) != {"branches", "paths"},
            lambda: "on.pull_request holds " + ", ".join(pr) + ", not exactly branches and paths")
     refuse("on.branches-main", pr.get("branches") != ["main"], "on.pull_request.branches is not [main]")
@@ -307,7 +336,7 @@ def check_triggers(root):
 def check_rate_paths(root):
     """The L3 rate gate counts every governance path. It passes the list to `git log --`, where
     pathspec magic such as :(exclude), :! or :^ removes paths from the count: none is allowed."""
-    patterns = mapping(at(parameters(root), PARAMETERS, "gates", "l3_paths"), "[gates.l3_paths]").get("patterns")
+    patterns = at(parameters(root), "parameters", "gates", "l3_paths").get("patterns")
     refuse("rate.strings", not isinstance(patterns, list) or any(not isinstance(x, str) for x in patterns),
            "[gates.l3_paths] patterns is not a list of strings")
     strings = [x for x in patterns if isinstance(x, str)] if isinstance(patterns, list) else []
@@ -321,9 +350,10 @@ def check_rate_paths(root):
 
 
 def check_levels(root):
-    """Exactly the template's four levels, each parameter a finite number, each with a finite cached
-    lambda. bstack's compute-lambda.sh --strict exits 0 with no levels (all([]) holds), on a level
-    with no cached value, and on inf in a parameter and its cache (inf - inf is nan)."""
+    """Exactly the template's four levels, each parameter of each a finite number, each with a
+    finite cached lambda. bstack's compute-lambda.sh --strict exits 0 with no levels (all([])
+    holds), on a level with no cached value, and on inf in a parameter and its cache (inf - inf
+    is nan, and nan > 1e-4 is false)."""
     data = parameters(root)
     levels = data.get("levels")
     refuse("levels.tables", not isinstance(levels, list) or any(not isinstance(x, dict) for x in levels),
@@ -335,13 +365,17 @@ def check_levels(root):
     refuse("levels.known", unknown, lambda: f"levels {unknown} are not the template's")
     repeated = sorted({str(i) for i in ids if ids.count(i) > 1})
     refuse("levels.once", repeated, lambda: f"levels {repeated} appear more than once")
-    for p in LEVEL_PARAMETERS:
-        values = [(lvl.get("id"), lvl.get(p)) for lvl in levels] if isinstance(levels, list) else []
-        refuse(f"param.{p}.number", [i for i, v in values if type(v) not in (int, float)],
-               f"a level's {p} is missing or not a number")
-        refuse(f"param.{p}.finite", [i for i, v in values if type(v) in (int, float) and not math.isfinite(v)],
-               f"a level's {p} is not finite")
-    cached = mapping(at(data, PARAMETERS, "derived", "lambda"), "[derived.lambda]")
+    by_id = {}
+    for lvl in levels if isinstance(levels, list) else []:
+        by_id.setdefault(lvl.get("id"), lvl)
+    for level in LEVELS:
+        for p in LEVEL_PARAMETERS:
+            v = by_id.get(level, {}).get(p)
+            refuse(f"param.{level}.{p}.number", level in by_id and type(v) not in (int, float),
+                   f"{level}'s {p} is missing or not a number")
+            refuse(f"param.{level}.{p}.finite", type(v) in (int, float) and not math.isfinite(v),
+                   f"{level}'s {p} is not finite")
+    cached = at(data, "parameters", "derived", "lambda")
     for level in LEVELS:
         v = cached.get(level)
         refuse(f"cache.{level}", level not in cached, f"[derived.lambda] caches no {level}")
@@ -357,8 +391,8 @@ def check_levels(root):
 def check_bstack_calls(root):
     """The job fetches bstack at a pinned full SHA with the exact install recipe, and its only
     other mention of bstack or its scripts is the two exact calls, in their own steps."""
-    steps = mapping(at(load_yaml(root, WORKFLOW), WORKFLOW, "jobs", "stability-check"),
-                    "jobs.stability-check").get("steps")
+    job = at(mapping(load_yaml(root, WORKFLOW), "workflow"), "workflow", "jobs", "stability-check")
+    steps = job.get("steps")
     refuse("steps.list", not isinstance(steps, list) or any(not isinstance(s, dict) for s in steps),
            "jobs.stability-check.steps is not a list of steps")
     installs = [s for s in steps if s.get("name") == INSTALL_STEP]
@@ -381,9 +415,20 @@ def check_bstack_calls(root):
     refuse("calls.exact", calls != BSTACK_CALLS,
            lambda: "outside the install step, the mentions of bstack are not exactly the bound, --strict "
                    "compute and rate calls: " + "; ".join(f"{i}: {c}" for i, c in calls))
-    loose = [s.get("id") for s in steps if s.get("id") in ("compute", "rate") and set(s) != {"id", "name", "run"}]
-    refuse("calls.step-keys", loose, lambda: f"the {', '.join(loose)} steps hold more than name, id and run")
+    for step_id, _ in BSTACK_CALLS:
+        loose = [s for s in steps if s.get("id") == step_id and set(s) != {"id", "name", "run"}]
+        refuse(f"calls.step-keys.{step_id}", loose, f"the {step_id} step holds more than name, id and run")
     return f"bstack {rev[:12]}, fetched and called as pinned"
+
+
+def check_bstack_parameters(root):
+    """LEVEL_PARAMETERS is exactly what the pinned compute-lambda.sh reads from each level."""
+    reads = set(re.findall(r"""lvl\[["'](\w+)["']\]""", read_bstack())) - {"id"}
+    for p in LEVEL_PARAMETERS:
+        refuse(f"bstack.reads.{p}", p not in reads, f"the pinned compute-lambda.sh does not read {p}")
+    extra = sorted(reads - set(LEVEL_PARAMETERS))
+    refuse("bstack.reads-only-these", extra, lambda: f"the pinned compute-lambda.sh also reads {', '.join(extra)}")
+    return "the pinned compute-lambda.sh reads exactly " + ", ".join(LEVEL_PARAMETERS)
 
 
 CHECKS = (
@@ -393,17 +438,20 @@ CHECKS = (
     ("rate-paths", check_rate_paths),
     ("rcs-levels", check_levels),
     ("bstack-calls", check_bstack_calls),
+    ("bstack-parameters", check_bstack_parameters),
 )
 
 
-def run(root, quiet=False):
-    """The names of the checks that failed. A check that crashes fails as `<name> (crashed)`: it
-    fails closed, and no case expects it."""
+def run(root, quiet=False, checks=CHECKS):
+    """The names of the checks that failed. A check that crashes, or exits (SystemExit, which quit()
+    and sys.exit() raise), fails as `<name> (crashed)`: it fails closed, and no case but the
+    runner's own expects it."""
     failed = []
-    for name, check in CHECKS:
+    for name, check in checks:
+        STATE["check"] = name
         try:
             detail = check(root)
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             crashed = not isinstance(e, Broken)
             failed.append(name + (" (crashed)" if crashed else ""))
             reason = f"{type(e).__name__}: {e}" if crashed else str(e)
@@ -419,54 +467,68 @@ def run(root, quiet=False):
 
 # Above the mutation proof marker, only these functions may raise, assert, catch, exit or name
 # Broken: the registry, the runner and the input readers.
-NOT_GUARDS = {"register", "refuse", "run", "read", "read_bytes", "number", "yq", "parameters"}
+NOT_GUARDS = {"register", "refuse", "run", "read", "read_bytes", "read_bstack", "yq", "parameters"}
+# Names a check may not use (sys.exit and os._exit are refused as attributes too).
+FORBIDDEN = {"Broken", "exit", "quit", "eval", "exec", "compile", "__import__", "globals", "vars",
+             "locals", "getattr", "setattr", "delattr", "breakpoint"}
 
-# mutation proof below: the selftest, the seeds that make every guard's cases, and the proof.
-
-
-RATE = '    "{}",\n'
-FIXTURE_SHARDS = 3
+# mutation proof below: the fixture, the seeds that make every guard's cases, and the proof.
 
 
 class Tree:
-    """The canonical fixture: a small tree that passes every check, generated from the constants
-    above. The selftest and the proof seed every case into a fresh copy of it, so no case depends
-    on how this repository's own files are written or quoted; run() is what checks those."""
-    n = FIXTURE_SHARDS
-    word = UNITS[FIXTURE_SHARDS]
-    phrase = f"after {UNITS[FIXTURE_SHARDS]} `mutants` jobs"
-    claude = "Read `AGENTS.md` (rules), `README.md` (commands) and `docs/spec.html` (design).\n"
+    """The fixture: this checkout's live values, written in one canonical format. The selftest and
+    the proof seed every case into a fresh copy of it."""
+    def __init__(self, root):
+        try:
+            self.word = COUNT.findall(read(root, "AGENTS.md"))[0]
+            self.shards = load_yaml(root, CI)["jobs"]["mutants"]["strategy"]["matrix"]["shard"]
+            workflow = load_yaml(root, WORKFLOW)
+            self.triggers = workflow["on"]["pull_request"]["paths"]
+            self.rev = next(s for s in workflow["jobs"]["stability-check"]["steps"]
+                            if s.get("name") == INSTALL_STEP)["env"]["BSTACK_REV"]
+            data = parameters(root)
+            self.levels = [{"id": x["id"], **{p: x[p] for p in LEVEL_PARAMETERS}} for x in data["levels"]]
+            self.cached = dict(data["derived"]["lambda"])
+            self.patterns = data["gates"]["l3_paths"]["patterns"]
+            self.claude_paths = claude_paths(read(root, "CLAUDE.md"))[1]
+        except (Broken, KeyError, TypeError, IndexError, StopIteration) as e:
+            raise Broken(f"the fixture is built from this checkout's values, which must pass the checks: "
+                         f"{type(e).__name__}: {e}")
+        self.n = len(self.shards)
+        self.phrase = f"after {self.word} `mutants` jobs"
+        self.claude = "Read " + " and ".join(f"`{p}`" for p in self.claude_paths) + ".\n"
 
     def files(self):
-        paths = [*GOVERNANCE_PATHS, *CONTRACT_INPUTS, "README.md", "docs/spec.html"]
-
         def run_block(text):
             return "        run: |\n" + "".join(f"          {line}\n" for line in text.splitlines())
 
         workflow = ("name: stability\non:\n  pull_request:\n    branches: [main]\n    paths:\n"
-                    + "".join(f"      - '{x}'\n" for x in paths)
-                    + "concurrency:\n  group: stability\njobs:\n  stability-check:\n    name: stability-check\n    steps:\n"
-                    + f"      - name: {INSTALL_STEP}\n        env:\n          BSTACK_REV: {'ab' * 20}\n" + run_block(INSTALL_RUN)
+                    + "".join(f"      - '{x}'\n" for x in self.triggers)
+                    + "concurrency:\n  group: stability\njobs:\n  stability-check:\n    name: stability-check\n"
+                    + f"    steps:\n      - name: {INSTALL_STEP}\n        env:\n          BSTACK_REV: {self.rev}\n"
+                    + run_block(INSTALL_RUN)
                     + "".join(f"\n      - name: {i}\n        id: {i}\n" + run_block(f"set +e\n{call}") for i, call in BSTACK_CALLS)
                     + "\n      - name: Report\n        run: echo done\n")
-        levels = "".join(f'\n[[levels]]\nid = "{level}"\n' + "".join(f"{p} = 1.5\n" for p in LEVEL_PARAMETERS)
-                         for level in LEVELS)
-        parameters = ("schema_version = 1\n" + levels + "\n[derived.lambda]\n" + "".join(f"{x} = 0.5\n" for x in LEVELS)
-                      + '\n[derived.omega]\nvalue = 0.5\nlevel = "L3"\n\n[gates.l3_paths]\npatterns = [\n'
-                      + "".join(RATE.format(x) for x in GOVERNANCE_PATHS) + "]\n")
-        return {
+        levels = "".join(f'\n[[levels]]\nid = "{x["id"]}"\n' + "".join(f"{p} = {x[p]!r}\n" for p in LEVEL_PARAMETERS)
+                         for x in self.levels)
+        params = ("schema_version = 1\n" + levels + "\n[derived.lambda]\n"
+                  + "".join(f"{k} = {v!r}\n" for k, v in self.cached.items())
+                  + '\n[derived.omega]\nvalue = 0.5\nlevel = "L3"\n\n[gates.l3_paths]\npatterns = [\n'
+                  + "".join(RATE.format(x) for x in self.patterns) + "]\n")
+        script = ('for lvl in data.get("levels", []):\n    try:\n'
+                  + "".join(f'        {p} = lvl["{p}"]\n' for p in LEVEL_PARAMETERS)
+                  + '    except KeyError:\n        pass\n    results.append({"id": lvl["id"]})\n')
+        files = {p: "x\n" for p in self.claude_paths}
+        files.update({
             "CLAUDE.md": self.claude,
             "AGENTS.md": f"# Rules\n\nCI runs the `ci` check {self.phrase} split the mutation check.\n",
-            "README.md": "# Readme\n",
-            "docs/spec.html": "<p>spec</p>\n",
             CI: "name: ci\njobs:\n  mutants:\n    strategy:\n      fail-fast: false\n      matrix:\n"
-                f"        shard: [{', '.join(map(str, range(self.n)))}]\n",
+                f"        shard: [{', '.join(json.dumps(x) for x in self.shards)}]\n",
             WORKFLOW: workflow,
-            PARAMETERS: parameters,
-        }
-
-
-TREE = Tree()
+            PARAMETERS: params,
+            SCRIPT: script,
+        })
+        return files
 
 
 def words(k):
@@ -479,7 +541,7 @@ def words(k):
     return tens + ("-" + UNITS[k % 10] if k % 10 else "")
 
 
-# Seeds: functions of (root, Tree) that change the copy at root.
+# Seeds: functions of (root, Tree) that change the fixture copy at root.
 def edit(rel, old, new):
     """Replace the one occurrence of old (a string, or a function of the Tree) in rel."""
     def apply(r, t):
@@ -492,6 +554,7 @@ def edit(rel, old, new):
 
 
 def resub(rel, pattern, repl, count=1):
+    """re.sub pattern with repl (a string, or a function of the match) in rel; it must match."""
     def apply(r, t):
         text = (r / rel).read_text(encoding="utf-8")
         new, k = re.subn(pattern, repl, text, count=count, flags=re.M)
@@ -505,6 +568,18 @@ def after(rel, pattern, *lines):
     """Add lines after the first line matching pattern (group 1 is its indentation), each indented
     as that line plus its own leading spaces."""
     return resub(rel, pattern, lambda m: m[0] + "".join("\n" + m[1] + line for line in lines))
+
+
+def append(rel, text):
+    def apply(r, t):
+        (r / rel).write_text((r / rel).read_text(encoding="utf-8") + text, encoding="utf-8")
+    return apply
+
+
+def prepend(rel, text):
+    def apply(r, t):
+        (r / rel).write_text(text + (r / rel).read_text(encoding="utf-8"), encoding="utf-8")
+    return apply
 
 
 def write(rel, text):
@@ -531,17 +606,29 @@ def seq(*seeds):
     return apply
 
 
+def live(t):
+    """The live shard list, as YAML scalars."""
+    return [json.dumps(x) for x in t.shards]
+
+
 def matrix(items):
-    """The shard list as items, a function of the Tree."""
-    return lambda r, t: resub(CI, SHARD, lambda m: f"{m[1]}shard: [{', '.join(map(str, items(t)))}]")(r, t)
+    """The shard list as items(t), YAML scalars."""
+    return lambda r, t: resub(CI, SHARD, lambda m: f"{m[1]}shard: [{', '.join(items(t))}]")(r, t)
 
 
-def named(*paths):
-    return edit("CLAUDE.md", "`AGENTS.md`", "`AGENTS.md` and " + " and ".join(f"`{p}`" for p in paths))
+def named(path, last=False):
+    """CLAUDE.md also names path, before AGENTS.md or at its end."""
+    return append("CLAUDE.md", f"See `{path}`.\n") if last else edit("CLAUDE.md", "`AGENTS.md`", f"`{path}` and `AGENTS.md`")
 
 
-def triggered(*paths):
-    return edit(WORKFLOW, "      - 'CLAUDE.md'\n", "      - 'CLAUDE.md'\n" + "".join(f"      - '{p}'\n" for p in paths))
+def triggered(path, last=False):
+    line = f"      - '{path}'\n"
+    return edit(WORKFLOW, "concurrency:", line + "concurrency:") if last else edit(WORKFLOW, "    paths:\n", "    paths:\n" + line)
+
+
+def rated(pattern, last=False):
+    line = RATE.format(pattern)
+    return edit(PARAMETERS, "\n]\n", "\n" + line + "]\n") if last else edit(PARAMETERS, "patterns = [\n", "patterns = [\n" + line)
 
 
 def extra_step(*lines):
@@ -549,19 +636,35 @@ def extra_step(*lines):
                 + "".join(f"          {x}\n" for x in lines) + "\n      - name: Report\n")
 
 
-SHARD = r"^( *)shard *:.*$"
-STRATEGY = r"^( *)strategy:$"
-FAIL_FAST = r"^( *)fail-fast: false$"
-BRANCHES = r"^( *)branches: \[main\]$"
-LEVEL = r'^\[\[levels\]\]\nid *= *"{}"\n(?:\w+ *=.*\n)*'
-WHY = ("inf", "-inf", "nan")
+def ends(make):
+    """Two cases from make(last): the offending entry first in its list, and last."""
+    first, last = make(False), make(True)
+    return [(f"{first[0]} (first)", first[1]), (f"{last[0]} (last)", last[1])]
 
 
-def copy_level(source, as_id):
+def unplain(path, file=None, trigger=True):
+    """CLAUDE.md names path, first and last; file is created and path triggered as asked."""
+    return ends(lambda last: (f"CLAUDE.md names {path!r}", seq(
+        named(path, last), *([write(file, "x\n")] if file else []), *([triggered(path)] if trigger else []))))
+
+
+def absolute(last):
+    def apply(r, t):
+        p = f"{r.resolve()}/AGENTS.md"
+        seq(named(p, last), triggered(p))(r, t)
+    return ("CLAUDE.md names an absolute path", apply)
+
+
+def in_level(level, p, value):
+    return resub(PARAMETERS, rf'(^\[\[levels\]\]\nid = "{level}"\n(?:\w+ = .*\n)*?){p} = .*$', rf"\g<1>{p} = {value}")
+
+
+def copy_level(source, as_id, first=False):
     def apply(r, t):
         text = (r / PARAMETERS).read_text(encoding="utf-8")
-        m = re.search(LEVEL.format(source), text, re.M)
-        (r / PARAMETERS).write_text(text + "\n" + m[0].replace(f'"{source}"', f'"{as_id}"'), encoding="utf-8")
+        block = re.search(LEVEL.format(source), text, re.M)[0].replace(f'"{source}"', f'"{as_id}"')
+        text = text.replace("\n[[levels]]", "\n" + block + "\n[[levels]]", 1) if first else text + "\n" + block
+        (r / PARAMETERS).write_text(text, encoding="utf-8")
     return apply
 
 
@@ -577,64 +680,89 @@ def symlink_to_pointer(r, t):
     (r / "CLAUDE.md").symlink_to("POINTER.md")
 
 
-def absolute(r, t):
-    path = f"{r.resolve()}/README.md"
-    seq(named(path), triggered(path))(r, t)
-
+SHARD = r"^( *)shard *:.*$"
+STRATEGY = r"^( *)strategy:$"
+FAIL_FAST = r"^( *)fail-fast: false$"
+NAME = r"^()name: ci$"
+BRANCHES = r"^( *)branches: \[main\]$"
+LEVEL = r'^\[\[levels\]\]\nid = "{}"\n(?:\w+ = .*\n)*'
+RATE = '    "{}",\n'
+SCRIPT = "bstack/scripts/compute-lambda.sh"
+TOP = "schema_version = 1\n"
+WHY = ("inf", "-inf", "nan")
+WF, CC = ("trigger-paths", "bstack-calls"), ("claude-points-to-agents", "trigger-paths")
+SC, LV, RP, BC, BP = ["shard-count"], ["rcs-levels"], ["rate-paths"], ["bstack-calls"], ["bstack-parameters"]
 
 # The registry: every guard and its own cases. Data-driven guards expand per entry.
-WF, CC = ("trigger-paths", "bstack-calls"), ("claude-points-to-agents", "trigger-paths")
-for name, data in (("tab", b" #\tx"), ("carriage-return", b"\r"), ("control", b" # \x7f"),
-                   ("non-ascii", b"\xc2\xa0# x")):
-    register(f"yaml.bytes.{name}", ["shard-count"], (f"ci.yml has {name} bytes", raw_after(CI, FAIL_FAST, data)))
-register("yaml.no-merge-keys", ["shard-count"],
-         ("ci.yml has a merge key", after(CI, FAIL_FAST, "<<: {}")),
-         ('ci.yml has a quoted "<<" key', after(CI, FAIL_FAST, '"<<": {}')))
-register("yaml.one-document", ["shard-count"],
-         ("ci.yml holds two documents", lambda r, t: (r / CI).write_text((r / CI).read_text() + "---\nx: 1\n")))
-register("yaml.no-duplicate-keys", ["shard-count"], ("ci.yml repeats a key", after(CI, FAIL_FAST, "fail-fast: false")))
-register("yaml.no-anchors", ["shard-count"],
-         ("ci.yml uses an anchor", lambda r, t: resub(CI, SHARD, r"\1shard: &s [" + ", ".join(map(str, range(t.n))) + "]")(r, t)))
-register("yaml.no-custom-tags", ["shard-count"], ("ci.yml uses a custom tag", resub(CI, FAIL_FAST, r"\1fail-fast: !flag false")))
-register("shape.mapping", ["rate-paths"], ("[gates] is a string", seq(
-    resub(PARAMETERS, r"^\[gates\.l3_paths\]\npatterns = \[[^\]]*\]\n", ""),
-    edit(PARAMETERS, "schema_version = 1\n", 'schema_version = 1\ngates = "x"\n'))))
+for name, data in (("tab", b" #\tx"), ("carriage-return", b"\r"), ("control", b" # \x7f"), ("non-ascii", b"\xc2\xa0# x")):
+    register(f"yaml.bytes.{name}", SC, (f"ci.yml has {name} bytes", raw_after(CI, FAIL_FAST, data)))
+register("yaml.no-directive", SC, ("ci.yml has a %YAML 1.1 directive", prepend(CI, "%YAML 1.1\n")))
+register("yaml.no-document-marker", SC, ("ci.yml starts with ---", prepend(CI, "---\n")),
+         ("ci.yml ends with ...", append(CI, "...\n")), ("ci.yml holds two documents", append(CI, "---\nx: 1\n")))
+register("yaml.no-duplicate-keys", SC, ("ci.yml repeats a key", after(CI, FAIL_FAST, "fail-fast: false")),
+         ("ci.yml has Name beside name", after(CI, NAME, "Name: x")))
+register("yaml.no-merge", SC, ('ci.yml has a quoted "<<" key', after(CI, FAIL_FAST, '"<<": {}')),
+         (r'ci.yml has an escaped "\x3c\x3c" matrix dimension', after(CI, SHARD, r'"\x3c\x3c": [a, b]')),
+         ('ci.yml has an explicit ? "<<" key', after(CI, FAIL_FAST, '? "<<"', ": {}")))
+register("yaml.no-key-tag", SC, *[(f"ci.yml has a {k} key", after(CI, NAME, f"{k}: x")) for k in ("true", "~", "1", "null")])
+register("yaml.no-anchor", SC, ("ci.yml uses an anchor", lambda r, t: resub(
+    CI, SHARD, lambda m: f"{m[1]}shard: &s [{', '.join(live(t))}]")(r, t)))
+register("yaml.no-value-tag", SC, ("ci.yml uses a custom tag", resub(CI, FAIL_FAST, r"\1fail-fast: !flag false")))
+# One guard per mapping the checks walk; each case makes that node a scalar the next step crashes on.
+for where, checks, seed in (
+        ("ci", SC, write(CI, "0\n")),
+        ("ci.jobs", SC, write(CI, "name: ci\njobs: 0\n")),
+        ("ci.jobs.mutants", SC, write(CI, "name: ci\njobs:\n  mutants: 0\n")),
+        ("ci.jobs.mutants.strategy", SC, resub(CI, r"^    strategy:\n(?:      .*\n)+", "    strategy: 0\n")),
+        ("ci.jobs.mutants.strategy.matrix", SC, resub(CI, r"^      matrix:\n(?:        .*\n)+", "      matrix: 0\n")),
+        ("workflow", WF, write(WORKFLOW, "0\n")),
+        ("workflow.on", WF[:1], resub(WORKFLOW, r"^on:\n(?:  .*\n)+", "on: 0\n")),
+        ("workflow.on.pull_request", WF[:1], resub(WORKFLOW, r"^  pull_request:\n(?:    .*\n)+", "  pull_request: 0\n")),
+        ("workflow.jobs", WF[1:], resub(WORKFLOW, r"^jobs:\n(?:(?:  .*)?\n)+", "jobs: 0\n")),
+        ("workflow.jobs.stability-check", WF[1:], resub(WORKFLOW, r"^  stability-check:\n(?:(?:    .*)?\n)+",
+                                                        "  stability-check: 0\n")),
+        ("parameters.gates", RP, seq(resub(PARAMETERS, r"^\[gates\.l3_paths\]\n", "[x]\n"),
+                                     edit(PARAMETERS, TOP, TOP + 'gates = "x"\n'))),
+        ("parameters.gates.l3_paths", RP, resub(PARAMETERS, r"^\[gates\.l3_paths\]\npatterns = \[\n(?:    .*\n)*\]\n",
+                                                '[gates]\nl3_paths = "x"\n')),
+        ("parameters.derived", LV, seq(resub(PARAMETERS, r"^\[derived\.lambda\]\n(?:L\d = .*\n)+", ""),
+                                       resub(PARAMETERS, r"^\[derived\.omega\]\n(?:\w+ = .*\n)+", ""),
+                                       edit(PARAMETERS, TOP, TOP + 'derived = "x"\n'))),
+        ("parameters.derived.lambda", LV, resub(PARAMETERS, r"^\[derived\.lambda\]\n(?:L\d = .*\n)+", '[derived]\nlambda = "x"\n'))):
+    register(f"shape.{where}", checks, (f"{where} is a scalar", seed))
 # claude-points-to-agents
 register("claude.not-symlink", ["claude-points-to-agents"], ("CLAUDE.md is a symlink to a separate pointer file", symlink_to_pointer))
 register("claude.not-copy", ["claude-points-to-agents"], ("CLAUDE.md is a copy of an AGENTS.md that names only itself", seq(
     write("AGENTS.md", lambda t: f"Rules are in `AGENTS.md`, {t.phrase}.\n"),
     write("CLAUDE.md", lambda t: f"Rules are in `AGENTS.md`, {t.phrase}.\n"))))
-register("claude.names-agents", ["claude-points-to-agents"], ("CLAUDE.md names only README.md", write("CLAUDE.md", "Read `README.md`.\n")))
+register("claude.names-agents", ["claude-points-to-agents"], ("CLAUDE.md names everything but AGENTS.md", write(
+    "CLAUDE.md", lambda t: "Read " + (" and ".join(f"`{p}`" for p in t.claude_paths if p != "AGENTS.md") or "nothing") + ".\n")))
 register("claude.paths-exist", ["claude-points-to-agents"],
-         ("CLAUDE.md names a path that does not exist", seq(named("docs/missing.md"), triggered("docs/missing.md"))),
-         ("CLAUDE.md names a .txt file that does not exist", seq(named("RULES.txt"), triggered("RULES.txt"))))
-register("claude.path.not-absolute", CC, ("CLAUDE.md names an absolute path", absolute))
-register("claude.path.no-dot-slash", CC, ("CLAUDE.md names a ./ path", seq(named("./README.md"), triggered("./README.md"))))
-register("claude.path.no-dot-dot", CC,
-         ("CLAUDE.md names a path through ..", seq(named("docs/../README.md"), triggered("docs/../README.md"))))
-register("claude.path.no-glob", CC,
-         ("CLAUDE.md names a [glob]", seq(named("docs/[x].md"), triggered("docs/[x].md"), write("docs/[x].md", "x\n"))),
-         ("CLAUDE.md names a + glob", seq(named("docs/x+.md"), triggered("docs/x+.md"), write("docs/x+.md", "x\n"))))
-register("claude.path.printable-ascii", CC,
-         ("CLAUDE.md names a non-ASCII path", seq(named("docs/é.md"), write("docs/é.md", "x\n"))))
+         *ends(lambda last: ("CLAUDE.md names a missing file", seq(named("missing.md", last), triggered("missing.md")))),
+         ("CLAUDE.md names a missing .txt file", seq(named("RULES.txt"), triggered("RULES.txt"))))
+register("claude.path.not-absolute", CC, *ends(absolute))
+register("claude.path.no-dot-slash", CC, *unplain("./AGENTS.md"))
+register("claude.path.no-dot-dot", CC, *unplain("x/../AGENTS.md", "x/keep"))
+register("claude.path.printable-ascii", CC, *unplain("xé.md", "xé.md", trigger=False))
+for name, c in GLOB_CHARS.items():
+    register(f"claude.path.no-glob.{name}", CC, *unplain(f"x{c}.md", f"x{c}.md"))
 # shard-count
-register("count.named", ["shard-count"],
-         ("AGENTS.md no longer names the count", edit("AGENTS.md", lambda t: t.phrase, "after the `mutants` run")))
-register("count.named-once", ["shard-count"], ("AGENTS.md names the count twice", edit(
-    "AGENTS.md", lambda t: t.phrase, lambda t: f"{t.phrase}, {t.phrase}")))
-register("matrix.strategy-keys", ["shard-count"], ("strategy gains another key", after(CI, STRATEGY, "  x: 1")))
-register("matrix.exactly-shard", ["shard-count"],
+register("count.named", SC, ("AGENTS.md no longer names the count", edit("AGENTS.md", lambda t: t.phrase, "after the `mutants` run")))
+register("count.named-once", SC, ("AGENTS.md names the count twice",
+                                  edit("AGENTS.md", lambda t: t.phrase, lambda t: f"{t.phrase}, {t.phrase}")))
+register("count.readable", SC, ("AGENTS.md names a count that is not a number",
+                                edit("AGENTS.md", lambda t: t.phrase, "after many `mutants` jobs")))
+register("matrix.strategy-keys", SC, ("strategy gains another key", after(CI, STRATEGY, "  x: 1")))
+register("matrix.exactly-shard", SC,
          ("the matrix excludes a shard", after(CI, SHARD, "exclude:", "  - shard: 0")),
          ("the matrix includes another job", after(CI, SHARD, "include:", "  - shard: 99")),
          ("the matrix gains a dimension", after(CI, SHARD, "os: [a, b]")))
-register("matrix.shard-list", ["shard-count"], ("the shard list is a string", lambda r, t: resub(
+register("matrix.shard-list", SC, ("the shard list is a string", lambda r, t: resub(
     CI, SHARD, r"\1shard: " + "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[:t.n])(r, t)))
-register("matrix.shard-scalars", ["shard-count"],
-         ("a shard is a boolean", matrix(lambda t: ["true"] + list(range(2, t.n + 1)))))
-register("matrix.shard-unique", ["shard-count"],
-         ("the shard list repeats a value", matrix(lambda t: list(range(t.n - 1)) + [0])))
-register("count.matches", ["shard-count"],
-         ("ci.yml drops a shard", matrix(lambda t: range(t.n - 1))),
+register("matrix.shard-scalars", SC, *ends(lambda last: ("a shard is a boolean", matrix(
+    (lambda t: live(t)[:-1] + ["true"]) if last else (lambda t: ["true"] + live(t)[1:])))))
+register("matrix.shard-unique", SC, ("the shard list repeats a value", matrix(lambda t: live(t)[:-1] + live(t)[:1])))
+register("count.matches", SC, ("ci.yml drops a shard", matrix(lambda t: live(t)[:-1])),
          ("AGENTS.md names one shard more", edit("AGENTS.md", lambda t: t.phrase, lambda t: f"after {t.n + 1} `mutants` jobs")))
 # trigger-paths
 register("on.exactly-pull_request", WF[:1],
@@ -644,81 +772,82 @@ register("on.exactly-branches-paths", WF[:1],
          ("paths-ignore is added", after(WORKFLOW, BRANCHES, "paths-ignore:", "  - 'docs/**'")),
          ("types narrows the events", after(WORKFLOW, BRANCHES, "types: [closed]")))
 register("on.branches-main", WF[:1], ("branches widens past main", edit(WORKFLOW, "branches: [main]", "branches: [main, dev]")))
-register("on.paths-strings", WF[:1], ("a trigger path is a mapping", after(WORKFLOW, r"^( *)- 'CLAUDE.md'$", "- x: y")))
-register("on.paths-no-negation", WF[:1],
-         ("the trigger list negates AGENTS.md", after(WORKFLOW, r"^( *)- 'AGENTS.md'$", "- '!AGENTS.md'")))
+register("on.paths-strings", WF[:1], *ends(lambda last: ("a trigger path is a mapping", edit(
+    WORKFLOW, "concurrency:", "      - x: y\nconcurrency:") if last else edit(WORKFLOW, "    paths:\n", "    paths:\n      - x: y\n"))))
+register("on.paths-no-negation", WF[:1], *ends(lambda last: ("the trigger list negates AGENTS.md", triggered("!AGENTS.md", last))))
 for p in GOVERNANCE_PATHS + CONTRACT_INPUTS:
     register(f"trigger.{p}", WF[:1], (f"the workflow stops running on {p}", edit(WORKFLOW, f"      - '{p}'\n", "")))
 register("trigger.claude-paths", WF[:1],
-         ("CLAUDE.md names a file the workflow does not run on", seq(named("UNRUN.md"), write("UNRUN.md", "x\n"))),
+         *ends(lambda last: ("CLAUDE.md names a file the workflow does not run on",
+                             seq(named("UNRUN.md", last), write("UNRUN.md", "x\n")))),
          ("CLAUDE.md names a .txt file the workflow does not run on", seq(named("RULES.txt"), write("RULES.txt", "x\n"))))
 # rate-paths
-register("rate.strings", ["rate-paths"],
-         ("a rate pattern is a number", edit(PARAMETERS, RATE.format("AGENTS.md"), RATE.format("AGENTS.md") + "    1,\n")))
-register("rate.printable-ascii", ["rate-paths"], ("a rate pattern has a non-breaking space", edit(
-    PARAMETERS, RATE.format("AGENTS.md"), RATE.format("AGENTS.md") + RATE.format("AGENTS.md "))))
-register("rate.no-pathspec-magic", ["rate-paths"], *[
-    (f"the rate list excludes AGENTS.md with {m}", edit(PARAMETERS, RATE.format("AGENTS.md"),
-                                                          RATE.format("AGENTS.md") + RATE.format(f"{m}AGENTS.md")))
-    for m in (":(exclude)", ":!", ":^")])
+register("rate.strings", RP, *ends(lambda last: ("a rate pattern is a number", edit(
+    PARAMETERS, "\n]\n", "\n    1,\n]\n") if last else edit(PARAMETERS, "patterns = [\n", "patterns = [\n    1,\n"))))
+register("rate.printable-ascii", RP, *ends(lambda last: ("a rate pattern has a non-breaking space", rated("AGENTS.md ", last))))
+register("rate.no-pathspec-magic", RP, *ends(lambda last: ("the rate list excludes AGENTS.md", rated(":(exclude)AGENTS.md", last))),
+         ("the rate list excludes with :!", rated(":!AGENTS.md")), ("the rate list excludes with :^", rated(":^AGENTS.md")))
 for p in GOVERNANCE_PATHS:
-    register(f"rate.{p}", ["rate-paths"], (f"the rate gate stops counting {p}", edit(PARAMETERS, RATE.format(p), "")))
+    register(f"rate.{p}", RP, (f"the rate gate stops counting {p}", edit(PARAMETERS, RATE.format(p), "")))
 # rcs-levels
-register("levels.tables", ["rcs-levels"], ("levels is a list of numbers", seq(
-    resub(PARAMETERS, LEVEL.format(r"L\d"), "", count=0),
-    edit(PARAMETERS, "schema_version = 1\n", "schema_version = 1\nlevels = [1, 2, 3, 4]\n"))))
+register("levels.tables", LV, ("levels is a list of numbers", seq(
+    resub(PARAMETERS, LEVEL.format(r"L\d"), "", count=0), edit(PARAMETERS, TOP, TOP + "levels = [1, 2, 3, 4]\n"))))
 for level in LEVELS:
-    register(f"levels.{level}", ["rcs-levels"], (f"level {level} is removed", resub(PARAMETERS, LEVEL.format(level), "")))
-register("levels.known", ["rcs-levels"], ("a level L4 is added", copy_level("L3", "L4")))
-register("levels.once", ["rcs-levels"], ("level L0 appears twice", copy_level("L0", "L0")))
-for k, p in enumerate(LEVEL_PARAMETERS):
-    register(f"param.{p}.number", ["rcs-levels"],
-             (f"L0's {p} is a boolean", resub(PARAMETERS, rf"^{p}( *)= .*$", rf"{p}\1= true")))
-    register(f"param.{p}.finite", ["rcs-levels"],
-             (f"L0's {p} is {WHY[k % 3]}, its cache finite", resub(PARAMETERS, rf"^{p}( *)= .*$", rf"{p}\1= {WHY[k % 3]}")))
+    register(f"levels.{level}", LV, (f"level {level} is removed", resub(PARAMETERS, LEVEL.format(level), "")))
+register("levels.known", LV, *ends(lambda last: ("a level L4 is added", copy_level("L3", "L4", first=not last))))
+register("levels.once", LV, ("level L0 appears twice", copy_level("L0", "L0")))
+for k, (level, p) in enumerate((level, p) for level in LEVELS for p in LEVEL_PARAMETERS):
+    register(f"param.{level}.{p}.number", LV, (f"{level}'s {p} is a boolean", in_level(level, p, "true")))
+    register(f"param.{level}.{p}.finite", LV, (f"{level}'s {p} is {WHY[k % 3]}, its cache finite", in_level(level, p, WHY[k % 3])))
 for k, level in enumerate(LEVELS):
-    register(f"cache.{level}", ["rcs-levels"], (f"the cached {level} is removed", resub(PARAMETERS, rf"^{level} = .*\n", "")))
-    register(f"cache.{level}.number", ["rcs-levels"],
-             (f"the cached {level} is a boolean", resub(PARAMETERS, rf"^{level} = .*$", f"{level} = true")))
-    register(f"cache.{level}.finite", ["rcs-levels"],
-             (f"the cached {level} is {WHY[(k + 2) % 3]}, its parameters finite",
-              resub(PARAMETERS, rf"^{level} = .*$", f"{level} = {WHY[(k + 2) % 3]}")))
-register("cache.known", ["rcs-levels"], ("a cached L4 is added", resub(PARAMETERS, r"^L3 = .*$", lambda m: m[0] + "\nL4 = 0.1")))
+    register(f"cache.{level}", LV, (f"the cached {level} is removed", resub(PARAMETERS, rf"^{level} = .*\n", "")))
+    register(f"cache.{level}.number", LV, (f"the cached {level} is a boolean", resub(PARAMETERS, rf"^{level} = .*$", f"{level} = true")))
+    register(f"cache.{level}.finite", LV, (f"the cached {level} is {WHY[(k + 2) % 3]}, its parameters finite",
+                                           resub(PARAMETERS, rf"^{level} = .*$", f"{level} = {WHY[(k + 2) % 3]}")))
+register("cache.known", LV, *ends(lambda last: ("a cached L4 is added", resub(
+    PARAMETERS, r"^L3 = .*$", lambda m: m[0] + "\nL4 = 0.1") if last else edit(PARAMETERS, "[derived.lambda]\n", "[derived.lambda]\nL4 = 0.1\n"))))
 # bstack-calls
-register("steps.list", ["bstack-calls"],
-         ("a step is a string", edit(WORKFLOW, "      - name: Report\n", "      - just-a-string\n\n      - name: Report\n")))
-register("install.once", ["bstack-calls"], ("the install step appears twice", duplicate_install))
-register("install.keys", ["bstack-calls"],
-         ("the install step gains continue-on-error", after(WORKFLOW, r"^( *)- name: Install bstack.*$", "  continue-on-error: true")))
-register("install.recipe", ["bstack-calls"],
+register("steps.list", BC, ("a step is a string", edit(WORKFLOW, "      - name: Report\n", "      - just-a-string\n\n      - name: Report\n")))
+register("install.once", BC, ("the install step appears twice", duplicate_install))
+register("install.keys", BC, ("the install step gains continue-on-error",
+                              after(WORKFLOW, r"^( *)- name: Install bstack.*$", "  continue-on-error: true")))
+register("install.recipe", BC,
          ("the fetched bstack is not verified", resub(WORKFLOW, r"^ *test .*BSTACK_REV.*\n", "")),
-         ("the checkout is not detached", edit(WORKFLOW, "checkout -q --detach FETCH_HEAD", "checkout -q FETCH_HEAD")))
-register("install.env", ["bstack-calls"], ("the install step sets another variable", after(WORKFLOW, r"^( *)BSTACK_REV: .*$", "X: y")))
-register("install.full-sha", ["bstack-calls"],
+         ("the checkout is not detached", edit(WORKFLOW, "checkout -q --detach FETCH_HEAD", "checkout -q FETCH_HEAD")),
+         ("git inherits the environment", edit(WORKFLOW, 'g() { env -i PATH="$PATH" HOME="$HOME" git "$@"; }', 'g() { git "$@"; }')))
+register("install.env", BC, ("the install step sets another variable", after(WORKFLOW, r"^( *)BSTACK_REV: .*$", "X: y")))
+register("install.full-sha", BC,
          ("bstack pinned to a branch", resub(WORKFLOW, r"(BSTACK_REV: )[0-9a-f]{40}", r"\1main")),
          ("bstack pinned to a short SHA", resub(WORKFLOW, r"(BSTACK_REV: [0-9a-f]{7})[0-9a-f]{33}", r"\1")))
-register("calls.exact", ["bstack-calls"],
+register("calls.exact", BC,
          ("compute-lambda.sh runs without --strict", edit(WORKFLOW, " --strict --human", " --human")),
          ("compute-lambda.sh reads no explicit config", edit(WORKFLOW, ' --config="$PWD/.control/rcs-parameters.toml"', "")),
          ("compute-lambda.sh inherits the environment", edit(WORKFLOW, BSTACK_ENV + "compute", 'bash "$BSTACK"/scripts/compute')),
          ("l3-rate-gate.sh inherits the environment", edit(WORKFLOW, BSTACK_ENV + "l3-rate", 'bash "$BSTACK"/scripts/l3-rate')),
          ("a second compute-lambda.sh without --strict", extra_step('bash "$BSTACK"/scripts/compute-lambda.sh --human')),
          ("an extra git clone, the verify line kept", extra_step("git clone https://github.com/broomva/bstack.git /tmp/b")),
-         ("a step uses a bstack action", edit(WORKFLOW, "      - name: Report\n",
-                                              "      - uses: broomva/bstack@main\n\n      - name: Report\n")))
-register("calls.step-keys", ["bstack-calls"],
-         ("the compute step gains continue-on-error", after(WORKFLOW, r"^( *)id: compute$", "continue-on-error: true")))
+         ("a step uses a bstack action", edit(WORKFLOW, "      - name: Report\n", "      - uses: broomva/bstack@main\n\n      - name: Report\n")))
+for step_id, _ in BSTACK_CALLS:
+    register(f"calls.step-keys.{step_id}", BC, (f"the {step_id} step gains continue-on-error",
+                                                after(WORKFLOW, rf"^( *)id: {step_id}$", "continue-on-error: true")))
+# bstack-parameters
+for p in LEVEL_PARAMETERS:
+    register(f"bstack.reads.{p}", BP, (f"compute-lambda.sh no longer reads {p}", edit(SCRIPT, f'        {p} = lvl["{p}"]\n', "")))
+register("bstack.reads-only-these", BP, ("compute-lambda.sh reads another parameter",
+                                         edit(SCRIPT, "    except KeyError:", '        kappa = lvl["kappa"]\n    except KeyError:')))
 
 # Cases no guard owns: each must pass.
 BENIGN = [
-    ("unchanged tree", lambda r, t: None),
+    ("unchanged fixture", lambda r, t: None),
     ("strategy sets max-parallel", after(CI, STRATEGY, "  max-parallel: 4")),
     ("the shard list in block style", lambda r, t: resub(
-        CI, SHARD, lambda m: f"{m[1]}shard:" + "".join(f"\n{m[1]}  - {i}" for i in range(t.n)))(r, t)),
+        CI, SHARD, lambda m: f"{m[1]}shard:" + "".join(f"\n{m[1]}  - {x}" for x in live(t)))(r, t)),
     ("both sides grow by eight, in words", lambda r, t: seq(
-        edit("AGENTS.md", t.phrase, f"after {words(t.n + 8)} `mutants` jobs"), matrix(lambda t: range(t.n + 8)))(r, t)),
+        edit("AGENTS.md", t.phrase, f"after {words(t.n + 8)} `mutants` jobs"),
+        matrix(lambda t: live(t) + [str(1000 + i) for i in range(8)]))(r, t)),
     ("both sides grow by eight, in digits", lambda r, t: seq(
-        edit("AGENTS.md", t.phrase, f"after {t.n + 8} `mutants` jobs"), matrix(lambda t: range(t.n + 8)))(r, t)),
+        edit("AGENTS.md", t.phrase, f"after {t.n + 8} `mutants` jobs"),
+        matrix(lambda t: live(t) + [str(1000 + i) for i in range(8)]))(r, t)),
     ("every trigger path double-quoted", resub(WORKFLOW, r"^(      - )'(.*)'$", r'\1"\2"', count=0)),
     ("every trigger path unquoted", resub(WORKFLOW, r"^(      - )'(.*)'$", r"\1\2", count=0)),
 ]
@@ -730,82 +859,107 @@ def cases():
            [(d, s, [], None) for d, s in BENIGN]
 
 
-def seeded(seed, tmp):
+def seeded(tree, seed, tmp):
     """A copy of the fixture at tmp, with seed applied."""
-    for rel, text in TREE.files().items():
+    for rel, text in tree.files().items():
         (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp / rel).write_text(text, encoding="utf-8")
-    seed(tmp, TREE)
+    seed(tmp, tree)
     return tmp
 
 
+def run_case(path, checks=CHECKS):
+    os.environ["BSTACK"] = str(path / "bstack")
+    return run(path, quiet=True, checks=checks)
+
+
 def completeness(fixture):
-    """The failures that make the registry incomplete: code above the marker that raises, asserts,
-    catches, exits or names Broken outside NOT_GUARDS, and registered guards the unchanged fixture
-    never evaluates."""
+    """The failures that make the registry incomplete (see the module docstring)."""
     source = Path(__file__).read_text(encoding="utf-8")
-    checks = ast.parse(source.split("# mutation proof " + "below", 1)[0])
-    found = []
-    for fn in (n for n in ast.walk(checks) if isinstance(n, ast.FunctionDef) and n.name not in NOT_GUARDS):
-        for node in ast.walk(fn):
-            if isinstance(node, (ast.Raise, ast.Assert, ast.Try)) or (
-                    isinstance(node, ast.Name) and node.id in ("Broken", "exit")) or (
-                    isinstance(node, ast.Attribute) and node.attr in ("exit", "_exit")):
-                found.append(f"{fn.name} line {node.lineno}: {type(node).__name__} outside refuse()")
+    head, tail = source.split("# mutation proof " + "below", 1)
+    above, below = ast.parse(head), ast.parse(tail.split("\n", 1)[1])
+    below_names = {n.name for n in below.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))} | {
+        t.id for n in below.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    found, gids = [], {}
+    for statement in above.body:
+        if isinstance(statement, ast.FunctionDef) and statement.name in NOT_GUARDS:
+            continue
+        local = {n.id for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)} | {
+            n.arg for n in ast.walk(statement) if isinstance(n, ast.arg)} if isinstance(statement, ast.FunctionDef) else set()
+        for node in ast.walk(statement):
+            bad = isinstance(node, (ast.Raise, ast.Assert, ast.Try)) or (
+                isinstance(node, ast.Name) and (node.id in FORBIDDEN or node.id in below_names - local)) or (
+                isinstance(node, ast.Attribute) and node.attr in ("exit", "_exit"))
+            if bad:
+                what = getattr(node, "id", None) or getattr(node, "attr", None) or ""
+                found.append(f"line {node.lineno}: {type(node).__name__} {what} outside refuse()".rstrip())
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "refuse" and node.args:
+                gids.setdefault(ast.dump(node.args[0]), []).append(node.lineno)
+    found += [f"one gid at lines {lines}" for lines in gids.values() if len(lines) > 1]
     EVALUATED.clear()
-    run(fixture, quiet=True)
+    SITES.clear()
+    run_case(fixture)
     found += [f"guard {g} is registered but never evaluated" for g in GUARDS if g not in EVALUATED]
+    found += [f"guard {g} is refused at lines {sorted(s)}" for g, s in SITES.items() if len(s) > 1]
     return found
 
 
-def selftest():
-    """Every case's outcome on a seeded copy of the fixture, then completeness; the failures."""
-    bad = 0
+def selftest(tree):
+    """Every case's outcome on a seeded copy of the fixture, the runner's crash rule and
+    completeness; the number of failures."""
     with tempfile.TemporaryDirectory() as tmp:
+        fixture = seeded(tree, lambda r, t: None, Path(tmp) / "fixture")
+        incomplete = completeness(fixture)
+        for line in incomplete:
+            print(f"FAIL completeness: {line}")
+        print(f"{'ok  ' if not incomplete else 'FAIL'} completeness: {len(GUARDS)} guards, each refused at one site and "
+              "evaluated by the unchanged fixture; no refusal outside refuse() and the readers")
+        bad = len(incomplete)
+        for name, crash in (("crashes", lambda r: [][0]), ("exits", lambda r: sys.exit(0))):
+            probe = run(fixture, quiet=True, checks=[("probe", crash)])
+            bad += probe != ["probe (crashed)"]
+            print(f"{'ok  ' if probe == ['probe (crashed)'] else 'FAIL'} runner: a check that {name} fails as "
+                  f"`probe (crashed)`: {probe}")
         for i, (desc, seed, want, gid) in enumerate(cases()):
-            got = run(seeded(seed, Path(tmp) / str(i)), quiet=True)
+            got = run_case(seeded(tree, seed, Path(tmp) / str(i)))
             bad += got != want
             print(f"{'ok  ' if got == want else 'FAIL'} selftest: {desc}: {'fails ' + ', '.join(got) if got else 'passes'}"
                   + ("" if got == want else f" (want {'fails ' + ', '.join(want) if want else 'passes'})"))
-        incomplete = completeness(seeded(lambda r, t: None, Path(tmp) / "fixture"))
-    for line in incomplete:
-        print(f"FAIL completeness: {line}")
-    print(f"{'ok  ' if not incomplete else 'FAIL'} completeness: {len(GUARDS)} guards, every refusal goes through "
-          "refuse(), and the unchanged fixture evaluates every guard")
-    return bad + len(incomplete)
+    return bad
 
 
-def mutation_proof():
+def mutation_proof(tree):
     """Disable each guard alone: its own cases must change outcome, and every other case must keep
-    its outcome. The baseline (no guard disabled) must give every case its want."""
+    its outcome. The baseline (no guard disabled) must give every case its want. A guard is re-run
+    only through the checks that evaluate it."""
     rows, crashed = [], 0
     with tempfile.TemporaryDirectory() as tmp:
         built = []
+        CHECKED_BY.clear()
         for i, (desc, seed, want, gid) in enumerate(cases()):
-            path = seeded(seed, Path(tmp) / str(i))
-            built.append((desc, path, want, gid, run(path, quiet=True)))
+            path = seeded(tree, seed, Path(tmp) / str(i))
+            built.append((desc, path, want, gid, run_case(path)))
         baseline = [d for d, _, want, _, got in built if got != want]
         for gid in GUARDS:
+            names = CHECKED_BY.get(gid, set())
+            subset = [(n, c) for n, c in CHECKS if n in names]
             DISABLED.clear()
             DISABLED.add(gid)
             own, others = [], []
             for desc, path, want, owner, base in built:
-                got = run(path, quiet=True)
-                (own if owner == gid else others).append((desc, got, base))
+                got = run_case(path, subset)
+                (own if owner == gid else others).append((desc, got, [x for x in base if x.split(" (")[0] in names]))
             DISABLED.clear()
             survived = [d for d, got, base in own if got == base]
             moved = [d for d, got, base in others if got != base]
             crash = any("(crashed)" in " ".join(got) for _, got, _ in own)
-            crashed += crash and not survived
-            rows.append((gid, len(own), "NO" if survived or moved else "yes (crash)" if crash else "yes",
-                         survived, moved))
+            crashed += crash and not survived and not moved
+            rows.append((gid, len(own), "NO" if survived or moved else "yes (crash)" if crash else "yes", survived, moved))
     print("guard | own cases | killed")
     for gid, n, killed, survived, moved in rows:
-        print(f"{gid} | {n} | {killed}" + (f": survived {survived}" if survived else "")
-              + (f": also moved {moved}" if moved else ""))
+        print(f"{gid} | {n} | {killed}" + (f": survived {survived}" if survived else "") + (f": also moved {moved}" if moved else ""))
     killed = sum(r[2] != "NO" for r in rows)
-    print(f"baseline: {len(built) - len(baseline)} of {len(built)} cases give their want"
-          + (f"; not: {baseline}" if baseline else ""))
+    print(f"baseline: {len(built) - len(baseline)} of {len(built)} cases give their want" + (f"; not: {baseline}" if baseline else ""))
     print(f"{killed} of {len(rows)} guards proven ({killed - crashed} by a changed outcome, {crashed} by a crash), "
           f"each alone, with every other case unmoved")
     return len(rows) - killed + len(baseline)
@@ -815,9 +969,9 @@ def main(argv):
     here = Path(__file__).resolve().parent.parent
     try:
         if argv == ["--selftest"]:
-            return 1 if selftest() else 0
+            return 1 if selftest(Tree(here)) else 0
         if argv == ["--mutation-proof"]:
-            return 1 if mutation_proof() else 0
+            return 1 if mutation_proof(Tree(here)) else 0
     except Broken as e:
         print(f"FAIL selftest: {e}")
         return 1

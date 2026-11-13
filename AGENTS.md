@@ -46,12 +46,13 @@ from this checkout's `.control/rcs-parameters.toml`, passed by path, and fails o
 to this file, the shard count above equals the `ci.yml` mutants matrix, all eight paths trigger
 the job and count toward the rate, and the files `CLAUDE.md` names trigger it too. The workspace
 policy's governance tier needs this check to pass before p9 merges such a PR. The checker reads
-YAML with mikefarah yq v4. Every refusal in it is a guard in one registry, with its own cases,
-except the input readers' (a file, a count or a TOML or YAML document it cannot read). After
-changing it, run `python3 scripts/governance-check.py --selftest`, which also fails when a refusal
-bypasses the registry or a registered guard is never evaluated, and `--mutation-proof`, which
-disables each guard alone and requires its own cases to change outcome and every other case to
-keep its outcome.
+YAML with mikefarah yq v4 and checks that the pinned `compute-lambda.sh` reads exactly the level
+parameters it holds (locally, set `BSTACK` to a bstack checkout at the pin). Every refusal is a
+registered guard, except the input readers' (a file or document the checker cannot read). Each
+guard, disabled alone, fails its own case built from the live values. A completeness scan fails on
+any refusal outside the registry. A guard's predicate logic is verified by review, not proven
+correct for all inputs. After changing the checker, run `python3 scripts/governance-check.py
+--selftest` (the scan, then every case) and `--mutation-proof` (each guard disabled alone).
 
 ## Copy
 
