@@ -660,6 +660,20 @@ def rated(pattern, last=False):
     return edit(PARAMETERS, "\n]\n", "\n" + line + "]\n") if last else edit(PARAMETERS, "patterns = [\n", "patterns = [\n" + line)
 
 
+def fresh(t, name):
+    """name, or a numbered variant of it, that the fixture has neither as a file nor as a trigger."""
+    stem, _, ext = name.rpartition(".")
+    taken, k = set(t.files()) | set(t.triggers), 0
+    while f"{stem}{'-' + str(k) if k else ''}.{ext}" in taken:
+        k += 1
+    return f"{stem}{'-' + str(k) if k else ''}.{ext}"
+
+
+def with_fresh(name, make):
+    """A seed that picks a fresh variant of name for this fixture and applies make(path)."""
+    return lambda r, t: make(fresh(t, name))(r, t)
+
+
 def extra_step(*lines):
     return edit(WORKFLOW, "      - name: Report\n", "      - name: Extra\n        run: |\n"
                 + "".join(f"          {x}\n" for x in lines) + "\n      - name: Report\n")
@@ -766,8 +780,9 @@ register("claude.not-copy", ["claude-points-to-agents"], ("CLAUDE.md is a copy o
 register("claude.names-agents", ["claude-points-to-agents"], ("CLAUDE.md names everything but AGENTS.md", write(
     "CLAUDE.md", lambda t: "Read " + (" and ".join(f"`{p}`" for p in t.claude_paths if p != "AGENTS.md") or "nothing") + ".\n")))
 register("claude.paths-exist", ["claude-points-to-agents"],
-         *ends(lambda last: ("CLAUDE.md names a missing file", seq(named("missing.md", last), triggered("missing.md")))),
-         ("CLAUDE.md names a missing .txt file", seq(named("RULES.txt"), triggered("RULES.txt"))))
+         *ends(lambda last: ("CLAUDE.md names a missing file", with_fresh(
+             "missing.md", lambda p: seq(named(p, last), triggered(p))))),
+         ("CLAUDE.md names a missing .txt file", with_fresh("RULES.txt", lambda p: seq(named(p), triggered(p)))))
 register("claude.path.not-absolute", CC, *ends(absolute))
 register("claude.path.no-dot-slash", CC, *unplain("./AGENTS.md"))
 register("claude.path.no-dot-dot", CC, *unplain("x/../AGENTS.md", "x/keep"))
@@ -808,8 +823,9 @@ for p in GOVERNANCE_PATHS + CONTRACT_INPUTS:
     register(f"trigger.{p}", WF[:1], (f"the workflow stops running on {p}", edit(WORKFLOW, f"      - '{p}'\n", "")))
 register("trigger.claude-paths", WF[:1],
          *ends(lambda last: ("CLAUDE.md names a file the workflow does not run on",
-                             seq(named("UNRUN.md", last), write("UNRUN.md", "x\n")))),
-         ("CLAUDE.md names a .txt file the workflow does not run on", seq(named("RULES.txt"), write("RULES.txt", "x\n"))))
+                             with_fresh("UNRUN.md", lambda p: seq(named(p, last), write(p, "x\n"))))),
+         ("CLAUDE.md names a .txt file the workflow does not run on",
+          with_fresh("RULES.txt", lambda p: seq(named(p), write(p, "x\n")))))
 # rate-paths
 register("rate.strings", RP, *ends(lambda last: ("a rate pattern is a number", edit(
     PARAMETERS, "\n]\n", "\n    1,\n]\n") if last else edit(PARAMETERS, "patterns = [\n", "patterns = [\n    1,\n"))))
@@ -968,10 +984,8 @@ def scanned():
 
 
 def selftest(tree):
-    """The static scan, then the unchanged fixture, the runner's crash rule and every case; the
+    """After main()'s static scan: the unchanged fixture, the runner's crash rule and every case; the
     number of failures."""
-    if scanned():
-        return 1
     bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         fixture = seeded(tree, lambda r, t: None, Path(tmp) / "fixture")
@@ -995,8 +1009,6 @@ def mutation_proof(tree):
     """Disable each guard alone: its own cases must change outcome, and every other case must keep
     its outcome. The baseline (no guard disabled) must give every case its want. A guard is re-run
     only through the checks that evaluate it."""
-    if scanned():
-        return 1
     rows, crashed = [], 0
     with tempfile.TemporaryDirectory() as tmp:
         built = []
@@ -1032,14 +1044,15 @@ def mutation_proof(tree):
 
 def main(argv):
     here = Path(__file__).resolve().parent.parent
-    try:
-        if argv == ["--selftest"]:
-            return 1 if selftest(Tree(here)) else 0
-        if argv == ["--mutation-proof"]:
-            return 1 if mutation_proof(Tree(here)) else 0
-    except Broken as e:
-        print(f"FAIL selftest: {e}")
-        return 1
+    if argv in (["--selftest"], ["--mutation-proof"]):
+        # The static scan first: before the fixture is built from the live tree, and before any check.
+        if scanned():
+            return 1
+        try:
+            return 1 if (selftest if argv == ["--selftest"] else mutation_proof)(Tree(here)) else 0
+        except Broken as e:
+            print(f"FAIL selftest: {e}")
+            return 1
     if len(argv) > 1 or (argv and argv[0].startswith("-")):
         print("\n".join(__doc__.strip().splitlines()[2:5]), file=sys.stderr)
         return 2
