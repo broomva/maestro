@@ -12,6 +12,8 @@ pub(crate) const INSTANCES: &str = "instances";
 pub(crate) const RETIRED: &str = "retired";
 pub(crate) const EVENTS: &str = "events.jsonl";
 pub(crate) const PROJECTION: &str = "projection.sqlite";
+/// The stop gate's refusal counts, one file per session (`kernel::stop`).
+pub(crate) const STOP_GATE: &str = "stop-gate";
 
 /// The paths of one flows root.
 #[derive(Debug, Clone)]

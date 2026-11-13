@@ -2081,6 +2081,93 @@ mutate $agt '        if self.kind(name)? != Some(FileType::RegularFile) {' '    
 # bullet; an agent flow with no params says none.
 mutate $drv 'do that node as step 2 says, then go back to 1. A refusal' 'do that node as step 2 says. A refusal'
 mutate $drv 'if ir.params.is_empty() { "none".to_string() }' 'if false { "none".to_string() }'
+# Slice 6b-2 (BRO-3636): the Stop-hook gate. The kernel's one predicate: an enabled node, a
+# pending verdict, an unfiled ask and a landed answer are work; a former owner's live claim and an
+# answer not landed are someone else's; only work refuses a stop. The open instances are the
+# session's own and unfinished. StopUnblockable replays as a record that changes no node, is
+# written only by the owner and not again until the instance moves. The loop bound refuses one
+# position three times, then lets the stop through, and starts again when the instance moves.
+stp=$fk/stop.rs
+gt=crates/mcp/src/stop.rs
+mutate $stp '        !self.work.is_empty()' '        true'
+mutate $stp '            Some(c) if c.seq < since => waiting.push(Waiting::Lease {' '            Some(c) if false => waiting.push(Waiting::Lease {'
+mutate $stp '        if let (true, Some(node)) = (r.awaiting_verdict, first) {' '        if let (true, Some(node)) = (false, first) {'
+mutate $stp '                Reason::Unfiled { .. } => work.push(Work::Ask { node: id.clone(), iteration }),' '                Reason::Unfiled { .. } => {}'
+mutate $stp '                        AnswerSeen::Landed => work.push(Work::Answer { node, iteration, ask_id, ledger }),' '                        AnswerSeen::Landed => waiting.push(Waiting::Owner { node, iteration, ask_id, ledger, landing: None }),'
+mutate $stp '            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {' '            if owners.retired.is_some() {'
+mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| !a.terminal))' '            Ok(Some(assess(&log, &started, now, seen)?))'
+mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'
+mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
+mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
+mutate $replay '            self.unblockable.push(record);' ''
+mutate $asks '        return AnswerSeen::Landed;' '        return AnswerSeen::Open;'
+# The driver skill stops on the kernel's work list, which next and status carry.
+mutate $drv 'If `{work}` (beside `next` in step 2' 'If `next.enabled` (beside `next` in step 2'
+mutate $mf '        out[kernel::stop::WORK] = work;' ''
+# The gate: the harness's own block format; a turn-end program that cannot block records and
+# alerts; the fourth stop goes through recorded; it fails open on stdin that is not a Stop hook's
+# (and past its bound), on an instance that does not read and on counts it cannot keep, and
+# alerts; no ledger is no flow; one alert per subject; the install check reads only a maestro
+# Stop hook; a command line that does not parse exits 0.
+mutate $gt '            Harness::Claude => json!({ "decision": "block", "reason": reason }).to_string(),' '            Harness::Claude => json!({ "decision": "deny", "reason": reason }).to_string(),'
+mutate $gt '            Harness::Codex => json!({ "decision": "block", "reason": reason }).to_string(),' '            Harness::Codex => json!({ "decision": "block", "reason": reason, "continue": true }).to_string(),'
+mutate $gt '        if self.gate.cannot_block {' '        if false {'
+mutate $gt '        if tally.refused.is_empty() {' '        if false {'
+mutate $gt '        Some("Stop") => {}' '        Some(_) => {}'
+mutate $gt '        if let Err(e) = payload(input) {' '        if let (true, Err(e)) = (false, payload(input)) {'
+mutate $gt '    if input.len() > MAX_INPUT {' '    if false {'
+mutate $gt '            if unread.is_some() {' '            if false {'
+mutate $gt '            if let Err(e) = counts.save(&guard, &me) {' '            if let (true, Err(e)) = (false, counts.save(&guard, &me)) {'
+mutate $gt '            Err(e) if e.code() == "no_ledger" => {' '            Err(_) if true => {'
+mutate $gt '                self.alert(s, &key, UNCHECKED, &words);' ''
+mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words);' ''
+mutate $gt '            Err(e) if e.message.contains("already has an ask") => {' '            Err(e) if false => {'
+mutate $gt 'let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));' 'let maestro = words.next().is_some();'
+mutate $gt '    maestro && verb && flag && !words.contains(&"--check-install")' '    maestro && verb && flag'
+mutate $gt '            if hook.get("type").and_then(Value::as_str) == Some("command") && runs_gate(command, harness) {' '            if runs_gate(command, harness) {'
+# Review round 1 (BRO-3636): a choice node's next step is choose, never complete; a record whose
+# alert was not filed is alerted by the next stop that finds it; a record that failed is alerted.
+mutate $stp '    if class == "choice" {' '    if false {'
+mutate $gt '                    already.push((a.instance.clone(), seq));' ''
+mutate $gt '        if made.is_empty() && already.is_empty() && failed.is_empty() {' '        if made.is_empty() && already.is_empty() {'
+# Round 1, stratum B (BRO-3636): two stops of one session at once are both counted (the count
+# lock spans load, tally and save; one held past its wait fails open); an instance that does not
+# read is noted, alerted and named whatever else the gate decides; a live claim holds a node only
+# over its current inputs.
+mutate $stp '        let held = live.iter().find(|c| c.node == e.node && c.iteration == e.iteration && c.inputs == e.inputs);' '        let held = live.iter().find(|c| c.node == e.node && c.iteration == e.iteration);'
+mutate $gt '            self.report_unread(&session, list);' ''
+mutate $gt '            reason.push_str(&format!(" Maestro could not read {list}, so the gate could not check it for work."));' ''
+mutate $gt '                let code = if e.code() == "busy" { "refusals_busy" } else { "refusals_unread" };' '                let code = "refusals_unread";'
+# Round 1, stratum A (Gemini, BRO-3636): every alert carries a summary; the counts live under the
+# ledger's own root, bound to its epoch, written only when there is something to write (the lock
+# that spans load and save is the ledger's write lock, which `Refusals::load` takes as its
+# argument, so removing it does not build); a retired instance has no work and is not open; a
+# record checks the clock, names at most MAX_NAMED instances and is deduplicated only against the
+# same session's record; a counts file past its bound is refused; a moved or archived ledger is
+# not "no ledger"; an alert's id does not depend on the order of its records; a settings file past
+# its bound is not read.
+lay=$fl/layout.rs
+mutate $gt '        "summary": SUMMARY,' ''
+mutate $lay 'pub(crate) const STOP_GATE: &str = "stop-gate";' 'pub(crate) const STOP_GATE: &str = "../flows.stop-gate";'
+mutate $stp '    Ok(if parsed.epoch == epoch { parsed.counts } else { BTreeMap::new() })' '    Ok(parsed.counts)'
+mutate $stp '        if self.was_empty && self.counts.is_empty() {' '        if false {'
+mutate $stp '    let retired = owners.retired.is_some();' '    let retired = false;'
+mutate $stp '            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {' '            if owners.owner.as_ref() != Some(&me) {'
+mutate $stp '    wall(&log)?;' ''
+mutate $stp '    let Some(bytes) = read_beside(root, STOP_GATE, name, MAX_REFUSALS_FILE, "refusal-count file")? else {' '    let Some(bytes) = read_beside(root, STOP_GATE, name, u64::MAX, "refusal-count file")? else {'
+mutate $stp '        open_instances: open_instances.iter().take(MAX_NAMED).cloned().collect(),' '        open_instances: open_instances.to_vec(),'
+mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if prior.is_some_and(|p| p.reason == reason) {'
+mutate $gt '    sorted.sort();' ''
+mutate $gt '        Ok(bytes) if bytes.len() <= MAX_INPUT => bytes,' '        Ok(bytes) => bytes,'
+# CodeRabbit at d57da10 (BRO-3636): the root is synced after `stop-gate/` is made in it, so the
+# new folder's entry is durable (a crash cannot be tested; `at::seams::SYNCED`, a unit-test record
+# of every directory synced, observes the sync); and a stop with no readable work clears the
+# counts even beside an unread instance (the mutant is the bug: the clear skipped then).
+mutate $fl/ledger.rs '        root.sync();' ''
+mutate $gt '            if counted {' '            if counted && unread.is_none() {'
+mutate $cli '        Err(e) if gate => {' '        Err(e) if false => {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

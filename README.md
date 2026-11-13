@@ -96,6 +96,9 @@ maestro flow ask --instance I --node-id N [--ledger L.yaml --ask '<json>']   # a
 maestro flow propose-adoption --instance I [--ledger L.yaml --ask '<json>']    # ask the owner to hand you an instance
 maestro flow propose-retirement --instance I [--ledger L.yaml --ask '<json>']  # ask the owner to retire an instance
 maestro flow spine --instance I [--against J]                # the accepting spine; exit 1 at the first difference from J's
+maestro flow open                                            # your session's unfinished instances: work, waiting, refuses_stop
+maestro flow stop-gate --harness claude|codex < stop.json    # the Stop-hook gate (no tool's twin); always exits 0
+maestro flow stop-gate --check-install --harness H [--settings F]   # does F wire the gate as H's Stop hook? exit 1 when not
 maestro dogfood verify-receipt --head=H --surface=S < outputs.json   # check a dogfood receipt (verify@1's exercise verify)
 maestro flow driver-skill --definition F.yaml [--out SKILL.md] [--check]   # the flow's driver skill, generated from its IR (no tool's twin)
 maestro agents render [--root DIR] [--check]                 # agents/*.agent.yaml to each harness's agent file; --check exits 1 at the first drift
@@ -229,7 +232,8 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
   enabled node with its own skill (an agent performer through the harness's own subagent, or
   Codex's brief), `flow complete`, and stop when `flow status` says `terminal` (a field of
   `status` and `next`, decided by the kernel: no node `ready`, `stale` or `waiting`, and no repeat
-  awaiting its `until` verdict) or nothing is enabled for the driver. The loop first checks that
+  awaiting its `until` verdict) or the kernel's `work` list is empty (the stop gate's own
+  predicate, below): the instance then waits on someone else. The loop first checks that
   `status.ir_hash` is the hash the skill was generated from, and stops on another; it calls `flow
   ask` for a filed ask as well as an unfiled one, since only that verb reads the owner's answer
   from main; and it retries a repeat awaiting its verdict through `flow claim` (which judges
@@ -257,6 +261,47 @@ maestro agents render [--root DIR] [--check]                 # agents/*.agent.ya
   `--against` compares two runs of one definition and exits 1 with `spine_differs` and the first
   difference: a node skipped or reordered, another edge, or another exit. Two instances of
   different definitions are not compared: `definition_mismatch`, exit 3. It writes nothing.
+- **The stop gate (BRO-3636; flow kernel spec, "L4: gates").** `flow next` and `flow status` add
+  `work` and `waiting`: what the instance's owner can do now (an enabled node, its own live claim,
+  a repeat awaiting its `until` verdict, an ask to file, an answer this clone sees on
+  `origin/main` to take) and whom it waits on (the owner's answer to a filed ask, unanswered or
+  only on an answers branch; a former owner's claim until its lease ends). One kernel predicate
+  decides it (`maestro_flow::kernel::stop`); the driver skill's step 4 stops on an empty `work`,
+  and `maestro flow stop-gate`, run as the harness's Stop hook, refuses a final message while an
+  instance the session owns has any. Waiting only on someone else is no ground to refuse, or a
+  session could never end. `flow open` (MCP `maestro_flow_open`) lists the session's open
+  instances, so judged, and `refuses_stop`; it needs a verified session, since ownership is the
+  session with its owner marker, and writes nothing. The block reason names each instance and the
+  verb to run next.
+  - **Loop bound** (owner decision). Refused 3 times in a row over one instance at one log
+    position (`seq`), the session's 4th stop goes through: the gate appends `StopUnblockable`
+    (reason `no_progress`) to that instance and files the alert. The count starts again whenever
+    the instance's `seq` moves, and drops an instance it no longer refuses over. It lives in one
+    file per session under the ledger's own root, `.broomva/flows/stop-gate/<digest>.json`, read
+    and written through the root's descriptor (never through a link), and taken under the
+    ledger's write lock from the load through the save. So the lock's checks bind it (another
+    host's ledger is `foreign_host`, a moved root or another epoch is refused), two stops at once
+    are both counted, and a lock held past 2 s lets the stop through (fail open). The file
+    records its epoch and counts of another epoch are none; it moves with the root, so an archive
+    takes it away and a fresh ledger starts with none. A stop with nothing to count writes nothing.
+  - **Fail open** (owner decision). The gate refuses only on the kernel's positive answer. Stdin
+    that is not a Stop payload, a session that does not verify, a ledger that does not read, or
+    counts that cannot be kept let the stop through, say why on stderr and file the alert. A
+    broken ledger must not trap every session; a root moved or archived is such a ledger, never
+    "no ledger". An instance that does not read is noted and alerted in every case: beside one
+    with work, the stop is refused and the reason names it. No session named, or no flow ledger,
+    is no flow: the stop goes through with a note, no alert. A command line that does not parse exits
+    0 too: exit 2 would block.
+  - **`StopUnblockable`** (`harness`, `session`, `open_instances`, `reason`: `no_progress` or
+    `harness_cannot_block`) is appended only by the gate, as the instance's owner, with every
+    write's checks, and not again while the instance has not moved. Replay lists it and changes
+    no node; `status` reports it as `stop_unblockable`.
+  - **The fleet alert** is a Maestro ask filed through `maestro_ask_file` (its writer of record
+    validates it) into `--alert-ledger` (`MAESTRO_ALERT_LEDGER`, default `bstack-fleet.yaml`): the
+    owner's Decisions view lists open asks, while an escalation goes only to the requests journal.
+    Its id is a digest of its subject (its records sorted), so one record or one failure class a
+    day is one ask. Every alert carries a `summary`, which the validator of record requires when
+    any of its words reads as a spec or design word (a session's name, a quoted error).
 - **Verified writers only.** The writes act for a verified session. On the CLI the claim is a
   Direct launch token (`MAESTRO_DIRECT_TOKEN` with `MAESTRO_CALLER_CWD`) or a bridge credential
   (`MAESTRO_BRIDGE_CREDENTIAL`); over MCP it is the arguments `cwd`, `token`, `node` and
@@ -486,6 +531,38 @@ Context injection through a hook, for example Claude Code `SessionStart`:
 
 The hook path never fails a session. On any error it prints nothing and exits 0.
 
+### The flow stop gate
+
+A Stop hook that runs `maestro flow stop-gate` refuses a final message while the session's flow
+work is open (see the stop gate under the flow commands). It reads the session from
+`MAESTRO_SESSION` and the claim from the caller variables, which a hook process inherits from its
+harness (Claude Code passes its environment to hooks; Codex 0.164 does too, measured). Nothing in
+this repository wires it into real settings; `--check-install` reports whether a file does.
+
+| Harness | Stop hook | Blocks a stop | The gate |
+|---|---|---|---|
+| Claude Code | `Stop` in `.claude/settings.json`; stdin has `stop_hook_active`, `last_assistant_message` | yes: `{"decision": "block", "reason"}` or exit 2 (code.claude.com/docs/en/hooks); it overrides a block after 8 continuations in a row | refuses |
+| Codex 0.164.0 | `Stop` in `hooks.json` (`$CODEX_HOME/hooks.json` or a project's `.codex/hooks.json`), feature `hooks` stable and on; the hook runs only once trusted (`/hooks`, or `hooks.state` in `config.toml`) | yes: the same JSON, or exit 2 with the prompt on stderr; its schema `stop.command.output` admits no other key | refuses |
+| A turn-end program that cannot block | | no | `--cannot-block`: appends `StopUnblockable` (`harness_cannot_block`) and files the alert |
+
+Codex's answer was measured on 0.164.0 (open question 1 of the flow kernel spec): its binary
+embeds `stop.command.input` (with `stop_hook_active`) and `stop.command.output` (`decision:
+"block"`, `reason`), and a trusted Stop hook that blocked once made `codex exec` continue: the
+model answered, the hook said `Stop Blocked`, the model answered the hook's reason, and the
+second stop came with `stop_hook_active: true`.
+
+Claude Code, `.claude/settings.json`:
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "~/.local/bin/maestro flow stop-gate --harness claude", "timeout": 60 } ] } ] } }
+```
+
+Codex, `~/.codex/hooks.json` (then trust it with `/hooks`):
+
+```json
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "~/.local/bin/maestro flow stop-gate --harness codex", "timeout": 60 } ] } ] } }
+```
+
 Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 `bun apps/maestro-paseo-t3-mcp-ui/mcp/server.ts`. The Claude Code entry also passed `--demo`.
 
@@ -501,7 +578,8 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 | `MAESTRO_PASEO_ASK_LOCKS` | `~/.local/state/control-asks/locks` (the plugin's ask-ledger lock root) |
 | `MAESTRO_ASK_LEDGER` | `<workspace>/scripts/ask_ledger.py` (the writer `ask file` runs: `ask_ledger.py file`) |
 | `MAESTRO_REQUESTS_WAIT_MS` | `30000`: how long a request waits for the journal lock (1–60000 ms) |
-| `MAESTRO_SESSION` | none: the session agent requests name |
+| `MAESTRO_SESSION` | none: the session agent requests name (and the stop gate gates) |
+| `MAESTRO_ALERT_LEDGER` | `bstack-fleet.yaml`: the asks ledger the stop gate files fleet alerts into |
 | `MAESTRO_USAGE` | unset: a file holding `provider_manager.py --json usage` output, which the economy reads; unset, the economy is unavailable |
 
 Inside the workspace, each name is read from `.broomva/<name>` when the tree has it and from
