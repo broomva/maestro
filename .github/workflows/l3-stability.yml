@@ -67,9 +67,13 @@ jobs:
           set +e
           out=$(python3 -I scripts/governance-check.py 2>&1)
           status=$?
-          self=$(python3 -I scripts/governance-check.py --selftest 2>&1)
-          self_status=$?
-          [ "$status" = 0 ] && status=$self_status
+          # The selftest seeds breaks into a tree that holds: on a broken tree it would only bury
+          # the break under its own failures.
+          self="selftest: skipped, the contract does not hold"
+          if [ "$status" = 0 ]; then
+            self=$(python3 -I scripts/governance-check.py --selftest 2>&1)
+            status=$?
+          fi
           echo "$out"
           echo "$self"
           # The output quotes the PR's files: a random delimiter, so no line can close it early.
