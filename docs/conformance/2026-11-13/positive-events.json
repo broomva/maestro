@@ -1,0 +1,94 @@
+[
+  {
+    "seq": 1,
+    "kind": "Started",
+    "node": null,
+    "performer": null,
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 2,
+    "kind": "Claimed",
+    "node": "pin",
+    "performer": {
+      "harness": "claude-code",
+      "model": null,
+      "session": "direct:-/positive"
+    },
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 3,
+    "kind": "Completed",
+    "node": "pin",
+    "performer": {
+      "harness": "claude-code",
+      "model": null,
+      "session": "direct:-/positive"
+    },
+    "verify_exit": 0,
+    "code": null
+  },
+  {
+    "seq": 4,
+    "kind": "Claimed",
+    "node": "check",
+    "performer": {
+      "harness": "claude-code",
+      "model": null,
+      "session": "direct:-/positive"
+    },
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 5,
+    "kind": "Refused",
+    "node": "check",
+    "performer": null,
+    "verify_exit": null,
+    "code": "verify_failed"
+  },
+  {
+    "seq": 6,
+    "kind": "StopUnblockable",
+    "node": null,
+    "performer": null,
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 7,
+    "kind": "Claimed",
+    "node": "surface",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/positive"
+    },
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 8,
+    "kind": "Completed",
+    "node": "surface",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/positive"
+    },
+    "verify_exit": 0,
+    "code": null
+  },
+  {
+    "seq": 9,
+    "kind": "StopUnblockable",
+    "node": null,
+    "performer": null,
+    "verify_exit": null,
+    "code": null
+  }
+]

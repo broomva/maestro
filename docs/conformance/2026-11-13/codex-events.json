@@ -1,0 +1,106 @@
+[
+  {
+    "seq": 1,
+    "kind": "Started",
+    "node": null,
+    "performer": null,
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 2,
+    "kind": "Claimed",
+    "node": "pin",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/codex"
+    },
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 3,
+    "kind": "Completed",
+    "node": "pin",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/codex"
+    },
+    "verify_exit": 0,
+    "code": null
+  },
+  {
+    "seq": 4,
+    "kind": "Claimed",
+    "node": "surface",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/codex"
+    },
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 5,
+    "kind": "Completed",
+    "node": "surface",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/codex"
+    },
+    "verify_exit": 0,
+    "code": null
+  },
+  {
+    "seq": 6,
+    "kind": "Claimed",
+    "node": "check",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/codex"
+    },
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 7,
+    "kind": "Completed",
+    "node": "check",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/codex"
+    },
+    "verify_exit": 0,
+    "code": null
+  },
+  {
+    "seq": 8,
+    "kind": "Claimed",
+    "node": "exercise",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/codex"
+    },
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 9,
+    "kind": "Completed",
+    "node": "exercise",
+    "performer": {
+      "harness": "codex",
+      "model": null,
+      "session": "direct:-/codex"
+    },
+    "verify_exit": 0,
+    "code": null
+  }
+]
