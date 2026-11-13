@@ -881,20 +881,23 @@ fn text_a_refusal_echoes_is_bounded() {
 
 #[test]
 fn the_writers_words_in_a_busy_refusal_are_bounded() {
-    // Busy, loudly, for five tries, then the stub files: a kernel that never stops retrying ends
-    // in a filing, never a hang.
-    let loud = "C = os.path.join(HERE, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nif n < 6:\n    sys.stdin.read()\n    print('error: ' + 'w' * 100000, file=sys.stderr)\n    sys.exit(75)";
+    // The writer announces that it has started, then waits until the clock has advanced.
+    let loud = "import time\nopen(os.path.join(HERE, 'ready'), 'w').close()\nuntil = time.monotonic() + 30\nwhile not os.path.exists(os.path.join(HERE, 'release')) and time.monotonic() < until:\n    time.sleep(0.01)\nsys.stdin.read()\nprint('error: ' + 'w' * 100000, file=sys.stderr)\nsys.exit(75)";
     let mut f = fx(Some(&wrapper(loud)), "");
     let fi = f.begin();
     let clock = TestClock::install();
-    clock.shift(SignedDuration::from_secs(0));
-    let mover = {
-        let clock = clock.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            clock.shift(ASK_BUSY_DEADLINE + SignedDuration::from_secs(1));
-        })
-    };
+    let ready = f.ws.join("scripts/ready");
+    let release = f.ws.join("scripts/release");
+    let mover = std::thread::spawn(move || {
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while !ready.exists() && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let started = ready.exists();
+        clock.shift(ASK_BUSY_DEADLINE + SignedDuration::from_secs(1));
+        std::fs::write(release, "").unwrap();
+        assert!(started, "writer did not start");
+    });
     let e = f.ask(&fi, Some(&filing())).unwrap_err();
     mover.join().unwrap();
     assert_eq!(e.code(), "ask_refused_busy");

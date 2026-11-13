@@ -278,9 +278,10 @@ fn http_call(addr: &str, name: &str, args: Value) -> Value {
         body.len()
     )
     .unwrap();
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    // The readiness line is emitted after bind; allow a loaded daemon time to process the request.
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(120))).unwrap();
     let mut raw = Vec::new();
-    let _ = stream.read_to_end(&mut raw);
+    stream.read_to_end(&mut raw).expect("daemon did not finish its response");
     let response = String::from_utf8_lossy(&raw).into_owned();
     let json = response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
     let v: Value = serde_json::from_str(json).unwrap_or_else(|_| panic!("{response}"));
@@ -320,9 +321,16 @@ fn the_http_daemon_takes_no_claim_from_its_environment() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut err = BufReader::new(child.stderr.take().unwrap());
-    let mut line = String::new();
-    err.read_line(&mut line).unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut err = BufReader::new(stderr);
+        let mut line = String::new();
+        let result = err.read_line(&mut line).map(|_| (line, err));
+        let _ = tx.send(result);
+    });
+    let (line, _err) =
+        rx.recv_timeout(std::time::Duration::from_secs(120)).expect("daemon did not report readiness").unwrap();
     let url = line.trim().strip_prefix("maestro: serving MCP on http://").unwrap_or_else(|| panic!("{line}"));
     let addr = url.split_once('/').unwrap().0.to_string();
     let start = json!({ "session": "direct:-/d1", "definition": DECIDE, "params": { "dir": m.work } });

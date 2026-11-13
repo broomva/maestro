@@ -852,15 +852,18 @@ fn an_effect_whose_inputs_changed_after_it_started_runs_over_the_new_ones() {
 fn a_cancel_deadline_ends_a_running_command() {
     // The run is no longer than what is left of the claim: an effect that would act after its
     // deadline is killed first.
-    let (mut f, test_clock) = clocked(LIMITS);
+    let (mut f, test_clock) = clocked(&LIMITS.replace("sleep 1; echo ran", "sleep 30; echo ran"));
     let fi = f.begin();
     let now = clock::now();
     test_clock.set(now);
     let c = f.claim(&fi, "slow");
     test_clock.set(now + secs(30) - ms(150));
     let started = std::time::Instant::now();
-    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "verify_timeout");
-    assert!(started.elapsed() < Duration::from_millis(800), "{:?}", started.elapsed());
+    let Completion::Refused { code, reason, .. } = f.complete(&c.token, Value::Null) else {
+        panic!("command completed")
+    };
+    assert_eq!((code, reason.as_str()), ("verify_timeout", "the command ran past 150 ms"));
+    assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
     assert_eq!(runs(&f), 0, "the effect never acted");
 }
 
