@@ -4,15 +4,31 @@ import os
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from phase1 import (Failure, capability_environment, codex_skill_evidence, codex_skill_read, control_not_completed, equal_spines, hook_blocked,
-                    kill_marked_processes, mcp_tool_calls, require_capability_isolation, require_driver,
-                    require_driver_trace, require_mcp_calls, supported_has_events)
+from phase1 import (Failure, capability_environment, capability_settings, codex_skill_evidence, codex_skill_read, control_not_completed, equal_spines, hook_blocked,
+                    kill_marked_processes, mcp_tool_calls, prepare_evidence_dir, require_capability_isolation, require_driver,
+                    require_driver_trace, require_mcp_calls, require_mcp_event_match, stop_hook_command, supported_has_events)
 
 class Guards(unittest.TestCase):
+    def test_evidence_directory_must_be_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'evidence'; self.assertEqual(prepare_evidence_dir(path),path)
+            (path/'results.json').write_text('{"old":true}')
+            with self.assertRaisesRegex(Failure,'evidence directory must be empty'): prepare_evidence_dir(path)
+            self.assertEqual((path/'results.json').read_text(),'{"old":true}')
+
+    def test_stop_hook_quotes_space_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'with space'; root.mkdir(); maestro=root/'maestro'; hook=root/'hook output'
+            maestro.write_text('#!/bin/sh\nprintf \'{"decision":"block"}\\n\'\n'); maestro.chmod(0o755)
+            command=stop_hook_command(maestro,'claude',hook)
+            p=subprocess.run(command,shell=True,capture_output=True,text=True,timeout=5)
+            self.assertEqual(p.returncode,0); self.assertEqual(p.stdout,'{"decision":"block"}\n')
+            self.assertEqual(hook.read_text(),p.stdout)
     def test_spines(self):
         equal_spines({'ok':True,'equal':True})
         with self.assertRaises(Failure): equal_spines({'ok':False,'equal':False})
@@ -35,14 +51,17 @@ class Guards(unittest.TestCase):
     def test_detached_process_cleanup(self):
         if not Path('/proc/self/environ').is_file(): return  # The mocked test covers other hosts.
         marker=secrets.token_hex(16); env=os.environ.copy(); env['MAESTRO_PHASE1_RUN']=marker
-        p=subprocess.Popen(['sleep','30'],env=env,start_new_session=True)
+        p=subprocess.Popen([sys.executable,'-c','import time; print("ready",flush=True); time.sleep(30)'],
+                           env=env,start_new_session=True,stdout=subprocess.PIPE,text=True)
         try:
+            self.assertEqual(p.stdout.readline(),'ready\n')
             kill_marked_processes(marker)
             try: result=p.wait(timeout=2)
             except subprocess.TimeoutExpired: self.fail('detached process survived cleanup')
             self.assertNotEqual(result,0)
         finally:
             if p.poll() is None: p.kill(); p.wait()
+            p.stdout.close()
 
     def test_proc_absent(self):
         with patch('phase1.Path') as path:
@@ -89,6 +108,7 @@ class Guards(unittest.TestCase):
             self.assertIsNone(codex_skill_evidence({**base,'command':f'/bin/bash -lc "test -f {path}"'},repo,skill))
 
     def test_mcp_calls(self):
+        self.assertIn('run_shell_command',capability_settings({'mcpServers':{}},'gemini')['tools']['exclude'])
         require_mcp_calls(['maestro_flow_claim','maestro_flow_complete'])
         with self.assertRaises(Failure): require_mcp_calls(['maestro_flow_claim'])
         calls,_=mcp_tool_calls('\n'.join(['{"type":"message","text":"maestro_flow_claim maestro_flow_complete"}',
@@ -109,6 +129,17 @@ class Guards(unittest.TestCase):
         complete=agy.replace('maestro_flow_claim','maestro_flow_complete').replace('"instance":"fi_test"','"claim_token":"fi_test.secret"')
         calls,excerpt=mcp_tool_calls(agy+'\n'+complete,'agy','fi_test')
         require_mcp_calls(calls); self.assertEqual(excerpt[1]['arguments']['claim_token'],'[redacted]')
+        with self.assertRaises(Failure): mcp_tool_calls('{"type":"tool_use","tool_name":"run_shell_command"}','gemini','fi_test')
+        with self.assertRaises(Failure): mcp_tool_calls('{"event":"step_update","step_update":{"tool_name":"run_command"}}','agy','fi_test')
+
+    def test_mcp_sequences_match_ledger(self):
+        events=[{'seq':2,'kind':'Claimed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}},
+                {'seq':3,'kind':'Completed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}}]
+        calls=[{'mcp_tool':'maestro_flow_claim','result':{'seq':2}}, {'mcp_tool':'maestro_flow_complete','result':{'seq':3}}]
+        require_mcp_event_match(calls,events,'agy')
+        with self.assertRaises(Failure): require_mcp_event_match(calls[:1],events,'agy')
+        with self.assertRaises(Failure): require_mcp_event_match(calls,events,'gemini')
+        with self.assertRaises(Failure): require_mcp_event_match(calls,[events[0],{**events[1],'seq':4}],'agy')
 
     def test_driver_availability(self):
         require_driver('codex',True); require_driver('gemini',False)

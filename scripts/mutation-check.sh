@@ -2186,6 +2186,13 @@ mutate $fl/ledger.rs '        root.sync();' ''
 mutate $gt '            if counted {' '            if counted && unread.is_none() {'
 mutate $cli '        Err(e) if gate => {' '        Err(e) if false => {'
 # The live runner must reject each invalid acceptance verdict.
+mutate $gt '    let Some(parsed) = shlex::split(command) else { return false };' '    let parsed: Vec<String> = command.split_whitespace().map(str::to_string).collect();'
+mutate scripts/conformance/phase1.py '    if any(path.iterdir()):' '    if False:'
+mutate scripts/conformance/phase1.py "    return f'{shlex.quote(str(maestro))} flow stop-gate --harness {harness} | tee -a {shlex.quote(str(hook))}'" "    return f'{maestro} flow stop-gate --harness {harness} | tee -a {shlex.quote(str(hook))}'"
+mutate scripts/conformance/phase1.py "        return {**server,'tools':{'exclude':['run_shell_command']}}" "        return {**server,'tools':{'exclude':[]}}"
+mutate scripts/conformance/phase1.py "        if harness=='gemini' and item.get('type')=='tool_use' and item.get('tool_name')=='run_shell_command':" '        if False:'
+mutate scripts/conformance/phase1.py "        if harness=='agy' and item.get('event')=='step_update' and item.get('step_update',{}).get('tool_name')=='run_command':" '        if False:'
+mutate scripts/conformance/phase1.py "    if not claim or not complete or claim[0]!='Claimed' or complete[0]!='Completed' or claim[1:]!=complete[1:]:" '    if False:'
 mutate scripts/conformance/phase1.py "    if not result.get('ok') or result.get('equal') is not True:" '    if False:'
 mutate scripts/conformance/phase1.py "    if any(e.get('kind') == 'Completed' and e.get('body', {}).get('node') == 'check' for e in events):" '    if False:'
 mutate scripts/conformance/phase1.py '               for _, node in found if node is not None):' '               for _, node in found if node is not None) and False:'

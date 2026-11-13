@@ -20,6 +20,20 @@ DEFINITION = ROOT / 'crates/flow/flows/verify.yaml'
 class Failure(Exception):
     pass
 
+def prepare_evidence_dir(path):
+    path.mkdir(parents=True,exist_ok=True)
+    if any(path.iterdir()):
+        raise Failure(f'evidence directory must be empty: {path}')
+    return path
+
+def stop_hook_command(maestro, harness, hook):
+    return f'{shlex.quote(str(maestro))} flow stop-gate --harness {harness} | tee -a {shlex.quote(str(hook))}'
+
+def capability_settings(server, harness):
+    if harness=='gemini':
+        return {**server,'tools':{'exclude':['run_shell_command']}}
+    return server
+
 def equal_spines(result):
     if not result.get('ok') or result.get('equal') is not True:
         raise Failure('spines differ or could not be compared')
@@ -58,6 +72,10 @@ def mcp_tool_calls(transcript, harness, instance):
     for line in transcript.splitlines():
         try: item=json.loads(line)
         except (ValueError,TypeError): continue
+        if harness=='gemini' and item.get('type')=='tool_use' and item.get('tool_name')=='run_shell_command':
+            raise Failure('Gemini invoked a shell during the MCP capability check')
+        if harness=='agy' and item.get('event')=='step_update' and item.get('step_update',{}).get('tool_name')=='run_command':
+            raise Failure('Antigravity invoked a shell during the MCP capability check')
         if harness=='gemini' and item.get('type')=='tool_use':
             name=item.get('tool_name','')
             for verb in ('maestro_flow_claim','maestro_flow_complete'):
@@ -90,6 +108,18 @@ def require_driver_trace(harness, calls, model):
             c.get('tool') == 'spawn_agent' and c.get('task_name') == 'verifier' and c.get('model') == model for c in calls)
     if not valid:
         raise Failure(f'{harness} driver skill and verifier evidence is missing')
+
+def require_mcp_event_match(excerpt, events, harness):
+    by_seq={e.get('seq'):e for e in events}
+    matches={}
+    for item in excerpt:
+        verb=item.get('mcp_tool') or item.get('tool_name','').removeprefix('mcp_maestro_')
+        e=by_seq.get(item.get('result',{}).get('seq'),{}); body=e.get('body',{})
+        if (body.get('performer') or {}).get('harness')==harness and e.get('kind') in ('Claimed','Completed'):
+            matches[verb]=(e['kind'],body.get('node'),body.get('iteration'))
+    claim=matches.get('maestro_flow_claim'); complete=matches.get('maestro_flow_complete')
+    if not claim or not complete or claim[0]!='Claimed' or complete[0]!='Completed' or claim[1:]!=complete[1:]:
+        raise Failure('MCP call sequences do not match the same claimed and completed node')
 
 def capability_environment(env, shim):
     env=env.copy()
@@ -162,8 +192,7 @@ def main():
         raise Failure('build target/release/maestro first: cargo build --release --locked')
     if not Path('/proc/self/environ').is_file():
         raise Failure('Linux /proc is required to clean up detached harness processes')
-    out = args.evidence_dir.resolve()
-    out.mkdir(parents=True, exist_ok=True)
+    out = prepare_evidence_dir(args.evidence_dir.resolve())
     host_home = Path.home()
     with tempfile.TemporaryDirectory(prefix='maestro-phase1-') as tmp:
         root = Path(tmp); repo = root / 'subject'; repo.mkdir()
@@ -294,7 +323,7 @@ def main():
                     ('MAESTRO_SESSION','MAESTRO_DIRECT_REGISTRY','MAESTRO_DIRECT_TOKEN','MAESTRO_CALLER_CWD',
                      'BROOMVA_WORKSPACE','BROOMVA_HOME','MAESTRO_TREE','MAESTRO_WORK_ROOT')}
             if h=='gemini':
-                (repo/'.gemini/settings.json').write_text(json.dumps(server))
+                (repo/'.gemini/settings.json').write_text(json.dumps(capability_settings(server,h)))
                 return run([shutil.which('gemini'),'-m',os.environ.get('MAESTRO_GEMINI_MODEL','gemini-3.8-flash'),'-p',prompt,'--output-format','stream-json','--skip-trust','--yolo',
                             '--allowed-mcp-server-names','maestro'],h,capability=True)
             agy_config.write_text(json.dumps(server))
@@ -379,8 +408,9 @@ def main():
                     (out/f'{h}-mcp-calls.json').write_text(json.dumps(transcript,indent=2)+'\n')
                     supported_has_events(events(i),h)
                     require_mcp_calls(calls)
+                    require_mcp_event_match(transcript,events(i),h)
                     results[h].update({'capability':'supported','exit':p.returncode})
-                except Failure:
+                except Failure as exc:
                     errors=[]
                     for line in p.stdout.splitlines():
                         try: item=json.loads(line)
@@ -389,8 +419,8 @@ def main():
                                 or '"ok":false' in str(item.get('output','')).replace(' ','')):
                             errors.append(str(item.get('output','')))
                     results[h].update({'capability':'unsupported','exit':p.returncode,
-                                       'error':scrub(errors[-1] if errors else p.stderr or p.stdout)[-2000:]
-                                               or 'No matching Claimed and Completed events.'})
+                                       'error':str(exc),
+                                       'detail':scrub(errors[-1] if errors else p.stderr or p.stdout)[-2000:]})
         if 'claude' in instances and 'codex' in instances:
             comparison,_=cli('claude','flow','spine','--instance',instances['claude'],'--against',instances['codex'],ok=False)
             (out/'spines.json').write_text(json.dumps(comparison,indent=2)+'\n'); equal_spines(comparison)
@@ -415,7 +445,7 @@ def main():
             control_not_completed(events(i))
             hook=out/f'{h}-hook.jsonl'
             hook.write_text('')
-            command=f'{MAESTRO} flow stop-gate --harness {h} | tee -a {shlex.quote(str(hook))}'
+            command=stop_hook_command(MAESTRO,h,hook)
             settings=repo/('.claude/settings.json' if h=='claude' else '.codex/hooks.json')
             settings.write_text(json.dumps({'hooks':{'Stop':[{'hooks':[{'type':'command','command':command,'timeout':60}]}]}}))
             install,rc=cli(h,'flow','stop-gate','--check-install','--harness',h,'--settings',settings,ok=False)

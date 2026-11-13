@@ -1132,6 +1132,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
  "tokio",
  "tokio-util",
