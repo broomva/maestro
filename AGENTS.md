@@ -43,8 +43,9 @@ and `.control/rcs-parameters.toml`; also `METALAYER.md`, `.control/policy.yaml` 
 a cleared environment bound to this checkout: `compute-lambda.sh` recomputes the RCS lambda from
 this checkout's `.control/rcs-parameters.toml`, passed by path, and fails on drift, and
 `l3-rate-gate.sh` reports the L3 rate. It runs `scripts/governance-check.py`: `CLAUDE.md` points to
-this file, the shard count above equals the length of the `ci.yml` shard list (2 to 91 shards, the
-range its selftest models), all eight paths trigger the job and count toward the rate, and the
+this file, the shard count above equals the length of the `ci.yml` shard list (3 to 83 shards, the
+range its selftest models), all eight paths trigger the job and count toward the rate when a commit
+modifies them (the pinned `l3-rate-gate.sh` does not count additions or deletions), and the
 backticked paths in `CLAUDE.md` (a token with a slash or a file extension) exist in exact case and
 trigger it too; prose and links in `CLAUDE.md` are not read. The shard check is count consistency
 only: whether `ci.yml` actually runs the mutation check (its job and step conditions,

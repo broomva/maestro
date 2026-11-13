@@ -7,9 +7,10 @@
 
 What it checks: CLAUDE.md is a pointer to AGENTS.md whose backticked paths (a token with a slash
 or a file extension) exist, in exact case, and trigger the job; prose and links in CLAUDE.md are
-not read. The `mutants` job count AGENTS.md names equals the length of ci.yml's shard list, of 2 to
-91 shards (the range the selftest models); the stability workflow's triggers;
-the rate gate's paths; the RCS levels; how the workflow fetches and calls the pinned bstack; and
+not read. The `mutants` job count AGENTS.md names equals the length of ci.yml's shard list, of 3 to
+83 shards (the range the selftest models); the stability workflow's triggers;
+the rate gate's paths (the pinned l3-rate-gate.sh counts commits that modify one, not additions or
+deletions); the RCS levels; how the workflow fetches and calls the pinned bstack; and
 that the pinned compute-lambda.sh reads the level parameters held here.
 
 What it claims, exactly:
@@ -75,6 +76,8 @@ CONTRACT_INPUTS = (WORKFLOW, CI, SELF)
 # The levels of bstack's rcs-parameters.toml template, and the parameters its compute-lambda.sh
 # reads for each (the bstack-parameters check holds this list to the pinned script).
 LEVELS = ("L0", "L1", "L2", "L3")
+# The shard counts the selftest's seeds model: one fewer or more, and eight fewer or more, stay in it.
+SHARDS = (3, 83)
 LEVEL_PARAMETERS = ("gamma", "L_theta", "rho", "L_d", "eta", "beta", "tau_bar", "nu", "tau_a")
 
 # How the job reaches bstack. The install step is this recipe exactly (git in a cleared
@@ -134,7 +137,7 @@ PLAIN = {"not-absolute": lambda p: p.startswith("/"),
          "no-dot-slash": lambda p: p.startswith("./"),
          "no-dot-dot": lambda p: ".." in p.split("/"),
          "no-dot-segment": lambda p: p == "." or "." in p.split("/")[1:],
-         "no-empty-segment": lambda p: p == "" or "" in p.split("/")[1:-1]}
+         "no-empty-segment": lambda p: p == "" or "" in p.split("/")[1:]}
 # GitHub path filter and glob characters, refused in the paths CLAUDE.md names.
 GLOB_CHARS = {"star": "*", "question": "?", "plus": "+", "bracket-open": "[", "bracket-close": "]",
               "brace-open": "{", "brace-close": "}", "bang": "!", "backslash": "\\"}
@@ -344,8 +347,8 @@ def check_shard_count(root):
     items = shards if isinstance(shards, list) else []
     refuse("matrix.shard-range", not isinstance(shards, list) or [type(x) for x in items] != [int] * len(items)
            or items != list(range(len(items))), "unsupported matrix shape: shard is not the integers 0..n-1")
-    refuse("matrix.shard-count-range", isinstance(shards, list) and not 2 <= len(items) <= 91,
-           f"{len(items)} shards: the selftest models 2 to 91")
+    refuse("matrix.shard-count-range", isinstance(shards, list) and not SHARDS[0] <= len(items) <= SHARDS[1],
+           f"{len(items)} shards: the selftest models {SHARDS[0]} to {SHARDS[1]}")
     refuse("count.matches", named is not None and named != len(items),
            lambda: f"AGENTS.md says {found[0]} ({named}) `mutants` jobs, but the matrix has {len(items)} shards")
     return f"AGENTS.md and {CI} both run {named} shards"
@@ -813,7 +816,7 @@ register("claude.path.not-absolute", CC, *ends(absolute))
 register("claude.path.no-dot-slash", CC, *unplain("./AGENTS.md"))
 register("claude.path.no-dot-dot", CC, *unplain("x/../AGENTS.md", "x/keep"))
 register("claude.path.no-dot-segment", CC, *unplain("x/./AGENTS.md", "x/AGENTS.md"))
-register("claude.path.no-empty-segment", CC, *unplain("x//AGENTS.md", "x/AGENTS.md"))
+register("claude.path.no-empty-segment", CC, *unplain("x//AGENTS.md", "x/AGENTS.md"), *unplain("AGENTS.md/"))
 register("claude.path.printable-ascii", CC, *unplain("xé.md", "xé.md", trigger=False))
 for name, c in GLOB_CHARS.items():
     register(f"claude.path.no-glob.{name}", CC, *unplain(f"x{c}.md", f"x{c}.md"))
@@ -832,9 +835,11 @@ register("matrix.shard-range", SC,
          ("the shard list repeats a value", matrix(lambda t: live(t)[:-1] + live(t)[:1])),
          ("a shard is a string", matrix(lambda t: ['"0"'] + live(t)[1:])),
          ("a shard is a boolean", matrix(lambda t: live(t)[:-1] + ["true"])))
-register("matrix.shard-count-range", SC, ("one shard, named one", seq(
-    edit("AGENTS.md", lambda t: t.phrase, "after one `mutants` jobs"), matrix(lambda t: ["0"]))))
-register("count.matches", SC, ("ci.yml drops a shard", matrix(lambda t: live(t)[:-1])),
+register("matrix.shard-count-range", SC, *[(f"{k} shards, named {k}", seq(
+    edit("AGENTS.md", lambda t: t.phrase, f"after {k} `mutants` jobs"), matrix(lambda t, k=k: [str(i) for i in range(k)])))
+    for k in (SHARDS[0] - 1, SHARDS[1] + 1)])
+register("count.matches", SC, ("ci.yml has one shard fewer (one more at the minimum)", matrix(
+    lambda t: live(t)[:-1] if t.n - 1 >= SHARDS[0] else live(t) + [str(t.n)])),
          ("AGENTS.md names one shard more", edit("AGENTS.md", lambda t: t.phrase, lambda t: f"after {t.n + 1} `mutants` jobs")))
 # trigger-paths
 register("on.exactly-pull_request", WF[:1],
@@ -866,7 +871,9 @@ for name, bad in (("not-absolute", "/x"), ("no-dot-slash", "./x"), ("no-dot-dot"
                   ("no-dot-segment", "a/./b"), ("no-empty-segment", "a//b")):
     extra = {"no-dot-segment": ".", "no-empty-segment": ""}.get(name)
     register(f"rate.path.{name}", RP, *ends(lambda last, bad=bad: (f"a rate pattern is {bad!r}", rated(bad, last))),
-             *([(f"a rate pattern is {extra!r}", rated(extra))] if extra is not None else []))
+             *([(f"a rate pattern is {extra!r}", rated(extra))] if extra is not None else []),
+             *(ends(lambda last: ("a rate pattern has a trailing slash", rated("AGENTS.md/", last)))
+               if name == "no-empty-segment" else []))
 for p in GOVERNANCE_PATHS:
     register(f"rate.{p}", RP, (f"the rate gate stops counting {p}", edit(PARAMETERS, RATE.format(p), "")))
 # rcs-levels
@@ -930,18 +937,23 @@ for p in LEVEL_PARAMETERS:
 register("bstack.reads-only-these", BP, ("compute-lambda.sh reads another parameter",
                                          edit(SCRIPT, "    except KeyError:", '        kappa = lvl["kappa"]\n    except KeyError:')))
 
+def moved(t):
+    """The live shard count eight up, or eight down where that would leave SHARDS."""
+    return t.n + 8 if t.n + 8 <= SHARDS[1] else t.n - 8
+
+
 # Cases no guard owns: each must pass.
 BENIGN = [
     ("unchanged fixture", lambda r, t: None),
     ("strategy sets max-parallel", after(CI, STRATEGY, "  max-parallel: 4")),
     ("the shard list in block style", lambda r, t: resub(
         CI, SHARD, lambda m: f"{m[1]}shard:" + "".join(f"\n{m[1]}  - {x}" for x in live(t)))(r, t)),
-    ("both sides grow by eight, in words", lambda r, t: seq(
-        edit("AGENTS.md", t.phrase, f"after {words(t.n + 8)} `mutants` jobs"),
-        matrix(lambda t: live(t) + [str(t.n + i) for i in range(8)]))(r, t)),
-    ("both sides grow by eight, in digits", lambda r, t: seq(
-        edit("AGENTS.md", t.phrase, f"after {t.n + 8} `mutants` jobs"),
-        matrix(lambda t: live(t) + [str(t.n + i) for i in range(8)]))(r, t)),
+    ("both sides move by eight, in words", lambda r, t: seq(
+        edit("AGENTS.md", t.phrase, f"after {words(moved(t))} `mutants` jobs"),
+        matrix(lambda t: [str(i) for i in range(moved(t))]))(r, t)),
+    ("both sides move by eight, in digits", lambda r, t: seq(
+        edit("AGENTS.md", t.phrase, f"after {moved(t)} `mutants` jobs"),
+        matrix(lambda t: [str(i) for i in range(moved(t))]))(r, t)),
     ("every trigger path double-quoted", resub(WORKFLOW, r"^(      - )'(.*)'$", r'\1"\2"', count=0)),
     ("every trigger path unquoted, but a leading *", resub(WORKFLOW, r"^(      - )'([^*].*)'$", r"\1\2", count=0)),
 ]

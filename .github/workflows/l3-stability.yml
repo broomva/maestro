@@ -10,7 +10,7 @@
 #   - bstack is fetched at a pinned commit, not its default branch, and its scripts run in a
 #     cleared environment with a fixed PATH bound to this checkout, before the PR's checker;
 #   - compute-lambda.sh runs with --strict, so a drifting cached lambda fails the job;
-#   - the triggers add the files CLAUDE.md names and the checks' own inputs;
+#   - the triggers add the backticked paths in CLAUDE.md and the checks' own inputs;
 #   - the report goes to the job summary, not a PR comment, so the token stays read-only;
 #   - the runner guard is ci.yml's.
 # This workflow and scripts/governance-check.py come from the PR they judge. The checker catches
@@ -22,8 +22,8 @@ on:
     branches: [main]
     # The shape is fixed, exactly on.pull_request with branches [main] and paths:
     # scripts/governance-check.py fails on another event, paths-ignore, types or a `!` entry,
-    # and when a policy governance path, an input of its checks or a file CLAUDE.md names is
-    # missing here.
+    # and when a policy governance path, an input of its checks or a backticked path in CLAUDE.md
+    # is missing here.
     paths:
       - 'CLAUDE.md'
       - 'AGENTS.md'
@@ -33,7 +33,7 @@ on:
       - 'docs/references/agent-operating-protocols.md'
       - 'docs/references/current-work.md'
       - 'docs/references/workspace-context.md'
-      # The files CLAUDE.md names: a PR that moves one runs the check that it still exists.
+      # The backticked paths in CLAUDE.md: a PR that moves one runs the check that it still exists.
       - 'README.md'
       - 'docs/specs/2026-10-18-maestro-rust.html'
       - '.github/workflows/l3-stability.yml'
