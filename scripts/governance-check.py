@@ -33,6 +33,8 @@ WORKFLOW = ".github/workflows/l3-stability.yml"
 CI = ".github/workflows/ci.yml"
 PARAMETERS = ".control/rcs-parameters.toml"
 SELF = "scripts/governance-check.py"
+# The levels of bstack's rcs-parameters.toml template, in its order.
+LEVELS = ("L0", "L1", "L2", "L3")
 # Besides the governance paths, a change to any input of a check must run the job.
 CONTRACT_INPUTS = (WORKFLOW, CI, SELF)
 
@@ -224,7 +226,12 @@ def check_triggers(root):
                          + ", ".join(pr))
         if scalars(lines, pr["branches"], "on.pull_request.branches") != ["main"]:
             raise Broken("on.pull_request.branches must be [main]")
-        triggers = set(scalars(lines, pr["paths"], "on.pull_request.paths"))
+        paths = scalars(lines, pr["paths"], "on.pull_request.paths")
+        # GitHub applies paths in order, and a `!` entry excludes what an earlier entry matched.
+        negated = [x for x in paths if x.startswith("!")]
+        if negated:
+            raise Broken("on.pull_request.paths negates " + ", ".join(negated))
+        triggers = set(paths)
     except Broken as e:
         raise Broken(f"unsupported trigger shape in {WORKFLOW}: {e}")
     want = [p for p in GOVERNANCE_PATHS if (root / p).exists()] + list(CONTRACT_INPUTS)
@@ -234,19 +241,55 @@ def check_triggers(root):
     return f"{len(want)} paths run the job"
 
 
-def check_rate_paths(root):
-    """The L3 rate gate counts every governance path in this repository."""
+def parameters(root):
     try:
-        data = tomllib.loads(read(root, PARAMETERS))
+        return tomllib.loads(read(root, PARAMETERS))
     except tomllib.TOMLDecodeError as e:
         raise Broken(f"{PARAMETERS} is not valid TOML: {e}")
-    patterns = data.get("gates", {}).get("l3_paths", {}).get("patterns")
-    if not isinstance(patterns, list):
-        raise Broken(f"{PARAMETERS} has no [gates.l3_paths] patterns list")
+
+
+def check_rate_paths(root):
+    """The L3 rate gate counts every governance path in this repository."""
+    patterns = parameters(root).get("gates", {}).get("l3_paths", {}).get("patterns")
+    if not isinstance(patterns, list) or not all(isinstance(x, str) for x in patterns):
+        raise Broken(f"{PARAMETERS} has no [gates.l3_paths] patterns list of strings")
+    # The rate gate passes the list to `git log --`, where pathspec magic such as :(exclude),
+    # :! or :^ removes paths from the count. None is read here, so none is allowed.
+    magic = [x for x in patterns if x.startswith(":")]
+    if magic:
+        raise Broken(f"{PARAMETERS} [gates.l3_paths] uses pathspec magic: " + ", ".join(magic))
     missing = [p for p in GOVERNANCE_PATHS if (root / p).exists() and p not in patterns]
     if missing:
         raise Broken(f"{PARAMETERS} [gates.l3_paths] does not count: " + ", ".join(missing))
     return f"{len(patterns)} patterns count every governance path present"
+
+
+def check_levels(root):
+    """The parameters hold exactly the template's four levels, each with a cached lambda: with
+    none, bstack's compute-lambda.sh finds all([]) stable, and a level with no cached value is
+    never checked for drift."""
+    data = parameters(root)
+    levels = data.get("levels")
+    if not isinstance(levels, list) or not all(isinstance(x, dict) for x in levels):
+        raise Broken(f"{PARAMETERS} has no [[levels]] tables")
+    ids = [x.get("id") for x in levels]
+    if ids != list(LEVELS):
+        raise Broken(f"{PARAMETERS} levels are {ids}, not {list(LEVELS)}")
+    cached = data.get("derived", {}).get("lambda")
+    if not isinstance(cached, dict) or sorted(cached) != sorted(LEVELS):
+        raise Broken(f"{PARAMETERS} [derived.lambda] caches "
+                     f"{sorted(cached) if isinstance(cached, dict) else 'nothing'}, not {list(LEVELS)}")
+    return "levels " + ", ".join(LEVELS) + ", each with a cached lambda"
+
+
+def check_lambda_strict(root):
+    """The job runs compute-lambda.sh once, with --strict: without it a cached lambda that drifts
+    from its recomputed value by more than 1e-4 still exits 0."""
+    runs = re.findall(r'bash "\$BSTACK"/scripts/compute-lambda\.sh([^\n]*)', read(root, WORKFLOW))
+    if len(runs) != 1 or "--strict" not in runs[0].split():
+        raise Broken(f"{WORKFLOW} must run compute-lambda.sh once, with --strict "
+                     f"(runs it {len(runs)} times: {'; '.join(r.strip() for r in runs) or '-'})")
+    return "compute-lambda.sh --strict"
 
 
 def check_bstack_pin(root):
@@ -274,6 +317,8 @@ CHECKS = (
     ("shard-count", check_shard_count),
     ("trigger-paths", check_triggers),
     ("rate-paths", check_rate_paths),
+    ("rcs-levels", check_levels),
+    ("lambda-strict", check_lambda_strict),
     ("bstack-pin", check_bstack_pin),
 )
 
@@ -349,6 +394,7 @@ def selftest(root):
         (r / "CLAUDE.md").symlink_to("AGENTS.md")
 
     SHARD_LINE = r"^( *)shard *:.*$"
+    LEVEL = r'^\[\[levels\]\]\nid *= *"{}"\n(?:\w+ *=.*\n)*'
     cases = [
         # (description, seed, the checks that must fail; empty means it must pass)
         ("unchanged tree", lambda r: None, []),
@@ -375,7 +421,8 @@ def selftest(root):
          ["trigger-paths"]),
         ("the rate gate stops counting AGENTS.md", edit(PARAMETERS, '    "AGENTS.md",\n', ""),
          ["rate-paths"]),
-        ("rcs-parameters.toml is unreadable", lambda r: (r / PARAMETERS).unlink(), ["rate-paths"]),
+        ("rcs-parameters.toml is unreadable", lambda r: (r / PARAMETERS).unlink(),
+         ["rate-paths", "rcs-levels"]),
         # The matrix's real shape: GitHub runs one job per combination, after include and exclude.
         ("the matrix excludes a shard", insert_after(CI, SHARD_LINE, ["exclude:", "  - shard: 0"]),
          ["shard-count"]),
@@ -416,6 +463,32 @@ def selftest(root):
             r'\1git clone --depth 1 https://github.com/broomva/bstack.git "$DEST"\n'), ["bstack-pin"]),
         ("the fetched bstack is not verified", resub(WORKFLOW, r"^ *test .*BSTACK_REV.*\n", ""),
          ["bstack-pin"]),
+        # Drift: compute-lambda.sh fails on it only with --strict.
+        ("compute-lambda.sh runs without --strict", edit(WORKFLOW, "compute-lambda.sh --strict ",
+                                                          "compute-lambda.sh "), ["lambda-strict"]),
+        # The levels: none, or one fewer, would pass bstack's all() unchecked.
+        ("a level is removed", resub(PARAMETERS, LEVEL.format("L2"), ""), ["rcs-levels"]),
+        ("every level is removed", lambda r: [resub(PARAMETERS, LEVEL.format(x), "")(r) for x in LEVELS],
+         ["rcs-levels"]),
+        ("a cached lambda is removed", resub(PARAMETERS, r"^L3 = .*\n", ""), ["rcs-levels"]),
+        # Pathspec magic in the rate gate's list removes paths from its count.
+        ("the rate list excludes AGENTS.md", edit(PARAMETERS, '    "AGENTS.md",\n',
+                                                  '    "AGENTS.md",\n    ":(exclude)AGENTS.md",\n'),
+         ["rate-paths"]),
+        ("the rate list excludes with :!", edit(PARAMETERS, '    "AGENTS.md",\n',
+                                                '    "AGENTS.md",\n    ":!AGENTS.md",\n'), ["rate-paths"]),
+        ("the rate list excludes with :^", edit(PARAMETERS, '    "AGENTS.md",\n',
+                                                '    "AGENTS.md",\n    ":^AGENTS.md",\n'), ["rate-paths"]),
+        # GitHub's paths: a later `!` entry excludes an earlier match; any quoting reads the same.
+        ("the trigger list negates AGENTS.md", edit(WORKFLOW, "      - 'AGENTS.md'\n",
+                                                    "      - 'AGENTS.md'\n      - '!AGENTS.md'\n"),
+         ["trigger-paths"]),
+        ("a double-quoted negation", edit(WORKFLOW, "      - 'AGENTS.md'\n",
+                                          "      - 'AGENTS.md'\n      - \"!AGENTS.md\"\n"),
+         ["trigger-paths"]),
+        ("trigger paths double-quoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", '      - "AGENTS.md"\n'),
+         []),
+        ("trigger paths unquoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", "      - AGENTS.md\n"), []),
     ]
     inputs = set(GOVERNANCE_PATHS) | set(CONTRACT_INPUTS) | {"README.md"}
     inputs |= set(re.findall(r"`([^`\s]+/[^`\s]+)`", read(root, "CLAUDE.md")))

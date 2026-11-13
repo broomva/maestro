@@ -101,7 +101,8 @@ jobs:
         id: compute
         run: |
           set +e
-          out=$(bash "$BSTACK"/scripts/compute-lambda.sh --human 2>&1)
+          # --strict: exit 3 when a cached lambda drifts from its recomputed value by over 1e-4.
+          out=$(bash "$BSTACK"/scripts/compute-lambda.sh --strict --human 2>&1)
           status=$?
           echo "$out"
           delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
@@ -147,8 +148,12 @@ jobs:
           contract, compute, rate = env("CONTRACT_STATUS", ""), env("COMPUTE_STATUS", ""), env("RATE_STATUS", "")
           if contract != "0":
               verdict = "**Governance contract broken** (exit " + (contract or "none") + "): do not merge"
+          elif compute == "1":
+              verdict = "**lambda_i <= 0**: composite unstable, do not merge"
+          elif compute == "3":
+              verdict = "**Cached lambda drifts** from its recomputed value by more than 1e-4: do not merge"
           elif compute != "0":
-              verdict = "**lambda_i <= 0, or lambda not computed** (exit " + (compute or "none") + "): do not merge"
+              verdict = "**Lambda not computed** (exit " + (compute or "none") + "): do not merge"
           elif rate not in ("0", "1"):
               verdict = "**Rate gate did not reach a verdict** (exit " + (rate or "none") + "): do not merge"
           elif rate == "1":
@@ -173,21 +178,23 @@ jobs:
           COMPUTE_STATUS: ${{ steps.compute.outputs.status }}
           RATE_STATUS: ${{ steps.rate.outputs.status }}
         run: |
-          # The contract and lambda > 0 are the gate. L3 rate exceeded (exit 1) is reported, not
+          # The contract, lambda > 0 and no drift are the gate. L3 rate exceeded (exit 1) is reported, not
           # failed: p9's l3_rate gate enforces it at merge. Any other status, empty included, is
           # no verdict and fails closed.
           if [ "$CONTRACT_STATUS" != "0" ]; then
             echo "FAIL: governance contract broken (exit '$CONTRACT_STATUS')"
             exit 1
           fi
-          if [ "$COMPUTE_STATUS" != "0" ]; then
-            echo "FAIL: lambda_i <= 0 or not computed (exit '$COMPUTE_STATUS')"
-            exit 1
-          fi
+          case "$COMPUTE_STATUS" in
+            0) ;;
+            1) echo "FAIL: lambda_i <= 0; composite unstable"; exit 1 ;;
+            3) echo "FAIL: a cached lambda drifts from its recomputed value by more than 1e-4"; exit 1 ;;
+            *) echo "FAIL: lambda not computed (exit '$COMPUTE_STATUS')"; exit 1 ;;
+          esac
           case "$RATE_STATUS" in
             0|1) ;;
             *)
               echo "FAIL: l3-rate-gate did not reach a verdict (exit '$RATE_STATUS')"
               exit 1 ;;
           esac
-          echo "OK: contract holds, all lambda_i > 0"
+          echo "OK: contract holds, all lambda_i > 0, no cached lambda drifts"
