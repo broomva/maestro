@@ -17,7 +17,7 @@ jobs:
     name: mutants (${{ strategy.job-index }}/${{ strategy.job-total }})
     # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
     runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
-    # Each shard runs a sixteenth of the mutants. Four shards reached 51-59 min of the 60 by
+    # Each shard runs a twenty-fourth of the mutants. Four shards reached 51-59 min of the 60 by
     # 2026-10-29 and two timed out once BRO-3588 added 13, so there were six. Six ran 47-60 min
     # with the flow kernel's mutants and two timed out on 2026-11-08 (BRO-3633), so there were ten
     # (BRO-3647, owner-approved). Ten ran 42-59 min with the human-step mutants and one timed out
