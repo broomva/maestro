@@ -295,8 +295,14 @@ fn a_record_that_failed_is_still_alerted() {
     assert!(out.recorded.is_empty(), "{out:?}");
     assert_eq!(f.events(&fi).len(), 1, "nothing was appended");
     assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.starts_with(&format!("maestro stop-gate: StopUnblockable was not recorded on {fi} (io:"))),
+        "{out:?}"
+    );
     let ledger = f.ledger();
-    assert!(ledger.contains("StopUnblockable could not be recorded on:") && ledger.contains(&fi), "{ledger}");
+    assert!(ledger.contains(&format!("StopUnblockable could not be recorded on: {fi} (io)")), "{ledger}");
 }
 
 /// Each error class lets the stop through, says why, and files the alert when it can.
@@ -358,7 +364,7 @@ fn the_gate_fails_open() {
     std::fs::create_dir(&file).unwrap();
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     allowed(&out);
-    assert!(out.notes.iter().any(|n| n.contains("refusals_unread")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_unread:")), "{out:?}");
 
     // Refusal counts that cannot be written: their folder takes no new file (the count and its lock
     // were made by a first stop, so they still open).
@@ -370,7 +376,7 @@ fn the_gate_fails_open() {
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     std::fs::set_permissions(&counts, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     allowed(&out);
-    assert!(out.notes.iter().any(|n| n.contains("refusals_unwritten")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_unwritten:")), "{out:?}");
 }
 
 #[test]
@@ -442,6 +448,8 @@ fn the_install_check_reads_the_harness_settings() {
         "maestro flow next --harness claude",
         "echo maestro flow stop-gate --harness claude",
         "maestro flow stop-gate --check-install --harness claude",
+        "maestro flow stop-gate --check-install=true --harness claude",
+        "maestro flow stop-gate --check-install=false --harness claude",
     ] {
         write(hook(not));
         assert!(!stop::check_install(Harness::Claude, &path).wired, "{not}");
@@ -516,7 +524,10 @@ fn a_count_lock_held_too_long_fails_open() {
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     root.unlock().unwrap();
     allowed(&out);
-    assert!(out.notes.iter().any(|n| n.contains("refusals_busy") && n.contains("fails open")), "{out:?}");
+    assert!(
+        out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_busy:") && n.contains("fails open")),
+        "{out:?}"
+    );
     assert_eq!(out.alerts.len(), 1, "{out:?}");
 }
 
@@ -617,4 +628,43 @@ fn an_unread_only_stop_clears_the_counts() {
         assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked, "fresh refusal {n}");
     }
     allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+}
+
+#[test]
+fn flow_open_matches_status_for_missing_roots() {
+    let f = fx();
+    let check = |expected: &str| {
+        let open = f.call(OPEN, f.as_("d1", json!({})));
+        let status = f.call(STATUS, json!({ "instance": "fi_x" }));
+        assert_eq!(open["code"], expected, "{open}");
+        assert_eq!(status["code"], expected, "{status}");
+    };
+    check("no_ledger");
+    f.begin("d1");
+    let parent = f.root.join("workspace/.broomva");
+    std::fs::rename(parent.join("flows"), parent.join("flows.moved")).unwrap();
+    check("root_moved");
+    let epoch = std::fs::read_to_string(parent.join("flows.moved/EPOCH")).unwrap();
+    std::fs::rename(parent.join("flows.moved"), parent.join(format!(".flows.genesis-{}", epoch.trim()))).unwrap();
+    check("genesis_incomplete");
+}
+
+#[test]
+fn a_shared_lock_held_too_long_fails_open_with_refusals_busy() {
+    let f = fx();
+    f.begin("d1");
+    let lock =
+        std::fs::OpenOptions::new().read(true).write(true).open(f.root.join("workspace/.broomva/flows.lock")).unwrap();
+    lock.lock().unwrap();
+    let start = std::time::Instant::now();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    let elapsed = start.elapsed();
+    lock.unlock().unwrap();
+    allowed(&out);
+    assert!(
+        out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_busy:") && n.contains("fails open")),
+        "{out:?}"
+    );
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert!(elapsed < std::time::Duration::from_secs(8), "waited {elapsed:?}");
 }

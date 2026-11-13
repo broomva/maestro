@@ -2111,6 +2111,16 @@ mutate $mf '        out[kernel::stop::WORK] = work;' ''
 # (and past its bound), on an instance that does not read and on counts it cannot keep, and
 # alerts; no ledger is no flow; one alert per subject; the install check reads only a maestro
 # Stop hook; a command line that does not parse exits 0.
+mutate $mf '    let guard = Reader::new(&w.root, Options::default())?.lock()?;' '    if std::fs::symlink_metadata(&w.root).is_err() { return Err(FlowError::NoLedger { root: w.root.clone() }.into()); }
+    let guard = Reader::new(&w.root, Options::default())?.lock()?;'
+mutate $gt '    if code == "busy" { "refusals_busy" } else { code }' '    code'
+mutate $gt '        let guard = Reader::new(root, Options { lock_wait: kstop::REFUSALS_WAIT })?.lock()?;' '        let guard = Reader::new(root, Options::default())?.lock()?;'
+
+mutate $cli '    args.iter().any(|a| a == "--check-install" || a.starts_with("--check-install="))' '    args.iter().any(|a| a == "--check-install")'
+mutate $cli '    args.iter().any(|a| a == "--check-install" || a.starts_with("--check-install="))' '    false'
+mutate $cli '        Err(_) if hook && !check_install => return std::process::ExitCode::SUCCESS,' '        Err(_) if hook => return std::process::ExitCode::SUCCESS,'
+mutate $cli '        Err(_) if hook && !check_install => return std::process::ExitCode::SUCCESS,' '        Err(_) if false => return std::process::ExitCode::SUCCESS,'
+mutate $cli '    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate") && !check_install' '    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate")'
 mutate $gt '            Harness::Claude => json!({ "decision": "block", "reason": reason }).to_string(),' '            Harness::Claude => json!({ "decision": "deny", "reason": reason }).to_string(),'
 mutate $gt '            Harness::Codex => json!({ "decision": "block", "reason": reason }).to_string(),' '            Harness::Codex => json!({ "decision": "block", "reason": reason, "continue": true }).to_string(),'
 mutate $gt '        if self.gate.cannot_block {' '        if false {'
@@ -2125,7 +2135,8 @@ mutate $gt '                self.alert(s, &key, UNCHECKED, &words);' ''
 mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words);' ''
 mutate $gt '            Err(e) if e.message.contains("already has an ask") => {' '            Err(e) if false => {'
 mutate $gt 'let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));' 'let maestro = words.next().is_some();'
-mutate $gt '    maestro && verb && flag && !words.contains(&"--check-install")' '    maestro && verb && flag'
+mutate $gt '    maestro && verb && flag && !words.iter().any(|w| *w == "--check-install" || w.starts_with("--check-install="))' '    maestro && verb && flag && !words.contains(&"--check-install")'
+mutate $gt '    maestro && verb && flag && !words.iter().any(|w| *w == "--check-install" || w.starts_with("--check-install="))' '    maestro && verb && flag'
 mutate $gt '            if hook.get("type").and_then(Value::as_str) == Some("command") && runs_gate(command, harness) {' '            if runs_gate(command, harness) {'
 # Review round 1 (BRO-3636): a choice node's next step is choose, never complete; a record whose
 # alert was not filed is alerted by the next stop that finds it; a record that failed is alerted.

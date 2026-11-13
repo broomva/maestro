@@ -537,9 +537,14 @@ fn is_hook(args: &[String]) -> bool {
             .any(|(i, a)| a == "--format=hook" || (a == "--format" && args.get(i + 1).is_some_and(|v| v == "hook")))
 }
 
+/// Whether argv requests the install check, including malformed values for the flag.
+fn is_check_install(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--check-install" || a.starts_with("--check-install="))
+}
+
 /// Whether the command line runs the Stop-hook gate (`flow stop-gate`), so it never exits 2.
-fn is_stop_gate(args: &[String]) -> bool {
-    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate")
+fn is_stop_gate(args: &[String], check_install: bool) -> bool {
+    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate") && !check_install
 }
 
 /// How long the hook may take before it gives up silently (`MAESTRO_HOOK_TIMEOUT_MS`, default 5000).
@@ -590,11 +595,12 @@ fn main() -> std::process::ExitCode {
     drop_inherited_git_repo();
     let args: Vec<String> = std::env::args().collect();
     let hook = is_hook(&args);
-    let gate = is_stop_gate(&args);
+    let check_install = is_check_install(&args);
+    let gate = is_stop_gate(&args, check_install);
     let port_cmd = args.iter().any(|a| a == "delegation" || a == "economy");
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(_) if hook => return std::process::ExitCode::SUCCESS,
+        Err(_) if hook && !check_install => return std::process::ExitCode::SUCCESS,
         // A Stop hook that exits 2 refuses the stop: a command line the gate cannot read lets it
         // through instead (it fails open), saying why.
         Err(e) if gate => {
