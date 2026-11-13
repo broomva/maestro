@@ -1,3 +1,9 @@
 /target
 /.worktrees
 __pycache__/
+# bstack's host hooks and sensors write state into any .control/ they find (the L3 edit log,
+# the leverage sensor). The two governance files the workspace policy names under .control/ stay
+# trackable without `git add -f` (BRO-3702).
+/.control/*
+!/.control/rcs-parameters.toml
+!/.control/policy.yaml
