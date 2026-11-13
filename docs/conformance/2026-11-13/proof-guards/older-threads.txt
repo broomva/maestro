@@ -1,0 +1,11 @@
+non-empty evidence: exit 1, killed=true
+quoted executable: exit 1, killed=true
+Gemini shell exclusion: exit 1, killed=true
+Gemini shell transcript: exit 1, killed=true
+agy shell transcript: exit 1, killed=true
+MCP event sequence: exit 1, killed=true
+non-empty evidence runner: exit 1; prior results unchanged
+space-path hook command test: exit 0
+space-path check-install: exit 0, wired=true
+Rust shlex mutant: cargo test exit 101; quoted-path install test failed as expected
+canonical output directory reuse: exit 1; previous successful results.json unchanged

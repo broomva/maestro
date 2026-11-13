@@ -1,5 +1,5 @@
 {
-  "instance": "fi_d16d4236e8d658227f4cd6ec7cf805dc",
+  "instance": "fi_e7368c537ef9b754bc1b068c00f10d6b",
   "events": [
     {
       "seq": 1,
@@ -36,7 +36,7 @@
     {
       "seq": 4,
       "kind": "Claimed",
-      "node": "check",
+      "node": "surface",
       "performer": {
         "harness": "claude-code",
         "model": null,
@@ -47,16 +47,20 @@
     },
     {
       "seq": 5,
-      "kind": "Refused",
-      "node": "check",
-      "performer": null,
-      "verify_exit": null,
-      "code": "verify_failed"
+      "kind": "Completed",
+      "node": "surface",
+      "performer": {
+        "harness": "claude-code",
+        "model": null,
+        "session": "direct:-/claude"
+      },
+      "verify_exit": 0,
+      "code": null
     },
     {
       "seq": 6,
       "kind": "Claimed",
-      "node": "surface",
+      "node": "check",
       "performer": {
         "harness": "claude-code",
         "model": null,
@@ -68,7 +72,31 @@
     {
       "seq": 7,
       "kind": "Completed",
-      "node": "surface",
+      "node": "check",
+      "performer": {
+        "harness": "claude-code",
+        "model": null,
+        "session": "direct:-/claude"
+      },
+      "verify_exit": 0,
+      "code": null
+    },
+    {
+      "seq": 8,
+      "kind": "Claimed",
+      "node": "exercise",
+      "performer": {
+        "harness": "claude-code",
+        "model": null,
+        "session": "direct:-/claude"
+      },
+      "verify_exit": null,
+      "code": null
+    },
+    {
+      "seq": 9,
+      "kind": "Completed",
+      "node": "exercise",
       "performer": {
         "harness": "claude-code",
         "model": null,
