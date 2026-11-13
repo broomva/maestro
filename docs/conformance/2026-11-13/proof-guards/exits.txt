@@ -1,0 +1,13 @@
+mcp exit 1: phase1: MCP claim and complete tool calls are required
+driver-claude exit 1: phase1: claude driver skill and verifier evidence is missing
+driver-codex exit 1: phase1: codex driver skill and verifier evidence is missing
+driver-model exit 1: phase1: codex driver skill and verifier evidence is missing
+unavailable exit 1: phase1: codex is unavailable
+isolation exit 1: phase1: capability harness has Direct credentials or maestro on PATH
+missing claude exit 1: phase1: claude is unavailable
+missing codex exit 1: phase1: codex is unavailable
+spines exit 1: phase1: spines differ or could not be compared
+control exit 1: phase1: positive-control check reached Completed
+support exit 1: phase1: gemini marked supported without matching Claimed and Completed
+missing GOOGLE_CLOUD_PROJECT: exit 0, Gemini unavailable (GOOGLE_CLOUD_PROJECT is required)
+nonexistent CARGO_TARGET_DIR: exit 1, release binary not found in alternate target

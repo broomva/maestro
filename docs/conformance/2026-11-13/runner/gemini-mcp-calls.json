@@ -1,0 +1,27 @@
+[
+  {
+    "type": "tool_use",
+    "tool_name": "mcp_maestro_maestro_flow_claim",
+    "parameters": {
+      "session": "direct:-/gemini",
+      "instance": "fi_45f0a964ff0b8f2da5d1b35b2d038e98",
+      "node_id": "pin"
+    },
+    "result": {
+      "ok": true,
+      "seq": 2
+    }
+  },
+  {
+    "type": "tool_use",
+    "tool_name": "mcp_maestro_maestro_flow_complete",
+    "parameters": {
+      "claim_token": "[redacted]",
+      "session": "direct:-/gemini"
+    },
+    "result": {
+      "ok": true,
+      "seq": 3
+    }
+  }
+]

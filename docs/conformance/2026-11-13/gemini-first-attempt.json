@@ -1,0 +1,14 @@
+[
+  {
+    "status": "success",
+    "output": "{\"code\":\"caller_refused\",\"identity\":\"invalid_token\",\"ok\":false,\"reason\":\"caller identity refused (InvalidToken): authenticated bridge credential or launch token is required\",\"recorded\":false}"
+  },
+  {
+    "status": "success",
+    "output": "{\"code\":\"caller_refused\",\"identity\":\"invalid_token\",\"ok\":false,\"reason\":\"caller identity refused (InvalidToken): authenticated bridge credential or launch token is required\",\"recorded\":false}"
+  },
+  {
+    "status": "success",
+    "output": "{\"code\":\"caller_refused\",\"identity\":\"invalid_token\",\"ok\":false,\"reason\":\"caller identity refused (InvalidToken): authenticated bridge credential or launch token is required\",\"recorded\":false}"
+  }
+]

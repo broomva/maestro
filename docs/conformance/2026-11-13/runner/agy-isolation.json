@@ -1,0 +1,14 @@
+{
+  "maestro_on_path": false,
+  "direct_or_session_env_keys": [],
+  "mcp_server_env_keys": [
+    "BROOMVA_HOME",
+    "BROOMVA_WORKSPACE",
+    "MAESTRO_CALLER_CWD",
+    "MAESTRO_DIRECT_REGISTRY",
+    "MAESTRO_DIRECT_TOKEN",
+    "MAESTRO_SESSION",
+    "MAESTRO_TREE",
+    "MAESTRO_WORK_ROOT"
+  ]
+}

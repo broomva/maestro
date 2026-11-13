@@ -567,7 +567,8 @@ pub struct Install {
 /// Whether `command` runs this gate for `harness`.
 fn runs_gate(command: &str, harness: Harness) -> bool {
     // The program is the first word after any `env` and `NAME=value` words: maestro itself.
-    let mut words = command.split_whitespace().skip_while(|w| *w == "env" || w.contains('='));
+    let Some(parsed) = shlex::split(command) else { return false };
+    let mut words = parsed.iter().map(String::as_str).skip_while(|w| *w == "env" || w.contains('='));
     let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));
     let words: Vec<&str> = words.collect();
     let flag = words.windows(2).any(|w| w == ["--harness", harness.name()])

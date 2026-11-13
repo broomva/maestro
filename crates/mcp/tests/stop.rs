@@ -439,6 +439,13 @@ fn the_install_check_reads_the_harness_settings() {
     let i = stop::check_install(Harness::Claude, &path);
     assert!(i.wired, "{i:?}");
     assert_eq!(i.commands, ["/usr/local/bin/maestro flow stop-gate --harness claude"]);
+    write(hook("'/tmp/a directory/maestro' flow stop-gate --harness claude | tee -a '/tmp/a directory/hook'"));
+    assert!(stop::check_install(Harness::Claude, &path).wired);
+    write(hook("'/tmp/an'\"'\"'other directory/maestro' flow stop-gate --harness claude"));
+    assert!(stop::check_install(Harness::Claude, &path).wired);
+    write(hook("'/tmp/a directory/maestro flow stop-gate --harness claude"));
+    assert!(!stop::check_install(Harness::Claude, &path).wired);
+    write(hook("/usr/local/bin/maestro flow stop-gate --harness claude"));
     // Wired for Claude is not wired for Codex.
     assert!(!stop::check_install(Harness::Codex, &path).wired);
     write(hook("maestro flow stop-gate --harness=codex"));

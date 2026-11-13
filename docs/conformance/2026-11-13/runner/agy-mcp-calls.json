@@ -1,0 +1,35 @@
+[
+  {
+    "event": "step_update",
+    "step_type": "tool",
+    "state": "DONE",
+    "tool_name": "call_mcp_tool",
+    "server": "maestro",
+    "mcp_tool": "maestro_flow_claim",
+    "arguments": {
+      "instance": "fi_f76ddcb330e950ec617716a310439c4b",
+      "node_id": "pin",
+      "session": "direct:-/agy"
+    },
+    "result": {
+      "ok": true,
+      "seq": 2
+    }
+  },
+  {
+    "event": "step_update",
+    "step_type": "tool",
+    "state": "DONE",
+    "tool_name": "call_mcp_tool",
+    "server": "maestro",
+    "mcp_tool": "maestro_flow_complete",
+    "arguments": {
+      "claim_token": "[redacted]",
+      "session": "direct:-/agy"
+    },
+    "result": {
+      "ok": true,
+      "seq": 3
+    }
+  }
+]
