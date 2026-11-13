@@ -282,10 +282,10 @@ impl Run<'_> {
             if counted {
                 let cleared =
                     self.ledger(&root).map_err(|(code, why)| format!("{code}: {why}")).and_then(|mut ledger| {
-                        let guard = ledger.lock().map_err(|e| format!("{}: {e}", e.code()))?;
-                        let mut r = Refusals::load(&guard, &me).map_err(|e| format!("{}: {e}", e.code()))?;
+                        let guard = ledger.lock().map_err(|e| format!("{}: {e}", busy_code(e.code())))?;
+                        let mut r = Refusals::load(&guard, &me).map_err(|e| format!("{}: {e}", busy_code(e.code())))?;
                         r.tally(&[]);
-                        r.save(&guard, &me).map_err(|e| format!("{}: {e}", e.code()))
+                        r.save(&guard, &me).map_err(|e| format!("{}: {e}", busy_code(e.code())))
                     });
                 if let Err(e) = cleared {
                     self.note(format!("the refusal counts were not cleared ({e})."));
@@ -317,16 +317,18 @@ impl Run<'_> {
                 Ok(g) => g,
                 Err(e) => {
                     let code = if e.code() == "busy" { "refusals_busy" } else { "refusals_unread" };
-                    return self.fail_open(Some(&session), code, &format!("{}: {e}", e.code()));
+                    return self.fail_open(Some(&session), code, &format!("{}: {e}", busy_code(e.code())));
                 }
             };
             let mut counts = match Refusals::load(&guard, &me) {
                 Ok(c) => c,
-                Err(e) => return self.fail_open(Some(&session), "refusals_unread", &format!("{}: {e}", e.code())),
+                Err(e) => {
+                    return self.fail_open(Some(&session), "refusals_unread", &format!("{}: {e}", busy_code(e.code())));
+                }
             };
             let tally = counts.tally(&refusing);
             if let Err(e) = counts.save(&guard, &me) {
-                return self.fail_open(Some(&session), "refusals_unwritten", &format!("{}: {e}", e.code()));
+                return self.fail_open(Some(&session), "refusals_unwritten", &format!("{}: {e}", busy_code(e.code())));
             }
             tally
         };
@@ -400,8 +402,9 @@ impl Run<'_> {
                     already.push((a.instance.clone(), seq));
                 }
                 Err(e) => {
-                    self.note(format!("StopUnblockable was not recorded on {} ({}: {e}).", a.instance, e.code()));
-                    failed.push(format!("{} ({})", a.instance, e.code()));
+                    let code = busy_code(e.code());
+                    self.note(format!("StopUnblockable was not recorded on {} ({code}: {e}).", a.instance));
+                    failed.push(format!("{} ({code})", a.instance));
                 }
             }
         }
@@ -570,7 +573,7 @@ fn runs_gate(command: &str, harness: Harness) -> bool {
     let flag = words.windows(2).any(|w| w == ["--harness", harness.name()])
         || words.contains(&format!("--harness={}", harness.name()).as_str());
     let verb = words.windows(2).any(|w| w == ["flow", "stop-gate"]);
-    maestro && verb && flag && !words.contains(&"--check-install")
+    maestro && verb && flag && !words.iter().any(|w| *w == "--check-install" || w.starts_with("--check-install="))
 }
 
 /// Reads `settings` (Claude Code's `settings.json`, or Codex's `hooks.json`) for a Stop hook that

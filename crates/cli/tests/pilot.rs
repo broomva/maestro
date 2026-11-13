@@ -737,6 +737,8 @@ fn bad_check_install_exits_nonzero() {
     for args in [
         vec!["flow", "stop-gate", "--check-install"],
         vec!["flow", "stop-gate", "--check-install", "--harness", "grok"],
+        vec!["flow", "stop-gate", "--check-install=true", "--harness", "claude"],
+        vec!["flow", "stop-gate", "--check-install=false", "--harness", "claude"],
     ] {
         let out = p.maestro().args(&args).stdin(Stdio::null()).output().unwrap();
         assert!(!out.status.success(), "{args:?}: {out:?}");

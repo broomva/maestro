@@ -442,6 +442,8 @@ fn the_install_check_reads_the_harness_settings() {
         "maestro flow next --harness claude",
         "echo maestro flow stop-gate --harness claude",
         "maestro flow stop-gate --check-install --harness claude",
+        "maestro flow stop-gate --check-install=true --harness claude",
+        "maestro flow stop-gate --check-install=false --harness claude",
     ] {
         write(hook(not));
         assert!(!stop::check_install(Harness::Claude, &path).wired, "{not}");

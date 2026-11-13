@@ -539,7 +539,8 @@ fn is_hook(args: &[String]) -> bool {
 
 /// Whether the command line runs the Stop-hook gate (`flow stop-gate`), so it never exits 2.
 fn is_stop_gate(args: &[String]) -> bool {
-    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate") && !args.iter().any(|a| a == "--check-install")
+    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate")
+        && !args.iter().any(|a| a == "--check-install" || a.starts_with("--check-install="))
 }
 
 /// How long the hook may take before it gives up silently (`MAESTRO_HOOK_TIMEOUT_MS`, default 5000).
