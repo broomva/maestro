@@ -91,14 +91,38 @@ def require_driver_trace(harness, calls, model):
     if not valid:
         raise Failure(f'{harness} driver skill and verifier evidence is missing')
 
-def capability_environment(env):
+def capability_environment(env, shim):
     env=env.copy()
     for key in list(env):
         if key.startswith('MAESTRO_DIRECT_') or key in ('MAESTRO_SESSION','MAESTRO_CALLER_CWD','MAESTRO_BRIDGE_CREDENTIAL'):
             env.pop(key,None)
-    env['PATH']=os.pathsep.join(p for p in env.get('PATH','').split(os.pathsep)
-                                if p and not (Path(p)/'maestro').exists())
+    shim.mkdir(parents=True,exist_ok=True)
+    for directory in env.get('PATH','').split(os.pathsep):
+        try: entries=sorted(Path(directory or '.').iterdir())
+        except (FileNotFoundError,NotADirectoryError,PermissionError): continue
+        for entry in entries:
+            if entry.name=='maestro' or not entry.is_file() or not os.access(entry,os.X_OK): continue
+            try: (shim/entry.name).symlink_to(entry.resolve())
+            except FileExistsError: pass  # The first executable on PATH wins.
+    env['PATH']=str(shim)
     return env
+
+def codex_skill_read(item, repo, skill):
+    if item.get('type')!='command_execution' or item.get('status')!='completed' or item.get('exit_code')!=0:
+        return False
+    command=item.get('command','')
+    try:
+        outer=shlex.split(command)
+        if len(outer)==3 and Path(outer[0]).name in ('bash','sh') and outer[1] in ('-c','-lc'):
+            command=outer[2]
+        if any(c in command for c in ';|&<>$`\n\r'): return False
+        words=shlex.split(command)
+    except ValueError: return False
+    if not words or Path(words[0]).name not in ('cat','sed','head','rg'): return False
+    if not any((repo/word).resolve()==skill.resolve() for word in words[1:] if not word.startswith('-')):
+        return False
+    output=item.get('aggregated_output','')
+    return isinstance(output,str) and any(len(line.strip())>=24 and line in output for line in skill.read_text().splitlines())
 
 def require_capability_isolation(env):
     if any(k.startswith('MAESTRO_DIRECT_') or k in ('MAESTRO_SESSION','MAESTRO_CALLER_CWD','MAESTRO_BRIDGE_CREDENTIAL') for k in env) or any(
@@ -190,7 +214,7 @@ def main():
             cmd=[str(c) for c in cmd]
             marker=secrets.token_hex(16); env=environment(h); env['MAESTRO_PHASE1_RUN']=marker
             if capability:
-                env=capability_environment(env)
+                env=capability_environment(env,root/'capability-bin')
                 require_capability_isolation(env)
                 (out/f'{h}-isolation.json').write_text(json.dumps({
                     'maestro_on_path':shutil.which('maestro',path=env['PATH']) is not None,
@@ -314,7 +338,7 @@ def main():
                     for line in p.stdout.splitlines():
                         try: item=json.loads(line).get('item',{})
                         except ValueError: continue
-                        if 'flow-verify-v1/SKILL.md' in item.get('command',''):
+                        if codex_skill_read(item,repo,repo/'.codex/skills/flow-verify-v1/SKILL.md'):
                             driver_calls.append({'tool':'skill','skill':'flow-verify-v1'})
                     for path in set(session_dir.rglob('*.jsonl'))-before if session_dir.exists() else []:
                         for line in path.read_text().splitlines():
@@ -396,7 +420,7 @@ def main():
             control_not_completed(events(i)); record_events(f'{h}-control',i)
             decisions=[json.loads(line) for line in hook.read_text().splitlines()] if hook.exists() else []
             hook_blocked(decisions,i)
-            results[h]['stop']='blocked'
+            results[h]['stop_hook_decision']='block'
             results[h]['stop_exit']=p.returncode
         (out/'results.json').write_text(json.dumps(results,indent=2)+'\n')
         print(json.dumps(results,indent=2))

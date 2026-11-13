@@ -2195,7 +2195,10 @@ mutate scripts/conformance/phase1.py "    if not {'maestro_flow_claim', 'maestro
 mutate scripts/conformance/phase1.py "    if harness in ('claude', 'codex') and not available:" '    if False:'
 mutate scripts/conformance/phase1.py '    if not valid:' '    if False:'
 mutate scripts/conformance/phase1.py '            env.pop(key,None)' '            pass'
-mutate scripts/conformance/phase1.py "                                if p and not (Path(p)/'maestro').exists())" '                                if p)'
+mutate scripts/conformance/phase1.py "            if entry.name=='maestro' or not entry.is_file() or not os.access(entry,os.X_OK): continue" "            if not entry.is_file() or not os.access(entry,os.X_OK): continue"
+mutate scripts/conformance/phase1.py "    if item.get('type')!='command_execution' or item.get('status')!='completed' or item.get('exit_code')!=0:" "    if item.get('type')!='command_execution' or item.get('status')!='completed':"
+mutate scripts/conformance/phase1.py "    if not words or Path(words[0]).name not in ('cat','sed','head','rg'): return False" '    if not words: return False'
+mutate scripts/conformance/phase1.py "    return isinstance(output,str) and any(len(line.strip())>=24 and line in output for line in skill.read_text().splitlines())" '    return True'
 mutate scripts/conformance/phase1.py "        raise Failure('capability harness has Direct credentials or maestro on PATH')" '        pass'
 mutate scripts/conformance/phase1.py "        if harness=='gemini' and item.get('type')=='tool_use':" '        if False:'
 mutate scripts/conformance/phase1.py "        elif harness=='agy' and item.get('event')=='step_update':" '        elif False:'

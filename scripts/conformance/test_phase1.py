@@ -2,12 +2,13 @@
 """Check the conformance runner's refusal predicates."""
 import os
 import secrets
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from phase1 import (Failure, capability_environment, control_not_completed, equal_spines, hook_blocked,
+from phase1 import (Failure, capability_environment, codex_skill_read, control_not_completed, equal_spines, hook_blocked,
                     kill_marked_processes, mcp_tool_calls, require_capability_isolation, require_driver,
                     require_driver_trace, require_mcp_calls, supported_has_events)
 
@@ -58,14 +59,31 @@ class Guards(unittest.TestCase):
 
     def test_capability_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp,'maestro').touch()
-            env={'PATH':tmp+os.pathsep+'/usr/bin','MAESTRO_SESSION':'s','MAESTRO_DIRECT_TOKEN':'t',
+            path=Path(tmp,'bin'); path.mkdir()
+            for name in ('maestro','node','sh'):
+                f=path/name; f.write_text('#!/bin/sh\n'); f.chmod(0o755)
+            env={'PATH':str(path),'MAESTRO_SESSION':'s','MAESTRO_DIRECT_TOKEN':'t',
                  'MAESTRO_DIRECT_REGISTRY':'r','MAESTRO_CALLER_CWD':'c','MAESTRO_BRIDGE_CREDENTIAL':'b'}
-            clean=capability_environment(env)
-            self.assertEqual(clean,{'PATH':'/usr/bin'})
+            clean=capability_environment(env,Path(tmp,'shim'))
+            self.assertIsNone(shutil.which('maestro',path=clean['PATH']))
+            self.assertIsNotNone(shutil.which('node',path=clean['PATH']))
+            self.assertIsNotNone(shutil.which('sh',path=clean['PATH']))
+            self.assertEqual(set(clean),{'PATH'})
             self.assertEqual(env['MAESTRO_DIRECT_TOKEN'],'t')
             require_capability_isolation(clean)
             with self.assertRaises(Failure): require_capability_isolation(env)
+
+    def test_codex_skill_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo=Path(tmp); skill=repo/'.codex/skills/flow-verify-v1/SKILL.md'; skill.parent.mkdir(parents=True)
+            content='The verifier skill has real instructions here.\n'; skill.write_text(content)
+            base={'type':'command_execution','status':'completed','exit_code':0,'aggregated_output':content}
+            path='.codex/skills/flow-verify-v1/SKILL.md'
+            self.assertFalse(codex_skill_read({**base,'command':f'/bin/bash -lc "test -f {path}"'},repo,skill))
+            self.assertFalse(codex_skill_read({**base,'command':f'/bin/bash -lc "cat {path}"','exit_code':1},repo,skill))
+            self.assertFalse(codex_skill_read({**base,'command':f'/bin/bash -lc "cat {path}"','status':'in_progress'},repo,skill))
+            self.assertFalse(codex_skill_read({**base,'command':f'/bin/bash -lc "cat {path}"','aggregated_output':'no content'},repo,skill))
+            self.assertTrue(codex_skill_read({**base,'command':f'/bin/bash -lc "cat {path}"'},repo,skill))
 
     def test_mcp_calls(self):
         require_mcp_calls(['maestro_flow_claim','maestro_flow_complete'])
