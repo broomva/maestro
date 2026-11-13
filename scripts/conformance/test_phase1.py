@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from phase1 import (Failure, capability_environment, codex_skill_read, control_not_completed, equal_spines, hook_blocked,
+from phase1 import (Failure, capability_environment, codex_skill_evidence, codex_skill_read, control_not_completed, equal_spines, hook_blocked,
                     kill_marked_processes, mcp_tool_calls, require_capability_isolation, require_driver,
                     require_driver_trace, require_mcp_calls, supported_has_events)
 
@@ -84,6 +84,9 @@ class Guards(unittest.TestCase):
             self.assertFalse(codex_skill_read({**base,'command':f'/bin/bash -lc "cat {path}"','status':'in_progress'},repo,skill))
             self.assertFalse(codex_skill_read({**base,'command':f'/bin/bash -lc "cat {path}"','aggregated_output':'no content'},repo,skill))
             self.assertTrue(codex_skill_read({**base,'command':f'/bin/bash -lc "cat {path}"'},repo,skill))
+            evidence=codex_skill_evidence({**base,'command':f'/bin/bash -lc "cat {path}"'},repo,skill)
+            self.assertEqual(evidence['exit_code'],0); self.assertEqual(evidence['output_line'],content.strip())
+            self.assertIsNone(codex_skill_evidence({**base,'command':f'/bin/bash -lc "test -f {path}"'},repo,skill))
 
     def test_mcp_calls(self):
         require_mcp_calls(['maestro_flow_claim','maestro_flow_complete'])

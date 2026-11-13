@@ -124,6 +124,12 @@ def codex_skill_read(item, repo, skill):
     output=item.get('aggregated_output','')
     return isinstance(output,str) and any(len(line.strip())>=24 and line in output for line in skill.read_text().splitlines())
 
+def codex_skill_evidence(item, repo, skill):
+    if not codex_skill_read(item,repo,skill): return None
+    line=next(line for line in skill.read_text().splitlines() if len(line.strip())>=24 and line in item['aggregated_output'])
+    return {'tool':'skill','skill':'flow-verify-v1','command':item['command'],
+            'status':item['status'],'exit_code':item['exit_code'],'output_line':line}
+
 def require_capability_isolation(env):
     if any(k.startswith('MAESTRO_DIRECT_') or k in ('MAESTRO_SESSION','MAESTRO_CALLER_CWD','MAESTRO_BRIDGE_CREDENTIAL') for k in env) or any(
             (Path(p)/'maestro').exists() for p in env.get('PATH','').split(os.pathsep) if p):
@@ -338,8 +344,8 @@ def main():
                     for line in p.stdout.splitlines():
                         try: item=json.loads(line).get('item',{})
                         except ValueError: continue
-                        if codex_skill_read(item,repo,repo/'.codex/skills/flow-verify-v1/SKILL.md'):
-                            driver_calls.append({'tool':'skill','skill':'flow-verify-v1'})
+                        read=codex_skill_evidence(item,repo,repo/'.codex/skills/flow-verify-v1/SKILL.md')
+                        if read: driver_calls.append(read)
                     for path in set(session_dir.rglob('*.jsonl'))-before if session_dir.exists() else []:
                         for line in path.read_text().splitlines():
                             try: payload=json.loads(line).get('payload',{})

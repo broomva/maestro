@@ -2199,6 +2199,7 @@ mutate scripts/conformance/phase1.py "            if entry.name=='maestro' or no
 mutate scripts/conformance/phase1.py "    if item.get('type')!='command_execution' or item.get('status')!='completed' or item.get('exit_code')!=0:" "    if item.get('type')!='command_execution' or item.get('status')!='completed':"
 mutate scripts/conformance/phase1.py "    if not words or Path(words[0]).name not in ('cat','sed','head','rg'): return False" '    if not words: return False'
 mutate scripts/conformance/phase1.py "    return isinstance(output,str) and any(len(line.strip())>=24 and line in output for line in skill.read_text().splitlines())" '    return True'
+mutate scripts/conformance/phase1.py '    if not codex_skill_read(item,repo,skill): return None' '    if False: return None'
 mutate scripts/conformance/phase1.py "        raise Failure('capability harness has Direct credentials or maestro on PATH')" '        pass'
 mutate scripts/conformance/phase1.py "        if harness=='gemini' and item.get('type')=='tool_use':" '        if False:'
 mutate scripts/conformance/phase1.py "        elif harness=='agy' and item.get('event')=='step_update':" '        elif False:'
