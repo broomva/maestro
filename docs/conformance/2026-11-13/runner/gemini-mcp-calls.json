@@ -3,9 +3,9 @@
     "type": "tool_use",
     "tool_name": "mcp_maestro_maestro_flow_claim",
     "parameters": {
+      "session": "direct:-/gemini",
       "node_id": "pin",
-      "instance": "fi_527ccc7d6109cb6aff9fa603c5e8dc0f",
-      "session": "direct:-/gemini"
+      "instance": "fi_359f1de3543a0b1e283213770577fc34"
     },
     "result": {
       "ok": true,

@@ -7,7 +7,7 @@
     "server": "maestro",
     "mcp_tool": "maestro_flow_claim",
     "arguments": {
-      "instance": "fi_68ef7e41b385d30346333e36f9b74b2a",
+      "instance": "fi_77b756e9908a6e796e6b45dd4b04b097",
       "node_id": "pin",
       "session": "direct:-/agy"
     },

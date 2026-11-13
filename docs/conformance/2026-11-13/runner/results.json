@@ -1,16 +1,4 @@
 {
-  "claude": {
-    "path": "/home/agent/.local/bin/claude",
-    "version": "2.1.314 (Claude Code)",
-    "preflight": "available",
-    "preflight_exit": 0,
-    "detail": "",
-    "exit": 0,
-    "exercise_completed": true,
-    "terminal": true,
-    "stop": "blocked",
-    "stop_exit": 124
-  },
   "codex": {
     "path": "/home/agent/.local/bin/codex",
     "version": "codex-cli 0.164.0",
@@ -20,7 +8,7 @@
     "exit": 0,
     "exercise_completed": true,
     "terminal": true,
-    "stop": "blocked",
+    "stop_hook_decision": "block",
     "stop_exit": 0
   },
   "gemini": {

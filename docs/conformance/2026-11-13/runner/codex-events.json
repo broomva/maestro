@@ -1,5 +1,5 @@
 {
-  "instance": "fi_0393a88f7eae9d27db15feabc8b2b605",
+  "instance": "fi_4507ebf8a59f7552f25b986a1e7e6ea7",
   "events": [
     {
       "seq": 1,
@@ -23,18 +23,6 @@
     },
     {
       "seq": 3,
-      "kind": "Completed",
-      "node": "pin",
-      "performer": {
-        "harness": "codex",
-        "model": null,
-        "session": "direct:-/codex"
-      },
-      "verify_exit": 0,
-      "code": null
-    },
-    {
-      "seq": 4,
       "kind": "Claimed",
       "node": "surface",
       "performer": {
@@ -43,6 +31,18 @@
         "session": "direct:-/codex"
       },
       "verify_exit": null,
+      "code": null
+    },
+    {
+      "seq": 4,
+      "kind": "Completed",
+      "node": "pin",
+      "performer": {
+        "harness": "codex",
+        "model": null,
+        "session": "direct:-/codex"
+      },
+      "verify_exit": 0,
       "code": null
     },
     {
