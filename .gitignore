@@ -1,3 +1,5 @@
 /target
 /.worktrees
 __pycache__/
+# The bstack plugin's L3 hook logs edits here on agent hosts once .control/ exists (BRO-3702).
+/.control/audit/

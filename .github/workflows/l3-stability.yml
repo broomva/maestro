@@ -1,0 +1,179 @@
+# bstack Gate G2 (BRO-3702): the RCS stability budget, the L3 rate report and Maestro's
+# governance contract on every PR that touches a governance path. p9 judges this repository's PRs
+# by the workspace policy, whose governance tier (auto_merge.gates.governance) needs a passing
+# check named exactly `stability-check` on a PR touching CLAUDE.md, AGENTS.md or
+# .control/rcs-parameters.toml (the tier's paths that exist here).
+# From bstack's assets/templates/gh-workflow-l3-stability.yml.template, as the workspace runs it
+# (broomva/workspace .github/workflows/l3-stability.yml), with three changes: the job also runs
+# scripts/governance-check.py; the report goes to the job summary, not a PR comment, so the
+# token stays read-only; and the runner guard is ci.yml's.
+name: L3 stability gate
+on:
+  pull_request:
+    branches: [main]
+    # scripts/governance-check.py fails when a governance path present in the repository, or an
+    # input of its checks, is missing from this list.
+    paths:
+      - 'CLAUDE.md'
+      - 'AGENTS.md'
+      - '.control/rcs-parameters.toml'
+      - '.github/workflows/l3-stability.yml'
+      - '.github/workflows/ci.yml'
+      - 'scripts/governance-check.py'
+concurrency:
+  group: l3-stability-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  stability-check:
+    name: stability-check
+    # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
+    runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      # The rate gate reads the last day of history. No token in .git/config.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+          persist-credentials: false
+
+      - name: Python floor
+        run: |
+          set -euo pipefail
+          # The runner's own python3, as the workspace's gate does: no setup-python, which cannot
+          # create its tool cache on a self-hosted runner. 3.11 for tomllib, which
+          # compute-lambda.sh and governance-check.py read the parameters with.
+          python3 -VV
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+            || { echo "::error::python3 older than 3.11"; exit 1; }
+
+      - name: Install bstack (from GitHub, never from the PR)
+        run: |
+          set -euo pipefail
+          # The scripts that judge this PR must not come from it (BRO-2651): bstack is cloned from
+          # its default branch. The PR's parameters are read as data.
+          DEST="$RUNNER_TEMP/bstack-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          rm -rf "$DEST"
+          git clone --depth 1 https://github.com/broomva/bstack.git "$DEST"
+          echo "bstack $(git -C "$DEST" rev-parse HEAD)"
+          echo "BSTACK=$DEST" >> "$GITHUB_ENV"
+
+      # Each step below records its output and exit status and continues, so the summary reports
+      # all three. The last step judges them.
+      - name: Governance contract (scripts/governance-check.py)
+        id: contract
+        run: |
+          set +e
+          out=$(python3 -I scripts/governance-check.py 2>&1)
+          status=$?
+          self=$(python3 -I scripts/governance-check.py --selftest 2>&1)
+          self_status=$?
+          [ "$status" = 0 ] && status=$self_status
+          echo "$out"
+          echo "$self"
+          # The output quotes the PR's files: a random delimiter, so no line can close it early.
+          delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "result<<$delim"
+            echo "$out"
+            echo "$self"
+            echo "$delim"
+            echo "status=$status"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Compute lambda (RCS stability budget)
+        id: compute
+        run: |
+          set +e
+          out=$(bash "$BSTACK"/scripts/compute-lambda.sh --human 2>&1)
+          status=$?
+          echo "$out"
+          delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "result<<$delim"
+            echo "$out"
+            echo "$delim"
+            echo "status=$status"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Run L3 rate gate
+        id: rate
+        run: |
+          set +e
+          out=$(BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/l3-rate-gate.sh 2>&1)
+          status=$?
+          echo "$out"
+          delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "result<<$delim"
+            echo "$out"
+            echo "$delim"
+            echo "status=$status"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Report
+        if: always()
+        # Values arrive through env:, never pasted into the script text (BRO-2651).
+        env:
+          CONTRACT_RESULT: ${{ steps.contract.outputs.result }}
+          COMPUTE_RESULT: ${{ steps.compute.outputs.result }}
+          RATE_RESULT: ${{ steps.rate.outputs.result }}
+          CONTRACT_STATUS: ${{ steps.contract.outputs.status }}
+          COMPUTE_STATUS: ${{ steps.compute.outputs.status }}
+          RATE_STATUS: ${{ steps.rate.outputs.status }}
+        run: |
+          python3 -I - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import os
+          import re
+          env = os.environ.get
+          contract, compute, rate = env("CONTRACT_STATUS", ""), env("COMPUTE_STATUS", ""), env("RATE_STATUS", "")
+          if contract != "0":
+              verdict = "**Governance contract broken** (exit " + (contract or "none") + "): do not merge"
+          elif compute != "0":
+              verdict = "**lambda_i <= 0, or lambda not computed** (exit " + (compute or "none") + "): do not merge"
+          elif rate not in ("0", "1"):
+              verdict = "**Rate gate did not reach a verdict** (exit " + (rate or "none") + "): do not merge"
+          elif rate == "1":
+              verdict = "**L3 rate exceeded**: the budget assumes one governance commit per tau_a_3 (p9's l3_rate gate enforces it)"
+          else:
+              verdict = "**All gates pass**: contract holds, composite stable, rate within budget"
+          def block(title, text):
+              # A fence longer than any backtick run inside, so quoted text cannot close it.
+              run = max([len(r) for r in re.findall("`+", text)] or [0])
+              fence = "`" * max(3, run + 1)
+              return ["### " + title, fence, text, fence, ""]
+          lines = ["## L3 stability gate", "", verdict, ""]
+          lines += block("Governance contract (scripts/governance-check.py)", env("CONTRACT_RESULT", ""))
+          lines += block("Per-level lambda (compute-lambda.sh)", env("COMPUTE_RESULT", ""))
+          lines += block("L3 rate gate (l3-rate-gate.sh)", env("RATE_RESULT", ""))
+          print("\n".join(lines))
+          PY
+
+      - name: Set final status
+        env:
+          CONTRACT_STATUS: ${{ steps.contract.outputs.status }}
+          COMPUTE_STATUS: ${{ steps.compute.outputs.status }}
+          RATE_STATUS: ${{ steps.rate.outputs.status }}
+        run: |
+          # The contract and lambda > 0 are the gate. L3 rate exceeded (exit 1) is reported, not
+          # failed: p9's l3_rate gate enforces it at merge. Any other status, empty included, is
+          # no verdict and fails closed.
+          if [ "$CONTRACT_STATUS" != "0" ]; then
+            echo "FAIL: governance contract broken (exit '$CONTRACT_STATUS')"
+            exit 1
+          fi
+          if [ "$COMPUTE_STATUS" != "0" ]; then
+            echo "FAIL: lambda_i <= 0 or not computed (exit '$COMPUTE_STATUS')"
+            exit 1
+          fi
+          case "$RATE_STATUS" in
+            0|1) ;;
+            *)
+              echo "FAIL: l3-rate-gate did not reach a verdict (exit '$RATE_STATUS')"
+              exit 1 ;;
+          esac
+          echo "OK: contract holds, all lambda_i > 0"
