@@ -260,32 +260,60 @@ fn the_mcp_server_runs_a_guarded_choose() {
 }
 
 /// A tools/call over HTTP ([`http_call`]); its structured result.
-fn http_tool(addr: &str, name: &str, args: Value) -> Value {
-    http_call(addr, name, args)["structuredContent"].clone()
+fn http_tool(addr: &str, name: &str, args: Value, deadline: std::time::Instant) -> Value {
+    http_call(addr, name, args, deadline)["structuredContent"].clone()
 }
 
 /// One stateless MCP 2026-07-28 tools/call to `maestro serve --http` at `addr`; the whole result.
-fn http_call(addr: &str, name: &str, args: Value) -> Value {
+fn http_call(addr: &str, name: &str, args: Value, deadline: std::time::Instant) -> Value {
     use std::io::Read as _;
     let meta = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} });
     let body =
         json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args, "_meta": meta } })
             .to_string();
-    let mut stream = std::net::TcpStream::connect(addr).unwrap();
-    write!(
-        stream,
+    let remaining = || {
+        deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .expect("daemon test deadline elapsed")
+    };
+    let addr_parsed = addr.parse().unwrap();
+    let mut stream = std::net::TcpStream::connect_timeout(&addr_parsed, remaining()).unwrap();
+    let request = format!(
         "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: tools/call\r\nMcp-Name: {name}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
-    )
-    .unwrap();
-    // The readiness line is emitted after bind; allow a loaded daemon time to process the request.
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(120))).unwrap();
+    );
+    let mut bytes = request.as_bytes();
+    while !bytes.is_empty() {
+        stream.set_write_timeout(Some(remaining())).unwrap();
+        let n = stream.write(bytes).expect("daemon did not receive its request");
+        assert!(n > 0, "daemon closed while receiving its request");
+        bytes = &bytes[n..];
+    }
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).expect("daemon did not finish its response");
+    let mut buf = [0; 8192];
+    loop {
+        stream.set_read_timeout(Some(remaining())).unwrap();
+        let n = stream.read(&mut buf).expect("daemon did not finish its response");
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+    }
     let response = String::from_utf8_lossy(&raw).into_owned();
     let json = response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
     let v: Value = serde_json::from_str(json).unwrap_or_else(|_| panic!("{response}"));
     v["result"].clone()
+}
+
+/// Reap the daemon on every exit, including a failed assertion.
+struct Daemon(std::process::Child);
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// A shared daemon (`serve --http`) takes no caller claim from its own environment: a caller
@@ -311,17 +339,19 @@ fn the_http_daemon_takes_no_claim_from_its_environment() {
     let now = maestro_hosts::current_time_ms();
     let node: maestro_hosts::NodeId = "node-flow".parse().unwrap();
     let credential = issuer.issue_bridge_credential(&verified, node, now - 5_000, now + 600_000).unwrap();
-    let mut child = m
-        .verified()
-        .env("MAESTRO_PASEO_AGENTS_DIR", &agents)
-        .env("MAESTRO_BRIDGE_SECRET", "daemon-secret")
-        .env("MAESTRO_BRIDGE_CREDENTIAL", serde_json::to_string(&credential).unwrap())
-        .args(["serve", "--http", "--bind", "127.0.0.1:0"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stderr = child.stderr.take().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut child = Daemon(
+        m.verified()
+            .env("MAESTRO_PASEO_AGENTS_DIR", &agents)
+            .env("MAESTRO_BRIDGE_SECRET", "daemon-secret")
+            .env("MAESTRO_BRIDGE_CREDENTIAL", serde_json::to_string(&credential).unwrap())
+            .args(["serve", "--http", "--bind", "127.0.0.1:0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stderr = child.0.stderr.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut err = BufReader::new(stderr);
@@ -329,32 +359,32 @@ fn the_http_daemon_takes_no_claim_from_its_environment() {
         let result = err.read_line(&mut line).map(|_| (line, err));
         let _ = tx.send(result);
     });
-    let (line, _err) =
-        rx.recv_timeout(std::time::Duration::from_secs(120)).expect("daemon did not report readiness").unwrap();
+    let (line, _err) = rx
+        .recv_timeout(deadline.checked_duration_since(std::time::Instant::now()).expect("daemon test deadline elapsed"))
+        .expect("daemon did not report readiness")
+        .unwrap();
     let url = line.trim().strip_prefix("maestro: serving MCP on http://").unwrap_or_else(|| panic!("{line}"));
     let addr = url.split_once('/').unwrap().0.to_string();
     let start = json!({ "session": "direct:-/d1", "definition": DECIDE, "params": { "dir": m.work } });
-    let refused = http_tool(&addr, "maestro_flow_start", start.clone());
+    let refused = http_tool(&addr, "maestro_flow_start", start.clone(), deadline);
     assert_eq!(refused["code"], "caller_refused", "{refused}");
     // The daemon's credential is nobody's claim either: a caller that knows the session's folder
     // but holds no credential is refused.
     let paseo =
         json!({ "session": "paseo:-/agent-flow", "cwd": m.work, "definition": DECIDE, "params": { "dir": m.work } });
-    let refused = http_tool(&addr, "maestro_flow_start", paseo);
+    let refused = http_tool(&addr, "maestro_flow_start", paseo, deadline);
     assert_eq!(refused["code"], "caller_refused", "{refused}");
     assert!(!m.root.join("workspace/.broomva/flows").exists(), "the daemon's variables wrote a flow");
     // Nor for an agent request: a handback naming the session is refused, not recorded verified.
-    let handback = http_call(&addr, "maestro_handback", json!({ "session": "direct:-/d1", "summary": "s" }));
+    let handback = http_call(&addr, "maestro_handback", json!({ "session": "direct:-/d1", "summary": "s" }), deadline);
     assert_eq!(handback["isError"], true, "{handback}");
     assert!(handback.to_string().contains("launch token is required"), "{handback}");
     assert!(!m.root.join("broomva-home/ledger/requests/requests.jsonl").exists(), "the handback was journalled");
     let mut own = start;
     own["token"] = json!("tok-1");
     own["cwd"] = json!(m.work);
-    let begun = http_tool(&addr, "maestro_flow_start", own);
+    let begun = http_tool(&addr, "maestro_flow_start", own, deadline);
     assert_eq!(begun["ok"], true, "{begun}");
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 /// A human node's ask filed through the CLI end to end (BRO-3635): `--ledger` and `--ask` reach the

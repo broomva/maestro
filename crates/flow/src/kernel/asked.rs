@@ -881,8 +881,8 @@ fn text_a_refusal_echoes_is_bounded() {
 
 #[test]
 fn the_writers_words_in_a_busy_refusal_are_bounded() {
-    // The writer announces that it has started, then waits until the clock has advanced.
-    let loud = "import time\nopen(os.path.join(HERE, 'ready'), 'w').close()\nuntil = time.monotonic() + 30\nwhile not os.path.exists(os.path.join(HERE, 'release')) and time.monotonic() < until:\n    time.sleep(0.01)\nsys.stdin.read()\nprint('error: ' + 'w' * 100000, file=sys.stderr)\nsys.exit(75)";
+    // The first try waits for the clock; after five busy tries the stub files instead of hanging.
+    let loud = "import time\nC = os.path.join(HERE, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nif n == 1:\n    open(os.path.join(HERE, 'ready'), 'w').close()\n    until = time.monotonic() + 30\n    while not os.path.exists(os.path.join(HERE, 'release')) and time.monotonic() < until:\n        time.sleep(0.01)\nif n < 6:\n    sys.stdin.read()\n    print('error: ' + 'w' * 100000, file=sys.stderr)\n    sys.exit(75)";
     let mut f = fx(Some(&wrapper(loud)), "");
     let fi = f.begin();
     let clock = TestClock::install();
