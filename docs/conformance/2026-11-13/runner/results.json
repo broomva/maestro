@@ -1,0 +1,42 @@
+{
+  "claude": {
+    "path": "/home/agent/.local/bin/claude",
+    "version": "2.1.314 (Claude Code)",
+    "preflight": "available",
+    "preflight_exit": 0,
+    "detail": "",
+    "exit": 0,
+    "exercise_completed": true,
+    "terminal": true,
+    "stop": "blocked"
+  },
+  "codex": {
+    "path": "/home/agent/.local/bin/codex",
+    "version": "codex-cli 0.164.0",
+    "preflight": "available",
+    "preflight_exit": 0,
+    "detail": "",
+    "exit": 0,
+    "exercise_completed": true,
+    "terminal": true,
+    "stop": "blocked"
+  },
+  "gemini": {
+    "path": "/usr/local/bin/gemini",
+    "version": "0.66.0",
+    "preflight": "available",
+    "preflight_exit": 0,
+    "detail": "",
+    "capability": "supported",
+    "exit": 0
+  },
+  "agy": {
+    "path": "/home/agent/.local/bin/agy",
+    "version": "1.5.8",
+    "preflight": "available",
+    "preflight_exit": 0,
+    "detail": "",
+    "capability": "supported",
+    "exit": 0
+  }
+}

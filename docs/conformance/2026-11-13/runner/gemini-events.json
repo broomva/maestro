@@ -1,0 +1,34 @@
+[
+  {
+    "seq": 1,
+    "kind": "Started",
+    "node": null,
+    "performer": null,
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 2,
+    "kind": "Claimed",
+    "node": "pin",
+    "performer": {
+      "harness": "gemini",
+      "model": null,
+      "session": "direct:-/gemini"
+    },
+    "verify_exit": null,
+    "code": null
+  },
+  {
+    "seq": 3,
+    "kind": "Completed",
+    "node": "pin",
+    "performer": {
+      "harness": "gemini",
+      "model": null,
+      "session": "direct:-/gemini"
+    },
+    "verify_exit": 0,
+    "code": null
+  }
+]

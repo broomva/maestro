@@ -1,0 +1,14 @@
+{
+  "codex": {
+    "path": "/home/agent/.local/bin/codex",
+    "version": "codex-cli 0.164.0",
+    "preflight": "available",
+    "preflight_exit": 0,
+    "detail": "",
+    "exit": 0,
+    "exercise_completed": true,
+    "terminal": true,
+    "stop": "blocked",
+    "stop_exit": 0
+  }
+}
