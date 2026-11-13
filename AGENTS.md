@@ -39,12 +39,13 @@ degraded-source rule, ships with a test that fails when the guard is removed, an
 A PR touching one of the workspace policy's eight governance paths (here `CLAUDE.md`, `AGENTS.md`
 and `.control/rcs-parameters.toml`; also `METALAYER.md`, `.control/policy.yaml` and three
 `docs/references/` files, should a PR add one) runs the `stability-check` job
-(`.github/workflows/l3-stability.yml`, BRO-3702). It recomputes the RCS lambda from
-`.control/rcs-parameters.toml` with bstack's scripts, pinned to one commit, and fails on drift. It
-reports the L3 rate and runs `scripts/governance-check.py`: `CLAUDE.md` points to this file, the
-shard count above equals the `ci.yml` mutants matrix, all eight paths trigger the job and count
-toward the rate, and the files `CLAUDE.md` names trigger it too. The workspace policy's
-governance tier needs this check to pass before p9 merges such a PR.
+(`.github/workflows/l3-stability.yml`, BRO-3702). It runs bstack's scripts, pinned to one commit,
+in a cleared environment bound to this checkout: `compute-lambda.sh` recomputes the RCS lambda
+from this checkout's `.control/rcs-parameters.toml`, passed by path, and fails on drift, and
+`l3-rate-gate.sh` reports the L3 rate. It runs `scripts/governance-check.py`: `CLAUDE.md` points
+to this file, the shard count above equals the `ci.yml` mutants matrix, all eight paths trigger
+the job and count toward the rate, and the files `CLAUDE.md` names trigger it too. The workspace
+policy's governance tier needs this check to pass before p9 merges such a PR.
 Run `python3 scripts/governance-check.py --selftest` after changing the checker.
 
 ## Copy

@@ -321,11 +321,35 @@ def check_levels(root):
 def check_lambda_strict(root):
     """The job runs compute-lambda.sh once, with --strict: without it a cached lambda that drifts
     from its recomputed value by more than 1e-4 still exits 0."""
-    runs = re.findall(r'bash "\$BSTACK"/scripts/compute-lambda\.sh([^\n]*)', read(root, WORKFLOW))
+    runs = re.findall(r'"\$BSTACK"/scripts/compute-lambda\.sh([^\n]*)', read(root, WORKFLOW))
     if len(runs) != 1 or "--strict" not in runs[0].split():
         raise Broken(f"{WORKFLOW} must run compute-lambda.sh once, with --strict "
                      f"(runs it {len(runs)} times: {'; '.join(r.strip() for r in runs) or '-'})")
     return "compute-lambda.sh --strict"
+
+
+# How the job calls bstack: a cleared environment with this checkout bound. compute-lambda.sh also
+# takes the checkout's parameters by path, so no fallback config is ever read.
+BSTACK_ENV = 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/'
+BSTACK_CALLS = {
+    "compute-lambda.sh": '--config="$PWD/.control/rcs-parameters.toml"',
+    "l3-rate-gate.sh": "",
+}
+
+
+def check_bstack_env(root):
+    """Every bstack script call runs in a cleared environment bound to this checkout: an inherited
+    BROOMVA_WORKSPACE, GIT_DIR or BSTACK_L3_CORRECTION would point it at another checkout."""
+    calls = re.findall(r'^.*"\$BSTACK"/scripts/([\w.-]+).*$', read(root, WORKFLOW), re.M)
+    lines = re.findall(r'^.*"\$BSTACK"/scripts/[\w.-]+.*$', read(root, WORKFLOW), re.M)
+    if sorted(calls) != sorted(BSTACK_CALLS):
+        raise Broken(f"{WORKFLOW} calls bstack's {', '.join(calls) or 'nothing'}, "
+                     f"not exactly {', '.join(BSTACK_CALLS)} once each")
+    for name, line in zip(calls, lines):
+        if BSTACK_ENV + name not in line or BSTACK_CALLS[name] not in line.split(name, 1)[1]:
+            raise Broken(f"{WORKFLOW} calls {name} without {BSTACK_ENV.split(' bash')[0]}"
+                         + (f" and {BSTACK_CALLS[name]}" if BSTACK_CALLS[name] else ""))
+    return "bstack runs in a cleared environment bound to this checkout"
 
 
 def check_bstack_pin(root):
@@ -355,6 +379,7 @@ CHECKS = (
     ("rate-paths", check_rate_paths),
     ("rcs-levels", check_levels),
     ("lambda-strict", check_lambda_strict),
+    ("bstack-env", check_bstack_env),
     ("bstack-pin", check_bstack_pin),
 )
 
@@ -522,6 +547,21 @@ def selftest(root, quiet=False):
         # Drift: compute-lambda.sh fails on it only with --strict.
         ("compute-lambda.sh runs without --strict", edit(WORKFLOW, "compute-lambda.sh --strict ",
                                                           "compute-lambda.sh "), ["lambda-strict"]),
+        # bstack reads BROOMVA_WORKSPACE (and GIT_DIR) from its environment: unbound, a runner's
+        # value would point it at another checkout.
+        ("compute-lambda.sh inherits BROOMVA_WORKSPACE", edit(
+            WORKFLOW, 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/compute-lambda.sh',
+            'bash "$BSTACK"/scripts/compute-lambda.sh'), ["bstack-env"]),
+        ("compute-lambda.sh reads no explicit config", edit(
+            WORKFLOW, ' --config="$PWD/.control/rcs-parameters.toml"', ""), ["bstack-env"]),
+        ("compute-lambda.sh keeps the runner's environment", edit(
+            WORKFLOW, 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/compute-lambda.sh',
+            'BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/compute-lambda.sh'), ["bstack-env"]),
+        ("l3-rate-gate.sh keeps the runner's environment", edit(
+            WORKFLOW, 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/l3-rate-gate.sh',
+            'BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/l3-rate-gate.sh'), ["bstack-env"]),
+        ("another bstack script is called", insert_after(
+            WORKFLOW, r"^( *)set \+e$", ['bash "$BSTACK"/scripts/doctor.sh || true']), ["bstack-env"]),
         # The levels: none, or one fewer, would pass bstack's all() unchecked.
         ("a level is removed", resub(PARAMETERS, LEVEL.format("L2"), ""), ["rcs-levels"]),
         ("every level is removed", lambda r: [resub(PARAMETERS, LEVEL.format(x), "")(r) for x in LEVELS],

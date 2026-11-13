@@ -81,7 +81,10 @@ jobs:
           echo "BSTACK=$DEST" >> "$GITHUB_ENV"
 
       # Each step below records its output and exit status and continues, so the summary reports
-      # all three. The last step judges them.
+      # all three. The last step judges them. bstack's scripts run with a cleared environment
+      # (env -i) and this checkout bound explicitly: they read BROOMVA_WORKSPACE, GIT_DIR and
+      # BSTACK_L3_CORRECTION, which a self-hosted runner could otherwise supply, pointing them at
+      # another checkout. scripts/governance-check.py (bstack-env) holds every call to this.
       - name: Governance contract (scripts/governance-check.py)
         id: contract
         run: |
@@ -113,7 +116,7 @@ jobs:
         run: |
           set +e
           # --strict: exit 3 when a cached lambda drifts from its recomputed value by over 1e-4.
-          out=$(bash "$BSTACK"/scripts/compute-lambda.sh --strict --human 2>&1)
+          out=$(env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/compute-lambda.sh --strict --human --config="$PWD/.control/rcs-parameters.toml" 2>&1)
           status=$?
           echo "$out"
           delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
@@ -129,7 +132,7 @@ jobs:
         id: rate
         run: |
           set +e
-          out=$(BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/l3-rate-gate.sh 2>&1)
+          out=$(env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/l3-rate-gate.sh 2>&1)
           status=$?
           echo "$out"
           delim="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
