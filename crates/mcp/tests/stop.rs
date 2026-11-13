@@ -295,8 +295,14 @@ fn a_record_that_failed_is_still_alerted() {
     assert!(out.recorded.is_empty(), "{out:?}");
     assert_eq!(f.events(&fi).len(), 1, "nothing was appended");
     assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.starts_with(&format!("maestro stop-gate: StopUnblockable was not recorded on {fi} (io:"))),
+        "{out:?}"
+    );
     let ledger = f.ledger();
-    assert!(ledger.contains("StopUnblockable could not be recorded on:") && ledger.contains(&fi), "{ledger}");
+    assert!(ledger.contains(&format!("StopUnblockable could not be recorded on: {fi} (io)")), "{ledger}");
 }
 
 /// Each error class lets the stop through, says why, and files the alert when it can.
@@ -358,7 +364,7 @@ fn the_gate_fails_open() {
     std::fs::create_dir(&file).unwrap();
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     allowed(&out);
-    assert!(out.notes.iter().any(|n| n.contains("refusals_unread")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_unread:")), "{out:?}");
 
     // Refusal counts that cannot be written: their folder takes no new file (the count and its lock
     // were made by a first stop, so they still open).
@@ -370,7 +376,7 @@ fn the_gate_fails_open() {
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     std::fs::set_permissions(&counts, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     allowed(&out);
-    assert!(out.notes.iter().any(|n| n.contains("refusals_unwritten")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_unwritten:")), "{out:?}");
 }
 
 #[test]
@@ -518,7 +524,10 @@ fn a_count_lock_held_too_long_fails_open() {
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     root.unlock().unwrap();
     allowed(&out);
-    assert!(out.notes.iter().any(|n| n.contains("refusals_busy") && n.contains("fails open")), "{out:?}");
+    assert!(
+        out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_busy:") && n.contains("fails open")),
+        "{out:?}"
+    );
     assert_eq!(out.alerts.len(), 1, "{out:?}");
 }
 
@@ -652,7 +661,10 @@ fn a_shared_lock_held_too_long_fails_open_with_refusals_busy() {
     let elapsed = start.elapsed();
     lock.unlock().unwrap();
     allowed(&out);
-    assert!(out.notes.iter().any(|n| n.contains("refusals_busy") && n.contains("fails open")), "{out:?}");
+    assert!(
+        out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_busy:") && n.contains("fails open")),
+        "{out:?}"
+    );
     assert_eq!(out.alerts.len(), 1, "{out:?}");
     assert!(elapsed < std::time::Duration::from_secs(8), "waited {elapsed:?}");
 }
