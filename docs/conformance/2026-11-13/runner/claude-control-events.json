@@ -1,86 +1,81 @@
-[
-  {
-    "seq": 1,
-    "kind": "Started",
-    "node": null,
-    "performer": null,
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 2,
-    "kind": "Claimed",
-    "node": "pin",
-    "performer": {
-      "harness": "claude-code",
-      "model": null,
-      "session": "direct:-/claude"
+{
+  "instance": "fi_d16d4236e8d658227f4cd6ec7cf805dc",
+  "events": [
+    {
+      "seq": 1,
+      "kind": "Started",
+      "node": null,
+      "performer": null,
+      "verify_exit": null,
+      "code": null
     },
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 3,
-    "kind": "Completed",
-    "node": "pin",
-    "performer": {
-      "harness": "claude-code",
-      "model": null,
-      "session": "direct:-/claude"
+    {
+      "seq": 2,
+      "kind": "Claimed",
+      "node": "pin",
+      "performer": {
+        "harness": "claude-code",
+        "model": null,
+        "session": "direct:-/claude"
+      },
+      "verify_exit": null,
+      "code": null
     },
-    "verify_exit": 0,
-    "code": null
-  },
-  {
-    "seq": 4,
-    "kind": "Claimed",
-    "node": "check",
-    "performer": {
-      "harness": "claude-code",
-      "model": null,
-      "session": "direct:-/claude"
+    {
+      "seq": 3,
+      "kind": "Completed",
+      "node": "pin",
+      "performer": {
+        "harness": "claude-code",
+        "model": null,
+        "session": "direct:-/claude"
+      },
+      "verify_exit": 0,
+      "code": null
     },
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 5,
-    "kind": "Refused",
-    "node": "check",
-    "performer": null,
-    "verify_exit": null,
-    "code": "verify_failed"
-  },
-  {
-    "seq": 6,
-    "kind": "Claimed",
-    "node": "surface",
-    "performer": {
-      "harness": "claude-code",
-      "model": null,
-      "session": "direct:-/claude"
+    {
+      "seq": 4,
+      "kind": "Claimed",
+      "node": "check",
+      "performer": {
+        "harness": "claude-code",
+        "model": null,
+        "session": "direct:-/claude"
+      },
+      "verify_exit": null,
+      "code": null
     },
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 7,
-    "kind": "Completed",
-    "node": "surface",
-    "performer": {
-      "harness": "claude-code",
-      "model": null,
-      "session": "direct:-/claude"
+    {
+      "seq": 5,
+      "kind": "Refused",
+      "node": "check",
+      "performer": null,
+      "verify_exit": null,
+      "code": "verify_failed"
     },
-    "verify_exit": 0,
-    "code": null
-  },
-  {
-    "seq": 8,
-    "kind": "StopUnblockable",
-    "node": null,
-    "performer": null,
-    "verify_exit": null,
-    "code": null
-  }
-]
+    {
+      "seq": 6,
+      "kind": "Claimed",
+      "node": "surface",
+      "performer": {
+        "harness": "claude-code",
+        "model": null,
+        "session": "direct:-/claude"
+      },
+      "verify_exit": null,
+      "code": null
+    },
+    {
+      "seq": 7,
+      "kind": "Completed",
+      "node": "surface",
+      "performer": {
+        "harness": "claude-code",
+        "model": null,
+        "session": "direct:-/claude"
+      },
+      "verify_exit": 0,
+      "code": null
+    }
+  ]
+}

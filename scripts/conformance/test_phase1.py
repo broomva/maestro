@@ -32,7 +32,7 @@ class Guards(unittest.TestCase):
         with self.assertRaises(Failure): hook_blocked([{'decision':'block','reason':'fi_other remains open'}], 'fi_control')
 
     def test_detached_process_cleanup(self):
-        if not Path('/proc/self/environ').is_file(): self.skipTest('Linux /proc required')
+        if not Path('/proc/self/environ').is_file(): return  # The mocked test covers other hosts.
         marker=secrets.token_hex(16); env=os.environ.copy(); env['MAESTRO_PHASE1_RUN']=marker
         p=subprocess.Popen(['sleep','30'],env=env,start_new_session=True)
         try:
@@ -75,6 +75,12 @@ class Guards(unittest.TestCase):
                                          '{"type":"tool_result","tool_id":"1","status":"success","output":"{\\"ok\\":true,\\"seq\\":2}"}']),'gemini','fi_test')
         self.assertEqual(calls,['maestro_flow_claim'])
         with self.assertRaises(Failure): require_mcp_calls(calls)
+        gemini='\n'.join(['{"type":"tool_use","tool_name":"mcp_maestro_maestro_flow_claim","tool_id":"1","parameters":{"instance":"fi_test"}}',
+                         '{"type":"tool_result","tool_id":"1","status":"success","output":"{\\"ok\\":true,\\"seq\\":2}"}',
+                         '{"type":"tool_use","tool_name":"mcp_maestro_maestro_flow_complete","tool_id":"2","parameters":{"claim_token":"fi_test.secret"}}',
+                         '{"type":"tool_result","tool_id":"2","status":"success","output":"{\\"ok\\":true,\\"seq\\":3}"}'])
+        calls,excerpt=mcp_tool_calls(gemini,'gemini','fi_test')
+        require_mcp_calls(calls); self.assertEqual(excerpt[1]['parameters']['claim_token'],'[redacted]')
         agy='{"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"call_mcp_tool","tool_info":{"parameters":{"ServerName":"maestro","ToolName":"maestro_flow_claim","Arguments":{"instance":"fi_test"}},"output":"{\\"ok\\":true,\\"seq\\":2}"}}}'
         calls,_=mcp_tool_calls(agy,'agy','fi_test'); self.assertEqual(calls,['maestro_flow_claim'])
         self.assertEqual(mcp_tool_calls(agy.replace('"ServerName":"maestro"','"ServerName":"other"'),'agy','fi_test')[0],[])

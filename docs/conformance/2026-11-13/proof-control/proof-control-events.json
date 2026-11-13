@@ -1,58 +1,61 @@
-[
-  {
-    "seq": 1,
-    "kind": "Started",
-    "node": null,
-    "performer": null,
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 2,
-    "kind": "Claimed",
-    "node": "pin",
-    "performer": {
-      "harness": "control",
-      "model": null,
-      "session": "direct:-/control"
+{
+  "instance": "fi_882fed81e91904e09cec368786119baa",
+  "events": [
+    {
+      "seq": 1,
+      "kind": "Started",
+      "node": null,
+      "performer": null,
+      "verify_exit": null,
+      "code": null
     },
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 3,
-    "kind": "Completed",
-    "node": "pin",
-    "performer": {
-      "harness": "control",
-      "model": null,
-      "session": "direct:-/control"
+    {
+      "seq": 2,
+      "kind": "Claimed",
+      "node": "pin",
+      "performer": {
+        "harness": "control",
+        "model": null,
+        "session": "direct:-/control"
+      },
+      "verify_exit": null,
+      "code": null
     },
-    "verify_exit": 0,
-    "code": null
-  },
-  {
-    "seq": 4,
-    "kind": "Claimed",
-    "node": "check",
-    "performer": {
-      "harness": "control",
-      "model": null,
-      "session": "direct:-/control"
+    {
+      "seq": 3,
+      "kind": "Completed",
+      "node": "pin",
+      "performer": {
+        "harness": "control",
+        "model": null,
+        "session": "direct:-/control"
+      },
+      "verify_exit": 0,
+      "code": null
     },
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 5,
-    "kind": "Completed",
-    "node": "check",
-    "performer": {
-      "harness": "control",
-      "model": null,
-      "session": "direct:-/control"
+    {
+      "seq": 4,
+      "kind": "Claimed",
+      "node": "check",
+      "performer": {
+        "harness": "control",
+        "model": null,
+        "session": "direct:-/control"
+      },
+      "verify_exit": null,
+      "code": null
     },
-    "verify_exit": 0,
-    "code": null
-  }
-]
+    {
+      "seq": 5,
+      "kind": "Completed",
+      "node": "check",
+      "performer": {
+        "harness": "control",
+        "model": null,
+        "session": "direct:-/control"
+      },
+      "verify_exit": 0,
+      "code": null
+    }
+  ]
+}

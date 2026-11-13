@@ -1,34 +1,37 @@
-[
-  {
-    "seq": 1,
-    "kind": "Started",
-    "node": null,
-    "performer": null,
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 2,
-    "kind": "Claimed",
-    "node": "pin",
-    "performer": {
-      "harness": "gemini",
-      "model": null,
-      "session": "direct:-/gemini"
+{
+  "instance": "fi_527ccc7d6109cb6aff9fa603c5e8dc0f",
+  "events": [
+    {
+      "seq": 1,
+      "kind": "Started",
+      "node": null,
+      "performer": null,
+      "verify_exit": null,
+      "code": null
     },
-    "verify_exit": null,
-    "code": null
-  },
-  {
-    "seq": 3,
-    "kind": "Completed",
-    "node": "pin",
-    "performer": {
-      "harness": "gemini",
-      "model": null,
-      "session": "direct:-/gemini"
+    {
+      "seq": 2,
+      "kind": "Claimed",
+      "node": "pin",
+      "performer": {
+        "harness": "gemini",
+        "model": null,
+        "session": "direct:-/gemini"
+      },
+      "verify_exit": null,
+      "code": null
     },
-    "verify_exit": 0,
-    "code": null
-  }
-]
+    {
+      "seq": 3,
+      "kind": "Completed",
+      "node": "pin",
+      "performer": {
+        "harness": "gemini",
+        "model": null,
+        "session": "direct:-/gemini"
+      },
+      "verify_exit": 0,
+      "code": null
+    }
+  ]
+}

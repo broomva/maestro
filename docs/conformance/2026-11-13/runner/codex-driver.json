@@ -1,0 +1,15 @@
+[
+  {
+    "tool": "skill",
+    "skill": "flow-verify-v1"
+  },
+  {
+    "tool": "skill",
+    "skill": "flow-verify-v1"
+  },
+  {
+    "tool": "spawn_agent",
+    "task_name": "verifier",
+    "model": "gpt-6.1-terra"
+  }
+]

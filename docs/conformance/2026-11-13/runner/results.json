@@ -8,7 +8,8 @@
     "exit": 0,
     "exercise_completed": true,
     "terminal": true,
-    "stop": "blocked"
+    "stop": "blocked",
+    "stop_exit": 124
   },
   "codex": {
     "path": "/home/agent/.local/bin/codex",
@@ -19,7 +20,8 @@
     "exit": 0,
     "exercise_completed": true,
     "terminal": true,
-    "stop": "blocked"
+    "stop": "blocked",
+    "stop_exit": 0
   },
   "gemini": {
     "path": "/usr/local/bin/gemini",

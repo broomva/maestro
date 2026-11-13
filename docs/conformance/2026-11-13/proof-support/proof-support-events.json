@@ -1,10 +1,13 @@
-[
-  {
-    "seq": 1,
-    "kind": "Started",
-    "node": null,
-    "performer": null,
-    "verify_exit": null,
-    "code": null
-  }
-]
+{
+  "instance": "fi_048028392257e8d04e6425d4825db966",
+  "events": [
+    {
+      "seq": 1,
+      "kind": "Started",
+      "node": null,
+      "performer": null,
+      "verify_exit": null,
+      "code": null
+    }
+  ]
+}
