@@ -62,7 +62,7 @@ fi
 if ! run_tests >log 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat log; exit 2
 fi
-if ! python3 scripts/conformance/test_phase1.py >log 2>&1; then
+if ! timeout "$limit" python3 scripts/conformance/test_phase1.py >log 2>&1; then
   echo "conformance baseline is red"; cat log; exit 2
 fi
 echo "baseline  green"
@@ -85,7 +85,7 @@ p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; failed=1; return; fi
   case $file in
-    scripts/conformance/*) python3 scripts/conformance/test_phase1.py >log 2>&1 ;;
+    scripts/conformance/*) timeout "$limit" python3 scripts/conformance/test_phase1.py >log 2>&1 ;;
     crates/flow/*) run_flow_tests >log 2>&1 ;;
     *) run_tests >log 2>&1 ;;
   esac
@@ -96,7 +96,7 @@ PY
   caught=$(awk '/^failures:$/ { n++; next } n >= 2 && /^    [^ ]/ { sub(/^ +/, ""); print; exit }' log)
   if [ "$code" = 0 ]; then
     echo "SURVIVED  $file: $old"; failed=1
-  elif [[ $file == scripts/conformance/* ]] && [ "$code" = 1 ] && grep -q '^FAILED (failures=' log; then
+  elif [[ $file == scripts/conformance/* ]] && [ "$code" = 1 ] && grep -qE '^FAILED \(failures=[0-9]+\)$' log; then
     echo "killed    $file: $old  [conformance guard test]"; killed=$((killed + 1))
   elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' log; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; failed=1
@@ -2191,6 +2191,15 @@ mutate scripts/conformance/phase1.py "    if any(e.get('kind') == 'Completed' an
 mutate scripts/conformance/phase1.py '               for _, node in found if node is not None):' '               for _, node in found if node is not None) and False:'
 mutate scripts/conformance/phase1.py "    if not any(d.get('decision')=='block' and instance in d.get('reason','') for d in decisions):" "    if not any(d.get('decision')=='block' for d in decisions):"
 mutate scripts/conformance/phase1.py "            if needle in (proc/'environ').read_bytes().split(b'\\0'):" '            if False:'
+mutate scripts/conformance/phase1.py "    if not {'maestro_flow_claim', 'maestro_flow_complete'}.issubset(set(calls)):" '    if False:'
+mutate scripts/conformance/phase1.py "    if harness in ('claude', 'codex') and not available:" '    if False:'
+mutate scripts/conformance/phase1.py '    if not valid:' '    if False:'
+mutate scripts/conformance/phase1.py '            env.pop(key,None)' '            pass'
+mutate scripts/conformance/phase1.py "                                if p and not (Path(p)/'maestro').exists())" '                                if p)'
+mutate scripts/conformance/phase1.py "        raise Failure('capability harness has Direct credentials or maestro on PATH')" '        pass'
+mutate scripts/conformance/phase1.py "        if harness=='gemini' and item.get('type')=='tool_use':" '        if False:'
+mutate scripts/conformance/phase1.py "        elif harness=='agy' and item.get('event')=='step_update':" '        elif False:'
+mutate scripts/conformance/phase1.py "        return isinstance(args,dict) and (args.get('instance')==instance if verb=='maestro_flow_claim'" "        return isinstance(args,dict) and (True if verb=='maestro_flow_claim'"
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

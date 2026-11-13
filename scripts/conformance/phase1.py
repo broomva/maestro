@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-MAESTRO = ROOT / 'target/release/maestro'
+MAESTRO = Path(os.environ.get('CARGO_TARGET_DIR', str(ROOT / 'target'))).resolve() / 'release/maestro'
 DEFINITION = ROOT / 'crates/flow/flows/verify.yaml'
 
 class Failure(Exception):
@@ -39,9 +39,77 @@ def hook_blocked(decisions, instance):
     if not any(d.get('decision')=='block' and instance in d.get('reason','') for d in decisions):
         raise Failure('hook did not block the control instance')
 
+def require_driver(harness, available):
+    if harness in ('claude', 'codex') and not available:
+        raise Failure(f'{harness} is unavailable')
+
+def require_mcp_calls(calls):
+    if not {'maestro_flow_claim', 'maestro_flow_complete'}.issubset(set(calls)):
+        raise Failure('MCP claim and complete tool calls are required')
+
+def mcp_tool_calls(transcript, harness, instance):
+    calls=[]; excerpt=[]; pending={}
+    def matches(verb,args):
+        return isinstance(args,dict) and (args.get('instance')==instance if verb=='maestro_flow_claim'
+                                         else str(args.get('claim_token','')).startswith(instance+'.'))
+    def safe_args(args):
+        return {k:('[redacted]' if k=='claim_token' else v) for k,v in args.items()
+                if k in ('instance','node_id','session','claim_token')}
+    for line in transcript.splitlines():
+        try: item=json.loads(line)
+        except (ValueError,TypeError): continue
+        if harness=='gemini' and item.get('type')=='tool_use':
+            name=item.get('tool_name','')
+            for verb in ('maestro_flow_claim','maestro_flow_complete'):
+                if name=='mcp_maestro_'+verb:
+                    pending[item.get('tool_id')]=(verb,item.get('parameters',{}))
+        elif harness=='gemini' and item.get('type')=='tool_result' and item.get('tool_id') in pending:
+            verb,args=pending.pop(item['tool_id'])
+            try: result=json.loads(item.get('output',''))
+            except (ValueError,TypeError): continue
+            if item.get('status')=='success' and result.get('ok') is True and matches(verb,args):
+                calls.append(verb); excerpt.append({'type':'tool_use','tool_name':'mcp_maestro_'+verb,'parameters':safe_args(args),'result':{'ok':True,'seq':result.get('seq')}})
+        elif harness=='agy' and item.get('event')=='step_update':
+            step=item.get('step_update',{}); info=step.get('tool_info',{}); params=info.get('parameters',{})
+            verb=params.get('ToolName'); args=params.get('Arguments',{})
+            if step.get('step_type')!='tool' or step.get('state')!='DONE' or step.get('tool_name')!='call_mcp_tool' or params.get('ServerName')!='maestro' or verb not in ('maestro_flow_claim','maestro_flow_complete'):
+                continue
+            try: result=json.loads(info.get('output',''))
+            except (ValueError,TypeError): continue
+            if result.get('ok') is True and matches(verb,args):
+                calls.append(verb); excerpt.append({'event':'step_update','step_type':'tool','state':'DONE',
+                    'tool_name':'call_mcp_tool','server':'maestro','mcp_tool':verb,'arguments':safe_args(args),'result':{'ok':True,'seq':result.get('seq')}})
+    return calls,excerpt
+
+def require_driver_trace(harness, calls, model):
+    if harness == 'claude':
+        valid = any(c.get('tool') == 'Skill' and c.get('skill') == 'flow-verify-v1' for c in calls) and any(
+            c.get('tool') == 'Agent' and c.get('subagent_type') == 'verifier' for c in calls)
+    else:
+        valid = any(c.get('tool') == 'skill' and c.get('skill') == 'flow-verify-v1' for c in calls) and any(
+            c.get('tool') == 'spawn_agent' and c.get('task_name') == 'verifier' and c.get('model') == model for c in calls)
+    if not valid:
+        raise Failure(f'{harness} driver skill and verifier evidence is missing')
+
+def capability_environment(env):
+    env=env.copy()
+    for key in list(env):
+        if key.startswith('MAESTRO_DIRECT_') or key in ('MAESTRO_SESSION','MAESTRO_CALLER_CWD','MAESTRO_BRIDGE_CREDENTIAL'):
+            env.pop(key,None)
+    env['PATH']=os.pathsep.join(p for p in env.get('PATH','').split(os.pathsep)
+                                if p and not (Path(p)/'maestro').exists())
+    return env
+
+def require_capability_isolation(env):
+    if any(k.startswith('MAESTRO_DIRECT_') or k in ('MAESTRO_SESSION','MAESTRO_CALLER_CWD','MAESTRO_BRIDGE_CREDENTIAL') for k in env) or any(
+            (Path(p)/'maestro').exists() for p in env.get('PATH','').split(os.pathsep) if p):
+        raise Failure('capability harness has Direct credentials or maestro on PATH')
+
 def kill_marked_processes(marker):
     """Kill even a detached child that inherited this invocation's unique marker (Linux)."""
     needle=('MAESTRO_PHASE1_RUN='+marker).encode()
+    # Tests also run on non-Linux hosts; the live runner itself requires /proc.
+    if not Path('/proc').is_dir(): return
     for proc in Path('/proc').iterdir():
         if not proc.name.isdigit() or int(proc.name)==os.getpid(): continue
         try:
@@ -55,7 +123,7 @@ def main():
     parser.add_argument('--harness', default='claude,codex,gemini,agy')
     parser.add_argument('--timeout', type=int, default=900)
     parser.add_argument('--evidence-dir', required=True, type=Path)
-    parser.add_argument('--prove', choices=['spines', 'control', 'support'])
+    parser.add_argument('--prove', choices=['spines', 'control', 'support', 'mcp', 'driver-claude', 'driver-codex', 'driver-model', 'unavailable', 'isolation'])
     args = parser.parse_args()
     names = args.harness.split(',')
     if args.timeout < 1 or len(set(names)) != len(names) or any(n not in ('claude','codex','gemini','agy') for n in names):
@@ -115,12 +183,21 @@ def main():
                 e.setdefault('GEMINI_CLI_HOME',str(host_home/'.local/share/broomva/gemini-vertex/home'))
                 e.setdefault('GOOGLE_APPLICATION_CREDENTIALS',str(host_home/'.config/gcloud/application_default_credentials.json'))
                 e.setdefault('GOOGLE_GENAI_USE_VERTEXAI','true')
-                e.setdefault('GOOGLE_CLOUD_PROJECT','sti-prod-ai'); e.setdefault('GOOGLE_CLOUD_QUOTA_PROJECT','sti-prod-ai'); e.setdefault('GOOGLE_CLOUD_LOCATION','global')
+                e.setdefault('GOOGLE_CLOUD_LOCATION','global')
                 e['GEMINI_CLI_TRUST_WORKSPACE']='true'
             return e
-        def run(cmd, h, timeout=None):
+        def run(cmd, h, timeout=None, capability=False):
             cmd=[str(c) for c in cmd]
             marker=secrets.token_hex(16); env=environment(h); env['MAESTRO_PHASE1_RUN']=marker
+            if capability:
+                env=capability_environment(env)
+                require_capability_isolation(env)
+                (out/f'{h}-isolation.json').write_text(json.dumps({
+                    'maestro_on_path':shutil.which('maestro',path=env['PATH']) is not None,
+                    'direct_or_session_env_keys':sorted(k for k in env if k.startswith('MAESTRO_DIRECT_')
+                        or k in ('MAESTRO_SESSION','MAESTRO_CALLER_CWD','MAESTRO_BRIDGE_CREDENTIAL')),
+                    'mcp_server_env_keys':sorted(server['mcpServers']['maestro'].get('env',{}))
+                },indent=2)+'\n')
             process=subprocess.Popen(cmd,cwd=repo,env=env,stdin=subprocess.DEVNULL,
                                      stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
             try:
@@ -153,8 +230,14 @@ def main():
             for e in events(i):
                 b=e['body']; rows.append({'seq':e['seq'],'kind':e['kind'],'node':b.get('node'),
                     'performer':b.get('performer'),'verify_exit':(b.get('verify') or {}).get('exit'),'code':b.get('code')})
-            (out/f'{name}-events.json').write_text(json.dumps(rows,indent=2)+'\n')
+            (out/f'{name}-events.json').write_text(json.dumps({'instance':i,'events':rows},indent=2)+'\n')
         if args.prove:
+            if args.prove=='mcp': require_mcp_calls(['maestro_flow_claim']); return
+            if args.prove=='driver-claude': require_driver_trace('claude',[{'tool':'Skill','skill':'flow-verify-v1'}],''); return
+            if args.prove=='driver-codex': require_driver_trace('codex',[{'tool':'skill','skill':'flow-verify-v1'}],'gpt-6.1-terra'); return
+            if args.prove=='driver-model': require_driver_trace('codex',[{'tool':'skill','skill':'flow-verify-v1'},{'tool':'spawn_agent','task_name':'verifier','model':'wrong'}],'gpt-6.1-terra'); return
+            if args.prove=='unavailable': require_driver('codex',False); return
+            if args.prove=='isolation': require_capability_isolation({'MAESTRO_DIRECT_TOKEN':'token','PATH':''}); return
             i=start('control', './hello.sh | grep -x hello' if args.prove=='control' else 'false')
             if args.prove=='spines':
                 j=start('control'); step('control',i,'pin')
@@ -176,39 +259,75 @@ def main():
                             '--permission-mode','bypassPermissions','--strict-mcp-config','--mcp-config',repo/'.mcp.json'],h)
             if h=='codex':
                 return run(['codex','exec','--sandbox','danger-full-access','--json',prompt],h)
-            if h=='gemini':
+            if h in ('gemini','agy'):
                 server['mcpServers']['maestro']['env']={k:environment(h)[k] for k in
                     ('MAESTRO_SESSION','MAESTRO_DIRECT_REGISTRY','MAESTRO_DIRECT_TOKEN','MAESTRO_CALLER_CWD',
                      'BROOMVA_WORKSPACE','BROOMVA_HOME','MAESTRO_TREE','MAESTRO_WORK_ROOT')}
+            if h=='gemini':
                 (repo/'.gemini/settings.json').write_text(json.dumps(server))
-                return run(['gemini','-m',os.environ.get('MAESTRO_GEMINI_MODEL','gemini-3.8-flash'),'-p',prompt,'--output-format','stream-json','--skip-trust','--yolo',
-                            '--allowed-mcp-server-names','maestro'],h)
-            return run(['agy','-p',prompt,'--output-format','json','--dangerously-skip-permissions'],h)
+                return run([shutil.which('gemini'),'-m',os.environ.get('MAESTRO_GEMINI_MODEL','gemini-3.8-flash'),'-p',prompt,'--output-format','stream-json','--skip-trust','--yolo',
+                            '--allowed-mcp-server-names','maestro'],h,capability=True)
+            agy_config.write_text(json.dumps(server))
+            return run([shutil.which('agy'),'-p',prompt,'--output-format','stream-json','--dangerously-skip-permissions'],h,capability=True)
         results={}; instances={}
         for h in names:
             binary={'claude':'claude','codex':'codex','gemini':'gemini','agy':'agy'}[h]
             if not shutil.which(binary):
                 results[h]={'preflight':'unavailable','detail':f'{binary} is not installed'}
-                print(f'{h}: unavailable ({binary} is not installed)',flush=True); continue
-            version=run([binary,'--version'],h,20)
+                print(f'{h}: unavailable ({binary} is not installed)',flush=True); require_driver(h,False); continue
+            if h=='gemini' and not os.environ.get('GOOGLE_CLOUD_PROJECT'):
+                results[h]={'preflight':'unavailable','detail':'GOOGLE_CLOUD_PROJECT is required for Gemini Vertex'}
+                print('gemini: unavailable (GOOGLE_CLOUD_PROJECT is required)',flush=True); continue
+            version=run([shutil.which(binary),'--version'],h,20,capability=h in ('gemini','agy'))
             probe=invoke(h,'Reply with exactly OK. Do not call tools.')
             detail='' if probe.returncode==0 else scrub(probe.stderr or probe.stdout)
             results[h]={'path':shutil.which(binary),'version':scrub(version.stdout).strip(),'preflight':'available' if probe.returncode==0 else 'unavailable',
                         'preflight_exit':probe.returncode,'detail':detail[-2000:]}
             print(f"{h}: {results[h]['preflight']} (preflight exit {probe.returncode})",flush=True)
             if probe.returncode and h in ('claude','codex'):
-                continue
+                require_driver(h,False)
             i=start(h); instances[h]=i
             if h in ('claude','codex'):
                 prompt=(f'Use the project skill flow-verify-v1 to drive instance {i} to completion. '
                         'Use Maestro MCP or CLI, read flow next launch_spec and use its verifier brief or agent. '
                         'The surface is ./hello.sh. Keep temporary files under TMPDIR.')
+                if h=='claude': prompt+=' Invoke the Skill tool for flow-verify-v1 and the Agent tool for verifier.'
+                else: prompt+=' Read .codex/skills/flow-verify-v1/SKILL.md and launch the verifier via the specified spawn_agent brief.'
             else:
                 prompt=(f'Use only Maestro MCP tools, never shell or CLI, to claim and complete node pin '
                         f'on instance {i}. Report the exact error if unable.')
+            session_dir=root/'home/.codex/sessions'
+            before=set(session_dir.rglob('*.jsonl')) if h=='codex' and session_dir.exists() else set()
             p=invoke(h,prompt)
             record_events(h,i)
             if h in ('claude','codex'):
+                driver_calls=[]
+                if h=='claude':
+                    for line in p.stdout.splitlines():
+                        try: item=json.loads(line)
+                        except ValueError: continue
+                        content=item.get('message',{}).get('content',[])
+                        for c in content if isinstance(content,list) else []:
+                            if isinstance(c,dict) and c.get('type')=='tool_use' and c.get('name') in ('Skill','Agent'):
+                                inp=c.get('input',{}); driver_calls.append({'tool':c['name'],'skill':inp.get('skill'),'subagent_type':inp.get('subagent_type')})
+                else:
+                    for line in p.stdout.splitlines():
+                        try: item=json.loads(line).get('item',{})
+                        except ValueError: continue
+                        if 'flow-verify-v1/SKILL.md' in item.get('command',''):
+                            driver_calls.append({'tool':'skill','skill':'flow-verify-v1'})
+                    for path in set(session_dir.rglob('*.jsonl'))-before if session_dir.exists() else []:
+                        for line in path.read_text().splitlines():
+                            try: payload=json.loads(line).get('payload',{})
+                            except ValueError: continue
+                            if payload.get('type')=='function_call' and payload.get('name')=='spawn_agent':
+                                try: a=json.loads(payload.get('arguments','{}'))
+                                except ValueError: continue
+                                driver_calls.append({'tool':'spawn_agent','task_name':a.get('task_name'),'model':a.get('model')})
+                match=re.search(r'^  codex:\s*(\S+)\s*$',(ROOT/'agents/verifier.agent.yaml').read_text(),re.MULTILINE)
+                if not match: raise Failure('verifier Codex model is missing')
+                (out/f'{h}-driver.json').write_text(json.dumps(driver_calls,indent=2)+'\n')
+                require_driver_trace(h,driver_calls,match.group(1))
                 status,_=cli(h,'flow','status','--instance',i)
                 done=any(e['kind']=='Completed' and e['body'].get('node')=='exercise' for e in events(i))
                 results[h].update({'exit':p.returncode,'exercise_completed':done,'terminal':status['status']['terminal']})
@@ -226,8 +345,11 @@ def main():
                     (out/'codex-trace.json').write_text(json.dumps(excerpt,indent=2)+'\n')
             else:
                 try:
+                    calls,transcript=mcp_tool_calls(p.stdout,h,i)
+                    (out/f'{h}-mcp-calls.json').write_text(json.dumps(transcript,indent=2)+'\n')
                     supported_has_events(events(i),h)
-                    results[h].update({'capability':'supported','exit':p.returncode,'preflight':'available'})
+                    require_mcp_calls(calls)
+                    results[h].update({'capability':'supported','exit':p.returncode})
                 except Failure:
                     errors=[]
                     for line in p.stdout.splitlines():
