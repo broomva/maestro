@@ -2111,6 +2111,12 @@ mutate $mf '        out[kernel::stop::WORK] = work;' ''
 # (and past its bound), on an instance that does not read and on counts it cannot keep, and
 # alerts; no ledger is no flow; one alert per subject; the install check reads only a maestro
 # Stop hook; a command line that does not parse exits 0.
+mutate $mf '    let guard = Reader::new(&w.root, Options::default())?.lock()?;' '    if std::fs::symlink_metadata(&w.root).is_err() { return Err(FlowError::NoLedger { root: w.root.clone() }.into()); }
+    let guard = Reader::new(&w.root, Options::default())?.lock()?;'
+mutate $gt '    if code == "busy" { "refusals_busy" } else { code }' '    code'
+mutate $gt '        let guard = Reader::new(root, Options { lock_wait: kstop::REFUSALS_WAIT })?.lock()?;' '        let guard = Reader::new(root, Options::default())?.lock()?;'
+
+mutate crates/cli/src/main.rs '    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate") && !args.iter().any(|a| a == "--check-install")' '    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate")'
 mutate $gt '            Harness::Claude => json!({ "decision": "block", "reason": reason }).to_string(),' '            Harness::Claude => json!({ "decision": "deny", "reason": reason }).to_string(),'
 mutate $gt '            Harness::Codex => json!({ "decision": "block", "reason": reason }).to_string(),' '            Harness::Codex => json!({ "decision": "block", "reason": reason, "continue": true }).to_string(),'
 mutate $gt '        if self.gate.cannot_block {' '        if false {'

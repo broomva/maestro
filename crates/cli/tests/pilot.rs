@@ -730,3 +730,32 @@ fn a_stop_gate_command_line_that_does_not_parse_lets_the_stop_through() {
     assert_eq!((v, code), (json!({}), Some(0)));
     assert!(stderr.contains("input_malformed"), "{stderr}");
 }
+
+#[test]
+fn bad_check_install_exits_nonzero() {
+    let p = pilot();
+    for args in [
+        vec!["flow", "stop-gate", "--check-install"],
+        vec!["flow", "stop-gate", "--check-install", "--harness", "grok"],
+    ] {
+        let out = p.maestro().args(&args).stdin(Stdio::null()).output().unwrap();
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+    }
+}
+
+#[test]
+fn flow_open_matches_status_for_missing_roots() {
+    let p = pilot();
+    let check = |expected: &str| {
+        assert_eq!(p.refused(&["flow", "open"])["code"], expected);
+        assert_eq!(p.refused(&["flow", "status", "--instance", "fi_x"])["code"], expected);
+    };
+    check("no_ledger");
+    p.start_with(Path::new(VERIFY), &p.head, "true", None);
+    let parent = p.root.join("workspace/.broomva");
+    std::fs::rename(parent.join("flows"), parent.join("flows.moved")).unwrap();
+    check("root_moved");
+    let epoch = std::fs::read_to_string(parent.join("flows.moved/EPOCH")).unwrap();
+    std::fs::rename(parent.join("flows.moved"), parent.join(format!(".flows.genesis-{}", epoch.trim()))).unwrap();
+    check("genesis_incomplete");
+}

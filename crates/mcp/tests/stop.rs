@@ -618,3 +618,39 @@ fn an_unread_only_stop_clears_the_counts() {
     }
     allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
 }
+
+#[test]
+fn flow_open_matches_status_for_missing_roots() {
+    let f = fx();
+    let check = |expected: &str| {
+        let open = f.call(OPEN, f.as_("d1", json!({})));
+        let status = f.call(STATUS, json!({ "instance": "fi_x" }));
+        assert_eq!(open["code"], expected, "{open}");
+        assert_eq!(status["code"], expected, "{status}");
+    };
+    check("no_ledger");
+    f.begin("d1");
+    let parent = f.root.join("workspace/.broomva");
+    std::fs::rename(parent.join("flows"), parent.join("flows.moved")).unwrap();
+    check("root_moved");
+    let epoch = std::fs::read_to_string(parent.join("flows.moved/EPOCH")).unwrap();
+    std::fs::rename(parent.join("flows.moved"), parent.join(format!(".flows.genesis-{}", epoch.trim()))).unwrap();
+    check("genesis_incomplete");
+}
+
+#[test]
+fn a_shared_lock_held_too_long_fails_open_with_refusals_busy() {
+    let f = fx();
+    f.begin("d1");
+    let lock =
+        std::fs::OpenOptions::new().read(true).write(true).open(f.root.join("workspace/.broomva/flows.lock")).unwrap();
+    lock.lock().unwrap();
+    let start = std::time::Instant::now();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    let elapsed = start.elapsed();
+    lock.unlock().unwrap();
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("refusals_busy") && n.contains("fails open")), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert!(elapsed < std::time::Duration::from_secs(8), "waited {elapsed:?}");
+}

@@ -656,9 +656,6 @@ fn read(paths: &maestro_store::Paths, name: &str, instance: &str) -> Result<Valu
 /// shared lock (`maestro_flow::kernel::stop::open`). Writes nothing; a ledger that is not there is
 /// `no_ledger`.
 pub(crate) fn open(paths: &maestro_store::Paths, w: &Writer) -> Result<kernel::stop::Open, KernelError> {
-    if std::fs::symlink_metadata(&w.root).is_err() {
-        return Err(FlowError::NoLedger { root: w.root.clone() }.into());
-    }
     let guard = Reader::new(&w.root, Options::default())?.lock()?;
     let now = maestro_flow::clock::now();
     kernel::stop::open(&guard, &w.me, now, &|l, a| kernel::seen(paths, l, a))

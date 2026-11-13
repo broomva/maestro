@@ -189,6 +189,11 @@ pub fn gate_in_env(paths: &Paths, g: &Gate, input: &[u8]) -> Outcome {
     gate(paths, &hosts, Ambient::Caller, &json!({}), g, input)
 }
 
+/// Use the same fail-open code whether the reader or the writer encounters a busy lock.
+fn busy_code(code: &str) -> &str {
+    if code == "busy" { "refusals_busy" } else { code }
+}
+
 impl Run<'_> {
     fn note(&mut self, text: impl Into<String>) {
         self.out.notes.push(format!("maestro stop-gate: {}", text.into()));
@@ -258,7 +263,10 @@ impl Run<'_> {
             Err(e) if e.code() == "no_ledger" => {
                 return self.note(format!("there is no flow ledger at {}, so no flow to gate.", root.display()));
             }
-            Err(e) => return self.fail_open(Some(&session), e.code(), &e.to_string()),
+            Err(e) => {
+                let code = busy_code(e.code());
+                return self.fail_open(Some(&session), code, &e.to_string());
+            }
         };
         // An instance that does not read is reported (a note and an alert) whatever else the gate
         // decides, so a broken log never goes unseen; it is named in a refusal too.
@@ -345,14 +353,16 @@ impl Run<'_> {
     /// (`foreign_host` on a ledger bound to another host).
     fn ledger(&self, root: &Path) -> Result<Ledger, (String, String)> {
         let host = crate::flow::host_id().map_err(|v| (s(&v["code"]).to_string(), s(&v["reason"]).to_string()))?;
-        Ledger::open(root, &host, Options { lock_wait: kstop::REFUSALS_WAIT })
-            .map_err(|e| (e.code().to_string(), e.to_string()))
+        Ledger::open(root, &host, Options { lock_wait: kstop::REFUSALS_WAIT }).map_err(|e| {
+            let code = busy_code(e.code());
+            (code.to_string(), e.to_string())
+        })
     }
 
     /// The session's open instances, and whether it has refusal counts to clear, under one shared
     /// lock. Counts that do not read are taken as there, so a clear is tried and its error noted.
     fn open(&self, root: &Path, me: &VerifiedSession) -> Result<(kstop::Open, bool), KernelError> {
-        let guard = Reader::new(root, Options::default())?.lock()?;
+        let guard = Reader::new(root, Options { lock_wait: kstop::REFUSALS_WAIT })?.lock()?;
         let now = maestro_flow::clock::now();
         let open = kstop::open(&guard, me, now, &|l, a| kernel::seen(self.paths, l, a))?;
         Ok((open, Refusals::any(&guard, me).unwrap_or(true)))
