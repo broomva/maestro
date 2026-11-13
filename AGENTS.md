@@ -42,9 +42,9 @@ and `.control/rcs-parameters.toml`; also `METALAYER.md`, `.control/policy.yaml` 
 (`.github/workflows/l3-stability.yml`, BRO-3702). It recomputes the RCS lambda from
 `.control/rcs-parameters.toml` with bstack's scripts, pinned to one commit, and fails on drift. It
 reports the L3 rate and runs `scripts/governance-check.py`: `CLAUDE.md` points to this file, the
-shard count above equals the `ci.yml` mutants matrix, and all eight paths trigger the job and
-count toward the rate. The workspace policy's governance tier needs this check to pass before p9
-merges such a PR.
+shard count above equals the `ci.yml` mutants matrix, all eight paths trigger the job and count
+toward the rate, and the files `CLAUDE.md` names trigger it too. The workspace policy's
+governance tier needs this check to pass before p9 merges such a PR.
 Run `python3 scripts/governance-check.py --selftest` after changing the checker.
 
 ## Copy

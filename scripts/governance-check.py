@@ -74,6 +74,16 @@ def number(text):
     raise Broken(f"not a count: {text!r}")
 
 
+def words(k):
+    """k below one hundred in the words number() reads ("twenty-four")."""
+    if k < 20:
+        return UNITS[k]
+    tens = [w for w, v in TENS.items() if v == k // 10 * 10]
+    if k >= 100 or not tens:
+        raise Broken(f"no words for {k}")
+    return tens[0] + ("-" + UNITS[k % 10] if k % 10 else "")
+
+
 # A strict reader for the block YAML these checks read, standard library only: PyYAML is not
 # guaranteed on a self-hosted runner, and nothing is installed. It reads plain block mappings of
 # unique keys and lists of scalars. Anything else (anchors, aliases, merge keys, tags, flow
@@ -169,9 +179,15 @@ def scalars(lines, entry, where):
 
 
 def claude_paths(text):
-    """The repository paths CLAUDE.md names: backticked, with a slash or a file extension."""
+    """The repository paths CLAUDE.md names: backticked, with a slash or a file extension. Each must
+    exist (claude-points-to-agents) and trigger the job (trigger-paths), so a PR that moves one
+    runs the check; the selftest copies them. A path outside the repository fails."""
     named = re.findall(r"`([^`\s]+)`", text)
-    return named, [p for p in named if "/" in p or re.search(r"\.(md|html|ya?ml|toml|sh|py|rs)$", p)]
+    paths = [p for p in named if "/" in p or re.search(r"\.(md|html|ya?ml|toml|sh|py|rs)$", p)]
+    outside = [p for p in paths if p.startswith("/") or ".." in p.split("/")]
+    if outside:
+        raise Broken("CLAUDE.md names paths outside the repository: " + ", ".join(outside))
+    return named, list(dict.fromkeys(paths))
 
 
 def check_claude_pointer(root):
@@ -223,7 +239,8 @@ def check_shard_count(root):
 
 
 def check_triggers(root):
-    """Every governance path in this repository, and every input of these checks, runs the job."""
+    """Every governance path, every input of these checks and every path CLAUDE.md names runs
+    the job."""
     lines = read(root, WORKFLOW).splitlines()
     # Exactly on.pull_request, on main, with paths: another event, paths-ignore or types would
     # change when the check runs, and none of them is read here.
@@ -245,7 +262,8 @@ def check_triggers(root):
         triggers = set(paths)
     except Broken as e:
         raise Broken(f"unsupported trigger shape in {WORKFLOW}: {e}")
-    want = list(GOVERNANCE_PATHS) + list(CONTRACT_INPUTS)
+    want = list(dict.fromkeys([*GOVERNANCE_PATHS, *CONTRACT_INPUTS,
+                               *claude_paths(read(root, "CLAUDE.md"))[1]]))
     missing = [p for p in want if p not in triggers]
     if missing:
         raise Broken(f"{WORKFLOW} does not run on: " + ", ".join(missing))
@@ -417,13 +435,21 @@ def selftest(root, quiet=False):
         # (description, seed, the checks that must fail; empty means it must pass)
         ("unchanged tree", lambda r: None, []),
         ("CLAUDE.md no longer names AGENTS.md", edit("CLAUDE.md", "`AGENTS.md`", "`RULES.md`"),
-         ["claude-points-to-agents"]),
-        ("CLAUDE.md is a symlink to AGENTS.md", to_symlink, ["claude-points-to-agents"]),
+         ["claude-points-to-agents", "trigger-paths"]),
+        ("CLAUDE.md is a symlink to AGENTS.md", to_symlink, ["claude-points-to-agents", "trigger-paths"]),
         ("CLAUDE.md names a path that does not exist", edit("CLAUDE.md", "`AGENTS.md`",
                                                             "`AGENTS.md` and `docs/missing.md`"),
-         ["claude-points-to-agents"]),
+         ["claude-points-to-agents", "trigger-paths"]),
+        ("CLAUDE.md names an absolute path", lambda r: edit(
+            "CLAUDE.md", "`AGENTS.md`", f"`AGENTS.md` and `{r.resolve()}/AGENTS.md`")(r),
+         ["claude-points-to-agents", "trigger-paths"]),
+        ("CLAUDE.md names a path through ..", edit("CLAUDE.md", "`AGENTS.md`",
+                                                   "`AGENTS.md` and `docs/../AGENTS.md`"),
+         ["claude-points-to-agents", "trigger-paths"]),
+        ("the workflow stops running on a file CLAUDE.md names", resub(
+            WORKFLOW, r"^ *- 'docs/specs/.*'\n", ""), ["trigger-paths"]),
         ("CLAUDE.md is a copy of AGENTS.md", lambda r: shutil.copyfile(r / "AGENTS.md", r / "CLAUDE.md"),
-         ["claude-points-to-agents"]),
+         ["claude-points-to-agents", "trigger-paths"]),
         ("AGENTS.md names one shard more", edit("AGENTS.md", phrase,
                                                 f"after {n + 1} `mutants` jobs"), ["shard-count"]),
         ("ci.yml drops a shard", matrix(n - 1), ["shard-count"]),
@@ -432,10 +458,11 @@ def selftest(root, quiet=False):
         ("a second shard matrix", edit(CI, "    strategy:", "    strategy:\n      # shard: [0]\n"
                                        "      x:\n        shard: [0]"), ["shard-count"]),
         ("ci.yml shard list in block style", matrix(n, "block"), []),
-        ("both sides grow, written as words", lambda r: (
-            edit("AGENTS.md", phrase, "after twenty-four `mutants` jobs")(r), matrix(24)(r)), []),
-        ("both sides grow, written as digits", lambda r: (
-            edit("AGENTS.md", phrase, "after 24 `mutants` jobs")(r), matrix(24)(r)), []),
+        # Grown from the current count, so each always changes it.
+        (f"both sides grow to {n + 8}, written as words", lambda r: (
+            edit("AGENTS.md", phrase, f"after {words(n + 8)} `mutants` jobs")(r), matrix(n + 8)(r)), []),
+        (f"both sides grow to {n + 8}, written as digits", lambda r: (
+            edit("AGENTS.md", phrase, f"after {n + 8} `mutants` jobs")(r), matrix(n + 8)(r)), []),
         ("the workflow stops running on AGENTS.md", edit(WORKFLOW, "      - 'AGENTS.md'\n", ""),
          ["trigger-paths"]),
         ("the workflow stops running on ci.yml", edit(WORKFLOW, f"      - '{CI}'\n", ""),
@@ -536,6 +563,7 @@ def selftest(root, quiet=False):
         """The selftest of a tree whose CLAUDE.md also names another root file: it must pass."""
         edit("CLAUDE.md", "`AGENTS.md`", "`AGENTS.md` and `NOTES.md`")(copy)
         (copy / "NOTES.md").write_text("notes\n", encoding="utf-8")
+        edit(WORKFLOW, "      - 'CLAUDE.md'\n", "      - 'CLAUDE.md'\n      - 'NOTES.md'\n")(copy)
         return selftest(copy, quiet=True)
 
     bad = 0
