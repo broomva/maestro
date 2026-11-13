@@ -4,15 +4,17 @@
 # check named exactly `stability-check` on a PR touching CLAUDE.md, AGENTS.md or
 # .control/rcs-parameters.toml (the tier's paths that exist here).
 # From bstack's assets/templates/gh-workflow-l3-stability.yml.template, as the workspace runs it
-# (broomva/workspace .github/workflows/l3-stability.yml), with three changes: the job also runs
-# scripts/governance-check.py; the report goes to the job summary, not a PR comment, so the
-# token stays read-only; and the runner guard is ci.yml's.
+# (broomva/workspace .github/workflows/l3-stability.yml), with four changes: the job also runs
+# scripts/governance-check.py; bstack is pinned to a commit, not its default branch; the report
+# goes to the job summary, not a PR comment, so the token stays read-only; and the runner guard
+# is ci.yml's.
 name: L3 stability gate
 on:
   pull_request:
     branches: [main]
-    # scripts/governance-check.py fails when a governance path present in the repository, or an
-    # input of its checks, is missing from this list.
+    # The shape is fixed, exactly on.pull_request with branches [main] and paths:
+    # scripts/governance-check.py fails on another event, paths-ignore or types, and when a
+    # governance path present in the repository, or an input of its checks, is missing here.
     paths:
       - 'CLAUDE.md'
       - 'AGENTS.md'
@@ -48,15 +50,23 @@ jobs:
           python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
             || { echo "::error::python3 older than 3.11"; exit 1; }
 
-      - name: Install bstack (from GitHub, never from the PR)
+      - name: Install bstack (pinned, never from the PR)
+        env:
+          # The bstack commit that judges this PR, by full SHA. The scripts that judge a PR must
+          # not come from it (BRO-2651), and a branch or tag can move under a reviewed workflow.
+          # Bumping the pin is a reviewed change to this file (a P20 pass, and this gate runs on
+          # it); scripts/governance-check.py (bstack-pin) fails on anything but a full SHA,
+          # fetched and checked out detached. A failed fetch fails the job.
+          BSTACK_REV: 77c24fc40c46771ad7236c3d9af447a28f200f28
         run: |
           set -euo pipefail
-          # The scripts that judge this PR must not come from it (BRO-2651): bstack is cloned from
-          # its default branch. The PR's parameters are read as data.
           DEST="$RUNNER_TEMP/bstack-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           rm -rf "$DEST"
-          git clone --depth 1 https://github.com/broomva/bstack.git "$DEST"
-          echo "bstack $(git -C "$DEST" rev-parse HEAD)"
+          git init -q "$DEST"
+          git -C "$DEST" fetch -q --depth 1 https://github.com/broomva/bstack.git "$BSTACK_REV"
+          git -C "$DEST" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$DEST" rev-parse HEAD)" = "$BSTACK_REV"
+          echo "bstack $BSTACK_REV"
           echo "BSTACK=$DEST" >> "$GITHUB_ENV"
 
       # Each step below records its output and exit status and continues, so the summary reports

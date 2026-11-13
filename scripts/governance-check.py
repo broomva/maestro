@@ -68,31 +68,98 @@ def number(text):
     raise Broken(f"not a count: {text!r}")
 
 
-def yaml_list(lines, i, indent):
-    """The items of the YAML list whose key is on line i: flow style ([a, b]) or block style (- a)."""
-    value = lines[i].split(":", 1)[1].split(" #", 1)[0].strip()
-    if value.startswith("["):
-        flow, j = value, i
-        while "]" not in flow:
-            j += 1
-            if j == len(lines):
-                raise Broken("unterminated flow list")
-            flow += " " + lines[j].split(" #", 1)[0].strip()
-        inner = flow[1:flow.index("]")]
-        return [x.strip() for x in inner.split(",") if x.strip()]
-    if value:
-        raise Broken(f"not a list: {value!r}")
-    items = []
-    for line in lines[i + 1:]:
-        if not line.strip() or line.lstrip().startswith("#"):
+# A strict reader for the block YAML these checks read, standard library only: PyYAML is not
+# guaranteed on a self-hosted runner, and nothing is installed. It reads plain block mappings of
+# unique keys and lists of scalars. Anything else (anchors, aliases, merge keys, tags, flow
+# mappings, tabs, a list where a key belongs) raises Broken: the checks fail closed on a shape
+# they cannot read, never pass over it.
+KEY = re.compile(r"""^ *('[^']*'|"[^"]*"|[^\s#'"{}\[\],&*!|>-][^:#]*?|-[^\s:#][^:#]*?) *:(?: +(.*))?$""")
+SCALAR = re.compile(r"""^(?:'[^']*'|"[^"\\]*"|[^\s'"#&*!|>{}\[\],][^#{}\[\],]*?)$""")
+
+
+def indent(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def unquote(s):
+    return s[1:-1] if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"" else s
+
+
+def content(lines, lo, hi, where):
+    """The line numbers in lines[lo:hi] that are not blank or comments."""
+    body = []
+    for i in range(lo, hi):
+        stripped = lines[i].strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        if len(line) - len(line.lstrip()) <= indent:
-            break
-        m = re.match(r"\s*-\s*(.*?)\s*(?:#.*)?$", line)
+        if lines[i][:indent(lines[i]) + 1].endswith("\t"):
+            raise Broken(f"{where}: tab indentation on line {i + 1}")
+        body.append(i)
+    return body
+
+
+def mapping(lines, lo, hi, where):
+    """The block mapping in lines[lo:hi]: {key: (value on the key's line, lo, hi of its block)}."""
+    body = content(lines, lo, hi, where)
+    if not body:
+        raise Broken(f"{where} is empty")
+    at = indent(lines[body[0]])
+    keys = []
+    for i in body:
+        if indent(lines[i]) < at:
+            raise Broken(f"{where}: line {i + 1} is outdented")
+        if indent(lines[i]) > at:
+            continue  # inside the previous key's block
+        m = KEY.match(lines[i])
         if not m:
-            raise Broken(f"not a list item: {line.strip()!r}")
-        items.append(m[1].strip("'\""))
-    return items
+            raise Broken(f"{where}: line {i + 1} is not a `key: value` entry")
+        key, value = unquote(m[1].strip()), re.sub(r"\s+#.*$", "", m[2] or "").strip()
+        if key == "<<" or value[:1] in ("&", "*", "!"):
+            raise Broken(f"{where}: anchors, aliases, merge keys and tags are not read (line {i + 1})")
+        if any(key == k for k, _, _ in keys):
+            raise Broken(f"{where}: duplicate key {key!r} (line {i + 1})")
+        keys.append((key, value, i))
+    ends = [i for _, _, i in keys[1:]] + [hi]
+    return {k: (v, i + 1, end) for (k, v, i), end in zip(keys, ends)}
+
+
+def block(parent, key, lines, where):
+    """The block mapping under `key`, which must hold one (not a scalar, flow value or expression)."""
+    if key not in parent:
+        raise Broken(f"{where} has no `{key}`")
+    value, lo, hi = parent[key]
+    if value:
+        raise Broken(f"{where}.{key} is {value!r}, not a block mapping")
+    return mapping(lines, lo, hi, f"{where}.{key}")
+
+
+def scalars(lines, entry, where):
+    """The list of scalars an entry holds, in flow style ([a, b]) or block style (- a)."""
+    value, lo, hi = entry
+    body = content(lines, lo, hi, where)
+    if value.startswith("["):
+        flow = " ".join([value] + [re.sub(r"\s+#.*$", "", lines[i]).strip() for i in body])
+        if not flow.endswith("]") or flow.count("[") != 1 or flow.count("]") != 1:
+            raise Broken(f"{where} is not a flat flow list")
+        items = [x.strip() for x in flow[1:-1].split(",")]
+        if items and not items[-1]:
+            items.pop()
+    elif not value:
+        if not body:
+            raise Broken(f"{where} is empty")
+        at = indent(lines[body[0]])
+        items = []
+        for i in body:
+            m = re.match(r"^ *- +(.*?)(?:\s+#.*)?$", lines[i])
+            if indent(lines[i]) != at or not m:
+                raise Broken(f"{where}: line {i + 1} is not a list item")
+            items.append(m[1].strip())
+    else:
+        raise Broken(f"{where} is {value!r}, not a list")
+    for x in items:
+        if not SCALAR.match(x) or re.search(r":\s|:$", x):
+            raise Broken(f"{where}: {x!r} is not a plain scalar")
+    return [unquote(x) for x in items]
 
 
 def check_claude_pointer(root):
@@ -119,14 +186,23 @@ def check_shard_count(root):
                      "(\"after <count> `mutants` jobs\")")
     named = number(found[0])
     lines = read(root, CI).splitlines()
-    keys = [i for i, line in enumerate(lines) if re.match(r"\s*shard\s*:", line)]
-    if len(keys) != 1:
-        raise Broken(f"{CI} has {len(keys)} `shard:` matrix keys, not one")
-    i = keys[0]
+    jobs = block(mapping(lines, 0, len(lines), CI), "jobs", lines, CI)
+    mutants = block(jobs, "mutants", lines, f"{CI} jobs")
+    # GitHub runs one job per matrix combination, after include and exclude. The count is the
+    # shard list's length only for one dimension and no include or exclude; any other shape fails.
     try:
-        shards = yaml_list(lines, i, len(lines[i]) - len(lines[i].lstrip()))
+        strategy = block(mutants, "strategy", lines, "mutants")
+        shaping = sorted(set(strategy) - {"matrix", "fail-fast", "max-parallel"})
+        if shaping:
+            raise Broken("strategy has " + ", ".join(shaping))
+        matrix = block(strategy, "matrix", lines, "mutants.strategy")
+        if list(matrix) != ["shard"]:
+            raise Broken("the matrix must hold exactly `shard`, and holds " + ", ".join(matrix))
+        shards = scalars(lines, matrix["shard"], "mutants.strategy.matrix.shard")
+        if len(set(shards)) != len(shards):
+            raise Broken("the shard list repeats a value")
     except Broken as e:
-        raise Broken(f"{CI} shard matrix: {e}")
+        raise Broken(f"unsupported matrix shape in {CI}: {e}")
     if named != len(shards):
         raise Broken(f"AGENTS.md says {found[0]} ({named}) `mutants` jobs, "
                      f"but the {CI} mutants matrix has {len(shards)} shards")
@@ -135,8 +211,22 @@ def check_shard_count(root):
 
 def check_triggers(root):
     """Every governance path in this repository, and every input of these checks, runs the job."""
-    head = read(root, WORKFLOW).split("\njobs:", 1)[0]
-    triggers = set(re.findall(r"^\s+-\s+'([^']+)'\s*$", head, re.M))
+    lines = read(root, WORKFLOW).splitlines()
+    # Exactly on.pull_request, on main, with paths: another event, paths-ignore or types would
+    # change when the check runs, and none of them is read here.
+    try:
+        on = block(mapping(lines, 0, len(lines), WORKFLOW), "on", lines, WORKFLOW)
+        if list(on) != ["pull_request"]:
+            raise Broken("`on` must hold exactly pull_request, and holds " + ", ".join(on))
+        pr = block(on, "pull_request", lines, "on")
+        if sorted(pr) != ["branches", "paths"]:
+            raise Broken("on.pull_request must hold exactly branches and paths, and holds "
+                         + ", ".join(pr))
+        if scalars(lines, pr["branches"], "on.pull_request.branches") != ["main"]:
+            raise Broken("on.pull_request.branches must be [main]")
+        triggers = set(scalars(lines, pr["paths"], "on.pull_request.paths"))
+    except Broken as e:
+        raise Broken(f"unsupported trigger shape in {WORKFLOW}: {e}")
     want = [p for p in GOVERNANCE_PATHS if (root / p).exists()] + list(CONTRACT_INPUTS)
     missing = [p for p in want if p not in triggers]
     if missing:
@@ -159,11 +249,32 @@ def check_rate_paths(root):
     return f"{len(patterns)} patterns count every governance path present"
 
 
+def check_bstack_pin(root):
+    """The job runs the bstack commit the workflow pins, fetched by its full SHA and checked out
+    detached: never a branch or tag, which can move under a reviewed workflow."""
+    text = read(root, WORKFLOW)
+    pins = re.findall(r"^ +BSTACK_REV: *(\S*) *$", text, re.M)
+    if len(pins) != 1 or not re.fullmatch(r"[0-9a-f]{40}", unquote(pins[0])):
+        raise Broken(f"{WORKFLOW} must set BSTACK_REV once, to a full 40-character commit SHA "
+                     f"(found {', '.join(pins) or 'none'})")
+    if re.search(r"\bgit\s+clone\b", text):
+        raise Broken(f"{WORKFLOW} clones a repository, which takes its moving default branch")
+    for what, pattern in (
+        ("fetch BSTACK_REV", r'git -C "\$DEST" fetch [^\n]*"\$BSTACK_REV"'),
+        ("check out FETCH_HEAD detached", r'git -C "\$DEST" checkout [^\n]*--detach FETCH_HEAD'),
+        ("verify HEAD is BSTACK_REV", r'test "\$\(git -C "\$DEST" rev-parse HEAD\)" = "\$BSTACK_REV"'),
+    ):
+        if not re.search(pattern, text):
+            raise Broken(f"{WORKFLOW} does not {what}")
+    return f"bstack {unquote(pins[0])[:12]}"
+
+
 CHECKS = (
     ("claude-points-to-agents", check_claude_pointer),
     ("shard-count", check_shard_count),
     ("trigger-paths", check_triggers),
     ("rate-paths", check_rate_paths),
+    ("bstack-pin", check_bstack_pin),
 )
 
 
@@ -194,13 +305,29 @@ def edit(rel, old, new, count=1):
     return apply
 
 
+def resub(rel, pattern, repl):
+    def apply(root):
+        text = (root / rel).read_text(encoding="utf-8")
+        new, n = re.subn(pattern, repl, text, count=1, flags=re.M)
+        if not n:
+            raise Broken(f"selftest seed anchor missing in {rel}: {pattern!r}")
+        (root / rel).write_text(new, encoding="utf-8")
+    return apply
+
+
+def insert_after(rel, pattern, added):
+    """Add lines after the first line matching pattern (whose group 1 is its indentation), each
+    indented as that line plus its own leading spaces."""
+    return resub(rel, pattern, lambda m: m[0] + "".join("\n" + m[1] + line for line in added))
+
+
 def matrix(shards, style="flow"):
+    items = [str(i) for i in (range(shards) if isinstance(shards, int) else shards)]
     def apply(root):
         text = (root / CI).read_text(encoding="utf-8")
-        m = re.search(r"^(\s*)shard\s*:.*$", text, re.M)
+        m = re.search(r"^( *)shard *:.*$", text, re.M)
         if not m:
             raise Broken("selftest seed anchor missing: shard matrix")
-        items = [str(i) for i in range(shards)]
         if style == "flow":
             new = f"{m[1]}shard: [{', '.join(items)}]"
         else:
@@ -221,6 +348,7 @@ def selftest(root):
         (r / "CLAUDE.md").unlink()
         (r / "CLAUDE.md").symlink_to("AGENTS.md")
 
+    SHARD_LINE = r"^( *)shard *:.*$"
     cases = [
         # (description, seed, the checks that must fail; empty means it must pass)
         ("unchanged tree", lambda r: None, []),
@@ -248,6 +376,46 @@ def selftest(root):
         ("the rate gate stops counting AGENTS.md", edit(PARAMETERS, '    "AGENTS.md",\n', ""),
          ["rate-paths"]),
         ("rcs-parameters.toml is unreadable", lambda r: (r / PARAMETERS).unlink(), ["rate-paths"]),
+        # The matrix's real shape: GitHub runs one job per combination, after include and exclude.
+        ("the matrix excludes a shard", insert_after(CI, SHARD_LINE, ["exclude:", "  - shard: 0"]),
+         ["shard-count"]),
+        ("the matrix includes another job", insert_after(CI, SHARD_LINE, ["include:", "  - shard: 99"]),
+         ["shard-count"]),
+        ("the matrix gains a dimension", insert_after(CI, SHARD_LINE, ["os: [a, b]"]), ["shard-count"]),
+        ("the matrix is an expression", lambda r: (
+            resub(CI, SHARD_LINE + r"\n", "")(r),
+            resub(CI, r"^( *)matrix:$", r"\1matrix: ${{ fromJSON(vars.SHARD_LINES) }}")(r)),
+         ["shard-count"]),
+        ("the shard list repeats a value", matrix(list(range(n - 1)) + [0]), ["shard-count"]),
+        ("the shard list is an anchor", resub(CI, r"^( *)shard: \[", r"\1shard: &s ["),
+         ["shard-count"]),
+        ("strategy gains another key", insert_after(CI, r"^( *)strategy:$", ["  x: 1"]),
+         ["shard-count"]),
+        ("strategy sets max-parallel", insert_after(CI, r"^( *)strategy:$", ["  max-parallel: 4"]),
+         []),
+        # The trigger: exactly on.pull_request, on main, with paths.
+        ("the event is push, not pull_request", edit(WORKFLOW, "\n  pull_request:\n", "\n  push:\n"),
+         ["trigger-paths"]),
+        ("a path moves under another event", lambda r: (
+            edit(WORKFLOW, "      - 'AGENTS.md'\n", "")(r),
+            edit(WORKFLOW, "\nconcurrency:", "\n  push:\n    paths:\n      - 'AGENTS.md'\nconcurrency:")(r)),
+         ["trigger-paths"]),
+        ("paths-ignore is added", insert_after(WORKFLOW, r"^( *)branches: \[main\]$",
+                                               ["paths-ignore:", "  - 'docs/**'"]), ["trigger-paths"]),
+        ("types narrows the events", insert_after(WORKFLOW, r"^( *)branches: \[main\]$",
+                                                  ["types: [closed]"]), ["trigger-paths"]),
+        ("branches widens past main", edit(WORKFLOW, "branches: [main]", "branches: [main, dev]"),
+         ["trigger-paths"]),
+        # The bstack that judges the PR: one commit, by full SHA.
+        ("bstack pinned to a branch", resub(WORKFLOW, r"(BSTACK_REV: )[0-9a-f]{40}", r"\1main"),
+         ["bstack-pin"]),
+        ("bstack pinned to a short SHA", resub(WORKFLOW, r"(BSTACK_REV: [0-9a-f]{7})[0-9a-f]{33}", r"\1"),
+         ["bstack-pin"]),
+        ("bstack cloned from its default branch", resub(
+            WORKFLOW, r"^( *)git init .*\n(?: *git -C .*\n)+",
+            r'\1git clone --depth 1 https://github.com/broomva/bstack.git "$DEST"\n'), ["bstack-pin"]),
+        ("the fetched bstack is not verified", resub(WORKFLOW, r"^ *test .*BSTACK_REV.*\n", ""),
+         ["bstack-pin"]),
     ]
     inputs = set(GOVERNANCE_PATHS) | set(CONTRACT_INPUTS) | {"README.md"}
     inputs |= set(re.findall(r"`([^`\s]+/[^`\s]+)`", read(root, "CLAUDE.md")))
