@@ -5,10 +5,16 @@
 # here (CLAUDE.md, AGENTS.md, .control/rcs-parameters.toml); all eight trigger the job, so a PR
 # that adds one of the other five gets the check too.
 # From bstack's assets/templates/gh-workflow-l3-stability.yml.template, as the workspace runs it
-# (broomva/workspace .github/workflows/l3-stability.yml), with four changes: the job also runs
-# scripts/governance-check.py; bstack is pinned to a commit, not its default branch; the report
-# goes to the job summary, not a PR comment, so the token stays read-only; and the runner guard
-# is ci.yml's.
+# (broomva/workspace .github/workflows/l3-stability.yml), changed so that:
+#   - the job runs scripts/governance-check.py, its selftest and its mutation proof;
+#   - bstack is fetched at a pinned commit, not its default branch, and runs in a cleared
+#     environment bound to this checkout;
+#   - compute-lambda.sh runs with --strict, so a drifting cached lambda fails the job;
+#   - the triggers add the files CLAUDE.md names and the checks' own inputs;
+#   - the report goes to the job summary, not a PR comment, so the token stays read-only;
+#   - the runner guard is ci.yml's.
+# scripts/governance-check.py comes from the PR like this file: it catches mistakes, and review
+# of .github/workflows/** and scripts/** (p9's P20 floor) catches intent.
 name: L3 stability gate
 on:
   pull_request:
@@ -53,21 +59,24 @@ jobs:
       - name: Python floor
         run: |
           set -euo pipefail
-          # The runner's own python3, as the workspace's gate does. The checks need only the
-          # standard library, so the job installs nothing and runs on any runner's python3 (the
-          # workspace's self-hosted macOS runners cannot run setup-python). 3.11 for tomllib,
-          # which compute-lambda.sh and governance-check.py read the parameters with.
+          # The runner's own python3 and yq: the job installs nothing, as the workspace's gate does
+          # (its self-hosted macOS runners cannot run setup-python). Python 3.11 for tomllib,
+          # which reads the parameters; mikefarah yq v4, preinstalled on GitHub's ubuntu images,
+          # which reads the YAML for scripts/governance-check.py.
           python3 -VV
           python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
             || { echo "::error::python3 older than 3.11"; exit 1; }
+          yq --version
+          yq --version | grep -q 'mikefarah/yq.* version v4\.' \
+            || { echo "::error::mikefarah yq v4 not found"; exit 1; }
 
       - name: Install bstack (pinned, never from the PR)
         env:
           # The bstack commit that judges this PR, by full SHA. The scripts that judge a PR must
           # not come from it (BRO-2651), and a branch or tag can move under a reviewed workflow.
           # Bumping the pin is a reviewed change to this file (a P20 pass, and this gate runs on
-          # it); scripts/governance-check.py (bstack-pin) fails on anything but a full SHA,
-          # fetched and checked out detached. A failed fetch fails the job.
+          # it); scripts/governance-check.py (bstack-calls) fails on anything but a full SHA and
+          # this exact recipe. A failed fetch fails the job.
           BSTACK_REV: 77c24fc40c46771ad7236c3d9af447a28f200f28
         run: |
           set -euo pipefail
@@ -84,7 +93,7 @@ jobs:
       # all three. The last step judges them. bstack's scripts run with a cleared environment
       # (env -i) and this checkout bound explicitly: they read BROOMVA_WORKSPACE, GIT_DIR and
       # BSTACK_L3_CORRECTION, which a self-hosted runner could otherwise supply, pointing them at
-      # another checkout. scripts/governance-check.py (bstack-env) holds every call to this.
+      # another checkout. scripts/governance-check.py (bstack-calls) holds every call to this.
       - name: Governance contract (scripts/governance-check.py)
         id: contract
         run: |
@@ -92,10 +101,16 @@ jobs:
           out=$(python3 -I scripts/governance-check.py 2>&1)
           status=$?
           # The selftest seeds breaks into a tree that holds: on a broken tree it would only bury
-          # the break under its own failures.
+          # the break under its own failures. The mutation proof then removes each guard in turn
+          # and requires that guard's own selftest case to fail.
           self="selftest: skipped, the contract does not hold"
           if [ "$status" = 0 ]; then
             self=$(python3 -I scripts/governance-check.py --selftest 2>&1)
+            status=$?
+          fi
+          if [ "$status" = 0 ]; then
+            self="$self
+          $(python3 -I scripts/governance-check.py --mutation-proof 2>&1)"
             status=$?
           fi
           echo "$out"
@@ -181,8 +196,8 @@ jobs:
               return ["### " + title, fence, text, fence, ""]
           lines = ["## L3 stability gate", "", verdict, ""]
           lines += block("Governance contract (scripts/governance-check.py)", env("CONTRACT_RESULT", ""))
-          lines += block("Per-level lambda (compute-lambda.sh)", env("COMPUTE_RESULT", ""))
-          lines += block("L3 rate gate (l3-rate-gate.sh)", env("RATE_RESULT", ""))
+          lines += block("Per-level lambda", env("COMPUTE_RESULT", ""))
+          lines += block("L3 rate", env("RATE_RESULT", ""))
           print("\n".join(lines))
           PY
 
@@ -208,7 +223,7 @@ jobs:
           case "$RATE_STATUS" in
             0|1) ;;
             *)
-              echo "FAIL: l3-rate-gate did not reach a verdict (exit '$RATE_STATUS')"
+              echo "FAIL: the rate gate did not reach a verdict (exit '$RATE_STATUS')"
               exit 1 ;;
           esac
           echo "OK: contract holds, all lambda_i > 0, no cached lambda drifts"

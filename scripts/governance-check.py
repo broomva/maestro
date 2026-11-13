@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Maestro's governance contract, run by the `stability-check` job (BRO-3702).
 
-    python3 -I scripts/governance-check.py [ROOT]     # check the tree at ROOT (default: this checkout)
-    python3 -I scripts/governance-check.py --selftest # seed one break per check in a copy: each must fail
+    python3 -I scripts/governance-check.py [ROOT]          # check the tree at ROOT (default: this checkout)
+    python3 -I scripts/governance-check.py --selftest [CASE]  # seed each case in a copy; each must hold
+    python3 -I scripts/governance-check.py --mutation-proof   # remove each guard in turn: its case must fail
 
 Exit 0 when every check holds, 1 when one does not, 2 on usage. A file that cannot be read, or a
-phrase that cannot be found, is a failure, never a pass. Standard library only (tomllib: Python
-3.11+), because the job runs the runner's own python3, with no setup-python.
+shape the checks do not read, is a failure with a named reason, never a pass. Needs Python 3.11
+(tomllib) and mikefarah yq v4, which reads the YAML; GitHub's ubuntu images ship both.
+
+This file comes from the PR it judges, like the workflow that runs it: it catches mistakes, and
+review of scripts/** and .github/workflows/** (p9's P20 floor) catches intent.
 """
+import json
 import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -35,17 +41,46 @@ WORKFLOW = ".github/workflows/l3-stability.yml"
 CI = ".github/workflows/ci.yml"
 PARAMETERS = ".control/rcs-parameters.toml"
 SELF = "scripts/governance-check.py"
-# The levels of bstack's rcs-parameters.toml template, in its order.
-LEVELS = ("L0", "L1", "L2", "L3")
-# The parameters bstack's compute-lambda.sh reads for each level.
-LEVEL_PARAMETERS = ("gamma", "L_theta", "rho", "L_d", "eta", "beta", "tau_bar", "nu", "tau_a")
 # Besides the governance paths, a change to any input of a check must run the job.
 CONTRACT_INPUTS = (WORKFLOW, CI, SELF)
+# The levels of bstack's rcs-parameters.toml template, in its order, and the parameters its
+# compute-lambda.sh reads for each.
+LEVELS = ("L0", "L1", "L2", "L3")
+LEVEL_PARAMETERS = ("gamma", "L_theta", "rho", "L_d", "eta", "beta", "tau_bar", "nu", "tau_a")
+
+# How the job reaches bstack. The install step is this recipe exactly, and outside it the only
+# workflow lines that mention bstack or its scripts are these two calls: a cleared environment
+# bound to this checkout, and compute-lambda.sh with --strict and the checkout's parameters.
+INSTALL_STEP = "Install bstack (pinned, never from the PR)"
+INSTALL_RUN = """set -euo pipefail
+DEST="$RUNNER_TEMP/bstack-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+rm -rf "$DEST"
+git init -q "$DEST"
+git -C "$DEST" fetch -q --depth 1 https://github.com/broomva/bstack.git "$BSTACK_REV"
+git -C "$DEST" checkout -q --detach FETCH_HEAD
+test "$(git -C "$DEST" rev-parse HEAD)" = "$BSTACK_REV"
+echo "bstack $BSTACK_REV"
+echo "BSTACK=$DEST" >> "$GITHUB_ENV"
+"""
+BSTACK_ENV = 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/'
+BSTACK_CALLS = [
+    ("compute", "out=$(" + BSTACK_ENV + "compute-lambda.sh --strict --human"
+     ' --config="$PWD/.control/rcs-parameters.toml" 2>&1)'),
+    ("rate", "out=$(" + BSTACK_ENV + "l3-rate-gate.sh 2>&1)"),
+]
+BSTACK_MENTION = re.compile(r"bstack|compute-lambda|l3-rate-gate|git[ \t]+clone", re.I)
+
+# How many keys and values (yq's `...`) carry an anchor, an alias, a merge key or a tag outside
+# YAML's core schema; an alias has an empty tag, a merge key `!!merge`. The document itself is
+# read by a separate `.` query: yq drops duplicate keys when it builds an object around it.
+YQ_EXOTIC = '[... | select(anchor != "" or (tag | test("^!!(map|seq|str|int|float|bool|null)$") | not))] | length'
+
 
 UNITS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
          "fifteen sixteen seventeen eighteen nineteen").split()
 TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
         "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+COUNT = re.compile(r"\bafter[ \t]+([A-Za-z0-9]+(?:[ -][A-Za-z]+)??)[ \t]+`mutants`[ \t]+jobs\b")
 
 
 class Broken(Exception):
@@ -57,136 +92,90 @@ def read(root, rel):
         return (root / rel).read_text(encoding="utf-8")
     except OSError as e:
         raise Broken(f"cannot read {rel}: {e.strerror or e}")
+    except UnicodeDecodeError:
+        raise Broken(f"{rel} is not UTF-8")
 
 
 def number(text):
     """A count written as digits or English words below one hundred ("sixteen", "twenty-four")."""
-    t = text.strip().lower()
+    t = text.lower()
     if re.fullmatch(r"[0-9]+", t):
         return int(t)
-    words = re.split(r"[\s-]+", t)
-    if len(words) == 1 and words[0] in UNITS:
-        return UNITS.index(words[0])
-    if len(words) == 1 and words[0] in TENS:
-        return TENS[words[0]]
-    if len(words) == 2 and words[0] in TENS and words[1] in UNITS[1:10]:
-        return TENS[words[0]] + UNITS.index(words[1])
-    raise Broken(f"not a count: {text!r}")
+    parts = re.split(r"[ -]", t)
+    if len(parts) == 1 and parts[0] in UNITS:
+        return UNITS.index(parts[0])
+    if len(parts) == 1 and parts[0] in TENS:
+        return TENS[parts[0]]
+    if len(parts) == 2 and parts[0] in TENS and parts[1] in UNITS[1:10]:
+        return TENS[parts[0]] + UNITS.index(parts[1])
+    raise Broken(f"not a count below one hundred: {text!r}")
 
 
-def words(k):
-    """k below one hundred in the words number() reads ("twenty-four")."""
-    if k < 20:
-        return UNITS[k]
-    tens = [w for w, v in TENS.items() if v == k // 10 * 10]
-    if k >= 100 or not tens:
-        raise Broken(f"no words for {k}")
-    return tens[0] + ("-" + UNITS[k % 10] if k % 10 else "")
+def mapping(x, where):
+    if not isinstance(x, dict):
+        raise Broken(f"{where} is not a mapping")
+    return x
 
 
-# A strict reader for the block YAML these checks read, standard library only: PyYAML is not
-# guaranteed on a self-hosted runner, and nothing is installed. It reads plain block mappings of
-# unique keys and lists of scalars. Anything else (anchors, aliases, merge keys, tags, flow
-# mappings, tabs, a list where a key belongs) raises Broken: the checks fail closed on a shape
-# they cannot read, never pass over it.
-KEY = re.compile(r"""^ *('[^']*'|"[^"]*"|[^\s#'"{}\[\],&*!|>-][^:#]*?|-[^\s:#][^:#]*?) *:(?: +(.*))?$""")
-SCALAR = re.compile(r"""^(?:'[^']*'|"[^"\\]*"|[^\s'"#&*!|>{}\[\],][^#{}\[\],]*?)$""")
+def no_duplicates(pairs):
+    keys = [k for k, _ in pairs]
+    dups = sorted({k for k in keys if keys.count(k) > 1})
+    if dups:
+        raise Broken("duplicate keys " + ", ".join(map(repr, dups)))
+    return dict(pairs)
 
 
-def indent(line):
-    return len(line) - len(line.lstrip(" "))
+_YAML = {}
 
 
-def unquote(s):
-    return s[1:-1] if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"" else s
+def load_yaml(root, rel):
+    """The YAML document at rel, read by yq. Refused: bytes outside printable ASCII and newline
+    (no tab, carriage return, form feed or non-breaking space for parsers to read differently),
+    duplicate keys, anchors, aliases, merge keys and non-core tags."""
+    try:
+        raw = (root / rel).read_bytes()
+    except OSError as e:
+        raise Broken(f"cannot read {rel}: {e.strerror or e}")
+    bad = sorted({b for b in raw if b != 0x0A and not 0x20 <= b <= 0x7E})
+    if bad:
+        raise Broken(f"{rel} has bytes outside printable ASCII and newline: "
+                     + ", ".join(f"0x{b:02x}" for b in bad))
+    if raw not in _YAML:
+        _YAML[raw] = [yq(root, rel, query) for query in (".", YQ_EXOTIC)]
+    doc, exotic = _YAML[raw]
+    if exotic != 0:
+        raise Broken(f"{rel} uses anchors, aliases, merge keys or non-core tags, which are not read")
+    return doc
 
 
-def content(lines, lo, hi, where):
-    """The line numbers in lines[lo:hi] that are not blank or comments."""
-    body = []
-    for i in range(lo, hi):
-        stripped = lines[i].strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if lines[i][:indent(lines[i]) + 1].endswith("\t"):
-            raise Broken(f"{where}: tab indentation on line {i + 1}")
-        body.append(i)
-    return body
-
-
-def mapping(lines, lo, hi, where):
-    """The block mapping in lines[lo:hi]: {key: (value on the key's line, lo, hi of its block)}."""
-    body = content(lines, lo, hi, where)
-    if not body:
-        raise Broken(f"{where} is empty")
-    at = indent(lines[body[0]])
-    keys = []
-    for i in body:
-        if indent(lines[i]) < at:
-            raise Broken(f"{where}: line {i + 1} is outdented")
-        if indent(lines[i]) > at:
-            continue  # inside the previous key's block
-        m = KEY.match(lines[i])
-        if not m:
-            raise Broken(f"{where}: line {i + 1} is not a `key: value` entry")
-        key, value = unquote(m[1].strip()), re.sub(r"\s+#.*$", "", m[2] or "").strip()
-        if key == "<<" or value[:1] in ("&", "*", "!"):
-            raise Broken(f"{where}: anchors, aliases, merge keys and tags are not read (line {i + 1})")
-        if any(key == k for k, _, _ in keys):
-            raise Broken(f"{where}: duplicate key {key!r} (line {i + 1})")
-        keys.append((key, value, i))
-    ends = [i for _, _, i in keys[1:]] + [hi]
-    return {k: (v, i + 1, end) for (k, v, i), end in zip(keys, ends)}
-
-
-def block(parent, key, lines, where):
-    """The block mapping under `key`, which must hold one (not a scalar, flow value or expression)."""
-    if key not in parent:
-        raise Broken(f"{where} has no `{key}`")
-    value, lo, hi = parent[key]
-    if value:
-        raise Broken(f"{where}.{key} is {value!r}, not a block mapping")
-    return mapping(lines, lo, hi, f"{where}.{key}")
-
-
-def scalars(lines, entry, where):
-    """The list of scalars an entry holds, in flow style ([a, b]) or block style (- a)."""
-    value, lo, hi = entry
-    body = content(lines, lo, hi, where)
-    if value.startswith("["):
-        flow = " ".join([value] + [re.sub(r"\s+#.*$", "", lines[i]).strip() for i in body])
-        if not flow.endswith("]") or flow.count("[") != 1 or flow.count("]") != 1:
-            raise Broken(f"{where} is not a flat flow list")
-        items = [x.strip() for x in flow[1:-1].split(",")]
-        if items and not items[-1]:
-            items.pop()
-    elif not value:
-        if not body:
-            raise Broken(f"{where} is empty")
-        at = indent(lines[body[0]])
-        items = []
-        for i in body:
-            m = re.match(r"^ *- +(.*?)(?:\s+#.*)?$", lines[i])
-            if indent(lines[i]) != at or not m:
-                raise Broken(f"{where}: line {i + 1} is not a list item")
-            items.append(m[1].strip())
-    else:
-        raise Broken(f"{where} is {value!r}, not a list")
-    for x in items:
-        if not SCALAR.match(x) or re.search(r":\s|:$", x):
-            raise Broken(f"{where}: {x!r} is not a plain scalar")
-    return [unquote(x) for x in items]
+def yq(root, rel, query):
+    """yq's reading of rel under query, as one JSON document."""
+    try:
+        out = subprocess.run(["yq", "-o=json", "-I=0", query, str(root / rel)],
+                             capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        raise Broken("yq not found: the checks read YAML with mikefarah yq v4")
+    if out.returncode:
+        raise Broken(f"yq cannot read {rel}: {out.stderr.strip()[:300]}")
+    try:
+        return json.loads(out.stdout, object_pairs_hook=no_duplicates)
+    except json.JSONDecodeError as e:
+        raise Broken(f"yq's reading of {rel} is not one JSON document: {e}")
+    except Broken as e:
+        raise Broken(f"{rel} has {e}")
 
 
 def claude_paths(text):
     """The repository paths CLAUDE.md names: backticked, with a slash or a file extension. Each must
     exist (claude-points-to-agents) and trigger the job (trigger-paths), so a PR that moves one
-    runs the check; the selftest copies them. A path outside the repository fails."""
-    named = re.findall(r"`([^`\s]+)`", text)
+    runs the check; the selftest copies them. Each must be a plain relative path, as git and
+    GitHub's path filters read it the same way: no leading / or ./, no .. segment, no glob."""
+    named = re.findall(r"`([^` \t\n]+)`", text)
     paths = [p for p in named if "/" in p or re.search(r"\.(md|html|ya?ml|toml|sh|py|rs)$", p)]
-    outside = [p for p in paths if p.startswith("/") or ".." in p.split("/")]
-    if outside:
-        raise Broken("CLAUDE.md names paths outside the repository: " + ", ".join(outside))
+    unplain = [p for p in paths if p.startswith(("/", "./")) or ".." in p.split("/")
+               or re.search(r"[*?\[\]{}!\\]", p) or not (p.isascii() and p.isprintable())]
+    if unplain:
+        raise Broken("CLAUDE.md names paths that are not plain repository paths: " + ", ".join(unplain))
     return named, list(dict.fromkeys(paths))
 
 
@@ -208,30 +197,31 @@ def check_claude_pointer(root):
 
 
 def check_shard_count(root):
-    """The number of `mutants` jobs AGENTS.md names is the length of ci.yml's mutants matrix."""
-    found = re.findall(r"\bafter\s+(\S+(?:[ -]\S+)??)\s+`mutants`\s+jobs\b", read(root, "AGENTS.md"))
+    """The number of `mutants` jobs AGENTS.md names is the number of jobs ci.yml's mutants matrix
+    runs. GitHub runs one job per combination after include and exclude, so the count is the
+    shard list's length only for exactly that shape; any other shape fails."""
+    found = COUNT.findall(read(root, "AGENTS.md"))
     if len(found) != 1:
         raise Broken(f"AGENTS.md names the `mutants` job count {len(found)} times, not once "
                      "(\"after <count> `mutants` jobs\")")
     named = number(found[0])
-    lines = read(root, CI).splitlines()
-    jobs = block(mapping(lines, 0, len(lines), CI), "jobs", lines, CI)
-    mutants = block(jobs, "mutants", lines, f"{CI} jobs")
-    # GitHub runs one job per matrix combination, after include and exclude. The count is the
-    # shard list's length only for one dimension and no include or exclude; any other shape fails.
-    try:
-        strategy = block(mutants, "strategy", lines, "mutants")
-        shaping = sorted(set(strategy) - {"matrix", "fail-fast", "max-parallel"})
-        if shaping:
-            raise Broken("strategy has " + ", ".join(shaping))
-        matrix = block(strategy, "matrix", lines, "mutants.strategy")
-        if list(matrix) != ["shard"]:
-            raise Broken("the matrix must hold exactly `shard`, and holds " + ", ".join(matrix))
-        shards = scalars(lines, matrix["shard"], "mutants.strategy.matrix.shard")
-        if len(set(shards)) != len(shards):
-            raise Broken("the shard list repeats a value")
-    except Broken as e:
-        raise Broken(f"unsupported matrix shape in {CI}: {e}")
+    doc = mapping(load_yaml(root, CI), CI)
+    mutants = mapping(mapping(doc.get("jobs"), f"{CI} jobs").get("mutants"), "jobs.mutants")
+    strategy = mapping(mutants.get("strategy"), "jobs.mutants.strategy")
+    shaping = sorted(set(strategy) - {"matrix", "fail-fast", "max-parallel"})
+    if shaping:
+        raise Broken(f"unsupported matrix shape in {CI}: strategy has " + ", ".join(shaping))
+    matrix = mapping(strategy.get("matrix"), "jobs.mutants.strategy.matrix")
+    if list(matrix) != ["shard"]:
+        raise Broken(f"unsupported matrix shape in {CI}: the matrix must hold exactly `shard`, "
+                     "and holds " + ", ".join(matrix))
+    shards = matrix["shard"]
+    if not isinstance(shards, list):
+        raise Broken(f"unsupported matrix shape in {CI}: shard is not a list")
+    if not all(type(x) in (int, str) for x in shards):
+        raise Broken(f"unsupported matrix shape in {CI}: a shard is not an integer or a string")
+    if len(set(shards)) != len(shards):
+        raise Broken(f"unsupported matrix shape in {CI}: the shard list repeats a value")
     if named != len(shards):
         raise Broken(f"AGENTS.md says {found[0]} ({named}) `mutants` jobs, "
                      f"but the {CI} mutants matrix has {len(shards)} shards")
@@ -239,32 +229,31 @@ def check_shard_count(root):
 
 
 def check_triggers(root):
-    """Every governance path, every input of these checks and every path CLAUDE.md names runs
-    the job."""
-    lines = read(root, WORKFLOW).splitlines()
-    # Exactly on.pull_request, on main, with paths: another event, paths-ignore or types would
-    # change when the check runs, and none of them is read here.
-    try:
-        on = block(mapping(lines, 0, len(lines), WORKFLOW), "on", lines, WORKFLOW)
-        if list(on) != ["pull_request"]:
-            raise Broken("`on` must hold exactly pull_request, and holds " + ", ".join(on))
-        pr = block(on, "pull_request", lines, "on")
-        if sorted(pr) != ["branches", "paths"]:
-            raise Broken("on.pull_request must hold exactly branches and paths, and holds "
-                         + ", ".join(pr))
-        if scalars(lines, pr["branches"], "on.pull_request.branches") != ["main"]:
-            raise Broken("on.pull_request.branches must be [main]")
-        paths = scalars(lines, pr["paths"], "on.pull_request.paths")
-        # GitHub applies paths in order, and a `!` entry excludes what an earlier entry matched.
-        negated = [x for x in paths if x.startswith("!")]
-        if negated:
-            raise Broken("on.pull_request.paths negates " + ", ".join(negated))
-        triggers = set(paths)
-    except Broken as e:
-        raise Broken(f"unsupported trigger shape in {WORKFLOW}: {e}")
+    """The workflow runs on exactly on.pull_request, on main, with paths that hold every governance
+    path, every input of these checks and every path CLAUDE.md names. Another event,
+    paths-ignore, types or a `!` entry would change when the check runs."""
+    doc = mapping(load_yaml(root, WORKFLOW), WORKFLOW)
+    on = mapping(doc.get("on"), f"{WORKFLOW} on")
+    if list(on) != ["pull_request"]:
+        raise Broken(f"unsupported trigger shape in {WORKFLOW}: `on` must hold exactly "
+                     "pull_request, and holds " + ", ".join(on))
+    pr = mapping(on["pull_request"], "on.pull_request")
+    if sorted(pr) != ["branches", "paths"]:
+        raise Broken(f"unsupported trigger shape in {WORKFLOW}: on.pull_request must hold exactly "
+                     "branches and paths, and holds " + ", ".join(pr))
+    if pr["branches"] != ["main"]:
+        raise Broken(f"unsupported trigger shape in {WORKFLOW}: on.pull_request.branches must be [main]")
+    paths = pr["paths"]
+    if not isinstance(paths, list) or not all(isinstance(x, str) for x in paths):
+        raise Broken(f"unsupported trigger shape in {WORKFLOW}: on.pull_request.paths is not a "
+                     "list of strings")
+    negated = [x for x in paths if x.startswith("!")]
+    if negated:
+        raise Broken(f"unsupported trigger shape in {WORKFLOW}: on.pull_request.paths negates "
+                     + ", ".join(negated))
     want = list(dict.fromkeys([*GOVERNANCE_PATHS, *CONTRACT_INPUTS,
                                *claude_paths(read(root, "CLAUDE.md"))[1]]))
-    missing = [p for p in want if p not in triggers]
+    missing = [p for p in want if p not in paths]
     if missing:
         raise Broken(f"{WORKFLOW} does not run on: " + ", ".join(missing))
     return f"{len(want)} paths run the job"
@@ -278,12 +267,16 @@ def parameters(root):
 
 
 def check_rate_paths(root):
-    """The L3 rate gate counts every governance path in this repository."""
-    patterns = parameters(root).get("gates", {}).get("l3_paths", {}).get("patterns")
+    """The L3 rate gate counts every governance path. It passes the list to `git log --`, where
+    pathspec magic such as :(exclude), :! or :^ removes paths from the count: none is allowed."""
+    gates = mapping(parameters(root).get("gates"), f"{PARAMETERS} [gates]")
+    patterns = mapping(gates.get("l3_paths"), f"{PARAMETERS} [gates.l3_paths]").get("patterns")
     if not isinstance(patterns, list) or not all(isinstance(x, str) for x in patterns):
-        raise Broken(f"{PARAMETERS} has no [gates.l3_paths] patterns list of strings")
-    # The rate gate passes the list to `git log --`, where pathspec magic such as :(exclude),
-    # :! or :^ removes paths from the count. None is read here, so none is allowed.
+        raise Broken(f"{PARAMETERS} [gates.l3_paths] patterns is not a list of strings")
+    unplain = [x for x in patterns if not (x.isascii() and x.isprintable())]
+    if unplain:
+        raise Broken(f"{PARAMETERS} [gates.l3_paths] has patterns outside printable ASCII: "
+                     + ", ".join(map(repr, unplain)))
     magic = [x for x in patterns if x.startswith(":")]
     if magic:
         raise Broken(f"{PARAMETERS} [gates.l3_paths] uses pathspec magic: " + ", ".join(magic))
@@ -293,10 +286,15 @@ def check_rate_paths(root):
     return f"{len(patterns)} patterns count every governance path"
 
 
+def finite(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
 def check_levels(root):
-    """The parameters hold exactly the template's four levels, each with a cached lambda: with
-    none, bstack's compute-lambda.sh finds all([]) stable, and a level with no cached value is
-    never checked for drift."""
+    """The parameters hold exactly the template's four levels, with finite numbers, each with a
+    cached lambda: with none, bstack's compute-lambda.sh finds all([]) stable, a level with no
+    cached value is never checked for drift, and inf in a parameter and its cache drifts by nan,
+    which --strict does not catch."""
     data = parameters(root)
     levels = data.get("levels")
     if not isinstance(levels, list) or not all(isinstance(x, dict) for x in levels):
@@ -304,13 +302,10 @@ def check_levels(root):
     ids = [x.get("id") for x in levels]
     if ids != list(LEVELS):
         raise Broken(f"{PARAMETERS} levels are {ids}, not {list(LEVELS)}")
-    cached = data.get("derived", {}).get("lambda")
-    if not isinstance(cached, dict) or sorted(cached) != sorted(LEVELS):
-        raise Broken(f"{PARAMETERS} [derived.lambda] caches "
-                     f"{sorted(cached) if isinstance(cached, dict) else 'nothing'}, not {list(LEVELS)}")
-    # A non-finite value computes a non-finite lambda (gamma = inf gives omega = inf, exit 0).
-    def finite(x):
-        return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+    cached = mapping(mapping(data.get("derived"), f"{PARAMETERS} [derived]").get("lambda"),
+                     f"{PARAMETERS} [derived.lambda]")
+    if sorted(cached) != sorted(LEVELS):
+        raise Broken(f"{PARAMETERS} [derived.lambda] caches {sorted(cached)}, not {list(LEVELS)}")
     bad = [f"{lvl['id']}.{k}" for lvl in levels for k in LEVEL_PARAMETERS if not finite(lvl.get(k))]
     bad += [f"derived.lambda.{k}" for k in LEVELS if not finite(cached[k])]
     if bad:
@@ -318,58 +313,45 @@ def check_levels(root):
     return "levels " + ", ".join(LEVELS) + ", finite, each with a cached lambda"
 
 
-def check_lambda_strict(root):
-    """The job runs compute-lambda.sh once, with --strict: without it a cached lambda that drifts
-    from its recomputed value by more than 1e-4 still exits 0."""
-    runs = re.findall(r'"\$BSTACK"/scripts/compute-lambda\.sh([^\n]*)', read(root, WORKFLOW))
-    if len(runs) != 1 or "--strict" not in runs[0].split():
-        raise Broken(f"{WORKFLOW} must run compute-lambda.sh once, with --strict "
-                     f"(runs it {len(runs)} times: {'; '.join(r.strip() for r in runs) or '-'})")
-    return "compute-lambda.sh --strict"
-
-
-# How the job calls bstack: a cleared environment with this checkout bound. compute-lambda.sh also
-# takes the checkout's parameters by path, so no fallback config is ever read.
-BSTACK_ENV = 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/'
-BSTACK_CALLS = {
-    "compute-lambda.sh": '--config="$PWD/.control/rcs-parameters.toml"',
-    "l3-rate-gate.sh": "",
-}
-
-
-def check_bstack_env(root):
-    """Every bstack script call runs in a cleared environment bound to this checkout: an inherited
-    BROOMVA_WORKSPACE, GIT_DIR or BSTACK_L3_CORRECTION would point it at another checkout."""
-    calls = re.findall(r'^.*"\$BSTACK"/scripts/([\w.-]+).*$', read(root, WORKFLOW), re.M)
-    lines = re.findall(r'^.*"\$BSTACK"/scripts/[\w.-]+.*$', read(root, WORKFLOW), re.M)
-    if sorted(calls) != sorted(BSTACK_CALLS):
-        raise Broken(f"{WORKFLOW} calls bstack's {', '.join(calls) or 'nothing'}, "
-                     f"not exactly {', '.join(BSTACK_CALLS)} once each")
-    for name, line in zip(calls, lines):
-        if BSTACK_ENV + name not in line or BSTACK_CALLS[name] not in line.split(name, 1)[1]:
-            raise Broken(f"{WORKFLOW} calls {name} without {BSTACK_ENV.split(' bash')[0]}"
-                         + (f" and {BSTACK_CALLS[name]}" if BSTACK_CALLS[name] else ""))
-    return "bstack runs in a cleared environment bound to this checkout"
-
-
-def check_bstack_pin(root):
-    """The job runs the bstack commit the workflow pins, fetched by its full SHA and checked out
-    detached: never a branch or tag, which can move under a reviewed workflow."""
-    text = read(root, WORKFLOW)
-    pins = re.findall(r"^ +BSTACK_REV: *(\S*) *$", text, re.M)
-    if len(pins) != 1 or not re.fullmatch(r"[0-9a-f]{40}", unquote(pins[0])):
-        raise Broken(f"{WORKFLOW} must set BSTACK_REV once, to a full 40-character commit SHA "
-                     f"(found {', '.join(pins) or 'none'})")
-    if re.search(r"\bgit\s+clone\b", text):
-        raise Broken(f"{WORKFLOW} clones a repository, which takes its moving default branch")
-    for what, pattern in (
-        ("fetch BSTACK_REV", r'git -C "\$DEST" fetch [^\n]*"\$BSTACK_REV"'),
-        ("check out FETCH_HEAD detached", r'git -C "\$DEST" checkout [^\n]*--detach FETCH_HEAD'),
-        ("verify HEAD is BSTACK_REV", r'test "\$\(git -C "\$DEST" rev-parse HEAD\)" = "\$BSTACK_REV"'),
-    ):
-        if not re.search(pattern, text):
-            raise Broken(f"{WORKFLOW} does not {what}")
-    return f"bstack {unquote(pins[0])[:12]}"
+def check_bstack_calls(root):
+    """The job fetches bstack at a pinned full SHA with the exact install recipe, and its only
+    other mention of bstack or its scripts is the two exact calls, in their own steps."""
+    doc = mapping(load_yaml(root, WORKFLOW), WORKFLOW)
+    job = mapping(mapping(doc.get("jobs"), "jobs").get("stability-check"), "jobs.stability-check")
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(s, dict) for s in steps):
+        raise Broken(f"{WORKFLOW} jobs.stability-check.steps is not a list of steps")
+    installs = [s for s in steps if s.get("name") == INSTALL_STEP]
+    if len(installs) != 1:
+        raise Broken(f"{WORKFLOW} has {len(installs)} {INSTALL_STEP!r} steps, not one")
+    install = installs[0]
+    if sorted(install) != ["env", "name", "run"]:
+        raise Broken(f"the install step holds {', '.join(install)}, not exactly name, env and run")
+    if install["run"] != INSTALL_RUN:
+        raise Broken("the install step's run is not the pinned fetch, detached checkout and "
+                     "verification recipe")
+    env = mapping(install["env"], "the install step's env")
+    if list(env) != ["BSTACK_REV"]:
+        raise Broken("the install step's env must set exactly BSTACK_REV")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(env["BSTACK_REV"])):
+        raise Broken(f"BSTACK_REV is {env['BSTACK_REV']!r}, not a full 40-character commit SHA")
+    calls = []
+    for s in steps:
+        if s.get("name") == INSTALL_STEP:
+            continue
+        for key, value in s.items():
+            text = value if isinstance(value, str) else json.dumps(value)
+            for line in text.split("\n"):
+                if BSTACK_MENTION.search(line):
+                    calls.append((s.get("id"), line.strip() if key == "run" else f"{key}: {line}"))
+    if calls != BSTACK_CALLS:
+        raise Broken("outside the install step, the workflow's mentions of bstack are not exactly "
+                     "the compute and rate calls, bound and --strict: "
+                     + "; ".join(f"{i}: {c}" for i, c in calls))
+    for s in steps:
+        if s.get("id") in ("compute", "rate") and sorted(s) != ["id", "name", "run"]:
+            raise Broken(f"the {s['id']} step holds {', '.join(s)}, not exactly name, id and run")
+    return f"bstack {env['BSTACK_REV'][:12]}, fetched and called as pinned"
 
 
 CHECKS = (
@@ -378,43 +360,59 @@ CHECKS = (
     ("trigger-paths", check_triggers),
     ("rate-paths", check_rate_paths),
     ("rcs-levels", check_levels),
-    ("lambda-strict", check_lambda_strict),
-    ("bstack-env", check_bstack_env),
-    ("bstack-pin", check_bstack_pin),
+    ("bstack-calls", check_bstack_calls),
 )
 
 
 def run(root, quiet=False):
-    """The names of the checks that failed."""
+    """The names of the checks that failed. A check that crashes fails as `<name> (crashed)`: it
+    fails closed, and no selftest case expects it."""
     failed = []
     for name, check in CHECKS:
         try:
             detail = check(root)
-        except Broken as e:
-            failed.append(name)
+        except Exception as e:
+            crashed = not isinstance(e, Broken)
+            failed.append(name + (" (crashed)" if crashed else ""))
+            reason = f"{type(e).__name__}: {e}" if crashed else str(e)
             if not quiet:
-                print(f"FAIL {name}: {e}")
+                print(f"FAIL {name}: {reason}")
                 if os.environ.get("GITHUB_ACTIONS") == "true":
-                    print(f"::error title=governance contract ({name})::{e}")
+                    print(f"::error title=governance contract ({name})::{reason}")
         else:
             if not quiet:
                 print(f"ok   {name}: {detail}")
     return failed
 
 
-def edit(rel, old, new, count=1):
+# mutation proof below: every guard above is listed in MUTANTS with an anchor that occurs once
+# above this line, and the selftest case that only it can fail.
+
+
+def words(k):
+    """k in the words number() reads ("twenty-four"); counts from one hundred are not supported."""
+    if not 0 <= k < 100:
+        raise Broken(f"the selftest grows the count to {k}; number() reads counts below one hundred")
+    if k < 20:
+        return UNITS[k]
+    tens = next(w for w, v in TENS.items() if v == k // 10 * 10)
+    return tens + ("-" + UNITS[k % 10] if k % 10 else "")
+
+
+def edit(rel, old, new):
+    """Replace the one occurrence of old in rel."""
     def apply(root):
         text = (root / rel).read_text(encoding="utf-8")
-        if text.count(old) < 1:
-            raise Broken(f"selftest seed anchor missing in {rel}: {old!r}")
-        (root / rel).write_text(text.replace(old, new, count), encoding="utf-8")
+        if text.count(old) != 1:
+            raise Broken(f"selftest seed anchor occurs {text.count(old)} times in {rel}: {old!r}")
+        (root / rel).write_text(text.replace(old, new), encoding="utf-8")
     return apply
 
 
-def resub(rel, pattern, repl):
+def resub(rel, pattern, repl, count=1):
     def apply(root):
         text = (root / rel).read_text(encoding="utf-8")
-        new, n = re.subn(pattern, repl, text, count=1, flags=re.M)
+        new, n = re.subn(pattern, repl, text, count=count, flags=re.M)
         if not n:
             raise Broken(f"selftest seed anchor missing in {rel}: {pattern!r}")
         (root / rel).write_text(new, encoding="utf-8")
@@ -427,188 +425,259 @@ def insert_after(rel, pattern, added):
     return resub(rel, pattern, lambda m: m[0] + "".join("\n" + m[1] + line for line in added))
 
 
-def matrix(shards, style="flow"):
-    items = [str(i) for i in (range(shards) if isinstance(shards, int) else shards)]
+def write(rel, text):
     def apply(root):
-        text = (root / CI).read_text(encoding="utf-8")
-        m = re.search(r"^( *)shard *:.*$", text, re.M)
-        if not m:
-            raise Broken("selftest seed anchor missing: shard matrix")
-        if style == "flow":
-            new = f"{m[1]}shard: [{', '.join(items)}]"
-        else:
-            new = f"{m[1]}shard:" + "".join(f"\n{m[1]}  - {i}" for i in items)
-        (root / CI).write_text(text[:m.start()] + new + text[m.end():], encoding="utf-8")
+        (root / rel).write_text(text, encoding="utf-8")
     return apply
 
 
-def selftest(root, quiet=False):
-    """Each seeded break fails exactly the check that guards it; each benign rewrite passes."""
-    count = re.search(r"\bafter\s+(\S+(?:[ -]\S+)??)\s+`mutants`\s+jobs\b", read(root, "AGENTS.md"))
+def matrix(shards):
+    items = [str(i) for i in (range(shards) if isinstance(shards, int) else shards)]
+    return resub(CI, r"^( *)shard *:.*$", lambda m: f"{m[1]}shard: [{', '.join(items)}]")
+
+
+def seq(*seeds):
+    def apply(root):
+        for s in seeds:
+            s(root)
+    return apply
+
+
+def bytes_into(rel, pattern, raw):
+    """Put raw bytes after the first line matching pattern (bytes the text helpers cannot write)."""
+    def apply(root):
+        data = (root / rel).read_bytes()
+        m = re.search(pattern.encode(), data, re.M)
+        if not m:
+            raise Broken(f"selftest seed anchor missing in {rel}: {pattern!r}")
+        (root / rel).write_bytes(data[:m.end()] + raw + data[m.end():])
+    return apply
+
+
+def cases_for(root):
+    """(description, seed, the checks that must fail; empty means it must pass). Each break is
+    isolated: it fails one check, through one guard, which the mutation proof confirms."""
+    count = COUNT.search(read(root, "AGENTS.md"))
     if not count:
         raise Broken("AGENTS.md has no shard count to seed")
     n, word = number(count[1]), count[1]
     phrase = f"after {word} `mutants` jobs"
+    claude = read(root, "CLAUDE.md")
+    trigger = "      - 'CLAUDE.md'\n"
+    level = r'^\[\[levels\]\]\nid *= *"{}"\n(?:\w+ *=.*\n)*'
+    rate = '    "AGENTS.md",\n'
+    shard_line = r"^( *)shard *:.*$"
+    branches = r"^( *)branches: \[main\]$"
+    compute = 'bash "$BSTACK"/scripts/compute-lambda.sh --strict --human'
 
-    def to_symlink(r):
+    def triggered(*paths):
+        return edit(WORKFLOW, trigger, trigger + "".join(f"      - '{p}'\n" for p in paths))
+
+    def named(*paths):
+        return edit("CLAUDE.md", "`AGENTS.md`", "`AGENTS.md` and " + " and ".join(f"`{p}`" for p in paths))
+
+    def symlink_to_pointer(r):
+        (r / "POINTER.md").write_text(claude, encoding="utf-8")
         (r / "CLAUDE.md").unlink()
-        (r / "CLAUDE.md").symlink_to("AGENTS.md")
+        (r / "CLAUDE.md").symlink_to("POINTER.md")
 
-    SHARD_LINE = r"^( *)shard *:.*$"
-    LEVEL = r'^\[\[levels\]\]\nid *= *"{}"\n(?:\w+ *=.*\n)*'
-    cases = [
-        # (description, seed, the checks that must fail; empty means it must pass)
-        ("unchanged tree", lambda r: None, []),
-        ("CLAUDE.md no longer names AGENTS.md", edit("CLAUDE.md", "`AGENTS.md`", "`RULES.md`"),
-         ["claude-points-to-agents", "trigger-paths"]),
-        ("CLAUDE.md is a symlink to AGENTS.md", to_symlink, ["claude-points-to-agents", "trigger-paths"]),
-        ("CLAUDE.md names a path that does not exist", edit("CLAUDE.md", "`AGENTS.md`",
-                                                            "`AGENTS.md` and `docs/missing.md`"),
-         ["claude-points-to-agents", "trigger-paths"]),
-        ("CLAUDE.md names an absolute path", lambda r: edit(
-            "CLAUDE.md", "`AGENTS.md`", f"`AGENTS.md` and `{r.resolve()}/AGENTS.md`")(r),
-         ["claude-points-to-agents", "trigger-paths"]),
-        ("CLAUDE.md names a path through ..", edit("CLAUDE.md", "`AGENTS.md`",
-                                                   "`AGENTS.md` and `docs/../AGENTS.md`"),
-         ["claude-points-to-agents", "trigger-paths"]),
-        ("the workflow stops running on a file CLAUDE.md names", resub(
-            WORKFLOW, r"^ *- 'docs/specs/.*'\n", ""), ["trigger-paths"]),
-        ("CLAUDE.md is a copy of AGENTS.md", lambda r: shutil.copyfile(r / "AGENTS.md", r / "CLAUDE.md"),
-         ["claude-points-to-agents", "trigger-paths"]),
-        ("AGENTS.md names one shard more", edit("AGENTS.md", phrase,
-                                                f"after {n + 1} `mutants` jobs"), ["shard-count"]),
-        ("ci.yml drops a shard", matrix(n - 1), ["shard-count"]),
-        ("AGENTS.md no longer names the count", edit("AGENTS.md", phrase, "after the `mutants` run"),
-         ["shard-count"]),
-        ("a second shard matrix", edit(CI, "    strategy:", "    strategy:\n      # shard: [0]\n"
-                                       "      x:\n        shard: [0]"), ["shard-count"]),
-        ("ci.yml shard list in block style", matrix(n, "block"), []),
-        # Grown from the current count, so each always changes it.
-        (f"both sides grow to {n + 8}, written as words", lambda r: (
-            edit("AGENTS.md", phrase, f"after {words(n + 8)} `mutants` jobs")(r), matrix(n + 8)(r)), []),
-        (f"both sides grow to {n + 8}, written as digits", lambda r: (
-            edit("AGENTS.md", phrase, f"after {n + 8} `mutants` jobs")(r), matrix(n + 8)(r)), []),
-        ("the workflow stops running on AGENTS.md", edit(WORKFLOW, "      - 'AGENTS.md'\n", ""),
-         ["trigger-paths"]),
-        ("the workflow stops running on ci.yml", edit(WORKFLOW, f"      - '{CI}'\n", ""),
-         ["trigger-paths"]),
-        ("the rate gate stops counting AGENTS.md", edit(PARAMETERS, '    "AGENTS.md",\n', ""),
-         ["rate-paths"]),
-        # A governance path the repository lacks still triggers the job and counts: adding it is a
-        # governance change.
-        ("the workflow stops running on METALAYER.md", edit(WORKFLOW, "      - 'METALAYER.md'\n", ""),
-         ["trigger-paths"]),
-        ("the workflow stops running on a docs reference", edit(
-            WORKFLOW, "      - 'docs/references/current-work.md'\n", ""), ["trigger-paths"]),
-        ("the rate gate stops counting METALAYER.md", edit(PARAMETERS, '    "METALAYER.md",\n', ""),
-         ["rate-paths"]),
-        ("rcs-parameters.toml is unreadable", lambda r: (r / PARAMETERS).unlink(),
-         ["rate-paths", "rcs-levels"]),
-        # The matrix's real shape: GitHub runs one job per combination, after include and exclude.
-        ("the matrix excludes a shard", insert_after(CI, SHARD_LINE, ["exclude:", "  - shard: 0"]),
-         ["shard-count"]),
-        ("the matrix includes another job", insert_after(CI, SHARD_LINE, ["include:", "  - shard: 99"]),
-         ["shard-count"]),
-        ("the matrix gains a dimension", insert_after(CI, SHARD_LINE, ["os: [a, b]"]), ["shard-count"]),
-        ("the matrix is an expression", lambda r: (
-            resub(CI, SHARD_LINE + r"\n", "")(r),
-            resub(CI, r"^( *)matrix:$", r"\1matrix: ${{ fromJSON(vars.SHARD_LINES) }}")(r)),
-         ["shard-count"]),
-        ("the shard list repeats a value", matrix(list(range(n - 1)) + [0]), ["shard-count"]),
-        ("the shard list is an anchor", resub(CI, r"^( *)shard: \[", r"\1shard: &s ["),
-         ["shard-count"]),
-        ("strategy gains another key", insert_after(CI, r"^( *)strategy:$", ["  x: 1"]),
-         ["shard-count"]),
-        ("strategy sets max-parallel", insert_after(CI, r"^( *)strategy:$", ["  max-parallel: 4"]),
-         []),
-        # The trigger: exactly on.pull_request, on main, with paths.
-        ("the event is push, not pull_request", edit(WORKFLOW, "\n  pull_request:\n", "\n  push:\n"),
-         ["trigger-paths"]),
-        ("a path moves under another event", lambda r: (
-            edit(WORKFLOW, "      - 'AGENTS.md'\n", "")(r),
-            edit(WORKFLOW, "\nconcurrency:", "\n  push:\n    paths:\n      - 'AGENTS.md'\nconcurrency:")(r)),
-         ["trigger-paths"]),
-        ("paths-ignore is added", insert_after(WORKFLOW, r"^( *)branches: \[main\]$",
-                                               ["paths-ignore:", "  - 'docs/**'"]), ["trigger-paths"]),
-        ("types narrows the events", insert_after(WORKFLOW, r"^( *)branches: \[main\]$",
-                                                  ["types: [closed]"]), ["trigger-paths"]),
-        ("branches widens past main", edit(WORKFLOW, "branches: [main]", "branches: [main, dev]"),
-         ["trigger-paths"]),
-        # The bstack that judges the PR: one commit, by full SHA.
-        ("bstack pinned to a branch", resub(WORKFLOW, r"(BSTACK_REV: )[0-9a-f]{40}", r"\1main"),
-         ["bstack-pin"]),
-        ("bstack pinned to a short SHA", resub(WORKFLOW, r"(BSTACK_REV: [0-9a-f]{7})[0-9a-f]{33}", r"\1"),
-         ["bstack-pin"]),
-        ("bstack cloned from its default branch", resub(
-            WORKFLOW, r"^( *)git init .*\n(?: *git -C .*\n)+",
-            r'\1git clone --depth 1 https://github.com/broomva/bstack.git "$DEST"\n'), ["bstack-pin"]),
-        ("the fetched bstack is not verified", resub(WORKFLOW, r"^ *test .*BSTACK_REV.*\n", ""),
-         ["bstack-pin"]),
-        # Drift: compute-lambda.sh fails on it only with --strict.
-        ("compute-lambda.sh runs without --strict", edit(WORKFLOW, "compute-lambda.sh --strict ",
-                                                          "compute-lambda.sh "), ["lambda-strict"]),
-        # bstack reads BROOMVA_WORKSPACE (and GIT_DIR) from its environment: unbound, a runner's
-        # value would point it at another checkout.
-        ("compute-lambda.sh inherits BROOMVA_WORKSPACE", edit(
-            WORKFLOW, 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/compute-lambda.sh',
-            'bash "$BSTACK"/scripts/compute-lambda.sh'), ["bstack-env"]),
-        ("compute-lambda.sh reads no explicit config", edit(
-            WORKFLOW, ' --config="$PWD/.control/rcs-parameters.toml"', ""), ["bstack-env"]),
-        ("compute-lambda.sh keeps the runner's environment", edit(
-            WORKFLOW, 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/compute-lambda.sh',
-            'BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/compute-lambda.sh'), ["bstack-env"]),
-        ("l3-rate-gate.sh keeps the runner's environment", edit(
-            WORKFLOW, 'env -i PATH="$PATH" HOME="$HOME" BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/l3-rate-gate.sh',
-            'BROOMVA_WORKSPACE="$PWD" bash "$BSTACK"/scripts/l3-rate-gate.sh'), ["bstack-env"]),
-        ("another bstack script is called", insert_after(
-            WORKFLOW, r"^( *)set \+e$", ['bash "$BSTACK"/scripts/doctor.sh || true']), ["bstack-env"]),
-        # The levels: none, or one fewer, would pass bstack's all() unchecked.
-        ("a level is removed", resub(PARAMETERS, LEVEL.format("L2"), ""), ["rcs-levels"]),
-        ("every level is removed", lambda r: [resub(PARAMETERS, LEVEL.format(x), "")(r) for x in LEVELS],
-         ["rcs-levels"]),
-        ("a cached lambda is removed", resub(PARAMETERS, r"^L3 = .*\n", ""), ["rcs-levels"]),
-        ("a gamma is infinite", resub(PARAMETERS, r"^gamma( *)= .*$", r"gamma\1= inf"), ["rcs-levels"]),
-        ("a tau_a is not a number", resub(PARAMETERS, r"^tau_a( *)= .*$", r"tau_a\1= nan"),
-         ["rcs-levels"]),
-        ("a rho is a string", resub(PARAMETERS, r"^rho( *)= (.*)$", r'rho\1= "\2"'), ["rcs-levels"]),
-        ("a cached lambda is infinite", resub(PARAMETERS, r"^L3 = .*$", "L3 = inf"), ["rcs-levels"]),
-        # inf - inf is nan, and nan > 1e-4 is false: compute-lambda.sh --strict exits 0 on this.
-        ("a gamma and its cached lambda are both infinite", lambda r: (
-            resub(PARAMETERS, r"^gamma( *)= .*$", r"gamma\1= inf")(r),
-            resub(PARAMETERS, r"^L0 = .*$", "L0 = inf")(r)), ["rcs-levels"]),
-        # Pathspec magic in the rate gate's list removes paths from its count.
-        ("the rate list excludes AGENTS.md", edit(PARAMETERS, '    "AGENTS.md",\n',
-                                                  '    "AGENTS.md",\n    ":(exclude)AGENTS.md",\n'),
-         ["rate-paths"]),
-        ("the rate list excludes with :!", edit(PARAMETERS, '    "AGENTS.md",\n',
-                                                '    "AGENTS.md",\n    ":!AGENTS.md",\n'), ["rate-paths"]),
-        ("the rate list excludes with :^", edit(PARAMETERS, '    "AGENTS.md",\n',
-                                                '    "AGENTS.md",\n    ":^AGENTS.md",\n'), ["rate-paths"]),
-        # GitHub's paths: a later `!` entry excludes an earlier match; any quoting reads the same.
-        ("the trigger list negates AGENTS.md", edit(WORKFLOW, "      - 'AGENTS.md'\n",
-                                                    "      - 'AGENTS.md'\n      - '!AGENTS.md'\n"),
-         ["trigger-paths"]),
-        ("a double-quoted negation", edit(WORKFLOW, "      - 'AGENTS.md'\n",
-                                          "      - 'AGENTS.md'\n      - \"!AGENTS.md\"\n"),
-         ["trigger-paths"]),
-        ("trigger paths double-quoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", '      - "AGENTS.md"\n'),
-         []),
-        ("trigger paths unquoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", "      - AGENTS.md\n"), []),
-    ]
-    # Every file a check reads: the governance paths, the checks' inputs, and every path CLAUDE.md
-    # names, whatever directory it is in.
-    inputs = set(GOVERNANCE_PATHS) | set(CONTRACT_INPUTS) | set(claude_paths(read(root, "CLAUDE.md"))[1])
+    def absolute(r):
+        path = f"{r.resolve()}/README.md"
+        seq(named(path), triggered(path))(r)
 
     def nested(copy):
         """The selftest of a tree whose CLAUDE.md also names another root file: it must pass."""
-        edit("CLAUDE.md", "`AGENTS.md`", "`AGENTS.md` and `NOTES.md`")(copy)
-        (copy / "NOTES.md").write_text("notes\n", encoding="utf-8")
-        edit(WORKFLOW, "      - 'CLAUDE.md'\n", "      - 'CLAUDE.md'\n      - 'NOTES.md'\n")(copy)
+        seq(named("NOTES.md"), triggered("NOTES.md"), write("NOTES.md", "notes\n"))(copy)
         return selftest(copy, quiet=True)
 
+    # A step that mentions bstack outside the install step and the two calls.
+    def extra_step(*lines):
+        return edit(WORKFLOW, "      - name: Report\n",
+                    "      - name: Extra\n        run: |\n"
+                    + "".join(f"          {x}\n" for x in lines) + "\n      - name: Report\n")
+
+    return [
+        ("unchanged tree", lambda r: None, []),
+        # claude-points-to-agents
+        ("CLAUDE.md is a symlink to a separate pointer file", symlink_to_pointer,
+         ["claude-points-to-agents"]),
+        ("CLAUDE.md is a copy of an AGENTS.md that names only itself", seq(
+            write("AGENTS.md", f"Rules are in `AGENTS.md`, {phrase}.\n"),
+            write("CLAUDE.md", f"Rules are in `AGENTS.md`, {phrase}.\n")), ["claude-points-to-agents"]),
+        ("CLAUDE.md names only README.md", write("CLAUDE.md", "Read `README.md`.\n"),
+         ["claude-points-to-agents"]),
+        ("CLAUDE.md names a path that does not exist", seq(named("docs/missing.md"),
+                                                           triggered("docs/missing.md")),
+         ["claude-points-to-agents"]),
+        # claude_paths() feeds both checks: an unplain path fails both.
+        ("CLAUDE.md names a path through ..", seq(named("docs/../README.md"), triggered("docs/../README.md")),
+         ["claude-points-to-agents", "trigger-paths"]),
+        ("CLAUDE.md names a ./ path", seq(named("./README.md"), triggered("./README.md")),
+         ["claude-points-to-agents", "trigger-paths"]),
+        ("CLAUDE.md names a glob", seq(named("docs/[x].md"), triggered("docs/[x].md"),
+                                       write("docs/[x].md", "x\n")), ["claude-points-to-agents", "trigger-paths"]),
+        ("CLAUDE.md names an absolute path", absolute, ["claude-points-to-agents", "trigger-paths"]),
+        # shard-count
+        ("AGENTS.md names the count twice", edit("AGENTS.md", phrase, f"{phrase}, after {word} `mutants` jobs"),
+         ["shard-count"]),
+        ("AGENTS.md names one shard more", edit("AGENTS.md", phrase, f"after {n + 1} `mutants` jobs"),
+         ["shard-count"]),
+        ("ci.yml drops a shard", matrix(n - 1), ["shard-count"]),
+        ("AGENTS.md no longer names the count", edit("AGENTS.md", phrase, "after the `mutants` run"),
+         ["shard-count"]),
+        ("AGENTS.md names a count that is not a number", edit("AGENTS.md", phrase, "after many `mutants` jobs"),
+         ["shard-count"]),
+        ("strategy gains another key", insert_after(CI, r"^( *)strategy:$", ["  x: 1"]), ["shard-count"]),
+        ("strategy sets max-parallel", insert_after(CI, r"^( *)strategy:$", ["  max-parallel: 4"]), []),
+        ("the matrix is an expression", seq(resub(CI, shard_line + r"\n", ""),
+                                            resub(CI, r"^( *)matrix:$", r"\1matrix: ${{ fromJSON(vars.SHARDS) }}")),
+         ["shard-count"]),
+        ("the matrix excludes a shard", insert_after(CI, shard_line, ["exclude:", "  - shard: 0"]),
+         ["shard-count"]),
+        ("the matrix includes another job", insert_after(CI, shard_line, ["include:", "  - shard: 99"]),
+         ["shard-count"]),
+        ("the matrix gains a dimension", insert_after(CI, shard_line, ["os: [a, b]"]), ["shard-count"]),
+        ("the shard list is a string", resub(CI, shard_line, r"\1shard: " + (
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[:n] if n <= 62 else "x")),
+         ["shard-count"]),
+        ("a shard is a list", matrix(["[0]"] + list(range(1, n))), ["shard-count"]),
+        ("a shard is a boolean", matrix(["true"] + list(range(2, n + 1))), ["shard-count"]),
+        ("the shard list repeats a value", matrix(list(range(n - 1)) + [0]), ["shard-count"]),
+        (f"both sides grow to {n + 8}, written as words",
+         seq(edit("AGENTS.md", phrase, f"after {words(n + 8)} `mutants` jobs"), matrix(n + 8)), []),
+        (f"both sides grow to {n + 8}, written as digits",
+         seq(edit("AGENTS.md", phrase, f"after {n + 8} `mutants` jobs"), matrix(n + 8)), []),
+        # The YAML loader (each break shows on the first check that reads the file).
+        ("ci.yml has a non-breaking space before a comment", bytes_into(CI, r"^( *)fail-fast: false", b"\xc2\xa0# x"),
+         ["shard-count"]),
+        ("ci.yml has a carriage return", bytes_into(CI, r"^( *)fail-fast: false", b"\r"), ["shard-count"]),
+        ("ci.yml has a form feed in a comment", bytes_into(CI, r"^( *)fail-fast: false", b" # \x0c"),
+         ["shard-count"]),
+        ("ci.yml repeats a key", insert_after(CI, r"^( *)fail-fast: false$", ["fail-fast: false"]),
+         ["shard-count"]),
+        ("ci.yml uses an anchor", resub(CI, shard_line, r"\1shard: &s [" + ", ".join(map(str, range(n))) + "]"),
+         ["shard-count"]),
+        ("ci.yml uses a merge key", insert_after(CI, r"^( *)fail-fast: false$", ["<<: {}"]), ["shard-count"]),
+        ("ci.yml uses a custom tag", resub(CI, r"^( *)fail-fast: false$", r"\1fail-fast: !flag false"),
+         ["shard-count"]),
+        ("ci.yml is two documents", lambda r: (r / CI).write_text((r / CI).read_text() + "---\nx: 1\n"),
+         ["shard-count"]),
+        # trigger-paths
+        ("push runs beside pull_request", edit(WORKFLOW, "concurrency:", "  push:\nconcurrency:"),
+         ["trigger-paths"]),
+        ("pull_request_target runs beside pull_request",
+         edit(WORKFLOW, "concurrency:", "  pull_request_target:\nconcurrency:"), ["trigger-paths"]),
+        # A workflow the loader refuses fails both checks that read it.
+        ('"on" repeats on', edit(WORKFLOW, "concurrency:", '"on":\n  pull_request:\nconcurrency:'),
+         ["trigger-paths", "bstack-calls"]),
+        ("paths-ignore is added", insert_after(WORKFLOW, branches, ["paths-ignore:", "  - 'docs/**'"]),
+         ["trigger-paths"]),
+        ("types narrows the events", insert_after(WORKFLOW, branches, ["types: [closed]"]), ["trigger-paths"]),
+        ("branches widens past main", edit(WORKFLOW, "branches: [main]", "branches: [main, dev]"),
+         ["trigger-paths"]),
+        ("a trigger path is a mapping", insert_after(WORKFLOW, r"^( *)- 'CLAUDE.md'$", ["- x: y"]),
+         ["trigger-paths"]),
+        ("the trigger list negates AGENTS.md", insert_after(WORKFLOW, r"^( *)- 'AGENTS.md'$", ["- '!AGENTS.md'"]),
+         ["trigger-paths"]),
+        ("the workflow stops running on AGENTS.md", edit(WORKFLOW, "      - 'AGENTS.md'\n", ""),
+         ["trigger-paths"]),
+        ("the workflow stops running on METALAYER.md", edit(WORKFLOW, "      - 'METALAYER.md'\n", ""),
+         ["trigger-paths"]),
+        ("the workflow stops running on ci.yml", edit(WORKFLOW, f"      - '{CI}'\n", ""), ["trigger-paths"]),
+        ("the workflow stops running on a file CLAUDE.md names",
+         resub(WORKFLOW, r"^ *- 'docs/specs/.*'\n", ""), ["trigger-paths"]),
+        ("trigger paths double-quoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", '      - "AGENTS.md"\n'), []),
+        ("trigger paths unquoted", edit(WORKFLOW, "      - 'AGENTS.md'\n", "      - AGENTS.md\n"), []),
+        # rate-paths
+        ("[gates] is a string", seq(resub(PARAMETERS, r"^\[gates\.l3_paths\]\npatterns = \[[^\]]*\]\n", ""),
+                                    edit(PARAMETERS, "schema_version = 1\n", 'schema_version = 1\ngates = "x"\n')),
+         ["rate-paths"]),
+        ("[gates.l3_paths] is a string", resub(PARAMETERS, r"^\[gates\.l3_paths\]\npatterns = \[[^\]]*\]\n",
+                                               '[gates]\nl3_paths = "x"\n'), ["rate-paths"]),
+        ("a rate pattern is a number", edit(PARAMETERS, rate, rate + "    1,\n"), ["rate-paths"]),
+        ("a rate pattern has a non-breaking space", edit(PARAMETERS, rate, rate + '    "AGENTS.md ",\n'),
+         ["rate-paths"]),
+        ("the rate list excludes AGENTS.md", edit(PARAMETERS, rate, rate + '    ":(exclude)AGENTS.md",\n'),
+         ["rate-paths"]),
+        ("the rate list excludes with :!", edit(PARAMETERS, rate, rate + '    ":!AGENTS.md",\n'), ["rate-paths"]),
+        ("the rate list excludes with :^", edit(PARAMETERS, rate, rate + '    ":^AGENTS.md",\n'), ["rate-paths"]),
+        ("the rate gate stops counting AGENTS.md", edit(PARAMETERS, rate, ""), ["rate-paths"]),
+        ("the rate gate stops counting METALAYER.md", edit(PARAMETERS, '    "METALAYER.md",\n', ""),
+         ["rate-paths"]),
+        # rcs-levels
+        ("levels is a list of numbers", seq(resub(PARAMETERS, level.format(r"L\d"), "", count=0),
+                                            edit(PARAMETERS, "schema_version = 1\n",
+                                                 "schema_version = 1\nlevels = [1, 2, 3, 4]\n")),
+         ["rcs-levels"]),
+        ("a level is removed", resub(PARAMETERS, level.format("L2"), ""), ["rcs-levels"]),
+        ("every level is removed", resub(PARAMETERS, level.format(r"L\d"), "", count=0), ["rcs-levels"]),
+        ("[derived] is a string", seq(resub(PARAMETERS, r"^\[derived\.lambda\]\n(?:L\d = .*\n)+", ""),
+                                      resub(PARAMETERS, r"^\[derived\.omega\]\n(?:\w+ *=.*\n)+", ""),
+                                      edit(PARAMETERS, "schema_version = 1\n", 'schema_version = 1\nderived = "x"\n')),
+         ["rcs-levels"]),
+        ("[derived.lambda] is a string", resub(PARAMETERS, r"^\[derived\.lambda\]\n(?:L\d = .*\n)+",
+                                               '[derived]\nlambda = "x"\n'), ["rcs-levels"]),
+        ("a cached lambda is removed", resub(PARAMETERS, r"^L3 = .*\n", ""), ["rcs-levels"]),
+        ("a cached lambda is added", resub(PARAMETERS, r"^L3 = .*$", lambda m: m[0] + "\nL4 = 0.1"), ["rcs-levels"]),
+        ("a rho is a string", resub(PARAMETERS, r"^rho( *)= (.*)$", r'rho\1= "\2"'), ["rcs-levels"]),
+        ("a rho is a boolean", resub(PARAMETERS, r"^rho( *)= (.*)$", r"rho\1= true"), ["rcs-levels"]),
+        ("a gamma and its cached lambda are both infinite",
+         seq(resub(PARAMETERS, r"^gamma( *)= .*$", r"gamma\1= inf"), resub(PARAMETERS, r"^L0 = .*$", "L0 = inf")),
+         ["rcs-levels"]),
+        ("a tau_a is not a number", resub(PARAMETERS, r"^tau_a( *)= .*$", r"tau_a\1= nan"), ["rcs-levels"]),
+        # bstack-calls
+        ("a step is a string", edit(WORKFLOW, "      - name: Report\n", "      - just-a-string\n\n      - name: Report\n"),
+         ["bstack-calls"]),
+        ("the install step appears twice", lambda r: edit(WORKFLOW, "      - name: Report\n", re.search(
+            r"(?ms)^      - name: Install bstack.*?\n\n", (r / WORKFLOW).read_text())[0] + "      - name: Report\n")(r),
+         ["bstack-calls"]),
+        ("the install step gains a key", insert_after(WORKFLOW, r"^( *)- name: Install bstack.*$",
+                                                      ["  continue-on-error: true"]), ["bstack-calls"]),
+        ("the fetched bstack is not verified", resub(WORKFLOW, r"^ *test .*BSTACK_REV.*\n", ""), ["bstack-calls"]),
+        ("the checkout is not detached", edit(WORKFLOW, "checkout -q --detach FETCH_HEAD", "checkout -q FETCH_HEAD"),
+         ["bstack-calls"]),
+        ("the install step sets another variable", insert_after(WORKFLOW, r"^( *)BSTACK_REV: .*$", ["X: y"]),
+         ["bstack-calls"]),
+        ("bstack pinned to a branch", resub(WORKFLOW, r"(BSTACK_REV: )[0-9a-f]{40}", r"\1main"), ["bstack-calls"]),
+        ("bstack pinned to a short SHA", resub(WORKFLOW, r"(BSTACK_REV: [0-9a-f]{7})[0-9a-f]{33}", r"\1"),
+         ["bstack-calls"]),
+        ("compute-lambda.sh runs without --strict", edit(WORKFLOW, " --strict --human", " --human"),
+         ["bstack-calls"]),
+        ("compute-lambda.sh reads no explicit config", edit(WORKFLOW, ' --config="$PWD/.control/rcs-parameters.toml"', ""),
+         ["bstack-calls"]),
+        ("compute-lambda.sh inherits the environment", edit(WORKFLOW, BSTACK_ENV + "compute", 'bash "$BSTACK"/scripts/compute'),
+         ["bstack-calls"]),
+        ("l3-rate-gate.sh inherits the environment", edit(WORKFLOW, BSTACK_ENV + "l3-rate", 'bash "$BSTACK"/scripts/l3-rate'),
+         ["bstack-calls"]),
+        ("a second compute-lambda.sh without --strict", extra_step(f'bash "$BSTACK"/scripts/compute-lambda.sh --human'),
+         ["bstack-calls"]),
+        ("an extra git clone, the verify line kept", extra_step("git clone https://github.com/broomva/bstack.git /tmp/b"),
+         ["bstack-calls"]),
+        ("a step uses a bstack action", edit(WORKFLOW, "      - name: Report\n",
+                                             "      - uses: broomva/bstack@main\n\n      - name: Report\n"),
+         ["bstack-calls"]),
+        ("the compute step sets BSTACK", insert_after(WORKFLOW, r"^( *)id: compute$", ["env:", "  BSTACK: /tmp/b"]),
+         ["bstack-calls"]),
+        ("the compute step gains continue-on-error", insert_after(WORKFLOW, r"^( *)id: compute$",
+                                                                  ["continue-on-error: true"]), ["bstack-calls"]),
+        # The selftest itself.
+        ("the selftest of a tree whose CLAUDE.md names another root file", nested, None),
+    ]
+
+
+def selftest(root, quiet=False, only=None):
+    """Seed each case into a copy of every file the checks read; the number of cases that did not
+    hold. A case whose want is None is a nested selftest, which must report no failed case."""
+    inputs = set(GOVERNANCE_PATHS) | set(CONTRACT_INPUTS) | set(claude_paths(read(root, "CLAUDE.md"))[1])
+    cases = cases_for(root)
+    if only is not None:
+        cases = [c for c in cases if c[0] == only]
+        if not cases:
+            raise Broken(f"no selftest case named {only!r}")
+    if quiet:
+        cases = [c for c in cases if c[2] is not None]
     bad = 0
-    for desc, seed, want in cases + ([] if quiet else [
-            ("the selftest of a tree whose CLAUDE.md names another root file", nested, None)]):
+    for desc, seed, want in cases:
         with tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp)
             for rel in inputs:
@@ -630,16 +699,118 @@ def selftest(root, quiet=False):
     return bad
 
 
+# (guard, anchor in the checks above, its neutered form, the selftest case only it can fail)
+MUTANTS = [
+    ("symlink refused", 'if (root / "CLAUDE.md").is_symlink():', "if False:",
+     "CLAUDE.md is a symlink to a separate pointer file"),
+    ("copy refused", 'if text == read(root, "AGENTS.md"):', "if False:",
+     "CLAUDE.md is a copy of an AGENTS.md that names only itself"),
+    ("names AGENTS.md", 'if "AGENTS.md" not in named:', "if False:", "CLAUDE.md names only README.md"),
+    ("named paths exist", "missing = [p for p in paths if not (root / p).is_file()]", "missing = []",
+     "CLAUDE.md names a path that does not exist"),
+    ("no .. segment", 'or ".." in p.split("/")', "", "CLAUDE.md names a path through .."),
+    ("no leading / or ./", 'p.startswith(("/", "./"))', "False", "CLAUDE.md names a ./ path"),
+    ("no glob", r're.search(r"[*?\[\]{}!\\]", p)', "False", "CLAUDE.md names a glob"),
+    ("count named once", "if len(found) != 1:", "if not found:", "AGENTS.md names the count twice"),
+    ("strategy keys", "if shaping:", "if False:", "strategy gains another key"),
+    ("matrix is exactly shard", 'if list(matrix) != ["shard"]:', "if False:", "the matrix excludes a shard"),
+    ("shard is a list", "if not isinstance(shards, list):", "if False:", "the shard list is a string"),
+    ("shards are scalars", "if not all(type(x) in (int, str) for x in shards):", "if False:",
+     "a shard is a boolean"),
+    ("shards are unique", "if len(set(shards)) != len(shards):", "if False:", "the shard list repeats a value"),
+    ("count equals the matrix", "if named != len(shards):", "if False:", "ci.yml drops a shard"),
+    ("YAML is printable ASCII", "if bad:\n        raise Broken(f\"{rel} has bytes", "if False:\n        raise Broken(f\"{rel} has bytes",
+     "ci.yml has a non-breaking space before a comment"),
+    ("YAML has no duplicate keys", "    if dups:\n", "    if False:\n", "ci.yml repeats a key"),
+    ("YAML has no anchors or tags", "if exotic != 0:", "if False:", "ci.yml uses an anchor"),
+    ("a mapping is a mapping", "    if not isinstance(x, dict):\n        raise Broken(f\"{where} is not a mapping\")",
+     "    if False:\n        raise Broken(f\"{where} is not a mapping\")", "[gates] is a string"),
+    ("on is exactly pull_request", 'if list(on) != ["pull_request"]:', "if False:",
+     "push runs beside pull_request"),
+    ("pull_request is exactly branches and paths", 'if sorted(pr) != ["branches", "paths"]:', "if False:",
+     "paths-ignore is added"),
+    ("branches is main", 'if pr["branches"] != ["main"]:', "if False:", "branches widens past main"),
+    ("trigger paths are strings", "if not isinstance(paths, list) or not all(isinstance(x, str) for x in paths):",
+     "if False:", "a trigger path is a mapping"),
+    ("no negated trigger", "if negated:", "if False:", "the trigger list negates AGENTS.md"),
+    ("triggers cover", "missing = [p for p in want if p not in paths]", "missing = []",
+     "the workflow stops running on AGENTS.md"),
+    ("rate patterns are strings",
+     "if not isinstance(patterns, list) or not all(isinstance(x, str) for x in patterns):", "if False:",
+     "a rate pattern is a number"),
+    ("rate patterns are printable ASCII", "if unplain:\n        raise Broken(f\"{PARAMETERS}",
+     "if False:\n        raise Broken(f\"{PARAMETERS}", "a rate pattern has a non-breaking space"),
+    ("no pathspec magic", "if magic:", "if False:", "the rate list excludes AGENTS.md"),
+    ("rate patterns cover", "missing = [p for p in GOVERNANCE_PATHS if p not in patterns]", "missing = []",
+     "the rate gate stops counting AGENTS.md"),
+    ("levels are tables", "if not isinstance(levels, list) or not all(isinstance(x, dict) for x in levels):",
+     "if False:", "levels is a list of numbers"),
+    ("level ids", "if ids != list(LEVELS):", "if False:", "a level is removed"),
+    ("cached lambda ids", "if sorted(cached) != sorted(LEVELS):", "if False:", "a cached lambda is added"),
+    ("numbers are numbers", "return isinstance(x, (int, float)) and", "return True and", "a rho is a string"),
+    ("numbers are not booleans", "and not isinstance(x, bool) and math", "and math", "a rho is a boolean"),
+    ("numbers are finite", "and math.isfinite(x)", "", "a gamma and its cached lambda are both infinite"),
+    ("steps are a list of steps", "if not isinstance(steps, list) or not all(isinstance(s, dict) for s in steps):",
+     "if False:", "a step is a string"),
+    ("one install step", "if len(installs) != 1:", "if False:", "the install step appears twice"),
+    ("install step keys", 'if sorted(install) != ["env", "name", "run"]:', "if False:",
+     "the install step gains a key"),
+    ("install recipe", 'if install["run"] != INSTALL_RUN:', "if False:", "the fetched bstack is not verified"),
+    ("install env is BSTACK_REV only", 'if list(env) != ["BSTACK_REV"]:', "if False:",
+     "the install step sets another variable"),
+    ("BSTACK_REV is a full SHA", r'if not re.fullmatch(r"[0-9a-f]{40}", str(env["BSTACK_REV"])):', "if False:",
+     "bstack pinned to a branch"),
+    ("bstack mentioned only in the two calls", "if calls != BSTACK_CALLS:", "if False:",
+     "a second compute-lambda.sh without --strict"),
+    ("call steps keys", 'if s.get("id") in ("compute", "rate") and sorted(s) != ["id", "name", "run"]:',
+     "if False:", "the compute step gains continue-on-error"),
+]
+
+
+def mutation_proof(root):
+    """Neuter each guard in turn, in a copy of this file, and run its case: the case must fail.
+    Each anchor must occur exactly once in the checks (above the mutation proof marker)."""
+    source = (root / SELF).read_text(encoding="utf-8")
+    marker = "# mutation proof " + "below"
+    checks, rest = source.split(marker, 1)
+    inputs = set(GOVERNANCE_PATHS) | set(CONTRACT_INPUTS) | set(claude_paths(read(root, "CLAUDE.md"))[1])
+    names = {c[0] for c in cases_for(root)}
+    survived = 0
+    print("guard | case | killed")
+    for guard, anchor, neutered, case in MUTANTS:
+        if checks.count(anchor) != 1 or case not in names:
+            print(f"{guard} | {case} | NO: anchor occurs {checks.count(anchor)} times"
+                  + ("" if case in names else ", and no case has that name"))
+            survived += 1
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp)
+            for rel in inputs:
+                if (root / rel).is_file():
+                    (copy / rel).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(root / rel, copy / rel)
+            (copy / SELF).write_text(checks.replace(anchor, neutered) + marker + rest, encoding="utf-8")
+            out = subprocess.run([sys.executable, "-I", str(copy / SELF), "--selftest", case],
+                                 capture_output=True, text=True, timeout=300)
+        killed = out.returncode == 1 and f"FAIL selftest: {case}:" in out.stdout
+        survived += not killed
+        print(f"{guard} | {case} | {'yes' if killed else 'NO: ' + (out.stdout + out.stderr).strip()[-200:]}")
+    print(f"{len(MUTANTS) - survived} of {len(MUTANTS)} guards proven")
+    return survived
+
+
 def main(argv):
     here = Path(__file__).resolve().parent.parent
-    if argv == ["--selftest"]:
-        try:
-            return 1 if selftest(here) else 0
-        except Broken as e:
-            print(f"FAIL selftest: {e}")
-            return 1
+    try:
+        if argv[:1] == ["--selftest"] and len(argv) <= 2:
+            return 1 if selftest(here, only=argv[1] if len(argv) == 2 else None) else 0
+        if argv == ["--mutation-proof"]:
+            return 1 if mutation_proof(here) else 0
+    except Broken as e:
+        print(f"FAIL selftest: {e}")
+        return 1
     if len(argv) > 1 or (argv and argv[0].startswith("-")):
-        print("\n".join(__doc__.strip().splitlines()[2:4]), file=sys.stderr)
+        print("\n".join(__doc__.strip().splitlines()[2:5]), file=sys.stderr)
         return 2
     root = Path(argv[0]) if argv else here
     return 1 if run(root) else 0
