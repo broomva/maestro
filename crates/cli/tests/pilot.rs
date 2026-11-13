@@ -739,6 +739,17 @@ fn bad_check_install_exits_nonzero() {
         vec!["flow", "stop-gate", "--check-install", "--harness", "grok"],
         vec!["flow", "stop-gate", "--check-install=true", "--harness", "claude"],
         vec!["flow", "stop-gate", "--check-install=false", "--harness", "claude"],
+        vec!["--workspace", "context", "flow", "stop-gate", "--harness", "claude", "--check-install", "--format=hook"],
+        vec![
+            "--workspace",
+            "context",
+            "flow",
+            "stop-gate",
+            "--harness",
+            "claude",
+            "--check-install=true",
+            "--format=hook",
+        ],
     ] {
         let out = p.maestro().args(&args).stdin(Stdio::null()).output().unwrap();
         assert!(!out.status.success(), "{args:?}: {out:?}");
@@ -760,4 +771,11 @@ fn flow_open_matches_status_for_missing_roots() {
     let epoch = std::fs::read_to_string(parent.join("flows.moved/EPOCH")).unwrap();
     std::fs::rename(parent.join("flows.moved"), parent.join(format!(".flows.genesis-{}", epoch.trim()))).unwrap();
     check("genesis_incomplete");
+}
+
+#[test]
+fn malformed_context_hook_still_exits_zero() {
+    let p = pilot();
+    let out = p.maestro().args(["context", "--format=hook", "--unknown-option"]).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
 }
