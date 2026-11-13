@@ -47,6 +47,8 @@
 //!   Its reason names its ask once `asks` pinned it (`AskPinned`, `AskLinked`, `AskWithdrawn` are
 //!   inert). Its receipt is `Answered` (the owner's answer, read by `asks`), never a `Completed`,
 //!   and an `Answered` counts only for the ask linked at that node and iteration.
+//! - `StopUnblockable` (the stop gate's record of a stop it could not refuse, `stop`) changes
+//!   nothing: `status` lists it.
 //! - Ownership and proposals (`ProposalPinned`, `ProposalLinked`, `ProposalWithdrawn`, `Adopted`,
 //!   `Retired`) are folded by `adoption::owners`, never here: they change no node. `status` and
 //!   `next` report the owner they leave (`Started`'s, or the latest accepted `Adopted`'s), each
@@ -88,7 +90,7 @@ use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
     Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat,
-    KernelEvent, Refused, Started, digest, receipt_digest,
+    KernelEvent, Refused, Started, StopUnblockable, Unblockable, digest, receipt_digest,
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
 use super::write;
@@ -236,6 +238,15 @@ pub struct Rejected {
     pub reason: String,
 }
 
+/// A stop the gate let through with work left (`StopUnblockable`), as `status` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StopRecord {
+    pub seq: u64,
+    pub harness: String,
+    pub session: String,
+    pub reason: Unblockable,
+}
+
 /// Every node's state, derived from the log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Status {
@@ -266,6 +277,10 @@ pub struct Status {
     pub nodes: BTreeMap<String, NodeStatus>,
     pub repeats: BTreeMap<String, RepeatStatus>,
     pub rejected: Vec<Rejected>,
+    /// Every stop the stop gate let through while this instance had work its owner could do now
+    /// (`StopUnblockable`), in log order. They change nothing else.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stop_unblockable: Vec<StopRecord>,
 }
 
 /// A node to do now, and the hint for launching its performer.
@@ -376,8 +391,15 @@ pub fn next(guard: &ReadGuard, instance: &InstanceId, now: Timestamp) -> Result<
 
 /// [`next`] over a log already read and pinned: the writers' view of what is enabled now.
 pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Next, KernelError> {
+    Ok(read_both(log, started, now)?.1)
+}
+
+/// [`status`] and [`next`] of one replay, over a log already read and pinned: what the stop gate
+/// judges (`stop::assess`).
+pub(crate) fn read_both(log: &Log, started: &Started, now: Timestamp) -> Result<(Status, Next), KernelError> {
     let fold = Fold::replay(log, started)?;
     let (status, stale) = fold.read(log, started, now);
+    let whole = status.clone();
     let mut enabled = Vec::new();
     let mut pending = BTreeMap::new();
     for (id, s) in status.nodes {
@@ -398,7 +420,7 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
             pending.insert(id, s);
         }
     }
-    Ok(Next {
+    let next = Next {
         instance: status.instance,
         flow: status.flow,
         ir_hash: status.ir_hash,
@@ -409,7 +431,8 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
         terminal: status.terminal,
         enabled,
         pending,
-    })
+    };
+    Ok((whole, next))
 }
 
 /// A repeat whose current iteration has settled and has no verdict, and the input its `until`
@@ -623,6 +646,8 @@ struct Fold<'a> {
     asks: BTreeMap<Key<'a>, AskRec>,
     /// Who owns the instance and what is proposed for it (`adoption::owners`).
     owners: Owners,
+    /// The stops the gate could not refuse (`StopUnblockable`), in log order.
+    unblockable: Vec<StopRecord>,
 }
 
 /// A human node's ask as the log has it: pinned (`AskPinned`), and linked once confirmed
@@ -676,6 +701,7 @@ impl<'a> Fold<'a> {
             started_effects: BTreeMap::new(),
             asks: BTreeMap::new(),
             owners: adoption::owners(log, started)?,
+            unblockable: Vec::new(),
         };
         for e in log.events.iter().skip(1) {
             let at: Timestamp =
@@ -743,6 +769,14 @@ impl<'a> Fold<'a> {
         }
         // Ownership and proposals: `adoption::owners` folds them; they change no node.
         if adoption::KINDS.contains(&e.kind.as_str()) {
+            return Ok(Ok(Change::Inert));
+        }
+        // A stop the gate could not refuse: listed, and nothing else.
+        if e.kind == StopUnblockable::KIND {
+            let u: StopUnblockable = body(log, e)?;
+            let record =
+                StopRecord { seq: e.seq, harness: u.harness, session: u.session.to_string(), reason: u.reason };
+            self.unblockable.push(record);
             return Ok(Ok(Change::Inert));
         }
         let kinds = [
@@ -1041,6 +1075,7 @@ impl<'a> Fold<'a> {
             nodes,
             repeats,
             rejected,
+            stop_unblockable: self.unblockable.clone(),
         };
         (status, stale)
     }

@@ -8,7 +8,7 @@
 //! node's ask (`asks`) writes `AskPinned`, `AskLinked`, `AskWithdrawn` and `Answered`. A proposal
 //! to adopt or retire the instance (`adoption`) writes `ProposalPinned`, `ProposalLinked` and
 //! `ProposalWithdrawn`, which change nothing but the proposal, and, on the owner's approval,
-//! `Adopted` or `Retired`.
+//! `Adopted` or `Retired`. The stop gate (`stop`) writes `StopUnblockable`, which changes nothing.
 //!
 //! A receipt (`Completed`, `Chosen`, and `Answered` for a human node) records in `inputs` the digest of every receipt it consumed:
 //! each node it needs or switches on, by node id ([`receipt_digest`]). `status` and `next` name
@@ -324,6 +324,36 @@ pub struct Adopted {
 pub struct Retired {
     pub by: Owner,
     pub approval: Approval,
+}
+
+/// Why a stop went through while the instance had work its owner could do now (`stop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unblockable {
+    /// The harness ran the stop gate but cannot refuse a stop.
+    HarnessCannotBlock,
+    /// The gate refused the same session at the same log position [`crate::kernel::stop::MAX_REFUSALS`]
+    /// times in a row, so the next stop went through.
+    NoProgress,
+}
+
+/// A stop the gate could not refuse, recorded on each open instance it left unfinished (flow
+/// kernel spec, "L4: gates"). It changes no node, claim, owner or receipt: replay lists it, and
+/// `status` reports it. Only the stop gate appends it, as the instance's owner (`stop`). It adds
+/// no IR field, so `IR_VERSION` and every IR hash stand; a build from before it replays a log that
+/// holds it as `malformed_instance`, unread and never misread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopUnblockable {
+    /// The harness whose stop went through: `claude` or `codex`.
+    pub harness: String,
+    pub session: SessionRef,
+    /// Every instance of the session that had work it could do now, this one included.
+    pub open_instances: Vec<String>,
+    pub reason: Unblockable,
+}
+
+impl KernelEvent for StopUnblockable {
+    const KIND: &'static str = "StopUnblockable";
 }
 
 impl KernelEvent for ProposalPinned {

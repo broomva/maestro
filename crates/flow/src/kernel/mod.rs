@@ -39,6 +39,9 @@
 //! - **The accepting spine** ([`spine`], BRO-3636). One record per accepted (node, iteration),
 //!   with its edge and verify exit, in log order: what two runs of one flow are compared on
 //!   ([`compare`]), since their raw logs legitimately differ. A read, as `status` is.
+//! - **The stop gate** ([`stop`], BRO-3636). Whether an instance has work its owner can do now,
+//!   the one predicate the Stop-hook gate and the driver skill both read; the open instances a
+//!   verified session owns; and `StopUnblockable`, the record of a stop the gate could not refuse.
 //! - **Events** ([`events`]) are typed bodies of the storage layer's generic event.
 
 pub mod adoption;
@@ -60,19 +63,23 @@ mod snapshot;
 pub mod spine;
 #[cfg(test)]
 mod spined;
+pub mod stop;
+#[cfg(test)]
+mod stopped;
 mod write;
 
 pub use adoption::{
     MAX_PROPOSALS, PROPOSAL_NOT_FILED, ProposalStatus, Proposed, Proposing, propose_adoption, propose_retirement,
 };
-pub use asks::{ASK_NOT_FILED, Asked, Filing, ask, landing};
+pub use asks::{ASK_NOT_FILED, AnswerSeen, Asked, Filing, ask, landing, seen};
 pub use compile::{CompiledFlow, MAX_SOURCE, compile};
 pub use error::{CompileError, KernelError, Refusal};
 pub use exec::Limits;
 pub use guard::guard_entry;
 pub use ir::{Ir, Iteration};
 pub use replay::{
-    Begun, Enabled, Next, NodeStatus, Reason, Rejected, RepeatState, RepeatStatus, State, Status, next, start, status,
+    Begun, Enabled, Next, NodeStatus, Reason, Rejected, RepeatState, RepeatStatus, State, Status, StopRecord, next,
+    start, status,
 };
 pub use spine::{DefinitionMismatch, Difference, Side, Spine, SpineRecord, compare, definition_mismatch, spine};
 pub use write::{

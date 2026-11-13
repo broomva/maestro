@@ -329,6 +329,49 @@ pub(crate) fn load_log(root: &Dir, id: &InstanceId) -> Result<Log> {
     }
 }
 
+/// The file `name` in the root's folder `dir`, at most `limit` bytes (`what` names it when over),
+/// read through the root's descriptor and never through a link; `None` when either is missing.
+pub(crate) fn read_beside(
+    root: &Dir,
+    dir: &str,
+    name: &str,
+    limit: u64,
+    what: &'static str,
+) -> Result<Option<Vec<u8>>> {
+    match root.dir(dir)? {
+        Some(d) => d.read_as(name, limit, what),
+        None => Ok(None),
+    }
+}
+
+/// Writes `bytes` as `name` in the root's folder `dir` (made when missing, and the root synced
+/// then), whole: written aside under a new name, synced, then renamed over it, all through
+/// descriptors, never through a link.
+pub(crate) fn write_beside(root: &Dir, dir: &str, name: &str, bytes: &[u8]) -> Result<()> {
+    let made = !root.exists(dir)?;
+    if made {
+        root.mkdir(dir)?;
+    }
+    let d = root.dir(dir)?.ok_or_else(|| FlowError::LedgerDamaged { detail: format!("{dir}/ vanished") })?;
+    let aside = format!(".{name}.{}", random_epoch()?);
+    let mut file = d
+        .file(&aside, OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL)?
+        .ok_or_else(|| FlowError::LedgerDamaged { detail: format!("{dir}/{aside} could not be made") })?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_data()).map_err(FlowError::io(d.path.join(&aside)));
+    let moved = written.and_then(|()| d.rename(&aside, &d, name));
+    if moved.is_err() {
+        let _ = rustix::fs::unlinkat(&d.fd, aside.as_str(), rustix::fs::AtFlags::empty());
+    }
+    moved?;
+    d.sync();
+    // A folder made here is durable only once the root's entry for it is: synced as `append`
+    // syncs `instances/` after it makes an instance's folder.
+    if made {
+        root.sync();
+    }
+    Ok(())
+}
+
 /// The live instances: the real directories under `instances/` with a valid id.
 pub(crate) fn list_instances(root: &Dir) -> Result<Vec<InstanceId>> {
     Ok(instances(root)?.subdirs()?.into_iter().filter_map(|n| InstanceId::new(n).ok()).collect())
@@ -337,6 +380,11 @@ pub(crate) fn list_instances(root: &Dir) -> Result<Vec<InstanceId>> {
 impl WriteGuard<'_> {
     pub(crate) fn root(&self) -> &Dir {
         &self.root
+    }
+
+    /// The epoch of the ledger this guard holds.
+    pub(crate) fn epoch(&self) -> &str {
+        &self.ledger.epoch
     }
 
     /// Brings the projection up to the logs. The cache needs a path (SQLite), so it is written
@@ -482,6 +530,11 @@ pub struct Summary {
 }
 
 impl ReadGuard {
+    /// The root this guard read, through its descriptor.
+    pub(crate) fn root(&self) -> &Dir {
+        &self.root
+    }
+
     pub fn host(&self) -> &str {
         &self.host
     }

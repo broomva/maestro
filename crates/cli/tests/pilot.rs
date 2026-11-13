@@ -653,3 +653,80 @@ fn flow_driver_skill_json_prints_the_skill_as_a_json_value() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(v, json!({ "ok": false, "code": "drift", "path": "s/SKILL.md" }));
 }
+
+impl Pilot {
+    /// `maestro flow stop-gate --harness <harness>` with `input` on its standard input, as the
+    /// harness runs it: its standard output as JSON, its standard error, and its exit status.
+    fn stop_gate(&self, harness: &str, input: &Value, extra: &[&str]) -> (Value, String, Option<i32>) {
+        let mut child = self
+            .maestro()
+            .args(["flow", "stop-gate", "--harness", harness])
+            .args(extra)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let v = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("not JSON: {}\n{stderr}", String::from_utf8_lossy(&out.stdout)));
+        (v, stderr, out.status.code())
+    }
+}
+
+/// The flow kernel spec's positive control (acceptance item 3), at unit level (BRO-3636): a
+/// seeded subject whose verify fails cannot reach `Completed`, and with that instance open,
+/// Claude Code's Stop hook refuses a final message with what to do next. Codex 0.164's Stop hook
+/// can block (README, harness matrix), so its adapter refuses it the same way. 6c runs it live.
+#[test]
+fn a_verify_that_fails_keeps_the_instance_open_and_the_stop_gate_refuses_the_stop() {
+    let p = pilot();
+    let fi = p.exercising();
+    let token = p.claim(&fi, "exercise");
+    let failing = named(&p.receipt("failed", |v| v["result"] = json!("fail")));
+    let (v, ok) = p.complete(&token, failing);
+    assert!(!ok && v["code"] == "verify_failed", "{v}");
+    assert!(!p.events(&fi).iter().any(|e| e["kind"] == "Completed" && e["body"]["node"] == "exercise"));
+    assert_eq!(p.status(&fi)["nodes"]["exercise"]["state"], "ready");
+
+    let claude = json!({
+        "session_id": "abc123", "transcript_path": "/tmp/t.jsonl", "cwd": p.repo, "permission_mode": "default",
+        "hook_event_name": "Stop", "stop_hook_active": false, "last_assistant_message": "All checks pass.",
+    });
+    let (v, stderr, code) = p.stop_gate("claude", &claude, &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(v["decision"], "block", "{v}\n{stderr}");
+    let reason = v["reason"].as_str().unwrap();
+    assert!(reason.contains(&format!("Instance {fi} (verify@1)")), "{reason}");
+    assert!(reason.contains("you hold a live claim on node exercise"), "{reason}");
+
+    let codex = json!({
+        "cwd": p.repo, "hook_event_name": "Stop", "last_assistant_message": "All checks pass.", "model": "gpt",
+        "permission_mode": "bypassPermissions", "session_id": "01a1", "stop_hook_active": false,
+        "transcript_path": null, "turn_id": "01a2",
+    });
+    let (v, stderr, code) = p.stop_gate("codex", &codex, &[]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(v.as_object().unwrap().keys().collect::<Vec<_>>(), ["decision", "reason"], "{v}");
+    assert_eq!(v["decision"], "block");
+
+    // `flow open` names the same instance and says the stop is refused.
+    let open = p.ok(&["flow", "open"]);
+    assert_eq!((&open["refuses_stop"], &open["open"]["instances"][0]["instance"]), (&json!(true), &json!(fi)));
+}
+
+/// A Stop hook that exits 2 refuses the stop, so the gate never does: a command line it cannot
+/// read lets the stop through, exit 0, and says why.
+#[test]
+fn a_stop_gate_command_line_that_does_not_parse_lets_the_stop_through() {
+    let p = pilot();
+    let out = p.maestro().args(["flow", "stop-gate", "--harness", "grok"]).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("the stop goes through"));
+    // And stdin that is not a Stop hook's is let through as well.
+    let (v, stderr, code) = p.stop_gate("claude", &json!({ "hook_event_name": "Notification" }), &[]);
+    assert_eq!((v, code), (json!({}), Some(0)));
+    assert!(stderr.contains("input_malformed"), "{stderr}");
+}

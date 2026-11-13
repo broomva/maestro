@@ -381,6 +381,54 @@ enum FlowCommand {
         #[arg(long)]
         again: bool,
     },
+    /// The flow instances this session owns that are not finished, each with its work (what the
+    /// session can do now) and what it waits on, and refuses_stop. Needs a verified session;
+    /// writes nothing.
+    Open {
+        #[command(flatten)]
+        session: SessionArg,
+    },
+    /// The Stop-hook gate: run by Claude Code or Codex as a Stop hook. Reads the hook's JSON on
+    /// stdin and refuses the final message, in the harness's format, while an instance this
+    /// session owns is open and has work it can do now. Fails open: on any error the stop goes
+    /// through, with the reason on stderr. Always exits 0. Needs no MCP twin: only a harness runs it.
+    StopGate {
+        /// The harness running the hook.
+        #[arg(long, value_enum)]
+        harness: GateHarness,
+        /// This session as `surface:environment/id`. Unset, no flow is gated.
+        #[arg(long, env = "MAESTRO_SESSION")]
+        session: Option<String>,
+        /// The harness cannot refuse a stop here: record StopUnblockable and file the alert instead.
+        #[arg(long)]
+        cannot_block: bool,
+        /// The asks ledger fleet alerts are filed into (a file in the asks folder).
+        #[arg(long, env = "MAESTRO_ALERT_LEDGER", default_value = maestro_mcp::stop::DEFAULT_ALERT_LEDGER)]
+        alert_ledger: String,
+        /// Report whether a settings file wires this gate as the harness's Stop hook, and exit 1
+        /// when it does not. Reads no stdin and gates nothing.
+        #[arg(long)]
+        check_install: bool,
+        /// The settings file --check-install reads. Default: ~/.claude/settings.json for claude,
+        /// $CODEX_HOME/hooks.json (~/.codex/hooks.json) for codex.
+        #[arg(long, requires = "check_install")]
+        settings: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum GateHarness {
+    Claude,
+    Codex,
+}
+
+impl GateHarness {
+    fn harness(self) -> maestro_mcp::stop::Harness {
+        match self {
+            GateHarness::Claude => maestro_mcp::stop::Harness::Claude,
+            GateHarness::Codex => maestro_mcp::stop::Harness::Codex,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -489,6 +537,11 @@ fn is_hook(args: &[String]) -> bool {
             .any(|(i, a)| a == "--format=hook" || (a == "--format" && args.get(i + 1).is_some_and(|v| v == "hook")))
 }
 
+/// Whether the command line runs the Stop-hook gate (`flow stop-gate`), so it never exits 2.
+fn is_stop_gate(args: &[String]) -> bool {
+    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate")
+}
+
 /// How long the hook may take before it gives up silently (`MAESTRO_HOOK_TIMEOUT_MS`, default 5000).
 fn hook_budget() -> std::time::Duration {
     let ms = std::env::var("MAESTRO_HOOK_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5_000);
@@ -537,10 +590,17 @@ fn main() -> std::process::ExitCode {
     drop_inherited_git_repo();
     let args: Vec<String> = std::env::args().collect();
     let hook = is_hook(&args);
+    let gate = is_stop_gate(&args);
     let port_cmd = args.iter().any(|a| a == "delegation" || a == "economy");
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(_) if hook => return std::process::ExitCode::SUCCESS,
+        // A Stop hook that exits 2 refuses the stop: a command line the gate cannot read lets it
+        // through instead (it fails open), saying why.
+        Err(e) if gate => {
+            eprintln!("maestro stop-gate: the command line does not parse, so the stop goes through: {e}");
+            return std::process::ExitCode::SUCCESS;
+        }
         Err(e) => match port_cmd.then(|| port::usage_error(&e)).flatten() {
             Some(code) => return code,
             None => e.exit(),
@@ -573,6 +633,20 @@ fn main() -> std::process::ExitCode {
         }
         Command::Flow { command: FlowCommand::DriverSkill { definition, out, check } } => {
             return exit(driver_skill(cli.json, definition, out.as_deref(), *check));
+        }
+        Command::Flow {
+            command: FlowCommand::StopGate { harness, session, cannot_block, alert_ledger, check_install, settings },
+        } => {
+            if *check_install {
+                return exit(check_gate(harness.harness(), settings.as_deref()));
+            }
+            let gate = maestro_mcp::stop::Gate {
+                harness: harness.harness(),
+                cannot_block: *cannot_block,
+                session: session.clone(),
+                alert_ledger: alert_ledger.clone(),
+            };
+            return stop_gate(&cli, &gate);
         }
         _ => {}
     }
@@ -713,6 +787,8 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
             (f::START, json!({ "session": session.session, "definition": text, "params": params }))
         }
         FlowCommand::DriverSkill { .. } => bail!("flow driver-skill is not a tool"),
+        FlowCommand::StopGate { .. } => bail!("flow stop-gate is not a tool"),
+        FlowCommand::Open { session } => (f::OPEN, json!({ "session": session.session })),
         FlowCommand::Next { instance } => (f::NEXT, json!({ "instance": instance })),
         FlowCommand::Status { instance } => (f::STATUS, json!({ "instance": instance })),
         FlowCommand::Spine { instance, against } => (f::SPINE, json!({ "instance": instance, "against": against })),
@@ -755,6 +831,55 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
         return Err(DefinitionMismatch(format!("definition_mismatch: {}", s(&v["reason"]))).into());
     }
     bail!("{}: {}", s(&v["code"]), s(&v["reason"]))
+}
+
+/// `maestro flow stop-gate`: the gate over stdin (`maestro_mcp::stop`), its answer on stdout and
+/// its notes on stderr. Always exits 0: a Stop hook that exits 2 would refuse the stop, and the
+/// gate refuses only through its answer.
+fn stop_gate(cli: &Cli, gate: &maestro_mcp::stop::Gate) -> std::process::ExitCode {
+    let mut input = Vec::new();
+    let limit = maestro_mcp::stop::MAX_INPUT as u64 + 1;
+    if let Err(e) = std::io::stdin().lock().take(limit).read_to_end(&mut input) {
+        eprintln!("maestro stop-gate: stdin does not read ({e}), so the stop goes through.");
+        println!("{}", gate.harness.allow());
+        return std::process::ExitCode::SUCCESS;
+    }
+    let paths = match Paths::from_env_with(cli.workspace.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("maestro stop-gate: the path registry: {e}; the stop goes through (the gate fails open).");
+            println!("{}", gate.harness.allow());
+            return std::process::ExitCode::SUCCESS;
+        }
+    };
+    let out = maestro_mcp::stop::gate_in_env(&paths, gate, &input);
+    for note in &out.notes {
+        eprintln!("{note}");
+    }
+    println!("{}", out.stdout);
+    std::process::ExitCode::SUCCESS
+}
+
+/// `maestro flow stop-gate --check-install`: whether `settings` (or the harness's default) wires
+/// the gate as its Stop hook. Prints the report as JSON; exits 1 when it is not wired.
+fn check_gate(harness: maestro_mcp::stop::Harness, settings: Option<&std::path::Path>) -> Result<()> {
+    use maestro_mcp::stop::Harness;
+    let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let path = match (settings, harness) {
+        (Some(p), _) => p.to_path_buf(),
+        (None, Harness::Claude) => home().join(".claude/settings.json"),
+        (None, Harness::Codex) => std::env::var_os("CODEX_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".codex"))
+            .join("hooks.json"),
+    };
+    let report = maestro_mcp::stop::check_install(harness, &path);
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if !report.wired {
+        bail!("{}", report.detail);
+    }
+    Ok(())
 }
 
 fn exit(result: Result<()>) -> std::process::ExitCode {

@@ -671,6 +671,38 @@ pub(super) fn waiting_to_land(paths: &Paths, ledger: &str, ask_id: &str) -> Opti
     })
 }
 
+/// Where a filed ask's answer stands, as this clone's own refs show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerSeen {
+    /// Answered on `origin/main` as last fetched: its agent can take it with `ask`.
+    Landed,
+    /// Answered on Maestro's answers branch (named) and not on `origin/main`: still waiting.
+    Landing(String),
+    /// Answered on neither: the owner has not answered.
+    Open,
+}
+
+/// The ref [`seen`] reads main at: origin's, as this clone last fetched it.
+pub const SEEN_MAIN: &str = "refs/remotes/origin/main";
+
+/// Where the answer to ask `ask_id` of `ledger` stands in this clone's refs, for the stop gate's
+/// judgment of whether a waiting human node is its agent's to take or the owner's (`stop`). A
+/// hint, never a receipt: only [`ask`] takes an answer, read where the answers remote says main is.
+/// So a hint that is wrong costs one `ask` that says waiting; it never records an answer. Reads
+/// git only, with no network; a ref that does not read holds no answer.
+pub fn seen(paths: &Paths, ledger: &str, ask_id: &str) -> AnswerSeen {
+    let main = Store::new(paths.clone(), TreeSource::GitRev(SEEN_MAIN.to_string()));
+    let landed = main.tree.unresolved.is_none()
+        && matches!(find(&main, ledger, ask_id), Ok(Found::Row(row)) if row.state() == AskState::Answered);
+    if landed {
+        return AnswerSeen::Landed;
+    }
+    match waiting_to_land(paths, ledger, ask_id) {
+        Some(at) => AnswerSeen::Landing(at),
+        None => AnswerSeen::Open,
+    }
+}
+
 /// For the reads (`next`, `status`): each `owner` reason whose answer waits to land on Maestro's
 /// answers branch becomes `answer_waiting_to_land`. Reads git only; writes nothing.
 pub fn landing(paths: &Paths, unmet: &mut [super::Reason]) {

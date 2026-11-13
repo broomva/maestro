@@ -9,7 +9,9 @@
 //! driven by this one's nodes. A human node's `flow ask` is called for a filed ask too, since only
 //! that verb reads the owner's answer from main. A repeat that awaits its `until` verdict is
 //! retried through `flow claim`, which judges every pending verdict first (`kernel::write`), at
-//! most [`VERDICT_RETRIES`] times.
+//! most [`VERDICT_RETRIES`] times. Whether anything is left for the driver is the kernel's too: the
+//! loop stops when the `work` list `flow next` returns is empty (`kernel::stop`), the predicate the
+//! Stop-hook gate refuses a final message on, so the skill and the gate never judge it apart.
 //!
 //! The loop, the verbs and what to do for each class of node are this module's fixed text. The
 //! steps (which nodes, in which order, what each waits on and when it applies), each performer's
@@ -30,6 +32,7 @@
 use crate::agents::{self, LaunchSpec};
 use crate::kernel::CompiledFlow;
 use crate::kernel::ir::{Class, Ir, Need, Node};
+use crate::kernel::stop;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
@@ -382,7 +385,9 @@ pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
     );
     let _ = writeln!(
         out,
-        "   - If `next.enabled` was empty and step 3 filed no ask and took no answer, nothing is yours to do now: the instance waits on someone else (the owner's answer to a `relay` ask, or another claim's lease). Stop and report what `relay` and `next.pending` name; the instance stays open."
+        "   - If `{work}` (beside `next` in step 2's result) was empty and step 3 filed no ask and took no answer, nothing is yours to do now: the instance waits on someone else, as `{waiting}` names (the owner's answer to a filed ask, or a former owner's claim until its lease ends). Stop and report what `{waiting}` and `relay` name; the instance stays open. `{work}` is the kernel's judgment of what you can do now, the same one Maestro's Stop-hook gate reads (`maestro_flow::kernel::stop`): while it is not empty, the gate refuses your final message.",
+        work = stop::WORK,
+        waiting = stop::WAITING,
     );
     let _ = writeln!(out, "   - Otherwise, go back to 1.\n");
     let _ = writeln!(

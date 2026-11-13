@@ -6,6 +6,11 @@
 //!   request uses). A caller that is not verified is refused `caller_unverified`, and one whose
 //!   claim does not verify `caller_refused`; both write nothing. `next`, `status` and `spine` are
 //!   reads: anyone may call them, and they write nothing.
+//! - **The stop gate's judgment (BRO-3636).** `next` and `status` add `work` and `waiting`: what the
+//!   instance's owner can do now, and whom it waits on (`maestro_flow::kernel::stop`). `open` lists
+//!   the open instances the caller's verified session owns, each so judged, and `refuses_stop`. It
+//!   writes nothing, but needs a verified session, since ownership is the session with its owner
+//!   marker. The Stop-hook gate (`crate::stop`) refuses a final message on exactly this.
 //! - **The accepting spine (BRO-3636).** `spine` returns an instance's accepting spine
 //!   (`maestro_flow::kernel::spine`) and, with `against`, compares it with another instance's. Two
 //!   instances of different definitions are not compared: `{"ok": false, "code":
@@ -66,6 +71,7 @@ pub const ASK: &str = "maestro_flow_ask";
 pub const PROPOSE_ADOPTION: &str = "maestro_flow_propose_adoption";
 pub const PROPOSE_RETIREMENT: &str = "maestro_flow_propose_retirement";
 pub const SPINE: &str = "maestro_flow_spine";
+pub const OPEN: &str = "maestro_flow_open";
 
 /// The flows root under the workspace: the ADR's `.broomva/flows`.
 pub const FLOWS: &str = ".broomva/flows";
@@ -102,6 +108,21 @@ pub struct FlowStartArgs {
 pub struct FlowInstanceArgs {
     /// The instance id `maestro_flow_start` returned, e.g. `fi_0123abcd...`.
     pub instance: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowOpenArgs {
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`.
+    pub session: String,
+    /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
+    pub cwd: Option<String>,
+    /// A Direct session's launch token.
+    pub token: Option<String>,
+    /// The tailnet node your session runs on.
+    pub node: Option<String>,
+    /// A T3 or Paseo session's signed bridge credential, a JSON object.
+    pub credential: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -312,6 +333,14 @@ pub(crate) fn call(
         SPINE => {
             let a: FlowSpineArgs = parse(crate::strip_auth_fields(args))?;
             Ok(spine(paths, &a.instance, a.against.as_deref()).unwrap_or_else(|v| v))
+        }
+        OPEN => {
+            let a: FlowOpenArgs = parse(args.clone())?;
+            let session = crate::session_of(&a.session)?;
+            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+                let open = open(paths, w)?;
+                Ok(json!({ "ok": true, "refuses_stop": open.refusing().next().is_some(), "open": open }))
+            }))
         }
         START => {
             let a: FlowStartArgs = parse(args.clone())?;
@@ -596,7 +625,10 @@ fn read(paths: &maestro_store::Paths, name: &str, instance: &str) -> Result<Valu
         let instance = InstanceId::new(instance)?;
         let guard = Reader::new(&root, Options::default())?.lock()?;
         let now = maestro_flow::clock::now();
-        Ok(if name == NEXT {
+        // What the instance's owner can do now and whom it waits on: the stop gate's own judgment.
+        let judged = kernel::stop::assess_instance(&guard, &instance, now, &|l, a| kernel::seen(paths, l, a))?;
+        let (work, waiting) = (json!(judged.work), json!(judged.waiting));
+        let mut out = if name == NEXT {
             let mut next = kernel::next(&guard, &instance, now)?;
             for s in next.pending.values_mut() {
                 kernel::landing(paths, &mut s.unmet);
@@ -612,9 +644,24 @@ fn read(paths: &maestro_store::Paths, name: &str, instance: &str) -> Result<Valu
             kernel::adoption::landing(paths, &mut status.proposals);
             let relay = relay(&status.instance, status.owner.as_ref(), &status.nodes);
             json!({ "ok": true, "status": status, "relay": relay })
-        })
+        };
+        out[kernel::stop::WORK] = work;
+        out[kernel::stop::WAITING] = waiting;
+        Ok(out)
     };
     run().map_err(|e| refused(&e))
+}
+
+/// `open`: the open instances the writer's verified session owns, judged now, read under the
+/// shared lock (`maestro_flow::kernel::stop::open`). Writes nothing; a ledger that is not there is
+/// `no_ledger`.
+pub(crate) fn open(paths: &maestro_store::Paths, w: &Writer) -> Result<kernel::stop::Open, KernelError> {
+    if std::fs::symlink_metadata(&w.root).is_err() {
+        return Err(FlowError::NoLedger { root: w.root.clone() }.into());
+    }
+    let guard = Reader::new(&w.root, Options::default())?.lock()?;
+    let now = maestro_flow::clock::now();
+    kernel::stop::open(&guard, &w.me, now, &|l, a| kernel::seen(paths, l, a))
 }
 
 /// `spine`: an instance's accepting spine and, with `against`, the first difference from another's,
@@ -653,16 +700,16 @@ fn spine(paths: &maestro_store::Paths, instance: &str, against: Option<&str>) ->
 }
 
 /// A write verb's caller, verified, and where it writes.
-struct Writer {
-    me: VerifiedSession,
-    root: PathBuf,
+pub(crate) struct Writer {
+    pub(crate) me: VerifiedSession,
+    pub(crate) root: PathBuf,
     host: HostId,
     may_create: bool,
 }
 
 impl Writer {
     /// The ledger, opened once the verb's own arguments are checked. Only `start` may make it.
-    fn ledger(&self) -> Result<Ledger, KernelError> {
+    pub(crate) fn ledger(&self) -> Result<Ledger, KernelError> {
         if !self.may_create && std::fs::symlink_metadata(&self.root).is_err() {
             return Err(FlowError::NoLedger { root: self.root.clone() }.into());
         }
@@ -672,7 +719,7 @@ impl Writer {
 
 /// A write verb: the caller verified first, then the flows root and host resolved, then the verb,
 /// which checks its own arguments before it opens the ledger. Every refusal is a result.
-fn write(
+pub(crate) fn write(
     workspace: &Path,
     caller: (&maestro_hosts::SurfaceRegistry, crate::Ambient),
     session: &SessionRef,
