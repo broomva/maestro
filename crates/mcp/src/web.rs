@@ -1,5 +1,6 @@
 //! Maestro's web pages (BRO-3588): Decisions, one decision, Today and Health, rendered on the
-//! server by `maestro-view` from the same catalog blocks the MCP App places, on the daemon
+//! server by `maestro-view` from the same catalog blocks the MCP App places, laid out as the
+//! approved design (BRO-3783, maestro#20), on the daemon
 //! `maestro serve --http` already runs. A phone or browser on the tailnet reads them with no
 //! Paseo and no MCP host.
 //!
@@ -158,11 +159,13 @@ async fn page_of(
             return None;
         }
         let at = maestro_store::views::now();
-        Some(maestro_view::render::render_with(&store, &validated, at, thread.as_deref()))
+        Some(maestro_view::render::render_web(&store, &validated, at, thread.as_deref()))
     })
     .await;
     match rendered {
-        Ok(Some(r)) => with_headers(page::web(&r.html, title, current).into_response(), "text/html; charset=utf-8"),
+        Ok(Some((r, shell))) => {
+            with_headers(page::web(&r.html, title, current, &shell).into_response(), "text/html; charset=utf-8")
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "no such ask\n").into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "the render did not finish\n").into_response(),
     }

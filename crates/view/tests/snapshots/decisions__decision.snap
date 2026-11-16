@@ -12,17 +12,19 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-chip" data-kind="decision">decision</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
 </p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
-<p class="mv-stakes">devteam ran out twice this week; context length is the lever.</p>
-<p class="mv-callout" data-tone="warning">If you don't answer: <bdi>wait: nothing changes and spend continues</bdi>
-</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
 <bdi>fleet-cost</bdi>
 </span>
 </p>
 <p class="mv-dbody">Long sessions drive the fleet's cost: about 19% of sessions over 400K context carry about 87% of it. Rotating long orchestrators by handoff caps the biggest spenders and leaves workers alone.</p>
 <p class="mv-dbody">Which context-cost policy should the fleet run?</p>
-<p class="mv-dbody mv-why">Why you: <bdi>It trades quality on long workers for spend, which is your call.</bdi>
+<div class="mv-pair">
+<p class="mv-stakes">
+<span class="mv-pair-label">What waiting costs</span> devteam ran out twice this week; context length is the lever.</p>
+<p class="mv-dbody mv-why">
+<span class="mv-pair-label">Why you</span> <bdi>It trades quality on long workers for spend, which is your call.</bdi>
 </p>
+</div>
 <h3 class="mv-label bv-meta">Choose one</h3>
 <ol class="mv-dopts">
 <li class="mv-dopt" data-option="rotate" data-recommended="true" data-chosen="false">
@@ -77,6 +79,8 @@ expression: "portable(&r.html, m.path())"
 </p>
 </li>
 </ol>
+<p class="mv-callout" data-tone="warning">If you don't answer: <bdi>wait: nothing changes and spend continues</bdi>
+</p>
 <h3 class="mv-label bv-meta">Tradeoffs</h3>
 <ul class="mv-free">
 <li>

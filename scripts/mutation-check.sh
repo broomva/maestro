@@ -241,8 +241,16 @@ mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_em
 mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| a.class != Some(AskClass::Idea))'
 mutate $decision '        @if landing == Landing::Unknown {' '        @if false {'
 mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
-mutate $web 'render_with(&store, &validated, at, thread.as_deref())' 'render_with(&store, &validated, at, None)'
+mutate $web 'render_web(&store, &validated, at, thread.as_deref())' 'render_web(&store, &validated, at, None)'
 mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
+# The web decision layout (BRO-3783): calm only on a whole read, the shell's lower bound, encoded links.
+wscr=crates/view/src/screens/web.rs
+mutate $wscr 'None if section.data.is_some() && section.errors.is_empty() && groups.is_empty() => calm(cx, id),' 'None if section.data.is_some() && groups.is_empty() => calm(cx, id),'
+mutate $wscr 'None if section.data.is_some() && section.errors.is_empty() && groups.is_empty() => calm(cx, id),' 'None if section.errors.is_empty() && groups.is_empty() => calm(cx, id),'
+mutate $wscr '        partial: !cx.reads.asks.errors.is_empty(),' '        partial: false,'
+mutate $wscr "        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {" '        if true {'
+mutate $wscr 'aria-current=[is(e, selected).then_some("page")]' 'aria-current=[Some("page")]'
+mutate $page '            Some((0, _)) if !self.partial => "Nothing needs you".into(),' '            Some((0, _)) => "Nothing needs you".into(),'
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,
 # sigterm_right_after_the_readiness_line_is_a_clean_stop: under this harness's load the race closes.)
 mutate $cli 'let mut term = signal(SignalKind::terminate())?;' 'let mut term = signal(SignalKind::user_defined1())?;'

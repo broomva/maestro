@@ -90,6 +90,13 @@ async fn each_page_renders_its_block_from_the_ledgers() {
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &host, &[]).await;
     assert_page(&r, "decision", "/decisions");
     assert!(r.body.contains("Merge now"), "the decision shows the ask's options");
+    // The approved layout (BRO-3783): the shell's count, the queue beside the decision, its row current.
+    assert!(r.body.contains(r#"<span class="mv-nav-count">"#), "the shell counts the open asks");
+    assert!(
+        r.body.contains(r#"<a href="/decisions/demo-arc.yaml/merge-now" aria-current="page">"#),
+        "the queue marks the decision shown: {}",
+        r.body
+    );
 
     for (path, what) in [("/today", "today"), ("/health", "health")] {
         assert_page(&send(addr, "GET", path, &host, &[]).await, what, path);

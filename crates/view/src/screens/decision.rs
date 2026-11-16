@@ -110,21 +110,18 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                 " by " bdi { (asker(lf, a)) }
             }
             p class="mv-dtitle" { (a.title()) }
-            @if let Some(stakes) = &a.stakes { p class="mv-stakes" { (stakes) } }
-            // What silence does is said only while the ask waits on the owner.
-            @if state == AskState::Open && landing == Landing::NotSeen {
-                @if let Some(d) = &a.default {
-                    p class="mv-callout" data-tone="warning" { "If you don't answer: " bdi { (d) } }
-                } @else if let Some(why) = &a.no_default_because {
-                    p class="mv-callout" data-tone="warning" { "No default: " (label(why)) ". It waits for you." }
-                }
-            }
             @if a.blocking && !a.gates.is_empty() {
                 p class="mv-gates bv-meta" { "Blocks " @for (i, g) in a.gates.iter().enumerate() { @if i > 0 { ", " } span class="bv-code" { bdi { (g) } } } }
             }
             @if let Some(s) = &rich.summary { p class="mv-dbody" { (s) } }
             @if let Some(q) = question { p class="mv-dbody" { (q) } }
-            @if let Some(why) = &a.why_you { p class="mv-dbody mv-why" { "Why you: " bdi { (why) } } }
+            // What waiting costs and why it is the owner's, side by side (maestro#20).
+            @if a.stakes.is_some() || a.why_you.is_some() {
+                div class="mv-pair" {
+                    @if let Some(stakes) = &a.stakes { p class="mv-stakes" { span class="mv-pair-label" { "What waiting costs" } " " (stakes) } }
+                    @if let Some(why) = &a.why_you { p class="mv-dbody mv-why" { span class="mv-pair-label" { "Why you" } " " bdi { (why) } } }
+                }
+            }
             @if let Some(details) = &rich.details {
                 // Sections, not folds: a poll swap keeps no state inside an opened decision.
                 section class="mv-fold" { h3 class="mv-fold-title" { "Details" } p class="mv-pre" { (details) } }
@@ -156,6 +153,14 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                             }
                         }
                     }
+                }
+            }
+            // What silence does is said only while the ask waits on the owner.
+            @if state == AskState::Open && landing == Landing::NotSeen {
+                @if let Some(d) = &a.default {
+                    p class="mv-callout" data-tone="warning" { "If you don't answer: " bdi { (d) } }
+                } @else if let Some(why) = &a.no_default_because {
+                    p class="mv-callout" data-tone="warning" { "No default: " (label(why)) ". It waits for you." }
                 }
             }
             @if !free.is_empty() {

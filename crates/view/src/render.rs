@@ -97,23 +97,53 @@ pub fn render_with(
     at: jiff::Timestamp,
     answer_thread: Option<&crate::handoff::AnswerThread>,
 ) -> Rendered {
-    let reads = Reads::of(store);
-    let snap = views::snapshot_of(store, &reads, at);
-    let cx = Ctx {
-        store,
-        reads,
-        snap,
-        at,
-        answer_thread: answer_thread.cloned(),
-        unlanded: std::cell::OnceCell::new(),
-        ids: std::cell::Cell::new(0),
-        plans: std::cell::OnceCell::new(),
-        economy: std::cell::OnceCell::new(),
-        committed: std::cell::OnceCell::new(),
+    let cx = Ctx::new(store, at, answer_thread);
+    finish(&cx, v, node(&cx, &v.root))
+}
+
+/// Render for the web pages (BRO-3783): the decision screens laid out as the approved design,
+/// with the header's [`Shell`](crate::page::Shell) read in the same render, so the header and
+/// the page never disagree. Every other block renders as [`render_with`] renders it.
+pub fn render_web(
+    store: &Store,
+    v: &Validated,
+    at: jiff::Timestamp,
+    answer_thread: Option<&crate::handoff::AnswerThread>,
+) -> (Rendered, crate::page::Shell) {
+    let cx = Ctx::new(store, at, answer_thread);
+    let screen = match &v.root.block {
+        Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
+        Block::Decision(p) => crate::screens::web::decide(&cx, &v.root.id, &p.ledger, &p.id),
+        _ => node(&cx, &v.root),
     };
+    let rendered = finish(&cx, v, screen);
+    (rendered, crate::screens::web::shell(&cx))
+}
+
+impl<'a> Ctx<'a> {
+    fn new(store: &'a Store, at: jiff::Timestamp, answer_thread: Option<&crate::handoff::AnswerThread>) -> Self {
+        let reads = Reads::of(store);
+        let snap = views::snapshot_of(store, &reads, at);
+        Ctx {
+            store,
+            reads,
+            snap,
+            at,
+            answer_thread: answer_thread.cloned(),
+            unlanded: std::cell::OnceCell::new(),
+            ids: std::cell::Cell::new(0),
+            plans: std::cell::OnceCell::new(),
+            economy: std::cell::OnceCell::new(),
+            committed: std::cell::OnceCell::new(),
+        }
+    }
+}
+
+/// The screen with its footer, and the revision of the whole fragment.
+fn finish(cx: &Ctx, v: &Validated, screen: Markup) -> Rendered {
     let body = html! {
         div class="mv-screen" {
-            (node(&cx, &v.root))
+            (screen)
             footer class="mv-foot bv-meta" { "Read from " span class="bv-code" { (cx.snap.tree) } }
         }
     };

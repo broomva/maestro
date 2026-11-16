@@ -13,6 +13,7 @@ mod inbox;
 mod rich;
 mod sources;
 mod today;
+pub(crate) mod web;
 
 pub(crate) use decision::decision;
 pub(crate) use health::health;

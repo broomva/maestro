@@ -1,0 +1,167 @@
+/* Maestro's web pages (BRO-3783): the shell and the decision layout of the approved design
+   (maestro#20). Three columns from 1100 px (queue, decision, what the agent tried), two from
+   900 px, one on a phone with a pager in place of the queue. No script, no fetch. */
+
+body.mv-web { padding: 0; min-height: 100vh; }
+#maestro-root[data-web="true"] { max-width: 1280px; padding: 0 var(--bv-space-8) var(--bv-space-8); }
+
+/* The shell: wordmark and summary, the capsule, the tree read. */
+.mv-web-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--bv-space-4);
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: var(--bv-space-6) var(--bv-space-8) var(--bv-space-5);
+}
+.mv-brand { margin: 0; display: flex; align-items: baseline; gap: var(--bv-space-3); min-width: 0; }
+.mv-wordmark {
+  font-family: var(--mv-font-display); font-size: 22px; font-weight: 400; letter-spacing: -0.03em;
+  color: var(--mv-ink); text-decoration: none;
+}
+.mv-brand-sub { font-size: var(--bv-text-sm); color: var(--mv-ink3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mv-brand-sub[data-state="unavailable"] { color: var(--mv-fail); }
+.mv-web-nav.mv-tabs {
+  display: inline-flex; gap: 2px; padding: 4px;
+  border: 1px solid transparent; border-radius: 999px;
+  background:
+    linear-gradient(var(--mv-glass-heavy), var(--mv-glass-heavy)) padding-box,
+    linear-gradient(140deg, var(--mv-rim-a), var(--mv-rim-b) 40%, var(--mv-rim-c) 72%, var(--mv-rim-d)) border-box;
+  box-shadow: 0 12px 30px -20px var(--mv-shadow);
+}
+.mv-web-nav .mv-tab {
+  padding: 8px 18px; border: 0; border-radius: 999px;
+  font-size: var(--bv-text-sm); font-weight: 500; color: var(--mv-ink2); text-decoration: none;
+}
+.mv-web-nav .mv-tab:hover { color: var(--mv-ink); }
+.mv-web-nav .mv-tab[aria-current="page"] {
+  background: var(--mv-surface); color: var(--mv-ink);
+  box-shadow: 0 1px 2px var(--mv-shadow), inset 0 0 0 1px var(--mv-line);
+}
+.mv-web-nav .mv-tab:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 2px; }
+.mv-nav-count { font-family: var(--bv-font-mono); font-size: 11px; color: var(--mv-tide); margin-left: 4px; }
+.mv-web-tree { margin: 0; justify-self: end; display: flex; align-items: center; gap: 6px; white-space: nowrap; font-family: var(--bv-font-mono); font-size: 12px; color: var(--mv-ink3); }
+.mv-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--mv-ok); flex: none; }
+
+/* The decision layout: queue, decision, what the agent tried. */
+.mv-decide { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: var(--bv-space-6); align-items: start; }
+.mv-decide-main { min-width: 0; display: flex; flex-direction: column; gap: var(--bv-space-3); }
+.mv-decide-main > .mv-card { padding: var(--bv-space-8); }
+.mv-decide-main > .mv-card > .mv-head { display: none; }
+
+.mv-queue {
+  position: sticky; top: var(--bv-space-4);
+  display: flex; flex-direction: column; gap: var(--bv-space-4);
+  min-height: min(70vh, 760px);
+  padding: var(--bv-space-5) var(--bv-space-3) var(--bv-space-4);
+  border: 1px solid transparent; border-radius: var(--mv-r-card);
+  background:
+    linear-gradient(var(--mv-glass), var(--mv-glass)) padding-box,
+    linear-gradient(140deg, var(--mv-rim-a), var(--mv-rim-b) 38%, var(--mv-rim-c) 70%, var(--mv-rim-d)) border-box;
+  box-shadow: 0 22px 48px -30px var(--mv-shadow);
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+}
+.mv-queue-head { display: flex; justify-content: space-between; align-items: baseline; padding: 0 var(--bv-space-2); }
+.mv-queue-count { font-family: var(--bv-font-mono); font-size: 11px; color: var(--mv-tide); }
+.mv-qgroup { display: flex; flex-direction: column; gap: 4px; }
+.mv-qgroup-name { margin: 0; padding: 0 var(--bv-space-2); font-size: 11px; color: var(--mv-ink3); overflow-wrap: anywhere; }
+.mv-qrow > a, .mv-qrow > div {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: var(--bv-space-2) var(--bv-space-3); border-radius: 14px;
+  color: inherit; text-decoration: none; border-left: 2px solid transparent;
+}
+.mv-qrow > a:hover { background: var(--mv-tide-soft); }
+.mv-qrow > a:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 1px; }
+.mv-qrow > a[aria-current="page"] {
+  background: color-mix(in srgb, var(--mv-tide) 14%, transparent);
+  border-left-color: var(--mv-tide);
+}
+.mv-qrow-title { font-size: var(--bv-text-sm); font-weight: 500; line-height: 1.35; color: var(--mv-ink); overflow-wrap: anywhere; unicode-bidi: isolate; }
+.mv-qrow-meta { font-size: 11px; color: var(--mv-ink3); overflow-wrap: anywhere; unicode-bidi: isolate; }
+.mv-queue-foot { margin-top: auto; padding: var(--bv-space-3) var(--bv-space-2) 0; border-top: 1px solid var(--mv-line); }
+.mv-queue-foot p { margin: 0 0 4px; line-height: 1.45; }
+
+.mv-pager { display: none; }
+
+/* What the agent tried beside the decision, from 1100 px. The article becomes two columns;
+   everything but the tried section stays in the first. */
+@media (min-width: 1100px) {
+  .mv-decide-main .mv-decision {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 260px;
+    column-gap: var(--bv-space-8);
+    align-items: start;
+  }
+  .mv-decide-main .mv-decision > * { grid-column: 1; }
+  .mv-decide-main .mv-decision > .mv-tried {
+    grid-column: 2; grid-row: 1 / span 40;
+    border: 0; background: none; padding: 0; position: sticky; top: var(--bv-space-4);
+  }
+  .mv-decide-main .mv-decision > .mv-tried .mv-fold-title {
+    font-family: var(--bv-font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mv-ink3); font-weight: 500;
+    padding-bottom: var(--bv-space-2); border-bottom: 1px solid var(--mv-line);
+  }
+}
+
+/* The calm screen: nothing is open, and every ask was read. */
+.mv-calm { display: flex; flex-direction: column; align-items: center; text-align: center; gap: var(--bv-space-5); padding: 12vh var(--bv-space-4) var(--bv-space-12); position: relative; }
+.mv-calm::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background-image: radial-gradient(color-mix(in srgb, var(--mv-tide) 34%, transparent) 1px, transparent 1.5px);
+  background-size: 18px 18px;
+  -webkit-mask-image: radial-gradient(70% 60% at 50% 40%, transparent 30%, #000 85%);
+  mask-image: radial-gradient(70% 60% at 50% 40%, transparent 30%, #000 85%);
+  opacity: 0.6;
+}
+.mv-calm .mv-kicker { display: inline-flex; align-items: center; gap: 8px; }
+.mv-calm .mv-kicker .mv-dot { width: 6px; height: 6px; }
+.mv-calm-title { margin: 0; font-family: var(--mv-font-display); font-size: clamp(44px, 7vw, 88px); font-weight: 300; letter-spacing: -0.045em; line-height: 1; color: var(--mv-ink); }
+.mv-calm-title em { font-style: normal; font-weight: 400; color: var(--mv-tide); }
+.mv-calm-sub { margin: 0; max-width: 34rem; font-size: 18px; line-height: 1.5; color: var(--mv-ink2); }
+.mv-stats {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(8rem, 1fr);
+  margin-top: 8vh; padding: var(--bv-space-4) var(--bv-space-6);
+  border: 1px solid transparent; border-radius: var(--mv-r-card);
+  background:
+    linear-gradient(var(--mv-glass-heavy), var(--mv-glass-heavy)) padding-box,
+    linear-gradient(140deg, var(--mv-rim-a), var(--mv-rim-b) 38%, var(--mv-rim-c) 70%, var(--mv-rim-d)) border-box;
+  box-shadow: 0 22px 48px -30px var(--mv-shadow);
+}
+.mv-stat { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 0 var(--bv-space-5); text-align: left; border-left: 1px solid var(--mv-line); }
+.mv-stat:first-child { border-left: 0; padding-left: 0; }
+.mv-stat-value { font-family: var(--mv-font-display); font-size: 28px; font-weight: 300; letter-spacing: -0.02em; color: var(--mv-ink); font-variant-numeric: tabular-nums; }
+
+/* Two columns: the queue narrows, what the agent tried stays in the decision. */
+@media (max-width: 1099px) {
+  .mv-decide { grid-template-columns: 260px minmax(0, 1fr); gap: var(--bv-space-4); }
+}
+
+/* The phone: one column. The capsule sits under the wordmark, the queue becomes a pager, and
+   the answer bar stays pinned at the bottom. */
+@media (max-width: 760px) {
+  .mv-web-head { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: var(--bv-space-4) var(--bv-space-4) var(--bv-space-3); gap: var(--bv-space-3); }
+  .mv-brand, .mv-web-tree { display: none; }
+  #maestro-root[data-web="true"] { padding: 0 var(--bv-space-4) var(--bv-space-6); }
+  .mv-decide { grid-template-columns: minmax(0, 1fr); }
+  .mv-queue { display: none; }
+  .mv-pager { display: flex; justify-content: space-between; align-items: center; gap: var(--bv-space-3); padding: 0 var(--bv-space-1); }
+  .mv-pager-at { font-size: 12px; color: var(--mv-ink3); }
+  .mv-pager-links { display: flex; gap: var(--bv-space-2); }
+  .mv-pager-link { font-size: 13px; color: var(--mv-tide); text-decoration: none; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--mv-line2); }
+  .mv-decide-main > .mv-card.bv-card {
+    padding: var(--bv-space-2) 0 0; border: 0; background: none; box-shadow: none;
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  .mv-dtitle { font-size: 28px; }
+  .mv-pair { grid-template-columns: minmax(0, 1fr); }
+  .mv-decision .mv-answerbar { position: sticky; bottom: var(--bv-space-3); }
+  .mv-calm { padding-top: 8vh; }
+  .mv-stats { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--bv-space-3); padding: var(--bv-space-4); }
+  .mv-stat { border-left: 0; padding: 0; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .mv-queue, .mv-web-nav.mv-tabs, .mv-stats { background: var(--mv-surface); backdrop-filter: none; -webkit-backdrop-filter: none; border-color: var(--mv-line2); }
+}
