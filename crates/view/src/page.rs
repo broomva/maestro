@@ -112,26 +112,51 @@ pub struct Shell {
     pub open: Option<(usize, usize)>,
     /// The asks read in part: every count is a lower bound.
     pub partial: bool,
+    /// What the needs list holds for the owner (asks and work), when it read in full.
+    pub needs: Option<usize>,
+    /// Nothing waits on the owner, by a whole read: the one condition for "Nothing needs you",
+    /// the same one the calm screen shows on.
+    pub calm: bool,
     /// How long ago the commit read was made (`3 h`), when it is known.
     pub committed: Option<String>,
 }
 
 impl Shell {
-    /// The line beside the wordmark. Unread is said, never shown as none; a partial read is a lower bound.
+    /// The line beside the wordmark. Unread is said, never shown as none; a partial read is a lower
+    /// bound; "Nothing needs you" only when [`Shell::calm`] says so.
     pub fn summary(&self) -> String {
+        let Some((n, blocking)) = self.open else { return "Decisions could not be read".into() };
+        if self.calm {
+            return "Nothing needs you".into();
+        }
+        if n == 0 && !self.partial {
+            return match self.needs {
+                Some(h) if h > 0 => {
+                    format!("No decision open, {h} other {} for you", if h == 1 { "hold" } else { "holds" })
+                }
+                _ => "No decision open; not everything that could need you was read".into(),
+            };
+        }
         let at_least = if self.partial { "at least " } else { "" };
+        let noun = if n == 1 { "decision" } else { "decisions" };
+        let blocks = match blocking {
+            0 if self.partial => "none seen blocking".to_string(),
+            0 => "none blocking".to_string(),
+            b => format!("{b} blocking"),
+        };
+        format!("{at_least}{n} {noun} for you, {blocks}")
+    }
+
+    /// The summary's state for styling: `unavailable`, `partial`, `calm`, `open` (asks open), or
+    /// `held` (no ask open, and something else holds or was not read). A phone shows the line only
+    /// when it is not `calm` or `open`.
+    pub fn state(&self) -> &'static str {
         match self.open {
-            None => "Decisions could not be read".into(),
-            Some((0, _)) if !self.partial => "Nothing needs you".into(),
-            Some((n, blocking)) => {
-                let noun = if n == 1 { "decision" } else { "decisions" };
-                let blocks = match blocking {
-                    0 if self.partial => "none seen blocking".to_string(),
-                    0 => "none blocking".to_string(),
-                    b => format!("{b} blocking"),
-                };
-                format!("{at_least}{n} {noun} for you, {blocks}")
-            }
+            None => "unavailable",
+            Some(_) if self.partial => "partial",
+            Some(_) if self.calm => "calm",
+            Some((0, _)) => "held",
+            Some(_) => "open",
         }
     }
 
@@ -144,12 +169,14 @@ impl Shell {
         }
     }
 
-    /// The tree as the header shows it: `main 0123abc` for `git:origin/main@0123abc4567`.
+    /// The tree as the header shows it: `main 0123abc` for `git:origin/main@0123abc4567`. The
+    /// commit is the text after the last `@`, cut by characters; an unresolved one is said.
     pub fn tree_short(&self) -> String {
-        match self.tree.strip_prefix("git:").and_then(|t| t.split_once('@')) {
+        match self.tree.strip_prefix("git:").and_then(|t| t.rsplit_once('@')) {
+            Some((rev, "unresolved")) => format!("{} (commit unresolved)", rev.strip_prefix("origin/").unwrap_or(rev)),
             Some((rev, commit)) => {
                 let rev = rev.strip_prefix("origin/").unwrap_or(rev);
-                format!("{rev} {}", &commit[..commit.len().min(7)])
+                format!("{rev} {}", commit.chars().take(7).collect::<String>())
             }
             None => self.tree.clone(),
         }
@@ -174,7 +201,7 @@ pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String 
                     p class="mv-brand" {
                         a class="mv-wordmark" href="/decisions" { "Maestro" }
                         " "
-                        span class="mv-brand-sub" data-state=(match shell.open { None => "unavailable", Some(_) if shell.partial => "partial", Some(_) => "ok" }) { (shell.summary()) }
+                        span class="mv-brand-sub" data-state=(shell.state()) { (shell.summary()) }
                     }
                     nav class="mv-tabs mv-web-nav" aria-label="Maestro" {
                         @for (path, label) in WEB_NAV {

@@ -243,13 +243,21 @@ mutate $decision '        @if landing == Landing::Unknown {' '        @if false 
 mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
 mutate $web 'render_web(&store, &validated, at, thread.as_deref())' 'render_web(&store, &validated, at, None)'
 mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
-# The web decision layout (BRO-3783): calm only on a whole read, the shell's lower bound, encoded links.
+# The web decision layout (BRO-3783): calm only when nothing waits by a whole read (owner holds on
+# work included), the shell's lower bounds, unread as "?", encoded links, shared handles never opened.
 wscr=crates/view/src/screens/web.rs
-mutate $wscr 'None if section.data.is_some() && section.errors.is_empty() && groups.is_empty() => calm(cx, id),' 'None if section.data.is_some() && groups.is_empty() => calm(cx, id),'
+mutate $wscr '        && needs.data.as_ref().is_some_and(Vec::is_empty)' '        && true'
+mutate $wscr '        && asks.errors.is_empty()' '        && true'
 mutate $wscr '        partial: !cx.reads.asks.errors.is_empty(),' '        partial: false,'
 mutate $wscr "        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {" '        if true {'
-mutate $wscr 'aria-current=[is(e, selected).then_some("page")]' 'aria-current=[Some("page")]'
-mutate $page '            Some((0, _)) if !self.partial => "Nothing needs you".into(),' '            Some((0, _)) => "Nothing needs you".into(),'
+mutate $wscr 'aria-current=[is(e, selected).then_some("true")]' 'aria-current=[Some("true")]'
+mutate $wscr '    let first = ledgers.iter().flat_map(|(_, v)| v).find(|e| e.keyed);' '    let first = ledgers.iter().flat_map(|(_, v)| v).next();'
+mutate $wscr '    let link = |j: usize| rows.get(j).filter(|e| e.keyed).map(|e| href(e));' '    let link = |j: usize| rows.get(j).map(|e| href(e));'
+mutate $wscr '@if section.data.is_none() { "?" }' '@if false { "?" }'
+mutate $wscr '" of " (rows.len()) @if partial { "+" }' '" of " (rows.len()) @if false { "+" }'
+mutate $page '        if self.calm {' '        if n == 0 {'
+mutate $page '            Some((n, _)) if self.partial => format!("{n}+"),' '            Some((n, _)) if false => format!("{n}+"),'
+mutate $page "        match self.tree.strip_prefix(\"git:\").and_then(|t| t.rsplit_once('@')) {" "        match self.tree.strip_prefix(\"git:\").and_then(|t| t.split_once('@')) {"
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,
 # sigterm_right_after_the_readiness_line_is_a_clean_stop: under this harness's load the race closes.)
 mutate $cli 'let mut term = signal(SignalKind::terminate())?;' 'let mut term = signal(SignalKind::user_defined1())?;'

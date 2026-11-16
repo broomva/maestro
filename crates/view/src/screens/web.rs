@@ -4,24 +4,27 @@
 //!
 //! Read-only, like every web page: the decision is the same body the App renders, with the
 //! same answer bar, and the queue is links between GET pages. Unread is never shown as empty:
-//! the calm "nothing needs you" screen appears only when every ask read in full and none is
-//! open; any other read falls back to the inbox card, which says what could not be read.
+//! the calm "nothing needs you" screen appears only when [`nothing_waits`] holds; any other read
+//! falls back to the inbox card, which says what could not be read, with the needs card above it
+//! when something else is held for the owner.
 
 use super::{Entry, Group, Landing, age, joined, kind, queue};
 use crate::catalog::DecisionsProps;
 use crate::page::Shell;
 use crate::render::{Ctx, errors};
-use maestro_core::initiative::InitiativeStatus;
 use maud::{Markup, html};
 
 /// The header's facts, from this render's reads.
 pub(crate) fn shell(cx: &Ctx) -> Shell {
     let counts = cx.snap.asks.data.as_ref();
+    let needs = &cx.snap.needs;
     Shell {
         tree: cx.snap.tree.clone(),
         open: counts.map(|c| (c.open, c.open_blocking)),
         // The tree read alone: an unread answers branch changes no count of open asks.
         partial: !cx.reads.asks.errors.is_empty(),
+        needs: needs.data.as_ref().filter(|_| needs.errors.is_empty()).map(Vec::len),
+        calm: nothing_waits(cx),
         committed: match cx.committed() {
             Ok(Some(t)) => ago(*t, cx.at),
             _ => None,
@@ -29,20 +32,36 @@ pub(crate) fn shell(cx: &Ctx) -> Shell {
     }
 }
 
-/// A coarse age for the header: minutes under an hour, hours under two days, else days.
+/// Whether nothing waits on the owner, as far as a whole read can tell: every ask and every answer
+/// source read in full with no ask open, and the needs list (owner holds on work as well as asks)
+/// read in full and empty. The header and the calm screen both ask this one question.
+pub(crate) fn nothing_waits(cx: &Ctx) -> bool {
+    let asks = joined(cx, None);
+    let needs = &cx.snap.needs;
+    // `data.is_some()` restates the whole read for a section that is unread with no error, which
+    // no reader builds (`Section::unavailable` carries one): belt and braces, not a proven guard.
+    asks.data.is_some()
+        && asks.errors.is_empty()
+        && queue(cx, None).is_empty()
+        && needs.errors.is_empty()
+        && needs.data.as_ref().is_some_and(Vec::is_empty)
+}
+
+/// A coarse age for the header: under a minute, minutes under an hour, hours under two days, else days.
 pub(crate) fn ago(from: jiff::Timestamp, at: jiff::Timestamp) -> Option<String> {
     match at.as_second() - from.as_second() {
         ..0 => None,
-        s @ 0..3_600 => Some(format!("{} min", s / 60)),
+        0..60 => Some("less than a minute".into()),
+        s @ 60..3_600 => Some(format!("{} min", s / 60)),
         s @ 3_600..172_800 => Some(format!("{} h", s / 3_600)),
         s => Some(format!("{} d", s / 86_400)),
     }
 }
 
-/// `/decisions`: the first open ask in queue order, decided in place; the calm screen when the
-/// asks read in full and none is open; otherwise the inbox card with its read state.
+/// `/decisions`: the first open ask in queue order, decided in place; the calm screen when
+/// nothing waits; otherwise the inbox card with its read state, under the needs card when the
+/// needs list holds something or could not be read.
 pub(crate) fn decisions(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
-    let section = joined(cx, None);
     let groups = queue(cx, None);
     let ledgers = by_ledger(&groups);
     let first = ledgers.iter().flat_map(|(_, v)| v).find(|e| e.keyed);
@@ -51,11 +70,17 @@ pub(crate) fn decisions(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
             let handle = e.ask.handle();
             layout(cx, &groups, Some((e.lf.file.as_str(), handle)), super::decision(cx, id, &e.lf.file, handle))
         }
-        // Calm needs a whole read. `data.is_some()` restates it for a section that is unread with
-        // no error, which the asks reader never builds (`Section::unavailable` carries one), so no
-        // test can tell it apart: it is belt and braces, not a proven guard.
-        None if section.data.is_some() && section.errors.is_empty() && groups.is_empty() => calm(cx, id),
-        None => super::inbox(cx, id, p),
+        None if nothing_waits(cx) => calm(cx, id),
+        None => {
+            let needs = &cx.snap.needs;
+            let held = !needs.errors.is_empty() || needs.data.as_ref().is_none_or(|n| !n.is_empty());
+            html! {
+                div class="mv-stack" {
+                    @if held { (crate::render::needs(cx, &format!("{id}-needs"), None, 8)) }
+                    (super::inbox(cx, id, p))
+                }
+            }
+        }
     }
 }
 
@@ -105,11 +130,17 @@ fn layout(cx: &Ctx, groups: &[Group], selected: Option<(&str, &str)>, main: Mark
     let ledgers = by_ledger(groups);
     let rows: Vec<&Entry> = ledgers.iter().flat_map(|(_, v)| v.iter().copied()).collect();
     let at = rows.iter().position(|e| is(e, selected));
+    let section = joined(cx, None);
+    let partial = !section.errors.is_empty() || rows.iter().any(|e| e.landing == Landing::Unknown);
     html! {
         div class="mv-decide" {
             (column(cx, &ledgers, rows.len(), selected))
             div class="mv-decide-main" {
-                @if let Some(i) = at { (pager(&rows, i)) }
+                // The queue column is hidden on a phone, so the pager carries its read state there.
+                @if let Some(i) = at { (pager(&rows, i, partial)) }
+                @if section.data.is_none() || partial {
+                    div class="mv-pager-read" { (read_state(cx, &section)) }
+                }
                 (main)
             }
         }
@@ -121,12 +152,13 @@ fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, selected: Opt
     let section = joined(cx, None);
     let partial =
         !section.errors.is_empty() || ledgers.iter().flat_map(|(_, v)| v).any(|e| e.landing == Landing::Unknown);
-    let counts = cx.snap.asks.data.as_ref();
     html! {
         aside class="mv-queue" aria-label="Waiting on you" data-state=(if section.data.is_none() { "unavailable" } else if partial { "partial" } else { "ok" }) {
             header class="mv-queue-head" {
                 h2 class="mv-kicker" { "Waiting on you" }
-                span class="mv-queue-count" { (total) @if partial { "+" } }
+                span class="mv-queue-count" {
+                    @if section.data.is_none() { "?" } @else { (total) @if partial { "+" } }
+                }
             }
             @for (ledger, entries) in ledgers {
                 section class="mv-qgroup" {
@@ -135,7 +167,8 @@ fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, selected: Opt
                         @for e in entries {
                             li class="mv-qrow" data-blocking=(e.ask.blocking) data-landing=(match e.landing { Landing::Waiting => "waiting", Landing::NotSeen => "open", Landing::Unknown => "unknown" }) {
                                 @if e.keyed {
-                                    a href=(href(e)) aria-current=[is(e, selected).then_some("page")] { (qrow(cx, e)) }
+                                    // `true`, not `page`: the nav's Decisions tab already marks the page.
+                                    a href=(href(e)) aria-current=[is(e, selected).then_some("true")] { (qrow(cx, e)) }
                                 } @else {
                                     div { (qrow(cx, e)) }
                                 }
@@ -144,24 +177,31 @@ fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, selected: Opt
                     }
                 }
             }
-            footer class="mv-queue-foot bv-meta" {
-                @match counts {
-                    Some(c) => {
-                        p { (c.answered) " answered across " (c.ledgers) " ledgers. Answered asks live in Today." }
-                        // Reading the working tree itself, nothing lands onto it: no count is made.
-                        @if cx.store.tree.source != maestro_store::TreeSource::WorkingTree {
-                            @match c.unlanded {
-                                Some(0) => {},
-                                Some(n) => p data-tone="success" { (n) " answered, not yet on " span class="bv-code" { (cx.snap.tree) } "." },
-                                None => p data-tone="warning" { "Answers not yet landed could not all be read. This is not the same as none." },
-                            }
-                        }
-                    },
-                    None => p class="mv-unavailable" { "The asks could not be read. This is not the same as none." },
-                }
-                (errors(&section))
-            }
+            footer class="mv-queue-foot bv-meta" { (read_state(cx, &section)) }
         }
+    }
+}
+
+/// What the queue stands on: answered counts, answers not yet landed, and every read error.
+/// The column shows it; on a phone, where the column is hidden, the pager's note does.
+fn read_state(cx: &Ctx, section: &maestro_core::Section<()>) -> Markup {
+    let counts = cx.snap.asks.data.as_ref();
+    html! {
+        @match counts {
+            Some(c) => {
+                p { (c.answered) " answered across " (c.ledgers) @if c.ledgers == 1 { " ledger" } @else { " ledgers" } ". Answered asks live in Today." }
+                // Reading the working tree itself, nothing lands onto it: no count is made.
+                @if cx.store.tree.source != maestro_store::TreeSource::WorkingTree {
+                    @match c.unlanded {
+                        Some(0) => {},
+                        Some(n) => p data-tone="success" { (n) " answered, not yet on " span class="bv-code" { (cx.snap.tree) } "." },
+                        None => p data-tone="warning" { "Answers not yet landed could not all be read. This is not the same as none." },
+                    }
+                }
+            },
+            None => p class="mv-unavailable" { "The asks could not be read. This is not the same as none." },
+        }
+        (errors(section))
     }
 }
 
@@ -183,11 +223,11 @@ fn qrow(cx: &Ctx, e: &Entry) -> Markup {
 }
 
 /// The phone's place in the queue: `1 of 3 · project`, with the previous and next asks.
-fn pager(rows: &[&Entry], i: usize) -> Markup {
+fn pager(rows: &[&Entry], i: usize, partial: bool) -> Markup {
     let link = |j: usize| rows.get(j).filter(|e| e.keyed).map(|e| href(e));
     html! {
         nav class="mv-pager" aria-label="Queue" {
-            span class="mv-pager-at bv-code" { (i + 1) " of " (rows.len()) " · " bdi { (rows[i].project()) } }
+            span class="mv-pager-at bv-code" { (i + 1) " of " (rows.len()) @if partial { "+" } " · " bdi { (rows[i].project()) } }
             span class="mv-pager-links" {
                 @if let Some(h) = i.checked_sub(1).and_then(link) { a class="mv-pager-link" href=(h) rel="prev" { "Previous" } }
                 @if let Some(h) = link(i + 1) { a class="mv-pager-link" href=(h) rel="next" { "Next" } }
@@ -196,18 +236,23 @@ fn pager(rows: &[&Entry], i: usize) -> Markup {
     }
 }
 
-/// Every ask read in full and none open.
+/// Nothing waits ([`nothing_waits`]). Each count says when its own read was partial or failed.
 fn calm(cx: &Ctx, id: &str) -> Markup {
     let s = &cx.snap;
-    let answered = s.asks.data.as_ref().map(|c| c.answered);
-    let loops = s.loops.data.as_ref().map(Vec::len);
-    let drifting = s.loops.data.as_ref().map(|l| l.iter().filter(|r| !r.drift.is_empty()).count());
-    let live = s.initiatives.data.as_ref().map(|i| i.iter().filter(|i| i.status == InitiativeStatus::Active).count());
-    let stat = |value: Option<usize>, label: Markup| {
+    let whole = |errors: &[maestro_core::SourceError]| errors.is_empty();
+    let answered = s.asks.data.as_ref().map(|c| (c.answered, true));
+    let loops = s.loops.data.as_ref().map(|l| (l.len(), whole(&s.loops.errors)));
+    // Drift comes from the ticks ledger: a loops read with any error may hide some.
+    let drifting =
+        s.loops.data.as_ref().map(|l| (l.iter().filter(|r| !r.drift.is_empty()).count(), whole(&s.loops.errors)));
+    // The snapshot's initiatives are the live ones already (active or blocked on the owner).
+    let live = s.initiatives.data.as_ref().map(|i| (i.len(), whole(&s.initiatives.errors)));
+    let number = |v: (usize, bool)| if v.1 { v.0.to_string() } else { format!("at least {}", v.0) };
+    let stat = |value: Option<(usize, bool)>, label: Markup| {
         html! {
-            div class="mv-stat" {
+            div class="mv-stat" data-state=(match value { None => "unavailable", Some((_, false)) => "partial", Some(_) => "ok" }) {
                 @match value {
-                    Some(n) => span class="mv-stat-value" { (n) },
+                    Some(v) => span class="mv-stat-value" { (number(v)) },
                     None => span class="mv-stat-value mv-unavailable" { "unavailable" },
                 }
                 span class="mv-stat-label bv-meta" { (label) }
@@ -219,12 +264,16 @@ fn calm(cx: &Ctx, id: &str) -> Markup {
             p class="mv-kicker" { span class="mv-dot" data-tone="success" aria-hidden="true" {} "All clear" }
             h1 class="mv-calm-title" { "Nothing needs " em { "you" } }
             p class="mv-calm-sub" {
-                "Every ask on " span class="bv-code" { (s.tree) } " has an answer. The next decision appears here when an agent files one."
+                "No ask on " span class="bv-code" { (s.tree) } " is open, and nothing else is held for you. The next decision appears here when an agent files one."
             }
             div class="mv-stats" {
                 (stat(answered, html! { "answered" }))
-                (stat(loops, html! { "loops" @if let Some(d) = drifting { ", " (d) " drifting" } }))
+                (stat(loops, html! { "loops" }))
+                (stat(drifting, html! { "loops drifting" }))
                 (stat(live, html! { "initiatives live" }))
+            }
+            @if !(whole(&s.loops.errors) && whole(&s.initiatives.errors)) {
+                p class="mv-calm-note bv-meta" data-tone="warning" { "Some counts read in part: they are lower bounds." }
             }
         }
     }

@@ -295,7 +295,7 @@ fn snapshot(cx: &Ctx, id: &str) -> Markup {
     }
 }
 
-fn needs(cx: &Ctx, id: &str, project: Option<&str>, limit: usize) -> Markup {
+pub(crate) fn needs(cx: &Ctx, id: &str, project: Option<&str>, limit: usize) -> Markup {
     let section = &cx.snap.needs;
     let list: Vec<_> =
         section.data.iter().flatten().filter(|n| project.is_none() || n.project.as_deref() == project).collect();

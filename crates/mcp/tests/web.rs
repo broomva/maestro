@@ -93,7 +93,7 @@ async fn each_page_renders_its_block_from_the_ledgers() {
     // The approved layout (BRO-3783): the shell's count, the queue beside the decision, its row current.
     assert!(r.body.contains(r#"<span class="mv-nav-count">"#), "the shell counts the open asks");
     assert!(
-        r.body.contains(r#"<a href="/decisions/demo-arc.yaml/merge-now" aria-current="page">"#),
+        r.body.contains(r#"<a href="/decisions/demo-arc.yaml/merge-now" aria-current="true">"#),
         "the queue marks the decision shown: {}",
         r.body
     );
