@@ -1,5 +1,6 @@
 /* Maestro view: the screen layer over the Broomva foundation tokens (inlined before this file).
-   Content is matte; glass is kept for the control layer (.mv-control) only.
+   Panels are glass with a pearl rim (BRO-3783); cards inside them are flat, and the answer bar
+   inside a panel is a flat surface with a rim, never a second blur.
    Motion is one spring, used for fragment swaps; reduced motion and reduced transparency
    each have a fallback. */
 
@@ -8,11 +9,137 @@
      integrated over 600 ms and sampled every 25 ms for linear(). */
   --mv-spring: linear(0, 0.045, 0.151, 0.286, 0.427, 0.560, 0.677, 0.775, 0.853, 0.912, 0.956, 0.986, 1.005, 1.016, 1.022, 1.023, 1.022, 1.020, 1.017, 1.013, 1.010, 1.008, 1.005, 1.003, 1);
   --mv-spring-dur: 600ms;
-  --mv-tone-attention: var(--bv-blue);
-  --mv-tone-info: var(--bv-info);
-  --mv-tone-warning: var(--bv-warning);
-  --mv-tone-danger: var(--bv-danger);
-  --mv-tone-success: var(--bv-success);
+}
+
+/* Maestro's palette (BRO-3783, design approved in maestro#20): Liquid Dawn for light, and
+   Maestro Midnight for dark, an Apple Midnight blue at OKLCH hue about 250 that overrides
+   Liquid Dawn's sea-slate Dusk. Dawn's values are the liquid-dawn skill's tokens. The theme
+   follows the system unless the host sets data-theme. Status colours always travel with a word. */
+:root {
+  --mv-paper: #f7f6f1;
+  --mv-surface: #fdfcfa;
+  --mv-sunk: #eeede7;
+  --mv-ink: #18232a;
+  --mv-ink2: #475258;
+  --mv-ink3: #56616a;
+  --mv-line: #2430371c;
+  --mv-line2: #24303733;
+  /* Liquid Dawn's tide (#00778d) and moss, darkened for Maestro so small text on sunk cards and the
+     current queue row clears WCAG AA (4.5:1). */
+  --mv-tide: #006a7e;
+  --mv-tide-soft: #006a7e12;
+  --mv-tide-line: #006a7ecc;
+  --mv-glass: #fdfcfac2;
+  --mv-glass-heavy: #fcfcf9eb;
+  --mv-shadow: #1b3f501f;
+  --mv-wash-a: #90c6e340;
+  --mv-wash-b: #e3cb9933;
+  --mv-wash-c: #7dd5da33;
+  --mv-rim-a: #ffffff;
+  --mv-rim-b: #b7bfc5;
+  --mv-rim-c: #65d0dc;
+  --mv-rim-d: #eccd8c;
+  --mv-ok: #336b3f;
+  --mv-warn: #8a5c00;
+  --mv-fail: #a63d35;
+  --mv-cta: #18232a;
+  --mv-cta-ink: #fdfcfa;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --mv-paper: #0b1622;
+    --mv-surface: #15202e;
+    --mv-sunk: #0a1420;
+    --mv-ink: #eef2f6;
+    --mv-ink2: #b9c4cf;
+    --mv-ink3: #93a0ae;
+    --mv-line: #c8d8ea1f;
+    --mv-line2: #c8d8ea3d;
+    --mv-tide: #8cc6e4;
+    --mv-tide-soft: #8cc6e41c;
+    --mv-tide-line: #8cc6e4cc;
+    --mv-glass: #15202ec7;
+    --mv-glass-heavy: #121d2bf0;
+    --mv-shadow: #00000066;
+    --mv-wash-a: #2a5f8a47;
+    --mv-wash-b: #b07a3a1f;
+    --mv-wash-c: #1f6f8238;
+    --mv-rim-a: #f3fcfe59;
+    --mv-rim-b: #75838a73;
+    --mv-rim-c: #6cd7e3b3;
+    --mv-rim-d: #eccd8c80;
+    --mv-ok: #84c99c;
+    --mv-warn: #e4bb6e;
+    --mv-fail: #f2907f;
+    --mv-cta: #eef2f6;
+    --mv-cta-ink: #0b1622;
+  }
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --mv-paper: #0b1622;
+  --mv-surface: #15202e;
+  --mv-sunk: #0a1420;
+  --mv-ink: #eef2f6;
+  --mv-ink2: #b9c4cf;
+  --mv-ink3: #93a0ae;
+  --mv-line: #c8d8ea1f;
+  --mv-line2: #c8d8ea3d;
+  --mv-tide: #8cc6e4;
+  --mv-tide-soft: #8cc6e41c;
+  --mv-tide-line: #8cc6e4cc;
+  --mv-glass: #15202ec7;
+  --mv-glass-heavy: #121d2bf0;
+  --mv-shadow: #00000066;
+  --mv-wash-a: #2a5f8a47;
+  --mv-wash-b: #b07a3a1f;
+  --mv-wash-c: #1f6f8238;
+  --mv-rim-a: #f3fcfe59;
+  --mv-rim-b: #75838a73;
+  --mv-rim-c: #6cd7e3b3;
+  --mv-rim-d: #eccd8c80;
+  --mv-ok: #84c99c;
+  --mv-warn: #e4bb6e;
+  --mv-fail: #f2907f;
+  --mv-cta: #eef2f6;
+  --mv-cta-ink: #0b1622;
+}
+
+/* The foundation's roles, read from the palette above in either mode. */
+:root, [data-theme] {
+  --background: var(--mv-paper);
+  --foreground: var(--mv-ink);
+  --card: var(--mv-surface);
+  --card-foreground: var(--mv-ink);
+  --primary: var(--mv-cta);
+  --primary-foreground: var(--mv-cta-ink);
+  --secondary: var(--mv-sunk);
+  --secondary-foreground: var(--mv-ink);
+  --muted: var(--mv-sunk);
+  --muted-foreground: var(--mv-ink3);
+  --accent: var(--mv-tide-soft);
+  --accent-foreground: var(--mv-ink2);
+  --border: var(--mv-line);
+  --input: var(--mv-line2);
+  --ring: var(--mv-tide);
+  --glass-surface: var(--mv-glass-heavy);
+  --glass-border: var(--mv-line2);
+  --bv-border-25: var(--mv-line2);
+  --bv-font-sans: "SF Pro Text", ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+  --mv-font-display: "SF Pro Display", ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+  --mv-tone-attention: var(--mv-tide);
+  --mv-tone-info: var(--mv-tide);
+  --mv-tone-warning: var(--mv-warn);
+  --mv-tone-danger: var(--mv-fail);
+  --mv-tone-success: var(--mv-ok);
+  --mv-r-chip: 10px;
+  --mv-r-card: 26px;
+  --mv-r-option: 16px;
+  /* The pearl liquid-metal rim, as a border-box layer under a padding-box fill. */
+  --mv-rim: linear-gradient(140deg, var(--mv-rim-a), var(--mv-rim-b) 38%, var(--mv-rim-c) 70%, var(--mv-rim-d));
 }
 
 * { box-sizing: border-box; }
@@ -241,4 +368,167 @@ body { padding: var(--bv-space-3); }
   body { padding: var(--bv-space-2); }
   .mv-card { padding: var(--bv-space-3); }
   .mv-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Materials (BRO-3783): paper ground with a soft wash, dew glass with a pearl liquid-metal rim on
+   the panels, flat cards inside them (no glass on glass), light tight display type, mono kickers.
+   The wash and the rim are gradients: the page fetches nothing. */
+body {
+  background:
+    radial-gradient(60rem 40rem at 8% -10%, var(--mv-wash-a), transparent 70%),
+    radial-gradient(50rem 36rem at 72% -14%, var(--mv-wash-b), transparent 70%),
+    radial-gradient(56rem 44rem at 96% 96%, var(--mv-wash-c), transparent 70%),
+    var(--mv-paper);
+  background-attachment: fixed;
+  color: var(--mv-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+.mv-card.bv-card {
+  border: 1px solid transparent;
+  border-radius: var(--mv-r-card);
+  background:
+    linear-gradient(var(--mv-glass), var(--mv-glass)) padding-box,
+    var(--mv-rim) border-box;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--mv-rim-a) 70%, transparent), 0 22px 48px -30px var(--mv-shadow);
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  padding: var(--bv-space-6);
+}
+.mv-stack > .mv-card.bv-card, .mv-rail > .mv-card.bv-card { padding: var(--bv-space-5); }
+.mv-title, .mv-kicker {
+  margin: 0;
+  font-family: var(--bv-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--mv-ink3);
+}
+.mv-count { font-family: var(--bv-font-mono); font-size: 11px; color: var(--mv-tide); }
+.mv-source { font-size: 11px; opacity: 0.85; }
+
+/* The decision: kicker chips, a display title, then the facts it stands on. */
+.mv-decision { gap: var(--bv-space-4); }
+.mv-dmeta { font-family: var(--bv-font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--mv-ink3); gap: var(--bv-space-2); }
+.mv-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 0; padding: 0; border-radius: 0;
+  font-family: var(--bv-font-mono); font-size: 11px; letter-spacing: 0.14em; color: var(--mv-ink3);
+}
+.mv-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mv-tone-info); }
+.mv-chip[data-kind="authority"]::before { background: var(--mv-tone-warning); }
+.mv-chip[data-kind="idea"]::before { background: var(--mv-tone-success); }
+.mv-chip[data-kind] { color: var(--mv-ink3); }
+.mv-dtitle {
+  font-family: var(--mv-font-display);
+  font-size: clamp(24px, 2.4vw + 6px, 32px);
+  font-weight: 300;
+  letter-spacing: -0.03em;
+  line-height: 1.14;
+  color: var(--mv-ink);
+}
+.mv-dbody { font-size: 16px; line-height: 1.5; color: var(--mv-ink2); }
+.mv-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: var(--bv-space-3); }
+.mv-pair > p {
+  margin: 0; padding: var(--bv-space-3) var(--bv-space-4);
+  border-radius: var(--mv-r-option); background: var(--mv-sunk); border: 1px solid var(--mv-line);
+  font-size: var(--bv-text-sm); line-height: 1.5; color: var(--mv-ink2);
+}
+.mv-pair-label { display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500; color: var(--mv-ink); }
+.mv-stakes { font-size: var(--bv-text-sm); }
+.mv-gates { font-family: var(--bv-font-mono); font-size: 11px; }
+.mv-label { font-family: var(--bv-font-mono); font-size: 11px; letter-spacing: 0.14em; color: var(--mv-ink3); }
+
+/* Options: flat cards with a radio mark and a key number; the recommended one in tide. */
+.mv-dopts { counter-reset: mv-opt; gap: var(--bv-space-2); }
+.mv-dopt::before, .mv-dopt::after { box-sizing: border-box; }
+.mv-dopt {
+  counter-increment: mv-opt;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--bv-space-3);
+  row-gap: 2px;
+  padding: var(--bv-space-3) var(--bv-space-4) var(--bv-space-3) 52px;
+  border-radius: var(--mv-r-option);
+  border: 1px solid var(--mv-line2);
+  background: color-mix(in srgb, var(--mv-surface) 80%, transparent);
+}
+.mv-dopt::before {
+  content: ""; position: absolute; left: 18px; top: 15px;
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 1.5px solid var(--mv-line2); background: var(--mv-surface);
+}
+.mv-dopt::after {
+  content: counter(mv-opt); position: absolute; right: 14px; bottom: 12px;
+  min-width: 20px; padding: 1px 5px; border-radius: 6px; border: 1px solid var(--mv-line2);
+  font-family: var(--bv-font-mono); font-size: 11px; text-align: center; color: var(--mv-ink3);
+}
+.mv-dopt > * { grid-column: 1; }
+.mv-dopt > .mv-chips { grid-column: 2; grid-row: 1; justify-content: end; align-self: start; }
+.mv-dopt > .mv-cells { grid-column: 1 / -1; padding-right: 32px; }
+.mv-dopt[data-recommended="true"] {
+  border: 1.5px solid var(--mv-tide-line);
+  background: linear-gradient(var(--mv-tide-soft), var(--mv-tide-soft)), color-mix(in srgb, var(--mv-surface) 86%, transparent);
+}
+.mv-dopt[data-recommended="true"]::before { border: 6px solid var(--mv-tide); background: var(--mv-surface); }
+.mv-dopt[data-chosen="true"] { border: 1.5px solid var(--mv-ok); }
+.mv-dopt[data-chosen="true"]::before { border: 6px solid var(--mv-ok); }
+.mv-dopt-label { font-size: 16px; font-weight: 500; color: var(--mv-ink); }
+.mv-dopt-text { font-size: var(--bv-text-sm); line-height: 1.45; color: var(--mv-ink2); padding-right: 32px; }
+.mv-badge { border: 0; padding: 0; margin: 0 0 0 var(--bv-space-2); font-family: var(--bv-font-mono); font-size: 11px; color: var(--mv-ink3); }
+.mv-badge[data-tone="info"] { color: var(--mv-tide); font-weight: 500; }
+
+/* What silence does: one quiet line with a clock mark, as the design draws it. */
+.mv-decision .mv-callout { border: 0; padding: 0 0 0 24px; position: relative; font-size: var(--bv-text-sm); color: var(--mv-ink2); }
+.mv-decision .mv-callout::before {
+  content: ""; position: absolute; left: 2px; top: 3px; width: 13px; height: 13px;
+  border-radius: 50%; border: 1.5px solid currentColor;
+  background: linear-gradient(currentColor, currentColor) 6px 3px / 1.5px 5px no-repeat;
+}
+.mv-decision .mv-callout[data-tone="warning"] { color: var(--mv-ink2); }
+.mv-decision .mv-callout[data-tone="success"] { color: var(--mv-ok); }
+
+.mv-fold { border-radius: var(--mv-r-option); border-color: var(--mv-line); background: color-mix(in srgb, var(--mv-surface) 60%, transparent); }
+.mv-tried ul { list-style: none; padding: 0; }
+.mv-tried li { padding: var(--bv-space-2) 0; border-top: 1px solid var(--mv-line); color: var(--mv-ink2); }
+.mv-tried li:first-child { border-top: 0; }
+.mv-tried li .bv-code { color: var(--mv-tide); font-size: 12px; }
+.mv-source-chip { border-color: var(--mv-line2); background: color-mix(in srgb, var(--mv-surface) 70%, transparent); }
+
+/* The answer bar: the control layer, glass with the pearl rim. */
+.mv-control {
+  border: 1px solid transparent;
+  border-radius: 22px;
+  background:
+    linear-gradient(var(--mv-glass-heavy), var(--mv-glass-heavy)) padding-box,
+    var(--mv-rim) border-box;
+  box-shadow: 0 16px 36px -24px var(--mv-shadow);
+}
+/* Inside a glass panel the bar is a flat surface with its rim: no blur on blur. */
+.mv-card .mv-control { backdrop-filter: none; -webkit-backdrop-filter: none; }
+.mv-answer-cta { border: 1px dashed var(--mv-line2); border-radius: 14px; font-weight: 500; color: var(--mv-ink); }
+.mv-handoff .mv-handoff-option { padding: var(--bv-space-2) 0; border-top: 1px solid var(--mv-line); }
+.mv-handoff .mv-handoff-option:first-child { border-top: 0; }
+.mv-handoff a {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  background: var(--mv-cta); color: var(--mv-cta-ink); text-decoration: none; font-size: 13px; font-weight: 500;
+}
+.mv-handoff a + a, .mv-handoff a[target] { background: transparent; color: var(--mv-ink); border: 1px solid var(--mv-line2); }
+
+.mv-tab[aria-current="page"] { color: var(--mv-ink); }
+.mv-banner { border-color: var(--mv-line); border-radius: 14px; background: color-mix(in srgb, var(--mv-surface) 60%, transparent); }
+.mv-tile, .mv-pill { background: var(--mv-sunk); border-color: var(--mv-line); }
+.mv-headline-text { font-family: var(--mv-font-display); font-weight: 300; letter-spacing: -0.03em; }
+
+@media (prefers-reduced-transparency: reduce) {
+  .mv-card.bv-card { background: var(--mv-surface); backdrop-filter: none; -webkit-backdrop-filter: none; border-color: var(--mv-line2); }
+  .mv-control { background: var(--mv-surface); }
+}
+
+@media (prefers-contrast: more) {
+  /* As specific as the dark-mode rule above, and later, so it wins in either mode. */
+  :root:not([data-theme="light"]), :root[data-theme="light"], [data-theme] { --mv-line: var(--mv-line2); --mv-ink3: var(--mv-ink2); }
+  .mv-card.bv-card { background: var(--mv-surface); border-color: var(--mv-ink3); }
 }

@@ -241,8 +241,34 @@ mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_em
 mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| a.class != Some(AskClass::Idea))'
 mutate $decision '        @if landing == Landing::Unknown {' '        @if false {'
 mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
-mutate $web 'render_with(&store, &validated, at, thread.as_deref())' 'render_with(&store, &validated, at, None)'
+mutate $web 'render_web(&store, &validated, at, thread.as_deref())' 'render_web(&store, &validated, at, None)'
 mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
+# The web decision layout (BRO-3783): calm only when nothing waits by a whole read (owner holds on
+# work included), the shell's lower bounds, unread as "?", encoded links, shared handles never opened.
+wscr=crates/view/src/screens/web.rs
+mutate $wscr '        && needs.data.as_ref().is_some_and(Vec::is_empty)' '        && true'
+mutate $wscr '        && asks.errors.is_empty()' '        && true'
+mutate $wscr '        partial: !cx.reads.asks.errors.is_empty(),' '        partial: false,'
+mutate $wscr "        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {" '        if true {'
+mutate $wscr 'aria-current=[current.is_some_and(|c| std::ptr::eq(c, *e)).then_some("true")]' 'aria-current=[Some("true")]'
+mutate $wscr '    let first = ledgers.iter().flat_map(|(_, v)| v).find(|e| e.keyed);' '    let first = ledgers.iter().flat_map(|(_, v)| v).next();'
+mutate $wscr '    let link = |e: &&Entry| e.keyed.then(|| href(e));' '    let link = |e: &&Entry| Some(href(e));'
+mutate $wscr '    let next = rows[i + 1..].iter().find_map(link);' '    let next = rows.get(i + 1).and_then(link);'
+mutate $wscr '        .position(|e| here(&e) && e.ask.handle() == handle)' '        .position(|e| here(&e) && (e.ask.handle() == handle || e.ask.id == handle))'
+mutate $wscr '        .or_else(|| rows.iter().position(|e| here(&e) && e.ask.id == handle))' ''
+mutate crates/view/src/render.rs '        @if list.is_empty() && section.errors.is_empty() { (empty("Nothing needs you.")) }' '        @if list.is_empty() { (empty("Nothing needs you.")) }'
+mutate $wscr '@if section.data.is_none() { "?" }' '@if false { "?" }'
+mutate $wscr '" of " (rows.len()) @if partial { "+" }' '" of " (rows.len()) @if false { "+" }'
+mutate $page '        if self.calm {' '        if n == 0 {'
+mutate $wscr '        && needs.errors.is_empty()' '        && true'
+mutate $wscr '        needs: needs.data.as_ref().filter(|_| needs.errors.is_empty()).map(Vec::len),' '        needs: needs.data.as_ref().map(Vec::len),'
+mutate $wscr '    let loops = s.loops.data.as_ref().map(|l| (l.len(), whole(&s.loops.errors)));' '    let loops = s.loops.data.as_ref().map(|l| (l.len(), true));'
+mutate $wscr '    let live = s.initiatives.data.as_ref().map(|i| (i.len(), whole(&s.initiatives.errors)));' '    let live = s.initiatives.data.as_ref().map(|i| (i.len(), true));'
+mutate $wscr '            @if !(whole(&s.loops.errors) && whole(&s.initiatives.errors)) {' '            @if false {'
+mutate $wscr '                    None => span class="mv-stat-value mv-unavailable" { "unavailable" },' '                    None => span class="mv-stat-value" { "0" },'
+mutate crates/view/assets/web.css '.mv-qrow > a[aria-current="true"] {' '.mv-qrow > a[aria-current="page"] {'
+mutate $page '            Some((n, _)) if self.partial => format!("{n}+"),' '            Some((n, _)) if false => format!("{n}+"),'
+mutate $page "        match self.tree.strip_prefix(\"git:\").and_then(|t| t.rsplit_once('@')) {" "        match self.tree.strip_prefix(\"git:\").and_then(|t| t.split_once('@')) {"
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,
 # sigterm_right_after_the_readiness_line_is_a_clean_stop: under this harness's load the race closes.)
 mutate $cli 'let mut term = signal(SignalKind::terminate())?;' 'let mut term = signal(SignalKind::user_defined1())?;'

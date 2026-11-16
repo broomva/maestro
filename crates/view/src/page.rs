@@ -96,27 +96,125 @@ pub fn app() -> String {
 /// them, and only the same origin's manifest may load.
 pub const WEB_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; manifest-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
 
-/// The navigation bar's styles, only on the web pages, so the App's stylesheet is unchanged.
-const WEB_CSS: &str = ".mv-web-nav { padding: var(--bv-space-3); }\n.mv-web-nav .mv-tab { color: inherit; text-decoration: none; }\n.mv-web-nav .mv-tab[aria-current=\"page\"] { background: var(--foreground); color: var(--background); border-color: var(--foreground); }";
+/// The web pages' styles (BRO-3783): the shell, the three-column decision and the phone layout.
+/// Only on the web pages, so the App's stylesheet holds only what the App places.
+const WEB_CSS: &str = include_str!("../assets/web.css");
 
 /// One place in the web pages' navigation: its path and its label.
 pub const WEB_NAV: [(&str, &str); 3] = [("/decisions", "Decisions"), ("/today", "Today"), ("/health", "Health")];
 
-/// One render as a web page for a browser (BRO-3588): no script, a navigation bar with `current`
+/// What the web pages' header says (BRO-3783), from the same read as the page under it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Shell {
+    /// The tree read, as the snapshot names it: `git:<rev>@<commit>` or `worktree`.
+    pub tree: String,
+    /// Open asks and how many of them block, when the asks were read.
+    pub open: Option<(usize, usize)>,
+    /// The asks read in part: every count is a lower bound.
+    pub partial: bool,
+    /// What the needs list holds for the owner (asks and work), when it read in full.
+    pub needs: Option<usize>,
+    /// Nothing waits on the owner, by a whole read: the one condition for "Nothing needs you",
+    /// the same one the calm screen shows on.
+    pub calm: bool,
+    /// How long ago the commit read was made (`3 h`), when it is known.
+    pub committed: Option<String>,
+}
+
+impl Shell {
+    /// The line beside the wordmark. Unread is said, never shown as none; a partial read is a lower
+    /// bound; "Nothing needs you" only when [`Shell::calm`] says so.
+    pub fn summary(&self) -> String {
+        let Some((n, blocking)) = self.open else { return "Decisions could not be read".into() };
+        if self.calm {
+            return "Nothing needs you".into();
+        }
+        if n == 0 && !self.partial {
+            return match self.needs {
+                Some(h) if h > 0 => {
+                    format!("No decision open, {h} other {} for you", if h == 1 { "hold" } else { "holds" })
+                }
+                _ => "No decision open; not everything that could need you was read".into(),
+            };
+        }
+        let at_least = if self.partial { "at least " } else { "" };
+        let noun = if n == 1 { "decision" } else { "decisions" };
+        let blocks = match blocking {
+            0 if self.partial => "none seen blocking".to_string(),
+            0 => "none blocking".to_string(),
+            b => format!("{b} blocking"),
+        };
+        format!("{at_least}{n} {noun} for you, {blocks}")
+    }
+
+    /// The summary's state for styling: `unavailable`, `partial`, `calm`, `open` (asks open), or
+    /// `held` (no ask open, and something else holds or was not read). A phone shows the line only
+    /// when it is not `calm` or `open`.
+    pub fn state(&self) -> &'static str {
+        match self.open {
+            None => "unavailable",
+            Some(_) if self.partial => "partial",
+            Some(_) if self.calm => "calm",
+            Some((0, _)) => "held",
+            Some(_) => "open",
+        }
+    }
+
+    /// The count on the Decisions tab: `3`, `3+` for a partial read, `?` when unread.
+    pub fn badge(&self) -> String {
+        match self.open {
+            None => "?".into(),
+            Some((n, _)) if self.partial => format!("{n}+"),
+            Some((n, _)) => n.to_string(),
+        }
+    }
+
+    /// The tree as the header shows it: `main 0123abc` for `git:origin/main@0123abc4567`. The
+    /// commit is the text after the last `@`, cut by characters; an unresolved one is said.
+    pub fn tree_short(&self) -> String {
+        match self.tree.strip_prefix("git:").and_then(|t| t.rsplit_once('@')) {
+            Some((rev, "unresolved")) => format!("{} (commit unresolved)", rev.strip_prefix("origin/").unwrap_or(rev)),
+            Some((rev, commit)) => {
+                let rev = rev.strip_prefix("origin/").unwrap_or(rev);
+                format!("{rev} {}", commit.chars().take(7).collect::<String>())
+            }
+            None => self.tree.clone(),
+        }
+    }
+}
+
+/// One render as a web page for a browser (BRO-3588): no script, the shell with `current`
 /// marked, and the manifest a phone installs it from. Read-only: answering is not offered here.
-pub fn web(fragment: &str, title: &str, current: &str) -> String {
+pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String {
     html! {
         (DOCTYPE)
         html lang="en" {
             head {
                 (head(&format!("{title} · Maestro"), WEB_CSP))
+                meta name="theme-color" content="#f7f6f1" media="(prefers-color-scheme: light)";
+                meta name="theme-color" content="#0b1622" media="(prefers-color-scheme: dark)";
                 link rel="manifest" href="/manifest.webmanifest";
                 style { (PreEscaped(WEB_CSS)) }
             }
-            body {
-                nav class="mv-tabs mv-web-nav" aria-label="Maestro" {
-                    @for (path, label) in WEB_NAV {
-                        a class="mv-tab" href=(path) aria-current=[(path == current).then_some("page")] { (label) }
+            body class="mv-web" {
+                header class="mv-web-head" {
+                    p class="mv-brand" {
+                        a class="mv-wordmark" href="/decisions" { "Maestro" }
+                        " "
+                        span class="mv-brand-sub" data-state=(shell.state()) { (shell.summary()) }
+                    }
+                    nav class="mv-tabs mv-web-nav" aria-label="Maestro" {
+                        @for (path, label) in WEB_NAV {
+                            a class="mv-tab" href=(path) aria-current=[(path == current).then_some("page")] {
+                                (label)
+                                @if path == "/decisions" { " " span class="mv-nav-count" { (shell.badge()) } }
+                            }
+                        }
+                    }
+                    p class="mv-web-tree bv-meta" {
+                        span class="mv-dot" aria-hidden="true" {}
+                        span class="bv-code" title=(shell.tree) { (shell.tree_short()) }
+                        @if let Some(ago) = &shell.committed { " · committed " (ago) " ago" }
                     }
                 }
                 main id="maestro-root" data-web="true" { (PreEscaped(fragment)) }
@@ -134,6 +232,8 @@ pub fn web_manifest() -> String {
         "start_url": "/decisions",
         "scope": "/",
         "display": "standalone",
+        "background_color": "#f7f6f1",
+        "theme_color": "#f7f6f1",
     })
     .to_string()
 }
