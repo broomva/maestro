@@ -437,6 +437,7 @@ body {
 
 /* Options: flat cards with a radio mark and a key number; the recommended one in tide. */
 .mv-dopts { counter-reset: mv-opt; gap: var(--bv-space-2); }
+.mv-dopt::before, .mv-dopt::after { box-sizing: border-box; }
 .mv-dopt {
   counter-increment: mv-opt;
   position: relative;
@@ -488,7 +489,7 @@ body {
 .mv-tried ul { list-style: none; padding: 0; }
 .mv-tried li { padding: var(--bv-space-2) 0; border-top: 1px solid var(--mv-line); color: var(--mv-ink2); }
 .mv-tried li:first-child { border-top: 0; }
-.mv-tried li .bv-code { display: block; color: var(--mv-tide); font-size: 12px; }
+.mv-tried li .bv-code { color: var(--mv-tide); font-size: 12px; }
 .mv-source-chip { border-color: var(--mv-line2); background: color-mix(in srgb, var(--mv-surface) 70%, transparent); }
 
 /* The answer bar: the control layer, glass with the pearl rim. */

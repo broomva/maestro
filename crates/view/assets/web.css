@@ -49,6 +49,9 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-decide-main { min-width: 0; display: flex; flex-direction: column; gap: var(--bv-space-3); }
 .mv-decide-main > .mv-card { padding: var(--bv-space-8); }
 .mv-decide-main > .mv-card > .mv-head { display: none; }
+/* The T3 hand-off closes the decision, in flow at every width: it lists every option, so pinned
+   it would cover the decision on a phone. The pinned bar is the in-place answer of a later slice. */
+.mv-decide-main .mv-decision .mv-answerbar { position: static; }
 
 .mv-queue {
   position: sticky; top: var(--bv-space-4);
@@ -81,7 +84,7 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-qrow-title { font-size: var(--bv-text-sm); font-weight: 500; line-height: 1.35; color: var(--mv-ink); overflow-wrap: anywhere; unicode-bidi: isolate; }
 .mv-qrow-meta { font-size: 11px; color: var(--mv-ink3); overflow-wrap: anywhere; unicode-bidi: isolate; }
 .mv-queue-foot { margin-top: auto; padding: var(--bv-space-3) var(--bv-space-2) 0; border-top: 1px solid var(--mv-line); }
-.mv-queue-foot p { margin: 0 0 4px; line-height: 1.45; }
+.mv-queue-foot p { margin: 0 0 4px; font-size: 12px; line-height: 1.45; color: var(--mv-ink3); }
 
 .mv-pager { display: none; }
 
@@ -138,8 +141,7 @@ body.mv-web { padding: 0; min-height: 100vh; }
   .mv-decide { grid-template-columns: 260px minmax(0, 1fr); gap: var(--bv-space-4); }
 }
 
-/* The phone: one column. The capsule sits under the wordmark, the queue becomes a pager, and
-   the answer bar stays pinned at the bottom. */
+/* The phone: one column. The capsule sits at the top and the queue becomes a pager. */
 @media (max-width: 760px) {
   .mv-web-head { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: var(--bv-space-4) var(--bv-space-4) var(--bv-space-3); gap: var(--bv-space-3); }
   .mv-brand, .mv-web-tree { display: none; }
@@ -156,7 +158,6 @@ body.mv-web { padding: 0; min-height: 100vh; }
   }
   .mv-dtitle { font-size: 28px; }
   .mv-pair { grid-template-columns: minmax(0, 1fr); }
-  .mv-decision .mv-answerbar { position: sticky; bottom: var(--bv-space-3); }
   .mv-calm { padding-top: 8vh; }
   .mv-stats { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--bv-space-3); padding: var(--bv-space-4); }
   .mv-stat { border-left: 0; padding: 0; }
