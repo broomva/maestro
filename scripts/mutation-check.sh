@@ -246,7 +246,6 @@ mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=
 # The web decision layout (BRO-3783): calm only on a whole read, the shell's lower bound, encoded links.
 wscr=crates/view/src/screens/web.rs
 mutate $wscr 'None if section.data.is_some() && section.errors.is_empty() && groups.is_empty() => calm(cx, id),' 'None if section.data.is_some() && groups.is_empty() => calm(cx, id),'
-mutate $wscr 'None if section.data.is_some() && section.errors.is_empty() && groups.is_empty() => calm(cx, id),' 'None if section.errors.is_empty() && groups.is_empty() => calm(cx, id),'
 mutate $wscr '        partial: !cx.reads.asks.errors.is_empty(),' '        partial: false,'
 mutate $wscr "        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {" '        if true {'
 mutate $wscr 'aria-current=[is(e, selected).then_some("page")]' 'aria-current=[Some("page")]'

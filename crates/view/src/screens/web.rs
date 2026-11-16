@@ -51,6 +51,9 @@ pub(crate) fn decisions(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
             let handle = e.ask.handle();
             layout(cx, &groups, Some((e.lf.file.as_str(), handle)), super::decision(cx, id, &e.lf.file, handle))
         }
+        // Calm needs a whole read. `data.is_some()` restates it for a section that is unread with
+        // no error, which the asks reader never builds (`Section::unavailable` carries one), so no
+        // test can tell it apart: it is belt and braces, not a proven guard.
         None if section.data.is_some() && section.errors.is_empty() && groups.is_empty() => calm(cx, id),
         None => super::inbox(cx, id, p),
     }
