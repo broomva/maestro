@@ -255,6 +255,7 @@ mutate $wscr '    let first = ledgers.iter().flat_map(|(_, v)| v).find(|e| e.key
 mutate $wscr '    let link = |e: &&Entry| e.keyed.then(|| href(e));' '    let link = |e: &&Entry| Some(href(e));'
 mutate $wscr '    let next = rows[i + 1..].iter().find_map(link);' '    let next = rows.get(i + 1).and_then(link);'
 mutate $wscr '        .position(|e| here(&e) && e.ask.handle() == handle)' '        .position(|e| here(&e) && (e.ask.handle() == handle || e.ask.id == handle))'
+mutate $wscr '        .or_else(|| rows.iter().position(|e| here(&e) && e.ask.id == handle))' ''
 mutate crates/view/src/render.rs '        @if list.is_empty() && section.errors.is_empty() { (empty("Nothing needs you.")) }' '        @if list.is_empty() { (empty("Nothing needs you.")) }'
 mutate $wscr '@if section.data.is_none() { "?" }' '@if false { "?" }'
 mutate $wscr '" of " (rows.len()) @if partial { "+" }' '" of " (rows.len()) @if false { "+" }'

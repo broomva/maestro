@@ -215,6 +215,24 @@ fn a_uid_equal_to_another_asks_id_marks_one_row_current() {
 }
 
 #[test]
+fn a_legacy_link_by_id_still_marks_the_asks_row() {
+    // The ask is addressed by its uid `u1`; an old link names it by its id `old`. With no handle
+    // `old` in the ledger, the id names the row: it is current, and the pager places it.
+    let m = all_answered(false);
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::write(
+        asks.join("legacy.yaml"),
+        format!("asks:\n{}{}", open_ask("first", None, "First"), open_ask("old", Some("u1"), "Renamed")),
+    )
+    .unwrap();
+    let (r, _) =
+        web(&worktree(m.path()), json!({ "type": "decision", "props": { "ledger": "legacy.yaml", "id": "old" } }));
+    let current: Vec<_> = queue_links(&r.html).into_iter().filter(|(_, c)| *c).collect();
+    assert_eq!(current, vec![("/decisions/legacy.yaml/u1".to_string(), true)], "{}", r.html);
+    assert!(r.html.contains("2 of 2"), "{}", r.html);
+}
+
+#[test]
 fn the_pager_steps_over_rows_it_cannot_link() {
     // Undated asks sort by ledger: `0a`, the two that share `same` in `1dup`, then `2c`.
     let m = all_answered(false);
