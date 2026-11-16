@@ -1,0 +1,35 @@
+[package]
+name = "maestro-flow"
+description = "The flow ledger and its kernel: one writer, a hash-chained event log per instance, a rebuildable SQLite projection, flow definitions, a read-only scheduler, and claims and receipts with kernel-run verifies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The crate has no doc tests, and running rustdoc for none costs every mutant of the mutation
+# check (scripts/mutation-check.sh runs the whole suite per mutant) seconds for nothing.
+[lib]
+doctest = false
+
+[dependencies]
+maestro-core.workspace = true
+# A human step files its ask through the store's agent path (`requests::file_ask`) and reads the
+# answer with its readers (BRO-3635). maestro-store depends on maestro-core alone.
+maestro-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
+rustix.workspace = true
+serde_yaml.workspace = true
+jaq-core.workspace = true
+jaq-std.workspace = true
+jaq-json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

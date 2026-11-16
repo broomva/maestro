@@ -238,6 +238,50 @@ impl Store {
         Section { source: docs.source, data, errors }
     }
 
+    /// One ask ledger, `file` in the asks folder, read as [`Store::asks`] reads each (the same
+    /// YAML reader, [`LEDGER_LIMIT`], and so the same entry hashes), and nothing else in the
+    /// folder. `Ok(None)` when the tree holds no such file. An entry that does not read is an
+    /// error, never skipped: it may be the one a caller looks for. Used where a caller needs one
+    /// ask by its id, not a listing (the flow kernel's human steps, BRO-3635).
+    pub fn ask_ledger(&self, file: &str) -> Result<Option<AskLedger>, String> {
+        if !requests::ledger_name_ok(file) {
+            return Err(format!("`{file}` is not a ledger name"));
+        }
+        let dir = self.rel(ASKS)?;
+        let listing =
+            self.tree.list(&dir, &[".yaml", ".yml"]).map_err(|e| format!("{}: {e}", self.tree.label(&dir)))?;
+        if let Some((_, reason)) = listing.skipped.iter().find(|(name, _)| name == file) {
+            return Err(format!("{dir}/{file}: {reason}"));
+        }
+        if !listing.names.iter().any(|name| name == file) {
+            return Ok(None);
+        }
+        let rel = format!("{dir}/{file}");
+        // Bounded at the read: a ledger over the limit, at any revision, is never taken in.
+        let text = self.tree.read_bounded(&rel, LEDGER_LIMIT).map_err(|e| e.to_string())?;
+        ask_ledger_of(&rel, &text).map(Some)
+    }
+
+    /// [`Store::ask_ledger`] at `commit`, every object on the way checked against its id
+    /// ([`tree::read_verified`]), so nothing planted in the object store reads as the ledger. The
+    /// folder is the registry's at this store's tree (as [`Store::rel`] gives it). `Ok(None)` when
+    /// the commit has no such file.
+    pub fn ask_ledger_verified(
+        &self,
+        file: &str,
+        commit: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<AskLedger>, String> {
+        if !requests::ledger_name_ok(file) {
+            return Err(format!("`{file}` is not a ledger name"));
+        }
+        let rel = format!("{}/{file}", self.rel(ASKS)?);
+        match tree::read_verified(self.tree.root(), commit, &rel, LEDGER_LIMIT, timeout)? {
+            Some(text) => ask_ledger_of(&rel, &text).map(Some),
+            None => Ok(None),
+        }
+    }
+
     pub fn initiatives(&self) -> Section<Vec<Initiative>> {
         self.yaml_dir(INITIATIVES)
     }
@@ -406,6 +450,16 @@ impl Store {
 /// is U+FFFD. JavaScript measures in UTF-16 units and a unit is at most 3 bytes of UTF-8, so the cut
 /// lies in the last `3 * limit + 3` bytes and only those are read, except when no line break
 /// follows the cut: then the tail is the whole file, as `indexOf` giving -1 makes it there.
+/// One ledger's text read as [`Store::asks`] reads each; an entry that does not read is an error.
+fn ask_ledger_of(rel: &str, text: &str) -> Result<AskLedger, String> {
+    let doc = yaml::parse(text).map_err(|e| format!("{rel}: {e}"))?.value;
+    let (ledger, bad) = AskLedger::from_value(doc).map_err(|e| format!("{rel}: {e}"))?;
+    if let Some((i, reason)) = bad.first() {
+        return Err(format!("{rel}#{i}: {reason}"));
+    }
+    Ok(ledger)
+}
+
 pub fn read_tail(path: &Path, limit: usize) -> std::io::Result<(String, u64)> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path)?;

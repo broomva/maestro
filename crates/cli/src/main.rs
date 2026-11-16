@@ -189,6 +189,246 @@ enum Command {
     /// Evaluate parity cases (JSON on stdin) with the ported functions: scripts/parity-delegation.py.
     #[command(hide = true)]
     ParityEval,
+    /// A flow's steps, through the flow kernel. Each prints the JSON its maestro_flow tool returns,
+    /// and exits 1 on a refusal. Writes need a verified session:
+    /// a Direct launch token (MAESTRO_DIRECT_TOKEN) or a bridge credential (MAESTRO_BRIDGE_CREDENTIAL).
+    Flow {
+        #[command(subcommand)]
+        command: FlowCommand,
+    },
+    /// Dogfood receipts (BRO-3636): the verifier pilot's check, which the flow kernel runs as the
+    /// verify of verify@1's exercise node. Reads only, and needs no workspace.
+    Dogfood {
+        #[command(subcommand)]
+        command: DogfoodCommand,
+    },
+    /// Specialist agents (BRO-3636): agents/<name>.agent.yaml, rendered for each harness. Needs no
+    /// workspace.
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentsCommand {
+    /// Write .claude/agents/<name>.md, .gemini/agents/<name>.md and .grok/agents/<name>.md from
+    /// every agents/<name>.agent.yaml under --root, and remove the renders whose source is gone.
+    /// With --check, write nothing and exit 1 naming the first render that drifts from its source.
+    Render {
+        /// The folder holding agents/ and the render folders.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long)]
+        check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DogfoodCommand {
+    /// Check a dogfood-receipt@1 file. Reads the outputs a performer completed with on stdin,
+    /// `{"receipt": "<path>", "receipt_sha256": "sha256:<hex>"}` (a relative path is taken from
+    /// the working directory), as the flow kernel hands them to the verify. Exits 0 only when the
+    /// receipt hashes to receipt_sha256, is well formed, is for --head and --surface, says pass,
+    /// and its evidence file hashes to the digest it records. Each failure has its own exit
+    /// status, 3 to 14 (see maestro_flow::dogfood). Prints one JSON line; writes nothing.
+    VerifyReceipt {
+        /// The commit the receipt must be for.
+        #[arg(long)]
+        head: String,
+        /// The surface the receipt must be for.
+        #[arg(long)]
+        surface: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum FlowCommand {
+    /// Start an instance of a flow, owned by this session.
+    Start {
+        #[command(flatten)]
+        session: SessionArg,
+        /// The definition's YAML file; `-` reads it from stdin.
+        #[arg(long)]
+        definition: String,
+        /// The flow's params as a JSON object.
+        #[arg(long)]
+        params: Option<String>,
+    },
+    /// The nodes that can be claimed now, and why the others cannot. Writes nothing.
+    Next {
+        #[arg(long)]
+        instance: String,
+    },
+    /// Claim an enabled node.
+    Claim {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        node_id: String,
+    },
+    /// Finish a claim: the kernel runs the node's command and records the receipt if it passes.
+    Complete {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        claim_token: String,
+        /// The node's outputs as a JSON object.
+        #[arg(long)]
+        outputs: Option<String>,
+        /// How long the node's command may run, in seconds.
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+    /// Take a declared edge of a claimed choice node, if its guard holds.
+    Choose {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        claim_token: String,
+        #[arg(long)]
+        edge: String,
+    },
+    /// Every node's state. Writes nothing.
+    Status {
+        #[arg(long)]
+        instance: String,
+    },
+    /// The accepting spine: one record per accepted node and iteration, with its edge and verify
+    /// exit, in log order. With --against, exits 1 at the first difference from another instance's,
+    /// and 3 when the two run different definitions, which are not compared. Writes nothing.
+    Spine {
+        #[arg(long)]
+        instance: String,
+        /// Another instance of the same flow to compare with.
+        #[arg(long)]
+        against: Option<String>,
+    },
+    /// The flow's driver skill (a SKILL.md), generated from its compiled IR: printed, or written
+    /// to --out. With --check, write nothing and exit 1 when --out is not what it generates. An
+    /// --out that is the definition itself is refused. With --json, prints {"ok", "skill",
+    /// "path"}. Needs no workspace, and is the one flow command that is no MCP tool's twin.
+    DriverSkill {
+        /// The definition's YAML file.
+        #[arg(long)]
+        definition: PathBuf,
+        /// The SKILL.md to write, or to check with --check.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long, requires = "out")]
+        check: bool,
+    },
+    /// Extend a claim's lease.
+    Heartbeat {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        claim_token: String,
+    },
+    /// A waiting human node: file its ask (first call), then take the owner's answer from the
+    /// answers ledger once there is one. Call it again until it says answered.
+    Ask {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        instance: String,
+        #[arg(long)]
+        node_id: String,
+        /// The asks ledger to file into (first call only).
+        #[arg(long)]
+        ledger: Option<String>,
+        /// The ask's fields besides id, ask and asked_at, as a JSON object (first call only).
+        #[arg(long)]
+        ask: Option<String>,
+    },
+    /// Propose to the owner that this session adopt an instance it does not own: file the ask
+    /// (first call), then carry out the owner's answer once it has landed on main. Call it again
+    /// until it says adopted or declined; a decline is reported on every call, and --again (with
+    /// --ledger and --ask) asks again.
+    ProposeAdoption {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        instance: String,
+        /// The asks ledger to file into (first call, or with --again).
+        #[arg(long)]
+        ledger: Option<String>,
+        /// The ask's fields besides those the kernel writes, as a JSON object (with --ledger).
+        #[arg(long)]
+        ask: Option<String>,
+        /// Ask again, in place of a declined or stale proposal (needs --ledger and --ask).
+        #[arg(long)]
+        again: bool,
+    },
+    /// Propose to the owner that an instance be retired: file the ask (first call), then carry
+    /// out the owner's answer once it has landed on main. Call it again until it says retired or
+    /// declined; a decline is reported on every call, and --again (with --ledger and --ask) asks
+    /// again.
+    ProposeRetirement {
+        #[command(flatten)]
+        session: SessionArg,
+        #[arg(long)]
+        instance: String,
+        /// The asks ledger to file into (first call, or with --again).
+        #[arg(long)]
+        ledger: Option<String>,
+        /// The ask's fields besides those the kernel writes, as a JSON object (with --ledger).
+        #[arg(long)]
+        ask: Option<String>,
+        /// Ask again, in place of a declined or stale proposal (needs --ledger and --ask).
+        #[arg(long)]
+        again: bool,
+    },
+    /// The flow instances this session owns that are not finished, each with its work (what the
+    /// session can do now) and what it waits on, and refuses_stop. Needs a verified session;
+    /// writes nothing.
+    Open {
+        #[command(flatten)]
+        session: SessionArg,
+    },
+    /// The Stop-hook gate: run by Claude Code or Codex as a Stop hook. Reads the hook's JSON on
+    /// stdin and refuses the final message, in the harness's format, while an instance this
+    /// session owns is open and has work it can do now. Fails open: on any error the stop goes
+    /// through, with the reason on stderr. Always exits 0. Needs no MCP twin: only a harness runs it.
+    StopGate {
+        /// The harness running the hook.
+        #[arg(long, value_enum)]
+        harness: GateHarness,
+        /// This session as `surface:environment/id`. Unset, no flow is gated.
+        #[arg(long, env = "MAESTRO_SESSION")]
+        session: Option<String>,
+        /// The harness cannot refuse a stop here: record StopUnblockable and file the alert instead.
+        #[arg(long)]
+        cannot_block: bool,
+        /// The asks ledger fleet alerts are filed into (a file in the asks folder).
+        #[arg(long, env = "MAESTRO_ALERT_LEDGER", default_value = maestro_mcp::stop::DEFAULT_ALERT_LEDGER)]
+        alert_ledger: String,
+        /// Report whether a settings file wires this gate as the harness's Stop hook, and exit 1
+        /// when it does not. Reads no stdin and gates nothing.
+        #[arg(long)]
+        check_install: bool,
+        /// The settings file --check-install reads. Default: ~/.claude/settings.json for claude,
+        /// $CODEX_HOME/hooks.json (~/.codex/hooks.json) for codex.
+        #[arg(long, requires = "check_install")]
+        settings: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum GateHarness {
+    Claude,
+    Codex,
+}
+
+impl GateHarness {
+    fn harness(self) -> maestro_mcp::stop::Harness {
+        match self {
+            GateHarness::Claude => maestro_mcp::stop::Harness::Claude,
+            GateHarness::Codex => maestro_mcp::stop::Harness::Codex,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -234,6 +474,19 @@ fn store(cli: &Cli) -> Result<Store> {
     let source: TreeSource = cli.tree.parse().map_err(|e: String| anyhow::anyhow!("--tree: {e}"))?;
     Ok(Store::new(paths, source))
 }
+
+/// Two instances `flow spine --against` does not compare, since they run different definitions:
+/// exit 3, apart from a difference (exit 1).
+#[derive(Debug)]
+struct DefinitionMismatch(String);
+
+impl std::fmt::Display for DefinitionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DefinitionMismatch {}
 
 /// A lock another writer held for the whole wait: exit 75 (EX_TEMPFAIL), as `ask_ledger.py` does, to retry.
 #[derive(Debug)]
@@ -284,6 +537,16 @@ fn is_hook(args: &[String]) -> bool {
             .any(|(i, a)| a == "--format=hook" || (a == "--format" && args.get(i + 1).is_some_and(|v| v == "hook")))
 }
 
+/// Whether argv requests the install check, including malformed values for the flag.
+fn is_check_install(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--check-install" || a.starts_with("--check-install="))
+}
+
+/// Whether the command line runs the Stop-hook gate (`flow stop-gate`), so it never exits 2.
+fn is_stop_gate(args: &[String], check_install: bool) -> bool {
+    args.windows(2).any(|w| w[0] == "flow" && w[1] == "stop-gate") && !check_install
+}
+
 /// How long the hook may take before it gives up silently (`MAESTRO_HOOK_TIMEOUT_MS`, default 5000).
 fn hook_budget() -> std::time::Duration {
     let ms = std::env::var("MAESTRO_HOOK_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5_000);
@@ -326,13 +589,24 @@ fn drop_inherited_git_repo() {
 fn drop_inherited_git_repo() {}
 
 fn main() -> std::process::ExitCode {
+    // First: in the flow kernel's guard evaluator (this binary started again) it answers and
+    // exits here; otherwise it registers this process as a guard host (BRO-3634).
+    maestro_flow::kernel::guard_entry();
     drop_inherited_git_repo();
     let args: Vec<String> = std::env::args().collect();
     let hook = is_hook(&args);
+    let check_install = is_check_install(&args);
+    let gate = is_stop_gate(&args, check_install);
     let port_cmd = args.iter().any(|a| a == "delegation" || a == "economy");
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(_) if hook => return std::process::ExitCode::SUCCESS,
+        Err(_) if hook && !check_install => return std::process::ExitCode::SUCCESS,
+        // A Stop hook that exits 2 refuses the stop: a command line the gate cannot read lets it
+        // through instead (it fails open), saying why.
+        Err(e) if gate => {
+            eprintln!("maestro stop-gate: the command line does not parse, so the stop goes through: {e}");
+            return std::process::ExitCode::SUCCESS;
+        }
         Err(e) => match port_cmd.then(|| port::usage_error(&e)).flatten() {
             Some(code) => return code,
             None => e.exit(),
@@ -351,11 +625,35 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    // The ports keep the Python's exit codes and need no workspace store.
+    // The ports keep the Python's exit codes and need no workspace store; nor does a receipt
+    // check, which the flow kernel runs with a cleared environment.
     match &cli.command {
         Command::Delegation { command } => return port::delegation(command, cli.json),
         Command::Economy { command } => return port::economy(command, cli.json),
         Command::ParityEval => return port::eval_stdin(),
+        Command::Dogfood { command: DogfoodCommand::VerifyReceipt { head, surface } } => {
+            return verify_receipt(head, surface);
+        }
+        Command::Agents { command: AgentsCommand::Render { root, check } } => {
+            return exit(render_agents(cli.json, root, *check));
+        }
+        Command::Flow { command: FlowCommand::DriverSkill { definition, out, check } } => {
+            return exit(driver_skill(cli.json, definition, out.as_deref(), *check));
+        }
+        Command::Flow {
+            command: FlowCommand::StopGate { harness, session, cannot_block, alert_ledger, check_install, settings },
+        } => {
+            if *check_install {
+                return exit(check_gate(harness.harness(), settings.as_deref()));
+            }
+            let gate = maestro_mcp::stop::Gate {
+                harness: harness.harness(),
+                cannot_block: *cannot_block,
+                session: session.clone(),
+                alert_ledger: alert_ledger.clone(),
+            };
+            return stop_gate(&cli, &gate);
+        }
         _ => {}
     }
 
@@ -365,6 +663,9 @@ fn main() -> std::process::ExitCode {
             eprintln!("maestro: {e:#}");
             if e.downcast_ref::<Busy>().is_some() {
                 return std::process::ExitCode::from(75);
+            }
+            if e.downcast_ref::<DefinitionMismatch>().is_some() {
+                return std::process::ExitCode::from(3);
             }
             std::process::ExitCode::FAILURE
         }
@@ -427,6 +728,7 @@ fn run(cli: &Cli) -> Result<()> {
         Command::Escalate { session, reason } => {
             request(cli, &store, "maestro_escalate", json!({ "session": session.session, "reason": reason }))?
         }
+        Command::Flow { command } => flow(&store, command)?,
         _ => read(cli, &store)?,
     }
     Ok(())
@@ -451,6 +753,268 @@ fn request(cli: &Cli, store: &Store, tool: &str, args: Value) -> Result<()> {
         d => println!("{} {} {}: recorded, {}", s(&r["request"]), s(&r["id"]), s(&r["at"]), d.unwrap_or("?")),
     }
     Ok(())
+}
+
+/// A JSON argument: an object for `params` and `outputs`.
+fn json_arg(flag: &str, text: Option<&str>) -> Result<Option<Value>> {
+    text.map(|t| serde_json::from_str(t).with_context(|| format!("{flag} must be JSON"))).transpose()
+}
+
+/// A definition, read to one byte past the kernel's bound, so an oversized one is never read
+/// whole. Over the bound it goes on with any character the cut split replaced, so the tool
+/// refuses it for its size (`definition_invalid`) exactly as it refuses one sent over MCP;
+/// within the bound it must be UTF-8, as every MCP argument is.
+fn read_definition(source: impl std::io::Read) -> Result<String> {
+    let limit = maestro_flow::kernel::MAX_SOURCE;
+    let mut bytes = Vec::new();
+    source.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    String::from_utf8(bytes).context("the definition is not UTF-8")
+}
+
+/// One flow verb, through the same tool an agent calls over MCP: the same JSON in and out. The
+/// CLI adds no caller claim of its own; the caller variables (`MAESTRO_DIRECT_TOKEN`,
+/// `MAESTRO_BRIDGE_CREDENTIAL`, `MAESTRO_CALLER_CWD`, `MAESTRO_CALLER_NODE`) carry it.
+fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
+    use maestro_mcp::flow as f;
+    let (tool, args) = match command {
+        FlowCommand::Start { session, definition, params } => {
+            let text = if definition == "-" {
+                read_definition(std::io::stdin().lock())?
+            } else {
+                std::fs::File::open(definition)
+                    .map_err(anyhow::Error::from)
+                    .and_then(read_definition)
+                    .with_context(|| format!("reading {definition}"))?
+            };
+            let params = json_arg("--params", params.as_deref())?;
+            (f::START, json!({ "session": session.session, "definition": text, "params": params }))
+        }
+        FlowCommand::DriverSkill { .. } => bail!("flow driver-skill is not a tool"),
+        FlowCommand::StopGate { .. } => bail!("flow stop-gate is not a tool"),
+        FlowCommand::Open { session } => (f::OPEN, json!({ "session": session.session })),
+        FlowCommand::Next { instance } => (f::NEXT, json!({ "instance": instance })),
+        FlowCommand::Status { instance } => (f::STATUS, json!({ "instance": instance })),
+        FlowCommand::Spine { instance, against } => (f::SPINE, json!({ "instance": instance, "against": against })),
+        FlowCommand::Claim { session, instance, node_id } => {
+            (f::CLAIM, json!({ "session": session.session, "instance": instance, "node_id": node_id }))
+        }
+        FlowCommand::Complete { session, claim_token, outputs, timeout_secs } => {
+            let outputs = json_arg("--outputs", outputs.as_deref())?;
+            let args = json!({ "session": session.session, "claim_token": claim_token, "outputs": outputs, "timeout_secs": timeout_secs });
+            (f::COMPLETE, args)
+        }
+        FlowCommand::Choose { session, claim_token, edge } => {
+            (f::CHOOSE, json!({ "session": session.session, "claim_token": claim_token, "edge": edge }))
+        }
+        FlowCommand::Heartbeat { session, claim_token } => {
+            (f::HEARTBEAT, json!({ "session": session.session, "claim_token": claim_token }))
+        }
+        FlowCommand::Ask { session, instance, node_id, ledger, ask } => {
+            let ask = json_arg("--ask", ask.as_deref())?;
+            let args = json!({ "session": session.session, "instance": instance, "node_id": node_id, "ledger": ledger, "ask": ask });
+            (f::ASK, args)
+        }
+        FlowCommand::ProposeAdoption { session, instance, ledger, ask, again }
+        | FlowCommand::ProposeRetirement { session, instance, ledger, ask, again } => {
+            let tool = match command {
+                FlowCommand::ProposeAdoption { .. } => f::PROPOSE_ADOPTION,
+                _ => f::PROPOSE_RETIREMENT,
+            };
+            let body = json_arg("--ask", ask.as_deref())?;
+            let args = json!({ "session": session.session, "instance": instance, "ledger": ledger, "ask": body, "again": again });
+            (tool, args)
+        }
+    };
+    let v = call(store, tool, args)?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    if v["ok"] == json!(true) {
+        return Ok(());
+    }
+    if v["code"] == "definition_mismatch" {
+        return Err(DefinitionMismatch(format!("definition_mismatch: {}", s(&v["reason"]))).into());
+    }
+    bail!("{}: {}", s(&v["code"]), s(&v["reason"]))
+}
+
+/// `maestro flow stop-gate`: the gate over stdin (`maestro_mcp::stop`), its answer on stdout and
+/// its notes on stderr. Always exits 0: a Stop hook that exits 2 would refuse the stop, and the
+/// gate refuses only through its answer.
+fn stop_gate(cli: &Cli, gate: &maestro_mcp::stop::Gate) -> std::process::ExitCode {
+    let mut input = Vec::new();
+    let limit = maestro_mcp::stop::MAX_INPUT as u64 + 1;
+    if let Err(e) = std::io::stdin().lock().take(limit).read_to_end(&mut input) {
+        eprintln!("maestro stop-gate: stdin does not read ({e}), so the stop goes through.");
+        println!("{}", gate.harness.allow());
+        return std::process::ExitCode::SUCCESS;
+    }
+    let paths = match Paths::from_env_with(cli.workspace.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("maestro stop-gate: the path registry: {e}; the stop goes through (the gate fails open).");
+            println!("{}", gate.harness.allow());
+            return std::process::ExitCode::SUCCESS;
+        }
+    };
+    let out = maestro_mcp::stop::gate_in_env(&paths, gate, &input);
+    for note in &out.notes {
+        eprintln!("{note}");
+    }
+    println!("{}", out.stdout);
+    std::process::ExitCode::SUCCESS
+}
+
+/// `maestro flow stop-gate --check-install`: whether `settings` (or the harness's default) wires
+/// the gate as its Stop hook. Prints the report as JSON; exits 1 when it is not wired.
+fn check_gate(harness: maestro_mcp::stop::Harness, settings: Option<&std::path::Path>) -> Result<()> {
+    use maestro_mcp::stop::Harness;
+    let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let path = match (settings, harness) {
+        (Some(p), _) => p.to_path_buf(),
+        (None, Harness::Claude) => home().join(".claude/settings.json"),
+        (None, Harness::Codex) => std::env::var_os("CODEX_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".codex"))
+            .join("hooks.json"),
+    };
+    let report = maestro_mcp::stop::check_install(harness, &path);
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if !report.wired {
+        bail!("{}", report.detail);
+    }
+    Ok(())
+}
+
+fn exit(result: Result<()>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("maestro: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// `maestro agents render`: every source's renders under `root`, written, or with `check`
+/// compared, failing on the first that drifts (`maestro_flow::agents::check`).
+fn render_agents(json: bool, root: &std::path::Path, check: bool) -> Result<()> {
+    use maestro_flow::agents;
+    if check {
+        if let Some(drift) = agents::check(root)? {
+            if json {
+                println!("{}", json!({ "ok": false, "code": "drift", "drift": drift }));
+            }
+            bail!("{drift}");
+        }
+        if json {
+            println!("{}", json!({ "ok": true }));
+        } else {
+            println!("every render matches its source");
+        }
+        return Ok(());
+    }
+    let written = agents::write(root)?;
+    if json {
+        println!("{}", json!({ "ok": true, "written": written.written, "removed": written.removed }));
+    } else {
+        for file in &written.written {
+            println!("wrote   {file}");
+        }
+        for file in &written.removed {
+            println!("removed {file}");
+        }
+    }
+    Ok(())
+}
+
+/// Whether `a` and `b` name one file: the same device and inode when both exist (so a link or a
+/// second path to it counts), and otherwise never, since a file that is not there is not `a`.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        #[cfg(unix)]
+        (Ok(x), Ok(y)) => {
+            use std::os::unix::fs::MetadataExt as _;
+            (x.dev(), x.ino()) == (y.dev(), y.ino())
+        }
+        #[cfg(not(unix))]
+        (Ok(_), Ok(_)) => std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok(),
+        _ => false,
+    }
+}
+
+/// `maestro flow driver-skill`: the driver skill generated from a definition
+/// (`maestro_flow::driver`), printed, written to `out`, or with `check` compared with `out`. An
+/// `out` that is the definition itself, by any path, is refused before anything is written.
+fn driver_skill(json: bool, definition: &std::path::Path, out: Option<&std::path::Path>, check: bool) -> Result<()> {
+    if let Some(path) = out
+        && same_file(path, definition)
+    {
+        bail!("--out {} is the definition itself; nothing was written", path.display());
+    }
+    let text = std::fs::File::open(definition)
+        .map_err(anyhow::Error::from)
+        .and_then(read_definition)
+        .with_context(|| format!("reading {}", definition.display()))?;
+    let flow = maestro_flow::kernel::compile(&text).map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
+    let skill = maestro_flow::driver::generate(&flow).map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
+    let shown = out.map(|p| p.display().to_string());
+    match out {
+        None if json => println!("{}", json!({ "ok": true, "skill": skill, "path": null })),
+        None => print!("{skill}"),
+        Some(path) if check => {
+            let on_disk = std::fs::read(path).ok();
+            if on_disk.as_deref() != Some(skill.as_bytes()) {
+                if json {
+                    println!("{}", json!({ "ok": false, "code": "drift", "path": shown }));
+                }
+                bail!(
+                    "{} drifts from the driver skill {} generates: run maestro flow driver-skill --out",
+                    path.display(),
+                    flow.name()
+                );
+            }
+            if json {
+                println!("{}", json!({ "ok": true, "skill": skill, "path": shown }));
+            }
+        }
+        Some(path) => {
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+            }
+            std::fs::write(path, &skill).with_context(|| format!("writing {}", path.display()))?;
+            if json {
+                println!("{}", json!({ "ok": true, "skill": skill, "path": shown }));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `maestro dogfood verify-receipt`: the receipt's check (`maestro_flow::dogfood`) over the outputs
+/// on stdin, read to one byte past their bound. One JSON line on stdout either way; a failure's
+/// reason on stderr too, where the kernel hands it back to the performer, and its own exit status.
+fn verify_receipt(head: &str, surface: &str) -> std::process::ExitCode {
+    let mut input = Vec::new();
+    let limit = maestro_flow::dogfood::MAX_OUTPUTS as u64 + 1;
+    if let Err(e) = std::io::stdin().lock().take(limit).read_to_end(&mut input) {
+        input = format!("stdin could not be read ({e})").into_bytes();
+    }
+    match maestro_flow::dogfood::verify(&input, head, surface) {
+        Ok(accepted) => {
+            let mut v = json!(accepted);
+            v["ok"] = json!(true);
+            println!("{v}");
+            std::process::ExitCode::SUCCESS
+        }
+        Err(failure) => {
+            println!("{}", json!({ "ok": false, "code": failure.code(), "reason": failure.to_string() }));
+            eprintln!("maestro: {}: {failure}", failure.code());
+            std::process::ExitCode::from(failure.exit())
+        }
+    }
 }
 
 fn doctor(cli: &Cli, store: &Store, bstack: Option<&std::path::Path>) -> Result<()> {

@@ -1,0 +1,8 @@
+focused guard suite: exit 0
+live PATH proof: exit 0; maestro unresolvable; node and sh resolvable
+PATH shim excludes maestro: exit 1, killed=true
+skill read exit: exit 1, killed=true
+skill read command: exit 1, killed=true
+skill read content: exit 1, killed=true
+skill evidence gate: exit 1, killed=true
+skill-read proof: exit 0; test -f=false; failed cat=false; successful content read=true

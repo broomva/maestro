@@ -1,8 +1,12 @@
-//! Who may do what. Three authority surfaces, from the BRO-3186 contract.
+//! Who may do what. Three authority surfaces from the BRO-3186 contract, plus agent writes.
 //!
 //! 1. Reads: scoped observations for coordinators and dashboards.
 //! 2. Agent requests: queue gated work, file a validated ask, request one held action.
 //! 3. Owner actions: answer, allow or deny, dispatch, send back, review, undo.
+//! 4. Agent writes: a verified agent session writing the flow ledger
+//!    (`docs/adrs/2026-11-06-flow-ledger.md`). Unlike a request, the write takes effect, so
+//!    only a verified agent holds this class. Which instances it may write is decided by
+//!    `crates/flow` from the instance's owner, not here.
 //!
 //! A model-visible tool is never proof of the owner. An owner action needs a
 //! principal the server can verify; a client-supplied `actor: human` is not one.
@@ -16,6 +20,9 @@ pub enum Authority {
     Read,
     AgentRequest,
     OwnerAction,
+    /// A verified agent session writing its own flow ledger. Not a held request: it takes
+    /// effect. Not an owner action: it decides nothing for the owner.
+    AgentWrite,
 }
 
 /// The caller as the server verified it, not as it described itself.
@@ -37,6 +44,9 @@ impl Principal {
             (_, Authority::Read) => true,
             (Principal::Agent { .. } | Principal::Owner { .. }, Authority::AgentRequest) => true,
             (Principal::Owner { .. }, Authority::OwnerAction) => true,
+            // A flow is owned by a verified agent session; the owner principal carries no
+            // session, so it owns no flow and holds no agent write (BRO-3631).
+            (Principal::Agent { .. }, Authority::AgentWrite) => true,
             _ => false,
         }
     }
@@ -105,6 +115,15 @@ mod tests {
         assert!(p.permits(Authority::Read));
         assert!(!p.permits(Authority::AgentRequest));
         assert!(!p.permits(Authority::OwnerAction));
+        assert!(!p.permits(Authority::AgentWrite));
+    }
+
+    #[test]
+    fn only_a_verified_agent_writes_a_flow() {
+        let agent = Principal::Agent { session: "t3:-/x".parse().unwrap() };
+        assert!(agent.permits(Authority::AgentWrite));
+        assert!(!Principal::Unverified.permits(Authority::AgentWrite));
+        assert!(!Principal::Owner { via: "app".into() }.permits(Authority::AgentWrite));
     }
 
     #[test]

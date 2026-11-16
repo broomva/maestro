@@ -1,0 +1,12 @@
+[
+  {
+    "tool": "Skill",
+    "skill": "flow-verify-v1",
+    "subagent_type": null
+  },
+  {
+    "tool": "Agent",
+    "skill": null,
+    "subagent_type": "verifier"
+  }
+]

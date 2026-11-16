@@ -7,6 +7,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeSource {
@@ -64,8 +65,8 @@ pub enum TreeError {
     #[error("{rel} is not valid UTF-8")]
     NotUtf8 { rel: String },
     /// A file past [`MAX_READ`]: not read, so no file can make a read allocate without bound.
-    #[error("{rel} is {size} bytes, over the {MAX_READ}-byte read limit")]
-    TooLarge { rel: String, size: u64 },
+    #[error("{rel} is {size} bytes, over the {limit}-byte read limit")]
+    TooLarge { rel: String, size: u64, limit: usize },
     /// The revision named no commit, so nothing is read from it: not the raw name, not a guess.
     #[error("revision `{rev}` did not resolve: {reason}")]
     Unresolved { rev: String, reason: String },
@@ -202,18 +203,38 @@ impl Tree {
     }
 
     pub fn read(&self, rel: &str) -> Result<String, TreeError> {
+        self.read_bounded(rel, MAX_READ)
+    }
+
+    /// [`Tree::read`], refusing a file over `limit` bytes (never more than [`MAX_READ`]) without
+    /// taking it in: the working tree reads through `take`, and a git revision asks the blob's
+    /// size (`cat-file -s`) before reading it. The revision is one resolved commit, so the blob
+    /// read is the one whose size was asked.
+    pub fn read_bounded(&self, rel: &str, limit: usize) -> Result<String, TreeError> {
+        let limit = limit.min(MAX_READ);
         match &self.source {
             TreeSource::WorkingTree => {
                 // Read through `take`, so a file that grows after it is opened is still bounded.
                 let file = std::fs::File::open(self.root.join(rel))?;
                 let mut bytes = Vec::new();
-                std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_READ as u64 + 1), &mut bytes)?;
-                if bytes.len() > MAX_READ {
-                    return Err(TreeError::TooLarge { rel: rel.to_string(), size: bytes.len() as u64 });
+                std::io::Read::read_to_end(&mut std::io::Read::take(file, limit as u64 + 1), &mut bytes)?;
+                if bytes.len() > limit {
+                    return Err(TreeError::TooLarge { rel: rel.to_string(), size: bytes.len() as u64, limit });
                 }
                 utf8(rel, bytes)
             }
-            TreeSource::GitRev(_) => self.git(&["show", &format!("{}:{rel}", self.rev()?)]),
+            TreeSource::GitRev(_) => {
+                let spec = format!("{}:{rel}", self.rev()?);
+                let said = self.git(&["cat-file", "-s", &spec])?;
+                let size: u64 = said.trim().parse().map_err(|_| TreeError::Git {
+                    args: format!("cat-file -s {spec}"),
+                    stderr: format!("not a size: {}", said.trim()),
+                })?;
+                if size > limit as u64 {
+                    return Err(TreeError::TooLarge { rel: rel.to_string(), size, limit });
+                }
+                self.git(&["show", &spec])
+            }
         }
     }
 
@@ -292,11 +313,333 @@ impl Tree {
     }
 }
 
-/// `git -C <root>`. The CLI drops an inherited GIT_DIR (and the like) at startup, so the root
-/// alone names the repository.
+/// The most bytes [`remote_ref`] reads of `git ls-remote`'s output, and of its error.
+pub const MAX_LS_REMOTE: usize = 4096;
+
+/// The git every store read and `ls-remote` runs on `os`, by absolute path, so no `git` earlier in
+/// a caller's `PATH` stands in for it. On macOS, `/usr/bin/git` is an `xcrun` launcher that finds
+/// git through a cache the user can write (`$(getconf DARWIN_USER_TEMP_DIR)xcrun_db`), so it is
+/// the Command Line Tools' git itself; never `xcode-select`'s path, which can name an app bundle.
+/// Before an answer read, [`check_root_owned`] checks it.
+pub fn git_for(os: &str) -> &'static str {
+    match os {
+        "macos" => "/Library/Developer/CommandLineTools/usr/bin/git",
+        _ => "/usr/bin/git",
+    }
+}
+
+/// The `PATH` git children get on `os`, whatever the caller's: git's own folder first, the system
+/// folders, then the two where GitHub's `gh` (the answers remote's credential helper) is installed.
+pub fn git_path_for(os: &str) -> &'static str {
+    match os {
+        "macos" => "/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        _ => "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+    }
+}
+
+/// [`git_for`] this platform.
+pub fn git() -> &'static str {
+    git_for(std::env::consts::OS)
+}
+
+/// [`git_path_for`] this platform.
+pub fn git_path() -> &'static str {
+    git_path_for(std::env::consts::OS)
+}
+
+/// Refuses `path` unless it and every folder above it, as given and each looked at itself
+/// (`lstat`, never through a link), are owned by root (uid 0), writable by no group and no other
+/// user, and none is a symbolic link: then no user-level write can replace it, or point it
+/// elsewhere. `path` must be absolute.
+pub fn check_root_owned(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    check_components(path, |at| {
+        let m = std::fs::symlink_metadata(at)?;
+        Ok(CompMeta { is_symlink: m.file_type().is_symlink(), uid: m.uid(), mode: m.mode() })
+    })
+}
+
+/// What [`check_components`] reads of one component of a path, looked at itself (`lstat`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompMeta {
+    is_symlink: bool,
+    uid: u32,
+    mode: u32,
+}
+
+/// [`check_root_owned`]'s rule over `path`, from the path itself up to `/`, each component read
+/// with `meta` (the filesystem's `lstat` in production; a table in the unit tests).
+fn check_components(path: &Path, meta: impl Fn(&Path) -> std::io::Result<CompMeta>) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{} is not an absolute path", path.display()));
+    }
+    for at in path.ancestors() {
+        let meta = meta(at).map_err(|e| format!("{}: {e}", at.display()))?;
+        if meta.is_symlink {
+            return Err(format!("{} is a symbolic link", at.display()));
+        }
+        if meta.uid != 0 {
+            return Err(format!("{} is owned by uid {}, not root", at.display(), meta.uid));
+        }
+        if meta.mode & 0o022 != 0 {
+            return Err(format!("{} is writable by its group or others (mode {:o})", at.display(), meta.mode & 0o7777));
+        }
+    }
+    Ok(())
+}
+
+/// The environment a git child keeps from the caller's: only these, so no `GIT_*` variable
+/// (`GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_REPLACE_REF_BASE`, `GIT_CONFIG_*`, ...) reaches it.
+const GIT_ENV_KEPT: [&str; 3] = ["HOME", "LANG", "TMPDIR"];
+
+/// `git -c <config>... ls-remote -- <url> <refname>`, to be run by [`remote_ref`], with nothing
+/// local applying: it runs in `/`, outside any repository, with no system or global configuration
+/// (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), no prompt (`GIT_TERMINAL_PROMPT=0`), no
+/// `xcrun` cache (`xcrun_nocache=1`), the platform's git ([`git`]) on a fixed `PATH` ([`git_path`]),
+/// and only `HOME` from the caller's environment (so a credential helper named in `config` finds
+/// its own token). So no `insteadOf`, `uploadpack`, `sshCommand`, proxy or `GIT_CONFIG_*`
+/// redirects it; `config` (each `key=value`, the caller's own constants) is the only
+/// configuration it has. `--` keeps the URL and the ref from reading as options.
+pub fn ls_remote_command(url: &str, refname: &str, config: &[&str]) -> Command {
+    let mut cmd = Command::new(git());
+    cmd.env_clear().env("PATH", git_path());
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.env("HOME", home);
+    }
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("xcrun_nocache", "1");
+    cmd.current_dir("/");
+    for pair in config {
+        cmd.args(["-c", pair]);
+    }
+    cmd.args(["ls-remote", "--", url, refname]);
+    cmd
+}
+
+/// Runs `cmd` in its own process group, for at most `timeout`, reading at most `limit` bytes of
+/// its output and of its error (one past it, then the pipe is closed); past `timeout`, the whole
+/// group (a helper it started included) is killed. Its status, output and error.
+fn run_bounded(
+    mut cmd: Command,
+    what: &str,
+    limit: usize,
+    timeout: Duration,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+    let mut child = cmd
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{what} did not start: {e}"))?;
+    let take = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(pipe) = pipe {
+                let _ = pipe.take(limit as u64 + 1).read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out = take(child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+    let err = take(child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+    let deadline = std::time::Instant::now() + timeout;
+    let group = rustix::process::Pid::from_raw(child.id() as i32).ok_or_else(|| format!("{what} has no pid"))?;
+    // Exited, looked at without reaping it (`WNOWAIT`): while the leader is unreaped, its pid,
+    // the group's id, stays ours, so the group kill below reaches only what it started.
+    let exited = || {
+        let options = rustix::process::WaitIdOptions::EXITED
+            | rustix::process::WaitIdOptions::NOHANG
+            | rustix::process::WaitIdOptions::NOWAIT;
+        rustix::process::waitid(rustix::process::WaitId::Pid(group), options).map(|s| s.is_some())
+    };
+    let answered = loop {
+        match exited().map_err(|e| e.to_string())? {
+            true => break true,
+            false if std::time::Instant::now() >= deadline => break false,
+            false => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    // The whole group, on both paths: a helper git started (git-remote-https, ssh, a credential
+    // helper) can hold the pipes after git is gone, and the readers wait on every holder.
+    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    if !answered {
+        return Err(format!("{what} did not answer within {}s", timeout.as_secs()));
+    }
+    Ok((status, out, err))
+}
+
+/// The object `refname` names where `cmd` ([`ls_remote_command`]) asks, from the remote itself,
+/// never from a local ref, which any process here can move. `Ok(None)` when the remote has no
+/// such ref. Bounded ([`run_bounded`]): `timeout`, and at most [`MAX_LS_REMOTE`] bytes.
+pub fn remote_ref(cmd: Command, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
+    let (status, out, err) = run_bounded(cmd, "git ls-remote", MAX_LS_REMOTE, timeout)?;
+    if out.len() > MAX_LS_REMOTE {
+        // The reader stopped one byte past the bound and closed the pipe.
+        return Err(format!("git ls-remote said more than {MAX_LS_REMOTE} bytes (read {}, then stopped)", out.len()));
+    }
+    if !status.success() {
+        let said = String::from_utf8_lossy(&err[..err.len().min(MAX_LS_REMOTE)]).trim().to_string();
+        return Err(format!("git ls-remote failed ({status}): {said}"));
+    }
+    parse_ls_remote(&out, refname).map_err(|e| format!("git ls-remote: {e}"))
+}
+
+/// The object id `git ls-remote` printed for exactly `refname` (its patterns match by suffix, so
+/// `refs/heads/x/refs/heads/main` is another ref). `out` over [`MAX_LS_REMOTE`] bytes, a second
+/// line for the ref, or an id that is not 40 or 64 lowercase hex is an error.
+pub fn parse_ls_remote(out: &[u8], refname: &str) -> Result<Option<String>, String> {
+    if out.len() > MAX_LS_REMOTE {
+        return Err(format!("it said more than {MAX_LS_REMOTE} bytes"));
+    }
+    let text = String::from_utf8_lossy(out);
+    let mut found = None;
+    for line in text.lines() {
+        let Some((oid, name)) = line.split_once('\t') else { continue };
+        if name != refname {
+            continue;
+        }
+        let hex = oid.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !(hex && (oid.len() == 40 || oid.len() == 64)) || found.is_some() {
+            return Err(format!("it named {refname} oddly: {line}"));
+        }
+        found = Some(oid.to_string());
+    }
+    Ok(found)
+}
+
+/// The most bytes [`read_verified`] reads of a commit or a tree object.
+pub const MAX_OBJECT: usize = 1024 * 1024;
+
+/// `rel` at `commit`, read object by object and each object checked against its id before it is
+/// trusted. Git does not check an object's hash when it reads it, so content planted in the
+/// object store under a genuine id (an overwritten loose object, a pack naming that id with other
+/// data, a loose commit planted under an id not fetched yet) reads as genuine to git; it does not
+/// here. Each object is read raw (`git cat-file <type> <id>`, at most [`MAX_OBJECT`] bytes of a
+/// commit or tree and `limit` of the file, each git call given `timeout`) and hashed in-process as
+/// git names it, `"<type> <size>\0" + content` with the repository's object format (sha1 or
+/// sha256): the commit against `commit`, each tree on the path against the id its parent gives,
+/// and the file against the id its tree gives. `Ok(None)` when the path is not there; a mismatch,
+/// or a file over `limit` bytes, is an error.
+pub fn read_verified(
+    root: &Path,
+    commit: &str,
+    rel: &str,
+    limit: usize,
+    timeout: Duration,
+) -> Result<Option<String>, String> {
+    let format = git_bytes(root, &["rev-parse", "--show-object-format"], 64, timeout)?;
+    let format = String::from_utf8_lossy(&format).trim().to_string();
+    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;
+    check(&format, "commit", commit, &body)?;
+    let tree = String::from_utf8_lossy(&body)
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("tree "))
+        .map(str::to_string)
+        .ok_or_else(|| format!("commit {commit} names no tree"))?;
+    let mut id = tree;
+    let parts: Vec<&str> = rel.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;
+        check(&format, "tree", &id, &body)?;
+        let last = i + 1 == parts.len();
+        match tree_entry(&body, part, &format)? {
+            Some((mode, next)) if last && (mode == "100644" || mode == "100755") => id = next,
+            Some((mode, next)) if !last && mode == "40000" => id = next,
+            _ => return Ok(None),
+        }
+    }
+    let blob = git_bytes(root, &["cat-file", "blob", &id], limit, timeout)?;
+    check(&format, "blob", &id, &blob)?;
+    String::from_utf8(blob).map(Some).map_err(|_| format!("{rel} is not valid UTF-8"))
+}
+
+/// Whether the object store of the repository at `root` holds an object under `id`
+/// (`cat-file -e`): present, never trusted ([`read_verified`] checks what it holds). Given
+/// `timeout` ([`run_bounded`]: a FIFO planted where git looks, such as the alternates file,
+/// cannot hang it); a git that does not answer in time is an error.
+pub fn has_object(root: &Path, id: &str, timeout: Duration) -> Result<bool, String> {
+    if id.starts_with('-') {
+        return Ok(false);
+    }
+    let mut cmd = git_command(root);
+    cmd.args(["cat-file", "-e", id]);
+    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, timeout)?;
+    Ok(status.success())
+}
+
+/// Refuses `body` unless it hashes, as git names objects, to `id`.
+fn check(format: &str, kind: &str, id: &str, body: &[u8]) -> Result<(), String> {
+    use sha2::Digest as _;
+    let header = format!("{kind} {}\0", body.len());
+    let digest: Vec<u8> = match format {
+        "sha1" => sha1::Sha1::new().chain_update(header.as_bytes()).chain_update(body).finalize().to_vec(),
+        "sha256" => sha2::Sha256::new().chain_update(header.as_bytes()).chain_update(body).finalize().to_vec(),
+        other => return Err(format!("the object format {other:?} is not one Maestro checks")),
+    };
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    if hex != id {
+        return Err(format!("the {kind} object {id} does not hash to its id (it hashes to {hex})"));
+    }
+    Ok(())
+}
+
+/// The mode and id of entry `name` in a raw tree object (`<mode> <name>\0<id bytes>`...).
+fn tree_entry(body: &[u8], name: &str, format: &str) -> Result<Option<(String, String)>, String> {
+    let width = if format == "sha256" { 32 } else { 20 };
+    let mut rest = body;
+    while !rest.is_empty() {
+        let space = rest.iter().position(|b| *b == b' ').ok_or("a tree entry has no mode")?;
+        let nul = rest.iter().position(|b| *b == 0).ok_or("a tree entry has no name")?;
+        if nul < space || rest.len() < nul + 1 + width {
+            return Err("a tree entry is cut short".into());
+        }
+        let mode = String::from_utf8_lossy(&rest[..space]).into_owned();
+        let entry = &rest[space + 1..nul];
+        let id: String = rest[nul + 1..nul + 1 + width].iter().map(|b| format!("{b:02x}")).collect();
+        if entry == name.as_bytes() {
+            return Ok(Some((mode, id)));
+        }
+        rest = &rest[nul + 1 + width..];
+    }
+    Ok(None)
+}
+
+/// `git <args>` in `root` ([`git_command`]), its output read to at most `limit` bytes, given
+/// `timeout` ([`run_bounded`]: a FIFO planted at an object's path cannot hang the read).
+fn git_bytes(root: &Path, args: &[&str], limit: usize, timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut cmd = git_command(root);
+    cmd.args(args);
+    let what = format!("git {}", args.join(" "));
+    let (status, out, _) = run_bounded(cmd, &what, limit, timeout)?;
+    if out.len() > limit {
+        return Err(format!("{what} said more than {limit} bytes (read {}, then stopped)", out.len()));
+    }
+    if !status.success() {
+        return Err(format!("{what} failed ({status})"));
+    }
+    Ok(out)
+}
+
+/// `git -C <root>`, reading only what the repository's objects hold: replace objects off
+/// (`--no-replace-objects`, so neither `refs/replace/` nor `GIT_REPLACE_REF_BASE` can stand a
+/// forged object in for a genuine one), and none of the caller's `GIT_*` environment
+/// ([`GIT_ENV_KEPT`] only), the platform's git ([`git`]) on a fixed `PATH` ([`git_path`]), and no
+/// `xcrun` cache (`xcrun_nocache=1`).
 fn git_command(root: &Path) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(root);
+    let mut cmd = Command::new(git());
+    cmd.env_clear().env("PATH", git_path()).env("xcrun_nocache", "1");
+    for key in GIT_ENV_KEPT {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd.arg("--no-replace-objects").arg("-C").arg(root);
     cmd
 }
 
@@ -337,7 +680,7 @@ fn read_batch(mut reader: impl BufRead, rev: &str, rels: &[String]) -> Result<Ve
         if size > MAX_READ {
             // Skip the blob to stay in step with the stream, without holding it.
             std::io::copy(&mut std::io::Read::take(&mut reader, size as u64 + 1), &mut std::io::sink())?;
-            out.push((rel.clone(), Err(TreeError::TooLarge { rel: rel.clone(), size: size as u64 })));
+            out.push((rel.clone(), Err(TreeError::TooLarge { rel: rel.clone(), size: size as u64, limit: MAX_READ })));
             continue;
         }
         let mut buf = vec![0u8; size + 1]; // trailing newline
@@ -360,6 +703,69 @@ fn reap(mut child: std::process::Child, writer: std::thread::JoinHandle<std::io:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_helper_that_outlives_git_holding_its_pipes_cannot_hold_the_read() {
+        // A stand-in for git that starts a grandchild holding its output and error, then exits 0:
+        // the readers wait on every holder, so without the group kill this waits 30 s.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", &format!("sleep 30 & echo $! > {}; echo said; exit 0", pidfile.display())]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let _ = tx.send(super::run_bounded(cmd, "sh", 4096, std::time::Duration::from_secs(20)));
+        });
+        let (status, out, _) =
+            rx.recv_timeout(std::time::Duration::from_secs(15)).expect("the read waited on the helper").unwrap();
+        assert!(status.success() && out == b"said\n", "{status} {out:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+        // And the helper is gone: the group kill reached it.
+        let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+        {
+            assert!(std::time::Instant::now() < until, "the helper {pid} was left running");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn every_component_of_the_path_is_checked_on_any_platform() {
+        // A table stands in for lstat, so the walk is checked where no root-owned file can be
+        // made: each component in turn is the one bad one, every other is root's, 0755.
+        use super::{CompMeta, check_components};
+        use std::path::{Path, PathBuf};
+        let path = Path::new("/a/b/c/git");
+        let parts: Vec<PathBuf> = path.ancestors().map(Path::to_path_buf).collect();
+        assert_eq!(parts.len(), 5, "the file, three folders, and /");
+        let good = CompMeta { is_symlink: false, uid: 0, mode: 0o40755 };
+        let bad = [
+            (CompMeta { uid: 501, ..good }, "is owned by uid 501, not root"),
+            (CompMeta { mode: 0o40775, ..good }, "is writable by its group or others"),
+            (CompMeta { mode: 0o40757, ..good }, "is writable by its group or others"),
+            (CompMeta { is_symlink: true, ..good }, "is a symbolic link"),
+        ];
+        assert_eq!(check_components(path, |_| Ok(good)), Ok(()));
+        for at in &parts {
+            for (meta, said) in bad {
+                let got = check_components(path, |p| Ok(if p == at { meta } else { good }));
+                let e = got.expect_err(&format!("{} bad as {meta:?}", at.display()));
+                assert!(e.starts_with(&format!("{} ", at.display())) && e.contains(said), "{e}");
+            }
+            // A component that cannot be read is refused too.
+            let got =
+                check_components(path, |p| if p == at { Err(std::io::ErrorKind::NotFound.into()) } else { Ok(good) });
+            assert!(got.is_err(), "{}", at.display());
+        }
+        assert!(check_components(Path::new("a/git"), |_| Ok(good)).is_err(), "a relative path");
+    }
+
     use super::*;
 
     #[test]

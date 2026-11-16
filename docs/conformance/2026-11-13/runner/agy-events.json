@@ -1,0 +1,37 @@
+{
+  "instance": "fi_f76ddcb330e950ec617716a310439c4b",
+  "events": [
+    {
+      "seq": 1,
+      "kind": "Started",
+      "node": null,
+      "performer": null,
+      "verify_exit": null,
+      "code": null
+    },
+    {
+      "seq": 2,
+      "kind": "Claimed",
+      "node": "pin",
+      "performer": {
+        "harness": "agy",
+        "model": null,
+        "session": "direct:-/agy"
+      },
+      "verify_exit": null,
+      "code": null
+    },
+    {
+      "seq": 3,
+      "kind": "Completed",
+      "node": "pin",
+      "performer": {
+        "harness": "agy",
+        "model": null,
+        "session": "direct:-/agy"
+      },
+      "verify_exit": 0,
+      "code": null
+    }
+  ]
+}

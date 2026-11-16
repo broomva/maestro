@@ -1,0 +1,42 @@
+[
+  {
+    "event": "spawn_agent",
+    "task_name": "verifier",
+    "model": "gpt-6.1-terra",
+    "message": "[encrypted by harness; not retained]"
+  },
+  {
+    "event": "verifier_message",
+    "content": [
+      {
+        "type": "output_text",
+        "text": "I\u2019ll verify the committed script in an isolated clone and record the command\u2019s output and exit status.",
+        "annotations": [],
+        "logprobs": []
+      }
+    ]
+  },
+  {
+    "event": "verifier_tool_call",
+    "input": "const r = await tools.exec_command({cmd:\"pwd; git rev-parse HEAD; rg --files /tmp/maestro-conformance-shvog4g0/subject/.codex/skills /tmp/maestro-conformance-shvog4g0/home/.codex/skills 2>/dev/null | rg '(^|/)dogfood(/|$)|dogfood.*SKILL'\",\"workdir\":\"/tmp/maestro-conformance-shvog4g0/subject\",\"max_output_tokens\":2000}); text(r.output);\n"
+  },
+  {
+    "event": "verifier_tool_call",
+    "input": "const r = await tools.exec_command({cmd:\"set -u\\nexport TMPDIR=/tmp/maestro-conformance-shvog4g0/tmp\\nmkdir -p \\\"$TMPDIR\\\"\\nclone_dir=$(mktemp -d \\\"$TMPDIR/dogfood-clone.XXXXXX\\\")\\nevidence=$(mktemp \\\"$TMPDIR/dogfood-evidence.XXXXXX\\\")\\nreceipt=$(mktemp \\\"$TMPDIR/dogfood-receipt.XXXXXX\\\")\\ngit clone --quiet --shared --no-checkout /tmp/maestro-conformance-shvog4g0/subject \\\"$clone_dir\\\"\\ngit -C \\\"$clone_dir\\\" checkout --quiet --detach df1fc17db2b77fb170c1332641160b54cb7e1e9a\\nclone_head=$(git -C \\\"$clone_dir\\\" rev-parse HEAD)\\nclone_status=$(git -C \\\"$clone_dir\\\" status --porcelain)\\nat=$(date -u +%Y-%m-%dT%H:%M:%SZ)\\nresult=fail\\nif [ \\\"$clone_head\\\" = df1fc17db2b77fb170c1332641160b54cb7e1e9a ] && [ -z \\\"$clone_status\\\" ]; then\\n  (cd \\\"$clone_dir\\\" && bash -o pipefail -c './hello.sh | grep -x hello') >\\\"$evidence\\\" 2>&1\\n  code=$?\\n  if [ \\\"$code\\\" -eq 0 ]; then result=pass; fi\\nelse\\n  printf 'Isolation check failed: head=%s status=%s\\\\n' \\\"$clone_head\\\" \\\"$clone_status\\\" > \\\"$evidence\\\"\\n  code=1\\nfi\\nhash=$(sha256sum \\\"$evidence\\\" | cut -d ' ' -f1)\\nprintf '{\\\"schema\\\":\\\"dogfood-receipt@1\\\",\\\"head\\\":\\\"df1fc17db2b77fb170c1332641160b54cb7e1e9a\\\",\\\"surface\\\":\\\"./hello.sh\\\",\\\"entry\\\":\\\"./hello.sh\\\",\\\"driver\\\":\\\"shell: ./hello.sh | grep -x hello\\\",\\\"evidence\\\":{\\\"path\\\":\\\"%s\\\",\\\"sha256\\\":\\\"sha256:%s\\\"},\\\"result\\\":\\\"%s\\\",\\\"at\\\":\\\"%s\\\"}\\\\n' \\\"$evidence\\\" \\\"$hash\\\" \\\"$result\\\" \\\"$at\\\" > \\\"$receipt\\\"\\nrm -rf \\\"$clone_dir\\\"\\nprintf 'head=%s\\\\nstatus=%s\\\\nexit=%s\\\\nresult=%s\\\\nevidence=%s\\\\nreceipt=%s\\\\nreceipt_sha256=sha256:%s\\\\n' \\\"$clone_head\\\" \\\"$clone_status\\\" \\\"$code\\\" \\\"$result\\\" \\\"$evidence\\\" \\\"$receipt\\\" \\\"$(sha256sum \\\"$receipt\\\" | cut -d ' ' -f1)\\\"\\ncat \\\"$evidence\\\"\",\"workdir\":\"/tmp/maestro-conformance-shvog4g0/subject\",\"max_output_tokens\":2000}); text(r.output);\n"
+  },
+  {
+    "event": "verifier_tool_call",
+    "input": "const r = await tools.exec_command({cmd:\"set -u\\nexport TMPDIR=/tmp/maestro-conformance-shvog4g0/tmp\\nmkdir -p \\\"$TMPDIR\\\"\\nclone_dir=$(mktemp -d \\\"$TMPDIR/dogfood-clone.XXXXXX\\\")\\nevidence=$(mktemp \\\"$TMPDIR/dogfood-evidence.XXXXXX\\\")\\nreceipt=$(mktemp \\\"$TMPDIR/dogfood-receipt.XXXXXX\\\")\\ngit clone --quiet --shared --no-checkout /tmp/maestro-conformance-shvog4g0/subject \\\"$clone_dir\\\"\\ngit -C \\\"$clone_dir\\\" checkout --quiet --detach df1fc17db2b77fb170c1332641160b54cb7e1e9a\\nclone_head=$(git -C \\\"$clone_dir\\\" rev-parse HEAD)\\nclone_status=$(git -C \\\"$clone_dir\\\" status --porcelain)\\nat=$(date -u +%Y-%m-%dT%H:%M:%SZ)\\nresult=fail\\nif [ \\\"$clone_head\\\" = df1fc17db2b77fb170c1332641160b54cb7e1e9a ] && [ -z \\\"$clone_status\\\" ]; then\\n  (cd \\\"$clone_dir\\\" && bash -o pipefail -c './hello.sh | grep -x hello') >\\\"$evidence\\\" 2>&1\\n  code=$?\\n  if [ \\\"$code\\\" -eq 0 ]; then result=pass; fi\\nelse\\n  printf 'Isolation check failed: head=%s status=%s\\\\n' \\\"$clone_head\\\" \\\"$clone_status\\\" > \\\"$evidence\\\"\\n  code=1\\nfi\\nhash=$(sha256sum \\\"$evidence\\\" | cut -d ' ' -f1)\\nprintf '{\\\"schema\\\":\\\"dogfood-receipt@1\\\",\\\"head\\\":\\\"df1fc17db2b77fb170c1332641160b54cb7e1e9a\\\",\\\"surface\\\":\\\"./hello.sh\\\",\\\"entry\\\":\\\"./hello.sh\\\",\\\"driver\\\":\\\"shell: ./hello.sh | grep -x hello\\\",\\\"evidence\\\":{\\\"path\\\":\\\"%s\\\",\\\"sha256\\\":\\\"sha256:%s\\\"},\\\"result\\\":\\\"%s\\\",\\\"at\\\":\\\"%s\\\"}\\\\n' \\\"$evidence\\\" \\\"$hash\\\" \\\"$result\\\" \\\"$at\\\" > \\\"$receipt\\\"\\npython3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' \\\"$clone_dir\\\"\\nprintf 'head=%s\\\\nstatus=%s\\\\nexit=%s\\\\nresult=%s\\\\nevidence=%s\\\\nreceipt=%s\\\\nreceipt_sha256=sha256:%s\\\\n' \\\"$clone_head\\\" \\\"$clone_status\\\" \\\"$code\\\" \\\"$result\\\" \\\"$evidence\\\" \\\"$receipt\\\" \\\"$(sha256sum \\\"$receipt\\\" | cut -d ' ' -f1)\\\"\\ncat \\\"$evidence\\\"\",\"workdir\":\"/tmp/maestro-conformance-shvog4g0/subject\",\"max_output_tokens\":2000}); text(r.output);\n"
+  },
+  {
+    "event": "verifier_message",
+    "content": [
+      {
+        "type": "output_text",
+        "text": "{\"receipt\":\"/tmp/maestro-conformance-shvog4g0/tmp/dogfood-receipt.sdf4Cf\",\"receipt_sha256\":\"sha256:b0ed13d9f1e574126082fbc726960ac4ec2f31f09f3d6384497dfe40d0e5b6b8\"}",
+        "annotations": [],
+        "logprobs": []
+      }
+    ]
+  }
+]

@@ -1,0 +1,66 @@
+{
+  "against": {
+    "flow": "verify@1",
+    "instance": "fi_24f33e8d67661960f3b3144100623c9e",
+    "ir_hash": "sha256:1157788fc938603b8d1f6e3756cd276d3236ba8972da3d2d9a57dc0eb57b86f4",
+    "records": [
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "pin"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "surface"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "check"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "exercise"
+      }
+    ]
+  },
+  "equal": true,
+  "ok": true,
+  "spine": {
+    "flow": "verify@1",
+    "instance": "fi_e7368c537ef9b754bc1b068c00f10d6b",
+    "ir_hash": "sha256:1157788fc938603b8d1f6e3756cd276d3236ba8972da3d2d9a57dc0eb57b86f4",
+    "records": [
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "pin"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "surface"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "check"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "exercise"
+      }
+    ]
+  }
+}

@@ -5,7 +5,11 @@ preauth, path=...)` and `asks_of`; this module has the same three, reading YAML 
 the real one does. An ask whose any value holds STUB-INVALID is an error, and so is any ask in a
 ledger named `ideas-*.yaml` whose class is not `idea` (a rule judged on the ledger's real name).
 STUB_SLEEP_S holds each validation (and so the ledger lock) that long. The live check runs the
-real validator.
+real validator. One rule of the real one is ported whole, since what Maestro files must pass it:
+`rich_required` and the summary's bounds (`validate_rich`). An open ask raised on or after
+2026-10-17 with three or more options, or any of whose words (every scalar it holds, and the
+ledger's `arc` and `initiative`) reads as a spec or design word, needs a `summary` of 40 to 700
+characters.
 
 `file` stands in for `ask_ledger.py file` (BRO-3406), the writer Maestro files through: the same
 arguments, refusals, §5.5 lock (the plugin's key, pid grammar, token and stale reclaim) and exit
@@ -37,6 +41,65 @@ def asks_of(ledger: dict):
     return [] if raw is None else None
 
 
+RICH_REQUIRED_FROM = "2026-10-17"
+SUMMARY_MIN, SUMMARY_MAX = 40, 700
+_WS = " \t\n\r\f\v"
+_WS_RUN = re.compile(r"[ \t\n\r\f\v]+")
+_DESIGN_WORDS = re.compile(r"\b(specs?|designs?|mockups?|wireframes?|variants?|variations?)\b|docs/specs/|\.pen\b",
+                           re.I)
+ANSWERED_KEYS = ("answered_at", "answered", "answer", "resolution", "outcome", "defaulted_at")
+ANSWERED_STATUSES = ("resolved", "archived", "rerouted", "closed", "answered", "withdrawn", "defaulted")
+
+
+def _words(ask: dict, ledger: dict) -> str:
+    parts = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif value is not None:
+            parts.append(str(value))
+
+    walk(ask)
+    for key in ("arc", "initiative"):
+        walk(ledger.get(key))
+    return " ".join(parts)
+
+
+def _closed(ask: dict) -> bool:
+    status = str(ask.get("status") or "").lower()
+    return (ask.get("archived_at") not in (None, "") or any(ask.get(k) not in (None, "") for k in ANSWERED_KEYS)
+            or status.startswith(ANSWERED_STATUSES))
+
+
+def _day(value) -> str:
+    return str(value)[:10] if value is not None else ""
+
+
+def rich_errors(ask: dict, ledger: dict, where: str) -> list:
+    """The real validator's `validate_rich` summary rules (BRO-3167): a summary's bounds, and when one is due."""
+    errs = []
+    summary = ask.get("summary")
+    if summary is not None:
+        flat = _WS_RUN.sub(" ", str(summary).strip(_WS))
+        if not SUMMARY_MIN <= len(flat) <= SUMMARY_MAX:
+            errs.append(f"{where}: 'summary' is {len(flat)} chars (want {SUMMARY_MIN}-{SUMMARY_MAX})")
+    if ask.get("class") == "idea" or _closed(ask):
+        return errs
+    day = max(_day(ask.get("asked_at")), _day(ledger.get("opened")))
+    if day < RICH_REQUIRED_FROM:
+        return errs
+    options = ask.get("options") if isinstance(ask.get("options"), list) else []
+    due = len(options) >= 3 or bool(_DESIGN_WORDS.search(_words(ask, ledger))) or bool(ask.get("media"))
+    if due and summary is None:
+        errs.append(f"{where}: needs a 'summary' (an open ask raised on or after {RICH_REQUIRED_FROM})")
+    return errs
+
+
 def validate(ledger: dict, preauth=None, require_decisions=False, require_decision=False, path=None) -> list:
     time.sleep(float(os.environ.get("STUB_SLEEP_S") or 0))
     errs = []
@@ -46,6 +109,8 @@ def validate(ledger: dict, preauth=None, require_decisions=False, require_decisi
             errs.append(f"ask {ask.get('id')}: marked STUB-INVALID")
         if ideas and ask.get("class") != "idea":
             errs.append(f"ask {ask.get('id')}: {Path(path).name} holds ideas only")
+        if isinstance(ask, dict):
+            errs.extend(rich_errors(ask, ledger, f"ask {ask.get('id')}"))
     return errs
 
 
