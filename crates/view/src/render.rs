@@ -300,7 +300,9 @@ pub(crate) fn needs(cx: &Ctx, id: &str, project: Option<&str>, limit: usize) -> 
     let list: Vec<_> =
         section.data.iter().flatten().filter(|n| project.is_none() || n.project.as_deref() == project).collect();
     let body = html! {
-        @if list.is_empty() { (empty("Nothing needs you.")) } @else {
+        // An empty list from a read with errors is not an all-clear: say what was read.
+        @if list.is_empty() && section.errors.is_empty() { (empty("Nothing needs you.")) }
+        @else if list.is_empty() { (empty("Nothing needs you in what could be read.")) } @else {
             ul class="mv-list" {
                 @for n in list.iter().take(limit) {
                     li class="mv-row" data-key=(n.key) {

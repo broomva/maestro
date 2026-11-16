@@ -185,6 +185,53 @@ fn an_unread_work_root_is_not_nothing_needs_you() {
     assert!(r.html.contains(r#"data-type="needs""#), "the needs card says what could not be read: {}", r.html);
     assert_eq!((shell.calm, shell.needs), (false, None), "{shell:?}");
     assert_eq!(shell.summary(), "No decision open; not everything that could need you was read");
+    // The needs card does not read an empty list from a failed read as an all-clear.
+    assert!(r.html.contains("Nothing needs you in what could be read."), "{}", r.html);
+    assert!(!r.html.contains(">Nothing needs you.<"), "{}", r.html);
+}
+
+/// One open, undated ask in YAML, with an optional uid.
+fn open_ask(id: &str, uid: Option<&str>, title: &str) -> String {
+    let uid = uid.map(|u| format!("    uid: {u}\n")).unwrap_or_default();
+    format!(
+        "  - id: {id}\n{uid}    ask: \"{title}\"\n    class: decision\n    gates: [g]\n    blocking: false\n    preanswerable: true\n    exhausted: [\"read: x\", \"default: y\"]\n"
+    )
+}
+
+#[test]
+fn a_uid_equal_to_another_asks_id_marks_one_row_current() {
+    // `a1`'s legacy id is `z`, and `z` is the other ask's uid: a link to `z` names only that one.
+    let m = all_answered(false);
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::write(
+        asks.join("clash.yaml"),
+        format!("asks:\n{}{}", open_ask("z", Some("a1"), "Legacy"), open_ask("b0", Some("z"), "By uid")),
+    )
+    .unwrap();
+    let (r, _) =
+        web(&worktree(m.path()), json!({ "type": "decision", "props": { "ledger": "clash.yaml", "id": "z" } }));
+    let current: Vec<_> = queue_links(&r.html).into_iter().filter(|(_, c)| *c).collect();
+    assert_eq!(current, vec![("/decisions/clash.yaml/z".to_string(), true)], "{}", r.html);
+}
+
+#[test]
+fn the_pager_steps_over_rows_it_cannot_link() {
+    // Undated asks sort by ledger: `0a`, the two that share `same` in `1dup`, then `2c`.
+    let m = all_answered(false);
+    let asks = m.path().join("workspace/.control/asks");
+    std::fs::write(asks.join("0a.yaml"), format!("asks:\n{}", open_ask("x", None, "First"))).unwrap();
+    std::fs::write(
+        asks.join("1dup.yaml"),
+        format!("asks:\n{}{}", open_ask("same", None, "A"), open_ask("same", None, "B")),
+    )
+    .unwrap();
+    std::fs::write(asks.join("2c.yaml"), format!("asks:\n{}", open_ask("y", None, "Last"))).unwrap();
+    let store = worktree(m.path());
+    let (a, _) = web(&store, json!({ "type": "decision", "props": { "ledger": "0a.yaml", "id": "x" } }));
+    assert!(a.html.contains(r#"href="/decisions/2c.yaml/y" rel="next""#), "{}", a.html);
+    assert!(a.html.contains("1 of 4"), "the position counts every row: {}", a.html);
+    let (c, _) = web(&store, json!({ "type": "decision", "props": { "ledger": "2c.yaml", "id": "y" } }));
+    assert!(c.html.contains(r#"href="/decisions/0a.yaml/x" rel="prev""#), "{}", c.html);
 }
 
 #[test]

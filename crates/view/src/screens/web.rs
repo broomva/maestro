@@ -90,8 +90,15 @@ pub(crate) fn decide(cx: &Ctx, id: &str, ledger: &str, ask_id: &str) -> Markup {
     layout(cx, &groups, Some((ledger, ask_id)), super::decision(cx, id, ledger, ask_id))
 }
 
-fn is(e: &Entry, selected: Option<(&str, &str)>) -> bool {
-    selected.is_some_and(|(ledger, handle)| e.lf.file == ledger && (e.ask.handle() == handle || e.ask.id == handle))
+/// The one row a selection names: the ask whose handle is exactly `handle` in that ledger, else
+/// (a legacy link by id) the one whose id is. Resolved once, so a uid that equals another ask's
+/// id never marks two rows current.
+fn selected_at(rows: &[&Entry], selected: Option<(&str, &str)>) -> Option<usize> {
+    let (ledger, handle) = selected?;
+    let here = |e: &&&Entry| e.lf.file == ledger;
+    rows.iter()
+        .position(|e| here(&e) && e.ask.handle() == handle)
+        .or_else(|| rows.iter().position(|e| here(&e) && e.ask.id == handle))
 }
 
 /// A path segment: every byte but the unreserved ones percent-encoded, so a ledger value can
@@ -129,12 +136,12 @@ fn by_ledger<'e, 'a>(groups: &'e [Group<'a>]) -> Vec<(&'e str, Vec<&'e Entry<'a>
 fn layout(cx: &Ctx, groups: &[Group], selected: Option<(&str, &str)>, main: Markup) -> Markup {
     let ledgers = by_ledger(groups);
     let rows: Vec<&Entry> = ledgers.iter().flat_map(|(_, v)| v.iter().copied()).collect();
-    let at = rows.iter().position(|e| is(e, selected));
+    let at = selected_at(&rows, selected);
     let section = joined(cx, None);
     let partial = !section.errors.is_empty() || rows.iter().any(|e| e.landing == Landing::Unknown);
     html! {
         div class="mv-decide" {
-            (column(cx, &ledgers, rows.len(), selected))
+            (column(cx, &ledgers, rows.len(), at.map(|i| rows[i])))
             div class="mv-decide-main" {
                 // The queue column is hidden on a phone, so the pager carries its read state there.
                 @if let Some(i) = at { (pager(&rows, i, partial)) }
@@ -148,7 +155,7 @@ fn layout(cx: &Ctx, groups: &[Group], selected: Option<(&str, &str)>, main: Mark
 }
 
 /// The queue column: each ledger's open asks, the current one marked.
-fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, selected: Option<(&str, &str)>) -> Markup {
+fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, current: Option<&Entry>) -> Markup {
     let section = joined(cx, None);
     let partial =
         !section.errors.is_empty() || ledgers.iter().flat_map(|(_, v)| v).any(|e| e.landing == Landing::Unknown);
@@ -168,7 +175,7 @@ fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, selected: Opt
                             li class="mv-qrow" data-blocking=(e.ask.blocking) data-landing=(match e.landing { Landing::Waiting => "waiting", Landing::NotSeen => "open", Landing::Unknown => "unknown" }) {
                                 @if e.keyed {
                                     // `true`, not `page`: the nav's Decisions tab already marks the page.
-                                    a href=(href(e)) aria-current=[is(e, selected).then_some("true")] { (qrow(cx, e)) }
+                                    a href=(href(e)) aria-current=[current.is_some_and(|c| std::ptr::eq(c, *e)).then_some("true")] { (qrow(cx, e)) }
                                 } @else {
                                     div { (qrow(cx, e)) }
                                 }
@@ -224,13 +231,16 @@ fn qrow(cx: &Ctx, e: &Entry) -> Markup {
 
 /// The phone's place in the queue: `1 of 3 · project`, with the previous and next asks.
 fn pager(rows: &[&Entry], i: usize, partial: bool) -> Markup {
-    let link = |j: usize| rows.get(j).filter(|e| e.keyed).map(|e| href(e));
+    // The nearest row each way that can be linked: a row whose handle is shared has no link.
+    let link = |e: &&Entry| e.keyed.then(|| href(e));
+    let prev = rows[..i].iter().rev().find_map(link);
+    let next = rows[i + 1..].iter().find_map(link);
     html! {
         nav class="mv-pager" aria-label="Queue" {
             span class="mv-pager-at bv-code" { (i + 1) " of " (rows.len()) @if partial { "+" } " · " bdi { (rows[i].project()) } }
             span class="mv-pager-links" {
-                @if let Some(h) = i.checked_sub(1).and_then(link) { a class="mv-pager-link" href=(h) rel="prev" { "Previous" } }
-                @if let Some(h) = link(i + 1) { a class="mv-pager-link" href=(h) rel="next" { "Next" } }
+                @if let Some(h) = prev { a class="mv-pager-link" href=(h) rel="prev" { "Previous" } }
+                @if let Some(h) = next { a class="mv-pager-link" href=(h) rel="next" { "Next" } }
             }
         }
     }
