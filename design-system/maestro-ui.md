@@ -59,7 +59,7 @@ The values are a one-time read on the Mac from 2026-11-05 at about 16:05 local (
 
 ### Sensor gaps (shown as "not measured")
 
-- NUC and VPS disk and swap; NUC GPU and VRAM.
+- NUC and VPS disk and swap; GPU on the Mac, and GPU and VRAM on the NUC and the VPS.
 - Tailnet latency between hosts.
 - Host history. CPU and memory are point-in-time today, so the tiles have no 24 hour line.
 - Gemini Vertex quota.
