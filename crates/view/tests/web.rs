@@ -178,6 +178,33 @@ fn work_held_for_you_is_not_nothing_needs_you() {
 }
 
 #[test]
+fn an_unread_answers_read_is_not_nothing_needs_you() {
+    // Every ask answered and committed; the tree reads whole at `main`, but the working tree's
+    // answers cannot be read (its asks folder is a file). Calm needs every source Maestro reads.
+    let m = all_answered(false);
+    let ws = m.path().join("workspace");
+    for args in [&["init", "-q", "-b", "main"][..], &["add", "."], &["commit", "-q", "-m", "seed"]] {
+        let ok = std::process::Command::new("git")
+            .current_dir(&ws)
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+    let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let (r, shell) = web(&store, json!({ "type": "decisions" }));
+    assert!(r.html.contains("mv-calm") && shell.calm, "whole, before the break: {}", r.html);
+    let dir = ws.join(".control/asks");
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::write(&dir, "not a directory").unwrap();
+    let (r, shell) = web(&store, json!({ "type": "decisions" }));
+    assert!(!r.html.contains("mv-calm"), "{}", r.html);
+    assert!(!shell.calm && shell.summary() != "Nothing needs you", "{shell:?}");
+}
+
+#[test]
 fn an_unread_queue_is_a_question_mark_never_zero() {
     let empty = tempfile::tempdir().unwrap();
     let (r, _) =
