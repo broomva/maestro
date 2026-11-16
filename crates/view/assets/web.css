@@ -89,7 +89,7 @@ body.mv-web { padding: 0; min-height: 100vh; }
 
 .mv-pager, .mv-pager-read { display: none; }
 .mv-pager-read { font-size: 12px; padding: var(--bv-space-2) var(--bv-space-3); border: 1px solid var(--mv-line2); border-radius: 14px; }
-.mv-pager-read p { margin: 0 0 4px; }
+.mv-pager-read p, .mv-pager-read summary { margin: 0 0 4px; font-size: 12px; line-height: 1.45; color: var(--mv-ink3); }
 
 /* What the agent tried beside the decision, from 1100 px. The article becomes two columns;
    everything but the tried section stays in the first. */
