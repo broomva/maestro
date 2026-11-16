@@ -158,6 +158,9 @@ body.mv-web { padding: 0; min-height: 100vh; }
   }
   .mv-dtitle { font-size: 28px; }
   .mv-pair { grid-template-columns: minmax(0, 1fr); }
+  /* Badges under the option text, so a long label keeps the full width. */
+  .mv-dopt > .mv-chips { grid-column: 1; grid-row: auto; justify-content: start; }
+  .mv-dopt .mv-badge:first-child { margin-left: 0; }
   .mv-calm { padding-top: 8vh; }
   .mv-stats { grid-auto-flow: row; grid-auto-columns: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--bv-space-3); padding: var(--bv-space-4); }
   .mv-stat { border-left: 0; padding: 0; }

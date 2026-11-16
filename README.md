@@ -497,6 +497,11 @@ Maestro decides every value on it:
   sha256. The page's Content-Security-Policy allows no fetch and no script but that bridge, by its
   hash, so markup in a forged tool result runs nothing (the e2e checks it). There is no WebAssembly:
   T3's CSP blocks it.
+- The web pages (`maestro serve --http`: `/decisions`, `/decisions/<ledger>/<id>`, `/today`,
+  `/health`) are the same blocks rendered on the server, read-only, with no script, laid out as the
+  approved design (maestro#20, BRO-3783). `view.css` holds the Liquid Dawn and Maestro Midnight tokens
+  the App shares; `crates/view/assets/web.css` adds the shell (counts from the same read as the page),
+  the queue beside the decision, and the phone pager. "Nothing needs you" shows only on a whole read.
 - `today` is the Today screen (design page 10): a headline composed from one snapshot that names the
   commit read and its age, count pills (needs you, running, open asks, silent loops, landing), the
   top decision in queue order, work running now with the tier, model, thinking, harness, node and
