@@ -41,19 +41,19 @@ Rules the frames follow (from the `dataviz` skill):
 - **Glass only on the verdict and host tiles.** Everything else sits flat on the page.
 - **"Not measured" never looks like zero.** It uses an empty track, a dash and the words "not measured". A span that could not be read is hatched. Sparklines shade the time before history began.
 
-The values are a live read from 2026-11-05 at about 16:05 local (21:05Z).
+The values are a one-time read on the Mac from 2026-11-05 at about 16:05 local (21:05Z), frozen into the frames. The sources below are machine-local files under `~/.config/broomva/fleet/meta/` on the Mac, outside this repository, so the figures cannot be recomputed from a checkout. Account names in the frames are role labels (`personal`, `team`, `devteam`, `gcp project`), not the real account identifiers.
 
 ### Data map
 
-| On screen | Source today |
+| On screen | Source today (on the Mac, under `~/.config/broomva/fleet/meta/`) |
 |---|---|
-| Host CPUs, load per core, memory used, live sessions and caps | `fleet/meta/fleet-snapshot.json` (`host_load`, `host_caps`) |
-| Mac swap, internal disk and SSD | `fleet/meta/capacity.json` (`host`) |
+| Host CPUs, load per core, memory used, live sessions and caps | `fleet-snapshot.json` (`host_load`, `host_caps`) |
+| Mac swap, internal disk and SSD | `capacity.json` (`host`) |
 | Provider lane state per host, failure streak | `fleet-snapshot.json` (`connections`) |
 | Token used, state, routing slots | `capacity.json` (`routing`, `claude_throttle`) |
-| Token sparklines and reset times | `fleet/meta/capacity-history.jsonl` (from 15:12Z on 11-05) |
-| Run-out projection | burn rate over the history; the logic already in `quota-dashboard/quota_dashboard.py` |
-| Loops | `fleet/meta/loop-health.json` |
+| Token sparklines and reset times | `capacity-history.jsonl` (from 15:12Z on 11-05) |
+| Run-out projection | burn rate over the history; the logic already in `quota-dashboard/quota_dashboard.py` there |
+| Loops | `loop-health.json` |
 | Incident lanes | `capacity.log` state transitions, plus census samples |
 | Sources pill | Maestro's existing read health |
 
