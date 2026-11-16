@@ -256,6 +256,13 @@ mutate $wscr '    let link = |j: usize| rows.get(j).filter(|e| e.keyed).map(|e| 
 mutate $wscr '@if section.data.is_none() { "?" }' '@if false { "?" }'
 mutate $wscr '" of " (rows.len()) @if partial { "+" }' '" of " (rows.len()) @if false { "+" }'
 mutate $page '        if self.calm {' '        if n == 0 {'
+mutate $wscr '        && needs.errors.is_empty()' '        && true'
+mutate $wscr '        needs: needs.data.as_ref().filter(|_| needs.errors.is_empty()).map(Vec::len),' '        needs: needs.data.as_ref().map(Vec::len),'
+mutate $wscr '    let loops = s.loops.data.as_ref().map(|l| (l.len(), whole(&s.loops.errors)));' '    let loops = s.loops.data.as_ref().map(|l| (l.len(), true));'
+mutate $wscr '    let live = s.initiatives.data.as_ref().map(|i| (i.len(), whole(&s.initiatives.errors)));' '    let live = s.initiatives.data.as_ref().map(|i| (i.len(), true));'
+mutate $wscr '            @if !(whole(&s.loops.errors) && whole(&s.initiatives.errors)) {' '            @if false {'
+mutate $wscr '                    None => span class="mv-stat-value mv-unavailable" { "unavailable" },' '                    None => span class="mv-stat-value" { "0" },'
+mutate crates/view/assets/web.css '.mv-qrow > a[aria-current="true"] {' '.mv-qrow > a[aria-current="page"] {'
 mutate $page '            Some((n, _)) if self.partial => format!("{n}+"),' '            Some((n, _)) if false => format!("{n}+"),'
 mutate $page "        match self.tree.strip_prefix(\"git:\").and_then(|t| t.rsplit_once('@')) {" "        match self.tree.strip_prefix(\"git:\").and_then(|t| t.split_once('@')) {"
 # SIGTERM is a clean stop. (The handler-before-readiness order is held by a probabilistic test,

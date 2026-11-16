@@ -159,6 +159,79 @@ fn nothing_needs_you_only_when_every_ask_was_read() {
     assert_eq!(shell.badge(), "?");
 }
 
+/// The calm screen's stat for `label`: its `data-state` and its value.
+fn stat<'h>(html: &'h str, label: &str) -> (&'h str, &'h str) {
+    let end = html
+        .find(&format!(r#"<span class="mv-stat-label bv-meta">{label}</span>"#))
+        .unwrap_or_else(|| panic!("no stat {label}: {html}"));
+    let start = html[..end].rfind(r#"<div class="mv-stat" data-state=""#).unwrap()
+        + r#"<div class="mv-stat" data-state=""#.len();
+    let state = &html[start..start + html[start..].find('"').unwrap()];
+    let v = html[start..end].find(r#"class="mv-stat-value"#).unwrap() + start;
+    let v = v + html[v..].find('>').unwrap() + 1;
+    (state, &html[v..v + html[v..].find('<').unwrap()])
+}
+
+#[test]
+fn an_unread_work_root_is_not_nothing_needs_you() {
+    // Every ask answered, and the work root unreadable: the needs list reads as empty with an
+    // error. Its error alone keeps the calm claim off, and the header's hold count unknown.
+    let m = all_answered(false);
+    let work = m.path().join("work");
+    std::fs::remove_dir_all(&work).unwrap();
+    std::fs::write(&work, "not a directory").unwrap();
+    let (r, shell) = web(&worktree(m.path()), json!({ "type": "decisions" }));
+    assert!(!r.html.contains("mv-calm"), "{}", r.html);
+    assert!(r.html.contains(r#"data-type="needs""#), "the needs card says what could not be read: {}", r.html);
+    assert_eq!((shell.calm, shell.needs), (false, None), "{shell:?}");
+    assert_eq!(shell.summary(), "No decision open; not everything that could need you was read");
+}
+
+#[test]
+fn calm_counts_say_when_their_read_was_partial_or_failed() {
+    let m = all_answered(false);
+    let (r, _) = web(&worktree(m.path()), json!({ "type": "decisions" }));
+    assert!(r.html.contains("mv-calm"), "{}", r.html);
+    assert_eq!(stat(&r.html, "loops").0, "ok", "{}", r.html);
+    assert!(!r.html.contains("mv-calm-note"), "{}", r.html);
+
+    // The ticks ledger unread (drift comes from it) and one initiative that does not parse.
+    std::fs::remove_file(m.path().join("broomva-home/ledger/loops/ticks.jsonl")).unwrap();
+    std::fs::write(m.path().join("workspace/.control/initiatives/broken.yaml"), "not: [valid\n").unwrap();
+    let (r, _) = web(&worktree(m.path()), json!({ "type": "decisions" }));
+    assert!(r.html.contains("mv-calm"), "the calm screen stands on asks and holds alone: {}", r.html);
+    for label in ["loops", "loops drifting", "initiatives live"] {
+        let (state, value) = stat(&r.html, label);
+        assert_eq!(state, "partial", "{label}: {}", r.html);
+        assert!(value.starts_with("at least "), "{label} is a lower bound: {value}");
+    }
+    assert!(r.html.contains("Some counts read in part: they are lower bounds."), "{}", r.html);
+
+    // The loop registry and the initiatives folder unreadable: unavailable, never zero.
+    let loops = m.path().join("workspace/.broomva/loops");
+    std::fs::remove_dir_all(&loops).unwrap();
+    std::fs::write(&loops, "not a directory").unwrap();
+    let initiatives = m.path().join("workspace/.control/initiatives");
+    std::fs::remove_dir_all(&initiatives).unwrap();
+    std::fs::write(&initiatives, "not a directory").unwrap();
+    let (r, _) = web(&worktree(m.path()), json!({ "type": "decisions" }));
+    for label in ["loops", "loops drifting", "initiatives live"] {
+        assert_eq!(stat(&r.html, label), ("unavailable", "unavailable"), "{label}: {}", r.html);
+    }
+}
+
+#[test]
+fn the_current_queue_row_is_styled_by_the_mark_it_carries() {
+    // The row carries aria-current="true" (the nav tab carries "page"); the stylesheet must
+    // highlight what the markup marks, or the current decision is not shown as current.
+    let m = machine();
+    let (r, shell) = web(&worktree(m.path()), json!({ "type": "decisions" }));
+    assert!(r.html.contains(r#"aria-current="true">"#), "{}", r.html);
+    let doc = page::web(&r.html, "Decisions", "/decisions", &shell);
+    assert!(doc.contains(r#".mv-qrow > a[aria-current="true"] {"#), "the current row's style");
+    assert!(!doc.contains(r#".mv-qrow > a[aria-current="page"]"#), "a selector the markup never matches");
+}
+
 #[test]
 fn work_held_for_you_is_not_nothing_needs_you() {
     // Every ask answered, but the fixture's work item is held for the owner (an owner step).
