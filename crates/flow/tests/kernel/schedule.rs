@@ -213,6 +213,19 @@ fn typed_params_are_checked_before_start() {
     f.begin(json!({"digest": format!("sha256:{}", "a".repeat(64)), "free": {"any": true}}));
 }
 
+#[test]
+fn string_typed_params_refuse_non_strings() {
+    let mut f =
+        fx("flow: f\nversion: 1\nparams: [name]\ntypes: {name: string}\nnodes:\n  a: {class: pure, run: [x]}\n");
+    for value in [json!(42), json!({}), json!([])] {
+        assert_eq!(
+            start(&mut f.ledger, &agent("a", "m"), &f.flow, json!({"name": value})).unwrap_err().code(),
+            "param_invalid"
+        );
+    }
+    f.begin(json!({"name": "valid"}));
+}
+
 const CHAIN: &str = "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n  b: {class: pure, run: [x], needs: [a]}\n  c: {class: pure, run: [x], needs: [b]}\n";
 
 #[test]
