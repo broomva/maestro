@@ -137,6 +137,26 @@ fn a_lock_replaced_while_opening_is_refused() {
     }
 }
 
+/// A writer or reader that opened the lock file before `archive` moved the root and its lock
+/// away refuses `root_moved`, not `lock_lost`.
+#[test]
+fn an_archive_while_opening_refuses_root_moved() {
+    for spec in [&["open", "", "mac"][..], &["read", ""][..]] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = root_in(tmp.path());
+        let dest = tmp.path().join("archive");
+        drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+        let mut spec: Vec<&str> = spec.to_vec();
+        spec[1] = root.to_str().unwrap();
+        let pause = Pause::at("lock_opened");
+        let child = spawn_child_pausing(&spec, Some(&pause));
+        pause.reached();
+        operator::archive(&root, &dest, &quick()).unwrap();
+        pause.go();
+        assert_eq!(child_result(child), "root_moved", "{}", spec[0]);
+    }
+}
+
 /// A fresh ledger re-checks, under the lock, that the old root is still gone, and that the lock
 /// it holds is the lock: a root back in place or a lock replaced meanwhile leaves everything as
 /// it was.
@@ -324,22 +344,64 @@ fn recover_removes_a_marker_beside_a_whole_ledger() {
     Ledger::open(&root, &host("nuc"), quick()).unwrap();
 }
 
-/// SQLite opens the cache by path after the root check, and its journal by path when it writes: a
-/// root moved in between fails the write, reported as a skipped cache, never an updated one. The
-/// log wins either way.
+/// SQLite opens the cache by path: a root moved while the cache is being opened (even if the
+/// lock is deleted and a new ledger is created at the path with its own cache) is caught before
+/// any row is written, reported as a skipped cache, and leaves the new ledger's cache untouched.
 #[test]
 fn a_cache_written_while_the_root_moved_is_reported_skipped() {
+    for replaced in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = root_in(tmp.path());
+        let parent = tmp.path().join(".broomva");
+        drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
+        let pause = Pause::at("projection_open");
+        let child = spawn_child_pausing(&["append-cache", root.to_str().unwrap(), "mac", "fi_a"], Some(&pause));
+        pause.reached();
+        std::fs::rename(&root, parent.join("flows-moved")).unwrap();
+        let new_epoch = if replaced {
+            std::fs::remove_file(lock_of(tmp.path())).unwrap();
+            let mut nuc = Ledger::open(&root, &host("nuc"), quick()).unwrap();
+            append_at_head(&mut nuc, &id("fi_nuc"), event("Started", 0)).unwrap();
+            Some(nuc.epoch().to_string())
+        } else {
+            None
+        };
+        pause.go();
+        assert_eq!(child_result(child), "cache_failed", "replaced {replaced}");
+        assert!(parent.join("flows-moved/instances/fi_a/events.jsonl").exists());
+        if let Some(epoch) = new_epoch {
+            let dump = Reader::new(&root, quick()).unwrap().lock().unwrap().projection_dump().unwrap().unwrap();
+            assert_eq!(dump.meta, vec![("epoch".to_string(), epoch)]);
+            assert_eq!(
+                dump.instances.iter().map(|r| (r.0.as_str(), r.1.as_str(), r.2)).collect::<Vec<_>>(),
+                vec![("fi_nuc", "ok", 1)]
+            );
+            assert!(!dump.instances.iter().any(|r| r.3.is_none() || r.4.is_empty()));
+            assert_eq!(dump.kind_counts, vec![("fi_nuc".to_string(), "Started".to_string(), 1)]);
+        }
+    }
+}
+
+/// `create_fresh_ledger` after a hand move holds its new lock until the staged root is renamed
+/// into place, so a concurrent `recover` waits for it instead of moving the stage first and
+/// causing `create_fresh_ledger` to fail with `io`.
+#[test]
+fn a_fresh_ledger_holds_its_new_lock_until_its_stage_is_moved_in() {
     let tmp = tempfile::tempdir().unwrap();
     let root = root_in(tmp.path());
     let parent = tmp.path().join(".broomva");
     drop(Ledger::open(&root, &host("mac"), Options::default()).unwrap());
-    let pause = Pause::at("projection_open");
-    let child = spawn_child_pausing(&["append-cache", root.to_str().unwrap(), "mac", "fi_a"], Some(&pause));
-    pause.reached();
     std::fs::rename(&root, parent.join("flows-moved")).unwrap();
+    let pause = Pause::at("fresh_lock_installed");
+    let fresh = spawn_child_pausing(&["fresh", root.to_str().unwrap(), "nuc"], Some(&pause));
+    pause.reached();
+    assert_eq!(code(operator::recover(&root, &quick())), "busy");
+    let r = root.clone();
+    let recovering = std::thread::spawn(move || code(operator::recover(&r, &Options::default())));
     pause.go();
-    assert_eq!(child_result(child), "cache_failed");
-    assert!(parent.join("flows-moved/instances/fi_a/events.jsonl").exists());
+    assert_eq!(child_result(fresh), "ok");
+    assert_eq!(recovering.join().unwrap(), "operator_refused");
+    assert_eq!(Ledger::open(&root, &host("nuc"), quick()).unwrap().host().as_str(), "nuc");
 }
 
 /// A genesis paused between seeing an empty tree and linking its lock, while another writer makes
