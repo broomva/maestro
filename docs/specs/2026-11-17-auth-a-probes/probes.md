@@ -1,0 +1,15 @@
+# auth-A probes, 2026-11-17, Mac (Darwin 25.5.0, T3 0.1.5-nightly.20261029)
+
+Run as the owner's uid (501) from T3 thread `493baa7d…`. No sudo was used and no `_maestro` user exists yet, so every claim about a second uid comes from a cross-uid read of a root-owned process, the nearest stand-in.
+
+| # | Question | Command | Result |
+|---|---|---|---|
+| P1 | Can a live T3 thread write a flow today? | MCP `maestro_flow_start` with `session: t3:local/<thread>`, `cwd: <worktree>`, no credential | Refused: `caller_refused`, `invalid_token`, "authenticated bridge credential or launch token is required" (`crates/mcp/src/lib.rs` `verified_caller`) |
+| P2 | Does the Stop gate know a T3 session? | `echo '{…}' \| maestro flow stop-gate --harness claude` in a T3 thread | `no Maestro session is named (--session or MAESTRO_SESSION)`; prints `{}`, so the stop goes through |
+| P3 | Process chain of a T3 tool call | `ps -o pid,ppid,comm`, walked up from the shell | `zsh → claude (harness) → t3 (server) → t3 (launcher) → launchd`; the harness is a direct child of the T3 server |
+| P4 | Does T3 record provider pids? | `provider_session_runtime.runtime_payload_json`, `orchestration_v2_projection_provider_sessions` | No pid field in either; there is thread id, cwd, provider and model |
+| P5 | Does T3 persist a tool call, attributed to its thread? | Echo the unique nonce `authA-probe-nonce-…` in a Bash call, then query `orchestration_v2_projection_turn_items` | A row in the calling thread only, `type = command_execution`, id `turn-item:provider:claudeAgent:native-item:toolu_…`, written about 1 s after the call (19:37:59 call, 19:38:00.995 `updated_at`). It is persisted while still `running`. Later calls that quoted the nonce matched too, so a match must be restricted to one tool name and one call |
+| P6 | Can a second uid read process facts? | `sysctl {CTL_KERN, KERN_PROC, KERN_PROC_PID, 1}` (pid 1 is root-owned) from uid 501 | Succeeds, 648 bytes of `kinfo_proc` (ppid, start time, comm). The environment and argv of another uid's processes are not readable on macOS |
+| P7 | Who can write T3's state? | `ls -l ~/.t3/userdata/statev2.sqlite` | `-rw-r--r-- broomva`: any process of the owner's uid, agents included, can write it |
+| P8 | Can a second uid reach `~/.t3`? | `ls -ld /Users/broomva` | `drwxr-x---+`: only with an ACL the owner grants |
+| P9 | Does the harness tell an MCP server the call id? | `strings` over the Claude Code and Codex binaries for `_meta` keys | Inconclusive. Maestro's `tool_use_id` fields are always `None` (`crates/flow/src/kernel/write.rs`). Nothing in this design depends on it |
