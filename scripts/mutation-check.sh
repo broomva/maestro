@@ -791,6 +791,8 @@ mutate $fl/ledger.rs '        let mut file = dir
             .open(self.ledger.layout.root.join(INSTANCES).join(id.as_str()).join(EVENTS))
             .map_err(FlowError::io(&dir.path))?;'
 mutate $fl/ledger.rs '                instances.mkdir(id.as_str())?;' '                std::fs::create_dir_all(self.ledger.layout.root.join(INSTANCES).join(id.as_str())).map_err(FlowError::io(&instances.path))?;'
+mutate $fl/projection.rs '    if !root.exists(PROJECTION)? {' '    if false {'
+mutate $fl/projection.rs '    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;' '    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;'
 mutate $fl/projection.rs '    if lock::root_id(&layout.root)? != root_id {' '    if false {'
 # No link under the root is followed: directories, logs, the root itself, the projection.
 mutate $fl/at.rs '    if e == Errno::LOOP {' '    if false {'
@@ -798,12 +800,18 @@ mutate $fl/at.rs '            Err(_) if self.kind(name)? == Some(FileType::Symli
 mutate $fl/at.rs '            Err(_) if std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink()) => {' '            Err(_) if false => {'
 mutate $fl/at.rs 'flags | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode' 'flags | OFlags::CLOEXEC, Mode'
 mutate $fl/at.rs '            if name != "." && name != ".." && self.is_dir(name)? {' '            if name != "." && name != ".." {'
-mutate $fl/projection.rs 'Ok(Connection::open_with_flags(db_path(layout)?, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)?)' 'Ok(Connection::open_with_flags(db_path(layout)?, flags)?)'
+mutate $fl/projection.rs 'let conn = Connection::open_with_flags(db_path(layout)?, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)?;' 'let conn = Connection::open_with_flags(db_path(layout)?, flags)?;'
 mutate $fl/projection.rs 'match Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW) {' 'match Connection::open_with_flags(&path, flags) {'
-# A lock is never rewritten in place: written whole, then renamed over.
+# A lock is never rewritten in place: written whole, locked, then renamed over.
+mutate $fl/ledger.rs '        OpenOptions::new().read(true).write(true).create_new(true).open(&private).map_err(FlowError::io(&private))?;
+    lock::take(&file, Mode::Exclusive, Duration::ZERO, &private)?;' '        OpenOptions::new().read(true).write(true).create_new(true).open(&private).map_err(FlowError::io(&private))?;'
 mutate $fl/ledger.rs '    std::fs::rename(&private, &layout.lock).map_err(FlowError::io(&layout.lock))?;' '    std::fs::copy(&private, &layout.lock).map_err(FlowError::io(&layout.lock))?;'
+mutate $fl/operator.rs '        let _new_lock = install_lock(&layout, &epoch)?;' '        drop(install_lock(&layout, &epoch)?);'
 # Identity checks while opening, for writers, readers and the operator.
 mutate $fl/ledger.rs '            if !lock::same_file(&file, &layout.lock)? {
+                if !layout::exists(&layout.root)? {
+                    return Err(FlowError::RootMoved { root: layout.root.clone() });
+                }
                 return Err(FlowError::LockLost {
                     lock: layout.lock.clone(),
                     detail: "the lock file was replaced while this writer opened it".into(),' '            if false {
@@ -811,9 +819,38 @@ mutate $fl/ledger.rs '            if !lock::same_file(&file, &layout.lock)? {
                     lock: layout.lock.clone(),
                     detail: "the lock file was replaced while this writer opened it".into(),'
 mutate $fl/ledger.rs '            if !lock::same_file(&file, &layout.lock)? {
+                if !layout::exists(&layout.root)? {
+                    return Err(FlowError::RootMoved { root: layout.root.clone() });
+                }
+                return Err(FlowError::LockLost {
+                    lock: layout.lock.clone(),
+                    detail: "the lock file was replaced while this writer opened it".into(),' '            if !lock::same_file(&file, &layout.lock)? {
+                if false {
+                    return Err(FlowError::RootMoved { root: layout.root.clone() });
+                }
+                return Err(FlowError::LockLost {
+                    lock: layout.lock.clone(),
+                    detail: "the lock file was replaced while this writer opened it".into(),'
+mutate $fl/ledger.rs '            if !lock::same_file(&file, &layout.lock)? {
+                if !layout::exists(&layout.root)? {
+                    return Err(FlowError::RootMoved { root: layout.root.clone() });
+                }
                 return Err(FlowError::LockLost {
                     lock: layout.lock.clone(),
                     detail: "the lock file was replaced while this reader opened it".into(),' '            if false {
+                return Err(FlowError::LockLost {
+                    lock: layout.lock.clone(),
+                    detail: "the lock file was replaced while this reader opened it".into(),'
+mutate $fl/ledger.rs '            if !lock::same_file(&file, &layout.lock)? {
+                if !layout::exists(&layout.root)? {
+                    return Err(FlowError::RootMoved { root: layout.root.clone() });
+                }
+                return Err(FlowError::LockLost {
+                    lock: layout.lock.clone(),
+                    detail: "the lock file was replaced while this reader opened it".into(),' '            if !lock::same_file(&file, &layout.lock)? {
+                if false {
+                    return Err(FlowError::RootMoved { root: layout.root.clone() });
+                }
                 return Err(FlowError::LockLost {
                     lock: layout.lock.clone(),
                     detail: "the lock file was replaced while this reader opened it".into(),'

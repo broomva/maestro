@@ -20,6 +20,7 @@ use crate::ledger::{instances, list_instances, read_log};
 use crate::lock::{self, FileId};
 use crate::log::{self, InstanceSummary};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
+use rustix::fs::OFlags;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -34,13 +35,13 @@ CREATE TABLE IF NOT EXISTS kind_counts (
 ";
 
 /// Every row of the projection, sorted: two equal dumps are the same projection. For tests.
-#[doc(hidden)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectionDump {
-    pub meta: Vec<(String, String)>,
+pub(crate) struct ProjectionDump {
+    pub(crate) meta: Vec<(String, String)>,
     /// `(id, state, seq, last_hash, stat)`.
-    pub instances: Vec<(String, String, i64, Option<String>, String)>,
-    pub kind_counts: Vec<(String, String, i64)>,
+    pub(crate) instances: Vec<(String, String, i64, Option<String>, String)>,
+    pub(crate) kind_counts: Vec<(String, String, i64)>,
 }
 
 /// One instance's row.
@@ -87,16 +88,22 @@ fn db_path(layout: &Layout) -> Result<PathBuf> {
 }
 
 /// Opens the cache for writing, only while the root's path still names the directory `root_id`
-/// (the one the writer holds): SQLite needs a path, and a root moved away must never have its
-/// rows written into whatever ledger now sits at that path.
-fn open_rw(layout: &Layout, root_id: FileId) -> Result<Connection> {
+/// (the one the writer holds): SQLite needs a path, so the file is created through the verified
+/// root descriptor first, opened without `SQLITE_OPEN_CREATE`, and checked afterwards so a root
+/// moved away and replaced by a new genesis never has the old guard's rows written into its cache.
+fn open_rw(root: &Dir, layout: &Layout, root_id: FileId) -> Result<Connection> {
+    if !root.exists(PROJECTION)? {
+        root.file(PROJECTION, OFlags::WRONLY | OFlags::CREATE)?;
+    }
+    pause!("projection_open");
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(db_path(layout)?, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)?;
     if lock::root_id(&layout.root)? != root_id {
         return Err(FlowError::Projection(
             "the root's path no longer names this ledger, so the cache was not written".into(),
         ));
     }
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    Ok(Connection::open_with_flags(db_path(layout)?, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)?)
+    Ok(conn)
 }
 
 fn open_ro(layout: &Layout) -> Result<Option<Connection>> {
@@ -157,12 +164,7 @@ fn rebuild_with(conn: &mut Connection, root: &Dir, epoch: &str) -> Result<()> {
 /// Brings the cache up to the log tree after a write: rows whose log changed are re-analyzed and
 /// rows of instances no longer live are dropped. A cache missing or stale is rebuilt whole.
 pub(crate) fn sync(root: &Dir, layout: &Layout, epoch: &str, root_id: FileId) -> Result<()> {
-    let mut conn = open_rw(layout, root_id)?;
-    pause!("projection_open");
-    // SQLite opened the cache by path after the check in `open_rw`, and makes its journal by path
-    // when it writes: a root moved meanwhile fails the write, which is reported as a skipped
-    // cache. Moved after the journal exists, the write lands in that root's own cache. The log
-    // wins either way.
+    let mut conn = open_rw(root, layout, root_id)?;
     if current(&conn, epoch)? { sync_with(&mut conn, root) } else { rebuild_with(&mut conn, root, epoch) }
 }
 
@@ -193,7 +195,7 @@ fn sync_with(conn: &mut Connection, root: &Dir) -> Result<()> {
 
 /// Rebuilds the whole projection from the logs.
 pub(crate) fn rebuild(root: &Dir, layout: &Layout, epoch: &str, root_id: FileId) -> Result<()> {
-    let mut conn = open_rw(layout, root_id)?;
+    let mut conn = open_rw(root, layout, root_id)?;
     rebuild_with(&mut conn, root, epoch)
 }
 
@@ -219,6 +221,7 @@ pub(crate) fn read(layout: &Layout, id: &InstanceId) -> Result<Option<Option<Row
 }
 
 /// Every row, read-only; `None` when there is no projection file.
+#[cfg(test)]
 pub(crate) fn dump(layout: &Layout) -> Result<Option<ProjectionDump>> {
     let Some(conn) = open_ro(layout)? else { return Ok(None) };
     let mut meta = Vec::new();
