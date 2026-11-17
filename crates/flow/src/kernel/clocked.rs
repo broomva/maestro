@@ -268,6 +268,7 @@ fn a_heartbeat_moves_only_the_lease_of_its_own_attempt() {
         iteration: Default::default(),
         attempt: c.attempt + 1,
         lease_until: (c.lease_until + secs(3600)).to_string(),
+        audit: None,
     };
     f.append(&fi, other.to_event().unwrap());
     test_clock.set(c.lease_until);
@@ -503,6 +504,7 @@ fn red() -> crate::NewEvent {
         verify: Some(verify),
         performer: None,
         tool_use_id: None,
+        audit: None,
     };
     receipt.to_event().unwrap()
 }
@@ -695,6 +697,7 @@ fn a_verdict_is_written_only_over_the_input_it_was_evaluated_on() {
         verify: None,
         performer: None,
         tool_use_id: None,
+        audit: None,
     };
     f.append(&fi, receipt.to_event().unwrap());
     let mut guard = f.ledger.lock().unwrap();
@@ -930,6 +933,7 @@ fn a_command_that_never_started_withdraws_only_its_own_attempt_s_start() {
         attempt,
         code: "spawn_failed".into(),
         reason: "fixture".into(),
+        audit: None,
     };
     f.append(&fi, refused(2, Default::default()).to_event().unwrap());
     f.append(&fi, refused(1, [("elsewhere".to_string(), 0)].into()).to_event().unwrap());

@@ -148,7 +148,7 @@ use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, WriteGuard, random_epoch};
 use crate::log::{Log, MAX_LINE, MAX_NESTING, line_hash, nesting};
 use jiff::{SignedDuration, Timestamp};
-use maestro_core::session::VerifiedSession;
+use maestro_core::session::{Audit, VerifiedSession};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -261,10 +261,19 @@ pub(crate) fn check_owner(
     let Some(owner) = &owners.owner else {
         return Err(Refusal::NoOwner { instance: instance.to_string() }.into());
     };
-    if *owner != me {
+    if !same_owner(owner, &me) {
         return Err(Refusal::NotOwner { instance: instance.to_string() }.into());
     }
     Ok(owners)
+}
+
+/// Whether the stored owner is `me`: the same marker, and the same session once both are canonical
+/// (BRO-3846). `me` was verified by this host's registry, so its T3 environment is this host's, and
+/// a stored `t3:local/…` or `t3:-/…` alias of the same thread is the same owner. The marker still
+/// has to match, so an alias never stands in for another thread or a recreated one.
+pub(crate) fn same_owner(stored: &Owner, me: &Owner) -> bool {
+    let host = me.session.environment.as_deref();
+    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)
 }
 
 fn performer(session: &VerifiedSession) -> Performer {
@@ -543,6 +552,7 @@ pub fn claim(
         performer: Some(performer(session)),
         tool_use_id: None,
         cancel_at: cancel_at.map(|at| at.to_string()),
+        audit: session.audit().cloned(),
     };
     let appended = guard.append(instance, log.seq(), claimed.to_event()?)?;
     Ok(Claim {
@@ -565,6 +575,8 @@ struct Held {
     next: Next,
     /// The node is an effect started in this iteration and not completed (`EffectStarted`).
     effect_started: bool,
+    /// The writer's audit facts, for the events this write appends.
+    audit: Option<Audit>,
 }
 
 impl Held {
@@ -614,7 +626,7 @@ fn hold(
         return Err(Refusal::InputsChanged { node: rec.node }.into());
     }
     let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));
-    Ok(Held { log, started, rec, next, effect_started })
+    Ok(Held { log, started, rec, next, effect_started, audit: session.audit().cloned() })
 }
 
 /// Extends the lease of the claim `token` names. See the module docs.
@@ -630,6 +642,7 @@ pub fn heartbeat(ledger: &mut Ledger, session: &VerifiedSession, token: &str) ->
         iteration: held.rec.iteration.clone(),
         attempt: held.rec.attempt,
         lease_until: lease_until.to_string(),
+        audit: held.audit.clone(),
     };
     let appended = guard.append(&instance, held.log.seq(), beat.to_event()?)?;
     Ok(Beat { lease_until, appended })
@@ -808,6 +821,7 @@ fn receipt(held: &Held, session: &VerifiedSession, outputs: Value, verify: Verif
         verify: Some(verify),
         performer: Some(performer(session)),
         tool_use_id: None,
+        audit: session.audit().cloned(),
     }
 }
 
@@ -844,6 +858,7 @@ fn refused(guard: &mut WriteGuard, held: &Held, code: &'static str, reason: &str
         attempt: held.rec.attempt,
         code: code.to_string(),
         reason: reason.to_string(),
+        audit: held.audit.clone(),
     };
     Ok(guard.append(&held.log.instance, held.log.seq(), refused.to_event()?)?)
 }
@@ -1047,6 +1062,7 @@ pub fn choose(
         inputs: held.rec.inputs.clone(),
         tool_use_id: None,
         guard_digest: Some(digest.clone()),
+        audit: held.audit.clone(),
     };
     let appended = guard.append(&instance, held.log.seq(), chosen.to_event()?)?;
     drop(guard);

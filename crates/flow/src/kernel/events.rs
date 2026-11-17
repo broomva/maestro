@@ -8,7 +8,8 @@
 //! node's ask (`asks`) writes `AskPinned`, `AskLinked`, `AskWithdrawn` and `Answered`. A proposal
 //! to adopt or retire the instance (`adoption`) writes `ProposalPinned`, `ProposalLinked` and
 //! `ProposalWithdrawn`, which change nothing but the proposal, and, on the owner's approval,
-//! `Adopted` or `Retired`. The stop gate (`stop`) writes `StopUnblockable`, which changes nothing.
+//! `Adopted` or `Retired`. The stop gate (`stop`) writes `StopUnblockable` and `StopUnverified`, which
+//! change nothing.
 //!
 //! A receipt (`Completed`, `Chosen`, and `Answered` for a human node) records in `inputs` the digest of every receipt it consumed:
 //! each node it needs or switches on, by node id ([`receipt_digest`]). `status` and `next` name
@@ -18,7 +19,7 @@
 use super::error::KernelError;
 use super::ir::{Ir, Iteration};
 use crate::log::NewEvent;
-use maestro_core::session::SessionRef;
+use maestro_core::session::{Audit, SessionRef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -46,6 +47,10 @@ pub struct Started {
     /// a log written before owners were recorded: such an instance takes no write.
     #[serde(default)]
     pub owner: Option<Owner>,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// An instance's owner: a session and the digest of its owner marker, together. The marker alone
@@ -101,6 +106,10 @@ pub struct Claimed {
     /// never runs past it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_at: Option<String>,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// The receipt: a node accepted in an iteration, with the verify the kernel ran.
@@ -120,6 +129,10 @@ pub struct Completed {
     pub performer: Option<Performer>,
     #[serde(default)]
     pub tool_use_id: Option<String>,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// A completion the kernel refused. The attempt stays open while its lease holds.
@@ -130,6 +143,10 @@ pub struct Refused {
     pub attempt: u32,
     pub code: String,
     pub reason: String,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// A choice node's edge, accepted because it was declared and its guard held.
@@ -146,6 +163,10 @@ pub struct Chosen {
     /// The digest of the input document the edge's guard held over (see `guard`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_digest: Option<String>,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// An effect's command about to run for an attempt, written before it runs. An effect started over
@@ -172,6 +193,10 @@ pub struct Heartbeat {
     pub iteration: Iteration,
     pub attempt: u32,
     pub lease_until: String,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// The recorded verdict of a repeat's `until` for one iteration, evaluated once when the
@@ -198,6 +223,10 @@ pub struct AskPinned {
     pub ledger: String,
     pub body: Value,
     pub body_hash: String,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// The pinned ask, confirmed in the asks ledger's working tree: a row with its id and its hash.
@@ -238,6 +267,10 @@ pub struct Answered {
     pub source: String,
     /// The answered row's entry hash (the plugin's `entryHash`), as read.
     pub row_hash: String,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// What a proposal asks the owner to decide.
@@ -316,6 +349,10 @@ pub struct Adopted {
     pub from: Owner,
     pub to: Owner,
     pub approval: Approval,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// The instance retired, on the owner's approval of a retirement proposal. Written last, before
@@ -324,6 +361,10 @@ pub struct Adopted {
 pub struct Retired {
     pub by: Owner,
     pub approval: Approval,
+    /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
+    /// the spine and every check ignore. Absent in logs written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
 }
 
 /// Why a stop went through while the instance had work its owner could do now (`stop`).
@@ -350,6 +391,24 @@ pub struct StopUnblockable {
     /// Every instance of the session that had work it could do now, this one included.
     pub open_instances: Vec<String>,
     pub reason: Unblockable,
+}
+
+/// Why the stop gate could not bind a stop to one thread (BRO-3846): its thread variables
+/// disagreed, did not resolve, or T3's registry did not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopUnverified {
+    /// The harness whose stop went through: `claude` or `codex`.
+    pub harness: String,
+    /// `thread_mismatch`, `attribution_unresolved` or `registry_unavailable`, with its detail.
+    pub reason: String,
+    /// The T3 threads the stop's variables named, each as a canonical session.
+    pub candidates: Vec<SessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<Audit>,
+}
+
+impl KernelEvent for StopUnverified {
+    const KIND: &'static str = "StopUnverified";
 }
 
 impl KernelEvent for StopUnblockable {

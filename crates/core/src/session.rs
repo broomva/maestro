@@ -151,6 +151,26 @@ impl fmt::Display for SessionRef {
     }
 }
 
+impl SessionRef {
+    /// This session with a T3 environment alias made canonical (BRO-3846): `local` and `-` (none)
+    /// both name this host's T3, so they become `host_environment`, the environment id this host's
+    /// registry reports. Any other environment, and every other surface, is left as it is, so a
+    /// session of another T3 environment never matches this host's.
+    pub fn canonical(&self, host_environment: Option<&str>) -> SessionRef {
+        if self.surface != Surface::T3 {
+            return self.clone();
+        }
+        match self.environment.as_deref() {
+            None | Some("local") | Some("-") => SessionRef {
+                surface: Surface::T3,
+                environment: host_environment.map(str::to_string),
+                id: self.id.clone(),
+            },
+            Some(_) => self.clone(),
+        }
+    }
+}
+
 impl std::str::FromStr for SessionRef {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -309,6 +329,21 @@ pub struct CallerClaim {
     pub credential: Option<BridgeCredential>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
+    /// The T3 thread the claiming process's own thread variable resolved to (BRO-3846). Set only
+    /// by the caller check, from the variables the surface registry captured at start; never read
+    /// from arguments, so it is skipped by serde both ways.
+    #[serde(skip)]
+    pub attribution: Option<Attribution>,
+}
+
+/// A thread variable of the claiming process, resolved through T3's registry (BRO-3846): which
+/// variable carried it, and the thread it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attribution {
+    /// `T3CODE_THREAD_ID`, `CODEX_THREAD_ID`, or `stdin:session_id` for a Codex Stop hook.
+    pub variable: String,
+    /// The T3 thread id it resolved to.
+    pub thread: String,
 }
 
 impl CallerClaim {
@@ -322,6 +357,7 @@ impl CallerClaim {
             node: None,
             credential: None,
             generation: None,
+            attribution: None,
         }
     }
 
@@ -335,6 +371,7 @@ impl CallerClaim {
             node: None,
             credential: None,
             generation: None,
+            attribution: None,
         }
     }
 
@@ -352,6 +389,7 @@ impl CallerClaim {
             node: None,
             credential: None,
             generation: None,
+            attribution: None,
         }
     }
 
@@ -479,6 +517,51 @@ pub struct VerifiedSession {
     owner_marker: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_permissions: Vec<PermissionPrompt>,
+    /// How the caller was verified and facts about the claiming process (BRO-3846), recorded on
+    /// the events its writes append. Never an input to any check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audit: Option<Audit>,
+}
+
+/// What a flow event records of the writer (BRO-3846): how its identity was established, and facts
+/// about the process that made the claim. Investigation clues only: no check reads them, and the
+/// spine ignores them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Audit {
+    pub identity: IdentityFacts,
+    pub process: ProcessFacts,
+}
+
+/// `{mode, variable, thread}`: the identity mode the write was accepted under, and the thread
+/// variable (by name) and thread it resolved to, when one did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityFacts {
+    /// `t3-attributed`, `bridge-credential` or `direct-token`.
+    pub mode: String,
+    pub variable: Option<String>,
+    pub thread: Option<String>,
+}
+
+/// Facts about the claiming process: the CLI process itself, or the `maestro mcp` server for stdio
+/// MCP. A fact that could not be read is `null`, and `unread` names it with the reason.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessFacts {
+    pub pid: u32,
+    pub start_time: Option<String>,
+    pub uid: Option<u32>,
+    /// Parent first, at most 8 ancestors.
+    pub ancestors: Option<Vec<Ancestor>>,
+    /// The names of the thread variables present in the process, never their values' use as proof.
+    pub variables: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub unread: std::collections::BTreeMap<String, String>,
+}
+
+/// One ancestor of the claiming process: its pid and command name (`null` when unread).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ancestor {
+    pub pid: u32,
+    pub command: Option<String>,
 }
 
 impl VerifiedSession {
@@ -500,7 +583,18 @@ impl VerifiedSession {
             incarnation: None,
             owner_marker: None,
             pending_permissions,
+            audit: None,
         }
+    }
+
+    pub fn with_audit(mut self, audit: Audit) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// What events record of this writer (see [`Audit`]).
+    pub fn audit(&self) -> Option<&Audit> {
+        self.audit.as_ref()
     }
 
     pub fn with_incarnation(mut self, incarnation: impl Into<String>) -> Self {
@@ -621,6 +715,49 @@ pub enum RefusalReason {
     IdReused,
     RegistryDisconnected,
     UnsupportedSurface,
+    /// Attributed mode: an unsigned T3 claim from a process with no thread variable (BRO-3846).
+    AttributionMissing,
+    /// A thread variable that maps to no thread, to more than one, or to an archived or deleted one.
+    AttributionUnresolved,
+    /// A thread variable whose thread is not the claimed session, or two that disagree.
+    ThreadMismatch,
+    /// T3's registry could not be read to resolve a thread variable; never a fallback.
+    RegistryUnavailable,
+}
+
+impl RefusalReason {
+    /// The stable snake_case code, as the reason serializes.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::MissingSessionId => "missing_session_id",
+            Self::MissingCwd => "missing_cwd",
+            Self::RelativeCwd => "relative_cwd",
+            Self::NotFound => "not_found",
+            Self::NotLive => "not_live",
+            Self::OutsideCwd => "outside_cwd",
+            Self::CrossSurface => "cross_surface",
+            Self::PeerMismatch => "peer_mismatch",
+            Self::InvalidToken => "invalid_token",
+            Self::WrongNode => "wrong_node",
+            Self::StaleCredential => "stale_credential",
+            Self::IdReused => "id_reused",
+            Self::RegistryDisconnected => "registry_disconnected",
+            Self::UnsupportedSurface => "unsupported_surface",
+            Self::AttributionMissing => "attribution_missing",
+            Self::AttributionUnresolved => "attribution_unresolved",
+            Self::ThreadMismatch => "thread_mismatch",
+            Self::RegistryUnavailable => "registry_unavailable",
+        }
+    }
+
+    /// The four refusals attributed identity adds (BRO-3846): a flow write reports each as its
+    /// own code rather than `caller_refused`.
+    pub fn is_attribution(self) -> bool {
+        matches!(
+            self,
+            Self::AttributionMissing | Self::AttributionUnresolved | Self::ThreadMismatch | Self::RegistryUnavailable
+        )
+    }
 }
 
 /// A refused caller identity check.

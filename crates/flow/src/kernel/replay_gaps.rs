@@ -17,6 +17,7 @@ impl L {
             ir: flow.ir().clone(),
             params: json!({}),
             owner: None,
+            audit: None,
         };
         let ev = Event {
             seq: 1,

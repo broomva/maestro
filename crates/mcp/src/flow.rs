@@ -82,13 +82,16 @@ pub const MAX_NAME: usize = 1024;
 
 // Every write tool's schema carries the caller's claim (`cwd`, `token`, `node`, `credential`):
 // a schema-enforcing client sends it in the call's arguments, the only place a shared daemon
-// reads it (`crate::Ambient`). The caller check reads these fields from the arguments.
+// reads it (`crate::Ambient`). The caller check reads these fields from the arguments. `session`
+// is optional (BRO-3846): a T3 thread's process carries its thread variable, and the caller check
+// derives the session from it; it never reads the variable from the arguments.
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowStartArgs {
-    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`.
-    pub session: String,
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread:
+    /// omitted, it is the thread this process's own thread variable names.
+    pub session: Option<String>,
     /// The flow definition, as YAML text.
     pub definition: String,
     /// The flow's params, a JSON object.
@@ -113,8 +116,9 @@ pub struct FlowInstanceArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowOpenArgs {
-    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`.
-    pub session: String,
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread:
+    /// omitted, it is the thread this process's own thread variable names.
+    pub session: Option<String>,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
     pub cwd: Option<String>,
     /// A Direct session's launch token.
@@ -137,7 +141,9 @@ pub struct FlowSpineArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowClaimArgs {
-    pub session: String,
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread:
+    /// omitted, it is the thread this process's own thread variable names.
+    pub session: Option<String>,
     pub instance: String,
     /// The flow node to claim, one `maestro_flow_next` lists as enabled.
     pub node_id: String,
@@ -154,7 +160,9 @@ pub struct FlowClaimArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowHeartbeatArgs {
-    pub session: String,
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread:
+    /// omitted, it is the thread this process's own thread variable names.
+    pub session: Option<String>,
     /// The token `maestro_flow_claim` returned.
     pub claim_token: String,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
@@ -170,7 +178,9 @@ pub struct FlowHeartbeatArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowCompleteArgs {
-    pub session: String,
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread:
+    /// omitted, it is the thread this process's own thread variable names.
+    pub session: Option<String>,
     /// The token `maestro_flow_claim` returned.
     pub claim_token: String,
     /// The node's outputs, a JSON object; the kernel records them with the receipt.
@@ -190,7 +200,9 @@ pub struct FlowCompleteArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowChooseArgs {
-    pub session: String,
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread:
+    /// omitted, it is the thread this process's own thread variable names.
+    pub session: Option<String>,
     /// The token `maestro_flow_claim` returned for the choice node.
     pub claim_token: String,
     /// The edge to take, one the choice node declares.
@@ -208,7 +220,9 @@ pub struct FlowChooseArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowAskArgs {
-    pub session: String,
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread:
+    /// omitted, it is the thread this process's own thread variable names.
+    pub session: Option<String>,
     pub instance: String,
     /// The human node, one `maestro_flow_next` lists as waiting on the owner.
     pub node_id: String,
@@ -232,7 +246,9 @@ pub struct FlowAskArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowProposeArgs {
-    pub session: String,
+    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread:
+    /// omitted, it is the thread this process's own thread variable names.
+    pub session: Option<String>,
     /// The instance, as `maestro_flow_status` names it.
     pub instance: String,
     /// The asks ledger to file the proposal into, a file name in the asks folder (`*.yaml`). Needed
@@ -336,16 +352,16 @@ pub(crate) fn call(
         }
         OPEN => {
             let a: FlowOpenArgs = parse(args.clone())?;
-            let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+            let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
                 let open = open(paths, w)?;
                 Ok(json!({ "ok": true, "refuses_stop": open.refusing().next().is_some(), "open": open }))
             }))
         }
         START => {
             let a: FlowStartArgs = parse(args.clone())?;
-            let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, (hosts, ambient), &session, &args, true, |w| {
+            let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, true, |w| {
                 // The definition compiles before the ledger is opened, or made.
                 let flow = kernel::compile(&a.definition)?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
@@ -361,8 +377,8 @@ pub(crate) fn call(
         }
         CLAIM => {
             let a: FlowClaimArgs = parse(args.clone())?;
-            let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+            let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
                 let node = match bounded("node_id", &a.node_id) {
                     Ok(node) => node,
                     Err(v) => return Ok(v),
@@ -384,16 +400,16 @@ pub(crate) fn call(
         }
         HEARTBEAT => {
             let a: FlowHeartbeatArgs = parse(args.clone())?;
-            let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+            let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
                 let beat = kernel::heartbeat(&mut w.ledger()?, &w.me, &a.claim_token)?;
                 Ok(json!({ "ok": true, "lease_until": beat.lease_until.to_string(), "seq": beat.appended.event.seq }))
             }))
         }
         COMPLETE => {
             let a: FlowCompleteArgs = parse(args.clone())?;
-            let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+            let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
                 let mut limits = Limits::default();
                 if let Some(secs) = a.timeout_secs {
                     limits.timeout = std::time::Duration::from_secs(secs);
@@ -418,8 +434,8 @@ pub(crate) fn call(
         }
         CHOOSE => {
             let a: FlowChooseArgs = parse(args.clone())?;
-            let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+            let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
                 let edge = match bounded("edge", &a.edge) {
                     Ok(edge) => edge,
                     Err(v) => return Ok(v),
@@ -442,8 +458,8 @@ pub(crate) fn call(
         }
         ASK => {
             let a: FlowAskArgs = parse(args.clone())?;
-            let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+            let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
                 let node = match bounded("node_id", &a.node_id) {
                     Ok(node) => node,
                     Err(v) => return Ok(v),
@@ -483,8 +499,8 @@ pub(crate) fn call(
         }
         PROPOSE_ADOPTION | PROPOSE_RETIREMENT => {
             let a: FlowProposeArgs = parse(args.clone())?;
-            let session = crate::session_of(&a.session)?;
-            Ok(write(workspace, (hosts, ambient), &session, &args, false, |w| {
+            let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
                 let instance = InstanceId::new(&a.instance)?;
                 let filing = match (&a.ledger, &a.ask) {
                     (Some(ledger), Some(body)) => Some(kernel::Filing { ledger: ledger.clone(), body: body.clone() }),
@@ -719,22 +735,31 @@ impl Writer {
 pub(crate) fn write(
     workspace: &Path,
     caller: (&maestro_hosts::SurfaceRegistry, crate::Ambient),
-    session: &SessionRef,
+    session: Option<&SessionRef>,
     args: &Value,
     may_create: bool,
     verb: impl FnOnce(&Writer) -> Result<Value, KernelError>,
 ) -> Value {
-    let me = match crate::verified_caller(caller.0, session, args, caller.1) {
+    let me = match crate::verified_caller(caller.0, session, args, caller.1, crate::Check::Write) {
         Ok(Some(me)) => me,
         Ok(None) => {
+            let named = session.map_or_else(|| "(none named)".to_string(), SessionRef::to_string);
             let reason = format!(
-                "Session {session} is not verified, so it writes no flow. A flow write needs a launch token or a bridge credential."
+                "Session {named} is not verified, so it writes no flow. A flow write needs a launch token, a bridge credential, or (in a T3 thread) the thread's own variable."
             );
             return refusal("caller_unverified", reason, false);
         }
         Err(e) => {
-            let mut v = refusal("caller_refused", &e.message, false);
-            v["identity"] = e.data.as_ref().and_then(|d| d.get("reason")).cloned().unwrap_or(Value::Null);
+            let identity = e.data.as_ref().and_then(|d| d.get("reason")).cloned().unwrap_or(Value::Null);
+            // The four refusals attributed identity adds are their own codes (BRO-3846).
+            let code = match identity.as_str() {
+                Some(
+                    c @ ("attribution_missing" | "attribution_unresolved" | "thread_mismatch" | "registry_unavailable"),
+                ) => c,
+                _ => "caller_refused",
+            };
+            let mut v = refusal(code, &e.message, false);
+            v["identity"] = identity;
             return v;
         }
     };

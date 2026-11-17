@@ -270,6 +270,7 @@ fn a_human_nodes_answer_is_on_the_spine_with_no_edge_or_exit() {
         ledger: ledger.clone(),
         body: json!({}),
         body_hash: "h".into(),
+        audit: None,
     };
     let linked = AskLinked {
         node: node.clone(),
@@ -287,6 +288,7 @@ fn a_human_nodes_answer_is_on_the_spine_with_no_edge_or_exit() {
         outputs: json!({ "answer_option": "ship" }),
         source: "main@0".into(),
         row_hash: "r".into(),
+        audit: None,
     };
     f.append(&fi, pinned.to_event().unwrap());
     f.append(&fi, linked.to_event().unwrap());
@@ -312,6 +314,7 @@ fn an_event_replay_set_aside_is_not_on_the_spine() {
         verify: None,
         performer: None,
         tool_use_id: None,
+        audit: None,
     };
     let fi = run.fi.clone();
     run.f.append(&fi, early.to_event().unwrap());

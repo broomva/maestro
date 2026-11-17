@@ -13,9 +13,15 @@
 //!   session generations to refuse ID reuse, refuses cross-surface spoofing, and projects
 //!   live permission prompts into [`Need`]s.
 
+pub mod attribution;
 pub mod paseo;
 pub mod t3;
 
+pub use attribution::{
+    Attributed, CODEX_THREAD_ID, IdentityMode, ProcStat, ProcessReader, STDIN_SESSION_ID, SystemProcesses,
+    T3CODE_THREAD_ID, ThreadVar, ThreadVars, VarOutcome,
+};
+pub use maestro_core::session::{Attribution, Audit, IdentityFacts, ProcessFacts};
 pub use maestro_core::session::{
     BridgeCredential, BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal,
     MAX_BRIDGE_CREDENTIAL_TTL_MS, NodeId, PeerCredentials, PermissionPrompt, RefusalReason, SessionError,
@@ -25,7 +31,7 @@ pub use paseo::{
     PARENT_AGENT_LABEL, PaseoAgent, PaseoRegistry, PermissionLike, describe_permission, permission_request_id,
     resolve_real, within,
 };
-pub use t3::{T3Registry, T3Thread, is_safe_t3_id};
+pub use t3::{MAX_T3_ID, Resolution, T3Registry, T3Thread, is_safe_t3_id};
 
 use maestro_core::need::Need;
 use paseo::{check_peer, is_safe_id, short_id};
@@ -39,7 +45,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,6 +663,15 @@ pub struct SurfaceRegistry {
     bridge_secret: Option<Vec<u8>>,
     generations_file: Option<PathBuf>,
     generations: Mutex<GenerationLedger>,
+    /// `MAESTRO_IDENTITY` (BRO-3846).
+    mode: IdentityMode,
+    /// The claiming process's thread variables, captured once at start (BRO-3846).
+    thread_vars: ThreadVars,
+    /// The T3 root was found (`T3CODE_HOME` or `~/.t3`) rather than configured (`MAESTRO_T3_HOME`):
+    /// a claimless agent request is then unverified, as it was before the root was found.
+    t3_found: bool,
+    /// Where the audit facts are read from; `None` is the running system.
+    processes: Option<Arc<dyn ProcessReader>>,
 }
 
 impl SurfaceRegistry {
@@ -673,19 +688,45 @@ impl SurfaceRegistry {
         }
     }
 
+    /// The T3 registry root (BRO-3846): `MAESTRO_T3_HOME`, then `T3CODE_HOME` (which T3 sets), then
+    /// `~/.t3` when it exists. The flag says whether it was found rather than configured.
+    pub fn t3_root_from(
+        maestro_t3_home: Option<&str>,
+        t3code_home: Option<&str>,
+        home: Option<&Path>,
+    ) -> Option<(PathBuf, bool)> {
+        if let Some(p) = maestro_t3_home.filter(|s| !s.is_empty()) {
+            return Some((PathBuf::from(p), false));
+        }
+        if let Some(p) = t3code_home.filter(|s| !s.is_empty()) {
+            return Some((PathBuf::from(p), true));
+        }
+        home.map(|h| h.join(".t3")).filter(|p| p.is_dir()).map(|p| (p, true))
+    }
+
     /// Construct a `SurfaceRegistry` from environment variables (`MAESTRO_PASEO_AGENTS_DIR`,
-    /// `MAESTRO_T3_HOME`, `MAESTRO_DIRECT_REGISTRY`, `MAESTRO_GENERATIONS_FILE`,
-    /// `MAESTRO_NODE`, `MAESTRO_BRIDGE_SECRET`).
+    /// `MAESTRO_T3_HOME` or `T3CODE_HOME` or `~/.t3`, `MAESTRO_DIRECT_REGISTRY`,
+    /// `MAESTRO_GENERATIONS_FILE`, `MAESTRO_NODE`, `MAESTRO_BRIDGE_SECRET`, `MAESTRO_IDENTITY`), and
+    /// the claiming process's thread variables (`T3CODE_THREAD_ID`, `CODEX_THREAD_ID`).
     pub fn from_env() -> Self {
         let paseo = std::env::var("MAESTRO_PASEO_AGENTS_DIR")
             .ok()
             .filter(|s| !s.is_empty())
             .map(|p| PaseoRegistry::new(PathBuf::from(p)));
-        let t3 =
-            std::env::var("MAESTRO_T3_HOME").ok().filter(|s| !s.is_empty()).map(|p| T3Registry::new(PathBuf::from(p)));
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+        let root = Self::t3_root_from(
+            std::env::var("MAESTRO_T3_HOME").ok().as_deref(),
+            std::env::var("T3CODE_HOME").ok().as_deref(),
+            home.as_deref(),
+        );
+        let t3_found = root.as_ref().is_some_and(|(_, found)| *found);
+        let t3 = root.map(|(p, _)| T3Registry::new(p));
         let direct =
             std::env::var("MAESTRO_DIRECT_REGISTRY").ok().filter(|s| !s.is_empty()).map(DirectRegistry::from_file);
-        let mut reg = Self::new(paseo, t3, direct);
+        let mut reg = Self::new(paseo, t3, direct)
+            .with_identity_mode(IdentityMode::parse(std::env::var("MAESTRO_IDENTITY").ok().as_deref()))
+            .with_thread_vars(ThreadVars::from_env());
+        reg.t3_found = t3_found;
         if let Ok(gen_file) = std::env::var("MAESTRO_GENERATIONS_FILE")
             && !gen_file.is_empty()
         {
@@ -702,6 +743,91 @@ impl SurfaceRegistry {
             reg = reg.with_bridge_secret(secret.into_bytes());
         }
         reg
+    }
+
+    pub fn with_identity_mode(mut self, mode: IdentityMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn identity_mode(&self) -> IdentityMode {
+        self.mode
+    }
+
+    /// The claiming process's thread variables, as captured (tests pass their own).
+    pub fn with_thread_vars(mut self, vars: ThreadVars) -> Self {
+        self.thread_vars = vars;
+        self
+    }
+
+    pub fn thread_vars(&self) -> &ThreadVars {
+        &self.thread_vars
+    }
+
+    /// Mark the T3 root as found (`T3CODE_HOME`, `~/.t3`) rather than configured.
+    pub fn with_t3_found(mut self, found: bool) -> Self {
+        self.t3_found = found;
+        self
+    }
+
+    /// Where the audit facts are read from (tests inject a reader).
+    pub fn with_process_reader(mut self, reader: Arc<dyn ProcessReader>) -> Self {
+        self.processes = Some(reader);
+        self
+    }
+
+    /// Whether `surface` has a registry here that was configured, not merely found: a claimless
+    /// agent request from a surface with none is unverified, never refused (BRO-3846 keeps that
+    /// for the T3 root it now finds through `T3CODE_HOME` or `~/.t3`).
+    pub fn has_configured_surface(&self, surface: &Surface) -> bool {
+        self.has_surface(surface) && !(surface == &Surface::T3 && self.t3_found)
+    }
+
+    /// This host's T3 environment id, the canonical form of a `local` or `-` T3 session.
+    pub fn t3_environment(&self) -> Option<String> {
+        self.t3.as_ref().and_then(T3Registry::environment_id)
+    }
+
+    /// What each of `vars` resolves to in T3's registry (BRO-3846). With no T3 registry here, each
+    /// is unreadable, never absent.
+    pub fn resolve_each(&self, vars: &ThreadVars) -> Vec<(ThreadVar, VarOutcome)> {
+        let environment = self.t3_environment();
+        vars.iter()
+            .map(|v| {
+                let outcome = match &self.t3 {
+                    None => VarOutcome::Unreadable("no T3 registry is found on this host".to_string()),
+                    Some(t3) => match t3.resolve(&v.value, v.native) {
+                        Ok(Resolution::Thread(t)) => VarOutcome::Thread { id: t.id, environment: environment.clone() },
+                        Ok(Resolution::Unresolved(why)) => VarOutcome::Unresolved(why),
+                        Err(r) => VarOutcome::Unreadable(r.message),
+                    },
+                };
+                (v.clone(), outcome)
+            })
+            .collect()
+    }
+
+    /// The captured variables, resolved and combined by the spec's precedence.
+    pub fn attribution(&self) -> Attributed {
+        attribution::combine(&self.resolve_each(&self.thread_vars))
+    }
+
+    /// The audit facts for a write accepted under `mode` (`t3-attributed`, `bridge-credential`,
+    /// `direct-token`), about this process: the claiming process.
+    pub fn audit(&self, mode: &str, attribution: Option<&Attribution>) -> Audit {
+        let system = SystemProcesses;
+        let reader: &dyn ProcessReader = match &self.processes {
+            Some(r) => r.as_ref(),
+            None => &system,
+        };
+        Audit {
+            identity: IdentityFacts {
+                mode: mode.to_string(),
+                variable: attribution.map(|a| a.variable.clone()),
+                thread: attribution.map(|a| a.thread.clone()),
+            },
+            process: attribution::process_facts(reader, std::process::id(), self.thread_vars.names()),
+        }
     }
 
     pub fn with_expected_node(mut self, node: NodeId) -> Self {
@@ -954,10 +1080,14 @@ impl SurfaceRegistry {
         {
             return Err(SessionError::WrongNode { expected: want_node.clone(), actual: actual_node.clone() });
         }
+        // The one exception (BRO-3846): an unsigned T3 claim the caller check attributed from the
+        // claiming process's own thread variable. `attribution` is never read from arguments.
+        let attributed = claim.surface == Surface::T3 && claim.attribution.is_some();
         if self.bridge_secret.is_some()
             && claim.surface != Surface::Direct
             && claim.credential.is_none()
             && claim.peer.is_none()
+            && !attributed
         {
             return Err(SessionError::Refused(IdentityRefusal::new(
                 RefusalReason::InvalidToken,
@@ -1118,7 +1248,19 @@ impl SurfaceRegistry {
                         detail: "T3 registry is not configured on this host".to_string(),
                     });
                 };
-                t3.verify(claim).map_err(Into::into)
+                match (&claim.attribution, &claim.credential) {
+                    (Some(a), None) => {
+                        if claim.session_id.as_deref() != Some(a.thread.as_str()) {
+                            return Err(IdentityRefusal::new(
+                                RefusalReason::ThreadMismatch,
+                                format!("{} names thread {}, not the claimed session.", a.variable, a.thread),
+                            )
+                            .into());
+                        }
+                        t3.verify_attributed(&a.thread, claim.node.as_ref()).map_err(Into::into)
+                    }
+                    _ => t3.verify(claim).map_err(Into::into),
+                }
             }
             Surface::Direct => {
                 let Some(direct) = &self.direct else {

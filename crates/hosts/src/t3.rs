@@ -16,17 +16,25 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Whether `id` is a plausible T3 thread id (e.g. `mcp:<uuid>` or `<uuid>` or token, with no path separators or NUL).
+/// The longest T3 thread id Maestro reads (BRO-3846): live delegated ids run 129 to 206 bytes.
+pub const MAX_T3_ID: usize = 512;
+
+/// Whether `id` is a plausible T3 thread id: `mcp:<uuid>`, `<uuid>`, or a percent-encoded composite
+/// such as `mcp:launch:abc%3Adef`. A leading alphanumeric, then alphanumerics and `-_:.%`, at most
+/// [`MAX_T3_ID`] bytes, never `/`, `..` or NUL. Ids are opaque: never percent-decoded, used only as
+/// SQL parameters and in comparisons, never as a path, so `%2F` is just three bytes.
 pub fn is_safe_t3_id(id: &str) -> bool {
     let bytes = id.as_bytes();
-    if bytes.is_empty() || bytes.len() > 128 {
+    if bytes.is_empty() || bytes.len() > MAX_T3_ID {
         return false;
     }
     if !bytes[0].is_ascii_alphanumeric() {
         return false;
     }
-    bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.'))
-        && !id.contains("..")
+    if id.contains('/') || id.contains('\0') || id.contains("..") {
+        return false;
+    }
+    bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.' | b'%'))
 }
 
 /// What Maestro reads of a T3 thread record.
@@ -128,6 +136,30 @@ struct RawT3Thread {
     parent_id: Option<String>,
     #[serde(default)]
     pending_permissions: Option<Vec<Value>>,
+    /// The thread's active provider-thread row (`active_provider_thread_id`).
+    #[serde(default)]
+    active_provider_thread_id: Option<String>,
+    /// The thread's provider-thread rows, active or retired, each with its native id
+    /// (`payload_json.$.nativeThreadRef.nativeId`), as `orchestration_v2_projection_provider_threads`
+    /// holds them.
+    #[serde(default)]
+    provider_threads: Vec<RawProviderThread>,
+}
+
+#[derive(Deserialize)]
+struct RawProviderThread {
+    provider_thread_id: String,
+    #[serde(default)]
+    native_id: Option<String>,
+}
+
+/// What one thread variable resolved to (BRO-3846).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// Exactly one thread, neither archived nor deleted.
+    Thread(T3Thread),
+    /// No thread, more than one, or one archived or deleted: why.
+    Unresolved(String),
 }
 
 /// T3 thread registry reader (`statev2.sqlite` or JSON snapshot).
@@ -235,6 +267,28 @@ def main():
             "parent_id": parent_id,
             "pending_permissions": perms,
         }
+
+    if mode == "native":
+        # The threads whose ACTIVE provider-thread row carries this native id (a Codex
+        # CODEX_THREAD_ID, or a Stop hook's session_id). A retired provider row never attributes.
+        out = []
+        if "orchestration_v2_projection_threads" in tables and "orchestration_v2_projection_provider_threads" in tables:
+            rows = conn.execute(
+                "SELECT t.thread_id AS thread_id, p.payload_json AS payload_json "
+                "FROM orchestration_v2_projection_threads t "
+                "JOIN orchestration_v2_projection_provider_threads p "
+                "ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id"
+            )
+            for r in rows:
+                try:
+                    payload = json.loads(r["payload_json"] or "{}")
+                except Exception:
+                    continue
+                ref = payload.get("nativeThreadRef") if isinstance(payload, dict) else None
+                if isinstance(ref, dict) and ref.get("nativeId") == target_id and r["thread_id"] not in out:
+                    out.append(r["thread_id"])
+        print(json.dumps(out))
+        sys.exit(0)
 
     if mode == "list":
         out = []
@@ -448,6 +502,106 @@ impl T3Registry {
         }
     }
 
+    /// The environment id this host's T3 registry reports (`userdata/environment-id`), the
+    /// canonical form of a `local` or `-` T3 session (BRO-3846).
+    pub fn environment_id(&self) -> Option<String> {
+        self.discover().environment_id
+    }
+
+    /// The threads whose active provider-thread row carries `native_id`, read from the registry.
+    fn native_threads(&self, native_id: &str) -> Result<Vec<String>, IdentityRefusal> {
+        let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
+        if self.disconnected {
+            return Err(unreadable("T3 registry is disconnected.".to_string()));
+        }
+        if let Some(json_file) = self.json_path() {
+            let text = std::fs::read_to_string(json_file)
+                .map_err(|e| unreadable(format!("T3 JSON registry could not be read: {e}.")))?;
+            let rows: Vec<RawT3Thread> =
+                serde_json::from_str(&text).map_err(|e| unreadable(format!("T3 JSON registry is malformed: {e}.")))?;
+            let mut out: Vec<String> = Vec::new();
+            for raw in rows {
+                let Some(active) = raw.active_provider_thread_id.as_deref() else { continue };
+                let hit = raw
+                    .provider_threads
+                    .iter()
+                    .any(|p| p.provider_thread_id == active && p.native_id.as_deref() == Some(native_id));
+                if hit && !out.contains(&raw.id) {
+                    out.push(raw.id);
+                }
+            }
+            return Ok(out);
+        }
+        if let Some(db_file) = self.sqlite_path() {
+            let out = Command::new("python3")
+                .arg("-I")
+                .arg("-c")
+                .arg(SQLITE_READER_PY)
+                .arg("native")
+                .arg(&db_file)
+                .arg(native_id)
+                .output()
+                .map_err(|e| unreadable(format!("T3 SQLite reader failed to launch: {e}.")))?;
+            if out.status.code() != Some(0) {
+                let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                return Err(unreadable(format!("T3 SQLite database is unreadable: {detail}")));
+            }
+            return serde_json::from_slice(&out.stdout)
+                .map_err(|e| unreadable(format!("T3 SQLite reader returned invalid JSON: {e}.")));
+        }
+        Err(unreadable(format!("No T3 registry database or snapshot at {}.", self.root.display())))
+    }
+
+    /// Resolves a thread variable to its thread (BRO-3846). `native` is false for
+    /// `T3CODE_THREAD_ID`, which names a thread row; true for `CODEX_THREAD_ID` or a Stop hook's
+    /// `session_id`, which name a provider's native thread and resolve through the thread's active
+    /// provider row only. Liveness is `archived_at` and `deleted_at` unset; `settled_at` and the run
+    /// status are ignored. A registry that does not read is `registry_unavailable`, never a fallback.
+    pub fn resolve(&self, value: &str, native: bool) -> Result<Resolution, IdentityRefusal> {
+        let thread_id = if native {
+            if value.is_empty() || value.len() > MAX_T3_ID || value.contains('\0') {
+                return Ok(Resolution::Unresolved(format!("{} is not a native thread id", short_id(value))));
+            }
+            let found = self.native_threads(value)?;
+            match found.as_slice() {
+                [] => {
+                    return Ok(Resolution::Unresolved(format!(
+                        "no T3 thread's active provider row is {}",
+                        short_id(value)
+                    )));
+                }
+                [one] => one.clone(),
+                many => {
+                    return Ok(Resolution::Unresolved(format!(
+                        "{} active provider rows carry {}",
+                        many.len(),
+                        short_id(value)
+                    )));
+                }
+            }
+        } else {
+            value.to_string()
+        };
+        if !is_safe_t3_id(&thread_id) {
+            return Ok(Resolution::Unresolved(format!("{} is not a T3 thread id", short_id(&thread_id))));
+        }
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryUnavailable, "T3 registry is disconnected."));
+        }
+        let thread =
+            self.lookup(&thread_id).map_err(|r| IdentityRefusal::new(RefusalReason::RegistryUnavailable, r.message))?;
+        Ok(match thread {
+            None => Resolution::Unresolved(format!("no T3 thread has the id {}", short_id(&thread_id))),
+            Some(t) if t.archived_at.is_some() => {
+                Resolution::Unresolved(format!("thread {} is archived", short_id(&t.id)))
+            }
+            Some(t) if t.deleted_at.is_some() => {
+                Resolution::Unresolved(format!("thread {} is deleted", short_id(&t.id)))
+            }
+            Some(t) => Resolution::Thread(t),
+        })
+    }
+
     fn lookup(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {
         if !is_safe_t3_id(id) {
             return Ok(None);
@@ -549,6 +703,75 @@ impl T3Registry {
         Vec::new()
     }
 
+    /// Verify the thread a claiming process's own thread variable resolved to (BRO-3846). Called
+    /// from `SurfaceRegistry::verify_session` for a T3 claim with an attribution and no credential,
+    /// so the node, environment, generation and cross-surface checks there still apply. It needs
+    /// no folder: the variable, not a cwd, picks the thread. Liveness is attribution's (`archived_at`
+    /// and `deleted_at` unset). It sets the same owner marker [`T3Registry::verify`] sets.
+    pub fn verify_attributed(
+        &self,
+        thread_id: &str,
+        node: Option<&NodeId>,
+    ) -> Result<VerifiedSession, IdentityRefusal> {
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        let Some(thread) = self.lookup(thread_id)? else {
+            return Err(IdentityRefusal::new(
+                RefusalReason::AttributionUnresolved,
+                format!("No T3 thread has the id {}.", short_id(thread_id)),
+            ));
+        };
+        let presented = node.or(self.expected_node.as_ref());
+        for (want, actual) in [(thread.node.as_ref(), presented), (self.expected_node.as_ref(), node)] {
+            if let (Some(want), Some(actual)) = (want, actual)
+                && want != actual
+            {
+                return Err(IdentityRefusal::new(
+                    RefusalReason::WrongNode,
+                    format!("Thread {} is bound to node {want}, not {actual}.", short_id(thread_id)),
+                ));
+            }
+        }
+        if thread.archived_at.is_some() || thread.deleted_at.is_some() {
+            return Err(IdentityRefusal::new(
+                RefusalReason::AttributionUnresolved,
+                format!("Thread {} is archived or deleted.", short_id(thread_id)),
+            ));
+        }
+        let Some(incarnation) = thread.incarnation() else {
+            return Err(IdentityRefusal::new(
+                RefusalReason::InvalidToken,
+                format!("Thread {thread_id} lacks an authoritative incarnation marker."),
+            ));
+        };
+        Ok(Self::verified(thread, incarnation))
+    }
+
+    /// A verified T3 session for `thread`, with its owner marker (ADR flow-ledger decision 6): fixed
+    /// across turns and provider switches, new when the thread is recreated. The environment lives
+    /// in the SessionRef, not here. No `created_at`, no marker: writes are then `no_owner_marker`.
+    fn verified(thread: T3Thread, incarnation: String) -> VerifiedSession {
+        let harness = thread.harness();
+        let owner_marker = thread
+            .created_at
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));
+        let verified = VerifiedSession::new(
+            SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
+            thread.cwd,
+            harness,
+            thread.parent_id,
+            thread.pending_permissions,
+        )
+        .with_incarnation(incarnation);
+        match owner_marker {
+            Some(marker) => verified.with_owner_marker(marker),
+            None => verified,
+        }
+    }
+
     /// Verify a caller claim against T3's thread registry.
     pub fn verify(&self, claim: &CallerClaim) -> Result<VerifiedSession, IdentityRefusal> {
         if claim.surface != Surface::T3 {
@@ -617,25 +840,6 @@ impl T3Registry {
                 format!("Thread {thread_id} lacks an authoritative incarnation marker."),
             ));
         };
-        let harness = thread.harness();
-        // Owner marker (ADR flow-ledger decision 6): fixed across turns and provider switches,
-        // new when the thread is recreated. The environment lives in the SessionRef, not here.
-        let owner_marker = thread
-            .created_at
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));
-        let verified = VerifiedSession::new(
-            SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
-            thread.cwd,
-            harness,
-            thread.parent_id,
-            thread.pending_permissions,
-        )
-        .with_incarnation(incarnation);
-        Ok(match owner_marker {
-            Some(marker) => verified.with_owner_marker(marker),
-            None => verified,
-        })
+        Ok(Self::verified(thread, incarnation))
     }
 }

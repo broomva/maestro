@@ -109,7 +109,7 @@ use jiff::SignedDuration;
 use maestro_core::ask::{Ask, AskState, OUTCOME_KEYS, entry_hash, text};
 use maestro_core::authority::Principal;
 use maestro_core::js::JsValue;
-use maestro_core::session::VerifiedSession;
+use maestro_core::session::{Audit, VerifiedSession};
 use maestro_store::locks::LockError;
 use maestro_store::requests::{self, FileError};
 use maestro_store::{ASKS, Paths, Store, TreeSource};
@@ -234,7 +234,7 @@ pub fn ask(
     let seen = look(ledger, session, instance, node)?;
     let rec = match seen.rec.clone() {
         Some(rec) => rec,
-        None => pin(ledger, paths, instance, node, &seen, filing)?,
+        None => pin(ledger, paths, instance, node, &seen, filing, session.audit())?,
     };
     if !rec.linked {
         return file_and_link(ledger, paths, session, instance, node, rec);
@@ -370,6 +370,7 @@ fn pin(
     node: &str,
     seen: &Seen,
     filing: Option<&Filing>,
+    audit: Option<&Audit>,
 ) -> Result<AskRec, KernelError> {
     let Some(filing) = filing else {
         return Err(invalid("a node's first ask needs a ledger and an ask body"));
@@ -401,6 +402,7 @@ fn pin(
         ledger: filing.ledger.clone(),
         body: Value::Object(body),
         body_hash,
+        audit: audit.cloned(),
     };
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
@@ -789,6 +791,7 @@ fn take_answer(
         outputs: outputs.clone(),
         source: source.clone(),
         row_hash: row.hash(),
+        audit: session.audit().cloned(),
     };
     let appended =
         append_if(ledger, session, instance, node, &rec, |iteration, inputs| answered(iteration, inputs).to_event())?;

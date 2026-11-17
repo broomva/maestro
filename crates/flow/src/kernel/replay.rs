@@ -48,7 +48,8 @@
 //!   inert). Its receipt is `Answered` (the owner's answer, read by `asks`), never a `Completed`,
 //!   and an `Answered` counts only for the ask linked at that node and iteration.
 //! - `StopUnblockable` (the stop gate's record of a stop it could not refuse, `stop`) changes
-//!   nothing: `status` lists it.
+//!   nothing: `status` lists it. `StopUnverified` (a stop it could not bind to one thread) changes
+//!   nothing either.
 //! - Ownership and proposals (`ProposalPinned`, `ProposalLinked`, `ProposalWithdrawn`, `Adopted`,
 //!   `Retired`) are folded by `adoption::owners`, never here: they change no node. `status` and
 //!   `next` report the owner they leave (`Started`'s, or the latest accepted `Adopted`'s), each
@@ -90,7 +91,7 @@ use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
     Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat,
-    KernelEvent, Refused, Started, StopUnblockable, Unblockable, digest, receipt_digest,
+    KernelEvent, Refused, Started, StopUnblockable, StopUnverified, Unblockable, digest, receipt_digest,
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
 use super::write;
@@ -339,7 +340,14 @@ pub fn start(
     let owner = Some(write::owner(session)?);
     check_params(flow.ir(), &params)?;
     let instance = InstanceId::new(format!("fi_{}", random_epoch()?))?;
-    let started = Started { flow: flow.name(), ir_hash: flow.hash().to_string(), ir: flow.ir().clone(), params, owner };
+    let started = Started {
+        flow: flow.name(),
+        ir_hash: flow.hash().to_string(),
+        ir: flow.ir().clone(),
+        params,
+        owner,
+        audit: session.audit().cloned(),
+    };
     let event = started.to_event()?;
     let appended = ledger.lock()?.append(&instance, 0, event)?;
     Ok(Begun { instance, appended })
@@ -790,6 +798,11 @@ impl<'a> Fold<'a> {
             let record =
                 StopRecord { seq: e.seq, harness: u.harness, session: u.session.to_string(), reason: u.reason };
             self.unblockable.push(record);
+            return Ok(Ok(Change::Inert));
+        }
+        // A stop the gate let through unbound to a thread (BRO-3846): changes nothing.
+        if e.kind == StopUnverified::KIND {
+            let _: StopUnverified = body(log, e)?;
             return Ok(Ok(Change::Inert));
         }
         let kinds = [
@@ -1543,6 +1556,7 @@ mod tests {
             ir: flow.ir().clone(),
             params: Value::Null,
             owner: None,
+            audit: None,
         };
         let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];
         let at = |node: &str| serde_json::json!({ "node": node, "iteration": {}, "attempt": 1, "lease_until": "2026-11-08T00:00:00Z", "token_sha256": "x", "code": "x", "reason": "x" });
@@ -1581,6 +1595,7 @@ mod tests {
             ir: flow.ir().clone(),
             params: Value::Null,
             owner: None,
+            audit: None,
         };
         let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];
         let head = |exit: i32| serde_json::json!({ "node": "head", "iteration": {}, "attempt": 1, "verify": { "argv": ["x"], "exit": exit, "stdout_sha256": "s", "ran_at": "x" } });

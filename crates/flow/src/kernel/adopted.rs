@@ -873,6 +873,7 @@ fn an_instance_with_no_recorded_owner_takes_no_proposal() {
         ir: f.flow.ir().clone(),
         params: json!({}),
         owner: None,
+        audit: None,
     };
     f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
     assert_eq!(code(adopt(&mut f, &other(), &fi, Some(&proposing()))), "no_owner");

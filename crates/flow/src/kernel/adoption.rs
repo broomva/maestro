@@ -112,7 +112,7 @@ use crate::ledger::{Appended, Ledger, WriteGuard};
 use crate::log::{Event, Log};
 use maestro_core::ask::text;
 use maestro_core::js::JsValue;
-use maestro_core::session::{SessionRef, VerifiedSession};
+use maestro_core::session::{Audit, SessionRef, VerifiedSession};
 use maestro_store::Paths;
 use maestro_store::requests;
 use serde::Serialize;
@@ -480,7 +480,7 @@ fn propose(
         source: source.clone(),
         row_hash: row.hash(),
     };
-    apply(ledger, instance, &rec, approval)
+    apply(ledger, instance, &rec, approval, session.audit())
 }
 
 fn waiting(rec: &ProposalRec, appended: Option<Appended>, landing: Option<String>) -> Proposed {
@@ -702,6 +702,7 @@ fn apply(
     instance: &InstanceId,
     rec: &ProposalRec,
     approval: Approval,
+    audit: Option<&Audit>,
 ) -> Result<Proposed, KernelError> {
     #[cfg(test)]
     if let Some(meanwhile) = seams::BEFORE_APPLY.with(|c| c.borrow_mut().take()) {
@@ -718,12 +719,12 @@ fn apply(
     let (ask_id, ledger_name, source) = (approval.ask_id.clone(), approval.ledger.clone(), approval.source.clone());
     match rec.proposal {
         Proposal::Adoption => {
-            let adopted = Adopted { from: rec.owner.clone(), to: rec.by.clone(), approval };
+            let adopted = Adopted { from: rec.owner.clone(), to: rec.by.clone(), approval, audit: audit.cloned() };
             let appended = guard.append(instance, log.seq(), adopted.to_event()?)?;
             Ok(Proposed::Adopted { ask_id, ledger: ledger_name, from: adopted.from, to: adopted.to, source, appended })
         }
         Proposal::Retirement => {
-            let retired = Retired { by: rec.by.clone(), approval };
+            let retired = Retired { by: rec.by.clone(), approval, audit: audit.cloned() };
             let appended = guard.append(instance, log.seq(), retired.to_event()?)?;
             crate::operator::retire_held(&guard, instance)?;
             Ok(Proposed::Retired { ask_id, ledger: ledger_name, source: Some(source), appended: Some(appended) })
