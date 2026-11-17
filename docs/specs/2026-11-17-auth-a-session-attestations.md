@@ -117,11 +117,11 @@ The gate binds through `T3CODE_THREAD_ID` from its environment, or `session_id` 
 
 ## Alternatives considered
 
-| Alternative | Why not | What we keep |
+| Alternative | Rejected because | What we keep |
 |---|---|---|
-| cwd attribution, in any form (rounds 2–3) | 74.5% of live threads share a worktree. Zombie `running` rows and overlapping parent/child runs (7,164 pairs) make every cwd rule ambiguous | Nothing |
-| maestrod with Ed25519 attestations (round 1) | Same-uid evidence makes signing meaningless; T3 runs as the owner | The isolation arc, BRO-3847 |
-| Launcher (Direct) tokens only | Leaves T3 threads, and so content-flow and the orchestrators, unable to write flows | Direct stays valid |
+| cwd attribution, in any form (rounds 2–3) | Rejected because 74.5% of live threads share a worktree. Zombie `running` rows and overlapping parent/child runs (7,164 pairs) make every cwd rule ambiguous | Nothing |
+| maestrod with Ed25519 attestations (round 1) | Rejected because same-uid evidence makes signing meaningless; T3 runs as the owner | The isolation arc, BRO-3847 |
+| Launcher (Direct) tokens only | Rejected because it leaves T3 threads, and so content-flow and the orchestrators, unable to write flows | Direct stays valid |
 
 ## Acceptance
 
