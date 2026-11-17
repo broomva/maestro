@@ -43,7 +43,7 @@ const CLASS_FIELDS: &[(ClassDef, &[&str])] = &[
     (ClassDef::Work, &["verify", "performer", "skill", "routing", "wait"]),
     (ClassDef::Choice, &["edges", "performer", "skill", "routing"]),
     (ClassDef::Effect, &["run", "preconditions", "reconcile", "performer", "skill", "routing", "wait"]),
-    (ClassDef::Human, &["ask"]),
+    (ClassDef::Human, &["ask", "required_body_fields"]),
 ];
 
 fn unique<'a>(kind: &'static str, ids: impl IntoIterator<Item = &'a str>) -> Result<(), CompileError> {
@@ -249,7 +249,11 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
             launch,
             wait,
         },
-        ClassDef::Human => Class::Human { ask: n.ask.unwrap_or_default() },
+        ClassDef::Human => {
+            let ask = n.ask.unwrap_or_default();
+            let fill_ask = ask.contains("{{");
+            Class::Human { ask, fill_ask, required_body_fields: n.required_body_fields.unwrap_or_default() }
+        }
     };
     Ok(Node {
         class,

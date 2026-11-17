@@ -1269,3 +1269,31 @@ fn a_git_that_is_not_roots_alone_reads_no_answer() {
     seams::GIT_CHECKED.with(|p| *p.borrow_mut() = None);
     assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { .. }));
 }
+
+#[test]
+fn human_ask_pins_filled_params() {
+    let mut f = fx(None, "");
+    f.flow = compile(
+        "flow: f\nversion: 1\nparams: [digest]\nnodes:\n  owner: {class: human, ask: 'Review {{params.digest}}?'}\n",
+    )
+    .unwrap();
+    let fi = start(&mut f.ledger, &f.me, &f.flow, serde_json::json!({"digest": "sha256:example"})).unwrap().instance;
+    f.ask(&fi, Some(&filing())).unwrap();
+    assert_eq!(f.pinned(&fi)["ask"], "Review sha256:example?");
+}
+
+#[test]
+fn human_ask_requires_declared_body_fields() {
+    let mut f = fx(None, "");
+    f.flow = compile(
+        "flow: f\nversion: 1\nnodes:\n  owner: {class: human, ask: 'Review?', required_body_fields: [evidence]}\n",
+    )
+    .unwrap();
+    let fi = f.begin();
+    assert_eq!(code(f.ask(&fi, Some(&filing()))), "ask_body_invalid");
+    assert_eq!(f.kinds(&fi), ["Started"]);
+    let mut complete = filing();
+    complete.body.insert("evidence".into(), Value::String("receipt".into()));
+    f.ask(&fi, Some(&complete)).unwrap();
+    assert_eq!(f.pinned(&fi)["evidence"], "receipt");
+}

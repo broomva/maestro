@@ -754,7 +754,7 @@ fn check_outputs(outputs: &Value) -> Result<(), Unfit> {
 /// or boolean as written, an absent or null optional param as nothing. Anything else in braces,
 /// an undeclared param or a param that is an array or object is refused, and so is a result
 /// over `budget` bytes, as soon as it is (one param at most past it, never a whole command).
-fn fill(ir: &Ir, params: &Value, text: &str, budget: usize) -> Result<String, String> {
+pub(super) fn fill(ir: &Ir, params: &Value, text: &str, budget: usize) -> Result<String, String> {
     let mut out = String::new();
     let mut rest = Some(text);
     while let Some(text) = rest {

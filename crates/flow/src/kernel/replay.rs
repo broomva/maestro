@@ -1333,7 +1333,7 @@ impl<'f, 'a> Eval<'f, 'a> {
                 State::Blocked
             }
             Form::Open => match self.fold.ir.nodes.get(id).map(|n| &n.class) {
-                Some(Class::Human { ask }) => {
+                Some(Class::Human { ask, .. }) => {
                     let reason = match self.fold.asks.get(&key) {
                         Some(r) if r.linked => {
                             Reason::Owner { ask: ask.clone(), ask_id: r.ask_id.clone(), ledger: r.ledger.clone() }
