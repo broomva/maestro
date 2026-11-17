@@ -1,139 +1,116 @@
-# auth-A: session attestations from maestrod
+# Attributed session identity for flow writes
 
-Status: proposed, 2026-11-17. Tracking: BRO-3273 (slice A), under arc BRO-3841.
-Owner decisions: 2026-11-17 AskUserQuestion. "Build BRO-3273 properly" was then narrowed to "Slice auth-A first".
-Accepted inputs, not reopened here: workspace `docs/adrs/2026-10-25-maestro-signing-contract.md` (Ed25519, explicit algorithm, contract version and certified key id; the private key lives only under the Maestro OS user) and `docs/adrs/2026-10-25-maestro-owner-custody.md` (stage isolated users and a TEST key before production).
-Probe receipts: [2026-11-17-auth-a-probes/probes.md](2026-11-17-auth-a-probes/probes.md), cited as P1 to P9.
-Reversal cost: high for the attestation wire format and the socket protocol; medium for the thread-binding mechanism, which is versioned; low for the CLI and MCP surface.
+Status: proposed, round 2, 2026-11-17. Tracking: BRO-3841 (arc). BRO-3273's isolation and owner-token scope moves to its own arc.
+Owner decision, 2026-11-17 (AskUserQuestion, after the round-1 review): **"Attributed identity now."**
+
+**The round-1 design is withdrawn.** It used maestrod as `_maestro`, Ed25519 attestations and a T3 timeline nonce. Both review strata found it STRUCTURAL: Codex 3/10, Gemini 2/10, findings on maestro#43. The decisive fact is that T3, the only component that knows which thread is calling, runs as the owner's uid. Any evidence or key T3 could hold is therefore forgeable by a same-uid agent, so no design makes one thread unable to impersonate another while agents share the owner's uid. This spec names identity at the level that is actually achievable.
+
+Probe receipts: [2026-11-17-auth-a-probes/probes.md](2026-11-17-auth-a-probes/probes.md), P1–P14.
+Reversal cost: low. Attribution is a field on events and a verifier mode; the later isolation arc replaces the mode without migrating any ledger.
 
 ## Objective
 
-Let a live agent session write to Maestro's flow ledger, and any other agent-write surface, under an identity that an agent running as the owner's user cannot mint. Today no live session can write at all (P1). The Stop gate also cannot tell which session it is gating (P2).
+Let a live T3 thread on Claude, Codex or Gemini write to the flow ledger, through MCP or the CLI, under an identity that is:
+
+- **attributed**: checked against T3's own record of the thread, so mix-ups, stale sessions, wrong-worktree claims and copied credentials are refused;
+- **honestly labelled**: every event records how its identity was established, so a later reader can't mistake attribution for authentication.
 
 ## Context
 
-- Since BRO-3268, `verified_caller` refuses T3 and Paseo claims without a signed bridge credential, and Direct claims without a launch token. Only tests mint either. The bridge credential is HMAC, so anything that can verify one can also forge one; the signing ADR rejected that for exactly this reason.
-- Agents run as the owner's macOS user. Whatever that user can read, an agent can read, and whatever it can write, an agent can forge. That includes T3's own state (P7). So no key, and no evidence the binding rests on, may live only in storage the owner's user can write.
-- The kernel's process facts can't be forged by a non-root process. A socket's peer pid and uid come from the kernel, and so do a process's parent and start time (P6). An agent can't make its MCP server the child of another thread's harness.
-- T3 records every tool call in the calling thread's timeline. The record carries the provider and the call id, and it is persisted while the call is still running (P5). But T3 doesn't record which process belongs to which thread (P4), and its database is writable by the owner's user (P7).
+- Today every live write is refused (P1). `verified_caller` (`crates/mcp/src/lib.rs`) rejects a T3 or Paseo claim that carries no signed credential, before the T3 registry is consulted, and only tests mint credentials.
+- `T3Registry::verify` (`crates/hosts/src/t3.rs`) already checks that a thread exists, that it is live (not closed, archived or settled-and-idle), and that the caller's cwd is within the thread's worktree. That is the attribution check. It is simply unreachable without a credential.
+- **What the harnesses expose** (P10–P13):
+  - Claude gives each thread its own `maestro mcp` and shells, both carrying `T3CODE_THREAD_ID`.
+  - Codex runs one shared `codex app-server` for every thread. It spawns one `maestro mcp` per thread with no thread variable, and its shells carry `CODEX_THREAD_ID`, which T3 maps to the thread through `nativeThreadRef.nativeId` (`strength: strong`).
+  - Gemini processes carry no thread variable.
+- The Stop gate names no session in a T3 thread (P2), so it never binds.
 
 ## Goals
 
-1. An agent running as the owner's user cannot produce a valid attestation. That means 0 of the forgery cases in the acceptance below, and the key file can't be read as that user.
-2. A session in thread A cannot obtain an attestation for thread B by mix-up, by stealing a bearer token from a transcript, or as a confused deputy (persuading B's agent through a message).
-3. The attestation names the provider and harness, so BRO-3828's different-provider routing can be enforced from it.
-4. The Stop gate learns the session from the attestation, without `MAESTRO_SESSION`.
-5. Nothing in phase 1 changes meaning: every existing flow and authority test keeps its behaviour.
+1. A live thread's flow write succeeds when its claim verifies against T3 (exists, live, cwd within the worktree), from MCP and from the CLI. That holds on Claude and Codex now, and on Gemini through MCP arguments.
+2. A claim naming another thread is refused unless the caller's cwd is within that thread's worktree. So are a settled, archived or unknown thread and a malformed id. Any explicit thread variable present must equal the claimed thread, with no fallback.
+3. Every flow event written under attribution records `identity: {mode: "t3-attributed", evidence: [...]}`, plus the kernel peer facts (pid, process start time, uid and the ppid chain up to the T3 server) for audit.
+4. The Stop gate derives the session without `MAESTRO_SESSION`. It distinguishes **never bound** (let the stop through) from **binding unavailable** (let it through, but append an event and file an alert, as `StopUnblockable` does today).
+5. BRO-3828 can read the claimer's provider from T3's thread record, labelled as attributed.
 
 ## Non-goals
 
-- **Passkey owner tokens, the HTTPS owner page, and session-end records on the event stream.** Those are auth-B, after BRO-3272.
-- **Defending against a deliberately malicious agent that forges T3's database during first binding.** That needs the T3 server to register its harness pids with maestrod (option 2 below). It is named as the follow-up, not solved here. See Drawbacks.
-- **Defending against root, or against the owner's admin rights.** The custody ADR already scopes the OS user as a boundary only against a non-privileged agent.
-- **Linux parity in this slice.** The design names the Linux equivalents (`SO_PEERCRED`, `/proc/<pid>/stat`). Live acceptance is on the Mac first; the VPS follows the custody ADR's staging.
+- **Stopping a deliberately malicious agent running as the owner's uid.** It can forge T3 state, edit the owner-writable ledger, or drive another process. That needs agents under a separate OS uid, which is the isolation arc (BRO-3273's successor). The hash-chained log makes such tampering visible, not impossible.
+- **Signed credentials and maestrod.** They add no strength while all evidence is same-uid. The HMAC `BridgeCredential` path stays as it is for Paseo and the existing tests, and is neither extended nor removed here.
+- **Telling a parent thread from its provider-native subagent.** They share a process and a worktree (P12). A subagent's writes are attributed to the parent thread, and the event says so (`evidence` lacks a thread variable match). The kernel's per-session claim tokens still apply.
 
 ## Design
 
-### Parts
+### Verification order for a T3 claim (`verified_caller`)
 
-| Part | Runs as | Holds |
-|---|---|---|
-| `maestrod` (new `crates/auth`, binary from `crates/cli`) | `_maestro` (LaunchDaemon) | The Ed25519 private key (`/var/db/maestro/key/ed25519.sk`, mode 0400, owner `_maestro`), the revocation list and the challenge table |
-| Socket | — | `/var/run/maestro/auth.sock`, directory `_maestro:staff 0750`, socket 0660, so only `staff` can connect |
-| `maestro mcp` / `maestro` CLI | the owner (as today) | The certified public key (`/etc/maestro/ed25519.pub` plus its owner certification), and, in memory only, the attestation for its own session |
+1. **Signed credential.** If a credential is presented, verify it as today; nothing changes.
+2. **Attribution.** Otherwise, if `MAESTRO_IDENTITY` is not `strict` (the default is `attributed`, set in the MCP server's config, never an argument), call `T3Registry::verify` with the claimed thread and the caller's cwd.
+   - On success the `VerifiedSession` carries `Attribution::T3Registry { evidence }`. `evidence` lists what corroborated the claim: `cwd_within_worktree` always; `thread_env` when the caller process (CLI) or the MCP server's own environment holds `T3CODE_THREAD_ID` equal to the claim; `codex_native` when `CODEX_THREAD_ID` maps to the claimed thread.
+   - **A present but mismatching thread variable is a refusal** (`thread_mismatch`), never a fallback.
+3. **Strict mode** keeps today's behaviour: refuse without a credential. The conformance runner and the authority tests run strict and attributed both.
 
-### The thread binding: peer process plus T3-witnessed challenge
+The CLI uses the same order with its own process environment. A CLI verb run from a thread's shell therefore carries `thread_env` (Claude) or `codex_native` (Codex) evidence without extra arguments. On a Gemini shell it has `cwd_within_worktree` only.
 
-When `maestro mcp` first serves a write verb, it binds its session in four steps:
+### Stop gate session derivation
 
-1. **Connect and register.** It connects to the socket and sends `hello {claimed_session, cwd}`. maestrod reads the peer's pid, uid and start time from the kernel (`LOCAL_PEERPID`, `LOCAL_PEERCRED`) and walks the parent chain with `sysctl KERN_PROC_PID`. It requires `peer → harness → T3 server`. The T3 server pid must be the one that launchd started from `~/.t3/runtime/versions/*/t3`. At install, the owner pins its code-signing identity or path. maestrod records a challenge: a 128-bit nonce bound to `(peer pid, peer start time, harness pid, harness start time, claimed_session)`, expiring after 60 s. It returns the nonce to the peer, never to the agent.
-2. **Surface the nonce through a tool call.** `maestro mcp` answers the agent's write call with `attest_required {nonce}`. The agent must then call the tool `maestro_session_attest {nonce}`. The driver skills and the MCP tool description say so, and the call costs one extra tool call per session per hour.
-3. **Confirm through the same process.** `maestro_session_attest` arrives on the same `maestro mcp` process, and it forwards `confirm {nonce}` on its existing socket. maestrod confirms three things:
-   - the confirm comes from the same peer pid and start time that registered the challenge, so a nonce relayed to another thread's process is refused;
-   - T3's timeline holds exactly one provider-sourced item (id prefix `turn-item:provider:`) for the tool `maestro_session_attest` whose input contains the nonce, created after the challenge was issued. maestrod reads this from T3's state through a read-only ACL the owner grants `_maestro` on `~/.t3/userdata` (P8). An agent's message to another thread is a user-message item, not a provider item, so it cannot satisfy this;
-   - that item belongs to `claimed_session`'s thread.
-   The provider comes from the item id (`provider:<instance>`), not from the agent.
-4. **Issue the attestation.** maestrod signs `{v: 1, alg: "ed25519", kid, session, node, provider, harness: {pid, start}, peer: {pid, start}, iat, exp ≤ iat + 3600}` over identity canonical bytes. It returns the attestation to the peer only.
-   - `maestro mcp` keeps the attestation in memory, never in a tool result. A transcript therefore never carries a bearer token.
-   - Every verification checks the signature, the expiry and the revocation list, and that the verifier's own pid and start time equal `peer`. A copied attestation is therefore useless in another process.
-   - The harness binding survives a renewal. After one hour, the same harness re-attests with a fresh challenge, with no T3 check if `(harness pid, start)` is unchanged and unrevoked.
+`maestro flow stop-gate` derives a T3 session, in order:
 
-The CLI follows the same path through `maestro attest`. A Direct session, started by a launcher, keeps launch tokens. maestrod becomes their registry, which closes the conformance runner's throwaway registry.
+1. `T3CODE_THREAD_ID` from the hook's environment;
+2. `CODEX_THREAD_ID`, mapped through T3;
+3. the single live thread whose worktree contains the hook's cwd.
 
-### Stop gate
+An ambiguous result (more than one live thread for the cwd) or a T3 read error is **binding unavailable**. The gate lets the stop through, appends an event to every open instance in that cwd's workspace, and files the fleet alert. No candidate at all means **never bound**: the stop goes through silently. With a derived session, the gate checks `flow open` as today.
 
-`maestro flow stop-gate` runs as a hook child of the harness. It connects to the socket. maestrod derives the harness from the peer's parent chain and returns that harness's attested session, if there is one. With no attestation, the session never wrote a flow, so there is nothing to gate. This replaces `MAESTRO_SESSION`, which stays as an override for Direct sessions only.
+### Audit facts
 
-### Revocation and renewal
-
-- maestrod keeps a revocation list keyed by `(harness pid, start)` and by session.
-- `maestro session end` (the agent's own close) and `maestrod revoke` (the owner, through the CLI as the owner's uid over the socket) add to it.
-- A dead harness pid revokes itself.
-- Attestations last at most one hour. Exactly 3600 s is accepted; 3601 s, zero and negative lifetimes are refused. This follows the identity crate's contract.
-
-### Replacing the HMAC bridge credential
-
-- `BridgeCredential` (HMAC) stays verifiable only under `#[cfg(test)]` and the test-support feature, so existing identity tests keep their meaning.
-- Production verification accepts only Ed25519 attestations whose key id is certified.
-- `issue_bridge_credential` leaves the production API.
-- `MAESTRO_BRIDGE_SECRET` is refused at startup outside tests, with a message naming this spec.
-
-### Owner steps (staged, per the custody ADR)
-
-1. **TEST stage.** Create a `_maestrotest` user, then run `sudo maestro auth install --stage test`. That writes the LaunchDaemon plist, the socket directory, the ACL on `~/.t3/userdata` (read only) and a TEST key.
-   - Certify the public key: the owner signs its fingerprint in the asks ledger answer.
-   - Run the acceptance suite against the TEST daemon.
-2. **Production.** Run the same command with `--stage prod` and a fresh key, after the TEST receipts pass. Quarterly rotation keeps the previous key verifiable for outstanding attestation lifetimes (at most one hour).
+The writer appends the identity mode, the evidence list and the peer facts to `Claimed`, `Completed`, `Chosen` and `Started`. They are gathered with `sysctl KERN_PROC_PID` (macOS) or `/proc/<pid>/stat` (Linux), up to 8 ancestors. The spine ignores them (as it already ignores performers), so conformance comparisons don't change.
 
 ## Alternatives considered
 
 | Alternative | Why not | What we keep |
 |---|---|---|
-| **Same-user issuer**: an HMAC key in the owner's user, checked against T3 state | Any agent can read the key and mint for any thread. The owner rejected this on 2026-11-17 | The T3 timeline as evidence |
-| **T3 timeline nonce alone**, with no peer process binding | T3's database is owner-writable (P7), and the attestation would be a bearer token in the transcript, readable from T3 state by any agent | The provider-sourced item rule |
-| **Peer process ancestry plus a T3-recorded harness pid** (T3 tells maestrod "pid H is thread X" at spawn) | The strongest binding, with no owner-writable evidence anywhere. But it needs a T3 server change, and T3 records no pids today (P4) | Named as the follow-up that closes the residual risk. The wire format already carries `harness {pid, start}`, so adding it is a binding-version change, not a format change |
-| **Launch token minted at spawn into the harness environment** | Any process of the owner's uid can read the environment of that uid's processes through `ps eww`, so the token leaks to every agent | Kept for Direct sessions only, where Maestro's launcher is the spawner |
-| **Harness call id (`tool_use_id`) matched against T3's running item** | Neither harness provably passes the call id to MCP servers (P9) | Revisit if a harness documents it |
+| Round-1 design: maestrod (`_maestro`) Ed25519 attestations bound through a T3 timeline nonce | STRUCTURAL in both strata. One Codex app-server serves all threads; Gemini records no tool inputs; CLI and subagents break process binding; T3's evidence is same-uid forgeable (maestro#43) | The probes, and the isolation arc as the real fix |
+| Run agents under a separate OS uid now | The only design that stops a malicious same-uid agent, but it is cross-cutting (T3 fork, toolchains, credentials), and the owner made it its own arc | The `identity.mode` field it will set to a stronger value |
+| Launcher (Direct) tokens only, with T3 threads read-only | Leaves content-flow and the orchestrators unable to drive flows from T3 threads, which is the point of "ready" | Direct tokens stay valid for launcher-started sessions |
+| Same-user signing key (interim issuer) | A signature over forgeable evidence is no stronger than the evidence, and it adds key handling | Nothing |
 
 ## Acceptance
 
-Commands that must pass, with each guard proved by a mutation that fails its test:
-
 ```bash
-bash scripts/ci.sh && cargo test -p maestro-auth --test forgery
-bash scripts/mutation-check.sh   # anchors for every guard below
+cargo test -p maestro-hosts -p maestro-mcp -p maestro-cli -p maestro-flow --locked
+bash scripts/mutation-check.sh
 ```
 
-`crates/auth/tests/forgery.rs`, with **0 of 10 succeeding**:
+Mutation-checked tests (each fails when its guard is removed). The pass bar is 7 of 7 refusal cases refused, 2 of 2 acceptance cases accepted, and 3 of 3 stop-gate cases correct:
 
-1. A forged signature.
-2. A wrong key id.
-3. An expired attestation, including exactly-1 h accepted, 1 h + 1 s refused, and zero or negative refused.
-4. A replayed nonce.
-5. A confirm from a different peer pid.
-6. A confirm whose T3 item is a user message, not a provider item.
-7. A T3 item in another thread.
-8. A wrong node.
-9. A revoked harness.
-10. An attestation copied into another process.
+- **Refusals:**
+  - an unknown thread;
+  - a settled thread;
+  - an archived thread;
+  - a caller cwd outside the claimed worktree;
+  - a `T3CODE_THREAD_ID` naming another thread;
+  - a `CODEX_THREAD_ID` mapping to another thread;
+  - strict mode without a credential.
+- **Acceptances:** cwd within the worktree with no variable (evidence `[cwd_within_worktree]`), and with a matching variable (evidence includes `thread_env`). Each event records `identity.mode = "t3-attributed"`.
+- **Stop gate:** never bound lets the stop through; binding unavailable lets it through and appends the event; a derived session with an open, workable instance refuses the stop.
+- **Fixture coverage:** a T3 fixture database models the shared Codex app-server and its `nativeThreadRef` mapping.
 
-Mutants that remove each of these guards must be killed: the signature check, nonce consumption, peer equality, provider-item filter, thread equality, node binding, apply-time expiry and the revocation check.
+Live on the Mac, each kept as a receipt under `docs/conformance/`:
 
-Live on the Mac (TEST stage), each kept as a receipt under `docs/conformance/`:
-
-- `cat /var/db/maestro/key/ed25519.sk` run as the agent's uid fails with `Permission denied`, and the agent has no sudo (`sudo -n true` fails).
-- A live T3 thread calls `maestro_flow_start` and completes a node under an attestation. The flow log's `Claimed` event carries the attested provider.
-- A second thread's attempt to confirm the first thread's nonce is refused.
-- With an unfinished instance open, the Stop gate refuses the thread's final message without `MAESTRO_SESSION` set.
+1. A Claude T3 thread runs `verify@1` to terminal through MCP.
+2. A Codex T3 thread runs `verify@1` to terminal through the CLI from its shell.
+3. A Gemini T3 thread passes `maestro_flow_start` through MCP.
+4. A claim of another thread from a different worktree is refused (`thread_mismatch` or `cwd_outside`).
+5. The Claude thread's Stop hook refuses its final message while its instance is open.
 
 ## Drawbacks and costs
 
-- **Residual risk, stated plainly.** A deliberately malicious agent running as the owner's uid could write a forged provider item into T3's database during the 60 s challenge, in its own process's name, for another thread. This needs intent and knowledge of the schema; the peer binding stops mix-ups and relays, but not this. The fix is the T3-recorded harness pid (alternative 3). Until then, flows that gate money or publication should keep a human node.
-- **One extra tool call per session per hour**, plus a daemon to install, monitor and back up.
-- **A dependency on T3's schema** (`orchestration_v2_projection_turn_items`). That schema has no stability promise, so the reader is versioned and fails closed: no attestation, never a wrong one.
-- **Owner privileged steps** are needed before anything is live. Without them the kernel stays unusable from T3 threads.
+- **Cost:** about 400–600 lines of Rust (verifier mode, evidence, stop-gate derivation, audit facts) plus a T3 fixture database, one PR with two review strata, and an ongoing dependency on T3's private schema.
+
+- **Attribution is not authentication.** A malicious same-uid agent can still impersonate a thread or edit the ledger. The label makes that explicit in every event, and flows that gate money or publication keep a human node until the isolation arc lands.
+- **Subagents write as their parent.** The kernel's claim tokens and leases still serialize the work.
+- **Dependence on T3's schema** (`orchestration_v2_projection_*`, `nativeThreadRef`). The reader is versioned and fails closed: a refusal, never a wrong identity.
 
 ## Open questions
 
-1. Does the owner prefer the T3 change (alternative 3) instead of the read ACL on `~/.t3/userdata`, if T3 can take it?
-2. Should Codex sessions launched outside T3 (`codex exec`) use Direct tokens from a Maestro launcher? The recommended default is yes.
+1. Should a Gemini thread's CLI writes, with `cwd_within_worktree` as the only evidence, be allowed, or require MCP? The recommended default is to allow them, with the weaker evidence recorded. Next step: the owner answers this in the arc's asks ledger before the implementation PR merges; until then the implementation ships the default.

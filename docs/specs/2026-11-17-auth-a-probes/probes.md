@@ -13,3 +13,13 @@ Run as the owner's uid (501) from T3 thread `493baa7d…`. No sudo was used and 
 | P7 | Who can write T3's state? | `ls -l ~/.t3/userdata/statev2.sqlite` | `-rw-r--r-- broomva`: any process of the owner's uid, agents included, can write it |
 | P8 | Can a second uid reach `~/.t3`? | `ls -ld /Users/broomva` | `drwxr-x---+`: only with an ACL the owner grants |
 | P9 | Does the harness tell an MCP server the call id? | `strings` over the Claude Code and Codex binaries for `_meta` keys | Inconclusive. Maestro's `tool_use_id` fields are always `None` (`crates/flow/src/kernel/write.rs`). Nothing in this design depends on it |
+
+## Round 2 probes (after the round-1 review)
+
+| # | Question | Command | Result |
+|---|---|---|---|
+| P10 | Does each Claude thread's `maestro mcp` carry its thread id? | `ps eww` on each `maestro mcp` whose parent is `claude` | Yes: one server per thread, each carrying its own `T3CODE_THREAD_ID` (4 threads observed) |
+| P11 | And Codex? | `ps eww` on the `maestro mcp` children of `codex app-server` (pid 91406) | 8 servers under one shared app-server, with no thread variable. Codex shells (e.g. `make`) carry `CODEX_THREAD_ID` and `CODEX_SESSION_ID` |
+| P12 | Do provider-native subagents share their parent's process? | Gemini's round-1 review, `orchestration_v2_projection_subagents` | Yes: 274 Claude and 1230 Codex `provider_native` subagents run in their parent's harness and MCP server |
+| P13 | Can `CODEX_THREAD_ID` be mapped to its T3 thread? | `orchestration_v2_projection_provider_threads.payload_json` | Yes: `nativeThreadRef: {driver: "codex", nativeId: <CODEX_THREAD_ID>, strength: "strong"}` on the thread's row |
+| P14 | And Gemini? | `ps eww` on `gemini --acp` and its children | No thread variable. Gemini also records `input: {}` for MCP tool calls in T3 (round-1 review) |
