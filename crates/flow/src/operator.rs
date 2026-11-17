@@ -290,14 +290,16 @@ pub fn create_fresh_ledger(root: &Path, host: &HostId, options: &Options) -> Res
         let _ = file.unlock();
         return finished(root_epoch(&layout.root)?);
     };
-    // A root moved away by hand left its lock behind: a new lock replaces it.
+    // A root moved away by hand left its lock behind: a new lock replaces it, held until the
+    // staged root is in place so a racing `recover` waits for it instead of moving the stage first.
     under_lock(&file, &layout, options, || {
         if in_place()? {
             return Err(still_there());
         }
         let epoch = random_epoch()?;
         let stage = stage_root(&layout, host, &epoch)?;
-        install_lock(&layout, &epoch)?;
+        let _new_lock = install_lock(&layout, &epoch)?;
+        pause!("fresh_lock_installed");
         std::fs::rename(&stage, &layout.root).map_err(FlowError::io(&layout.root))?;
         finished(epoch)
     })

@@ -140,5 +140,3 @@ pub use error::{FlowError, Result};
 pub use ids::{HostId, InstanceId};
 pub use ledger::{Appended, CacheState, CacheWrite, Ledger, Options, ReadGuard, Reader, Summary, WriteGuard};
 pub use log::{Event, InstanceSummary, Log, NewEvent};
-#[doc(hidden)]
-pub use projection::ProjectionDump;

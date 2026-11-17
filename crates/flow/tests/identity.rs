@@ -496,6 +496,6 @@ fn a_projection_from_another_epoch_is_rebuilt() {
     let mut ledger = Ledger::open(&root, &host("mac"), Options::default()).unwrap();
     std::fs::write(root.join("projection.sqlite"), foreign).unwrap();
     append_at_head(&mut ledger, &id("fi_a"), event("Started", 0)).unwrap();
-    let dump = Reader::new(&root, quick()).unwrap().lock().unwrap().projection_dump().unwrap().unwrap();
+    let dump = projection_dump(&root);
     assert_eq!(dump.meta, vec![("epoch".to_string(), ledger.epoch().to_string())]);
 }

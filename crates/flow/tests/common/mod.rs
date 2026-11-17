@@ -160,6 +160,37 @@ pub fn replace_with_copy(path: &Path) {
     std::fs::rename(&tmp, path).unwrap();
 }
 
+/// Every row of the projection, sorted: two equal dumps are the same projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionDump {
+    pub meta: Vec<(String, String)>,
+    pub instances: Vec<(String, String, i64, Option<String>, String)>,
+    pub kind_counts: Vec<(String, String, i64)>,
+}
+
+/// Reads the projection tables at `<root>/projection.sqlite` for test assertions.
+pub fn projection_dump(root: &Path) -> ProjectionDump {
+    use rusqlite::{Connection, OpenFlags};
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let conn = Connection::open_with_flags(root.join("projection.sqlite"), flags).unwrap();
+    let mut meta = Vec::new();
+    let mut stmt = conn.prepare("SELECT key, value FROM meta ORDER BY key").unwrap();
+    for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap() {
+        meta.push(row.unwrap());
+    }
+    let mut instances = Vec::new();
+    let mut stmt = conn.prepare("SELECT id, state, seq, last_hash, stat FROM instances ORDER BY id").unwrap();
+    for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap() {
+        instances.push(row.unwrap());
+    }
+    let mut kind_counts = Vec::new();
+    let mut stmt = conn.prepare("SELECT instance, kind, n FROM kind_counts ORDER BY instance, kind").unwrap();
+    for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap() {
+        kind_counts.push(row.unwrap());
+    }
+    ProjectionDump { meta, instances, kind_counts }
+}
+
 /// The child's `FLOW_RESULT` line: `ok` or a refusal code.
 pub fn child_result(child: Child) -> String {
     let out = child.wait_with_output().unwrap();
