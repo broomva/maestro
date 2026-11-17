@@ -1297,3 +1297,20 @@ fn human_ask_requires_declared_body_fields() {
     f.ask(&fi, Some(&complete)).unwrap();
     assert_eq!(f.pinned(&fi)["evidence"], "receipt");
 }
+
+#[test]
+fn required_kernel_owned_fields_cannot_be_supplied_or_pinned() {
+    for key in ["id", "uid", "ask", "asked_at"] {
+        let mut f = fx(None, "");
+        let yaml = format!(
+            "flow: f\nversion: 1\nnodes:\n  owner: {{class: human, ask: 'Review?', required_body_fields: [{key}]}}\n"
+        );
+        f.flow = compile(&yaml).unwrap();
+        let fi = f.begin();
+        let mut given = filing();
+        assert_eq!(code(f.ask(&fi, Some(&given))), "ask_body_invalid", "missing {key}");
+        given.body.insert(key.into(), Value::String("override".into()));
+        assert_eq!(code(f.ask(&fi, Some(&given))), "ask_body_invalid", "supplied {key}");
+        assert_eq!(f.kinds(&fi), ["Started"]);
+    }
+}
