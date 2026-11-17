@@ -1,6 +1,6 @@
 # Attributed session identity for flow writes: by thread variable
 
-Status: proposed, round 5, 2026-11-17. Tracking: BRO-3846, arc BRO-3841. Isolation is BRO-3847, and T3 passing the thread id to MCP servers is BRO-3848.
+Status: proposed, round 6, 2026-11-17. From round 6 on, this spec is reviewed together with its implementation and the table-driven tests (BRO-3846), not as prose alone. Tracking: BRO-3846, arc BRO-3841. Isolation is BRO-3847, and T3 passing the thread id to MCP servers is BRO-3848.
 Owner decisions (AskUserQuestion, 2026-11-17): "Attributed identity now", after round 1. "Thread variable only", after round 3.
 Reversal cost: low. Attribution is a verifier mode plus a field on events; the isolation arc replaces the mode without migrating any ledger.
 Probe receipts: [2026-11-17-auth-a-probes/probes.md](2026-11-17-auth-a-probes/probes.md), P1–P16. Review history is on maestro#43.
@@ -13,13 +13,14 @@ Probe receipts: [2026-11-17-auth-a-probes/probes.md](2026-11-17-auth-a-probes/pr
 | 2 | T3-registry check, cwd within the worktree | Codex 4, Gemini 5 | 74.5% of live threads share a worktree; cwd can't tell them apart |
 | 3 | Thread variable first, cwd when unique among running threads | Codex 4, Gemini 3: STRUCTURAL | Zombie `running` rows and overlapping parent/child runs make "unique running cwd" unusable |
 | 4 | Thread variable only. The cwd is subtracted | Codex 6/10 `continue` (Gemini's run returned no result) | The promise needed a precise matrix; strict mode, the bridge-secret guard and alias owners needed stating |
-| 5 | **This one: round 4 plus the decision matrix and the precise integration points** | — | — |
+| 5 | Decision matrix and integration points | Codex 5/10 `continue` (prediction confirmed and resolved) | A presented invalid credential must never fall back to attribution; missing unresolved and cross-surface rows |
+| 6 | **This one: credential-first branching, the full matrix and qualified wording** | — | — |
 
 Every round-2 and round-3 finding landed on cwd attribution, so round 4 removes it instead of hardening it.
 
 ## Objective
 
-Let a live T3 thread write to the flow ledger when the process making the write carries a thread variable that T3 maps to a thread. Refuse it otherwise. Record on every event which variable the writer carried.
+Let a live T3 thread write to the flow ledger *without a credential* when the process making the write carries a thread variable that T3 maps to a thread, and refuse such an unsigned write otherwise. Credentialed writes follow the matrix below. Record on every event which variable the writer carried.
 
 ## What this promises, and what it doesn't
 
@@ -58,7 +59,7 @@ Let a live T3 thread write to the flow ledger when the process making the write 
 
 ## Non-goals
 
-- **Codex and Gemini over MCP.** Their MCP servers carry no variable, so they are refused `attribution_missing` until BRO-3848 lands. Codex uses the CLI meanwhile; Gemini can't write flows until then. The generated driver skills say so.
+- **Unsigned Codex and Gemini writes over MCP.** Their MCP servers carry no variable, so an unsigned write from them is refused `attribution_missing` until BRO-3848 lands. A credentialed write follows the matrix. Codex uses the CLI meanwhile; Gemini can't write flows until then. The generated driver skills say so.
 - **Any cwd-based attribution.** Removed.
 - **Telling a parent from its provider-native subagent.** They share a process and an environment, so the subagent writes as its parent.
 - **Malicious same-uid agents.** BRO-3847.
@@ -80,6 +81,12 @@ Let a live T3 thread write to the flow ledger when the process making the write 
 | attributed | stdio MCP or CLI | none, Paseo or Direct surface | any | today's result: refused |
 | attributed | HTTP daemon | valid credential | n/a (no caller environment) | today's result |
 | attributed | HTTP daemon | none | n/a | refused `attribution_missing` |
+| attributed | stdio MCP or CLI | **presented but invalid** credential or token (bad signature, expired, stale generation, wrong node) | any | **the credential verifier's refusal, unchanged; never falls back to attribution** |
+| attributed | stdio MCP or CLI | none, T3 session | present but unresolved, or two variables with one unresolved | refused `attribution_unresolved` |
+| attributed | stdio MCP or CLI | valid Paseo or Direct credential | T3 variable present (resolved or not) | refused `thread_mismatch`: a T3 thread variable can never equal a Paseo or Direct session, so its presence contradicts the claim |
+| strict or attributed | HTTP daemon, or strict mode | any | any | no registry read happens for attribution, so an unrelated registry failure can't affect these requests |
+
+**Credential first.** When a credential or token is *presented*, the existing credential verifier runs in full and its result is final (after the attributed-mode contradiction check). Attribution is considered only when *no* credential or token is presented. Registry reads for attribution happen only on the unsigned T3 path and in the contradiction check. A present but invalid credential with a matching variable is a required test, with and without a configured bridge secret. So are expired and stale-generation credentials.
 
 Precedence, in order:
 1. A registry read error is `registry_unavailable`.
@@ -115,10 +122,11 @@ The variables are read from **the environment of the process making the claim**:
 2. **Attributed mode** (the default):
    - (a) Gather the variables from the claiming process.
    - (b) If any is present, resolve it and check it against the claimed session: a mismatch is refused, *including* when a signed credential or Direct token is also presented. Attributed mode adds this mismatch check to the credential path; strict mode does not.
-   - (c) A valid signed credential or Direct token verifies as today.
+   - (c) A *presented* signed credential or Direct token runs the existing verifier in full, and its result (accept or refuse) is final. There is no fallback to attribution.
    - (d) Otherwise, a resolved T3 variable verifies a T3 session through a new `T3Registry::verify_attributed(thread_id)`. It is called from `verify_session`, so the node, environment and generation checks and the cross-surface refusal still apply. It requires no cwd containment; `T3Registry::verify`, used with credentials, keeps its cwd rule unchanged.
+     - **MCP pre-check.** `verified_caller` in `crates/mcp/src/lib.rs` currently refuses an unsigned non-Direct claim before reaching the registry (the `authenticated bridge credential or launch token is required` branch). That pre-check gains the same narrow exception: a T3 claim with a resolved environment attribution. Without it, the host-level change is unreachable.
      - **Bridge-secret guard.** The guard in `verify_session` that refuses an unsigned claim when a bridge secret is configured is unchanged for every claim, *except* a T3 claim carrying `CallerClaim.attribution = Some(resolved)`. That field is set only by `verified_caller` from the claiming process's environment, never deserialized from arguments. Credential verification is untouched.
-     - **Owner marker.** `verify_attributed` sets the same T3 owner marker `T3Registry::verify` sets (thread id + `created_at`), so `check_owner` compares exactly as today. A thread without `created_at` yields no marker, so writes are refused `no_owner_marker`, as today.
+     - **Owner marker.** `verify_attributed` sets the same T3 owner marker `T3Registry::verify` sets (thread id + `created_at`), so `check_owner`'s marker comparison is exactly as today. Its session comparison changes to compare canonical forms (owner aliases, above), which is the one deliberate change to `check_owner`. A thread without `created_at` yields no marker, so writes are refused `no_owner_marker`, as today.
      - **Tests:** a configured bridge secret, wrong node, stale generation, missing incarnation, and a cross-surface claim, each with an attributed T3 claim.
    - (e) Otherwise refuse `attribution_missing`.
 
@@ -207,7 +215,7 @@ Live on the Mac (receipts under `docs/conformance/`, each recording the variable
 ## Drawbacks and costs
 
 - **Cost:** about 500–700 lines of Rust (variable resolution, the three fixes, optional session, Stop-gate binding, audit facts, dual-mode suites) and a T3 fixture database with provider rows. Plus the dependency on T3's private schema; its reader is versioned and fails closed.
-- **Inherited variables can mis-attribute,** as stated above. It's visible in the audit chain, not prevented.
+- **Inherited variables can mis-attribute,** as stated above. The audit chain gives clues; it neither prevents nor guarantees detection.
 - **Gemini can't write flows,** and Codex only through the CLI, until BRO-3848.
 
 ## Open questions
