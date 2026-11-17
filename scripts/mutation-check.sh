@@ -555,7 +555,7 @@ mutate $request '            (Self::AskFile, _) => Disposition::Applied,' '     
 mutate $request '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Held,' '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Recorded,'
 mutate $mcp '        None => (session.clone(), Principal::Unverified),' '        None => (session.clone(), Principal::Owner { via: "mcp".into() }),'
 # A filed ask whose journal line fails is a failed request; a busy lock exits 75 to retry (P20 r1).
-mutate $mcp '            if let Err(e) = requests::record(&disk.paths, &record) {' '            if let Some(e) = requests::record(&disk.paths, &record).err().filter(|_| false) {'
+mutate $mcp '    if let Err(e) = requests::record(&disk.paths, &record) {' '    if let Some(e) = requests::record(&disk.paths, &record).err().filter(|_| false) {'
 mutate $mcp '        Some(json!({ "filed": { "ledger": ledger, "id": id } })),' '        Some(json!({ "filed": { "ledger": ledger, "id": id }, "busy": true })),'
 mutate $mcp '        Some(json!({ "filed": { "ledger": ledger, "id": id } })),' '        Some(json!({ "filed": { "ledger": ledger, "id": id }, "busy": is_busy(e) })),'
 mutate $locks '        Some(text) => holder_alive(text),' '        Some(_text) => false,'
@@ -714,7 +714,13 @@ mutate $hlb 'if in_t3 && !in_paseo {' 'if false {'
 mutate $hlb 'if in_paseo && !in_t3 {' 'if false {'
 mutate $hlb 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())' 'true'
 mutate $hlb 'if cred.generation != current_gen {' 'if false {'
-mutate $ht 'if self.disconnected {' 'if false {'
+mutate $ht 'if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        check_peer(' 'if false {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        check_peer('
 mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
 mutate $ht '            .filter(|s| !s.trim().is_empty())
             .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));' '            .or(Some(""))
@@ -728,8 +734,11 @@ mutate $hp '            .as_deref()
 mutate $hp 'format!("paseo-owner:{}:{handle_id}", agent.id)' 'format!("paseo-owner:{}:{handle_id}:{:?}", agent.id, agent.pid)'
 mutate $hlb 'format!("direct-owner:{}", hex_sha256(session.token.as_bytes()))' 'format!("direct-owner:{}:{}", session.cwd, hex_sha256(session.token.as_bytes()))'
 mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
-mutate $mcp 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if true {'
-mutate $mcp 'if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {' 'if false {'
+mutate $mcp 'if !hosts.has_configured_surface(&session.surface) && !has_claim_meta && !attributed {' 'if true {'
+mutate $mcp '    if arg_cred.is_none()
+        && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none())
+        && !attributed
+    {' '    if false {'
 mutate $mcp 'if packet.scope.project.is_none() && packet.scope.initiative.is_none() {' 'if true {'
 mutate $hlb 'if effective_now_ms < cred.issued_at_ms || effective_now_ms >= cred.expires_at_ms {' 'if false {'
 mutate $hlb 'if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {' 'if false {'
@@ -1201,9 +1210,9 @@ mutate $fk/replay.rs '            seq: log.seq(),
 mutate $fk/write.rs '    let marker = session.owner_marker().filter(|m| !m.is_empty()).ok_or(Refusal::NoOwnerMarker)?;' '    let marker = session.owner_marker().ok_or(Refusal::NoOwnerMarker)?;'
 mutate $fk/replay.rs '    let owner = Some(write::owner(session)?);' '    let owner = write::owner(session).ok();'
 mutate $fk/write.rs '    let Some(owner) = &owners.owner else {' '    let Some(owner) = owners.owner.as_ref().or(Some(&me)) else {'
-mutate $fk/write.rs '    if *owner != me {' '    if false {'
-mutate $fk/write.rs '    if *owner != me {' '    if owner.marker_sha256 != me.marker_sha256 {'
-mutate $fk/write.rs '    if *owner != me {' '    if owner.session != me.session {'
+mutate $fk/write.rs '    if !same_owner(owner, &me) {' '    if false {'
+mutate $fk/write.rs '    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)' '    stored.marker_sha256 == me.marker_sha256'
+mutate $fk/write.rs '    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)' '    stored.session.canonical(host) == me.session.canonical(host)'
 mutate $fk/write.rs '    check_owner(&log, &started, instance, session)?;
     let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {' '    let now = wall(&log)?;
@@ -1585,14 +1594,14 @@ mutate $fx '        if self.max_output == 0 || self.max_output > MAX_OUTPUT {' '
 mf=crates/mcp/src/flow.rs
 mutate $mf '        Ok(Some(me)) => me,
         Ok(None) => {' '        Ok(Some(me)) => me,
-        Ok(None) => VerifiedSession::new(session.clone(), "/", None, None, vec![]).with_owner_marker("forged"),
+        Ok(None) => VerifiedSession::new(session.cloned().unwrap_or_else(|| SessionRef { surface: Surface::T3, environment: None, id: "forged".into() }), "/", None, None, vec![]).with_owner_marker("forged"),
         #[allow(unreachable_patterns)]
         Ok(None) => {'
 mutate $mf '        Err(e) => {
-            let mut v = refusal("caller_refused"' '        Err(_) => VerifiedSession::new(session.clone(), "/", None, None, vec![]).with_owner_marker("forged"),
+            let identity = e.data' '        Err(_) => VerifiedSession::new(session.cloned().unwrap_or_else(|| SessionRef { surface: Surface::T3, environment: None, id: "forged".into() }), "/", None, None, vec![]).with_owner_marker("forged"),
         #[allow(unreachable_patterns)]
         Err(e) => {
-            let mut v = refusal("caller_refused"'
+            let identity = e.data'
 mutate $mf '    if !std::fs::symlink_metadata(&broomva).is_ok_and(|m| m.is_dir()) {' '    if false {'
 mutate $mf '    if std::fs::symlink_metadata(workspace.join(".git")).is_ok_and(|m| !m.is_dir()) {' '    if false {'
 mutate $mf '        if !self.may_create && std::fs::symlink_metadata(&self.root).is_err() {' '        if false {'
@@ -2182,7 +2191,7 @@ mutate $stp '            Some(c) if c.seq < since => waiting.push(Waiting::Lease
 mutate $stp '        if let (true, Some(node)) = (r.awaiting_verdict, first) {' '        if let (true, Some(node)) = (false, first) {'
 mutate $stp '                Reason::Unfiled { .. } => work.push(Work::Ask { node: id.clone(), iteration }),' '                Reason::Unfiled { .. } => {}'
 mutate $stp '                        AnswerSeen::Landed => work.push(Work::Answer { node, iteration, ask_id, ledger }),' '                        AnswerSeen::Landed => waiting.push(Waiting::Owner { node, iteration, ask_id, ledger, landing: None }),'
-mutate $stp '            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {' '            if owners.retired.is_some() {'
+mutate $stp '            if !owners.owner.as_ref().is_some_and(|o| same_owner(o, &me)) || owners.retired.is_some() {' '            if owners.retired.is_some() {'
 mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| !a.terminal))' '            Ok(Some(assess(&log, &started, now, seen)?))'
 mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
@@ -2253,7 +2262,7 @@ mutate $lay 'pub(crate) const STOP_GATE: &str = "stop-gate";' 'pub(crate) const 
 mutate $stp '    Ok(if parsed.epoch == epoch { parsed.counts } else { BTreeMap::new() })' '    Ok(parsed.counts)'
 mutate $stp '        if self.was_empty && self.counts.is_empty() {' '        if false {'
 mutate $stp '    let retired = owners.retired.is_some();' '    let retired = false;'
-mutate $stp '            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {' '            if owners.owner.as_ref() != Some(&me) {'
+mutate $stp '            if !owners.owner.as_ref().is_some_and(|o| same_owner(o, &me)) || owners.retired.is_some() {' '            if !owners.owner.as_ref().is_some_and(|o| same_owner(o, &me)) {'
 mutate $stp '    wall(&log)?;' ''
 mutate $stp '    let Some(bytes) = read_beside(root, STOP_GATE, name, MAX_REFUSALS_FILE, "refusal-count file")? else {' '    let Some(bytes) = read_beside(root, STOP_GATE, name, u64::MAX, "refusal-count file")? else {'
 mutate $stp '        open_instances: open_instances.iter().take(MAX_NAMED).cloned().collect(),' '        open_instances: open_instances.to_vec(),'

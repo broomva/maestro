@@ -1028,3 +1028,40 @@ fn adopted_and_retired_carry_the_proposers_audit_facts() {
     let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
     assert_eq!((&last["kind"], &last["body"]["audit"]["process"]["pid"]), (&json!("Retired"), &json!(7)));
 }
+
+/// BRO-3846: `StopUnverified` goes on each candidate thread's unfinished instance only (not a
+/// finished one, a retired one, or another thread's), once while the instance has not moved, and
+/// never after `Retired`.
+#[test]
+fn stop_unverified_goes_on_a_candidates_unfinished_instances_only() {
+    use crate::kernel::events::StopUnverified;
+    use crate::kernel::stop::{Recorded, owned_by_threads, record_unverified};
+    let (mut f, open, _clock) = started();
+    let me = f.me.clone();
+    let finished = f.begin();
+    for node in ["one", "two", "three"] {
+        let c = claim(&mut f.ledger, &me, &finished, node).unwrap();
+        assert_eq!(complete_as(&mut f, &me, &c.token), "completed");
+    }
+    // Retired, with the move a crash left undone.
+    let retired = f.begin();
+    let id = linked(&retire(&mut f, &other(), &retired, Some(&proposing())).unwrap());
+    append_raw(&mut f, &retired, "Retired", json!({ "by": owner_json(&other()), "approval": approval(&id, "retire") }));
+    let theirs = crate::kernel::start(&mut f.ledger, &other(), &f.flow, json!({})).unwrap().instance;
+    let owner: SessionRef = "t3:local/owner".parse().unwrap();
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let (owned, unread) = owned_by_threads(&reader.lock().unwrap(), std::slice::from_ref(&owner), None).unwrap();
+    drop(reader);
+    assert_eq!((owned, unread.len()), (vec![open.to_string()], 0), "not {finished}, {retired} or {theirs}");
+    let event = StopUnverified {
+        harness: "claude".into(),
+        reason: "thread_mismatch: two variables".into(),
+        candidates: vec![owner],
+        audit: None,
+    };
+    assert!(matches!(record_unverified(&mut f.ledger, &open, &event).unwrap(), Recorded::Appended(_)));
+    assert!(matches!(record_unverified(&mut f.ledger, &open, &event).unwrap(), Recorded::Already { .. }));
+    assert_eq!(code(record_unverified(&mut f.ledger, &retired, &event)), "retired");
+    // It changes nothing: the instance reads, its next step still ready.
+    assert_eq!(f.status(&open).nodes["one"].state, State::Ready);
+}

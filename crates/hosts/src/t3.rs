@@ -31,10 +31,9 @@ pub fn is_safe_t3_id(id: &str) -> bool {
     if !bytes[0].is_ascii_alphanumeric() {
         return false;
     }
-    if id.contains('/') || id.contains('\0') || id.contains("..") {
-        return false;
-    }
-    bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.' | b'%'))
+    // The charset has no `/` and no NUL; `..` is the one sequence of allowed bytes refused.
+    !id.contains("..")
+        && bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.' | b'%'))
 }
 
 /// What Maestro reads of a T3 thread record.
@@ -502,6 +501,16 @@ impl T3Registry {
         }
     }
 
+    /// A JSON snapshot's row: one with no environment of its own is in the snapshot's environment
+    /// (`environment-id` beside it), as every `statev2.sqlite` row is in its database's.
+    fn snapshot_row(&self, raw: RawT3Thread) -> T3Thread {
+        let mut thread = Self::from_raw(raw);
+        if thread.environment_id.is_none() {
+            thread.environment_id = self.environment_id();
+        }
+        thread
+    }
+
     /// The environment id this host's T3 registry reports (`userdata/environment-id`), the
     /// canonical form of a `local` or `-` T3 session (BRO-3846).
     pub fn environment_id(&self) -> Option<String> {
@@ -623,7 +632,7 @@ impl T3Registry {
                     format!("T3 JSON registry is malformed: {e}."),
                 )
             })?;
-            return Ok(rows.into_iter().find(|raw| raw.id == id).map(Self::from_raw));
+            return Ok(rows.into_iter().find(|raw| raw.id == id).map(|raw| self.snapshot_row(raw)));
         }
         if let Some(db_file) = self.sqlite_path() {
             let out = Command::new("python3")
@@ -688,7 +697,7 @@ impl T3Registry {
             let Ok(rows) = serde_json::from_str::<Vec<RawT3Thread>>(&text) else {
                 return Vec::new();
             };
-            return rows.into_iter().map(Self::from_raw).filter(|t| t.liveness().is_live()).collect();
+            return rows.into_iter().map(|raw| self.snapshot_row(raw)).filter(|t| t.liveness().is_live()).collect();
         }
         if let Some(db_file) = self.sqlite_path() {
             let Ok(out) =
@@ -726,17 +735,7 @@ impl T3Registry {
                 format!("No T3 thread has the id {}.", short_id(thread_id)),
             ));
         };
-        let presented = node.or(self.expected_node.as_ref());
-        for (want, actual) in [(thread.node.as_ref(), presented), (self.expected_node.as_ref(), node)] {
-            if let (Some(want), Some(actual)) = (want, actual)
-                && want != actual
-            {
-                return Err(IdentityRefusal::new(
-                    RefusalReason::WrongNode,
-                    format!("Thread {} is bound to node {want}, not {actual}.", short_id(thread_id)),
-                ));
-            }
-        }
+        self.check_node(&thread, node)?;
         if thread.archived_at.is_some() || thread.deleted_at.is_some() {
             return Err(IdentityRefusal::new(
                 RefusalReason::AttributionUnresolved,
@@ -750,6 +749,22 @@ impl T3Registry {
             ));
         };
         Ok(Self::verified(thread, incarnation))
+    }
+
+    /// The thread's node, and this host's, against the node the claim presents.
+    fn check_node(&self, thread: &T3Thread, node: Option<&NodeId>) -> Result<(), IdentityRefusal> {
+        let presented = node.or(self.expected_node.as_ref());
+        for (want, actual) in [(thread.node.as_ref(), presented), (self.expected_node.as_ref(), node)] {
+            if let (Some(want), Some(actual)) = (want, actual)
+                && want != actual
+            {
+                return Err(IdentityRefusal::new(
+                    RefusalReason::WrongNode,
+                    format!("Thread {} is bound to node {want}, not {actual}.", thread.id),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// A verified T3 session for `thread`, with its owner marker (ADR flow-ledger decision 6): fixed
@@ -809,17 +824,7 @@ impl T3Registry {
         let Some(thread) = self.lookup(thread_id)? else {
             return Err(IdentityRefusal::new(RefusalReason::NotFound, format!("No T3 thread has the id {thread_id}.")));
         };
-        let presented = claim.node.as_ref().or(self.expected_node.as_ref());
-        for (want, actual) in [(thread.node.as_ref(), presented), (self.expected_node.as_ref(), claim.node.as_ref())] {
-            if let (Some(want), Some(actual)) = (want, actual)
-                && want != actual
-            {
-                return Err(IdentityRefusal::new(
-                    RefusalReason::WrongNode,
-                    format!("Thread {thread_id} is bound to node {want}, not {actual}."),
-                ));
-            }
-        }
+        self.check_node(&thread, claim.node.as_ref())?;
         let liveness = thread.liveness();
         if !liveness.is_live() {
             let short = short_id(thread_id);

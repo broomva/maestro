@@ -419,7 +419,7 @@ pub fn record_unverified(
     if adoption::owners(&log, &started)?.retired.is_some() {
         return Err(crate::FlowError::Retired { instance: instance.to_string() }.into());
     }
-    wall(&log)?;
+    super::write::wall(&log)?;
     if let Some(last) = log.events.last().filter(|e| e.kind == StopUnverified::KIND) {
         let prior: Option<StopUnverified> = serde_json::from_value(last.body.clone()).ok();
         if prior.is_some_and(|p| p.reason == event.reason && p.candidates == event.candidates) {

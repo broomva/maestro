@@ -825,6 +825,10 @@ fn an_attributed_claim_still_meets_every_host_check() {
     let mut other = attributed(A);
     other.session_id = Some(B.into());
     assert_eq!(hosts.verify_caller(&other).unwrap_err().reason, maestro_hosts::RefusalReason::ThreadMismatch);
+    // The guard's exception is for a T3 claim only: an attribution on a Paseo claim meets it.
+    let mut paseo = CallerClaim::paseo(Some("agent-p"), Some(f.work.to_string_lossy().into_owned()));
+    paseo.attribution = Some(maestro_hosts::Attribution { variable: T3V.into(), thread: A.into() });
+    assert_eq!(hosts.verify_caller(&paseo).unwrap_err().reason, maestro_hosts::RefusalReason::InvalidToken);
     // Never read from arguments: serde skips it both ways.
     let parsed: CallerClaim = serde_json::from_value(json!({
         "surface": "t3", "session_id": A, "attribution": { "variable": T3V, "thread": A }

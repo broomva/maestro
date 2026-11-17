@@ -266,13 +266,12 @@ impl Run<'_> {
             Harness::Claude => None,
         };
         let vars = self.hosts.thread_vars().clone().with_native(STDIN_SESSION_ID, stdin_session.as_deref());
-        if vars.is_empty() {
-            return self
-                .note(format!("{unnamed} and no thread variable binds this stop, so there is no flow to gate."));
-        }
         let each = self.hosts.resolve_each(&vars);
         let a = match maestro_hosts::attribution::combine(&each) {
-            Attributed::Absent => return self.note(format!("{unnamed}, so there is no flow to gate.")),
+            Attributed::Absent => {
+                let why = "and no thread variable binds this stop, so there is no flow to gate.";
+                return self.note(format!("{unnamed} {why}"));
+            }
             Attributed::Refused(refusal) => return self.unbound(&each, &refusal),
             Attributed::Resolved { attribution, .. } => attribution,
         };
@@ -284,8 +283,8 @@ impl Run<'_> {
             Ok(me) => me,
             Err(r) => return self.fail_open(Some(&thread), "caller_refused", &r.message),
         };
-        if let Err(e) = payload(input) {
-            return self.fail_open(Some(&thread), "input_malformed", &e);
+        if let Err(why) = payload(input) {
+            return self.fail_open(Some(&thread), "input_malformed", &why);
         }
         let session = me.session().clone();
         self.gated(&session, &me);
@@ -351,7 +350,7 @@ impl Run<'_> {
                         }
                     }
                 }
-                Err(e) if e.code() == "no_ledger" => {}
+                Err(missing) if missing.code() == "no_ledger" => {}
                 Err(e) => failed.push(format!("the flow ledger ({}: {e})", busy_code(e.code()))),
             }
         }
