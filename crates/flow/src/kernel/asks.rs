@@ -246,6 +246,7 @@ pub fn ask(
 struct Seen {
     seq: u64,
     question: String,
+    required_body_fields: Vec<String>,
     rec: Option<AskRec>,
 }
 
@@ -279,11 +280,15 @@ fn look(
     let started = pinned(&log)?;
     check_owner(&log, &started, instance, session)?;
     waiting(&log, &started, node)?;
-    let question = match started.ir.nodes.get(node).map(|n| &n.class) {
-        Some(Class::Human { ask }) => ask.clone(),
-        _ => String::new(),
+    let (question, required_body_fields) = match started.ir.nodes.get(node).map(|n| &n.class) {
+        Some(Class::Human { ask, required_body_fields, .. }) if started.ir.ir_version >= 6 => (
+            super::write::fill(&started.ir, &started.params, ask, MAX_ASK_BODY).map_err(invalid)?,
+            required_body_fields.clone(),
+        ),
+        Some(Class::Human { ask, .. }) => (ask.clone(), Vec::new()),
+        _ => (String::new(), Vec::new()),
     };
-    Ok(Seen { seq: log.seq(), question, rec: ask_of(&log, &started, node)? })
+    Ok(Seen { seq: log.seq(), question, required_body_fields, rec: ask_of(&log, &started, node)? })
 }
 
 /// Appends `event` under the flows lock if the node's ask is still `expect` and the node still
@@ -370,6 +375,11 @@ fn pin(
         return Err(invalid("a node's first ask needs a ledger and an ask body"));
     };
     check_filing(filing, &KERNEL_KEYS)?;
+    if let Some(name) =
+        seen.required_body_fields.iter().find(|name| !filing.body.get(*name).is_some_and(|v| !v.is_null()))
+    {
+        return Err(invalid(format!("required body field {name} is missing")));
+    }
     let taken = taken(paths, &filing.ledger)?;
     let ask_id = mint(node, &taken, &filing.ledger)?;
     #[cfg(test)]

@@ -254,7 +254,7 @@ fn node_section(out: &mut String, ir: &Ir, id: &str, node: &Node) {
         Class::Effect { .. } => format!(
             "claim it; {doer} if it has a performer; then complete it. The kernel checks its preconditions, runs it at most once in an iteration and, after a run with no receipt, runs its reconcile instead."
         ),
-        Class::Human { ask } => format!(
+        Class::Human { ask, .. } => format!(
             "nothing to claim. File its ask with `flow ask` (the first call takes `--ledger` and `--ask`), then call `flow ask` again until it says answered. The owner answers {}; never answer it yourself.",
             code(ask.trim())
         ),

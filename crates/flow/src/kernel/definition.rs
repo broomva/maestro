@@ -82,6 +82,7 @@ pub(crate) struct NodeDef {
     pub preconditions: Option<Vec<String>>,
     pub reconcile: Option<Vec<String>>,
     pub ask: Option<String>,
+    pub required_body_fields: Option<Vec<String>>,
     pub wait: Option<WaitDef>,
     /// A subflow (`uses: pr-head@1`): phase 2.
     pub uses: Option<serde_yaml::Value>,
@@ -104,6 +105,7 @@ impl NodeDef {
             ("preconditions", self.preconditions.is_some()),
             ("reconcile", self.reconcile.is_some()),
             ("ask", self.ask.is_some()),
+            ("required_body_fields", self.required_body_fields.is_some()),
             ("wait", self.wait.is_some()),
         ];
         set.into_iter().filter(|(_, on)| *on).map(|(name, _)| name).collect()
