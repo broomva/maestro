@@ -1007,3 +1007,24 @@ fn a_retired_instance_left_in_place_has_no_work_and_is_not_open() {
         crate::kernel::stop::open(&guard, &me, crate::clock::now(), &|_, _| crate::kernel::AnswerSeen::Open).unwrap();
     assert!(open.instances.is_empty(), "{open:?}");
 }
+
+#[test]
+fn adopted_and_retired_carry_the_proposers_audit_facts() {
+    use crate::kernel::asks::asked::audited;
+    let (mut f, fi, _clock) = started();
+    let proposer = audited(other(), "other");
+    let id = linked(&adopt(&mut f, &proposer, &fi, Some(&proposing())).unwrap());
+    answer(&f, &id, Some("adopt"));
+    f.land_on_main();
+    assert!(matches!(adopt(&mut f, &proposer, &fi, None).unwrap(), Proposed::Adopted { .. }));
+    let last = f.events(&fi).pop().unwrap();
+    assert_eq!((&last["kind"], &last["body"]["audit"]["identity"]["thread"]), (&json!("Adopted"), &json!("other")));
+    // Retired by a proposal of the new owner's own.
+    let id = linked(&retire(&mut f, &proposer, &fi, Some(&proposing())).unwrap());
+    answer(&f, &id, Some("retire"));
+    f.land_on_main();
+    assert!(matches!(retire(&mut f, &proposer, &fi, None).unwrap(), Proposed::Retired { .. }));
+    let log = std::fs::read_to_string(f.flows.join("retired").join(fi.as_str()).join("events.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!((&last["kind"], &last["body"]["audit"]["process"]["pid"]), (&json!("Retired"), &json!(7)));
+}

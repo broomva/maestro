@@ -1318,3 +1318,38 @@ fn required_kernel_owned_fields_cannot_be_supplied_or_pinned() {
         assert_eq!(f.kinds(&fi), ["Started"]);
     }
 }
+
+/// The writer's audit facts (BRO-3846), as the caller check attaches them.
+pub(crate) fn audited(session: VerifiedSession, thread: &str) -> VerifiedSession {
+    use maestro_core::session::{Audit, IdentityFacts, ProcessFacts};
+    let identity = IdentityFacts {
+        mode: "t3-attributed".into(),
+        variable: Some("T3CODE_THREAD_ID".into()),
+        thread: Some(thread.into()),
+    };
+    session.with_audit(Audit { identity, process: ProcessFacts { pid: 7, ..ProcessFacts::default() } })
+}
+
+#[test]
+fn a_human_nodes_events_carry_the_writers_audit_facts() {
+    let mut f = fx(None, "");
+    f.me = audited(f.me.clone(), "owner");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&id);
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == id));
+    let events = f.events(&fi);
+    for e in &events {
+        let audit = &e["body"]["audit"];
+        match e["kind"].as_str().unwrap() {
+            "Started" | "AskPinned" | "Answered" => {
+                assert_eq!(audit["identity"]["thread"], "owner", "{e}");
+                assert_eq!(audit["process"]["pid"], 7, "{e}");
+            }
+            // Not a write of the session's own: it records no facts.
+            _ => assert!(audit.is_null(), "{e}"),
+        }
+    }
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "Answered"]);
+}

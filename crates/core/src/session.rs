@@ -857,6 +857,18 @@ mod tests {
     }
 
     #[test]
+    fn a_t3_alias_is_canonical_to_the_hosts_environment() {
+        let host = Some("env-1");
+        let canon = |s: &str| s.parse::<SessionRef>().unwrap().canonical(host).to_string();
+        for alias in ["t3:local/x", "t3:-/x", "t3:x", "t3:env-1/x"] {
+            assert_eq!(canon(alias), "t3:env-1/x", "{alias}");
+        }
+        assert_eq!(canon("t3:env-2/x"), "t3:env-2/x", "another environment stays another");
+        assert_eq!(canon("paseo:local/x"), "paseo:local/x", "only T3 has the alias");
+        assert_eq!("t3:local/x".parse::<SessionRef>().unwrap().canonical(None).to_string(), "t3:-/x");
+    }
+
+    #[test]
     fn surfaces_do_not_alias() {
         let a: SessionRef = "t3:-/x".parse().unwrap();
         let b: SessionRef = "paseo:-/x".parse().unwrap();

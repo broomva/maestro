@@ -752,10 +752,9 @@ pub(crate) fn write(
         Err(e) => {
             let identity = e.data.as_ref().and_then(|d| d.get("reason")).cloned().unwrap_or(Value::Null);
             // The four refusals attributed identity adds are their own codes (BRO-3846).
-            let code = match identity.as_str() {
-                Some(
-                    c @ ("attribution_missing" | "attribution_unresolved" | "thread_mismatch" | "registry_unavailable"),
-                ) => c,
+            let reason = serde_json::from_value::<maestro_hosts::RefusalReason>(identity.clone()).ok();
+            let code = match reason {
+                Some(r) if r.is_attribution() => r.code(),
                 _ => "caller_refused",
             };
             let mut v = refusal(code, &e.message, false);

@@ -157,7 +157,7 @@ struct RawProviderThread {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
     /// Exactly one thread, neither archived nor deleted.
-    Thread(T3Thread),
+    Thread(Box<T3Thread>),
     /// No thread, more than one, or one archived or deleted: why.
     Unresolved(String),
 }
@@ -602,7 +602,7 @@ impl T3Registry {
             Some(t) if t.deleted_at.is_some() => {
                 Resolution::Unresolved(format!("thread {} is deleted", short_id(&t.id)))
             }
-            Some(t) => Resolution::Thread(t),
+            Some(t) => Resolution::Thread(Box::new(t)),
         })
     }
 
