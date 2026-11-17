@@ -424,8 +424,11 @@ fn open_and_next_carry_the_gates_own_judgment() {
     // Another session owns none of it; an unverified one is refused.
     let theirs = f.call(OPEN, f.as_("d2", json!({})));
     assert_eq!((&theirs["refuses_stop"], &theirs["open"]["instances"]), (&json!(false), &json!([])));
-    let unverified = f.call(OPEN, json!({ "session": "t3:-/nobody" }));
+    let unverified = f.call(OPEN, json!({ "session": "paseo:-/nobody" }));
     assert_eq!(unverified["code"], "caller_unverified", "{unverified}");
+    // An unsigned T3 claim from a process with no thread variable (BRO-3846, attributed mode).
+    let unattributed = f.call(OPEN, json!({ "session": "t3:-/nobody" }));
+    assert_eq!(unattributed["code"], "attribution_missing", "{unattributed}");
 }
 
 #[test]

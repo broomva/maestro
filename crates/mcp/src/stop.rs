@@ -304,8 +304,9 @@ impl Run<'_> {
         let host = self.hosts.t3_environment();
         let mut candidates: Vec<SessionRef> = Vec::new();
         for (_, outcome) in each {
-            if let VarOutcome::Thread { id, .. } = outcome {
-                let s = SessionRef { surface: Surface::T3, environment: host.clone(), id: id.clone() };
+            if let VarOutcome::Thread { id, environment } = outcome {
+                let environment = environment.clone().or_else(|| host.clone());
+                let s = SessionRef { surface: Surface::T3, environment, id: id.clone() };
                 if !candidates.contains(&s) {
                     candidates.push(s);
                 }

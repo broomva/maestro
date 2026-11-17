@@ -797,7 +797,10 @@ impl SurfaceRegistry {
                 let outcome = match &self.t3 {
                     None => VarOutcome::Unreadable("no T3 registry is found on this host".to_string()),
                     Some(t3) => match t3.resolve(&v.value, v.native) {
-                        Ok(Resolution::Thread(t)) => VarOutcome::Thread { id: t.id, environment: environment.clone() },
+                        Ok(Resolution::Thread(t)) => VarOutcome::Thread {
+                            id: t.id,
+                            environment: t.environment_id.or_else(|| environment.clone()),
+                        },
                         Ok(Resolution::Unresolved(why)) => VarOutcome::Unresolved(why),
                         Err(r) => VarOutcome::Unreadable(r.message),
                     },

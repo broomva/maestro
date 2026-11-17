@@ -917,18 +917,23 @@ pub(crate) fn verified_caller(
     // Attributed: the caller's own variables, never a shared daemon's.
     let has_vars = ambient == Ambient::Caller && !hosts.thread_vars().is_empty();
     let host = hosts.t3_environment();
-    let thread_session =
-        |thread: &str| SessionRef { surface: Surface::T3, environment: host.clone(), id: thread.to_string() };
-    // The session named must be the resolved thread's, once canonical: `local`, `-` and this
-    // host's environment id are one; another environment, or another thread, is a mismatch.
-    let check_named = |named: &SessionRef, a: &maestro_hosts::Attribution| -> Result<(), McpError> {
-        if named.canonical(host.as_deref()) != thread_session(&a.thread) {
+    // The resolved thread's session: its registry environment id, the canonical one.
+    let thread_session = |thread: &str, environment: &Option<String>| SessionRef {
+        surface: Surface::T3,
+        environment: environment.clone().or_else(|| host.clone()),
+        id: thread.to_string(),
+    };
+    // The session named must be the resolved thread's, once canonical: `local`, `-` and the
+    // registry's environment id are one; another environment, or another thread, is a mismatch.
+    let check_named = |named: &SessionRef, a: &maestro_hosts::Attribution, env: &Option<String>| {
+        let thread = thread_session(&a.thread, env);
+        if named.canonical(thread.environment.as_deref()) != thread {
             return Err(refuse(
                 RefusalReason::ThreadMismatch,
                 format!("{} names T3 thread {}, but the claimed session is {named}", a.variable, a.thread),
             ));
         }
-        Ok(())
+        Ok::<(), McpError>(())
     };
     if presented.credentialed() {
         let mut attribution = None;
@@ -947,9 +952,9 @@ pub(crate) fn verified_caller(
             match hosts.attribution() {
                 Attributed::Absent => {}
                 Attributed::Refused(r) => return Err(refused(r)),
-                Attributed::Resolved { attribution: a, .. } => {
-                    let named = session.get_or_insert_with(|| thread_session(&a.thread));
-                    check_named(named, &a)?;
+                Attributed::Resolved { attribution: a, environment } => {
+                    let named = session.get_or_insert_with(|| thread_session(&a.thread, &environment));
+                    check_named(named, &a, &environment)?;
                     attribution = Some(a);
                 }
             }
@@ -980,17 +985,17 @@ pub(crate) fn verified_caller(
         };
         return Err(refuse(RefusalReason::AttributionMissing, why));
     }
-    let a = match hosts.attribution() {
+    let (a, environment) = match hosts.attribution() {
         Attributed::Absent => {
             return Err(refuse(RefusalReason::AttributionMissing, "this process carries no T3 thread variable"));
         }
         Attributed::Refused(r) => return Err(refused(r)),
-        Attributed::Resolved { attribution: a, .. } => a,
+        Attributed::Resolved { attribution, environment } => (attribution, environment),
     };
     if let Some(named) = session {
-        check_named(named, &a)?;
+        check_named(named, &a, &environment)?;
     }
-    let session = thread_session(&a.thread);
+    let session = thread_session(&a.thread, &environment);
     let verified = claimed(hosts, &session, presented, Some(a.clone()))?;
     Ok(verified.map(|v| v.with_audit(hosts.audit("t3-attributed", Some(&a)))))
 }

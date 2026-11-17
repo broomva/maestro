@@ -505,7 +505,11 @@ impl T3Registry {
     /// The environment id this host's T3 registry reports (`userdata/environment-id`), the
     /// canonical form of a `local` or `-` T3 session (BRO-3846).
     pub fn environment_id(&self) -> Option<String> {
-        self.discover().environment_id
+        self.discover().environment_id.or_else(|| {
+            // A JSON snapshot's root is the file: its `environment-id` sits beside it.
+            let beside = self.root.parent().filter(|_| self.root.is_file())?.join("environment-id");
+            std::fs::read_to_string(beside).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        })
     }
 
     /// The threads whose active provider-thread row carries `native_id`, read from the registry.
