@@ -14,7 +14,8 @@ Probe receipts: [2026-11-17-auth-a-probes/probes.md](2026-11-17-auth-a-probes/pr
 | 3 | Thread variable first, cwd when unique among running threads | Codex 4, Gemini 3: STRUCTURAL | Zombie `running` rows and overlapping parent/child runs make "unique running cwd" unusable |
 | 4 | Thread variable only. The cwd is subtracted | Codex 6/10 `continue` (Gemini's run returned no result) | The promise needed a precise matrix; strict mode, the bridge-secret guard and alias owners needed stating |
 | 5 | Decision matrix and integration points | Codex 5/10 `continue` (prediction confirmed and resolved) | A presented invalid credential must never fall back to attribution; missing unresolved and cross-surface rows |
-| 6 | **This one: credential-first branching, the full matrix and qualified wording** | — | — |
+| 5b | (Gemini on round 5) | Gemini 7.8/10 PASS, `converged` | Existing-code integration points: claimless requests, alert filing, test hermeticity, the T3 reader's wrong table |
+| 6 | **This one: credential-first branching, the full matrix, qualified wording, and Gemini's integration fixes** | — | — |
 
 Every round-2 and round-3 finding landed on cwd attribution, so round 4 removes it instead of hardening it.
 
@@ -114,7 +115,10 @@ The variables are read from **the environment of the process making the claim**:
 1. `is_safe_t3_id` allows `%` and up to 512 bytes. It still requires a leading alphanumeric and refuses `/`, `..` and NUL. Thread ids are **opaque**: never percent-decoded, and used only as SQL parameters and in string comparisons, never as a path component. So `%2F` is safe. It is mutation-checked against the percent-encoded ids the probes found, with boundary tests at 512 and 513 bytes and for `%2F`, `/`, `..` and NUL.
 2. The T3 registry root resolves from `MAESTRO_T3_HOME`, then `T3CODE_HOME`, then `~/.t3` when it exists.
 3. **Owner aliases.** No flow ledger instance exists today on the Mac or gcp-1 (checked 2026-11-17: 0 instances; conformance used throwaway sandboxes), so there are no stored owners to migrate. New owners are stored in canonical form. Owner comparison canonicalizes *both* the stored and the presented session (`local`, `-` and a uuid all become this host's registry environment id), so a fixture or future alias still matches its owner.
-4. `session` becomes optional on every flow write (CLI `--session`, MCP `session`). In attributed mode, when it is omitted, the verifier derives the session from the resolved thread. When it is given, its environment part is canonicalized to the registry's environment id before comparison; `local` and `-` mean "this host's T3", and any other mismatch is refused `thread_mismatch`. Downstream code, `stop.rs` included, compares only canonical sessions.
+5. **Claimless agent requests stay as today.** `resolve_caller` (`Authority::AgentRequest`: `maestro_ask_file`, `handback`, `work_queue`, …) keeps returning `Principal::Unverified` for a claim with no claim metadata, even once the registry root is found through `T3CODE_HOME`. Only flow writes (`Authority::AgentWrite`) require attribution. This keeps `crates/mcp/tests/authority.rs` (e.g. `a_filed_ask_with_a_busy_journal_lock_has_no_busy_flag`) and claimless production requests unchanged.
+6. **Thread variables are read only for T3 claims, or when the session is omitted, and only through the registry.** The variables are captured once by `SurfaceRegistry::from_env` and carried in the registry. They are not read with ad-hoc `std::env::var` in `verified_caller`, so a test that passes its own `SurfaceRegistry` (`call_with_hosts`) is hermetic even when `cargo test` runs inside a T3 shell. A Paseo or Direct claim never consults them, except for the attributed-mode contradiction check, which runs only when the registry carries a variable.
+7. **Liveness for attribution is `archived_at IS NULL AND deleted_at IS NULL`.** `settled_at` is ignored, because 71% of live threads are settled. The T3 reader's `SQLITE_READER_PY` queries a table that doesn't exist (`orchestration_v2_projection_turns`), so `status` is always `None`. It is fixed to read the latest row of `orchestration_v2_projection_runs` (`ORDER BY ordinal DESC LIMIT 1`). `T3Registry::verify`'s own liveness rule, used with credentials, is otherwise unchanged.
+8. `session` becomes optional on every flow write and on `flow open` (CLI `--session`, MCP `session`). In attributed mode, when it is omitted, the verifier derives the session from the resolved thread. When it is given, its environment part is canonicalized to the registry's environment id before comparison; `local` and `-` mean "this host's T3", and any other mismatch is refused `thread_mismatch`. Downstream code, `stop.rs` included, compares only canonical sessions.
 
 ### Verification order (`verified_caller` → `SurfaceRegistry::verify_session`)
 
@@ -138,7 +142,7 @@ The gate binds through `T3CODE_THREAD_ID` from its environment, or `session_id` 
 |---|---|
 | One thread | Refuse the final message while that thread owns an unfinished, workable instance (`flow open`) |
 | No variable | **Never bound**: the stop goes through silently |
-| Variables that disagree, don't resolve, or hit a read error | **Binding unavailable**: the stop goes through, `StopUnverified {reason}` is appended to every unfinished instance owned by any candidate thread, and the fleet alert is filed keyed by `(workspace, reason)`. A failed append still lets the stop through, and the alert names the failure |
+| Variables that disagree, don't resolve, or hit a read error | **Binding unavailable**: the stop goes through, `StopUnverified {reason}` is appended to every unfinished instance owned by any candidate thread, and the fleet alert is filed keyed by `(workspace, reason)`. The alert is filed through `requests::file_ask` as `Principal::Unverified`, with the first candidate session or `t3:-/unverified`, never through `verified_caller`, which would fail with the same error. A failed append still lets the stop through, and the alert names the failure |
 
 ### Audit facts
 
