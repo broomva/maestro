@@ -11,20 +11,18 @@ use super::error::CompileError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The IR's newest version. A change to its shape or meaning bumps it. Version 2 added
-/// `workdir`; version 3 added an effect's `run`; version 4 a pure node's `snapshot`;
-/// version 5 adds parameter types.
-pub const IR_VERSION: u32 = 6;
+/// The newest IR version: 2 added workdir, 3 effect runs, 4 snapshots, 5 parameter types,
+/// 6 human ask templating and required fields, and 7 receipt-aware stdin.
+pub const IR_VERSION: u32 = 7;
 
-/// The version an IR is written in: the lowest that expresses it, so 5 for parameter types,
-/// 4 for an IR with a node that
-/// runs in a snapshot, 3 for one with an effect that has a `run`, 2 for one that carries a
-/// `workdir` and 1 for none of them. An IR, and its hash, are what they were under the version
-/// that expresses it, and an instance started under an earlier version keeps replaying.
+/// The lowest IR version that expresses all features in this definition. Older shapes retain
+/// their original version and hash, and continue to replay under their pinned rules.
 pub fn version_for(ir: &Ir) -> u32 {
     let runs_effect = ir.nodes.values().any(|n| matches!(&n.class, Class::Effect { run, .. } if !run.is_empty()));
-    if ir.nodes.values().any(|n| matches!(&n.class, Class::Human { fill_ask, required_body_fields, .. } if *fill_ask || !required_body_fields.is_empty())) {
+    if ir.receipt_stdin {
         IR_VERSION
+    } else if ir.nodes.values().any(|n| matches!(&n.class, Class::Human { fill_ask, required_body_fields, .. } if *fill_ask || !required_body_fields.is_empty())) {
+        6
     } else if !ir.types.is_empty() {
         5
     } else if ir.nodes.values().any(|n| n.snapshot.is_some()) {
@@ -90,6 +88,9 @@ pub struct Ir {
     /// version 1 IR and hashes as it did before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
+    /// Opt in to receipt-aware stdin (IR version 7).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub receipt_stdin: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,10 +246,8 @@ fn unknown(from: impl Into<String>, name: &str) -> CompileError {
     CompileError::UnknownReference { from: from.into(), name: name.to_string() }
 }
 
-/// The rules every IR passes, at compile time and again on the copy a `Started` event pins. Its
-/// version must be [`version_for`] it: version 1 has no `workdir`, version 2 has one, version 3
-/// has an effect with a `run` (and then every effect has one), version 4 a pure node that runs in
-/// a snapshot (only a pure node does), version 5 parameter types, and any other version is refused.
+/// The rules every IR passes, at compile time and again on the copy a `Started` event pins.
+/// Its version must be the lowest version expressing its features ([`version_for`]).
 pub fn validate(ir: &Ir) -> Result<(), CompileError> {
     let want = version_for(ir);
     if ir.ir_version != want {

@@ -60,19 +60,26 @@ pub(crate) fn is_object_id(commit: &str) -> bool {
 
 /// Runs `argv` in a snapshot of `commit` of the repository at `repo`, within `limits`. `commit`
 /// passed [`is_object_id`]. See the module docs.
-pub(crate) fn run_in(repo: &Path, commit: &str, argv: &[String], limits: &Limits) -> Ran {
+pub(crate) fn run_in(repo: &Path, commit: &str, argv: &[String], limits: &Limits, stdin: Option<&[u8]>) -> Ran {
     // A timeout too long for the clock leaves no deadline to share; the limits' own is the bound.
     let deadline = Instant::now().checked_add(limits.timeout);
-    run_by(repo, commit, argv, limits, deadline)
+    run_by(repo, commit, argv, limits, deadline, stdin)
 }
 
 /// [`run_in`], every step and the command bounded by what is left before `deadline`.
-fn run_by(repo: &Path, commit: &str, argv: &[String], limits: &Limits, deadline: Option<Instant>) -> Ran {
+fn run_by(
+    repo: &Path,
+    commit: &str,
+    argv: &[String],
+    limits: &Limits,
+    deadline: Option<Instant>,
+    stdin: Option<&[u8]>,
+) -> Ran {
     let snapshot = match Snapshot::make(repo, commit, limits, deadline) {
         Ok(snapshot) => snapshot,
         Err((detail, stderr)) => return Ran::Failed { code: "snapshot_failed", detail, stderr },
     };
-    let ran = exec::run(argv, &snapshot.root, &left(limits, deadline), Feed { search: Search::Caller, stdin: None });
+    let ran = exec::run(argv, &snapshot.root, &left(limits, deadline), Feed { search: Search::Caller, stdin });
     match snapshot.moved(commit) {
         None => ran,
         Some(detail) => {
@@ -253,9 +260,23 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let head = repository(tmp.path(), format);
             assert_eq!(head.len(), if format == "sha1" { 40 } else { 64 });
-            let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", "test -f at-head"]), &limits(60));
+            let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", "test -f at-head"]), &limits(60), None);
             assert!(matches!(ran, Ran::Exited { code: Some(0), .. }), "{format}: {ran:?}");
         }
+    }
+
+    #[test]
+    fn snapshot_command_receives_stdin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let head = repository(tmp.path(), "sha1");
+        let ran = run_in(
+            tmp.path(),
+            &head,
+            &argv(&["sh", "-c", "read -r value; test \"$value\" = receipt"]),
+            &limits(60),
+            Some(b"receipt\n"),
+        );
+        assert!(matches!(ran, Ran::Exited { code: Some(0), .. }), "{ran:?}");
     }
 
     /// `git` in `dir`, as the tests' author.
@@ -322,7 +343,7 @@ mod tests {
         git_in(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "two"]);
         let head = git_in(tmp.path(), &["rev-parse", "HEAD"]);
         let check = format!("test \"$(git rev-parse HEAD^)\" = {first} && test \"$(git describe --tags HEAD^)\" = v1");
-        let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60));
+        let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60), None);
         assert_eq!(outcome(ran), "exit Some(0)");
     }
 
@@ -342,7 +363,7 @@ mod tests {
             ("its log rewritten", "printf x > .git/logs/HEAD".to_string()),
         ];
         for (case, check) in cases {
-            let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60));
+            let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60), None);
             assert_eq!(outcome(ran), "snapshot_moved", "{case}");
         }
         // A HEAD log grown past the bound is never read short: an entry past it is not missed.
@@ -350,11 +371,11 @@ mod tests {
         let check = format!(
             "yes '{entry}' | head -n 20000 >> .git/logs/HEAD && echo '{head} {first} t <t@localhost> 0 +0000\tx' >> .git/logs/HEAD"
         );
-        let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60));
+        let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60), None);
         assert_eq!(outcome(ran), "snapshot_moved", "a log past the bound");
         // Moving to the head itself is no move; a check that does nothing to HEAD passes.
         for check in [format!("git checkout -q {head}"), "git reset -q --hard HEAD".to_string(), "true".to_string()] {
-            let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60));
+            let ran = run_in(tmp.path(), &head, &argv(&["sh", "-c", &check]), &limits(60), None);
             assert_eq!(outcome(ran), "exit Some(0)", "{check}");
         }
     }
@@ -365,7 +386,7 @@ mod tests {
         let head = repository(tmp.path(), "sha1");
         // The deadline has passed: each git step has 1 ms, too little to make the snapshot, though
         // the limits' own timeout would be plenty.
-        let ran = run_by(tmp.path(), &head, &argv(&["true"]), &limits(60), Some(Instant::now()));
+        let ran = run_by(tmp.path(), &head, &argv(&["true"]), &limits(60), Some(Instant::now()), None);
         let Ran::Failed { code, detail, .. } = ran else { panic!("{ran:?}") };
         assert_eq!(code, "snapshot_failed");
         assert!(detail.contains("git clone"), "{detail}");
@@ -377,7 +398,7 @@ mod tests {
         let head = repository(tmp.path(), "sha1");
         let begun = Instant::now();
         let deadline = Some(begun + Duration::from_secs(3));
-        let ran = run_by(tmp.path(), &head, &argv(&["sleep", "20"]), &limits(60), deadline);
+        let ran = run_by(tmp.path(), &head, &argv(&["sleep", "20"]), &limits(60), deadline, None);
         let Ran::Failed { code, .. } = ran else { panic!("{ran:?}") };
         assert_eq!(code, "verify_timeout");
         assert!(begun.elapsed() < Duration::from_secs(10), "{:?}", begun.elapsed());

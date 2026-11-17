@@ -1934,7 +1934,9 @@ mutate $fk/snapshot.rs '&left(limits, deadline), Feed { search: Search::Caller, 
 # snapshot or the workdir is refused at compile time (an IR pinned before keeps its run-time
 # refusal).
 mutate $fx '        Some(Ok(file)) => cmd.stdin(Stdio::from(file)),' '        Some(Ok(_)) => cmd.stdin(Stdio::null()),'
-mutate $fk/write.rs '    let stdin = judges.then(|| serde_json::to_vec(outputs).unwrap_or_default());' '    let stdin = false.then(|| serde_json::to_vec(outputs).unwrap_or_default());'
+mutate $fk/write.rs '        judges.then(|| serde_json::to_vec(outputs).unwrap_or_default())' '        false.then(|| serde_json::to_vec(outputs).unwrap_or_default())'
+mutate $fk/write.rs '            guard_input(&held.log, &held.started, &held.rec.node).map_err(|e| ("input_invalid", e.to_string()))?;' '            serde_json::json!({});'
+mutate $fk/snapshot.rs 'Feed { search: Search::Caller, stdin }' 'Feed { search: Search::Caller, stdin: None }'
 mutate $fk/write.rs '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, false),' '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, true),'
 mutate $fk/write.rs '        Some(Class::Work { verify, .. }) => (verify, Step::Command, true),' '        Some(Class::Work { verify, .. }) => (verify, Step::Command, false),'
 mutate $fk/compile.rs '    check_no_outputs_placeholders(&ir)?;' ''

@@ -319,3 +319,37 @@ fn an_event_replay_set_aside_is_not_on_the_spine() {
     assert_eq!(f.status(&fi, clock::now()).rejected.len(), 1);
     assert_eq!(differ(&f, &clean, &fi), None);
 }
+
+#[test]
+fn receipt_stdin_verify_rejects_mismatched_upstream_output() {
+    let shape = r#"
+flow: receipt_input
+version: 1
+receipt_stdin: true
+params: [dir]
+workdir: "{{params.dir}}"
+nodes:
+  source: {class: pure, run: ['true']}
+  judge:
+    class: work
+    needs: [source]
+    verify: [sh, -c, 'read -r input; case "$input" in *"\"expected\":\"yes\""*"\"actual\":\"yes\""*) exit 0;; *) exit 1;; esac']
+"#;
+    let (mut f, _clock) = (fx(shape), TestClock::install());
+    let who = f.me.clone();
+    let fi = start(&mut f.ledger, &who, &f.flow, json!({"dir": f.dir.to_str().unwrap()})).unwrap().instance;
+    let c = claim(&mut f.ledger, &who, &fi, "source").unwrap();
+    assert_eq!(
+        outcome(&complete(&mut f.ledger, &who, &c.token, json!({"expected":"yes"}), &quick()).unwrap()),
+        "completed"
+    );
+    let c = claim(&mut f.ledger, &who, &fi, "judge").unwrap();
+    assert_eq!(
+        outcome(&complete(&mut f.ledger, &who, &c.token, json!({"actual":"no"}), &quick()).unwrap()),
+        "verify_failed"
+    );
+    assert_eq!(
+        outcome(&complete(&mut f.ledger, &who, &c.token, json!({"actual":"yes"}), &quick()).unwrap()),
+        "completed"
+    );
+}

@@ -694,7 +694,16 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
     if !cwd.is_absolute() || !cwd.is_dir() {
         return Err(("workdir_invalid", "the workdir is not an absolute path to a directory".to_string()));
     }
-    let stdin = judges.then(|| serde_json::to_vec(outputs).unwrap_or_default());
+    let stdin = if ir.receipt_stdin
+        && matches!(node.map(|n| &n.class), Some(Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. }))
+    {
+        let inputs =
+            guard_input(&held.log, &held.started, &held.rec.node).map_err(|e| ("input_invalid", e.to_string()))?;
+        let own = if judges { outputs.clone() } else { Value::Null };
+        Some(serde_json::to_vec(&serde_json::json!({ "outputs": own, "inputs": inputs })).unwrap_or_default())
+    } else {
+        judges.then(|| serde_json::to_vec(outputs).unwrap_or_default())
+    };
     let snapshot = match node.and_then(|n| n.snapshot.as_deref()) {
         Some(rev) => {
             let commit = fill(ir, params, rev, MAX_ARGV).map_err(|e| ("snapshot_invalid", e))?;
@@ -906,7 +915,7 @@ pub fn complete(
     drop(guard);
     let ran_at = clock::now();
     let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
         None => exec::run(&plan.argv, &plan.cwd, limits, feed),
     };
     pause!("command_ran");
