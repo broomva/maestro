@@ -1117,7 +1117,7 @@ mutate $fk/replay.rs '            Form::Open if !stale.is_empty() => {' '       
 mutate $fk/replay.rs '        let digest = Rc::from(receipt_digest(outputs, value.as_deref()));' '        let digest = Rc::from(receipt_digest(outputs, None));'
 mutate $fk/replay.rs 'let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));' 'let rerun = s.state == State::Stale;'
 mutate $fk/replay.rs 'let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));' 'let rerun = false;'
-mutate $fk/replay.rs '            Some(Class::Human { ask }) => {' '            Some(Class::Human { ask }) if false => {'
+mutate $fk/replay.rs '            Some(Class::Human { ask, .. }) => {' '            Some(Class::Human { ask, .. }) if false => {'
 mutate $fk/replay.rs '    SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))' '    SignedDuration::from_mins(i64::try_from(s / 60).unwrap_or(i64::MAX))'
 # Read-path bounds: inert and rejected events cost no evaluation; cores (evaluations without the
 # clock) are kept across events, dropped downstream of a receipt with new content, and all
