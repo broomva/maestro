@@ -254,3 +254,40 @@ fn only_the_projects_command_in_a_snapshot_searches_the_callers_path() {
     let seen = std::fs::read_to_string(out.join("path-seen")).unwrap();
     assert_eq!(seen, maestro_store::tree::git_path(), "every other command searches the system's");
 }
+
+#[test]
+fn receipt_stdin_reaches_pure_observe_and_snapshot_runs() {
+    let yaml = r#"
+flow: inputs
+version: 1
+receipt_stdin: true
+params: [repo, head, check]
+workdir: "{{params.repo}}"
+nodes:
+  source: {class: work, verify: ['true']}
+  plain: {class: pure, needs: [source], run: [sh, -c, "{{params.check}}"]}
+  snap: {class: pure, needs: [source], snapshot: "{{params.head}}", run: [sh, -c, "{{params.check}}"]}
+  observe: {class: observe, needs: [source], inputs: [source], run: [sh, -c, "{{params.check}}"], exit_map: {0: yes}}
+"#;
+    let (mut f, _clock, head) = pilot(yaml);
+    assert_eq!(f.flow.ir().ir_version, 5);
+    let check = r#"read -r input; case "$input" in *'"expected":"yes"'*'"outputs":null'*) exit 0;; *) exit 1;; esac"#;
+    let fi = begin(&mut f, &head, check);
+    let source = f.claim(&fi, "source");
+    assert_eq!(outcome(&f.complete(&source.token, json!({"expected": "yes"}))), "completed");
+    for node in ["plain", "snap", "observe"] {
+        let c = f.claim(&fi, node);
+        assert_eq!(outcome(&f.complete(&c.token, json!({"ignored": true}))), "completed", "{node}");
+    }
+    let fi = begin(&mut f, &head, check);
+    let source = f.claim(&fi, "source");
+    assert_eq!(outcome(&f.complete(&source.token, json!({"expected": "no"}))), "completed");
+    for node in ["plain", "snap", "observe"] {
+        let c = f.claim(&fi, node);
+        assert_eq!(
+            outcome(&f.complete(&c.token, json!({"ignored": true}))),
+            if node == "observe" { "exit_unmapped" } else { "verify_failed" },
+            "{node}"
+        );
+    }
+}

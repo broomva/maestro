@@ -53,9 +53,10 @@
 //! `complete` checks the claim, then that the node is still enabled now (everything it consumes
 //! current and fresh) and that the outputs fit, then runs the node's own command: a pure node's
 //! `run`, a work node's `verify`, an observe node's `run` (its value is its exit status through
-//! `exit_map`; any other status fails closed). A work node's verify reads the outputs it judges
-//! as JSON on its standard input (BRO-3636); no command's argv or workdir is ever filled from
-//! them, so a performer's text is never read as code. A pure node with a `snapshot` runs in a
+//! `exit_map`; any other status fails closed). By default a work verify reads its outputs as JSON.
+//! With `receipt_stdin`, verifies and pure and observe runs read an envelope of outputs and the
+//! consumed receipt document (BRO-3827). No command argv or workdir is filled from outputs, so a
+//! performer's text is never read as code. A pure node with a `snapshot` runs in a
 //! snapshot of that commit, never in the working tree (`snapshot`); a snapshot that cannot be made
 //! is refused `snapshot_failed`, and a run that moved the snapshot's HEAD `snapshot_moved`, never
 //! as an exit status of the project's command. The commands
@@ -639,7 +640,7 @@ struct Plan {
     argv: Vec<String>,
     cwd: PathBuf,
     step: Step,
-    /// A work node's verify reads the outputs it judges here, as JSON, on its standard input.
+    /// JSON stdin according to the pinned definition's contract.
     stdin: Option<Vec<u8>>,
     /// A pure node's `snapshot`, filled: the commit its command runs in a snapshot of.
     snapshot: Option<String>,
@@ -666,9 +667,7 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
     enabled(held)?;
     let ir = &held.started.ir;
     let node = held.started.ir.nodes.get(&held.rec.node);
-    // Only a work node's verify reads the outputs it judges, and only as data on its standard
-    // input; every command's words are a function of the pinned IR and params, which no performer
-    // chooses.
+    // Commands receive data on stdin only; their words are functions of pinned IR and params.
     let (words, step, judges) = match node.map(|n| &n.class) {
         Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, false),
         Some(Class::Work { verify, .. }) => (verify, Step::Command, true),
@@ -925,7 +924,7 @@ pub fn complete(
     let log = guard.log(&instance)?;
     let after = wall(&log)?;
     let held = hold(log, session, &instance, &sha, after)?;
-    // The command is a function of the pinned IR and params, so only the rest can have changed.
+    // The command and its input are bound to the pinned IR, params and claim inputs.
     if let Err(unfit) = prepare(&held, &outputs) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
