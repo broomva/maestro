@@ -365,6 +365,19 @@ fn check_params(ir: &Ir, params: &Value) -> Result<(), KernelError> {
     if let Some(name) = given.keys().find(|k| !ir.params.contains_key(*k)) {
         return Err(refuse(format!("{name} is not a param of this flow")));
     }
+    for (name, kind) in &ir.types {
+        if let Some(value) = given.get(name).filter(|v| !v.is_null()) {
+            let valid = match kind {
+                ir::ParamType::String => value.is_string(),
+                ir::ParamType::Sha256 => value.as_str().and_then(|v| v.strip_prefix("sha256:")).is_some_and(|v| {
+                    v.len() == 64 && v.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                }),
+            };
+            if !valid {
+                return Err(KernelError::ParamInvalid { name: name.clone() });
+            }
+        }
+    }
     Ok(())
 }
 

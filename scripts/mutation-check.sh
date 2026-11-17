@@ -1032,6 +1032,7 @@ mutate $fk/jq.rs '        Tok::Word if BANNED_WORDS.contains(s) => Some(*s),' ' 
 mutate $fk/jq.rs "        Tok::Sym if s.starts_with('*') => Some(*s)," '        Tok::Sym if false => Some(*s),'
 mutate $fk/jq.rs '        Tok::Block(inner) => banned(inner),' '        Tok::Block(_) => None,'
 mutate $fk/jq.rs '            StrPart::Term(t) => banned(std::slice::from_ref(t)),' '            StrPart::Term(_) => None,'
+mutate $fk/replay.rs '            if !valid {' '            if false {'
 # start: params that do not fit are refused before anything is written; null is absent; params
 # have a byte bound so a flow that compiles can always start.
 mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'

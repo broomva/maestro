@@ -12,17 +12,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The IR's newest version. A change to its shape or meaning bumps it. Version 2 added
-/// `workdir`; version 3 added an effect's `run`; version 4 a pure node's `snapshot` (BRO-3636).
-pub const IR_VERSION: u32 = 4;
+/// `workdir`; version 3 added an effect's `run`; version 4 a pure node's `snapshot`;
+/// version 5 adds parameter types.
+pub const IR_VERSION: u32 = 5;
 
-/// The version an IR is written in: the lowest that expresses it, so 4 for an IR with a node that
+/// The version an IR is written in: the lowest that expresses it, so 5 for parameter types,
+/// 4 for an IR with a node that
 /// runs in a snapshot, 3 for one with an effect that has a `run`, 2 for one that carries a
 /// `workdir` and 1 for none of them. An IR, and its hash, are what they were under the version
 /// that expresses it, and an instance started under an earlier version keeps replaying.
 pub fn version_for(ir: &Ir) -> u32 {
     let runs_effect = ir.nodes.values().any(|n| matches!(&n.class, Class::Effect { run, .. } if !run.is_empty()));
-    if ir.nodes.values().any(|n| n.snapshot.is_some()) {
+    if !ir.types.is_empty() {
         IR_VERSION
+    } else if ir.nodes.values().any(|n| n.snapshot.is_some()) {
+        4
     } else if runs_effect {
         3
     } else if ir.workdir.is_some() {
@@ -74,6 +78,8 @@ pub struct Ir {
     pub version: u32,
     /// Param name to whether it is required.
     pub params: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub types: BTreeMap<String, ParamType>,
     pub nodes: BTreeMap<String, Node>,
     pub repeats: BTreeMap<String, Repeat>,
     /// The directory the flow's commands run in, `{{params.<name>}}` filled in when they run. A
@@ -82,6 +88,13 @@ pub struct Ir {
     /// version 1 IR and hashes as it did before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamType {
+    String,
+    Sha256,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -227,7 +240,7 @@ fn unknown(from: impl Into<String>, name: &str) -> CompileError {
 /// The rules every IR passes, at compile time and again on the copy a `Started` event pins. Its
 /// version must be [`version_for`] it: version 1 has no `workdir`, version 2 has one, version 3
 /// has an effect with a `run` (and then every effect has one), version 4 a pure node that runs in
-/// a snapshot (only a pure node does), and any other version is refused.
+/// a snapshot (only a pure node does), version 5 parameter types, and any other version is refused.
 pub fn validate(ir: &Ir) -> Result<(), CompileError> {
     let want = version_for(ir);
     if ir.ir_version != want {
@@ -242,6 +255,10 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
     let node = |from: &str, name: &str| ir.nodes.get(name).ok_or_else(|| unknown(from, name));
     let repeat = |from: &str, name: &str| ir.repeats.get(name).ok_or_else(|| unknown(from, name));
     let param = |from: &str, name: &str| ir.params.contains_key(name).then_some(()).ok_or_else(|| unknown(from, name));
+
+    for name in ir.types.keys() {
+        param("types", name)?;
+    }
 
     let body = |r: &str| ir.repeats.get(r).map(|r| r.body.iter().map(String::as_str)).into_iter().flatten();
     let member: BTreeMap<&str, &str> =

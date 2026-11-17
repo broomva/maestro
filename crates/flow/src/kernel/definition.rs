@@ -16,6 +16,8 @@ pub(crate) struct Definition {
     /// `name` is required, `name?` optional.
     #[serde(default)]
     pub params: Vec<String>,
+    #[serde(default)]
+    pub types: BTreeMap<String, super::ir::ParamType>,
     #[serde(deserialize_with = "entries")]
     pub nodes: Vec<(String, NodeDef)>,
     #[serde(default, deserialize_with = "entries")]

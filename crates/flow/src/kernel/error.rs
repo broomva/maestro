@@ -67,6 +67,8 @@ pub enum KernelError {
     /// The params passed to `start` do not fit the flow's declared params.
     #[error("The params do not fit flow {flow}: {detail}, so no instance was started.")]
     InvalidParams { flow: String, detail: String },
+    #[error("Param {name} does not match its declared type.")]
+    ParamInvalid { name: String },
     /// The instance's log verified but its events do not replay as a flow. Never read as empty.
     #[error("Instance {instance} does not replay at event {seq}: {detail}.")]
     Malformed { instance: String, seq: u64, detail: String },
@@ -267,6 +269,7 @@ impl KernelError {
             KernelError::Compile(e) => e.code(),
             KernelError::Flow(e) => e.code(),
             KernelError::InvalidParams { .. } => "invalid_params",
+            KernelError::ParamInvalid { .. } => "param_invalid",
             KernelError::Malformed { .. } => "malformed_instance",
             KernelError::Encode(_) => "encode",
             KernelError::Refused(r) => r.code(),
