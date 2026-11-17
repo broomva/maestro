@@ -108,7 +108,7 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
 
 - **Human steps (BRO-3635).** A waiting `human` node is the owner's. `flow ask` (MCP
   `maestro_flow_ask`) files its ask on the first call: the kernel mints the id, takes the question
-  from the definition (filling `{{params.name}}` from the pinned params) and `asked_at` from its own clock. A human node can declare `required_body_fields: [evidence]` to require those fields in `--ask`; the kernel refuses a missing or null field before pinning. It adds your `--ask` fields (what the
+  from the definition (filling `{{params.name}}` from the pinned params) and `asked_at` from its own clock. An ask containing `{{` is treated as a template and uses IR version 6; use that syntax only for parameter placeholders. A human node can declare `required_body_fields: [evidence]` to require those fields in `--ask`; the kernel refuses a missing or null field before pinning. It adds your `--ask` fields (what the
   ledger's validator requires), pins that body in the flow's log, and files it through the
   writer of record (`ask_ledger.py file`, as `ask file` does) with the flow ledger's lock
   released. It links the row it finds in the working tree by that id and hash. Call it again until
