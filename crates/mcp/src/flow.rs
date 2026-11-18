@@ -94,6 +94,8 @@ pub struct FlowStartArgs {
     pub session: Option<String>,
     /// The flow definition, as YAML text.
     pub definition: String,
+    /// Absolute path to the definition, for resolving its agents root.
+    pub definition_path: Option<String>,
     /// The flow's params, a JSON object.
     pub params: Option<Value>,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
@@ -362,8 +364,35 @@ pub(crate) fn call(
             let a: FlowStartArgs = parse(args.clone())?;
             let session = a.session.as_deref().map(crate::session_of).transpose()?;
             Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, true, |w| {
+                if a.definition.len() > kernel::MAX_SOURCE {
+                    return Err(kernel::CompileError::Invalid {
+                        detail: format!(
+                            "the definition is {} bytes, more than {}",
+                            a.definition.len(),
+                            kernel::MAX_SOURCE
+                        ),
+                    }
+                    .into());
+                }
+                if let Some(path) = &a.definition_path {
+                    use std::io::Read;
+                    let path = std::path::Path::new(path);
+                    if !path.is_absolute() {
+                        return Err(kernel::CompileError::AgentsRootNeedsPath.into());
+                    }
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(path)
+                        .and_then(|f| f.take(kernel::MAX_SOURCE as u64 + 1).read_to_end(&mut bytes))
+                        .map_err(|e| kernel::CompileError::Invalid {
+                            detail: format!("cannot read definition path: {e}"),
+                        })?;
+                    if bytes != a.definition.as_bytes() {
+                        return Err(kernel::CompileError::DefinitionPathMismatch.into());
+                    }
+                }
                 // The definition compiles before the ledger is opened, or made.
-                let flow = kernel::compile(&a.definition)?;
+                let flow =
+                    kernel::compile_with_path(&a.definition, a.definition_path.as_deref().map(std::path::Path::new))?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
                 let begun = kernel::start(&mut w.ledger()?, &w.me, &flow, params)?;
                 Ok(json!({

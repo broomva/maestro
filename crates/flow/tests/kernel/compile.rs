@@ -69,8 +69,8 @@ fn the_verifier_pilot_compiles_to_a_hashed_ir() {
 
 #[test]
 fn an_ir_is_written_in_the_lowest_version_that_expresses_it() {
-    // Version 4 added a pure node's `snapshot` (BRO-3636): the pilot's check runs in one.
-    assert_eq!(compile(VERIFY).unwrap().ir().ir_version, 4);
+    // The pilot pins its builtin specialist in version 8.
+    assert_eq!(compile(VERIFY).unwrap().ir().ir_version, 8);
     // Version 2 added `workdir`: a flow with one is version 2; one without, version 1, as it
     // was before the field existed.
     let workdir = compile("flow: f\nversion: 1\nworkdir: /tmp\nnodes:\n  a: {class: pure, run: [x]}\n").unwrap();

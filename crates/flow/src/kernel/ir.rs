@@ -12,15 +12,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The newest IR version: 2 added workdir, 3 effect runs, 4 snapshots, 5 parameter types,
-/// 6 human ask templating and required fields, and 7 receipt-aware stdin.
-pub const IR_VERSION: u32 = 7;
+/// 6 human ask templating and required fields, 7 receipt-aware stdin, and 8 pinned agents.
+pub const IR_VERSION: u32 = 8;
 
 /// The lowest IR version that expresses all features in this definition. Older shapes retain
 /// their original version and hash, and continue to replay under their pinned rules.
 pub fn version_for(ir: &Ir) -> u32 {
     let runs_effect = ir.nodes.values().any(|n| matches!(&n.class, Class::Effect { run, .. } if !run.is_empty()));
-    if ir.receipt_stdin {
+    if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| l.pinned_agent.is_some())) {
         IR_VERSION
+    } else if ir.receipt_stdin {
+        7
     } else if ir.nodes.values().any(|n| matches!(&n.class, Class::Human { fill_ask, required_body_fields, .. } if *fill_ask || !required_body_fields.is_empty())) {
         6
     } else if !ir.types.is_empty() {
@@ -215,6 +217,8 @@ pub enum Input {
 /// Who performs a node and how to start them: the hint `next` returns. The kernel launches nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Launch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_agent: Option<crate::agents::AgentLaunch>,
     pub performer: Option<String>,
     pub skill: Option<String>,
     pub routing: BTreeMap<String, String>,
