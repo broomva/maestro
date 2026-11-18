@@ -1334,12 +1334,19 @@ impl<'f, 'a> Eval<'f, 'a> {
             }
             Form::Open => match self.fold.ir.nodes.get(id).map(|n| &n.class) {
                 Some(Class::Human { ask, .. }) => {
+                    // A pinned ask carries the question the kernel filled at pin time (`{{params.*}}`
+                    // substituted, BRO-3829); show that one. The definition's text is the fallback
+                    // only while nothing is pinned.
+                    let question = |rec: Option<&AskRec>| {
+                        rec.and_then(|r| r.body.get("ask").and_then(Value::as_str))
+                            .map_or_else(|| ask.clone(), str::to_owned)
+                    };
                     let reason = match self.fold.asks.get(&key) {
                         Some(r) if r.linked => {
-                            Reason::Owner { ask: ask.clone(), ask_id: r.ask_id.clone(), ledger: r.ledger.clone() }
+                            Reason::Owner { ask: question(Some(r)), ask_id: r.ask_id.clone(), ledger: r.ledger.clone() }
                         }
                         rec => Reason::Unfiled {
-                            ask: ask.clone(),
+                            ask: question(rec),
                             ask_id: rec.map(|r| r.ask_id.clone()),
                             ledger: rec.map(|r| r.ledger.clone()),
                         },

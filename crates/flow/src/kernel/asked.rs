@@ -1280,6 +1280,10 @@ fn human_ask_pins_filled_params() {
     let fi = start(&mut f.ledger, &f.me, &f.flow, serde_json::json!({"digest": "sha256:example"})).unwrap().instance;
     f.ask(&fi, Some(&filing())).unwrap();
     assert_eq!(f.pinned(&fi)["ask"], "Review sha256:example?");
+    // Waiting status names the pinned (filled) question, not the definition's template.
+    let s = f.status(&fi);
+    let crate::kernel::Reason::Owner { ask, .. } = &s.nodes["owner"].unmet[0] else { panic!() };
+    assert_eq!(ask, "Review sha256:example?");
 }
 
 #[test]

@@ -1074,6 +1074,7 @@ mutate $fk/ir.rs '        param("types", name)?;' '        let _ = name;'
 mutate $fk/replay.rs '            if !valid {' '            if false {'
 mutate $fk/asks.rs '            super::write::fill(&started.ir, &started.params, ask, MAX_ASK_BODY).map_err(invalid)?,' '            ask.clone(),'
 mutate $fk/asks.rs 'seen.required_body_fields.iter().find(|name| !filing.body.get(*name).is_some_and(|v| !v.is_null()))' 'seen.required_body_fields.iter().find(|_| false)'
+mutate $fk/replay.rs '                        rec.and_then(|r| r.body.get("ask").and_then(Value::as_str))' '                        None::<&str>'
 # start: params that do not fit are refused before anything is written; null is absent; params
 # have a byte bound so a flow that compiles can always start.
 mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'
