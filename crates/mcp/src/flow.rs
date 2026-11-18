@@ -94,6 +94,8 @@ pub struct FlowStartArgs {
     pub session: Option<String>,
     /// The flow definition, as YAML text.
     pub definition: String,
+    /// Absolute path to the definition, for resolving its agents root.
+    pub definition_path: Option<String>,
     /// The flow's params, a JSON object.
     pub params: Option<Value>,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
@@ -363,7 +365,8 @@ pub(crate) fn call(
             let session = a.session.as_deref().map(crate::session_of).transpose()?;
             Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, true, |w| {
                 // The definition compiles before the ledger is opened, or made.
-                let flow = kernel::compile(&a.definition)?;
+                let flow =
+                    kernel::compile_with_path(&a.definition, a.definition_path.as_deref().map(std::path::Path::new))?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
                 let begun = kernel::start(&mut w.ledger()?, &w.me, &flow, params)?;
                 Ok(json!({

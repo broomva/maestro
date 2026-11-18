@@ -96,20 +96,11 @@
 //!
 //! # The kernel's agents
 //!
-//! The kernel knows the sources this crate was built with ([`builtin`]: `agents/*.agent.yaml` at the
-//! repository's root, compiled in), so a definition that names `agent:<name>` without a source does
-//! not compile (`unknown_agent`): an instance that could never be launched is never started, and
-//! the check needs no file read, as no other compile rule does. An instance started by a binary
-//! that had the agent keeps its pinned IR; `flow next` then gives that node an
-//! [`LaunchSpec::UnknownAgent`] spec, never none, so a missing agent is never read as a node that
-//! needs no agent.
-//!
-//! **A running instance takes the current build's agent.** The IR pins a performer's name
-//! (`agent:<name>`), never its source: the agent a node is launched with is the source this build
-//! has when `flow next` is read, even for an instance started under another (owner decision,
-//! BRO-3636, round 1). The launch spec carries that source's digest (`source_sha256`), so a driver,
-//! and anyone reading what it did, can see which source applied. The node's verify is the check
-//! either way: an agent's instructions do not decide what the kernel accepts.
+//! The compiler resolves `agent:<name>` from the builtins and an optional definition-relative
+//! agents root, refusing unknown names and collisions. New instances pin the launch data and
+//! source digest in their IR, so replay does not depend on files or a later binary. Old IR retains
+//! the builtin lookup and may produce [`LaunchSpec::UnknownAgent`]. This amends the BRO-3636
+//! round-1 decision that a running instance takes the current build's agent.
 //!
 //! Agent files shape behaviour; they are not a security boundary. A harness's tools list narrows
 //! its built-in tools only, and every consequential check is the kernel's verify.
@@ -560,7 +551,7 @@ impl Agent {
 
 /// The arguments of Codex's `spawn_agent` for one agent: `message` (the brief, to which the driver
 /// appends the node's task) and `model`, and `task_name` where the tool asks for one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexBrief {
     pub tool: String,
     pub task_name: String,
@@ -571,7 +562,7 @@ pub struct CodexBrief {
 /// How a harness with an agent file launches it: the file, the tool to call, and the argument
 /// that names the agent in that tool (`subagent_type` for Claude Code and Grok, `agent_name` for
 /// Gemini CLI).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeLaunch {
     pub file: String,
     pub tool: String,
@@ -582,7 +573,7 @@ pub struct NativeLaunch {
 }
 
 /// What `flow next` returns for an enabled node whose performer is `agent:<name>`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLaunch {
     pub agent: String,
     /// The node's own skill.
@@ -612,6 +603,9 @@ pub enum LaunchSpec {
 /// The launch spec of a node with this launch hint: `None` unless its performer is `agent:<name>`.
 pub fn launch_spec(launch: &Launch) -> Option<LaunchSpec> {
     let name = performer_agent(launch.performer.as_deref()?)?;
+    if let Some(pinned) = &launch.pinned_agent {
+        return Some(LaunchSpec::Agent(Box::new(pinned.clone())));
+    }
     Some(match find(name) {
         Some(agent) => LaunchSpec::Agent(Box::new(agent.launch(launch.skill.as_deref()))),
         None => LaunchSpec::UnknownAgent {

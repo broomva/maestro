@@ -158,6 +158,7 @@ fn each_render_carries_its_harness_fields_and_the_shared_body() {
 #[test]
 fn a_launch_spec_is_given_only_for_an_agent_performer() {
     let launch = |performer: Option<&str>| Launch {
+        pinned_agent: None,
         performer: performer.map(str::to_string),
         skill: Some("dogfood".into()),
         routing: Default::default(),

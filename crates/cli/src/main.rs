@@ -800,7 +800,11 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
                     .with_context(|| format!("reading {definition}"))?
             };
             let params = json_arg("--params", params.as_deref())?;
-            (f::START, json!({ "session": session.session, "definition": text, "params": params }))
+            let definition_path = if definition == "-" { None } else { Some(std::fs::canonicalize(definition)?) };
+            (
+                f::START,
+                json!({ "session": session.session, "definition": text, "definition_path": definition_path, "params": params }),
+            )
         }
         FlowCommand::DriverSkill { .. } => bail!("flow driver-skill is not a tool"),
         FlowCommand::StopGate { .. } => bail!("flow stop-gate is not a tool"),
@@ -968,7 +972,8 @@ fn driver_skill(json: bool, definition: &std::path::Path, out: Option<&std::path
         .map_err(anyhow::Error::from)
         .and_then(read_definition)
         .with_context(|| format!("reading {}", definition.display()))?;
-    let flow = maestro_flow::kernel::compile(&text).map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
+    let flow = maestro_flow::kernel::compile_with_path(&text, Some(&std::fs::canonicalize(definition)?))
+        .map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
     let skill = maestro_flow::driver::generate(&flow).map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
     let shown = out.map(|p| p.display().to_string());
     match out {

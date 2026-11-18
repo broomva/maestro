@@ -371,6 +371,11 @@ fn the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record() {
         args["cwd"] = json!(root);
         maestro_mcp::call_with_hosts(&store, &hosts, tool, args).unwrap_or_else(|e| panic!("{tool}: {}", e.message))
     };
+    let missing_path = call(
+        "maestro_flow_start",
+        json!({ "definition": "flow: f\nversion: 1\nagents: agents\nnodes:\n  a: {class: work, verify: [true], performer: 'agent:x'}\n" }),
+    );
+    assert_eq!(missing_path["code"], "agents_root_needs_path");
     let definition = "flow: gate\nversion: 1\nnodes:\n  owner: {class: human, ask: Merge the gate?}\n  ship: {class: pure, run: ['true'], needs: [owner]}\n";
     let begun = call("maestro_flow_start", json!({ "definition": definition }));
     let fi = begun["instance"].as_str().unwrap().to_string();

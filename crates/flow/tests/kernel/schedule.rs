@@ -681,10 +681,16 @@ fn an_agent_this_build_lacks_is_an_unknown_agent_launch_spec_never_none() {
     let mut f = fx(SWITCH);
     let mut ir = f.flow.ir().clone();
     for node in ir.nodes.values_mut() {
-        if let maestro_flow::kernel::ir::Class::Choice { launch, .. } = &mut node.class {
-            launch.performer = Some("agent:ghost".into());
+        match &mut node.class {
+            maestro_flow::kernel::ir::Class::Choice { launch, .. } => {
+                launch.performer = Some("agent:ghost".into());
+                launch.pinned_agent = None;
+            }
+            maestro_flow::kernel::ir::Class::Work { launch, .. } => launch.pinned_agent = None,
+            _ => {}
         }
     }
+    ir.ir_version = maestro_flow::kernel::ir::version_for(&ir);
     let started = Started {
         flow: f.flow.name(),
         ir_hash: content_hash(&ir).unwrap(),
@@ -1410,4 +1416,76 @@ fn a_launch_spec_carries_the_digest_of_the_current_agent_source() {
     let source = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../agents/verifier.agent.yaml")).unwrap();
     assert_eq!(spec.source_sha256, maestro_flow::dogfood::sha256(&source));
     assert_eq!(spec.source, "agents/verifier.agent.yaml");
+}
+
+#[test]
+fn external_agents_are_pinned_for_the_running_instance() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(repo).status().unwrap().success());
+    std::fs::create_dir(repo.join("agents")).unwrap();
+    let source = include_str!("../../../../agents/verifier.agent.yaml").replace("name: verifier", "name: x");
+    let agent_file = repo.join("agents/x.agent.yaml");
+    std::fs::write(&agent_file, &source).unwrap();
+    let definition = repo.join("flow.yaml");
+    let yaml =
+        "flow: f\nversion: 1\nagents: agents\nnodes:\n  a: {class: work, verify: [true], performer: 'agent:x'}\n";
+    std::fs::write(&definition, yaml).unwrap();
+    let flow = maestro_flow::kernel::compile_with_path(yaml, Some(&definition)).unwrap();
+    assert_eq!(flow.ir().ir_version, 8);
+    assert_eq!(maestro_flow::kernel::compile(yaml).unwrap_err().code(), "agents_root_needs_path");
+    assert_eq!(
+        maestro_flow::kernel::compile_with_path(&yaml.replace("agent:x", "agent:missing"), Some(&definition))
+            .unwrap_err()
+            .code(),
+        "unknown_agent"
+    );
+    assert!(
+        maestro_flow::kernel::compile_with_path(&yaml.replace("agents: agents", "agents: .."), Some(&definition))
+            .is_err()
+    );
+    let mut f = fx("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [true]}\n");
+    f.flow = flow;
+    let fi = f.begin(json!({}));
+    let before = f.next(&fi, Timestamp::now());
+    let Some(LaunchSpec::Agent(spec)) = &before.enabled[0].launch_spec else { panic!() };
+    assert_eq!(spec.source_sha256, maestro_flow::agents::parse("x.agent.yaml", &source).unwrap().source_sha256);
+    std::fs::write(repo.join("agents/verifier.agent.yaml"), include_str!("../../../../agents/verifier.agent.yaml"))
+        .unwrap();
+    assert_eq!(
+        maestro_flow::kernel::compile_with_path(yaml, Some(&definition)).unwrap_err().code(),
+        "agent_name_conflict"
+    );
+    std::fs::write(&agent_file, source.replace("claude: sonnet", "claude: opus")).unwrap();
+    assert_eq!(before.enabled[0].launch_spec, f.next(&fi, Timestamp::now()).enabled[0].launch_spec);
+}
+
+#[test]
+fn old_ir_replays_builtin_agent_with_the_current_binary() {
+    let mut f = fx(SWITCH);
+    let mut ir = f.flow.ir().clone();
+    for node in ir.nodes.values_mut() {
+        match &mut node.class {
+            maestro_flow::kernel::ir::Class::Choice { launch, .. }
+            | maestro_flow::kernel::ir::Class::Work { launch, .. } => launch.pinned_agent = None,
+            _ => {}
+        }
+    }
+    ir.ir_version = maestro_flow::kernel::ir::version_for(&ir);
+    assert!(ir.ir_version < 8);
+    let started = Started {
+        flow: f.flow.name(),
+        ir_hash: content_hash(&ir).unwrap(),
+        ir,
+        params: json!({}),
+        owner: None,
+        audit: None,
+    };
+    let fi = id("fi_old_builtin");
+    f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
+    let n = f.next(&fi, Timestamp::now());
+    assert_eq!(
+        n.enabled[0].launch_spec,
+        Some(LaunchSpec::Agent(Box::new(maestro_flow::agents::find("verifier").unwrap().launch(None))))
+    );
 }

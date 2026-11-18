@@ -142,3 +142,7 @@ ledgers are archived at `~/.config/broomva/cross-review-archive/maestro21-flow-l
 | Human steps | Maestro asks, also relayed into the driving T3 thread; answers only through the owner path |
 | Retiring an abandoned instance | Through an owner-approved Maestro ask; the log is kept |
 
+
+## Amendment: pinned specialist agents (BRO-3826)
+
+This amends BRO-3636 round 1: a new instance embeds each resolved specialist's launch data and source SHA-256 in its IR. Replay uses those pinned fields, so changing a source or Maestro build does not change a running instance. Earlier IR retains the builtin lookup behavior. A definition may declare `agents: <relative path>` from its own directory. The canonical root and source files must remain inside the definition's Git repository; inaccessible roots are errors. A root agent whose name matches a builtin is refused with `agent_name_conflict`. CLI start and driver-skill use the definition path; MCP start requires an absolute `definition_path` when the field is declared.

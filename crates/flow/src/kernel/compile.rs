@@ -104,10 +104,15 @@ fn seconds(at: &str, text: &str) -> Result<u64, CompileError> {
 
 /// Compiles a YAML definition to its IR.
 pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
+    compile_with_path(yaml, None)
+}
+
+pub fn compile_with_path(yaml: &str, path: Option<&std::path::Path>) -> Result<CompiledFlow, CompileError> {
     if yaml.len() > MAX_SOURCE {
         return Err(CompileError::invalid(format!("the definition is {} bytes, more than {MAX_SOURCE}", yaml.len())));
     }
     let def: Definition = serde_yaml::from_str(yaml).map_err(|e| CompileError::invalid(e.to_string()))?;
+    let external = load_agents(def.agents.as_deref(), path)?;
     if def.uses.is_some() {
         return Err(CompileError::Unsupported { feature: "A trait (uses at the top level)".into() });
     }
@@ -161,7 +166,21 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
                 n.class.name()
             )));
         }
-        let node = build_node(&id, n, &need)?;
+        let mut node = build_node(&id, n, &need)?;
+        let launch = match &mut node.class {
+            Class::Work { launch, .. } | Class::Choice { launch, .. } | Class::Effect { launch, .. } => Some(launch),
+            _ => None,
+        };
+        if let Some(launch) = launch
+            && let Some(name) = launch.performer.as_deref().and_then(crate::agents::performer_agent)
+        {
+            let agent = external
+                .iter()
+                .find(|a| a.name == name)
+                .or_else(|| crate::agents::find(name))
+                .ok_or_else(|| CompileError::UnknownAgent { node: id.clone(), agent: name.to_string() })?;
+            launch.pinned_agent = Some(agent.launch(launch.skill.as_deref()));
+        }
         nodes.insert(id, node);
     }
 
@@ -191,7 +210,7 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
     ir::validate(&ir)?;
     check_guards(&ir)?;
     check_no_outputs_placeholders(&ir)?;
-    check_agents(&ir)?;
+
     let bytes = serde_json::to_vec(&ir).map(|b| b.len()).unwrap_or(usize::MAX);
     if bytes > ir::MAX_IR {
         return Err(CompileError::invalid(format!("the IR is {bytes} bytes, more than {}", ir::MAX_IR)));
@@ -201,7 +220,8 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
 }
 
 fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Result<Node, CompileError> {
-    let launch = Launch { performer: n.performer, skill: n.skill, routing: n.routing.unwrap_or_default() };
+    let launch =
+        Launch { pinned_agent: None, performer: n.performer, skill: n.skill, routing: n.routing.unwrap_or_default() };
     let wait = match n.wait {
         Some(w) => {
             Some(Wait { heartbeat: seconds(&format!("node {id} wait.heartbeat"), &w.heartbeat)?, external: w.external })
@@ -272,20 +292,61 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
     })
 }
 
-/// Refuses a performer `agent:<name>` this build has no source for (`crate::agents`, BRO-3636):
-/// such a node could never be launched, so its flow never starts. Compile time only, as the
-/// placeholder rule is: an IR pinned by a build that had the agent replays as it did, and `next`
-/// reports its node's launch spec as `unknown_agent`.
-fn check_agents(ir: &Ir) -> Result<(), CompileError> {
-    for (id, n) in &ir.nodes {
-        let named = n.class.launch().and_then(|l| l.performer.as_deref()).and_then(crate::agents::performer_agent);
-        if let Some(agent) = named
-            && crate::agents::find(agent).is_none()
-        {
-            return Err(CompileError::UnknownAgent { node: id.clone(), agent: agent.to_string() });
-        }
+fn load_agents(root: Option<&str>, path: Option<&std::path::Path>) -> Result<Vec<crate::agents::Agent>, CompileError> {
+    let Some(root) = root else {
+        return Ok(Vec::new());
+    };
+    let path = path.filter(|p| p.is_absolute()).ok_or(CompileError::AgentsRootNeedsPath)?;
+    let definition = path.canonicalize().map_err(|e| CompileError::invalid(e.to_string()))?;
+    let dir = definition.parent().ok_or_else(|| CompileError::invalid("definition has no parent"))?;
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .map_err(|e| CompileError::invalid(e.to_string()))?;
+    if !output.status.success() {
+        return Err(CompileError::invalid("definition is not in a git repository"));
     }
-    Ok(())
+    let repo = std::path::PathBuf::from(
+        String::from_utf8(output.stdout).map_err(|e| CompileError::invalid(e.to_string()))?.trim(),
+    )
+    .canonicalize()
+    .map_err(|e| CompileError::invalid(e.to_string()))?;
+    let relative = std::path::Path::new(root);
+    if relative.is_absolute() {
+        return Err(CompileError::invalid("agents root must be relative"));
+    }
+    let root = dir.join(relative).canonicalize().map_err(|e| CompileError::invalid(e.to_string()))?;
+    if !root.starts_with(&repo) {
+        return Err(CompileError::invalid("agents root escapes repository"));
+    }
+    let mut result = Vec::new();
+    for entry in std::fs::read_dir(&root).map_err(|e| CompileError::invalid(e.to_string()))? {
+        let entry = entry.map_err(|e| CompileError::invalid(e.to_string()))?;
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if !file.ends_with(".agent.yaml") {
+            continue;
+        }
+        let file_path = entry.path().canonicalize().map_err(|e| CompileError::invalid(e.to_string()))?;
+        if !file_path.starts_with(&repo) {
+            return Err(CompileError::invalid("agent source escapes repository"));
+        }
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(file_path)
+            .map_err(|e| CompileError::invalid(e.to_string()))?
+            .take(crate::agents::MAX_SOURCE as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| CompileError::invalid(e.to_string()))?;
+        let text = String::from_utf8(bytes).map_err(|e| CompileError::invalid(e.to_string()))?;
+        let mut agent = crate::agents::parse(&file, &text).map_err(|e| CompileError::invalid(e.to_string()))?;
+        agent.source = relative.join(&file).to_string_lossy().into_owned();
+        if crate::agents::find(&agent.name).is_some() {
+            return Err(CompileError::AgentNameConflict { name: agent.name });
+        }
+        result.push(agent);
+    }
+    Ok(result)
 }
 
 /// Refuses an `{{outputs.<name>}}` placeholder in any command or the workdir (BRO-3636): the
