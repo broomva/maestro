@@ -527,6 +527,26 @@ fn a_waiting_human_node_is_relayed_toward_its_t3_thread() {
     assert!(none("t3:env-1/thread-1", owner("flow-owner-1", "ar\u{2028}c.yaml")), "not printable ASCII");
     assert!(none("t3:env-1/thread-1", owner("flow-owner-1", "a\nb.yaml")), "a line break");
     assert!(none("t3:env-1/thread-1", owner(&"f".repeat(9000), "arc.yaml")), "over T3's link limit");
+    // A pending re-ask carries `inputs_changed` and the ask id it supersedes.
+    let reask = BTreeMap::from([(
+        "owner".to_string(),
+        NodeStatus {
+            state: State::Waiting,
+            class: "human".into(),
+            iteration: BTreeMap::new(),
+            unmet: vec![
+                owner("flow-owner-2", "arc.yaml"),
+                Reason::InputsChanged { supersedes: Some("flow-owner-1".into()) },
+            ],
+            inputs: BTreeMap::new(),
+        },
+    )]);
+    let session: maestro_core::session::SessionRef = "t3:env-1/thread-1".parse().unwrap();
+    let r = maestro_mcp::flow::relay("fi_1", Some(&session), &reask);
+    assert_eq!(
+        (&r[0]["ask_id"], &r[0]["supersedes"], &r[0]["reason"]),
+        (&json!("flow-owner-2"), &json!("flow-owner-1"), &json!("inputs_changed"))
+    );
 }
 
 #[test]

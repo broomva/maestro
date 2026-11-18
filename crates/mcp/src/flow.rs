@@ -470,14 +470,23 @@ pub(crate) fn call(
                     _ => None,
                 };
                 Ok(match kernel::ask(&mut w.ledger()?, paths, &w.me, &instance, node, filing.as_ref())? {
-                    Asked::Waiting { ask_id, ledger, appended, landing } => json!({
-                        "ok": true,
-                        "state": "waiting",
-                        "ask_id": ask_id,
-                        "ledger": ledger,
-                        "seq": appended.map(|a| a.event.seq),
-                        "answer_waiting_to_land": landing,
-                    }),
+                    Asked::Waiting { ask_id, ledger, appended, landing, supersedes, reason } => {
+                        let mut v = json!({
+                            "ok": true,
+                            "state": "waiting",
+                            "ask_id": ask_id,
+                            "ledger": ledger,
+                            "seq": appended.map(|a| a.event.seq),
+                            "answer_waiting_to_land": landing,
+                        });
+                        if let Some(supersedes) = supersedes {
+                            v["supersedes"] = json!(supersedes);
+                        }
+                        if let Some(reason) = reason {
+                            v["reason"] = json!(reason);
+                        }
+                        v
+                    }
                     Asked::Answered { ask_id, ledger, outputs, source, appended } => json!({
                         "ok": true,
                         "state": "answered",
@@ -586,6 +595,10 @@ pub fn relay(instance: &str, owner: Option<&SessionRef>, nodes: &BTreeMap<String
         .and_then(|t| maestro_view::handoff::AnswerThread::parse(&t).ok());
     let mut out = Vec::new();
     for (node, s) in nodes {
+        let reask: Option<(Option<&str>, &str)> = s.unmet.iter().find_map(|r| match r {
+            Reason::InputsChanged { supersedes } => Some((supersedes.as_deref(), "inputs_changed")),
+            _ => None,
+        });
         for reason in &s.unmet {
             let (state, ask, ask_id, ledger) = match reason {
                 Reason::Unfiled { ask, ask_id, ledger } => ("unfiled", ask, ask_id.as_deref(), ledger.as_deref()),
@@ -603,6 +616,12 @@ pub fn relay(instance: &str, owner: Option<&SessionRef>, nodes: &BTreeMap<String
                 "ask_id": ask_id,
                 "ledger": ledger,
             });
+            if let Some((supersedes, why)) = reask {
+                entry["reason"] = json!(why);
+                if let Some(prev) = supersedes {
+                    entry["supersedes"] = json!(prev);
+                }
+            }
             if let (Some(thread), Some(id), Some(ledger), true) = (&thread, ask_id, ledger, state != "unfiled") {
                 let prompt = format!(
                     "Maestro ask {id} in {ledger} is for flow instance {instance}, node {node}. Once its answer has landed on main, take it with maestro_flow_ask (instance {instance}, node_id {node}); the kernel reads it from main, not from this message."

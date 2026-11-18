@@ -99,7 +99,7 @@ use super::adoption;
 use super::error::{KernelError, Refusal};
 use super::events::{Answered, AskLinked, AskPinned, AskWithdrawn, KernelEvent, Started};
 use super::ir::{Class, Iteration};
-use super::replay::{AskRec, State, ask_of, next_of, pinned};
+use super::replay::{AskRec, State, ask_of, next_of, pinned, prior_ask_of};
 use super::write::{MAX_OUTPUTS, check_owner, check_writable, wall};
 use crate::clock;
 use crate::ids::InstanceId;
@@ -210,7 +210,14 @@ pub enum Asked {
     /// The ask is filed and linked, and main holds no answer to it yet. `appended` is the
     /// `AskLinked` this call wrote, if it linked it. `landing` names the answers branch where an
     /// answer waits to land, if one does: still waiting, never a receipt.
-    Waiting { ask_id: String, ledger: String, appended: Option<Appended>, landing: Option<String> },
+    Waiting {
+        ask_id: String,
+        ledger: String,
+        appended: Option<Appended>,
+        landing: Option<String>,
+        supersedes: Option<String>,
+        reason: Option<String>,
+    },
     /// The owner's answer, appended as the node's receipt.
     Answered { ask_id: String, ledger: String, outputs: Value, source: String, appended: Appended },
     /// The writer of record refused the pinned ask and the working tree has no row of its id:
@@ -248,6 +255,7 @@ struct Seen {
     question: String,
     required_body_fields: Vec<String>,
     rec: Option<AskRec>,
+    prior: Option<AskRec>,
 }
 
 /// The node is a human node of `started` and waiting now; its iteration and inputs.
@@ -280,6 +288,7 @@ fn look(
     let started = pinned(&log)?;
     check_owner(&log, &started, instance, session)?;
     waiting(&log, &started, node)?;
+    let (_, inputs) = waiting(&log, &started, node)?;
     let (question, required_body_fields) = match started.ir.nodes.get(node).map(|n| &n.class) {
         Some(Class::Human { ask, required_body_fields, .. }) if started.ir.ir_version >= 6 => (
             super::write::fill(&started.ir, &started.params, ask, MAX_ASK_BODY).map_err(invalid)?,
@@ -288,7 +297,13 @@ fn look(
         Some(Class::Human { ask, .. }) => (ask.clone(), Vec::new()),
         _ => (String::new(), Vec::new()),
     };
-    Ok(Seen { seq: log.seq(), question, required_body_fields, rec: ask_of(&log, &started, node)? })
+    Ok(Seen {
+        seq: log.seq(),
+        question,
+        required_body_fields,
+        rec: ask_of(&log, &started, node, &inputs)?,
+        prior: prior_ask_of(&log, &started, node, &inputs)?,
+    })
 }
 
 /// Appends `event` under the flows lock if the node's ask is still `expect` and the node still
@@ -307,7 +322,7 @@ fn append_if(
     let started = pinned(&log)?;
     check_owner(&log, &started, instance, session)?;
     let (iteration, inputs) = waiting(&log, &started, node)?;
-    match ask_of(&log, &started, node)? {
+    match ask_of(&log, &started, node, &inputs)? {
         Some(now) if now == *expect => {}
         Some(now) if now.ask_id == expect.ask_id && now.linked && !expect.linked => return Ok(None),
         _ => {
@@ -372,8 +387,16 @@ fn pin(
     filing: Option<&Filing>,
     audit: Option<&Audit>,
 ) -> Result<AskRec, KernelError> {
-    let Some(filing) = filing else {
-        return Err(invalid("a node's first ask needs a ledger and an ask body"));
+    let owned;
+    let filing = match (filing, &seen.prior) {
+        (Some(filing), _) => filing,
+        (None, Some(prior)) => {
+            let mut body = prior.body.as_object().cloned().unwrap_or_default();
+            body.retain(|k, _| !KERNEL_KEYS.contains(&k.as_str()) && k != "supersedes" && k != "reason");
+            owned = Filing { ledger: prior.ledger.clone(), body };
+            &owned
+        }
+        (None, None) => return Err(invalid("a node's first ask needs a ledger and an ask body")),
     };
     check_filing(filing, &KERNEL_KEYS)?;
     if let Some(name) =
@@ -387,12 +410,20 @@ fn pin(
     if let Some(meanwhile) = seams::BEFORE_PIN.with(|c| c.borrow_mut().take()) {
         meanwhile();
     }
+    let (supersedes, reason) = match &seen.prior {
+        Some(prior) => (Some(prior.ask_id.clone()), Some("inputs_changed".to_string())),
+        None => (None, None),
+    };
     let mut body = Map::new();
     body.insert("id".into(), Value::String(ask_id.clone()));
     body.insert("ask".into(), Value::String(seen.question.clone()));
     // Pinned before hashing: every filing of this pin files these bytes.
     body.insert("asked_at".into(), Value::String(clock::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string()));
     body.extend(filing.body.clone());
+    if let Some(prev) = &supersedes {
+        body.insert("supersedes".into(), Value::String(prev.clone()));
+        body.insert("reason".into(), Value::String("inputs_changed".into()));
+    }
     let body = requests::compose_ask(&body).map_err(|e| invalid(e.to_string()))?;
     let body_hash = comparable_hash(&JsValue::from(Value::Object(body.clone())));
     let pin = AskPinned {
@@ -402,20 +433,32 @@ fn pin(
         ledger: filing.ledger.clone(),
         body: Value::Object(body),
         body_hash,
+        inputs: BTreeMap::new(),
+        supersedes,
+        reason,
         audit: audit.cloned(),
     };
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
     check_writable(&log, &started)?;
-    let (iteration, _) = waiting(&log, &started, node)?;
-    let pin = AskPinned { iteration, ..pin };
+    let (iteration, inputs) = waiting(&log, &started, node)?;
+    let pin = AskPinned { iteration, inputs, ..pin };
     // Nothing appended since `look`, or the pin is not appended (`stale_seq`): the only concurrency
     // rule. Another session's proposal bookkeeping changes nothing the pin depends on, so a
     // stranger's proposal cannot make the owner's ask fail.
     let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };
     super::write::append_writable(&mut guard, instance, at, pin.to_event()?)?;
-    Ok(AskRec { ask_id: pin.ask_id, ledger: pin.ledger, body: pin.body, body_hash: pin.body_hash, linked: false })
+    Ok(AskRec {
+        ask_id: pin.ask_id,
+        ledger: pin.ledger,
+        body: pin.body,
+        body_hash: pin.body_hash,
+        inputs: pin.inputs,
+        supersedes: pin.supersedes,
+        reason: pin.reason,
+        linked: false,
+    })
 }
 
 /// Every `id` and `uid` in the ledger's working tree, trimmed as the plugin addresses them.
@@ -578,8 +621,14 @@ fn file_and_link(
     node: &str,
     rec: AskRec,
 ) -> Result<Asked, KernelError> {
-    let waiting =
-        |appended| Asked::Waiting { ask_id: rec.ask_id.clone(), ledger: rec.ledger.clone(), appended, landing: None };
+    let waiting = |appended| Asked::Waiting {
+        ask_id: rec.ask_id.clone(),
+        ledger: rec.ledger.clone(),
+        appended,
+        landing: None,
+        supersedes: rec.supersedes.clone(),
+        reason: rec.reason.clone(),
+    };
     file_and_confirm(ledger, paths, session, rec.clone(), |ledger, confirmed| match confirmed {
         Confirmed::NotFiled { reason } => {
             let withdrawn = AskWithdrawn {
@@ -772,10 +821,24 @@ fn take_answer(
     let (row, source) = match landed(paths, &rec)? {
         Answer::Landed { row, source } => (row, source),
         Answer::Landing { at } => {
-            return Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended: None, landing: Some(at) });
+            return Ok(Asked::Waiting {
+                ask_id: rec.ask_id,
+                ledger: rec.ledger,
+                appended: None,
+                landing: Some(at),
+                supersedes: rec.supersedes,
+                reason: rec.reason,
+            });
         }
         Answer::Open => {
-            return Ok(Asked::Waiting { ask_id: rec.ask_id, ledger: rec.ledger, appended: None, landing: None });
+            return Ok(Asked::Waiting {
+                ask_id: rec.ask_id,
+                ledger: rec.ledger,
+                appended: None,
+                landing: None,
+                supersedes: rec.supersedes,
+                reason: rec.reason,
+            });
         }
     };
     let outputs = Value::Object(outputs_of(&row));

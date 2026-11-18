@@ -107,7 +107,14 @@ pub enum Work {
     /// A repeat awaiting its `until` verdict: a claim of `node`, its body's first node, judges it.
     Verdict { repeat: String, iteration: u32, node: String },
     /// A human node whose ask is not filed.
-    Ask { node: String, iteration: Iteration },
+    Ask {
+        node: String,
+        iteration: Iteration,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        supersedes: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// A human node whose answer this clone sees on `origin/main`: `flow ask` takes it.
     Answer { node: String, iteration: Iteration, ask_id: String, ledger: String },
 }
@@ -124,6 +131,10 @@ pub enum Waiting {
         ledger: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         landing: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        supersedes: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// A former owner's claim holds an enabled node until `lease_until`.
     Lease { node: String, iteration: Iteration, lease_until: String },
@@ -225,20 +236,40 @@ pub(crate) fn assess(
         }
     }
     for (id, s) in status.nodes.iter().filter(|(_, s)| s.state == State::Waiting) {
+        let reask: Option<(Option<String>, String)> = s.unmet.iter().find_map(|r| match r {
+            Reason::InputsChanged { supersedes } => Some((supersedes.clone(), "inputs_changed".to_string())),
+            _ => None,
+        });
         for reason in &s.unmet {
             let iteration = s.iteration.clone();
+            let (supersedes, why) = match &reask {
+                Some((sup, why)) => (sup.clone(), Some(why.clone())),
+                None => (None, None),
+            };
             match reason {
-                Reason::Unfiled { .. } => work.push(Work::Ask { node: id.clone(), iteration }),
+                Reason::Unfiled { .. } => work.push(Work::Ask { node: id.clone(), iteration, supersedes, reason: why }),
                 Reason::Owner { ask_id, ledger, .. } | Reason::AnswerWaitingToLand { ask_id, ledger, .. } => {
                     let (node, ask_id, ledger) = (id.clone(), ask_id.clone(), ledger.clone());
                     match seen(&ledger, &ask_id) {
                         AnswerSeen::Landed => work.push(Work::Answer { node, iteration, ask_id, ledger }),
-                        AnswerSeen::Landing(at) => {
-                            waiting.push(Waiting::Owner { node, iteration, ask_id, ledger, landing: Some(at) })
-                        }
-                        AnswerSeen::Open => {
-                            waiting.push(Waiting::Owner { node, iteration, ask_id, ledger, landing: None })
-                        }
+                        AnswerSeen::Landing(at) => waiting.push(Waiting::Owner {
+                            node,
+                            iteration,
+                            ask_id,
+                            ledger,
+                            landing: Some(at),
+                            supersedes,
+                            reason: why,
+                        }),
+                        AnswerSeen::Open => waiting.push(Waiting::Owner {
+                            node,
+                            iteration,
+                            ask_id,
+                            ledger,
+                            landing: None,
+                            supersedes,
+                            reason: why,
+                        }),
                     }
                 }
                 _ => {}

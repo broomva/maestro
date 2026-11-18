@@ -148,3 +148,11 @@ ledgers are archived at `~/.config/broomva/cross-review-archive/maestro21-flow-l
 The owner decision, "latch terminal", makes the first log position whose replayed state is terminal at that event's recorded time permanent. Replay derives that position from the log; it writes no event and does not consult the subject. Stale observations remain visible in status, but cannot enable work or reopen the instance. A flow that needs periodic verification starts a new instance.
 
 Once latched, instance writes are refused with `instance_terminal` and nothing is recorded. This applies to claims, completions, choices, heartbeats, human asks, adoption and retirement proposals, and stop records.
+
+## Human re-asks when inputs change (BRO-3655)
+
+- **Re-ask, bound to inputs.** An answer (and the ask it answers) is bound to the human node's input digests at the time of the ask. When an upstream input's receipt digest changes before the instance latches terminal, that earlier answer no longer satisfies the node, and the node re-enters `waiting` (never `enabled`) so it is re-askable. Calling `ask` then mints and files a new ask with a new ask id, recording that it `supersedes` the previous ask id with reason `inputs_changed`, without deleting or editing the old ask record in either ledger. Replay accepts a second `AskPinned` for the same node and iteration when its inputs differ from the standing ask's inputs, and still refuses a duplicate with `already_pinned` when the inputs are unchanged.
+- **Revalidation.** Because replay is deterministic over the append-only log and binds each accepted human answer to the input digests it consumed, if the upstream receipt digests return to the exact values an earlier answer was bound to, that earlier answer satisfies the human node again without another ask.
+- **Relay.** While a re-ask is pending (unfiled, waiting on the owner, or waiting to land on `origin/main`), `status`, `next` and the stop gate's `open` show the human node as waiting on the owner the same as a first ask, and include the reason `inputs_changed` (with `supersedes` naming the prior ask id), so neither relay hides it.
+- **Terminal latch.** The terminal latch (`BRO-3870`) still holds: re-asking applies only before the instance latches terminal, and any `ask` on a latched instance is refused with `instance_terminal`.
+

@@ -1732,7 +1732,8 @@ mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOU
 mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha, READ_TIMEOUT).map_err(unread)? {' '    if false {'
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
 mutate $replay '                    Class::Human { .. } => return Ok(Err("wrong_class")),' ''
-mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {' 'if false {'
+mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == a.inputs) {' 'if false {'
+mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == a.inputs) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {'
 # Every other code `ask` adds, by its guard: ask_body_invalid (ledger name, size, nesting),
 # ask_ledger_unread, ask_id_exhausted, ask_not_filed, ask_unconfirmed, ask_ambiguous,
 # answer_mismatch, answers_unread, answer_too_large and ask_changed.
@@ -1848,10 +1849,33 @@ mutate $asks '    let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map
         let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;'
 mutate $asks '        Some(s) if s.state == State::Waiting => Ok((s.iteration.clone(), s.inputs.clone())),' '        Some(s) => Ok((s.iteration.clone(), s.inputs.clone())),'
 mutate $asks 'let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };' 'let at = log.seq();'
-mutate $replay '                if self.asks.contains_key(&(id, i)) {' '                if false {'
+mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == p.inputs) {' '                if false {'
+mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == p.inputs) {' '                if self.asks.contains_key(&(id, i)) {'
 mutate $replay 'Some(r) if !r.linked && r.ask_id == l.ask_id && r.body_hash == l.body_hash => {' 'Some(r) if !r.linked && r.ask_id == l.ask_id => {'
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| !r.linked && r.ask_id == w.ask_id) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.ask_id == w.ask_id) {'
 mutate $replay 'Some(r) if r.linked => {' 'Some(r) if true => {'
+# Re-ask when a human node's inputs change, and revalidation when they return (BRO-3655).
+mutate $replay '                if let Some(prev) = self.prior_asks.get_mut(&(id, i)).and_then(Vec::pop) {
+                    self.asks.insert((id, i), prev);
+                }' ''
+mutate $replay '        if matches!(node.class, Class::Human { .. }) {
+            self.answers.entry(key).or_default().insert(receipt.inputs.clone(), receipt.clone());
+        }' ''
+mutate $replay '            && let Some((_, r)) = by_inputs.iter().find(|(inputs, _)| same_inputs(inputs, consumed))' '            && let Some((_, r)) = by_inputs.iter().next()'
+mutate $replay '        if matches!(n.class, Class::Human { .. }) && !out.reasons.is_empty() {
+            out.form = Form::Open;
+            return out;
+        }' ''
+mutate $replay '                    if supersedes.is_some() || !reasons.is_empty() {
+                        human.push(Reason::InputsChanged { supersedes });
+                    }' ''
+mutate $replay '        .filter(|r| &r.inputs == inputs)' '        .filter(|_| true)'
+mutate $replay '    Ok(fold.asks.get(&(id.as_str(), i)).filter(|r| &r.inputs != inputs).cloned())' '    Ok(None)'
+mutate $asks '    if let Some(prev) = &supersedes {
+        body.insert("supersedes".into(), Value::String(prev.clone()));
+        body.insert("reason".into(), Value::String("inputs_changed".into()));
+    }' ''
+mutate $asks '    let pin = AskPinned { iteration, inputs, ..pin };' '    let pin = AskPinned { iteration, ..pin };'
 mutate $asks 'let mut out: String = text.chars().take(MAX_ECHO).collect();' 'let mut out: String = text.chars().collect();'
 mutate $asks ' || !filing.ledger.bytes().all(|b| b.is_ascii_graphic())' ''
 mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Value> = None;'
@@ -2195,8 +2219,10 @@ gt=crates/mcp/src/stop.rs
 mutate $stp '        !self.work.is_empty()' '        true'
 mutate $stp '            Some(c) if c.seq < since => waiting.push(Waiting::Lease {' '            Some(c) if false => waiting.push(Waiting::Lease {'
 mutate $stp '        if let (true, Some(node)) = (r.awaiting_verdict, first) {' '        if let (true, Some(node)) = (false, first) {'
-mutate $stp '                Reason::Unfiled { .. } => work.push(Work::Ask { node: id.clone(), iteration }),' '                Reason::Unfiled { .. } => {}'
-mutate $stp '                        AnswerSeen::Landed => work.push(Work::Answer { node, iteration, ask_id, ledger }),' '                        AnswerSeen::Landed => waiting.push(Waiting::Owner { node, iteration, ask_id, ledger, landing: None }),'
+mutate $stp '                Reason::Unfiled { .. } => work.push(Work::Ask { node: id.clone(), iteration, supersedes, reason: why }),' '                Reason::Unfiled { .. } => {}'
+mutate $stp '                        AnswerSeen::Landed => work.push(Work::Answer { node, iteration, ask_id, ledger }),' '                        AnswerSeen::Landed => waiting.push(Waiting::Owner { node, iteration, ask_id, ledger, landing: None, supersedes, reason: why }),'
+mutate $stp '            Reason::InputsChanged { supersedes } => Some((supersedes.clone(), "inputs_changed".to_string())),' '            Reason::InputsChanged { .. } => None,'
+mutate $mf '            Reason::InputsChanged { supersedes } => Some((supersedes.as_deref(), "inputs_changed")),' '            Reason::InputsChanged { .. } => None,'
 mutate $stp '            if !owners.owner.as_ref().is_some_and(|o| same_owner(o, &me)) || owners.retired.is_some() {' '            if owners.retired.is_some() {'
 mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| !a.terminal))' '            Ok(Some(assess(&log, &started, now, seen)?))'
 mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'

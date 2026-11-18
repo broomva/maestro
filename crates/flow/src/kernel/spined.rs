@@ -279,6 +279,9 @@ fn a_human_nodes_answer_is_on_the_spine_with_no_edge_or_exit() {
         ledger: ledger.clone(),
         body: json!({}),
         body_hash: "h".into(),
+        inputs: Default::default(),
+        supersedes: None,
+        reason: None,
         audit: None,
     };
     let linked = AskLinked {

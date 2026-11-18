@@ -1353,3 +1353,169 @@ fn a_human_nodes_events_carry_the_writers_audit_facts() {
     }
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "Answered"]);
 }
+
+#[test]
+fn a_human_node_whose_inputs_changed_is_re_askable_and_revalidates() {
+    let clock = TestClock::install();
+    let mut f = fx(None, "");
+    f.flow = compile(
+        "flow: gate\nversion: 1\nworkdir: \"/tmp\"\nnodes:\n  probe: {class: observe, run: ['true'], fresh_for: 10s, exit_map: {0: ok, 1: moved}}\n  owner: {class: human, ask: 'Ship it?', needs: [probe]}\n  ship: {class: pure, run: ['true'], needs: [owner]}\n",
+    )
+    .unwrap();
+    let fi = f.begin();
+    let observe = |f: &mut Fx, fi: &InstanceId, outputs: Value| {
+        let c = crate::kernel::claim(&mut f.ledger, &f.me, fi, "probe").unwrap();
+        let done = crate::kernel::complete(&mut f.ledger, &f.me, &c.token, outputs, &crate::kernel::Limits::default())
+            .unwrap();
+        assert!(matches!(done, crate::kernel::Completion::Completed { .. }), "{done:?}");
+    };
+    observe(&mut f, &fi, serde_json::json!({ "v": 1 }));
+    let d1 = f.status(&fi).nodes["owner"].inputs["probe"].clone();
+    let first_id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&first_id);
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == first_id));
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
+    let owner_d1 = f.status(&fi).nodes["ship"].inputs["owner"].clone();
+
+    // Duplicate ask with unchanged inputs is refused by `ask` and by replay.
+    assert!(matches!(
+        f.ask(&fi, Some(&filing())),
+        Err(KernelError::Refused(Refusal::NotEnabled { ref node, ref state })) if node == "owner" && state == "done"
+    ));
+    let append = |f: &mut Fx, kind: &str, body: Value| {
+        let mut guard = f.ledger.lock().unwrap();
+        let seq = guard.log(&fi).unwrap().seq();
+        guard.append(&fi, seq, crate::NewEvent::new(kind, body)).unwrap();
+    };
+    append(
+        &mut f,
+        "AskPinned",
+        serde_json::json!({
+            "node": "owner",
+            "iteration": {},
+            "ask_id": "flow-owner-dup",
+            "ledger": "ledger.yaml",
+            "body": {},
+            "body_hash": "h",
+            "inputs": { "probe": d1 },
+        }),
+    );
+    assert!(
+        f.status(&fi)
+            .rejected
+            .iter()
+            .any(|r| r.kind == "AskPinned" && r.subject == "owner" && r.reason == "already_pinned")
+    );
+
+    // Upstream observation is re-run with a new digest: owner is waiting in `pending` (never `enabled`),
+    // with `inputs_changed` naming `first_id`.
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, &fi, serde_json::json!({ "v": 2 }));
+    let s = f.status(&fi);
+    let d2 = s.nodes["owner"].inputs["probe"].clone();
+    assert_ne!(d1, d2);
+    assert_eq!(s.nodes["owner"].state, State::Waiting);
+    assert!(matches!(&s.nodes["owner"].unmet[0], crate::kernel::Reason::Unfiled { ask_id: None, .. }));
+    assert!(
+        s.nodes["owner"].unmet.contains(&crate::kernel::Reason::InputsChanged { supersedes: Some(first_id.clone()) })
+    );
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let nxt = crate::kernel::next(&reader.lock().unwrap(), &fi, clock::now()).unwrap();
+    assert!(nxt.enabled.is_empty(), "{nxt:?}");
+    assert_eq!(nxt.pending["owner"].state, State::Waiting);
+
+    // An answer naming the old ask over the new inputs is rejected as `not_linked`.
+    append(
+        &mut f,
+        "Answered",
+        serde_json::json!({
+            "node": "owner",
+            "iteration": {},
+            "ask_id": first_id,
+            "ledger": "ledger.yaml",
+            "inputs": { "probe": d2 },
+            "outputs": { "answer_option": "ship" },
+            "source": "main@0",
+            "row_hash": "r",
+        }),
+    );
+    assert!(
+        f.status(&fi).rejected.iter().any(|r| r.kind == "Answered" && r.subject == "owner" && r.reason == "not_linked")
+    );
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Waiting);
+
+    // Revalidation before re-asking: returning upstream to the earlier digest satisfies `owner` again.
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, &fi, serde_json::json!({ "v": 1 }));
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
+
+    // Move upstream to the new digest again; a withdrawn re-ask restores the prior ask, and the
+    // next `ask` files a new ask superseding `first_id` with reason `inputs_changed` without
+    // deleting or editing the old ask record.
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, &fi, serde_json::json!({ "v": 2 }));
+    let mut bad = filing();
+    bad.body.insert("stakes".into(), Value::String("STUB-INVALID".into()));
+    assert!(matches!(f.ask(&fi, Some(&bad)).unwrap(), Asked::Withdrawn { code: ASK_NOT_FILED, .. }));
+    let second_id = match f.ask(&fi, None).unwrap() {
+        Asked::Waiting { ask_id, supersedes, reason, appended: Some(_), .. } => {
+            assert_eq!(supersedes.as_deref(), Some(first_id.as_str()));
+            assert_eq!(reason.as_deref(), Some("inputs_changed"));
+            ask_id
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(second_id, first_id);
+    let old_row = f.row(&first_id).expect("first ask record stays intact");
+    assert_eq!(old_row.answer_option.as_deref(), Some("ship"));
+    let new_row = f.row(&second_id).expect("new ask record is filed");
+    assert_eq!(new_row.extra["supersedes"], first_id);
+    assert_eq!(new_row.extra["reason"], "inputs_changed");
+    let s = f.status(&fi);
+    assert_eq!(s.nodes["owner"].state, State::Waiting);
+    assert!(matches!(&s.nodes["owner"].unmet[0], crate::kernel::Reason::Owner { ask_id, .. } if *ask_id == second_id));
+    assert!(
+        s.nodes["owner"].unmet.contains(&crate::kernel::Reason::InputsChanged { supersedes: Some(first_id.clone()) })
+    );
+
+    // Answer the second ask; then verify revalidation across both answers (`d1` and `d2`).
+    f.add_to_row(
+        &second_id,
+        "    answer: \"Ship v2\"\n    answer_option: \"ship\"\n    answered_at: \"2026-11-09T00:00:00Z\"\n    answered_by: \"owner:maestro-web\"\n",
+    );
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == second_id));
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
+    let owner_d2 = f.status(&fi).nodes["ship"].inputs["owner"].clone();
+    assert_ne!(owner_d1, owner_d2);
+
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, &fi, serde_json::json!({ "v": 1 }));
+    let s = f.status(&fi);
+    assert_eq!(s.nodes["owner"].state, State::Done);
+    assert_eq!(s.nodes["ship"].inputs["owner"], owner_d1);
+    let log = f.ledger.lock().unwrap().log(&fi).unwrap();
+    let guard_doc =
+        crate::kernel::replay::guard_input(&log, &crate::kernel::replay::pinned(&log).unwrap(), "ship").unwrap();
+    assert_eq!(guard_doc["nodes"]["owner"]["outputs"]["answer"], "Ship it");
+
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, &fi, serde_json::json!({ "v": 2 }));
+    let s = f.status(&fi);
+    assert_eq!(s.nodes["owner"].state, State::Done);
+    assert_eq!(s.nodes["ship"].inputs["owner"], owner_d2);
+    let log = f.ledger.lock().unwrap().log(&fi).unwrap();
+    let guard_doc =
+        crate::kernel::replay::guard_input(&log, &crate::kernel::replay::pinned(&log).unwrap(), "ship").unwrap();
+    assert_eq!(guard_doc["nodes"]["owner"]["outputs"]["answer"], "Ship v2");
+
+    // Once `ship` completes, the instance latches terminal (BRO-3870) and refuses any further `ask`.
+    let c = crate::kernel::claim(&mut f.ledger, &f.me, &fi, "ship").unwrap();
+    let done = crate::kernel::complete(&mut f.ledger, &f.me, &c.token, Value::Null, &crate::kernel::Limits::default())
+        .unwrap();
+    assert!(matches!(done, crate::kernel::Completion::Completed { .. }), "{done:?}");
+    assert!(f.status(&fi).terminal);
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    assert_eq!(code(f.ask(&fi, Some(&filing()))), "instance_terminal");
+}

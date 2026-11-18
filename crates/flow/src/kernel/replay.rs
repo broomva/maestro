@@ -166,6 +166,11 @@ pub enum Reason {
     InputChanged {
         input: String,
     },
+    /// A human node whose earlier answer or ask was bound to inputs that have since changed.
+    InputsChanged {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        supersedes: Option<String>,
+    },
     /// This observation recorded no exit status, or one outside its `exit_map`.
     ExitUnmapped {
         exit: Option<i32>,
@@ -667,8 +672,12 @@ struct Fold<'a> {
     /// The effects started and not withdrawn by a refusal that their command never started
     /// (`spawn_failed`): by node and iteration, each attempt's inputs.
     started_effects: BTreeMap<Key<'a>, BTreeMap<u32, BTreeMap<String, String>>>,
+    /// Human answers accepted at an iteration, bound to their `inputs` (BRO-3655).
+    answers: BTreeMap<Key<'a>, BTreeMap<BTreeMap<String, String>, Receipt>>,
     /// Each human node's ask at an iteration: the pin that stands, and whether it was linked.
     asks: BTreeMap<Key<'a>, AskRec>,
+    /// Earlier asks at an iteration that were replaced when the node's inputs changed.
+    prior_asks: BTreeMap<Key<'a>, Vec<AskRec>>,
     /// Who owns the instance and what is proposed for it (`adoption::owners`).
     owners: Owners,
     /// The stops the gate could not refuse (`StopUnblockable`), in log order.
@@ -685,14 +694,42 @@ pub(crate) struct AskRec {
     pub ledger: String,
     pub body: Value,
     pub body_hash: String,
+    pub inputs: BTreeMap<String, String>,
+    pub supersedes: Option<String>,
+    pub reason: Option<String>,
     pub linked: bool,
 }
 
-/// The ask of `node` at its current iteration, as replay accepted it.
-pub(crate) fn ask_of(log: &Log, started: &Started, node: &str) -> Result<Option<AskRec>, KernelError> {
+/// The ask of `node` at its current iteration bound to `inputs`, as replay accepted it.
+pub(crate) fn ask_of(
+    log: &Log,
+    started: &Started,
+    node: &str,
+    inputs: &BTreeMap<String, String>,
+) -> Result<Option<AskRec>, KernelError> {
     let fold = Fold::replay(log, started)?;
     let Some(i) = fold.current(node) else { return Ok(None) };
-    Ok(started.ir.nodes.get_key_value(node).and_then(|(id, _)| fold.asks.get(&(id.as_str(), i)).cloned()))
+    let Some((id, _)) = started.ir.nodes.get_key_value(node) else { return Ok(None) };
+    let key = (id.as_str(), i);
+    Ok(fold
+        .asks
+        .get(&key)
+        .filter(|r| &r.inputs == inputs)
+        .or_else(|| fold.prior_asks.get(&key)?.iter().rev().find(|r| &r.inputs == inputs))
+        .cloned())
+}
+
+/// The earlier ask at `node`'s current iteration that a new ask over `inputs` supersedes.
+pub(crate) fn prior_ask_of(
+    log: &Log,
+    started: &Started,
+    node: &str,
+    inputs: &BTreeMap<String, String>,
+) -> Result<Option<AskRec>, KernelError> {
+    let fold = Fold::replay(log, started)?;
+    let Some(i) = fold.current(node) else { return Ok(None) };
+    let Some((id, _)) = started.ir.nodes.get_key_value(node) else { return Ok(None) };
+    Ok(fold.asks.get(&(id.as_str(), i)).filter(|r| &r.inputs != inputs).cloned())
 }
 
 /// A claim, for the retry projection: it ends at its lease's end (which is never past its cancel
@@ -726,7 +763,9 @@ impl<'a> Fold<'a> {
             cores: Cell::new(0),
             attempts: BTreeMap::new(),
             started_effects: BTreeMap::new(),
+            answers: BTreeMap::new(),
             asks: BTreeMap::new(),
+            prior_asks: BTreeMap::new(),
             owners: adoption::owners(log, started)?,
             unblockable: Vec::new(),
             latched_at: None,
@@ -916,7 +955,7 @@ impl<'a> Fold<'a> {
                     return Ok(Err("wrong_class"));
                 }
                 // Only an answer to the linked ask counts.
-                if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {
+                if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == a.inputs) {
                     return Ok(Err("not_linked"));
                 }
                 (Receipt::new(e.seq, at, &a.outputs, None, None, a.inputs), 0)
@@ -926,13 +965,23 @@ impl<'a> Fold<'a> {
                 if !matches!(node.class, Class::Human { .. }) {
                     return Ok(Err("wrong_class"));
                 }
-                // A pin stands until it is withdrawn; a linked one is never replaced.
-                if self.asks.contains_key(&(id, i)) {
+                // A pin stands until it is withdrawn; a linked one is replaced only when inputs changed.
+                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == p.inputs) {
                     return Ok(Err("already_pinned"));
                 }
-                let rec =
-                    AskRec { ask_id: p.ask_id, ledger: p.ledger, body: p.body, body_hash: p.body_hash, linked: false };
-                self.asks.insert((id, i), rec);
+                let rec = AskRec {
+                    ask_id: p.ask_id,
+                    ledger: p.ledger,
+                    body: p.body,
+                    body_hash: p.body_hash,
+                    inputs: p.inputs,
+                    supersedes: p.supersedes,
+                    reason: p.reason,
+                    linked: false,
+                };
+                if let Some(prev) = self.asks.insert((id, i), rec) {
+                    self.prior_asks.entry((id, i)).or_default().push(prev);
+                }
                 return Ok(Ok(Change::Inert));
             }
             AskLinked::KIND => {
@@ -951,6 +1000,9 @@ impl<'a> Fold<'a> {
                     return Ok(Err("not_pinned"));
                 }
                 self.asks.remove(&(id, i));
+                if let Some(prev) = self.prior_asks.get_mut(&(id, i)).and_then(Vec::pop) {
+                    self.asks.insert((id, i), prev);
+                }
                 return Ok(Ok(Change::Inert));
             }
             _ => {
@@ -982,6 +1034,9 @@ impl<'a> Fold<'a> {
         if !same {
             self.invalidate(id);
         }
+        if matches!(node.class, Class::Human { .. }) {
+            self.answers.entry(key).or_default().insert(receipt.inputs.clone(), receipt.clone());
+        }
         self.receipts.insert(key, receipt);
         if let Some(last) = self.attempts.get_mut(&key).and_then(|c| c.last_mut())
             && last.attempt == attempt
@@ -989,6 +1044,22 @@ impl<'a> Fold<'a> {
             last.spent = true;
         }
         Ok(Ok(Change::State))
+    }
+
+    fn receipt(&self, key: Key<'a>, consumed: &BTreeMap<&'a str, Rc<str>>) -> Option<&Receipt> {
+        if let Some(by_inputs) = self.answers.get(&key)
+            && let Some((_, r)) = by_inputs.iter().find(|(inputs, _)| same_inputs(inputs, consumed))
+        {
+            return Some(r);
+        }
+        self.receipts.get(&key)
+    }
+
+    fn ask_for(&self, key: Key<'a>, consumed: &BTreeMap<&'a str, Rc<str>>) -> Option<&AskRec> {
+        self.asks
+            .get(&key)
+            .filter(|r| same_inputs(&r.inputs, consumed))
+            .or_else(|| self.prior_asks.get(&key)?.iter().rev().find(|r| same_inputs(&r.inputs, consumed)))
     }
 
     /// The node's `retry.attempts`, when they have all ended without a receipt at `now`, in its
@@ -1386,21 +1457,32 @@ impl<'f, 'a> Eval<'f, 'a> {
                     // A pinned ask carries the question the kernel filled at pin time (`{{params.*}}`
                     // substituted, BRO-3829); show that one. The definition's text is the fallback
                     // only while nothing is pinned.
+                    let latest = self.fold.asks.get(&key);
+                    let current = self.fold.ask_for(key, &c.consumed);
                     let question = |rec: Option<&AskRec>| {
                         rec.and_then(|r| r.body.get("ask").and_then(Value::as_str))
                             .map_or_else(|| ask.clone(), str::to_owned)
                     };
-                    let reason = match self.fold.asks.get(&key) {
+                    let reason = match current {
                         Some(r) if r.linked => {
                             Reason::Owner { ask: question(Some(r)), ask_id: r.ask_id.clone(), ledger: r.ledger.clone() }
                         }
                         rec => Reason::Unfiled {
-                            ask: question(rec),
+                            ask: question(rec.or(latest)),
                             ask_id: rec.map(|r| r.ask_id.clone()),
                             ledger: rec.map(|r| r.ledger.clone()),
                         },
                     };
-                    reasons.push(reason);
+                    let mut human = vec![reason];
+                    let supersedes = match current {
+                        Some(r) => r.supersedes.clone(),
+                        None => latest.map(|r| r.ask_id.clone()),
+                    };
+                    if supersedes.is_some() || !reasons.is_empty() {
+                        human.push(Reason::InputsChanged { supersedes });
+                    }
+                    human.extend(reasons);
+                    reasons = human;
                     State::Waiting
                 }
                 _ => State::Ready,
@@ -1499,7 +1581,7 @@ impl<'f, 'a> Eval<'f, 'a> {
         if !out.enabled {
             return out;
         }
-        let Some(r) = fold.receipts.get(&(id, i)) else {
+        let Some(r) = fold.receipt((id, i), &out.consumed) else {
             out.form = Form::Open;
             return out;
         };
@@ -1512,6 +1594,10 @@ impl<'f, 'a> Eval<'f, 'a> {
             if r.inputs.get(*input).map(String::as_str) != Some(&**d) {
                 out.reasons.push(Reason::InputChanged { input: input.to_string() });
             }
+        }
+        if matches!(n.class, Class::Human { .. }) && !out.reasons.is_empty() {
+            out.form = Form::Open;
+            return out;
         }
         out.satisfies = out.reasons.is_empty();
         out.form = Form::Recorded;
@@ -1550,6 +1636,10 @@ impl<'f, 'a> Eval<'f, 'a> {
             }
         }
     }
+}
+
+fn same_inputs(inputs: &BTreeMap<String, String>, consumed: &BTreeMap<&str, Rc<str>>) -> bool {
+    inputs.len() == consumed.len() && consumed.iter().all(|(k, d)| inputs.get(*k).map(String::as_str) == Some(&**d))
 }
 
 /// Records why a node is not ready, once: a node may wait on one repeat for several reasons (two
