@@ -1494,6 +1494,12 @@ fn a_configured_registry_that_does_not_read_is_never_empty_and_complete() {
     // Direct: a configured registry file that is not there.
     let direct = SurfaceRegistry::new(None, None, Some(DirectRegistry::from_file(tmp.path().join("no-such.json"))));
     assert_eq!(context(&direct), (json!(false), json!(["direct permission prompts (1 unread)"])));
+    // Direct: a registry file that is there but does not parse (Gemini's joint round 7).
+    let malformed = tmp.path().join("direct-malformed.json");
+    std::fs::write(&malformed, "[{ not json").unwrap();
+    let direct = SurfaceRegistry::new(None, None, Some(DirectRegistry::from_file(&malformed)));
+    assert_eq!(context(&direct), (json!(false), json!(["direct permission prompts (1 unread)"])));
+    assert!(snapshot_errors(&direct).contains("the registry file does not parse"));
 }
 
 /// Codex's joint round 7: discovery reads by the one rule too. A home that cannot be read, with
@@ -1552,5 +1558,39 @@ fn a_registry_that_discovery_cannot_read_is_unread_never_absent() {
             let refused = result.unwrap_err();
             assert_eq!(refused.reason, maestro_hosts::RefusalReason::RegistryDisconnected, "{name}: {refused:?}");
         }
+    }
+}
+
+/// Gemini's joint round 7: the `~/.t3` fallback is a registry only when a database or snapshot is
+/// under it. A `~/.t3` of client config, logs and worktrees only, with neither variable set, is
+/// no registry: the owner's views stay complete. The same folder with a database that does not
+/// read is a registry found but unreadable: incomplete, naming T3.
+#[test]
+fn a_t3_folder_with_no_registry_keeps_the_views_complete() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = complete_store(tmp.path());
+    let home = tmp.path().join("home");
+    for dir in [".t3/userdata/logs", ".t3/worktrees/maestro", ".t3/caches"] {
+        std::fs::create_dir_all(home.join(dir)).unwrap();
+    }
+    std::fs::write(home.join(".t3/userdata/settings.json"), "{}").unwrap();
+    let context = |home: &Path| {
+        // As `SurfaceRegistry::from_env` builds it, with both variables unset.
+        let found = SurfaceRegistry::t3_root_from(None, None, Some(home));
+        let t3 = found.as_ref().map(|(root, _)| T3Registry::new(root));
+        let hosts = SurfaceRegistry::new(None, t3, None).with_t3_found(found.is_some());
+        let v = call_with_hosts(&store, &hosts, "maestro_context", json!({})).unwrap();
+        (found.is_some(), v["packet"]["needs_complete"].clone(), v["packet"]["degraded"].clone())
+    };
+    assert_eq!(context(&home), (false, json!(true), Value::Null), "no registry under ~/.t3");
+    let db = home.join(".t3/userdata/statev2.sqlite");
+    std::fs::write(&db, "").unwrap();
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let blocked = std::fs::read(&db).is_err(); // not as root
+    let got = context(&home);
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).unwrap();
+    if blocked {
+        assert_eq!(got, (true, json!(false), json!(["t3 permission prompts (1 unread)"])), "an unreadable database");
     }
 }

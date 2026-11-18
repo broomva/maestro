@@ -725,9 +725,14 @@ impl SurfaceRegistry {
     }
 
     /// The T3 registry root (BRO-3846): `MAESTRO_T3_HOME`, then `T3CODE_HOME` (which T3 sets), then
-    /// `~/.t3` when it exists. The flag says whether it was found rather than configured. `~/.t3` is
-    /// probed by the [`read`] rule: one whose metadata does not read (an inaccessible home) is a
-    /// registry found but unreadable, which every reader then reports, never "no registry".
+    /// `~/.t3` when a registry is there. The flag says whether it was found rather than configured.
+    ///
+    /// An explicit `MAESTRO_T3_HOME` or `T3CODE_HOME` is configured: a registry missing there is
+    /// unread. The `~/.t3` fallback is found only when a registry database or snapshot is under it,
+    /// by T3's own `locate` and the [`read`] rule: one there is found; one whose probe does not read
+    /// (an inaccessible home, an unreadable folder) is found but unreadable, which every reader then
+    /// reports; none there (a `~/.t3` of client config, logs or worktrees only) is no registry, and
+    /// the owner's views stay complete.
     pub fn t3_root_from(
         maestro_t3_home: Option<&str>,
         t3code_home: Option<&str>,
@@ -740,9 +745,9 @@ impl SurfaceRegistry {
             return Some((PathBuf::from(p), true));
         }
         let t3 = home?.join(".t3");
-        match read::is_dir(&t3) {
-            Read::Present(true) | Read::Unreadable(_) => Some((t3, true)),
-            Read::Present(false) | Read::Absent => None,
+        match T3Registry::new(&t3).locate() {
+            Read::Present(_) | Read::Unreadable(_) => Some((t3, true)),
+            Read::Absent => None,
         }
     }
 

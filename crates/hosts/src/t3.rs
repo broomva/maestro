@@ -172,7 +172,7 @@ struct RawProviderThread {
 
 /// Where a T3 registry is: a JSON snapshot, or a `statev2.sqlite`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Located {
+pub(crate) enum Located {
     Json(PathBuf),
     Sqlite(PathBuf),
 }
@@ -568,7 +568,7 @@ impl T3Registry {
     /// `statev2.sqlite` (`<root>`, `<root>/statev2.sqlite`, `<root>/userdata/statev2.sqlite`),
     /// each probed by the [`read`](crate::read) rule: a candidate whose metadata does not read
     /// makes the registry unreadable, never "not there".
-    fn locate(&self) -> Read<Located> {
+    pub(crate) fn locate(&self) -> Read<Located> {
         let json = [self.root.clone(), self.root.join("threads.json")].map(|c| (c, true));
         let sqlite = [self.root.clone(), self.root.join("statev2.sqlite"), self.root.join("userdata/statev2.sqlite")]
             .map(|c| (c, false));

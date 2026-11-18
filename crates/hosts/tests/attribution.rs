@@ -49,7 +49,12 @@ fn the_t3_root_is_maestro_t3_home_then_t3code_home_then_home_t3() {
     let home = tmp.path().join("home");
     let at = |m: Option<&str>, t: Option<&str>, h: &Path| SurfaceRegistry::t3_root_from(m, t, Some(h));
     assert_eq!(at(None, None, &home), None, "no ~/.t3, no root");
-    std::fs::create_dir_all(home.join(".t3")).unwrap();
+    // A ~/.t3 with no registry under it (client config, logs, worktrees) is no root (Gemini's
+    // joint round 7); one with a database under it is found.
+    std::fs::create_dir_all(home.join(".t3/userdata")).unwrap();
+    std::fs::create_dir_all(home.join(".t3/worktrees")).unwrap();
+    assert_eq!(at(None, None, &home), None, "a ~/.t3 with no registry");
+    std::fs::write(home.join(".t3/userdata/statev2.sqlite"), "").unwrap();
     assert_eq!(at(None, None, &home), Some((home.join(".t3"), true)));
     assert_eq!(at(None, Some("/t3code"), &home), Some((PathBuf::from("/t3code"), true)));
     assert_eq!(at(Some("/maestro"), Some("/t3code"), &home), Some((PathBuf::from("/maestro"), false)));

@@ -211,6 +211,7 @@ Three deliberate exceptions:
       - Paseo's agents folder, its entries (a `read_dir` entry that fails is an unread item, never dropped), its agent folders and agent files;
       - the Direct registry file;
       - the reader's `environment-id` (only a missing file is absent).
+    - **The `~/.t3` fallback is a registry only when one is there** (Gemini's joint round 7). It is found when T3's own `locate` finds a database or snapshot under it, or cannot tell. A `~/.t3` with neither (client config, logs and worktrees only, before `userdata/statev2.sqlite` exists) is no registry, so the owner's views stay complete. An explicit `MAESTRO_T3_HOME` or `T3CODE_HOME` is configured, so a registry missing there is unread.
     - Discovery that cannot read (an inaccessible home) yields a found registry that is unreadable. It reaches `live_permission_report` as an unread source naming the surface. Identity on it fails closed: `registry_disconnected` from a lookup, `registry_unavailable` from a variable's resolution, never "no such session".
     - Plugin parity holds. A Paseo agent file that reads but does not parse, or names another agent, is still "no such session" to identity, as `callers-golden.json` requires. The listing reports it unread.
     - `crates/hosts/tests/read_guard.rs` fails if a raw `is_dir`, `is_file`, `exists`, `read_dir`, `read_to_string`, or a dropped entry error comes back in those functions.

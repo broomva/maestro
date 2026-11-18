@@ -2321,7 +2321,7 @@ mutate $ht '            Some(t) if t.archived_at.is_some() => {' '            So
 mutate $ht '            Some(t) if t.deleted_at.is_some() => {' '            Some(t) if false => {'
 mutate $ht '        if thread.archived_at.is_some() || thread.deleted_at.is_some() {' '        if false {'
 mutate $hlb '        if let Some(p) = t3code_home.filter(|s| !s.is_empty()) {' '        if let Some(p) = t3code_home.filter(|_| false) {'
-mutate $hlb '            Read::Present(true) | Read::Unreadable(_) => Some((t3, true)),' '            Read::Present(true) | Read::Unreadable(_) | Read::Present(false) | Read::Absent => Some((t3, true)),'
+mutate $hlb '            Read::Present(_) | Read::Unreadable(_) => Some((t3, true)),' '            Read::Present(_) | Read::Unreadable(_) | Read::Absent => Some((t3, true)),'
 mutate $hlb '            std::env::var("T3CODE_HOME").ok().as_deref(),' '            std::env::var("T3CODE_HOME_UNSET").ok().as_deref(),'
 mutate $hlb '        self.has_surface(surface) && !(surface == &Surface::T3 && self.t3_found)' '        self.has_surface(surface)'
 mutate $hlb '            .with_identity_mode(IdentityMode::parse(std::env::var("MAESTRO_IDENTITY").ok().as_deref()))' '            .with_identity_mode(IdentityMode::Attributed)'
@@ -2474,11 +2474,15 @@ mutate $hlb '            unreadable(Surface::Direct, failed);' ''
 hrd=crates/hosts/src/read.rs
 mutate $hrd '            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => Read::Absent,' '            Err(_) => Read::Absent,'
 mutate $hrd '            Err(e) => Read::Unreadable(format!("an entry of {} does not read: {e}", dir.display())),' '            Err(_) => Read::Absent,'
-mutate $hlb '            Read::Present(true) | Read::Unreadable(_) => Some((t3, true)),' $'            Read::Present(true) => Some((t3, true)),\n            Read::Unreadable(_) => None,'
+mutate $hlb '            Read::Present(_) | Read::Unreadable(_) => Some((t3, true)),' $'            Read::Present(_) => Some((t3, true)),\n            Read::Unreadable(_) => None,'
 mutate $ht '                Read::Unreadable(why) => return Read::Unreadable(why),' '                Read::Unreadable(_) => {}'
 mutate $hp $'            Read::Absent => return Ok(None),\n            Read::Unreadable(why) => return Err(unread(why)),' $'            Read::Absent | Read::Unreadable(_) => return Ok(None),'
 mutate $hp '                    unread.push((at(&self.dir), why));' ''
 mutate $hlb '            Read::Unreadable(why) => Err(why),' '            Read::Unreadable(_) => Ok(Vec::new()),'
+# Gemini's joint round 7 (BRO-3846, at 875c1af): the ~/.t3 fallback is a registry only when one is
+# located under it; a Direct registry file that does not parse is unread.
+mutate $hlb '        match T3Registry::new(&t3).locate() {' '        match read::is_dir(&t3).map(|_| ()) {'
+mutate $hlb '                .map_err(|e| format!("the registry file does not parse: {e}")),' '                .or_else(|_| Ok::<Vec<DirectSession>, serde_json::Error>(Vec::new())).map_err(|e| format!("the registry file does not parse: {e}")),'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
