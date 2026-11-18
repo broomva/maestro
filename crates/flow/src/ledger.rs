@@ -61,7 +61,7 @@ pub struct Ledger {
     epoch: String,
     root_id: FileId,
     lock_file: File,
-    pub(crate) options: Options,
+    options: Options,
 }
 
 pub(crate) fn random_epoch() -> Result<String> {
@@ -97,17 +97,21 @@ pub(crate) fn stage_root(layout: &Layout, host: &HostId, epoch: &str) -> Result<
     Ok(stage)
 }
 
-/// Puts a lock naming `epoch` in place. The lock is never rewritten: a new one is written whole
-/// under a private name, synced, and renamed over it. A crash before the rename leaves the old
-/// lock as it was. A holder of the old lock file sees `lock_lost` afterwards.
-pub(crate) fn install_lock(layout: &Layout, epoch: &str) -> Result<()> {
+/// Puts a lock naming `epoch` in place, held exclusive by the returned [`File`]. The lock is
+/// never rewritten: a new one is written whole under a private name, locked, synced, and renamed
+/// over it. A crash before the rename leaves the old lock as it was. A holder of the old lock
+/// file sees `lock_lost` afterwards.
+pub(crate) fn install_lock(layout: &Layout, epoch: &str) -> Result<File> {
     let private = layout.private_lock("new", epoch);
     let _ = std::fs::remove_file(&private);
-    write_new(&private, &format!("{epoch}\n"))?;
+    let mut file =
+        OpenOptions::new().read(true).write(true).create_new(true).open(&private).map_err(FlowError::io(&private))?;
+    lock::take(&file, Mode::Exclusive, Duration::ZERO, &private)?;
+    file.write_all(format!("{epoch}\n").as_bytes()).and_then(|()| file.sync_all()).map_err(FlowError::io(&private))?;
     pause!("lock_written");
     std::fs::rename(&private, &layout.lock).map_err(FlowError::io(&layout.lock))?;
     sync_dir(&layout.parent);
-    Ok(())
+    Ok(file)
 }
 
 /// Opens the lock file without creating it. `None` only on an empty tree: no lock, no root, no
@@ -234,6 +238,9 @@ impl Ledger {
         lock::take(&file, Mode::Shared, options.lock_wait, &layout.lock)?;
         let checked = (|| {
             if !lock::same_file(&file, &layout.lock)? {
+                if !layout::exists(&layout.root)? {
+                    return Err(FlowError::RootMoved { root: layout.root.clone() });
+                }
                 return Err(FlowError::LockLost {
                     lock: layout.lock.clone(),
                     detail: "the lock file was replaced while this writer opened it".into(),
@@ -479,6 +486,9 @@ impl Reader {
         lock::take(&file, Mode::Shared, self.options.lock_wait, &layout.lock)?;
         let checked = (|| {
             if !lock::same_file(&file, &layout.lock)? {
+                if !layout::exists(&layout.root)? {
+                    return Err(FlowError::RootMoved { root: layout.root.clone() });
+                }
                 return Err(FlowError::LockLost {
                     lock: layout.lock.clone(),
                     detail: "the lock file was replaced while this reader opened it".into(),
@@ -553,8 +563,8 @@ impl ReadGuard {
     }
 
     /// Every row of the projection, read-only; `None` when there is no projection file. For tests.
-    #[doc(hidden)]
-    pub fn projection_dump(&self) -> Result<Option<projection::ProjectionDump>> {
+    #[cfg(test)]
+    pub(crate) fn projection_dump(&self) -> Result<Option<projection::ProjectionDump>> {
         projection::dump(&self.layout)
     }
 

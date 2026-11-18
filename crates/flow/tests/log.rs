@@ -68,7 +68,6 @@ fn a_read_writes_nothing() {
         assert_eq!(code(guard.summary(&id("fi_b"))), "torn_tail");
         assert_eq!(code(guard.log(&id("fi_none"))), "unknown_instance");
         let summary = guard.summary(&id("fi_a")).unwrap();
-        guard.projection_dump().unwrap();
         summary.cache
     };
 
@@ -248,7 +247,6 @@ fn the_projection_is_never_opened_through_a_link() {
             let cache = guard.summary(&id("fi_a")).unwrap().cache;
             if name == "projection.sqlite" {
                 assert!(matches!(cache, CacheState::Unreadable(_)), "{name} -> {target}");
-                assert!(guard.projection_dump().is_err(), "{name} -> {target}");
             }
             drop(guard);
             assert_eq!(snapshot(&outside), before, "{name} -> {target}: written through the link");
@@ -270,7 +268,7 @@ fn the_incremental_projection_equals_a_rebuild() {
     }
     append_at_head(&mut ledger, &id("fi_d"), event("Started", 0)).unwrap();
     let reader = Reader::new(&root, Options::default()).unwrap();
-    let dump = |reader: &Reader| reader.lock().unwrap().projection_dump().unwrap().unwrap();
+    let dump = |_: &Reader| projection_dump(&root);
     // Compares the cache as kept with a rebuild, then puts the kept one back.
     let same_as_rebuild = |ledger: &mut Ledger, step: &str| {
         let kept = dump(&reader);
@@ -326,7 +324,7 @@ fn the_projection_replays_exactly_and_the_log_wins() {
         append_at_head(&mut ledger, fi, event(kind, 0)).unwrap();
     }
     let reader = Reader::new(&root, Options::default()).unwrap();
-    let dump = || reader.lock().unwrap().projection_dump().unwrap().unwrap();
+    let dump = || projection_dump(&root);
     let built = dump();
     assert_eq!(built.instances.len(), 2);
     assert!(built.kind_counts.contains(&("fi_a".into(), "Claimed".into(), 2)));
