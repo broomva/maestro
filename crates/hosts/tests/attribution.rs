@@ -730,7 +730,9 @@ fn a_paseo_permission_record_that_does_not_decode_is_unread() {
     assert_eq!(needs, 1, "the well-formed prompt is listed");
     assert_eq!(unread.len(), 1, "{unread:?}");
     assert!(
-        unread[0].starts_with("paseo ") && unread[0].contains("agent-a.json") && unread[0].contains("does not decode"),
+        unread[0].starts_with("paseo ")
+            && unread[0].contains("agent-a.json")
+            && unread[0].contains("permission record 0 names no tool"),
         "{unread:?}"
     );
     // Identity: the agent is found as before, with its decoded prompt only.
@@ -749,7 +751,10 @@ fn a_t3_snapshot_permission_record_that_does_not_decode_is_unread() {
     let (needs, unread) = unread_reasons(&SurfaceRegistry::new(None, Some(t3.clone()), None));
     assert_eq!(needs, 1);
     assert_eq!(unread.len(), 1, "{unread:?}");
-    assert!(unread[0].starts_with("t3 t3 thread mcp:a") && unread[0].contains("does not decode"), "{unread:?}");
+    assert!(
+        unread[0].starts_with("t3 t3 thread mcp:a") && unread[0].contains("permission record 0 is not an object"),
+        "{unread:?}"
+    );
     let v = t3.verify_attributed("mcp:a", None).unwrap();
     assert_eq!(v.pending_permissions().len(), 1, "identity carries the decoded prompt only");
 }
@@ -788,4 +793,131 @@ for rid, payload in [("req-bad", "{bad"), ("req-null", None), ("req-list", "[1]"
     }
     let v = t3.verify_attributed("mcp:a", None).unwrap();
     assert_eq!(v.pending_permissions().len(), 1, "identity carries the decoded prompt only");
+}
+
+/// BRO-3863 round 11: one rule, in Rust, for every surface. Each payload is put, beside a
+/// well-formed neighbour, through a T3 runtime request (SQLite, kind `approval`), a Paseo agent
+/// file and a T3 snapshot row; each surface gives the expected answer, the neighbour is listed, and
+/// identity still finds the session. Non-JSON text exists only as a runtime request's payload.
+#[derive(Clone, Copy, Debug)]
+enum Outcome {
+    Prompt(&'static str),
+    Unread(&'static str),
+}
+
+/// A prompt's title, or why the record is unread.
+fn outcome_of(hosts: &SurfaceRegistry) -> Result<String, String> {
+    let live = hosts.live_permission_report(None, None);
+    let titles: Vec<&str> = live.needs.iter().map(|n| n.title.as_str()).collect();
+    assert!(titles.contains(&"Neighbour"), "the well-formed neighbour is listed: {titles:?}");
+    match (live.needs.len(), live.unreadable.len()) {
+        (2, 0) => match titles.iter().find(|t| **t != "Neighbour") {
+            Some(t) => Ok(t.to_string()),
+            None => panic!("{titles:?}"),
+        },
+        (1, 1) => Err(live.unreadable[0].error.reason.clone()),
+        other => panic!("{other:?}: {titles:?} {:?}", live.unreadable),
+    }
+}
+
+fn runtime_outcome(payload: Option<&str>) -> Result<String, String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let payload = match payload {
+        Some(text) => serde_json::to_string(text).unwrap(),
+        None => "None".to_string(),
+    };
+    let db = partial_db(
+        tmp.path(),
+        true,
+        &format!(
+            r#"
+conn.executescript("""CREATE TABLE orchestration_v2_projection_runtime_requests (
+  runtime_request_id TEXT, thread_id TEXT, kind TEXT, status TEXT, created_at TEXT, payload_json TEXT);""")
+thread("mcp:a", None, {{"worktreePath": "/w"}})
+for rid, payload in [("req-case", {payload}), ("req-neighbour", json.dumps({{"toolName": "Neighbour"}}))]:
+    conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
+        (rid, "mcp:a", "approval", "pending", "2026-11-17T00:00:00Z", payload))
+"#
+        ),
+    );
+    let t3 = T3Registry::new(db);
+    let outcome = outcome_of(&SurfaceRegistry::new(None, Some(t3.clone()), None));
+    assert!(t3.verify_attributed("mcp:a", None).is_ok(), "identity is unaffected");
+    outcome
+}
+
+fn paseo_outcome(record: &serde_json::Value) -> Result<String, String> {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("work")).unwrap();
+    let agent = serde_json::json!({ "id": "agent-a", "cwd": "/w", "lastStatus": "running",
+        "pendingPermissions": [record, { "name": "Neighbour" }] });
+    std::fs::write(tmp.path().join("work/agent-a.json"), agent.to_string()).unwrap();
+    let outcome = outcome_of(&SurfaceRegistry::new(Some(maestro_hosts::PaseoRegistry::new(tmp.path())), None, None));
+    assert!(maestro_hosts::PaseoRegistry::new(tmp.path()).find("agent-a").is_some(), "identity is unaffected");
+    outcome
+}
+
+fn snapshot_outcome(record: &serde_json::Value) -> Result<String, String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("threads.json");
+    let rows = serde_json::json!([{ "id": "mcp:a", "cwd": "/w", "created_at": "2026-11-17T00:00:00Z", "status": "running",
+        "pending_permissions": [record, { "toolName": "Neighbour" }] }]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    let t3 = T3Registry::new(&path);
+    let outcome = outcome_of(&SurfaceRegistry::new(None, Some(t3.clone()), None));
+    assert!(t3.verify_attributed("mcp:a", None).is_ok(), "identity is unaffected");
+    outcome
+}
+
+#[test]
+fn one_permission_rule_answers_alike_on_every_surface() {
+    use Outcome::{Prompt, Unread};
+    const TOOL: &str = "has a tool name that is not a non-blank string (`toolName`)";
+    const NAME: &str = "has a tool name that is not a non-blank string (`name`)";
+    // (payload, the answer of a record surface (Paseo, T3 snapshot), a runtime request's answer).
+    let cases: [(Option<&str>, Option<Outcome>, Outcome); 20] = [
+        (Some(r#"{"toolName": ""}"#), Some(Unread(TOOL)), Unread(TOOL)),
+        (Some(r#"{"toolName": 0}"#), Some(Unread(TOOL)), Unread(TOOL)),
+        (Some(r#"{"toolName": false}"#), Some(Unread(TOOL)), Unread(TOOL)),
+        (Some(r#"{"toolName": null}"#), Some(Unread(TOOL)), Unread(TOOL)),
+        (Some(r#"{"toolName": []}"#), Some(Unread(TOOL)), Unread(TOOL)),
+        (Some(r#"{"toolName": 7}"#), Some(Unread(TOOL)), Unread(TOOL)),
+        (Some(r#"{"toolName": "   "}"#), Some(Unread(TOOL)), Unread(TOOL)),
+        (Some(r#"{"name": ""}"#), Some(Unread(NAME)), Unread(NAME)),
+        (Some(r#"{"name": null}"#), Some(Unread(NAME)), Unread(NAME)),
+        // The first present key governs: an invalid `toolName` is not rescued by a valid `name`.
+        (Some(r#"{"toolName": 7, "name": "Deploy"}"#), Some(Unread(TOOL)), Unread(TOOL)),
+        (Some(r#"{"toolName": "Deploy", "name": "Other"}"#), Some(Prompt("Deploy")), Prompt("Deploy")),
+        (Some(r#"{"toolName": "Deploy"}"#), Some(Prompt("Deploy")), Prompt("Deploy")),
+        (Some(r#"{"name": "Deploy"}"#), Some(Prompt("Deploy")), Prompt("Deploy")),
+        // Optional fields of a wrong type are ignored, never unread.
+        (
+            Some(r#"{"toolName": "Deploy", "id": [1], "title": 7, "description": false, "input": "x"}"#),
+            Some(Prompt("Deploy")),
+            Prompt("Deploy"),
+        ),
+        (Some(r#"{"toolName": "Deploy", "title": "Ship it"}"#), Some(Prompt("Ship it")), Prompt("Ship it")),
+        // Neither key: a runtime request is a prompt named by its kind; a record has no kind.
+        (Some("{}"), Some(Unread("names no tool")), Prompt("approval")),
+        (Some("[1]"), Some(Unread("is not an object")), Unread("is not an object")),
+        (None, Some(Unread("is not an object")), Unread("is empty")),
+        (Some("   "), None, Unread("is empty")),
+        (Some("{bad"), None, Unread("does not parse")),
+    ];
+    let same = |got: &Result<String, String>, want: Outcome| match (got, want) {
+        (Ok(g), Prompt(w)) => g == w,
+        (Err(g), Unread(w)) => g.ends_with(w),
+        _ => false,
+    };
+    for (payload, records, runtime) in cases {
+        let got = runtime_outcome(payload);
+        assert!(same(&got, runtime), "runtime {payload:?}: {got:?}, want {runtime:?}");
+        if let Some(want) = records {
+            let record: serde_json::Value =
+                payload.map_or(serde_json::Value::Null, |p| serde_json::from_str(p).unwrap());
+            for (surface, got) in [("paseo", paseo_outcome(&record)), ("snapshot", snapshot_outcome(&record))] {
+                assert!(same(&got, want), "{surface} {payload:?}: {got:?}, want {want:?}");
+            }
+        }
+    }
 }

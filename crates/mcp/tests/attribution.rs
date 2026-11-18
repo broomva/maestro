@@ -1611,12 +1611,13 @@ fn a_permission_record_that_does_not_decode_leaves_the_views_incomplete() {
     assert_eq!(context["packet"]["degraded"], json!(["t3 permission prompts (1 unread)"]), "{context}");
     let needs = call_with_hosts(&store, &hosts, "maestro_needs_list", json!({})).unwrap();
     assert!(needs["data"].to_string().contains("mcp:good"), "{needs}");
-    assert!(needs["errors"].to_string().contains("does not decode"), "{needs}");
+    assert!(needs["errors"].to_string().contains("permission record 0 names no tool"), "{needs}");
 }
 
 /// The owner's decision after round 9: a pending approval whose payload names no tool (`{}`) is a
 /// prompt named by its kind, never hidden and never an unread record, so the views stay complete.
-/// Removing the reader's fallback to the kind makes it unread and fails this test.
+/// Removing the rule's fallback to the kind (`permission_record`, round 11) makes it unread and
+/// fails this test.
 #[test]
 fn an_approval_that_names_no_tool_is_a_prompt_named_by_its_kind() {
     let tmp = tempfile::tempdir().unwrap();

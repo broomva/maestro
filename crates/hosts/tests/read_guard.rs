@@ -1,5 +1,6 @@
-//! The read rule's guard (BRO-3846, joint rounds 7 and 9): registry discovery, enumeration and
-//! record decoding go through `maestro_hosts::read` and `decode_permissions` only. A raw probe or
+//! The read rule's guard (BRO-3846, joint rounds 7, 9 and 11): registry discovery, enumeration and
+//! record decoding go through `maestro_hosts::read` and the one permission rule
+//! (`permission_record`, behind `decode_permissions` and `decode_runtime_requests`) only. A raw probe or
 //! read (`is_dir`, `is_file`, `exists`, `read_dir`, `read_to_string`, `fs::metadata`, `fs::read`,
 //! `File::open`), an error dropped by `.ok()` on a decode or in a `filter_map`, or an embedded-reader
 //! `except …: continue` turns a read failure into "not there", the defect these rules end.
@@ -7,7 +8,8 @@
 //! It is a scoped, lexical guard over a named list and claims no more than it checks: the functions
 //! named below, for the listed patterns, matched over each statement (the text between `;`, `{` and
 //! `}`, whitespace normalised, so a chain split across lines is one statement); and the whole
-//! embedded SQLite reader, for a `continue` anywhere in an `except` block's body. Code outside the
+//! embedded SQLite reader, for a `continue` anywhere in an `except` block's body (blank and
+//! comment-only lines skipped). Code outside the
 //! list, and errors dropped by other means, are review's to catch. Its one reviewed exception is
 //! listed in [`REVIEWED`], with why.
 
@@ -38,7 +40,19 @@ const GUARDED: &[(&str, &[&str])] = &[
             "list_live_report",
         ],
     ),
-    ("src/paseo.rs", &["is_connected", "lookup", "list_with", "agent_at", "parse_agent", "decode_permissions"]),
+    (
+        "src/paseo.rs",
+        &[
+            "is_connected",
+            "lookup",
+            "list_with",
+            "agent_at",
+            "parse_agent",
+            "decode_permissions",
+            "decode_runtime_requests",
+            "permission_record",
+        ],
+    ),
 ];
 
 /// What turns a read failure into absence outside `read`.
@@ -80,8 +94,9 @@ fn drops_an_error(statement: &str) -> bool {
 }
 
 /// The embedded SQLite reader's `except …:` clauses with a `continue` anywhere in their body (the
-/// lines indented deeper than the `except`, up to the first that is not), so logging or assigning
-/// first does not hide the skip.
+/// lines indented deeper than the `except`, up to the first that is not; blank and comment-only
+/// lines neither end the body nor count), so logging, assigning or a comment first does not hide
+/// the skip. Lexical, and only this: a skip spelt otherwise (`pass`, `return None`) is review's.
 fn skips_on_error(reader: &str) -> Vec<String> {
     let indent = |l: &str| l.len() - l.trim_start().len();
     let lines: Vec<&str> = reader.lines().collect();
@@ -91,7 +106,8 @@ fn skips_on_error(reader: &str) -> Vec<String> {
             continue;
         }
         let depth = indent(line);
-        let body = lines[i + 1..].iter().filter(|l| !l.trim().is_empty()).take_while(|l| indent(l) > depth);
+        let code = |l: &&&str| !l.trim().is_empty() && !l.trim_start().starts_with('#');
+        let body = lines[i + 1..].iter().filter(code).take_while(|l| indent(l) > depth);
         if body.into_iter().any(|l| l.trim() == "continue" || l.trim().starts_with("continue ")) {
             out.push(format!("line {}: {}", i + 1, line.trim()));
         }
@@ -153,8 +169,9 @@ fn registry_discovery_and_enumeration_read_by_the_one_rule() {
     assert!(found.is_empty(), "read through maestro_hosts::read instead:\n{}", found.join("\n"));
 }
 
-/// The embedded SQLite reader skips nothing on an error: a record that does not read is a marker
-/// or an exit status, never a `continue`.
+/// The embedded SQLite reader, whole, skips nothing on an error: a payload that does not read is an
+/// exit status, or a listed thread with why, never a `continue`. It interprets no permission
+/// payload: those are Rust's (`permission_record`, BRO-3863 round 11).
 #[test]
 fn the_embedded_reader_never_skips_on_an_error() {
     let t3 = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/t3.rs")).unwrap();
@@ -186,9 +203,15 @@ fn the_guards_rules_see_what_they_name() {
     assert_eq!(skips_on_error(direct), ["line 3: except Exception:"]);
     let later = "for r in rows:\n    try:\n        x = load(r)\n    except ValueError as e:\n        log(e)\n        bad = True\n        continue\n    use(x)\n";
     assert_eq!(skips_on_error(later), ["line 4: except ValueError as e:"]);
+    // A comment, at any indent, neither ends the body nor hides the continue after it.
+    let commented = "for r in rows:\n    try:\n        x = load(r)\n    except E:\n# a note at column 0\n        # an indented note\n\n        continue\n";
+    assert_eq!(skips_on_error(commented), ["line 4: except E:"]);
     // Not flagged: an except that records and goes on, and a continue after the block ends.
     let kept = "for r in rows:\n    try:\n        x = load(r)\n    except E as e:\n        out.append(e)\n    if skip(r):\n        continue\n";
     assert!(skips_on_error(kept).is_empty(), "{:?}", skips_on_error(kept));
+    // Nor a continue that is only in a comment, or after the block with a comment between.
+    let noted = "for r in rows:\n    try:\n        x = load(r)\n    except E as e:\n        # continue would hide it\n        out.append(e)\n    # done\n    continue\n";
+    assert!(skips_on_error(noted).is_empty(), "{:?}", skips_on_error(noted));
 }
 
 /// The guard itself sees a raw probe.

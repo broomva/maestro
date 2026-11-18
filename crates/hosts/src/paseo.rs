@@ -49,32 +49,118 @@ pub struct PermissionLike {
     pub input: Option<serde_json::Map<String, Value>>,
 }
 
-/// The one rule for a session's pending permission records (BRO-3863), for Paseo and T3 alike: each
-/// record that decodes is a prompt; each that does not is an unread record, with why, never
-/// dropped. A record `{"unreadable": why}` with no `name` is the T3 reader's own marker for a
-/// runtime request whose payload did not read. Identity is unaffected: a verified session carries
-/// the prompts that decoded, and its lookup's outcome does not depend on them; only the owner's
-/// permission listing reports the unread ones.
+/// The one rule for a pending permission record (BRO-3863), for every surface: Paseo agent files,
+/// T3 snapshot rows and T3 runtime requests alike. It reads keys by presence and type, never by
+/// truthiness. The tool name is `toolName` when that key is present, else `name` when that key is
+/// present; the first present key governs, and it must hold a non-blank string, else the record
+/// is unread (`""`, `"   "`, `0`, `false`, `null`, `[]` all are). A record with neither key is a
+/// prompt named by its `kind` (a T3 runtime request's); one with neither key nor kind is unread.
+/// `id`, `title`, `description` and `input` are optional and typed: a wrong type is ignored.
+pub(crate) fn permission_record(
+    record: &serde_json::Map<String, Value>,
+    kind: Option<&str>,
+) -> Result<PermissionLike, String> {
+    let name = if let Some(v) = record.get("toolName") {
+        tool_name(v, "toolName")?
+    } else if let Some(v) = record.get("name") {
+        tool_name(v, "name")?
+    } else {
+        match kind.map(str::trim).filter(|k| !k.is_empty()) {
+            Some(k) => k.to_string(),
+            None => return Err("names no tool".to_string()),
+        }
+    };
+    let text = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_string);
+    Ok(PermissionLike {
+        id: text("id"),
+        name,
+        title: text("title"),
+        description: text("description"),
+        input: record.get("input").and_then(Value::as_object).cloned(),
+    })
+}
+
+fn tool_name(value: &Value, key: &str) -> Result<String, String> {
+    match value.as_str().filter(|s| !s.trim().is_empty()) {
+        Some(name) => Ok(name.to_string()),
+        None => Err(format!("has a tool name that is not a non-blank string (`{key}`)")),
+    }
+}
+
+/// A session's pending permission records, each a prompt or an unread record with why, never
+/// dropped (BRO-3863): a record that is not an object is unread, any other reads by
+/// [`permission_record`]. Records carry no kind, so one naming no tool is unread. Identity is
+/// unaffected: a verified session carries the prompts that decoded, and its lookup's outcome does
+/// not depend on them; only the owner's permission listing reports the unread ones.
 pub(crate) fn decode_permissions(raw: Vec<Value>, cwd: &str, prefix: &str) -> (Vec<PermissionPrompt>, Vec<String>) {
     let mut prompts = Vec::new();
     let mut unread = Vec::new();
-    for (i, value) in raw.into_iter().enumerate() {
-        if value.get("name").is_none()
-            && let Some(why) = value.get("unreadable").and_then(Value::as_str)
-        {
-            unread.push(why.to_string());
+    for (i, value) in raw.iter().enumerate() {
+        let Some(record) = value.as_object() else {
+            unread.push(format!("permission record {i} is not an object"));
             continue;
-        }
-        match serde_json::from_value::<PermissionLike>(value) {
-            Ok(p) => {
-                let (title, detail) = describe_permission(&p, Some(cwd));
-                let request_id = permission_request_id(&p, prefix);
-                prompts.push(PermissionPrompt { request_id, title, detail });
-            }
-            Err(e) => unread.push(format!("permission record {i} does not decode: {e}")),
+        };
+        match permission_record(record, None) {
+            Ok(p) => prompts.push(prompt_of(&p, cwd, prefix)),
+            Err(why) => unread.push(format!("permission record {i} {why}")),
         }
     }
     (prompts, unread)
+}
+
+/// One pending T3 runtime request, raw, as the SQLite reader emits it: the reader does not
+/// interpret its payload (BRO-3863 round 11).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct RawRuntimeRequest {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub payload_json: Option<String>,
+}
+
+/// A T3 thread's pending runtime requests, by the same rule: a payload that is NULL, blank, not
+/// JSON or not an object is unread; any other reads by [`permission_record`] with the request's
+/// kind, so a payload naming no tool (`{}`) is a prompt named by its kind. The request's own id
+/// is the prompt's when it is non-blank, else the payload's `id`.
+pub(crate) fn decode_runtime_requests(
+    raw: Vec<RawRuntimeRequest>,
+    thread: &str,
+    cwd: &str,
+    prefix: &str,
+) -> (Vec<PermissionPrompt>, Vec<String>) {
+    let mut prompts = Vec::new();
+    let mut unread = Vec::new();
+    for req in raw {
+        let what = format!("permission request {} of thread {thread}", req.id.as_deref().unwrap_or("-"));
+        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {
+            None => Err("is empty"),
+            Some(text) => match serde_json::from_str::<Value>(text) {
+                Err(_) => Err("does not parse"),
+                Ok(Value::Object(record)) => Ok(record),
+                Ok(_) => Err("is not an object"),
+            },
+        };
+        let decoded =
+            payload.map_err(str::to_string).and_then(|record| permission_record(&record, req.kind.as_deref()));
+        match decoded {
+            Ok(mut p) => {
+                if let Some(id) = req.id.as_deref().filter(|s| !s.trim().is_empty()) {
+                    p.id = Some(id.to_string());
+                }
+                prompts.push(prompt_of(&p, cwd, prefix));
+            }
+            Err(why) => unread.push(format!("{what} {why}")),
+        }
+    }
+    (prompts, unread)
+}
+
+fn prompt_of(p: &PermissionLike, cwd: &str, prefix: &str) -> PermissionPrompt {
+    let (title, detail) = describe_permission(p, Some(cwd));
+    let request_id = permission_request_id(p, prefix);
+    PermissionPrompt { request_id, title, detail }
 }
 
 /// What Maestro reads from a Paseo registry file (`server/callers.ts` `RegistryAgent`).
@@ -677,6 +763,27 @@ pub fn permission_request_id(raw: &PermissionLike, prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BRO-3863 round 11: a runtime request's own id is its prompt's when non-blank; a blank one
+    /// gives way to the payload's `id`, and with neither the prompt's id is derived.
+    #[test]
+    fn a_runtime_request_is_known_by_its_own_id_else_its_payloads() {
+        let req = |id: Option<&str>, payload: &str| RawRuntimeRequest {
+            id: id.map(str::to_string),
+            kind: Some("approval".to_string()),
+            payload_json: Some(payload.to_string()),
+        };
+        let raw = vec![
+            req(Some("req-1"), r#"{"id": "p-1", "toolName": "Deploy"}"#),
+            req(Some("  "), r#"{"id": "p-2", "toolName": "Deploy"}"#),
+            req(None, r#"{"toolName": "Deploy"}"#),
+        ];
+        let (prompts, unread) = decode_runtime_requests(raw, "mcp:a", "/w", "t3-perm");
+        assert!(unread.is_empty(), "{unread:?}");
+        let ids: Vec<&str> = prompts.iter().map(|p| p.request_id.as_str()).collect();
+        assert_eq!(ids[..2], ["req-1", "p-2"]);
+        assert!(ids[2].starts_with("t3-perm-"), "{ids:?}");
+    }
 
     /// Codex's joint round 7: a directory entry whose read fails is an unread item of the listing,
     /// never an agent silently left out. A real `read_dir` cannot be made to fail one entry, so the

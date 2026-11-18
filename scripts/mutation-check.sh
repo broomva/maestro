@@ -2443,7 +2443,7 @@ mutate $ht '.filter(|raw| attributed || !raw.cwd.is_empty())' '.filter(|_| true)
 # signal: an unreadable thread keeps its prompts, a bad snapshot row hides no other, and every
 # view says what did not read.
 mutate $ht $'                except PayloadError as exc:\n                    built = {' $'                except PayloadError as exc:\n                    continue\n                    built = {'
-mutate $ht '                        "pending_permissions": permissions_of(row["thread_id"]),' '                        "pending_permissions": [],'
+mutate $ht '                        "runtime_requests": runtime_requests_of(row["thread_id"]),' '                        "runtime_requests": [],'
 mutate $ht '                        "unreadable": str(exc),' '                        "unreadable": None,'
 mutate $ht '            if mode not in ("attr", "list"):' '            if mode not in ("attr",):'
 mutate $ht '                    report.unreadable.push((format!("t3 thread {}", raw.id), why));' ''
@@ -2485,18 +2485,33 @@ mutate $hlb '        match T3Registry::new(&t3).locate() {' '        match read:
 mutate $hlb '                .map_err(|e| format!("the registry file does not parse: {e}")),' '                .or_else(|_| Ok::<Vec<DirectSession>, serde_json::Error>(Vec::new())).map_err(|e| format!("the registry file does not parse: {e}")),'
 # Round 9, BRO-3863 folded in: a pending permission record that does not decode is an unread item of
 # the owner's listing, tagged with its surface and session, never dropped; identity is unaffected.
-mutate $hp '            Err(e) => unread.push(format!("permission record {i} does not decode: {e}")),' '            Err(_) => {}'
-mutate $hp '            unread.push(why.to_string());' ''
 mutate $hp $'            pending_permissions,\n            unread_permissions,\n        })' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        })'
 mutate $hp '                            unread.push((at(&path), why.clone()));' ''
 mutate $ht $'            pending_permissions,\n            unread_permissions,\n        }' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        }'
 mutate $ht '            self.unreadable.push((format!("t3 thread {}", thread.id), why.clone()));' ''
-mutate $ht '            return {"unreadable": str(exc)}' '            return None'
-mutate $ht '        if not isinstance(name, str) or not name.strip():' '        if False:'
-mutate $ht '                    perms.append(permission_of(req, thread_id))' '                    perms.extend(p for p in [permission_of(req, thread_id)] if "unreadable" not in p)'
-# Round 10 (the owner's decision after round 9): a payload that names no tool is a prompt named by
-# its kind, never hidden and never unread.
-mutate $ht '        name = rp.get("toolName") or rp.get("name") or req["kind"]' '        name = rp.get("toolName") or rp.get("name")'
+# Round 11 (the owner's decision after round 10): one permission rule, in Rust, for every surface;
+# the reader emits each pending runtime request raw. Keys by presence and type: the first present
+# of toolName and name governs and must be a non-blank string; neither is a prompt named by its kind.
+mutate $ht $'                    requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})' $'                    requests.append({"id": req["runtime_request_id"], "kind": None, "payload_json": req["payload_json"]})'
+mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n        }' $'            "runtime_requests": [],\n        }'
+mutate $ht '        pending_permissions.extend(requested);' ''
+mutate $ht '        unread_permissions.extend(unread_requests);' ''
+mutate $hp '    let name = if let Some(v) = record.get("toolName") {' '    let name = if let Some(v) = record.get("toolName").filter(|_| false) {'
+mutate $hp '    } else if let Some(v) = record.get("name") {' '    } else if let Some(v) = record.get("name").filter(|_| false) {'
+mutate $hp '            Some(k) => k.to_string(),' '            Some(_) => return Err("names no tool".to_string()),'
+mutate $hp '            None => return Err("names no tool".to_string()),' '            None => String::new(),'
+mutate $hp '    match value.as_str().filter(|s| !s.trim().is_empty()) {' '    match value.as_str() {'
+mutate $hp $'        None => Err(format!("has a tool name that is not a non-blank string (`{key}`)")),' '        None => Ok(String::new()),'
+mutate $hp '        title: text("title"),' '        title: None,'
+mutate $hp '            unread.push(format!("permission record {i} is not an object"));' ''
+mutate $hp '            Err(why) => unread.push(format!("permission record {i} {why}")),' '            Err(_) => {}'
+mutate $hp '        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {' '        let payload = match req.payload_json.as_deref() {'
+mutate $hp '            None => Err("is empty"),' '            None => Ok(serde_json::Map::new()),'
+mutate $hp '                Err(_) => Err("does not parse"),' '                Err(_) => Ok(serde_json::Map::new()),'
+mutate $hp '                Ok(_) => Err("is not an object"),' '                Ok(_) => Ok(serde_json::Map::new()),'
+mutate $hp '                if let Some(id) = req.id.as_deref().filter(|s| !s.trim().is_empty()) {' '                if let Some(id) = req.id.as_deref() {'
+mutate $hp '                    p.id = Some(id.to_string());' ''
+mutate $hp '            Err(why) => unread.push(format!("{what} {why}")),' '            Err(_) => {}'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

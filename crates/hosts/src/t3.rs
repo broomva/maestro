@@ -6,7 +6,7 @@
 //! to verify a T3 thread's existence, liveness, working directory (`worktreePath` or
 //! project `workspace_root`), environment id, and pending permission prompts.
 
-use crate::paseo::{check_peer, decode_permissions, short_id, within};
+use crate::paseo::{RawRuntimeRequest, check_peer, decode_permissions, decode_runtime_requests, short_id, within};
 use crate::read::{self, Read};
 use maestro_core::session::{
     BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, RefusalReason,
@@ -139,6 +139,9 @@ struct RawT3Thread {
     parent_id: Option<String>,
     #[serde(default)]
     pending_permissions: Option<Vec<Value>>,
+    /// The thread's pending runtime requests, raw, as the SQLite reader emits them (BRO-3863).
+    #[serde(default)]
+    runtime_requests: Vec<RawRuntimeRequest>,
     /// The thread's active provider-thread row (`active_provider_thread_id`).
     #[serde(default)]
     active_provider_thread_id: Option<String>,
@@ -248,34 +251,11 @@ def main():
     conn.row_factory = sqlite3.Row
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
-    def permission_of(req, thread_id):
-        # One pending request: a prompt, or a marker the Rust side reports unread, never skipped
-        # (BRO-3863); its payload reads by the one rule, `payload_of`. A payload that names no tool
-        # (`{}`) is a prompt named by its kind, never hidden and never unread; only a tool name that
-        # is present but not a non-blank string is unread.
-        what = f"permission request {req['runtime_request_id']} of thread {thread_id}"
-        try:
-            rp = payload_of(req["payload_json"], what)
-        except PayloadError as exc:
-            return {"unreadable": str(exc)}
-        name = rp.get("toolName") or rp.get("name") or req["kind"]
-        if not isinstance(name, str) or not name.strip():
-            return {"unreadable": f"{what} has a tool name that is not a non-blank string"}
-        req_id = req["runtime_request_id"]
-        if not isinstance(req_id, str) or not req_id.strip():
-            req_id = rp.get("id") if isinstance(rp.get("id"), str) else None
-        return {
-            "id": req_id,
-            "name": name,
-            "title": rp.get("title") if isinstance(rp.get("title"), str) else None,
-            "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
-            "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
-        }
-
-    def permissions_of(thread_id):
-        # A thread's pending permission prompts: stored apart from its payload, so they read
-        # even when the payload does not.
-        perms = []
+    def runtime_requests_of(thread_id):
+        # A thread's pending permission requests, raw: stored apart from its payload, so they read
+        # even when the payload does not. The reader does not interpret them: the one rule for
+        # prompt or unread lives in Rust (`decode_runtime_requests`, BRO-3863 round 11).
+        requests = []
         if "orchestration_v2_projection_runtime_requests" in tables:
             for req in conn.execute(
                 "SELECT runtime_request_id, kind, status, payload_json "
@@ -284,8 +264,8 @@ def main():
                 (thread_id,),
             ):
                 if req["kind"] in ("approval", "permission", "tool_approval"):
-                    perms.append(permission_of(req, thread_id))
-        return perms
+                    requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})
+        return requests
 
     def build_thread(row):
         payload = payload_of(row["payload_json"], f"thread {row['thread_id']}'s payload")
@@ -323,7 +303,6 @@ def main():
         lineage = payload.get("lineage") or payload.get("forkedFrom")
         if isinstance(lineage, dict):
             parent_id = lineage.get("parentThreadId") or lineage.get("threadId")
-        perms = permissions_of(row["thread_id"])
         created_at = row["created_at"] if "created_at" in row.keys() and row["created_at"] else payload.get("createdAt")
         run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")
         return {
@@ -339,7 +318,8 @@ def main():
             "settled_at": settled_at,
             "status": run_status,
             "parent_id": parent_id,
-            "pending_permissions": perms,
+            "pending_permissions": [],
+            "runtime_requests": runtime_requests_of(row["thread_id"]),
         }
 
     if mode == "native":
@@ -413,7 +393,8 @@ def main():
                         "settled_at": None,
                         "status": None,
                         "parent_id": None,
-                        "pending_permissions": permissions_of(row["thread_id"]),
+                        "pending_permissions": [],
+                        "runtime_requests": runtime_requests_of(row["thread_id"]),
                         "unreadable": str(exc),
                     }
                 if built is not None:
@@ -628,8 +609,11 @@ impl T3Registry {
     }
 
     fn from_raw(raw: RawT3Thread) -> T3Thread {
-        let (pending_permissions, unread_permissions) =
+        let (mut pending_permissions, mut unread_permissions) =
             decode_permissions(raw.pending_permissions.unwrap_or_default(), &raw.cwd, "t3-perm");
+        let (requested, unread_requests) = decode_runtime_requests(raw.runtime_requests, &raw.id, &raw.cwd, "t3-perm");
+        pending_permissions.extend(requested);
+        unread_permissions.extend(unread_requests);
         T3Thread {
             id: raw.id,
             cwd: raw.cwd,
