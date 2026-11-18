@@ -807,11 +807,122 @@ pub struct Install {
     pub detail: String,
 }
 
+/// The raw whitespace-delimited shell tokens of `command`.
+fn raw_words(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let (mut i, mut out) = (0, Vec::new());
+    while i < bytes.len() {
+        if matches!(bytes[i], b' ' | b'\t' | b'\n') {
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'#' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t' | b'\n') {
+            match bytes[i] {
+                b'\'' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'\'' {
+                        i += 1;
+                    }
+                    i += usize::from(i < bytes.len());
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        i += 1 + usize::from(bytes[i] == b'\\' && i + 1 < bytes.len());
+                    }
+                    i += usize::from(i < bytes.len());
+                }
+                b'\\' => i += 1 + usize::from(i + 1 < bytes.len()),
+                _ => i += 1,
+            }
+        }
+        out.push(&command[start..i]);
+    }
+    out
+}
+
+/// Byte offset in the unquoted word where the first unquoted `|`, `||`, `&&` or `;` starts.
+fn unquoted_separator(raw: &str) -> Option<usize> {
+    let bytes = raw.as_bytes();
+    let (mut i, mut out) = (0, 0);
+    while i < bytes.len() {
+        let is_pipe = bytes[i] == b'|';
+        let is_semi = bytes[i] == b';';
+        let is_and = bytes[i..].starts_with(b"&&");
+        if is_pipe || is_semi || is_and {
+            return Some(out);
+        }
+        match bytes[i] {
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                    out += 1;
+                }
+                i += usize::from(i < bytes.len());
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        match bytes[i + 1] {
+                            b'$' | b'`' | b'"' | b'\\' => out += 1,
+                            b'\n' => {}
+                            _ => out += 2,
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                        out += 1;
+                    }
+                }
+                i += usize::from(i < bytes.len());
+            }
+            b'\\' if i + 1 < bytes.len() => {
+                out += usize::from(bytes[i + 1] != b'\n');
+                i += 2;
+            }
+            _ => {
+                i += 1;
+                out += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Whether `raw` is an unquoted `NAME=value` assignment (`^[A-Za-z_][A-Za-z0-9_]*=`).
+fn is_env_assignment(word: &str, raw: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else { return false };
+    let mut chars = name.bytes();
+    word == raw
+        && chars.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && chars.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Whether `command` runs this gate for `harness`.
 fn runs_gate(command: &str, harness: Harness) -> bool {
     // The program is the first word after any `env` and `NAME=value` words: maestro itself.
-    let Some(parsed) = shlex::split(command) else { return false };
-    let mut words = parsed.iter().map(String::as_str).skip_while(|w| *w == "env" || w.contains('='));
+    let parsed = shlex::split(command);
+    let Some(parsed) = parsed else { return false };
+    let mut first = Vec::new();
+    for (word, raw) in parsed.iter().map(String::as_str).zip(raw_words(command)) {
+        if let Some(at) = unquoted_separator(raw) {
+            if at > 0 && at <= word.len() {
+                first.push((&word[..at], &raw[..raw.len().min(at)]));
+            }
+            break;
+        }
+        first.push((word, raw));
+    }
+    let mut words = first.into_iter().skip_while(|(w, raw)| *w == "env" || is_env_assignment(w, raw)).map(|(w, _)| w);
     let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));
     let words: Vec<&str> = words.collect();
     let flag = words.windows(2).any(|w| w == ["--harness", harness.name()])

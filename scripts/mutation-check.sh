@@ -2283,7 +2283,14 @@ mutate $fl/ledger.rs '        root.sync();' ''
 mutate $gt '            if counted {' '            if counted && unread.is_none() {'
 mutate $cli '        Err(e) if gate => {' '        Err(e) if false => {'
 # The live runner must reject each invalid acceptance verdict.
-mutate $gt '    let Some(parsed) = shlex::split(command) else { return false };' '    let parsed: Vec<String> = command.split_whitespace().map(str::to_string).collect();'
+mutate $gt '    let parsed = shlex::split(command);' '    let parsed = Some(command.split_whitespace().map(str::to_string).collect::<Vec<_>>());'
+mutate $gt '    let Some(parsed) = parsed else { return false };' '    let parsed = parsed.unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect());'
+mutate $gt '        let is_pipe = bytes[i] == b'\''|'\'';' '        let is_pipe = false;'
+mutate $gt '        let is_semi = bytes[i] == b'\'';'\'';' '        let is_semi = false;'
+mutate $gt '        let is_and = bytes[i..].starts_with(b"&&");' '        let is_and = false;'
+mutate $gt '    word == raw' '    true'
+mutate $gt '        && chars.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'\''_'\'')' '        && chars.next().is_some()'
+mutate $gt '        && chars.all(|b| b.is_ascii_alphanumeric() || b == b'\''_'\'')' '        && true'
 mutate scripts/conformance/phase1.py '    if any(path.iterdir()):' '    if False:'
 mutate scripts/conformance/phase1.py "    return f'{shlex.quote(str(maestro))} flow stop-gate --harness {harness} | tee -a {shlex.quote(str(hook))}'" "    return f'{maestro} flow stop-gate --harness {harness} | tee -a {shlex.quote(str(hook))}'"
 mutate scripts/conformance/phase1.py "        return {**server,'tools':{'exclude':['run_shell_command']}}" "        return {**server,'tools':{'exclude':[]}}"

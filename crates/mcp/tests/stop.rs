@@ -446,7 +446,11 @@ fn the_install_check_reads_the_harness_settings() {
     assert!(stop::check_install(Harness::Claude, &path).wired);
     write(hook("'/tmp/an'\"'\"'other directory/maestro' flow stop-gate --harness claude"));
     assert!(stop::check_install(Harness::Claude, &path).wired);
+    write(hook("env FOO_1=bar _BAR=2 maestro flow stop-gate --harness claude"));
+    assert!(stop::check_install(Harness::Claude, &path).wired);
     write(hook("'/tmp/a directory/maestro flow stop-gate --harness claude"));
+    assert!(!stop::check_install(Harness::Claude, &path).wired);
+    write(hook("maestro flow stop-gate --harness claude '"));
     assert!(!stop::check_install(Harness::Claude, &path).wired);
     write(hook("/usr/local/bin/maestro flow stop-gate --harness claude"));
     // Wired for Claude is not wired for Codex.
@@ -457,6 +461,13 @@ fn the_install_check_reads_the_harness_settings() {
     for not in [
         "maestro flow next --harness claude",
         "echo maestro flow stop-gate --harness claude",
+        "maestro --help | echo flow stop-gate --harness claude",
+        "maestro --help || echo flow stop-gate --harness claude",
+        "maestro --help && echo flow stop-gate --harness claude",
+        "maestro version; echo flow stop-gate --harness claude",
+        "'FOO=bar baz' maestro flow stop-gate --harness claude",
+        "1FOO=bar maestro flow stop-gate --harness claude",
+        "FOO-BAR=bar maestro flow stop-gate --harness claude",
         "maestro flow stop-gate --check-install --harness claude",
         "maestro flow stop-gate --check-install=true --harness claude",
         "maestro flow stop-gate --check-install=false --harness claude",
