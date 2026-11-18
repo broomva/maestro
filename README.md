@@ -226,14 +226,12 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   subagent_type?, agent_name?}`: the `Agent` tool with `subagent_type`, `invoke_agent` with
   `agent_name`, `spawn_subagent` with `subagent_type`) and
   `codex` (`{tool: spawn_agent, task_name, model, message}`). Other nodes have none, so their
-  shape is unchanged. The kernel knows the sources it was built with, so a definition naming an
-  agent with no source does not compile (`unknown_agent`): it is a reference to nothing, refused
-  where the compiler refuses unknown references, before an instance that could never be launched
-  is started, and with no file read at compile time. An instance pinned by a build that had the
-  agent replays as it did, and `next` gives that node `kind: unknown_agent`, never no spec. **A
-  running instance takes the current build's agent** (owner decision, BRO-3636): the IR pins the
-  performer's name, not its source, so `next` launches the source this build has, and
-  `source_sha256` in the launch spec says which one applied.
+  shape is unchanged. The compiler resolves builtins and a definition's optional `agents:` root;
+  unknown names are refused, as are collisions between a root agent and a builtin. The root is
+  relative to the definition and must resolve inside its Git repository. New instances pin launch
+  data and `source_sha256` in their IR; old IR uses the current builtin source. MCP start needs
+  an absolute `definition_path` when `agents:` is declared. This amends the BRO-3636 round-1
+  decision that all running instances take the current build's agent.
 - **Driver skills (BRO-3636).** `maestro flow driver-skill` (with `--json`, `{"skill", "path"}`)
   generates a flow's `SKILL.md` (Agent
   Skills format, named `flow-<flow>-v<version>`) from its compiled IR: loop `flow next`, do each

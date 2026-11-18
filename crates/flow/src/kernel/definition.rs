@@ -11,6 +11,7 @@ use std::marker::PhantomData;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Definition {
+    pub agents: Option<String>,
     pub flow: String,
     pub version: u32,
     /// `name` is required, `name?` optional.
