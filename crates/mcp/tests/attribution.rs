@@ -1222,3 +1222,57 @@ fn a_named_sessions_credential_is_final_at_the_gate() {
     assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: registry_disconnected")), "{out:?}");
     assert_eq!(last_kind(&f, &a), "StopUnverified");
 }
+
+/// Gemini's joint review: every Stop-gate alert path files as an unverified caller, never through
+/// a caller check, so an alert whose session's claim does not verify still lands. `fail_open`: a
+/// Direct session with a wrong launch token. `report_unread` and `unblockable`: an attributed T3
+/// session on a host whose T3 registry is configured, whose claim a caller check refuses.
+#[test]
+fn every_stop_gate_alert_lands_when_the_claim_does_not_verify() {
+    let landed = |f: &Fx, out: &Outcome, path: &str| {
+        assert_eq!(out.alerts.len(), 1, "{path}: {out:?}");
+        assert!(f.ledger().contains(&out.alerts[0]), "{path}: the alert is not in the ledger");
+        let journal = std::fs::read_to_string(maestro_store::requests::journal(&f.paths)).unwrap();
+        let line =
+            journal.lines().find(|l| l.contains(&out.alerts[0])).unwrap_or_else(|| panic!("{path}: no journal line"));
+        assert!(line.contains("\"verified\":false"), "{path}: {line}");
+    };
+    // fail_open: the named Direct session's token is wrong, so its claim is refused.
+    let f = fx();
+    let hosts = f.hosts(ATTRIB, &[], Reg::Good, false);
+    let g = Gate {
+        harness: Harness::Claude,
+        cannot_block: false,
+        session: Some("direct:-/d1".into()),
+        alert_ledger: "ledger.yaml".into(),
+    };
+    let wrong = json!({ "token": "not-the-token", "cwd": f.work });
+    let out = stop::gate(&f.paths, &hosts, Ambient::Shared, &wrong, &g, &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("caller_refused")), "{out:?}");
+    landed(&f, &out, "fail_open");
+
+    // report_unread: thread A's stop, beside an instance whose log does not read.
+    let f = fx();
+    f.begin_as((T3V, A));
+    let torn = f.begin_as((T3V, B));
+    let log = f.root.join("workspace/.broomva/flows/instances").join(&torn).join("events.jsonl");
+    let mut text = std::fs::read_to_string(&log).unwrap();
+    text.push_str("{\"torn\n");
+    std::fs::write(&log, text).unwrap();
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let out = gate(&f, &hosts, Harness::Claude, &claude_stop());
+    assert!(out.blocked, "A still has work: {out:?}");
+    assert!(out.notes.iter().any(|n| n.contains("instances_unread")), "{out:?}");
+    landed(&f, &out, "report_unread");
+
+    // unblockable: thread A's harness cannot refuse the stop.
+    let f = fx();
+    let a = f.begin_as((T3V, A));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let g = Gate { harness: Harness::Claude, cannot_block: true, session: None, alert_ledger: "ledger.yaml".into() };
+    let out = stop::gate(&f.paths, &hosts, Ambient::Caller, &json!({}), &g, &claude_stop());
+    allowed(&out);
+    assert_eq!(last_kind(&f, &a), "StopUnblockable");
+    landed(&f, &out, "unblockable");
+}

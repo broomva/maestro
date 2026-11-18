@@ -2228,8 +2228,8 @@ mutate $gt '    if input.len() > MAX_INPUT {' '    if false {'
 mutate $gt '            if unread.is_some() {' '            if false {'
 mutate $gt '            if let Err(e) = counts.save(&guard, &me) {' '            if let (true, Err(e)) = (false, counts.save(&guard, &me)) {'
 mutate $gt '            Err(e) if e.code() == "no_ledger" => {' '            Err(_) if true => {'
-mutate $gt '                self.alert(s, &key, UNCHECKED, &words);' ''
-mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words);' ''
+mutate $gt '                self.alert(s, &key, UNCHECKED, &words, &Principal::Unverified);' ''
+mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);' ''
 mutate $gt '            Err(e) if e.message.contains("already has an ask") => {' '            Err(e) if false => {'
 mutate $gt 'let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));' 'let maestro = words.next().is_some();'
 mutate $gt '    maestro && verb && flag && !words.iter().any(|w| *w == "--check-install" || w.starts_with("--check-install="))' '    maestro && verb && flag && !words.contains(&"--check-install")'
@@ -2365,7 +2365,7 @@ mutate $session '    #[serde(skip)]
     pub attribution: Option<Attribution>,' '    pub attribution: Option<Attribution>,'
 mutate $gt '        if self.hosts.identity_mode() == IdentityMode::Strict {' '        if false {'
 mutate $gt '            Harness::Claude => None,' '            Harness::Claude => payload(input).ok().and_then(|p| p.harness_session),'
-mutate $gt '        self.alert_as(&session, &key, UNCHECKED, &words, true);' '        self.alert_as(&session, &key, UNCHECKED, &words, false);'
+mutate $gt '        self.alert(&session, &key, UNCHECKED, &words, &Principal::Unverified);' '        self.alert(&session, &key, UNCHECKED, &words, &Principal::Agent { session: session.clone() });'
 mutate $gt 'kstop::record_unverified(&mut ledger, &id, &event)' 'Err(KernelError::Encode("skipped".into()))'
 mutate $gt '            words.push_str(&format!(" StopUnverified could not be recorded on: {}.", failed.join(", ")));' ''
 mutate $stp '            if !wanted.contains(&owner.session.canonical(host)) {' '            if false {'
@@ -2405,6 +2405,12 @@ mutate $gt '            Some(r) if r.is_attribution() || (registry && session.su
 mutate $gt '                    Err(r) => return self.unbound(&candidates, &r),' '                    Err(r) => return self.fail_open(Some(&thread), "caller_refused", &r.message),'
 mutate $gt '            self.add_candidate(&mut candidates, n);' ''
 mutate $gt '                self.add_candidate(&mut all, session);' ''
+# Gemini's joint review (BRO-3846): every Stop-gate alert path files as an unverified caller,
+# never through a caller check, so an alert whose session's claim does not verify still lands.
+mutate $gt '                self.alert(s, &key, UNCHECKED, &words, &Principal::Unverified);' '                self.alert(s, &key, UNCHECKED, &words, &Principal::Agent { session: s.clone() });'
+mutate $gt '        self.alert(session, &key, UNCHECKED, &words, &Principal::Unverified);' '        self.alert(session, &key, UNCHECKED, &words, &Principal::Agent { session: session.clone() });'
+mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);' '        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Agent { session: session.clone() });'
+mutate $gt '        let filed = crate::file_ask_as(&store, session.clone(), caller, &self.gate.alert_ledger, &ask);' '        let filed = crate::verified_caller(self.hosts, Some(session), self.claim, self.ambient, Check::Request).and_then(|_| crate::file_ask_as(&store, session.clone(), caller, &self.gate.alert_ledger, &ask));'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

@@ -42,14 +42,17 @@
 //!
 //! # The alert
 //!
-//! A fleet alert is a Maestro ask, filed through `maestro_ask_file`, the agent path every ask takes
-//! (its writer of record, `ask_ledger.py file`, validates it), into `--alert-ledger`. An ask is
+//! A fleet alert is a Maestro ask, filed into `--alert-ledger` through the asks ledger's writer of
+//! record (`ask_ledger.py file`, which validates it) and journalled, as `maestro_ask_file` files an
+//! ask, but as an unverified caller with no caller check (BRO-3846): an alert reports that the gate
+//! could not check or keep a session, often because its claim did not verify, which a caller check
+//! would refuse again. An ask is
 //! what the owner's Decisions view lists; an escalation is recorded in the requests journal, which
 //! no screen shows. Its id is a digest of what it is about, so the same alert is filed once: for a
 //! `StopUnblockable`, its instance and position; for a failure, the session, the code and the day.
 
 use crate::{Ambient, Check};
-use maestro_core::request::RequestKind;
+use maestro_core::authority::Principal;
 use maestro_core::session::{IdentityRefusal, RefusalReason, SessionRef, Surface, VerifiedSession};
 use maestro_flow::kernel::events::{StopUnverified, Unblockable, digest};
 use maestro_flow::kernel::stop::{self as kstop, Assessment, Recorded, Refusals};
@@ -211,7 +214,7 @@ impl Run<'_> {
                 let words = format!(
                     "The flow stop gate could not check session {s}, so it let the session stop without knowing whether a flow instance it owns had work left. Why: {code}, {reason}."
                 );
-                self.alert(s, &key, UNCHECKED, &words);
+                self.alert(s, &key, UNCHECKED, &words, &Principal::Unverified);
             }
             None => self.note("no session to file the alert as, so none was filed."),
         }
@@ -225,7 +228,7 @@ impl Run<'_> {
         let words = format!(
             "The flow stop gate could not read flow instance(s) {list} while it checked session {session}, so it could not tell whether they had work left. Repair or retire them; until then the gate cannot check them."
         );
-        self.alert(session, &key, UNCHECKED, &words);
+        self.alert(session, &key, UNCHECKED, &words, &Principal::Unverified);
     }
 
     fn judge(&mut self, input: &[u8]) {
@@ -464,7 +467,7 @@ impl Run<'_> {
             key.push_str(&format!("\nunrecorded\n{}", failed.join("\n")));
         }
         self.out.recorded.extend(made);
-        self.alert_as(&session, &key, UNCHECKED, &words, true);
+        self.alert(&session, &key, UNCHECKED, &words, &Principal::Unverified);
     }
 
     /// The gate's judgment for a verified session `me`, named as `session`.
@@ -663,35 +666,19 @@ impl Run<'_> {
             key.push_str(&format!("\nunrecorded\n{session}\n{reason:?}\n{}\n{day}", failed.join("\n")));
         }
         self.out.recorded.extend(made);
-        self.alert(&session, &key, LEFT_WORK, &words);
+        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);
     }
 
-    /// Files the alert ask, once per `key` (see the module docs).
-    fn alert(&mut self, session: &SessionRef, key: &str, headline: &str, words: &str) {
-        self.alert_as(session, key, headline, words, false);
-    }
-
-    /// Files the alert ask, once per `key`: through `maestro_ask_file`'s caller check, or, when
-    /// `unverified` (a stop the gate could not bind, BRO-3846), straight through the writer of
-    /// record as [`Principal::Unverified`](maestro_core::authority::Principal::Unverified), since
-    /// the caller check would fail for the very reason the alert reports.
-    fn alert_as(&mut self, session: &SessionRef, key: &str, headline: &str, words: &str, unverified: bool) {
+    /// Files the alert ask, once per `key` (see the module docs), straight through the asks
+    /// ledger's writer of record as `caller`, never through a caller check (BRO-3846): an alert
+    /// reports that the gate could not check or keep a session, often because its claim did not
+    /// verify, so a caller check would refuse the alert for the reason it reports. Every call site
+    /// files as [`Principal::Unverified`]: the gate vouches for no one.
+    fn alert(&mut self, session: &SessionRef, key: &str, headline: &str, words: &str, caller: &Principal) {
         let id = alert_id(key);
-        let mut args = match self.claim.as_object() {
-            Some(o) => o.clone(),
-            None => Map::new(),
-        };
-        args.insert("session".into(), json!(session.to_string()));
-        args.insert("ledger".into(), json!(self.gate.alert_ledger));
         let ask = alert_ask(&id, headline, words);
-        args.insert("ask".into(), Value::Object(ask.clone()));
         let store = Store::new(self.paths.clone(), TreeSource::WorkingTree);
-        let filed = if unverified {
-            let caller = maestro_core::authority::Principal::Unverified;
-            crate::file_ask_as(&store, session.clone(), &caller, &self.gate.alert_ledger, &ask)
-        } else {
-            crate::agent_request_in(&store, self.hosts, self.ambient, RequestKind::AskFile, Value::Object(args))
-        };
+        let filed = crate::file_ask_as(&store, session.clone(), caller, &self.gate.alert_ledger, &ask);
         match filed {
             Ok(_) => {
                 self.note(format!("filed alert ask {id} in {}.", self.gate.alert_ledger));
