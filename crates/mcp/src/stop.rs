@@ -807,25 +807,46 @@ pub struct Install {
     pub detail: String,
 }
 
-/// The raw whitespace-delimited shell tokens of `command`.
-fn raw_words(command: &str) -> Vec<&str> {
+/// Whether `word` is a `NAME=value` assignment matching `^[A-Za-z_][A-Za-z0-9_]*=`.
+fn is_env_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else { return false };
+    let mut chars = name.bytes();
+    let head_ok = chars.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_');
+    let tail_ok = chars.all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    head_ok && tail_ok
+}
+
+/// Scans `command` once, tracking quotes: refuses unquoted shell control characters, cuts at the
+/// first unquoted `|` (so the conformance runner's `| tee -a` hook stays wired while any earlier
+/// non-gate command fails), and counts leading unquoted words before the first quote or escape.
+fn scan_command(command: &str) -> Option<(&str, usize)> {
     let bytes = command.as_bytes();
-    let (mut i, mut out) = (0, Vec::new());
+    let (mut i, mut end, mut unquoted_prefix, mut in_prefix) = (0, None, 0, true);
     while i < bytes.len() {
-        if matches!(bytes[i], b' ' | b'\t' | b'\n') {
+        if matches!(bytes[i], b' ' | b'\t') {
             i += 1;
             continue;
         }
-        if bytes[i] == b'#' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
+        let word_start = i;
+        let mut word_quoted = false;
+        while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t') {
+            let is_pipe = bytes[i] == b'|';
+            let is_amp = bytes[i] == b'&';
+            let is_semi = bytes[i] == b';';
+            let is_redir = matches!(bytes[i], b'<' | b'>');
+            let is_sub = bytes[i] == b'$';
+            let is_paren = matches!(bytes[i], b'(' | b')');
+            let is_nl = matches!(bytes[i], b'\n' | b'\r');
+            let is_tick = bytes[i] == b'`';
+            if is_amp || is_semi || is_redir || is_sub || is_paren || is_nl || is_tick {
+                return None;
             }
-            continue;
-        }
-        let start = i;
-        while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t' | b'\n') {
+            if is_pipe {
+                break;
+            }
             match bytes[i] {
                 b'\'' => {
+                    word_quoted = true;
                     i += 1;
                     while i < bytes.len() && bytes[i] != b'\'' {
                         i += 1;
@@ -833,96 +854,55 @@ fn raw_words(command: &str) -> Vec<&str> {
                     i += usize::from(i < bytes.len());
                 }
                 b'"' => {
+                    word_quoted = true;
                     i += 1;
                     while i < bytes.len() && bytes[i] != b'"' {
                         i += 1 + usize::from(bytes[i] == b'\\' && i + 1 < bytes.len());
                     }
                     i += usize::from(i < bytes.len());
                 }
-                b'\\' => i += 1 + usize::from(i + 1 < bytes.len()),
+                b'\\' => {
+                    word_quoted = true;
+                    i += 1 + usize::from(i + 1 < bytes.len());
+                }
                 _ => i += 1,
             }
         }
-        out.push(&command[start..i]);
-    }
-    out
-}
-
-/// Byte offset in the unquoted word where the first unquoted `|`, `||`, `&&` or `;` starts.
-fn unquoted_separator(raw: &str) -> Option<usize> {
-    let bytes = raw.as_bytes();
-    let (mut i, mut out) = (0, 0);
-    while i < bytes.len() {
-        let is_pipe = bytes[i] == b'|';
-        let is_semi = bytes[i] == b';';
-        let is_and = bytes[i..].starts_with(b"&&");
-        if is_pipe || is_semi || is_and {
-            return Some(out);
-        }
-        match bytes[i] {
-            b'\'' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'\'' {
-                    i += 1;
-                    out += 1;
-                }
-                i += usize::from(i < bytes.len());
-            }
-            b'"' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        match bytes[i + 1] {
-                            b'$' | b'`' | b'"' | b'\\' => out += 1,
-                            b'\n' => {}
-                            _ => out += 2,
-                        }
-                        i += 2;
-                    } else {
-                        i += 1;
-                        out += 1;
-                    }
-                }
-                i += usize::from(i < bytes.len());
-            }
-            b'\\' if i + 1 < bytes.len() => {
-                out += usize::from(bytes[i + 1] != b'\n');
-                i += 2;
-            }
-            _ => {
-                i += 1;
-                out += 1;
+        if end.is_none() && i > word_start {
+            if in_prefix && !word_quoted {
+                unquoted_prefix += 1;
+            } else {
+                in_prefix = false;
             }
         }
+        if i < bytes.len() && bytes[i] == b'|' {
+            if end.replace(i).is_some() {
+                return None;
+            }
+            i += 1;
+        }
     }
-    None
-}
-
-/// Whether `raw` is an unquoted `NAME=value` assignment (`^[A-Za-z_][A-Za-z0-9_]*=`).
-fn is_env_assignment(word: &str, raw: &str) -> bool {
-    let Some((name, _)) = word.split_once('=') else { return false };
-    let mut chars = name.bytes();
-    word == raw
-        && chars.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-        && chars.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    if let Some(at) = end
+        && !shlex::split(&command[at + 1..])
+            .is_some_and(|w| matches!(w.iter().map(String::as_str).collect::<Vec<_>>().as_slice(), ["tee", "-a", _]))
+    {
+        return None;
+    }
+    Some((&command[..end.unwrap_or(bytes.len())], unquoted_prefix))
 }
 
 /// Whether `command` runs this gate for `harness`.
 fn runs_gate(command: &str, harness: Harness) -> bool {
-    // The program is the first word after any `env` and `NAME=value` words: maestro itself.
-    let parsed = shlex::split(command);
+    // The program is the first word after any `env` and unquoted `NAME=value` words: maestro itself.
+    let Some((head, unquoted_prefix)) = scan_command(command) else { return false };
+    let parsed = shlex::split(head);
     let Some(parsed) = parsed else { return false };
-    let mut first = Vec::new();
-    for (word, raw) in parsed.iter().map(String::as_str).zip(raw_words(command)) {
-        if let Some(at) = unquoted_separator(raw) {
-            if at > 0 && at <= word.len() {
-                first.push((&word[..at], &raw[..raw.len().min(at)]));
-            }
-            break;
-        }
-        first.push((word, raw));
-    }
-    let mut words = first.into_iter().skip_while(|(w, raw)| *w == "env" || is_env_assignment(w, raw)).map(|(w, _)| w);
+    let mut words = parsed
+        .iter()
+        .map(String::as_str)
+        .enumerate()
+        .skip_while(|(i, w)| *i < unquoted_prefix && (*w == "env" || is_env_assignment(w)))
+        .map(|(_, w)| w);
     let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));
     let words: Vec<&str> = words.collect();
     let flag = words.windows(2).any(|w| w == ["--harness", harness.name()])
