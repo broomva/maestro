@@ -2437,7 +2437,7 @@ mutate $ht $'    except Exception:\n        raise PayloadError(f"{what} does not
 mutate $ht $'    if not isinstance(payload, dict):\n        raise PayloadError' $'    if False:\n        raise PayloadError'
 mutate $ht 'except PayloadError as exc:' 'except ZeroDivisionError as exc:'
 mutate $ht '                    Some(_) => return Err(unavailable(format!("row {id} has a cwd that is not a string"))),' '                    Some(_) => {}'
-mutate $ht '                    return Err(unavailable("has a row that is not an object".to_string()));' '                    return Ok(None);'
+mutate $ht '                    return Err(unavailable("has a row that is not an object".to_string()));' '                    return serde_json::from_value(serde_json::json!({ "id": "", "cwd": "" })).map_err(|e| unavailable(e.to_string()));'
 mutate $ht '.filter(|raw| attributed || !raw.cwd.is_empty())' '.filter(|_| true)'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
