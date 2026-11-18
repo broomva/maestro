@@ -319,6 +319,18 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   daemon (`maestro serve --http`) serves every caller on the machine, so it reads a claim only from
   the call's arguments, never from its own environment, for every agent tool. An unverified
   caller is refused (`caller_unverified`), and a claim that does not verify too (`caller_refused`).
+- **Attributed T3 writes (BRO-3846).** In a T3 thread a write needs no credential and no
+  `session`: in the default `MAESTRO_IDENTITY=attributed` mode, the process making it (the CLI, or
+  the stdio `maestro mcp` server) is attributed to the thread its own `T3CODE_THREAD_ID` names, or
+  its `CODEX_THREAD_ID` through the thread's active provider row in T3's registry (found through
+  `MAESTRO_T3_HOME`, `T3CODE_HOME` or `~/.t3`). Claude threads write over MCP and the CLI; Codex
+  threads through the CLI, since Codex's MCP server carries no variable (BRO-3848). The refusals
+  are their own codes: `attribution_missing`, `attribution_unresolved`, `thread_mismatch` (also a
+  variable beside a credential for another session) and `registry_unavailable`. A presented
+  credential is verified in full and never falls back to attribution, and the HTTP daemon never
+  attributes. Every write event records `audit`: the identity mode, variable and thread, and the
+  claiming process's pid, start time, uid and ancestors. `MAESTRO_IDENTITY=strict` is the
+  credential rules alone. The design is `docs/specs/2026-11-17-auth-a-session-attestations.md`.
   `next`, `status` and `spine` read for anyone and write nothing.
 - **Where.** The ledger is `.broomva/flows` in the workspace (the same root every reader uses). A
   workspace with no `.broomva` folder (`workspace_unready`) or that is a linked git worktree
@@ -549,7 +561,12 @@ The hook path never fails a session. On any error it prints nothing and exits 0.
 A Stop hook that runs `maestro flow stop-gate` refuses a final message while the session's flow
 work is open (see the stop gate under the flow commands). It reads the session from
 `MAESTRO_SESSION` and the claim from the caller variables, which a hook process inherits from its
-harness (Claude Code passes its environment to hooks; Codex 0.164 does too, measured). Nothing in
+harness (Claude Code passes its environment to hooks; Codex 0.164 does too, measured). With no
+session named, it binds the stop through `T3CODE_THREAD_ID` (Claude) or the stdin `session_id`
+(Codex) as an attributed write does: no variable lets the stop through silently, and a binding
+that is unavailable (variables that disagree or do not resolve, a registry that does not read)
+lets it through, records `StopUnverified` on each candidate thread's unfinished instances, and
+files the alert. Nothing in
 this repository wires it into real settings; `--check-install` reports whether a file does.
 
 | Harness | Stop hook | Blocks a stop | The gate |
@@ -591,7 +608,9 @@ Before 2026-10-18 both registrations pointed at the T3 MCP proof of concept,
 | `MAESTRO_PASEO_ASK_LOCKS` | `~/.local/state/control-asks/locks` (the plugin's ask-ledger lock root) |
 | `MAESTRO_ASK_LEDGER` | `<workspace>/scripts/ask_ledger.py` (the writer `ask file` runs: `ask_ledger.py file`) |
 | `MAESTRO_REQUESTS_WAIT_MS` | `30000`: how long a request waits for the journal lock (1–60000 ms) |
-| `MAESTRO_SESSION` | none: the session agent requests name (and the stop gate gates) |
+| `MAESTRO_SESSION` | none: the session agent requests name (and the stop gate gates); optional for flow writes in a T3 thread |
+| `MAESTRO_IDENTITY` | `attributed`: an unsigned T3 flow write is attributed by the process's thread variable; `strict` turns that off (any other value is strict) |
+| `T3CODE_HOME` | set by T3: T3's registry root when `MAESTRO_T3_HOME` is unset, then `~/.t3` |
 | `MAESTRO_ALERT_LEDGER` | `bstack-fleet.yaml`: the asks ledger the stop gate files fleet alerts into |
 | `MAESTRO_USAGE` | unset: a file holding `provider_manager.py --json usage` output, which the economy reads; unset, the economy is unavailable |
 
