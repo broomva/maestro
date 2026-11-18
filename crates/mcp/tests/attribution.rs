@@ -1538,14 +1538,16 @@ fn a_registry_that_discovery_cannot_read_is_unread_never_absent() {
     }
     let blocked = std::fs::read_dir(&agents).is_err();
     let w = tmp.path().to_string_lossy().into_owned();
-    let paseo = SurfaceRegistry::new(Some(PaseoRegistry::new(&agents)), None, None)
-        .verify_caller(&CallerClaim::paseo(Some("agent-p"), Some(w.clone())));
+    let paseo_hosts = SurfaceRegistry::new(Some(PaseoRegistry::new(&agents)), None, None);
+    let listed = paseo_hosts.live_permission_report(None, None).errors();
+    let paseo = paseo_hosts.verify_caller(&CallerClaim::paseo(Some("agent-p"), Some(w.clone())));
     let direct = SurfaceRegistry::new(None, None, Some(DirectRegistry::from_file(&direct_file)))
         .verify_caller(&CallerClaim::direct(Some("d1"), Some(w), Some("tok-1")));
     for path in [&agents, &direct_file] {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     if blocked {
+        assert!(listed.iter().any(|e| e.reason.contains("the agents folder does not read")), "{listed:?}");
         for (name, result) in [("paseo", paseo), ("direct", direct)] {
             let refused = result.unwrap_err();
             assert_eq!(refused.reason, maestro_hosts::RefusalReason::RegistryDisconnected, "{name}: {refused:?}");
