@@ -461,6 +461,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_evaluator_that_crashes_is_refused_as_a_guard_error() {
+        // A string of nested brackets parsed by the guard overflows the evaluator's stack and
+        // aborts. A generous timeout keeps scheduler or core-handler delay under load from turning
+        // the crash into a timeout.
+        guard_entry();
+        let nested = format!("{}{}", "[".repeat(30_000), "]".repeat(30_000));
+        let input = serde_json::to_vec(&json!({ "s": nested })).unwrap();
+        let evaluated = evaluate(".s | fromjson | length > 0", &input, Duration::from_secs(30));
+        assert_eq!(evaluated.outcome.unwrap_err(), ("guard_error", "the evaluator crashed".into()));
+        assert!(gone(evaluated.pid.unwrap()));
+    }
+
+    #[test]
     fn an_evaluator_its_kernel_never_kills_ends_itself_at_its_default_deadline() {
         // As after a kernel crash: the kernel's timeout is far off, and the child has the deadline
         // the writers give it, their timeout plus the grace (1.5 s).
