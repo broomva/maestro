@@ -297,7 +297,8 @@ fn v4_without_a_surface_exercise_never_becomes_enabled() {
         json!([{ "reason": "switch", "on": "surface", "took": "none", "case": "declared" }])
     );
     let v = p.refused(&["flow", "claim", "--instance", &fi, "--node-id", "exercise"]);
-    assert_eq!(v["code"], "not_enabled");
+    assert_eq!(v["code"], "instance_terminal");
+    assert_eq!(v["recorded"], false);
 }
 
 #[test]

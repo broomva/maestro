@@ -71,6 +71,15 @@ fn spine_of(f: &Fx, fi: &InstanceId) -> Spine {
     spine(&reader.lock().unwrap(), fi).unwrap()
 }
 
+// Old logs may contain a re-run after terminal. Spine still reads those events.
+fn append_old_probe(f: &mut Fx, fi: &InstanceId, exit: i32) {
+    let mut guard = f.ledger.lock().unwrap();
+    let log = guard.log(fi).unwrap();
+    let mut body = log.events.iter().find(|e| e.kind == "Completed" && e.body["node"] == "probe").unwrap().body.clone();
+    body["verify"]["exit"] = json!(exit);
+    guard.append(fi, log.seq(), crate::NewEvent::new("Completed", body)).unwrap();
+}
+
 fn differ(f: &Fx, a: &InstanceId, b: &InstanceId) -> Option<Difference> {
     compare(&spine_of(f, a), &spine_of(f, b))
 }
@@ -222,7 +231,7 @@ fn a_re_run_keeps_the_first_place_and_the_latest_result() {
     let mut run = Run::new(&mut f, me.clone());
     let same = run.clean("ship");
     test_clock.set(clock::now() + secs(7200));
-    Run { f: &mut f, who: me.clone(), fi: same.clone() }.done("probe");
+    append_old_probe(&mut f, &same, 0);
     let kinds = f.kinds(&same);
     assert_eq!(kinds.iter().filter(|k| *k == "Completed").count(), 4, "probe ran twice: {kinds:?}");
     let records = spine_of(&f, &same).records;
@@ -234,7 +243,7 @@ fn a_re_run_keeps_the_first_place_and_the_latest_result() {
     let down = run.clean("ship");
     test_clock.set(clock::now() + secs(7200));
     std::fs::write(f.dir.join("probe"), "1").unwrap();
-    Run { f: &mut f, who: me.clone(), fi: down.clone() }.done("probe");
+    append_old_probe(&mut f, &down, 1);
     std::fs::remove_file(f.dir.join("probe")).unwrap();
     let records = spine_of(&f, &down).records;
     assert_eq!(records.iter().map(|r| r.node.as_str()).collect::<Vec<_>>(), ["probe", "left", "right", "pick"]);

@@ -142,3 +142,9 @@ ledgers are archived at `~/.config/broomva/cross-review-archive/maestro21-flow-l
 | Human steps | Maestro asks, also relayed into the driving T3 thread; answers only through the owner path |
 | Retiring an abandoned instance | Through an owner-approved Maestro ask; the log is kept |
 
+
+## Terminal instances (BRO-3870)
+
+The owner decision, "latch terminal", makes the first log position whose replayed state is terminal at that event's recorded time permanent. Replay derives that position from the log; it writes no event and does not consult the subject. Stale observations remain visible in status, but cannot enable work or reopen the instance. A flow that needs periodic verification starts a new instance.
+
+Once latched, instance writes are refused with `instance_terminal` and nothing is recorded. This applies to claims, completions, choices, heartbeats, human asks, adoption and retirement proposals, and stop records.

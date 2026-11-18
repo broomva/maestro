@@ -244,10 +244,40 @@ pub(crate) fn owner(session: &VerifiedSession) -> Result<Owner, Refusal> {
     Ok(Owner { session: session.session().clone(), marker_sha256: marker_digest(marker) })
 }
 
+/// Checks the common terminal write barrier under the flows lock.
+pub(crate) fn check_writable(log: &Log, started: &Started) -> Result<(), KernelError> {
+    if super::replay::latched(log, started)? {
+        return Err(Refusal::InstanceTerminal { instance: log.instance.to_string() }.into());
+    }
+    Ok(())
+}
+
+/// The single append boundary for writes to an existing kernel instance.
+pub(crate) fn append_writable(
+    guard: &mut WriteGuard,
+    instance: &InstanceId,
+    seq: u64,
+    event: crate::NewEvent,
+) -> Result<Appended, KernelError> {
+    let log = guard.log(instance)?;
+    check_writable(&log, &pinned(&log)?)?;
+    Ok(guard.append(instance, seq, event)?)
+}
+
 /// Refuses any session but the instance's current owner (`Started`'s, or the latest accepted
 /// `Adopted`'s), with the same marker, and any write once the log records `Retired`. Returns who
 /// owns the instance, as the log has it.
 pub(crate) fn check_owner(
+    log: &Log,
+    started: &Started,
+    instance: &InstanceId,
+    session: &VerifiedSession,
+) -> Result<Owners, KernelError> {
+    check_writable(log, started)?;
+    check_owner_only(log, started, instance, session)
+}
+
+fn check_owner_only(
     log: &Log,
     started: &Started,
     instance: &InstanceId,
@@ -501,11 +531,16 @@ pub fn claim(
     node: &str,
 ) -> Result<Claim, KernelError> {
     // A verdict a crash left unwritten is written first, so what waits on it can be claimed.
-    settle(ledger, session, instance)?;
+    let verdicts = settle(ledger, session, instance)?;
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
-    check_owner(&log, &started, instance, session)?;
+    if verdicts.iter().any(|v| matches!(v, Verdict::Recorded { .. })) {
+        check_writable(&log, &started)?;
+        check_owner_only(&log, &started, instance, session)?;
+    } else {
+        check_owner(&log, &started, instance, session)?;
+    }
     let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(Refusal::UnknownNode { node: node.to_string() }.into());
@@ -554,7 +589,7 @@ pub fn claim(
         cancel_at: cancel_at.map(|at| at.to_string()),
         audit: session.audit().cloned(),
     };
-    let appended = guard.append(instance, log.seq(), claimed.to_event()?)?;
+    let appended = append_writable(&mut guard, instance, log.seq(), claimed.to_event()?)?;
     Ok(Claim {
         token,
         instance: instance.clone(),
@@ -644,7 +679,7 @@ pub fn heartbeat(ledger: &mut Ledger, session: &VerifiedSession, token: &str) ->
         lease_until: lease_until.to_string(),
         audit: held.audit.clone(),
     };
-    let appended = guard.append(&instance, held.log.seq(), beat.to_event()?)?;
+    let appended = append_writable(&mut guard, &instance, held.log.seq(), beat.to_event()?)?;
     Ok(Beat { lease_until, appended })
 }
 
@@ -860,7 +895,7 @@ fn refused(guard: &mut WriteGuard, held: &Held, code: &'static str, reason: &str
         reason: reason.to_string(),
         audit: held.audit.clone(),
     };
-    Ok(guard.append(&held.log.instance, held.log.seq(), refused.to_event()?)?)
+    append_writable(guard, &held.log.instance, held.log.seq(), refused.to_event()?)
 }
 
 /// Completes the claim `token` names: runs the node's command and appends the receipt, or a
@@ -919,7 +954,7 @@ pub fn complete(
             inputs: held.rec.inputs.clone(),
             guard_digest,
         };
-        guard.append(&instance, held.log.seq(), intent.to_event()?)?;
+        append_writable(&mut guard, &instance, held.log.seq(), intent.to_event()?)?;
     }
     // A claim's cancel deadline ends its command too: the run is no longer than what is left.
     let limits = &cancel_capped(limits, held.rec.cancel_at);
@@ -973,7 +1008,7 @@ pub fn complete(
         return refuse(&mut guard, &held, unfit, &stderr);
     }
     let completed = receipt(&held, session, outputs, verify.clone());
-    let appended = guard.append(&instance, held.log.seq(), completed.to_event()?)?;
+    let appended = append_writable(&mut guard, &instance, held.log.seq(), completed.to_event()?)?;
     drop(guard);
     let verdicts = settled(ledger, session, &instance);
     Ok(Completion::Completed { appended, verify, stderr: String::from_utf8_lossy(&stderr).into_owned(), verdicts })
@@ -1064,7 +1099,7 @@ pub fn choose(
         guard_digest: Some(digest.clone()),
         audit: held.audit.clone(),
     };
-    let appended = guard.append(&instance, held.log.seq(), chosen.to_event()?)?;
+    let appended = append_writable(&mut guard, &instance, held.log.seq(), chosen.to_event()?)?;
     drop(guard);
     let verdicts = settled(ledger, session, &instance);
     Ok(Choosing::Chosen { appended, edge: edge.to_string(), guard_digest: digest, verdicts })
@@ -1090,8 +1125,11 @@ fn settle(ledger: &mut Ledger, session: &VerifiedSession, instance: &InstanceId)
         if started.ir.repeats.values().all(|r| r.until.is_none()) {
             return Ok(Vec::new());
         }
-        check_owner(&log, &started, instance, session)?;
         let pending = awaiting(&log, &started)?;
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        check_owner(&log, &started, instance, session)?;
         (started, pending)
     };
     let mut out = Vec::new();
@@ -1142,7 +1180,7 @@ pub(super) fn record(
         holds: judged.holds,
         digest: Some(judged.digest.clone()),
     };
-    Ok(Some(guard.append(&log.instance, log.seq(), verdict.to_event()?)?))
+    Ok(Some(append_writable(guard, &log.instance, log.seq(), verdict.to_event()?)?))
 }
 
 #[cfg(test)]

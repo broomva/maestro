@@ -243,8 +243,8 @@ fn an_approved_adoption_hands_the_instance_to_the_new_owner() {
     let s = f.status(&fi);
     assert_eq!(s.owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/other"));
     assert!(s.nodes.values().all(|n| n.state == State::Done));
-    // The new owner adopts nothing more; the former owner may propose to adopt it back.
-    assert_eq!(code(adopt(&mut f, &other(), &fi, Some(&proposing()))), "already_owner");
+    // The finished instance takes no further proposals.
+    assert_eq!(code(adopt(&mut f, &other(), &fi, Some(&proposing()))), "instance_terminal");
 }
 
 #[test]
@@ -373,6 +373,22 @@ fn a_retirement_a_crash_left_unmoved_takes_no_write_and_the_next_call_moves_it()
     }
     assert!(f.flows.join("retired").join(fi.as_str()).join("events.jsonl").is_file());
     assert!(!f.flows.join("instances").join(fi.as_str()).exists());
+}
+
+#[test]
+fn a_latched_retirement_left_unmoved_can_be_recovered() {
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let id = linked(&retire(&mut f, &other(), &fi, Some(&proposing())).unwrap());
+    for node in ["one", "two", "three"] {
+        let c = claim(&mut f.ledger, &me, &fi, node).unwrap();
+        assert_eq!(complete_as(&mut f, &me, &c.token), "completed");
+    }
+    assert!(f.status(&fi).terminal);
+    append_raw(&mut f, &fi, "Retired", json!({"by": owner_json(&other()), "approval": approval(&id, "retire")}));
+    assert_eq!(code(adopt(&mut f, &other(), &fi, None)), "retired");
+    assert!(matches!(retire(&mut f, &other(), &fi, None), Ok(Proposed::Retired { appended: None, .. })));
+    assert!(f.flows.join("retired").join(fi.as_str()).join("events.jsonl").is_file());
 }
 
 #[test]
@@ -733,6 +749,17 @@ fn an_owner_change_between_reading_an_approval_and_applying_it_is_proposal_stale
 }
 
 #[test]
+fn a_claim_that_records_the_terminal_verdict_refuses_even_an_unknown_node() {
+    let mut f = fx(None, "");
+    f.flow = compile(&format!("flow: loop\nversion: 1\nworkdir: {}\nnodes:\n  step: {{class: pure, run: ['true']}}\nrepeats:\n  rounds: {{body: [step], max: 3, until: 'true'}}\n", f.ws.display())).unwrap();
+    let fi = f.begin();
+    let me = f.me.clone();
+    append_raw(&mut f, &fi, "Completed", json!({"node": "step", "iteration": {"rounds": 0}, "attempt": 1}));
+    assert_eq!(code(claim(&mut f.ledger, &me, &fi, "unknown")), "instance_terminal");
+    assert!(f.kinds(&fi).iter().any(|k| k == "Guarded"));
+}
+
+#[test]
 fn a_verdict_is_recorded_only_while_its_writer_still_owns_the_instance() {
     // `complete` settles a repeat's iteration and evaluates its `until` with the flows lock
     // released; an adoption lands meanwhile. The former owner records no verdict.
@@ -772,7 +799,7 @@ fn a_verdict_is_recorded_only_while_its_writer_still_owns_the_instance() {
     assert_eq!(code(claim(&mut f.ledger, &me, &fi, "step")), "not_owner");
     assert_eq!(judged.get(), 0, "a guard ran for a session that does not own the instance");
     // (The verdict holds, so the repeat is done and `step` takes no claim.)
-    assert_eq!(code(claim(&mut f.ledger, &other(), &fi, "step")), "not_enabled");
+    assert_eq!(code(claim(&mut f.ledger, &other(), &fi, "step")), "instance_terminal");
     assert_eq!(judged.get(), 1);
     crate::kernel::guard::tests::WHILE_JUDGING.with(|hook| *hook.borrow_mut() = None);
     assert!(f.kinds(&fi).iter().any(|k| k == "Guarded"), "{:?}", f.kinds(&fi));
