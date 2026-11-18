@@ -616,3 +616,87 @@ fn a_credentialed_claim_fails_closed_on_an_unreadable_payload() {
     );
     assert_eq!(hosts.verify_caller(&signed).unwrap_err().reason, RefusalReason::NotLive);
 }
+
+/// A `statev2.sqlite` whose thread `mcp:bad` has a payload that does not read, whose thread
+/// `mcp:good` reads, and whose thread `mcp:nofolder` reads but has no folder; each has one pending
+/// permission prompt, stored apart from the payload.
+fn prompts_db(dir: &Path) -> PathBuf {
+    partial_db(
+        dir,
+        true,
+        r#"
+conn.executescript("""CREATE TABLE orchestration_v2_projection_runtime_requests (
+  runtime_request_id TEXT, thread_id TEXT, kind TEXT, status TEXT, created_at TEXT, payload_json TEXT);""")
+thread("mcp:good", None, {"worktreePath": "/w"})
+thread("mcp:nofolder", None, {})
+conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ("mcp:bad", "p", "t", "codex", None, "2026-11-17T00:00:00Z", "2026-11-17T00:00:00Z", None, None, "{corrupt"))
+for tid, cmd in [("mcp:good", "cargo test"), ("mcp:bad", "git push"), ("mcp:nofolder", "ls")]:
+    conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
+        (f"req-{tid}", tid, "approval", "pending", "2026-11-17T00:00:00Z",
+         json.dumps({"toolName": "Bash", "input": {"command": cmd}})))
+"#,
+    )
+}
+
+/// Codex's joint round 5: the permission-prompt listing fails open. A thread whose payload does not
+/// read keeps its pending prompts, which are stored apart from the payload.
+#[test]
+fn a_thread_whose_payload_does_not_read_keeps_its_prompts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(prompts_db(tmp.path()))), None);
+    let needs = hosts.live_permission_needs(None, None);
+    let keys: Vec<&str> = needs.iter().map(|n| n.key.as_str()).collect();
+    assert!(keys.iter().any(|k| k.contains("mcp:bad")), "the unreadable thread's prompt is listed: {keys:?}");
+    assert!(keys.iter().any(|k| k.contains("mcp:good")), "{keys:?}");
+    assert!(keys.iter().any(|k| k.contains("mcp:nofolder")), "a prompt needs no folder: {keys:?}");
+}
+
+/// The listing says what it could not read: the unreadable thread, by id and reason; and the
+/// identity readers stay fail-closed on the same thread.
+#[test]
+fn the_permission_listing_names_what_it_could_not_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t3 = T3Registry::new(prompts_db(tmp.path()));
+    let report = t3.list_live_report();
+    assert_eq!(report.unreadable.len(), 1, "{:?}", report.unreadable);
+    let (at, why) = &report.unreadable[0];
+    assert!(at.contains("mcp:bad") && why.contains("payload does not parse"), "{at}: {why}");
+    let bad = report.threads.iter().find(|t| t.id == "mcp:bad").expect("listed from what is known");
+    assert_eq!((bad.cwd.as_str(), bad.pending_permissions.len()), ("", 1));
+    let hosts = SurfaceRegistry::new(None, Some(t3.clone()), None);
+    let live = hosts.live_permission_report(None, None);
+    assert_eq!((live.needs.len(), live.unreadable.len()), (3, 1));
+    // A database that does not read at all is named, never an empty healthy list.
+    let broken = tmp.path().join("broken");
+    std::fs::create_dir_all(broken.join("userdata")).unwrap();
+    std::fs::write(broken.join("userdata/statev2.sqlite"), "not a database").unwrap();
+    let report = T3Registry::new(&broken).list_live_report();
+    assert!(report.threads.is_empty() && report.unreadable.len() == 1, "{report:?}");
+    assert!(report.unreadable[0].1.contains("unreadable"), "{report:?}");
+    // Identity is untouched: the same thread is still refused.
+    assert!(unavailable(t3.resolve("mcp:bad", false)).contains("payload does not parse"));
+    assert!(t3.find("mcp:bad").is_none());
+}
+
+/// One snapshot row that does not read hides no other thread's prompts, and is named.
+#[test]
+fn one_bad_snapshot_row_hides_no_other_prompts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("threads.json");
+    let rows = serde_json::json!([
+        7,
+        { "id": "mcp:cwd", "cwd": 7 },
+        { "id": "mcp:good", "cwd": "/w", "created_at": "2026-11-17T00:00:00Z", "status": "running",
+          "pending_permissions": [{ "name": "Bash", "input": { "command": "cargo test" } }] },
+    ]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(&path)), None);
+    assert_eq!(hosts.live_permission_needs(None, None).len(), 1, "mcp:good's prompt is listed");
+    let live = hosts.live_permission_report(None, None);
+    assert_eq!((live.needs.len(), live.unreadable.len()), (1, 2), "{:?}", live.unreadable);
+    // A snapshot that does not read at all is named too, never an empty healthy list.
+    std::fs::write(&path, "[{ not json").unwrap();
+    let live = hosts.live_permission_report(None, None);
+    assert_eq!((live.needs.len(), live.unreadable.len()), (0, 1));
+}

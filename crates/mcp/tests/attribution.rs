@@ -1369,3 +1369,34 @@ fn fail_open_alerts_do_not_multiply_with_the_named_session() {
     }
     assert_eq!(ids[0], ids[1]);
 }
+
+/// Codex's joint round 5: the owner's views never show live permission prompts as complete when
+/// some did not read. A snapshot row that does not read is an error of the needs section in
+/// `maestro_snapshot` and `maestro_needs_list`, and an unread source of `maestro_context`; the
+/// prompts that did read are still listed.
+#[test]
+fn the_owners_views_say_when_prompts_did_not_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("threads.json");
+    let rows = json!([
+        7,
+        { "id": "mcp:good", "cwd": "/w", "created_at": CREATED, "status": "running",
+          "pending_permissions": [{ "name": "Bash", "input": { "command": "cargo test" } }] },
+    ]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(&path)), None);
+    let machine = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine");
+    let store = Store::new(Paths::under(machine), TreeSource::WorkingTree);
+    let call = |tool: &str| call_with_hosts(&store, &hosts, tool, json!({})).unwrap();
+    for (tool, section) in [("maestro_snapshot", "/needs"), ("maestro_needs_list", "")] {
+        let v = call(tool);
+        let needs = v.pointer(section).unwrap();
+        assert!(needs["data"].to_string().contains("mcp:good"), "{tool}: the good prompt is listed: {needs}");
+        let errors = needs["errors"].as_array().unwrap_or_else(|| panic!("{tool}: no errors: {needs}"));
+        assert!(errors.iter().any(|e| e["reason"].as_str().unwrap().contains("not an object")), "{tool}: {needs}");
+    }
+    let context = call("maestro_context");
+    assert_eq!(context["packet"]["needs_complete"], false, "{context}");
+    assert!(context["packet"]["degraded"].to_string().contains("t3 permission prompts (1 unread)"), "{context}");
+    assert!(context["markdown"].as_str().unwrap().contains("t3 permission prompts"), "{context}");
+}

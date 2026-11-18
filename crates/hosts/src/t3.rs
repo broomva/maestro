@@ -143,6 +143,23 @@ struct RawT3Thread {
     /// holds them.
     #[serde(default)]
     provider_threads: Vec<RawProviderThread>,
+    /// Set by the listing only (BRO-3846): why the thread's payload did not read. The thread is
+    /// listed from what is known, its permission prompts included, and the listing reports it.
+    #[serde(default)]
+    unreadable: Option<String>,
+}
+
+/// The live threads a listing found, and what it could not read (BRO-3846). The listing feeds
+/// the owner's permission prompts, not identity, so it fails open with a signal: a thread whose
+/// payload did not read is still in `threads`, prompts and all, and named in `unreadable`; a
+/// snapshot row that did not read is left out and named; a registry that did not read at all is
+/// named by its path. A consumer must not show the prompts as complete while `unreadable` holds
+/// anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveThreads {
+    pub threads: Vec<T3Thread>,
+    /// `(where, why)`: a thread id, or the registry's path.
+    pub unreadable: Vec<(String, String)>,
 }
 
 #[derive(Deserialize)]
@@ -202,48 +219,16 @@ def main():
     conn.row_factory = sqlite3.Row
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
-    def build_thread(row):
-        payload = payload_of(row["payload_json"], f"thread {row['thread_id']}'s payload")
-        cwd = payload.get("worktreePath")
-        if not cwd and "projection_projects" in tables:
-            proj = conn.execute(
-                "SELECT workspace_root FROM projection_projects WHERE project_id = ?",
-                (row["project_id"],),
-            ).fetchone()
-            if proj:
-                cwd = proj["workspace_root"]
-        if not isinstance(cwd, str) or not cwd:
-            # Attribution picks a thread by its variable, never by a folder: a live thread with
-            # no worktree and no project root is still the thread.
-            if mode != "attr":
-                return None
-            cwd = ""
-        run_status = payload.get("status")
-        latest_run_id = None
-        if "orchestration_v2_projection_runs" in tables:
-            r = conn.execute(
-                "SELECT run_id, status FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1",
-                (row["thread_id"],),
-            ).fetchone()
-            if r:
-                if r["status"]:
-                    run_status = r["status"]
-                latest_run_id = r["run_id"]
-        settled_at = payload.get("settledAt")
-        unsettled_at = payload.get("unsettledAt")
-        if settled_at and unsettled_at and unsettled_at > settled_at:
-            settled_at = None
-        parent_id = None
-        lineage = payload.get("lineage") or payload.get("forkedFrom")
-        if isinstance(lineage, dict):
-            parent_id = lineage.get("parentThreadId") or lineage.get("threadId")
+    def permissions_of(thread_id):
+        # A thread's pending permission prompts: stored apart from its payload, so they read
+        # even when the payload does not.
         perms = []
         if "orchestration_v2_projection_runtime_requests" in tables:
             for req in conn.execute(
                 "SELECT runtime_request_id, kind, status, payload_json "
                 "FROM orchestration_v2_projection_runtime_requests "
                 "WHERE thread_id = ? AND status = 'pending' ORDER BY created_at ASC",
-                (row["thread_id"],),
+                (thread_id,),
             ):
                 if req["kind"] in ("approval", "permission", "tool_approval"):
                     try:
@@ -265,6 +250,45 @@ def main():
                         "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
                         "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
                     })
+        return perms
+
+    def build_thread(row):
+        payload = payload_of(row["payload_json"], f"thread {row['thread_id']}'s payload")
+        cwd = payload.get("worktreePath")
+        if not cwd and "projection_projects" in tables:
+            proj = conn.execute(
+                "SELECT workspace_root FROM projection_projects WHERE project_id = ?",
+                (row["project_id"],),
+            ).fetchone()
+            if proj:
+                cwd = proj["workspace_root"]
+        if not isinstance(cwd, str) or not cwd:
+            # Attribution picks a thread by its variable, never by a folder: a live thread with
+            # no worktree and no project root is still the thread. The listing feeds permission
+            # prompts, which need no folder either.
+            if mode not in ("attr", "list"):
+                return None
+            cwd = ""
+        run_status = payload.get("status")
+        latest_run_id = None
+        if "orchestration_v2_projection_runs" in tables:
+            r = conn.execute(
+                "SELECT run_id, status FROM orchestration_v2_projection_runs WHERE thread_id = ? ORDER BY ordinal DESC LIMIT 1",
+                (row["thread_id"],),
+            ).fetchone()
+            if r:
+                if r["status"]:
+                    run_status = r["status"]
+                latest_run_id = r["run_id"]
+        settled_at = payload.get("settledAt")
+        unsettled_at = payload.get("unsettledAt")
+        if settled_at and unsettled_at and unsettled_at > settled_at:
+            settled_at = None
+        parent_id = None
+        lineage = payload.get("lineage") or payload.get("forkedFrom")
+        if isinstance(lineage, dict):
+            parent_id = lineage.get("parentThreadId") or lineage.get("threadId")
+        perms = permissions_of(row["thread_id"])
         created_at = row["created_at"] if "created_at" in row.keys() and row["created_at"] else payload.get("createdAt")
         run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")
         return {
@@ -334,12 +358,29 @@ def main():
                 "SELECT rowid AS _rowid, thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
                 "FROM orchestration_v2_projection_threads ORDER BY updated_at DESC"
             ):
-                # The listing feeds permission prompts, not identity: a thread whose payload does
-                # not read is left out, so it cannot hide every other thread's prompts.
+                # The listing feeds permission prompts, not identity: it fails open, with a signal.
+                # A thread whose payload does not read is still listed, from what is known (its
+                # columns, and its prompts, stored apart), with the reason in `unreadable`; its
+                # payload fields are unknown. Its prompts are never dropped.
                 try:
                     built = build_thread(row)
-                except PayloadError:
-                    continue
+                except PayloadError as exc:
+                    built = {
+                        "id": row["thread_id"],
+                        "cwd": "",
+                        "environment_id": env_id,
+                        "node": None,
+                        "provider": row["default_provider"],
+                        "created_at": row["created_at"],
+                        "run_id": None,
+                        "archived_at": row["archived_at"],
+                        "deleted_at": row["deleted_at"],
+                        "settled_at": None,
+                        "status": None,
+                        "parent_id": None,
+                        "pending_permissions": permissions_of(row["thread_id"]),
+                        "unreadable": str(exc),
+                    }
                 if built is not None:
                     out.append(built)
         print(json.dumps(out))
@@ -558,13 +599,20 @@ impl T3Registry {
     /// `cwd` is neither missing, null nor a string, or that does not deserialize, is
     /// `registry_unavailable`: never skipped, never read as `{}`. A missing or null `cwd` is none.
     fn snapshot_rows(json_file: &Path) -> Result<Vec<RawT3Thread>, IdentityRefusal> {
+        Self::snapshot_each(json_file)?.into_iter().collect()
+    }
+
+    /// [`Self::snapshot_rows`], each row's outcome kept apart: the listing leaves out only the row
+    /// that does not read, never every row.
+    fn snapshot_each(json_file: &Path) -> Result<Vec<Result<RawT3Thread, IdentityRefusal>>, IdentityRefusal> {
         let disconnected =
             |e: String| IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("T3 JSON registry {e}."));
         let unavailable =
             |e: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, format!("T3 JSON registry {e}."));
         let text = std::fs::read_to_string(json_file).map_err(|e| disconnected(format!("could not be read: {e}")))?;
         let rows: Vec<Value> = serde_json::from_str(&text).map_err(|e| disconnected(format!("is malformed: {e}")))?;
-        rows.into_iter()
+        Ok(rows
+            .into_iter()
             .map(|mut row| {
                 let id = row.get("id").and_then(Value::as_str).unwrap_or("?").to_string();
                 let Some(o) = row.as_object_mut() else {
@@ -579,7 +627,7 @@ impl T3Registry {
                 }
                 serde_json::from_value(row).map_err(|e| unavailable(format!("row {id} is malformed: {e}")))
             })
-            .collect()
+            .collect::<Vec<_>>())
     }
 
     /// A JSON snapshot's row: one with no environment of its own is in the snapshot's environment
@@ -783,35 +831,76 @@ impl T3Registry {
 
     /// Enumerate all live T3 threads in the registry.
     pub fn list_live_threads(&self) -> Vec<T3Thread> {
+        self.list_live_report().threads
+    }
+
+    /// Every live thread, and what could not be read (see [`LiveThreads`]).
+    pub fn list_live_report(&self) -> LiveThreads {
+        let mut report = LiveThreads::default();
         if !self.is_connected() {
-            return Vec::new();
+            return report;
         }
+        let at = self.root.display().to_string();
         if let Some(json_file) = self.json_path() {
-            let Ok(rows) = Self::snapshot_rows(&json_file) else {
-                return Vec::new();
+            let rows = match Self::snapshot_each(&json_file) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    report.unreadable.push((at, e.message));
+                    return report;
+                }
             };
             let env = self.environment_id();
-            return rows
-                .into_iter()
-                .map(|raw| Self::snapshot_row(raw, &env))
-                .filter(|t| t.liveness().is_live())
-                .collect();
+            for row in rows {
+                match row {
+                    Ok(raw) => {
+                        let thread = Self::snapshot_row(raw, &env);
+                        if thread.liveness().is_live() {
+                            report.threads.push(thread);
+                        }
+                    }
+                    Err(e) => report.unreadable.push((at.clone(), e.message)),
+                }
+            }
+            return report;
         }
         if let Some(db_file) = self.sqlite_path() {
-            let Ok(out) =
-                Command::new("python3").arg("-I").arg("-c").arg(SQLITE_READER_PY).arg("list").arg(&db_file).output()
-            else {
-                return Vec::new();
+            let out = match Command::new("python3")
+                .arg("-I")
+                .arg("-c")
+                .arg(SQLITE_READER_PY)
+                .arg("list")
+                .arg(&db_file)
+                .output()
+            {
+                Ok(out) => out,
+                Err(e) => {
+                    report.unreadable.push((at, format!("the T3 SQLite reader failed to launch: {e}")));
+                    return report;
+                }
             };
             if !out.status.success() {
-                return Vec::new();
+                let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                report.unreadable.push((at, format!("the T3 SQLite database is unreadable: {why}")));
+                return report;
             }
-            let Ok(rows) = serde_json::from_slice::<Vec<RawT3Thread>>(&out.stdout) else {
-                return Vec::new();
+            let rows = match serde_json::from_slice::<Vec<RawT3Thread>>(&out.stdout) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    report.unreadable.push((at, format!("the T3 SQLite reader returned invalid JSON: {e}")));
+                    return report;
+                }
             };
-            return rows.into_iter().map(Self::from_raw).filter(|t| t.liveness().is_live()).collect();
+            for raw in rows {
+                if let Some(why) = raw.unreadable.clone() {
+                    report.unreadable.push((format!("t3 thread {}", raw.id), why));
+                }
+                let thread = Self::from_raw(raw);
+                if thread.liveness().is_live() {
+                    report.threads.push(thread);
+                }
+            }
         }
-        Vec::new()
+        report
     }
 
     /// Verify the thread a claiming process's own thread variable resolved to (BRO-3846). Called

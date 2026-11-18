@@ -2381,7 +2381,7 @@ mutate $ht '        if missing:
 '
 mutate $ht '            if r["provider_thread_id"] is None:' '            if False:'
 mutate $ht '                if !raw.provider_threads.iter().any(|p| p.provider_thread_id == active) {' '                if false {'
-mutate $ht '            if mode != "attr":' '            if True:'
+mutate $ht '            if mode not in ("attr", "list"):' '            if mode not in ("list",):'
 mutate $ht '            if cwd or mode == "attr":' '            if cwd:'
 mutate $ht '    if mode == "attr" and not (' '    if False and not ('
 mutate $ht '.arg(if attributed { "attr" } else { "get" })' '.arg("get")'
@@ -2435,10 +2435,27 @@ mutate $ht '    #[serde(default, alias = "archivedAt")]' '    #[serde(default)]'
 mutate $ht $'    if raw is None or not str(raw).strip():\n        raise PayloadError' $'    if False:\n        raise PayloadError'
 mutate $ht $'    except Exception:\n        raise PayloadError(f"{what} does not parse")' $'    except Exception:\n        return {}'
 mutate $ht $'    if not isinstance(payload, dict):\n        raise PayloadError' $'    if False:\n        raise PayloadError'
-mutate $ht 'except PayloadError as exc:' 'except ZeroDivisionError as exc:'
+mutate $ht $'except PayloadError as exc:\n    # A payload that does not read' $'except ZeroDivisionError as exc:\n    # A payload that does not read'
 mutate $ht '                    Some(_) => return Err(unavailable(format!("row {id} has a cwd that is not a string"))),' '                    Some(_) => {}'
 mutate $ht '                    return Err(unavailable("has a row that is not an object".to_string()));' '                    return serde_json::from_value(serde_json::json!({ "id": "", "cwd": "" })).map_err(|e| unavailable(e.to_string()));'
 mutate $ht '.filter(|raw| attributed || !raw.cwd.is_empty())' '.filter(|_| true)'
+# Joint round 5 (BRO-3846, Codex at 5ced368): the permission-prompt listing fails open with a
+# signal: an unreadable thread keeps its prompts, a bad snapshot row hides no other, and every
+# view says what did not read.
+mutate $ht $'                except PayloadError as exc:\n                    built = {' $'                except PayloadError as exc:\n                    continue\n                    built = {'
+mutate $ht '                        "pending_permissions": permissions_of(row["thread_id"]),' '                        "pending_permissions": [],'
+mutate $ht '                        "unreadable": str(exc),' '                        "unreadable": None,'
+mutate $ht '            if mode not in ("attr", "list"):' '            if mode not in ("attr",):'
+mutate $ht '                    report.unreadable.push((format!("t3 thread {}", raw.id), why));' ''
+mutate $ht '                    Err(e) => report.unreadable.push((at.clone(), e.message)),' '                    Err(_) => {}'
+mutate $ht '            let rows = match Self::snapshot_each(&json_file) {' '            let rows = match Self::snapshot_rows(&json_file).map(|r| r.into_iter().map(Ok).collect::<Vec<_>>()) {'
+mutate $ht '                    report.unreadable.push((at, e.message));' ''
+mutate $ht '                report.unreadable.push((at, format!("the T3 SQLite database is unreadable: {why}")));' ''
+mutate $hlb '            unreadable.extend(listed.unreadable.into_iter().map(|(at, reason)| SourceError { at, reason }));' ''
+mutate $mcp '            snap.needs.errors.extend(live.unreadable);' ''
+mutate $mcp '                    section.errors.extend(live.unreadable);' ''
+mutate $mcp '                    packet.needs_complete = false;' ''
+mutate $mcp '                    packet.degraded.push(format!("t3 permission prompts ({} unread)", live.unreadable.len()));' ''
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

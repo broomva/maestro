@@ -592,9 +592,13 @@ fn dispatch(
     match name {
         "maestro_snapshot" => {
             let mut snap = views::snapshot(store);
+            // Live prompts fail open with a signal (BRO-3846): what did not read is an error of
+            // the section, so the needs never look complete when they are not.
+            let live = hosts.live_permission_report(None, None);
             if let Some(list) = snap.needs.data.as_mut() {
-                list.extend(hosts.live_permission_needs(None, None));
+                list.extend(live.needs);
             }
+            snap.needs.errors.extend(live.unreadable);
             Ok(json!(snap))
         }
         "maestro_needs_list" => {
@@ -603,7 +607,9 @@ fn dispatch(
             let mut section = snap.needs;
             if let Some(list) = section.data.as_mut() {
                 if a.project.is_none() {
-                    list.extend(hosts.live_permission_needs(None, None));
+                    let live = hosts.live_permission_report(None, None);
+                    list.extend(live.needs);
+                    section.errors.extend(live.unreadable);
                 } else if let Some(p) = a.project.as_deref() {
                     list.retain(|n| n.project.as_deref() == Some(p));
                 }
@@ -760,9 +766,11 @@ fn dispatch(
             let mut packet =
                 views::context(store, ContextScope { cwd: a.cwd, project: a.project, initiative: a.initiative });
             if packet.scope.project.is_none() && packet.scope.initiative.is_none() {
-                let live_needs = hosts.live_permission_needs(None, None);
-                if !live_needs.is_empty() {
-                    packet.needs.extend(live_needs);
+                let live = hosts.live_permission_report(None, None);
+                packet.needs.extend(live.needs);
+                if !live.unreadable.is_empty() {
+                    packet.needs_complete = false;
+                    packet.degraded.push(format!("t3 permission prompts ({} unread)", live.unreadable.len()));
                 }
             }
             let markdown = packet.render_markdown(a.max_needs.unwrap_or(8));

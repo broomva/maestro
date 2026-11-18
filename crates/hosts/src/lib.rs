@@ -31,8 +31,9 @@ pub use paseo::{
     PARENT_AGENT_LABEL, PaseoAgent, PaseoRegistry, PermissionLike, describe_permission, permission_request_id,
     resolve_real, within,
 };
-pub use t3::{MAX_T3_ID, Resolution, T3Registry, T3Thread, is_safe_t3_id};
+pub use t3::{LiveThreads, MAX_T3_ID, Resolution, T3Registry, T3Thread, is_safe_t3_id};
 
+use maestro_core::SourceError;
 use maestro_core::need::Need;
 use paseo::{check_peer, is_safe_id, short_id};
 use serde::{Deserialize, Serialize};
@@ -1348,6 +1349,15 @@ impl SurfaceRegistry {
     /// Enumerate all live permission prompts across configured Paseo, T3, and Direct registries
     /// and convert them into [`Need`] items.
     pub fn live_permission_needs(&self, project: Option<&str>, since: Option<&str>) -> Vec<Need> {
+        self.live_permission_report(project, since).needs
+    }
+
+    /// [`Self::live_permission_needs`], and what could not be read (BRO-3846): T3 threads whose
+    /// payload did not read (their prompts are still listed), snapshot rows that did not read, or
+    /// a T3 registry that did not read at all. A view must not show the needs as complete while
+    /// `unreadable` holds anything.
+    pub fn live_permission_report(&self, project: Option<&str>, since: Option<&str>) -> PermissionNeeds {
+        let mut unreadable = Vec::new();
         let mut out = Vec::new();
         if let Some(paseo) = &self.paseo {
             for agent in paseo.list_live_agents() {
@@ -1358,7 +1368,9 @@ impl SurfaceRegistry {
             }
         }
         if let Some(t3) = &self.t3 {
-            for thread in t3.list_live_threads() {
+            let listed = t3.list_live_report();
+            unreadable.extend(listed.unreadable.into_iter().map(|(at, reason)| SourceError { at, reason }));
+            for thread in listed.threads {
                 let sref = SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id };
                 for prompt in &thread.pending_permissions {
                     out.push(prompt.to_need(&sref, project.map(str::to_string), since.map(str::to_string)));
@@ -1373,6 +1385,13 @@ impl SurfaceRegistry {
                 }
             }
         }
-        out
+        PermissionNeeds { needs: out, unreadable }
     }
+}
+
+/// Live permission prompts as needs, and the sources that could not be read for them.
+#[derive(Debug, Clone, Default)]
+pub struct PermissionNeeds {
+    pub needs: Vec<Need>,
+    pub unreadable: Vec<SourceError>,
 }
