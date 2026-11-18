@@ -1446,7 +1446,9 @@ fn external_agents_are_pinned_for_the_running_instance() {
     );
     assert!(
         maestro_flow::kernel::compile_with_path(&yaml.replace("agents: agents", "agents: ../.."), Some(&definition))
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .contains("agents root escapes repository")
     );
     let mut f = fx("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [true]}\n");
     f.flow = flow;
