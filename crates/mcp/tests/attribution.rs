@@ -1594,3 +1594,22 @@ fn a_t3_folder_with_no_registry_keeps_the_views_complete() {
         assert_eq!(got, (true, json!(false), json!(["t3 permission prompts (1 unread)"])), "an unreadable database");
     }
 }
+
+/// BRO-3863: a permission record that does not decode leaves the owner's views incomplete, naming
+/// the surface, while the well-formed prompt beside it is still listed.
+#[test]
+fn a_permission_record_that_does_not_decode_leaves_the_views_incomplete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = complete_store(tmp.path());
+    let path = tmp.path().join("threads.json");
+    let rows = json!([{ "id": "mcp:good", "cwd": "/w", "created_at": CREATED, "status": "running",
+        "pending_permissions": [{ "no_name": true }, { "name": "Bash", "input": { "command": "cargo test" } }] }]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(&path)), None);
+    let context = call_with_hosts(&store, &hosts, "maestro_context", json!({})).unwrap();
+    assert_eq!(context["packet"]["needs_complete"], false, "{context}");
+    assert_eq!(context["packet"]["degraded"], json!(["t3 permission prompts (1 unread)"]), "{context}");
+    let needs = call_with_hosts(&store, &hosts, "maestro_needs_list", json!({})).unwrap();
+    assert!(needs["data"].to_string().contains("mcp:good"), "{needs}");
+    assert!(needs["errors"].to_string().contains("does not decode"), "{needs}");
+}

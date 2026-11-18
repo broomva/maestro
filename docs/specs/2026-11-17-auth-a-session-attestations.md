@@ -19,6 +19,8 @@ Probe receipts: [2026-11-17-auth-a-probes/probes.md](2026-11-17-auth-a-probes/pr
 
 Every round-2 and round-3 finding landed on cwd attribution, so round 4 removes it instead of hardening it.
 
+**Review ledger exception.** Joint rounds 1–8 on the implementation are preserved as they are on maestro#43. Round 8 (Gemini 9.4 PASS `converged`, Codex 6 FAIL) was past the review budget. The owner approved one round beyond it, round 9, to fold BRO-3863 (pending permission records that do not decode, decision 17) into this PR. Round 9 is single: a failure stops the PR for the owner, with no override.
+
 ## Objective
 
 Let a live T3 thread write to the flow ledger *without a credential* when the process making the write carries a thread variable that T3 maps to a thread, and refuse such an unsigned write otherwise. Credentialed writes follow the matrix below. Record on every event which variable the writer carried.
@@ -215,6 +217,20 @@ Three deliberate exceptions:
     - Discovery that cannot read (an inaccessible home) yields a found registry that is unreadable. It reaches `live_permission_report` as an unread source naming the surface. Identity on it fails closed: `registry_disconnected` from a lookup, `registry_unavailable` from a variable's resolution, never "no such session".
     - Plugin parity holds. A Paseo agent file that reads but does not parse, or names another agent, is still "no such session" to identity, as `callers-golden.json` requires. The listing reports it unread.
     - `crates/hosts/tests/read_guard.rs` fails if a raw `is_dir`, `is_file`, `exists`, `read_dir`, `read_to_string`, or a dropped entry error comes back in those functions.
+17. **The record-decode rule** (round 9, BRO-3863 folded in by the owner). A pending permission record that does not decode is never dropped. One helper, `decode_permissions`, holds the rule for Paseo agents and T3 threads alike: each record that decodes is a prompt, and each that does not is an unread record, with why.
+    - The embedded SQLite reader reads each runtime request's payload by the one parser (`payload_of`). It emits an explicit `{"unreadable": why}` marker, never a `continue`, for:
+      - a payload that is NULL, empty, not JSON or not an object;
+      - a record that names no tool.
+
+      The helper converts the marker.
+    - `T3Registry::list_live_report` and Paseo's listing report each live session's unread records. They reach `live_permission_report` as unread sources tagged with the surface, naming the agent file or thread and the request. The owner's views are then incomplete (`needs_complete: false`), and the well-formed prompts beside them are still listed.
+    - **Identity is not affected.** A verified session carries the prompts that decoded, as before, and no lookup's outcome depends on a permission record: a malformed one never refuses, admits or changes a session. Paseo plugin parity (`callers-golden.json`) holds.
+    - `crates/hosts/tests/read_guard.rs` now also flags these, in the functions it guards (and across the whole embedded reader for the last):
+      - `.ok()` in a `filter_map` or on a decode;
+      - raw `fs::metadata`, `fs::read` and `File::open`;
+      - an `except …: continue`.
+
+      It is a scoped lexical guard and claims no more than it checks. Its one reviewed exception, listed in the guard with why, is `discover`'s display-only runtime metadata (a version and an endpoint), which identity and needs never read.
 13. **Existing tests.** The authority suites (`crates/mcp/tests/{authority,dispatch}.rs`, `crates/cli/tests/requests.rs`) are unchanged. Three tests outside them changed: `crates/mcp/tests/flow.rs` `verified_t3_and_paseo_sessions_write` now runs in both modes (attributed refuses the unsigned T3 claim `attribution_missing`). `crates/mcp/tests/stop.rs` and `transports.rs` name `paseo:-/nobody` for their unverified `flow open`, so they hold in any environment. The stop test also asserts the T3 case's `attribution_missing`.
 
 ## Alternatives considered

@@ -6,7 +6,7 @@
 //! to verify a T3 thread's existence, liveness, working directory (`worktreePath` or
 //! project `workspace_root`), environment id, and pending permission prompts.
 
-use crate::paseo::{PermissionLike, check_peer, describe_permission, permission_request_id, short_id, within};
+use crate::paseo::{check_peer, decode_permissions, short_id, within};
 use crate::read::{self, Read};
 use maestro_core::session::{
     BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, RefusalReason,
@@ -64,6 +64,9 @@ pub struct T3Thread {
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
+    /// Pending permission records that did not decode, each with why (BRO-3863).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_permissions: Vec<String>,
 }
 
 impl T3Thread {
@@ -177,6 +180,20 @@ pub(crate) enum Located {
     Sqlite(PathBuf),
 }
 
+impl LiveThreads {
+    /// A thread the listing read: listed when live, and each of its pending permission records
+    /// that did not decode reported unread (BRO-3863), never dropped.
+    fn take(&mut self, thread: T3Thread) {
+        if !thread.liveness().is_live() {
+            return;
+        }
+        for why in &thread.unread_permissions {
+            self.unreadable.push((format!("t3 thread {}", thread.id), why.clone()));
+        }
+        self.threads.push(thread);
+    }
+}
+
 /// What one thread variable resolved to (BRO-3846).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
@@ -243,14 +260,17 @@ def main():
                 (thread_id,),
             ):
                 if req["kind"] in ("approval", "permission", "tool_approval"):
+                    # A record that does not decode is a marker the Rust side reports unread, never
+                    # skipped (BRO-3863); its payload reads by the one rule, `payload_of`.
+                    what = f"permission request {req['runtime_request_id']} of thread {thread_id}"
                     try:
-                        rp = json.loads(req["payload_json"] or "{}")
-                    except Exception:
-                        continue
-                    if not isinstance(rp, dict):
+                        rp = payload_of(req["payload_json"], what)
+                    except PayloadError as exc:
+                        perms.append({"unreadable": str(exc)})
                         continue
                     name = rp.get("toolName") or rp.get("name") or req["kind"]
                     if not isinstance(name, str) or not name.strip():
+                        perms.append({"unreadable": f"{what} names no tool"})
                         continue
                     req_id = req["runtime_request_id"]
                     if not isinstance(req_id, str) or not req_id.strip():
@@ -525,10 +545,12 @@ impl T3Registry {
             Read::Absent | Read::Unreadable(_) => None,
         };
         let env_id = text(userdata.join("environment-id")).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        let runtime_json =
-            text(userdata.join("server-runtime.json")).and_then(|t| serde_json::from_str::<Value>(&t).ok());
-        let service_json =
-            text(self.root.join("runtime/service-state.json")).and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        // Display metadata only (the runtime's version and endpoint): a file that does not decode
+        // reports them unknown. Identity and needs never read these two files; the read guard lists
+        // this as its one reviewed exception.
+        let decode = |t: String| serde_json::from_str::<Value>(&t).ok();
+        let runtime_json = text(userdata.join("server-runtime.json")).and_then(decode);
+        let service_json = text(self.root.join("runtime/service-state.json")).and_then(decode);
 
         let version = runtime_json
             .as_ref()
@@ -603,17 +625,8 @@ impl T3Registry {
     }
 
     fn from_raw(raw: RawT3Thread) -> T3Thread {
-        let pending_permissions = raw
-            .pending_permissions
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|val| serde_json::from_value::<PermissionLike>(val).ok())
-            .map(|p| {
-                let (title, detail) = describe_permission(&p, Some(&raw.cwd));
-                let request_id = permission_request_id(&p, "t3-perm");
-                PermissionPrompt { request_id, title, detail }
-            })
-            .collect();
+        let (pending_permissions, unread_permissions) =
+            decode_permissions(raw.pending_permissions.unwrap_or_default(), &raw.cwd, "t3-perm");
         T3Thread {
             id: raw.id,
             cwd: raw.cwd,
@@ -628,6 +641,7 @@ impl T3Registry {
             status: raw.status,
             parent_id: raw.parent_id,
             pending_permissions,
+            unread_permissions,
         }
     }
 
@@ -924,12 +938,7 @@ impl T3Registry {
             let env = self.environment_id();
             for row in rows {
                 match row {
-                    Ok(raw) => {
-                        let thread = Self::snapshot_row(raw, &env);
-                        if thread.liveness().is_live() {
-                            report.threads.push(thread);
-                        }
-                    }
+                    Ok(raw) => report.take(Self::snapshot_row(raw, &env)),
                     Err(e) => report.unreadable.push((at.clone(), e.message)),
                 }
             }
@@ -966,10 +975,7 @@ impl T3Registry {
                 if let Some(why) = raw.unreadable.clone() {
                     report.unreadable.push((format!("t3 thread {}", raw.id), why));
                 }
-                let thread = Self::from_raw(raw);
-                if thread.liveness().is_live() {
-                    report.threads.push(thread);
-                }
+                report.take(Self::from_raw(raw));
             }
         }
         report

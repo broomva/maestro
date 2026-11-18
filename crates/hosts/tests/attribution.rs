@@ -705,3 +705,86 @@ fn one_bad_snapshot_row_hides_no_other_prompts() {
     let live = hosts.live_permission_report(None, None);
     assert_eq!((live.needs.len(), live.unreadable.len()), (0, 1));
 }
+
+/// BRO-3863 (folded into round 9): a pending permission record that does not decode is an unread
+/// item of the listing, tagged with its surface and session, never dropped; a well-formed
+/// neighbour is still listed; identity is unaffected (the session's prompts are the decoded ones).
+fn unread_reasons(hosts: &SurfaceRegistry) -> (usize, Vec<String>) {
+    let live = hosts.live_permission_report(None, None);
+    (
+        live.needs.len(),
+        live.unreadable.iter().map(|u| format!("{} {}: {}", u.surface.as_str(), u.error.at, u.error.reason)).collect(),
+    )
+}
+
+#[test]
+fn a_paseo_permission_record_that_does_not_decode_is_unread() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("work")).unwrap();
+    let agent = serde_json::json!({ "id": "agent-a", "cwd": "/w", "lastStatus": "running",
+        "pendingPermissions": [{ "bad_entry_missing_name": 42 }, { "name": "Bash", "input": { "command": "ls" } }] });
+    std::fs::write(tmp.path().join("work/agent-a.json"), agent.to_string()).unwrap();
+    let paseo = maestro_hosts::PaseoRegistry::new(tmp.path());
+    let (needs, unread) =
+        unread_reasons(&SurfaceRegistry::new(Some(maestro_hosts::PaseoRegistry::new(tmp.path())), None, None));
+    assert_eq!(needs, 1, "the well-formed prompt is listed");
+    assert_eq!(unread.len(), 1, "{unread:?}");
+    assert!(
+        unread[0].starts_with("paseo ") && unread[0].contains("agent-a.json") && unread[0].contains("does not decode"),
+        "{unread:?}"
+    );
+    // Identity: the agent is found as before, with its decoded prompt only.
+    let found = paseo.find("agent-a").unwrap();
+    assert_eq!((found.pending_permissions.len(), found.unread_permissions.len()), (1, 1));
+}
+
+#[test]
+fn a_t3_snapshot_permission_record_that_does_not_decode_is_unread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("threads.json");
+    let rows = serde_json::json!([{ "id": "mcp:a", "cwd": "/w", "created_at": "2026-11-17T00:00:00Z", "status": "running",
+        "pending_permissions": [7, { "name": "Bash", "input": { "command": "ls" } }] }]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    let t3 = T3Registry::new(&path);
+    let (needs, unread) = unread_reasons(&SurfaceRegistry::new(None, Some(t3.clone()), None));
+    assert_eq!(needs, 1);
+    assert_eq!(unread.len(), 1, "{unread:?}");
+    assert!(unread[0].starts_with("t3 t3 thread mcp:a") && unread[0].contains("does not decode"), "{unread:?}");
+    let v = t3.verify_attributed("mcp:a", None).unwrap();
+    assert_eq!(v.pending_permissions().len(), 1, "identity carries the decoded prompt only");
+}
+
+#[test]
+fn a_t3_runtime_request_that_does_not_decode_is_unread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = partial_db(
+        tmp.path(),
+        true,
+        r#"
+conn.executescript("""CREATE TABLE orchestration_v2_projection_runtime_requests (
+  runtime_request_id TEXT, thread_id TEXT, kind TEXT, status TEXT, created_at TEXT, payload_json TEXT);""")
+thread("mcp:a", None, {"worktreePath": "/w"})
+for rid, payload in [("req-bad", "{bad"), ("req-null", None), ("req-list", "[1]"), ("req-tool", json.dumps({"toolName": 7})),
+                     ("req-good", json.dumps({"toolName": "Bash", "input": {"command": "ls"}}))]:
+    conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
+        (rid, "mcp:a", "approval", "pending", "2026-11-17T00:00:00Z", payload))
+"#,
+    );
+    let t3 = T3Registry::new(db);
+    let (needs, unread) = unread_reasons(&SurfaceRegistry::new(None, Some(t3.clone()), None));
+    assert_eq!(needs, 1, "req-good is listed");
+    assert_eq!(unread.len(), 4, "{unread:?}");
+    for (rid, says) in [
+        ("req-bad", "does not parse"),
+        ("req-null", "is empty"),
+        ("req-list", "is not an object"),
+        ("req-tool", "names no tool"),
+    ] {
+        assert!(
+            unread.iter().any(|u| u.contains(&format!("permission request {rid} of thread mcp:a {says}"))),
+            "{rid}: {unread:?}"
+        );
+    }
+    let v = t3.verify_attributed("mcp:a", None).unwrap();
+    assert_eq!(v.pending_permissions().len(), 1, "identity carries the decoded prompt only");
+}

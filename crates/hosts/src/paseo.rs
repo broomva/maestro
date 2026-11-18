@@ -49,6 +49,34 @@ pub struct PermissionLike {
     pub input: Option<serde_json::Map<String, Value>>,
 }
 
+/// The one rule for a session's pending permission records (BRO-3863), for Paseo and T3 alike: each
+/// record that decodes is a prompt; each that does not is an unread record, with why, never
+/// dropped. A record `{"unreadable": why}` with no `name` is the T3 reader's own marker for a
+/// runtime request whose payload did not read. Identity is unaffected: a verified session carries
+/// the prompts that decoded, and its lookup's outcome does not depend on them; only the owner's
+/// permission listing reports the unread ones.
+pub(crate) fn decode_permissions(raw: Vec<Value>, cwd: &str, prefix: &str) -> (Vec<PermissionPrompt>, Vec<String>) {
+    let mut prompts = Vec::new();
+    let mut unread = Vec::new();
+    for (i, value) in raw.into_iter().enumerate() {
+        if value.get("name").is_none()
+            && let Some(why) = value.get("unreadable").and_then(Value::as_str)
+        {
+            unread.push(why.to_string());
+            continue;
+        }
+        match serde_json::from_value::<PermissionLike>(value) {
+            Ok(p) => {
+                let (title, detail) = describe_permission(&p, Some(cwd));
+                let request_id = permission_request_id(&p, prefix);
+                prompts.push(PermissionPrompt { request_id, title, detail });
+            }
+            Err(e) => unread.push(format!("permission record {i} does not decode: {e}")),
+        }
+    }
+    (prompts, unread)
+}
+
 /// What Maestro reads from a Paseo registry file (`server/callers.ts` `RegistryAgent`).
 /// Bearer tokens and `persistence` credentials are never read into this struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +96,10 @@ pub struct PaseoAgent {
     pub handle_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
+    /// Pending permission records that did not decode, each with why (BRO-3863): never dropped,
+    /// so the owner's permission listing reports them unread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_permissions: Vec<String>,
 }
 
 impl PaseoAgent {
@@ -294,7 +326,12 @@ impl PaseoRegistry {
                     continue;
                 }
                 match Self::agent_at(&path, stem) {
-                    Read::Present(Ok(agent)) if agent.liveness().is_live() => out.push(agent),
+                    Read::Present(Ok(agent)) if agent.liveness().is_live() => {
+                        for why in &agent.unread_permissions {
+                            unread.push((at(&path), why.clone()));
+                        }
+                        out.push(agent);
+                    }
                     Read::Present(Ok(_)) | Read::Absent => {}
                     Read::Present(Err(why)) | Read::Unreadable(why) => unread.push((at(&path), why)),
                 }
@@ -327,17 +364,8 @@ impl PaseoRegistry {
             .and_then(|labels| labels.get(PARENT_AGENT_LABEL))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let pending_permissions = parsed
-            .pending_permissions
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|raw| serde_json::from_value::<PermissionLike>(raw).ok())
-            .map(|raw| {
-                let (title, detail) = describe_permission(&raw, Some(&parsed.cwd));
-                let request_id = permission_request_id(&raw, "perm");
-                PermissionPrompt { request_id, title, detail }
-            })
-            .collect();
+        let (pending_permissions, unread_permissions) =
+            decode_permissions(parsed.pending_permissions.unwrap_or_default(), &parsed.cwd, "perm");
         Ok(PaseoAgent {
             id: parsed.id,
             cwd: parsed.cwd,
@@ -349,6 +377,7 @@ impl PaseoRegistry {
             pid: parsed.pid,
             handle_id: parsed.persistence.and_then(|p| p.session_id),
             pending_permissions,
+            unread_permissions,
         })
     }
 

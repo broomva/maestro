@@ -2483,6 +2483,16 @@ mutate $hlb '            Read::Unreadable(why) => Err(why),' '            Read::
 # located under it; a Direct registry file that does not parse is unread.
 mutate $hlb '        match T3Registry::new(&t3).locate() {' '        match read::is_dir(&t3).map(|_| ()) {'
 mutate $hlb '                .map_err(|e| format!("the registry file does not parse: {e}")),' '                .or_else(|_| Ok::<Vec<DirectSession>, serde_json::Error>(Vec::new())).map_err(|e| format!("the registry file does not parse: {e}")),'
+# Round 9, BRO-3863 folded in: a pending permission record that does not decode is an unread item of
+# the owner's listing, tagged with its surface and session, never dropped; identity is unaffected.
+mutate $hp '            Err(e) => unread.push(format!("permission record {i} does not decode: {e}")),' '            Err(_) => {}'
+mutate $hp '            unread.push(why.to_string());' ''
+mutate $hp $'            pending_permissions,\n            unread_permissions,\n        })' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        })'
+mutate $hp '                            unread.push((at(&path), why.clone()));' ''
+mutate $ht $'            pending_permissions,\n            unread_permissions,\n        }' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        }'
+mutate $ht '            self.unreadable.push((format!("t3 thread {}", thread.id), why.clone()));' ''
+mutate $ht '                        perms.append({"unreadable": str(exc)})' '                        pass'
+mutate $ht '                        perms.append({"unreadable": f"{what} names no tool"})' '                        pass'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
