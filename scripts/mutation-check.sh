@@ -2437,6 +2437,12 @@ mutate $gt '                let key = format!("fail_open\n{workspace}\n{code}\n{
 # Joint round 3 (BRO-3846, Codex at 25e3007): an empty, blank or NULL payload is no payload, never {}.
 mutate $ht '        if mode == "attr" and (row["payload_json"] is None or not str(row["payload_json"]).strip()):' '        if False:'
 mutate $ht '            if r["payload_json"] is None or not str(r["payload_json"]).strip():' '            if False:'
+# Joint round 3 (BRO-3846, Gemini at 25e3007): a thread archived or deleted in its payload only is
+# no live thread to the native scan, whose own payload must read to tell.
+mutate $ht '            if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):' '            if False:'
+mutate $ht '            if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):' '            if thread_payload.get("archivedAt"):'
+mutate $ht '            if raw is None or not str(raw).strip():' '            if False:'
+mutate $ht '    #[serde(default, alias = "archivedAt")]' '    #[serde(default)]'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

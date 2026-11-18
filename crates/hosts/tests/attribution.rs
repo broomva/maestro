@@ -512,3 +512,43 @@ fn native_resolution_reads_only_live_threads_and_skips_unassigned_ids() {
     std::fs::write(&path, rows.to_string()).unwrap();
     assert_eq!(resolved(T3Registry::new(&path).resolve("native-a", true).unwrap()), "mcp:a");
 }
+
+/// Gemini's joint round 3: a thread archived or deleted only in its payload (`archivedAt`,
+/// `deletedAt`, as the thread reader honours them) is no live thread to the native scan: its
+/// native id collides with no live thread's, and its pruned provider row breaks nothing. A live
+/// thread's own payload that does not read is `registry_unavailable`.
+#[test]
+fn a_thread_archived_in_its_payload_only_is_not_scanned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let live = r#"thread("mcp:a", "pt-a", {"worktreePath": "/w"}); provider("pt-a", "mcp:a", native("native-n"))"#;
+    for (name, key) in [("archived", "archivedAt"), ("deleted", "deletedAt")] {
+        let old = format!(
+            r#"thread("mcp:old", "pt-old", {{"{key}": "2026-11-17T01:00:00Z"}}); provider("pt-old", "mcp:old", native("native-n"))"#
+        );
+        let db = partial_db(&tmp.path().join(name), true, &format!("{live}\n{old}"));
+        assert_eq!(resolved(T3Registry::new(db).resolve("native-n", true).unwrap()), "mcp:a", "{name}");
+        let pruned = format!(r#"thread("mcp:old", "pt-gone", {{"{key}": "2026-11-17T01:00:00Z"}})"#);
+        let db = partial_db(&tmp.path().join(format!("{name}-pruned")), true, &format!("{live}\n{pruned}"));
+        assert_eq!(resolved(T3Registry::new(db).resolve("native-n", true).unwrap()), "mcp:a", "{name} pruned");
+    }
+    for (name, payload, says) in
+        [("empty", r#""""#, "is empty"), ("null", "None", "is empty"), ("corrupt", r#""{x""#, "does not parse")]
+    {
+        let other = format!(
+            r#"conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)", ("mcp:b", "p", "t", "codex", "pt-b", "c", "u", None, None, {payload})); provider("pt-b", "mcp:b", native("native-b"))"#
+        );
+        let db = partial_db(&tmp.path().join(format!("thread-{name}")), true, &format!("{live}\n{other}"));
+        let why = unavailable(T3Registry::new(db).resolve("native-n", true));
+        assert!(why.contains(&format!("thread mcp:b's payload {says}")), "{name}: {why}");
+    }
+    // The snapshot: a row archived under the payload's own key is not scanned either.
+    let path = tmp.path().join("threads.json");
+    let rows = serde_json::json!([
+        { "id": "mcp:a", "cwd": "/w", "active_provider_thread_id": "pt-a",
+          "provider_threads": [{ "provider_thread_id": "pt-a", "native_id": "native-n" }] },
+        { "id": "mcp:old", "cwd": "/w", "archivedAt": "2026-11-17T01:00:00Z", "active_provider_thread_id": "pt-old",
+          "provider_threads": [{ "provider_thread_id": "pt-old", "native_id": "native-n" }] },
+    ]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    assert_eq!(resolved(T3Registry::new(&path).resolve("native-n", true).unwrap()), "mcp:a");
+}

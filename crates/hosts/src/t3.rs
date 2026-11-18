@@ -123,9 +123,9 @@ struct RawT3Thread {
     created_at: Option<String>,
     #[serde(default, alias = "runId", alias = "session_id", alias = "sessionId")]
     run_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "archivedAt")]
     archived_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "deletedAt")]
     deleted_at: Option<String>,
     #[serde(default)]
     settled_at: Option<String>,
@@ -297,13 +297,30 @@ def main():
             sys.exit(2)
         out = []
         rows = conn.execute(
-            "SELECT t.thread_id AS thread_id, p.provider_thread_id AS provider_thread_id, p.payload_json AS payload_json "
+            "SELECT t.thread_id AS thread_id, t.payload_json AS thread_payload, "
+            "p.provider_thread_id AS provider_thread_id, p.payload_json AS payload_json "
             "FROM orchestration_v2_projection_threads t "
             "LEFT JOIN orchestration_v2_projection_provider_threads p "
             "ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id "
             "WHERE t.active_provider_thread_id IS NOT NULL AND t.archived_at IS NULL AND t.deleted_at IS NULL"
         )
         for r in rows:
+            # A thread archived or deleted in its payload only (`archivedAt`, `deletedAt`, as
+            # `build_thread` reads them) is no live thread either. Its payload must read to tell.
+            raw = r["thread_payload"]
+            if raw is None or not str(raw).strip():
+                sys.stderr.write(f"sqlite_error: thread {r['thread_id']}'s payload is empty\n")
+                sys.exit(2)
+            try:
+                thread_payload = json.loads(raw)
+            except Exception:
+                sys.stderr.write(f"sqlite_error: thread {r['thread_id']}'s payload does not parse\n")
+                sys.exit(2)
+            if not isinstance(thread_payload, dict):
+                sys.stderr.write(f"sqlite_error: thread {r['thread_id']}'s payload is not an object\n")
+                sys.exit(2)
+            if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):
+                continue
             if r["provider_thread_id"] is None:
                 unreadable(r["thread_id"], "is missing")
             if r["payload_json"] is None or not str(r["payload_json"]).strip():
