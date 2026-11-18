@@ -2289,7 +2289,7 @@ mutate $gt '            let is_pipe = bytes[i] == b'\''|'\'';' '            let 
 mutate $gt '            let is_amp = bytes[i] == b'\''&'\'';' '            let is_amp = false;'
 mutate $gt '            let is_semi = bytes[i] == b'\'';'\'';' '            let is_semi = false;'
 mutate $gt '            let is_redir = matches!(bytes[i], b'\''<'\'' | b'\''>'\'');' '            let is_redir = false;'
-mutate $gt '            let is_sub = bytes[i] == b'\''$'\'';' '            let is_sub = false;'
+mutate $gt '            let is_sub = bytes[i] == b'\''$'\'' && dollar_var_len(&bytes[i..]).is_none();' '            let is_sub = false;'
 mutate $gt '            let is_paren = matches!(bytes[i], b'\''('\'' | b'\'')'\'');' '            let is_paren = false;'
 mutate $gt '            let is_nl = matches!(bytes[i], b'\''\n'\'' | b'\''\r'\'');' '            let is_nl = false;'
 mutate $gt '            let is_tick = bytes[i] == b'\''`'\'';' '            let is_tick = false;'

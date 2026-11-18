@@ -446,6 +446,10 @@ fn the_install_check_reads_the_harness_settings() {
     assert!(stop::check_install(Harness::Claude, &path).wired);
     write(hook("'/tmp/an'\"'\"'other directory/maestro' flow stop-gate --harness claude"));
     assert!(stop::check_install(Harness::Claude, &path).wired);
+    write(hook("$HOME/.local/bin/maestro flow stop-gate --harness claude"));
+    assert!(stop::check_install(Harness::Claude, &path).wired);
+    write(hook("${HOME}/.local/bin/maestro flow stop-gate --harness claude"));
+    assert!(stop::check_install(Harness::Claude, &path).wired);
     write(hook("env FOO_1=bar _BAR=2 maestro flow stop-gate --harness claude"));
     assert!(stop::check_install(Harness::Claude, &path).wired);
     write(hook("'/tmp/a directory/maestro flow stop-gate --harness claude"));
@@ -470,8 +474,10 @@ fn the_install_check_reads_the_harness_settings() {
         "maestro --help\necho flow stop-gate --harness claude",
         "maestro flow stop-gate --harness claude > /tmp/x",
         "maestro flow stop-gate --harness claude < /tmp/x",
+        "maestro$(true) flow stop-gate --harness claude",
+        "$((1)) maestro flow stop-gate --harness claude",
         "maestro flow stop-gate --harness claude $(true)",
-        "maestro flow stop-gate --harness claude $EXTRA",
+        "maestro flow stop-gate --harness claude $1",
         "maestro flow stop-gate --harness claude `true`",
         "(maestro flow stop-gate --harness claude)",
         "maestro flow stop-gate --harness claude (true)",
