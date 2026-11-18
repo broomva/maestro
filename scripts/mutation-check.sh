@@ -1072,6 +1072,9 @@ mutate $fk/jq.rs '            StrPart::Term(t) => banned(std::slice::from_ref(t)
 mutate $fk/replay.rs '                ir::ParamType::String => value.is_string(),' '                ir::ParamType::String => true,'
 mutate $fk/ir.rs '        param("types", name)?;' '        let _ = name;'
 mutate $fk/replay.rs '            if !valid {' '            if false {'
+mutate $fk/asks.rs '            super::write::fill(&started.ir, &started.params, ask, MAX_ASK_BODY).map_err(invalid)?,' '            ask.clone(),'
+mutate $fk/asks.rs 'seen.required_body_fields.iter().find(|name| !filing.body.get(*name).is_some_and(|v| !v.is_null()))' 'seen.required_body_fields.iter().find(|_| false)'
+mutate $fk/replay.rs '                        rec.and_then(|r| r.body.get("ask").and_then(Value::as_str))' '                        None::<&str>'
 # start: params that do not fit are refused before anything is written; null is absent; params
 # have a byte bound so a flow that compiles can always start.
 mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'
@@ -1152,7 +1155,7 @@ mutate $fk/replay.rs '            Form::Open if !stale.is_empty() => {' '       
 mutate $fk/replay.rs '        let digest = Rc::from(receipt_digest(outputs, value.as_deref()));' '        let digest = Rc::from(receipt_digest(outputs, None));'
 mutate $fk/replay.rs 'let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));' 'let rerun = s.state == State::Stale;'
 mutate $fk/replay.rs 'let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));' 'let rerun = false;'
-mutate $fk/replay.rs '            Some(Class::Human { ask }) => {' '            Some(Class::Human { ask }) if false => {'
+mutate $fk/replay.rs '            Some(Class::Human { ask, .. }) => {' '            Some(Class::Human { ask, .. }) if false => {'
 mutate $fk/replay.rs '    SignedDuration::from_secs(i64::try_from(s).unwrap_or(i64::MAX))' '    SignedDuration::from_mins(i64::try_from(s / 60).unwrap_or(i64::MAX))'
 # Read-path bounds: inert and rejected events cost no evaluation; cores (evaluations without the
 # clock) are kept across events, dropped downstream of a receipt with new content, and all

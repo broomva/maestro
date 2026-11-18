@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The IR's newest version. A change to its shape or meaning bumps it. Version 2 added
 /// `workdir`; version 3 added an effect's `run`; version 4 a pure node's `snapshot`;
 /// version 5 adds parameter types.
-pub const IR_VERSION: u32 = 5;
+pub const IR_VERSION: u32 = 6;
 
 /// The version an IR is written in: the lowest that expresses it, so 5 for parameter types,
 /// 4 for an IR with a node that
@@ -23,8 +23,10 @@ pub const IR_VERSION: u32 = 5;
 /// that expresses it, and an instance started under an earlier version keeps replaying.
 pub fn version_for(ir: &Ir) -> u32 {
     let runs_effect = ir.nodes.values().any(|n| matches!(&n.class, Class::Effect { run, .. } if !run.is_empty()));
-    if !ir.types.is_empty() {
+    if ir.nodes.values().any(|n| matches!(&n.class, Class::Human { fill_ask, required_body_fields, .. } if *fill_ask || !required_body_fields.is_empty())) {
         IR_VERSION
+    } else if !ir.types.is_empty() {
+        5
     } else if ir.nodes.values().any(|n| n.snapshot.is_some()) {
         4
     } else if runs_effect {
@@ -157,7 +159,13 @@ pub enum Class {
         wait: Option<Wait>,
     },
     /// Waits for the owner's answer to `ask`, through the asks ledger.
-    Human { ask: String },
+    Human {
+        ask: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fill_ask: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        required_body_fields: Vec<String>,
+    },
 }
 
 impl Class {
@@ -391,7 +399,7 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
                     command("run", run)?;
                 }
             }
-            Class::Human { ask } => {
+            Class::Human { ask, .. } => {
                 if ask.trim().is_empty() {
                     return Err(CompileError::invalid(format!("human node {id} needs an ask")));
                 }
