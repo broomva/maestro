@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "seq": 5,
+  "stderr": "",
+  "verdicts": [],
+  "verify": {
+    "argv": [
+      "sh",
+      "-c",
+      "true"
+    ],
+    "exit": 0,
+    "ran_at": "2026-11-18T16:11:57.614834Z",
+    "stdout_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "next": {
+    "enabled": [],
+    "flow": "verify@1",
+    "instance": "fi_91e91794e75c887e81a993852e5addd6",
+    "ir_hash": "sha256:1157788fc938603b8d1f6e3756cd276d3236ba8972da3d2d9a57dc0eb57b86f4",
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "thread:delegated-task:command%3Amcp%3A6ed48328-2886-4b6b-93ce-74a0b99e42d1%3Adelegate-task%3Abae42cf9-2598-4f1b-9a39-e95e8f633cbb",
+      "surface": "t3"
+    },
+    "pending": {
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "check": "sha256:23668a0ff1ecf9b5f07881700868817716c755dbb7670a268567dc8bf90f68b7",
+          "surface": "sha256:434f28a9ce0ad05de3cb459fb80e9e0274038c27596b3381a1e0c4533e1c45c4"
+        },
+        "iteration": {},
+        "state": "blocked",
+        "unmet": [
+          {
+            "case": "declared",
+            "on": "surface",
+            "reason": "switch",
+            "took": "none"
+          }
+        ]
+      }
+    },
+    "seq": 7,
+    "terminal": true
+  },
+  "ok": true,
+  "relay": [],
+  "waiting": [],
+  "work": []
+}

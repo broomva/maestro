@@ -1,0 +1,5 @@
+Real Claude Code Stop hook, at the end of the coordinator turn, 2026-11-18 ~16:13Z, in T3 thread 493baa7d-3bee-423f-946a-3c07bac908cf (T3CODE_THREAD_ID set; no MAESTRO_SESSION).
+Hook command: ~/.local/bin/maestro flow stop-gate --harness claude
+The harness reported "Stop hook blocking error" with this text:
+
+Maestro's stop gate: a flow instance you own is open and has work you can do now. Instance fi_d4bd37528747cd37f63f1b99db50bf5f (verify@1): you hold a live claim on node pin: complete it with `maestro flow complete --claim-token <its token>`, or heartbeat it while the work runs; node surface is enabled: claim it with `maestro flow claim --instance fi_d4bd37528747cd37f63f1b99db50bf5f --node-id surface` and complete it with `maestro flow complete --claim-token <the claim token it returns>` (`maestro flow next --instance fi_d4bd37528747cd37f63f1b99db50bf5f --json` says how). Do it before you stop. If something outside your reach blocks it, say what blocks it in your reply.

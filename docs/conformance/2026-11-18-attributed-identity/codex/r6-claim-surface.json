@@ -1,0 +1,11 @@
+{
+  "attempt": 1,
+  "claim_token": "<redacted: lease token of a finished claim>",
+  "inputs": {},
+  "instance": "fi_215c086784710fa9a435fe4338d17541",
+  "iteration": {},
+  "lease_until": "2026-11-18T16:21:57.868092Z",
+  "node_id": "surface",
+  "ok": true,
+  "seq": 6
+}
