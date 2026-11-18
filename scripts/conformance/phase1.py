@@ -61,6 +61,11 @@ def require_mcp_calls(calls):
     if not {'maestro_flow_claim', 'maestro_flow_complete'}.issubset(set(calls)):
         raise Failure('MCP claim and complete tool calls are required')
 
+def agy_step_allowed(step):
+    if not isinstance(step,dict) or step.get('step_type') not in ('tool','thinking','text','message','user_input','planner_response'):
+        return False
+    return (step.get('step_type')!='tool' and step.get('tool_name') is None) or step.get('tool_name')=='call_mcp_tool'
+
 def mcp_tool_calls(transcript, harness, instance):
     calls=[]; excerpt=[]; pending={}
     def matches(verb,args):
@@ -70,11 +75,14 @@ def mcp_tool_calls(transcript, harness, instance):
         return {k:('[redacted]' if k=='claim_token' else v) for k,v in args.items()
                 if k in ('instance','node_id','session','claim_token')}
     for line in transcript.splitlines():
+        if not line.strip(): continue
         try: item=json.loads(line)
         except (ValueError,TypeError): continue
+        if not isinstance(item,dict):
+            raise Failure('malformed transcript: line is not a JSON object')
         if harness=='gemini' and item.get('type')=='tool_use' and item.get('tool_name')=='run_shell_command':
             raise Failure('Gemini invoked a shell during the MCP capability check')
-        if harness=='agy' and item.get('event')=='step_update' and item.get('step_update',{}).get('tool_name')=='run_command':
+        if harness=='agy' and item.get('event')=='step_update' and not agy_step_allowed(item.get('step_update')):
             raise Failure('Antigravity invoked a shell during the MCP capability check')
         if harness=='gemini' and item.get('type')=='tool_use':
             name=item.get('tool_name','')
@@ -85,16 +93,17 @@ def mcp_tool_calls(transcript, harness, instance):
             verb,args=pending.pop(item['tool_id'])
             try: result=json.loads(item.get('output',''))
             except (ValueError,TypeError): continue
-            if item.get('status')=='success' and result.get('ok') is True and matches(verb,args):
+            if isinstance(result,dict) and item.get('status')=='success' and result.get('ok') is True and matches(verb,args):
                 calls.append(verb); excerpt.append({'type':'tool_use','tool_name':'mcp_maestro_'+verb,'parameters':safe_args(args),'result':{'ok':True,'seq':result.get('seq')}})
         elif harness=='agy' and item.get('event')=='step_update':
-            step=item.get('step_update',{}); info=step.get('tool_info',{}); params=info.get('parameters',{})
+            step=item.get('step_update',{}); info=step.get('tool_info',{}); params=info.get('parameters',{}) if isinstance(info,dict) else {}
+            if not isinstance(params,dict): continue
             verb=params.get('ToolName'); args=params.get('Arguments',{})
             if step.get('step_type')!='tool' or step.get('state')!='DONE' or step.get('tool_name')!='call_mcp_tool' or params.get('ServerName')!='maestro' or verb not in ('maestro_flow_claim','maestro_flow_complete'):
                 continue
             try: result=json.loads(info.get('output',''))
             except (ValueError,TypeError): continue
-            if result.get('ok') is True and matches(verb,args):
+            if isinstance(result,dict) and result.get('ok') is True and matches(verb,args):
                 calls.append(verb); excerpt.append({'event':'step_update','step_type':'tool','state':'DONE',
                     'tool_name':'call_mcp_tool','server':'maestro','mcp_tool':verb,'arguments':safe_args(args),'result':{'ok':True,'seq':result.get('seq')}})
     return calls,excerpt
@@ -114,12 +123,36 @@ def require_mcp_event_match(excerpt, events, harness):
     matches={}
     for item in excerpt:
         verb=item.get('mcp_tool') or item.get('tool_name','').removeprefix('mcp_maestro_')
-        e=by_seq.get(item.get('result',{}).get('seq'),{}); body=e.get('body',{})
+        args=item.get('arguments') if isinstance(item.get('arguments'),dict) else item.get('parameters') if isinstance(item.get('parameters'),dict) else {}
+        seq=item.get('result',{}).get('seq')
+        e=by_seq.get(seq,{}); body=e.get('body',{})
+        if verb=='maestro_flow_claim' and args.get('node_id')!=body.get('node'):
+            continue
         if (body.get('performer') or {}).get('harness')==harness and e.get('kind') in ('Claimed','Completed'):
-            matches[verb]=(e['kind'],body.get('node'),body.get('iteration'))
+            matches[verb]=(e['kind'],body.get('node'),body.get('iteration'),seq)
     claim=matches.get('maestro_flow_claim'); complete=matches.get('maestro_flow_complete')
-    if not claim or not complete or claim[0]!='Claimed' or complete[0]!='Completed' or claim[1:]!=complete[1:]:
+    if not claim or not complete or claim[0]!='Claimed' or complete[0]!='Completed' or claim[1:3]!=complete[1:3] or not isinstance(claim[3],int) or not isinstance(complete[3],int) or claim[3]>=complete[3]:
         raise Failure('MCP call sequences do not match the same claimed and completed node')
+
+def record_capability_result(out, results, h, i, p, events, scrub=lambda s: s):
+    try:
+        calls,transcript=mcp_tool_calls(p.stdout,h,i)
+        (out/f'{h}-mcp-calls.json').write_text(json.dumps(transcript,indent=2)+'\n')
+        supported_has_events(events,h)
+        require_mcp_calls(calls)
+        require_mcp_event_match(transcript,events,h)
+        results.setdefault(h,{}).update({'capability':'supported','exit':p.returncode})
+    except Failure as exc:
+        errors=[]
+        for line in p.stdout.splitlines():
+            try: item=json.loads(line)
+            except (ValueError,TypeError): continue
+            if isinstance(item,dict) and item.get('type')=='tool_result' and ('error' in str(item.get('status','')).lower()
+                    or '"ok":false' in str(item.get('output','')).replace(' ','')):
+                errors.append(str(item.get('output','')))
+        results.setdefault(h,{}).update({'capability':'unsupported','exit':p.returncode,
+                                         'error':str(exc),
+                                         'detail':scrub(errors[-1] if errors else p.stderr or p.stdout)[-2000:]})
 
 def capability_environment(env, shim):
     env=env.copy()
@@ -403,24 +436,7 @@ def main():
                             excerpt.append({k:scrub(str(item.get(k,''))) for k in ('type','command','aggregated_output','text')})
                     (out/'codex-trace.json').write_text(json.dumps(excerpt,indent=2)+'\n')
             else:
-                try:
-                    calls,transcript=mcp_tool_calls(p.stdout,h,i)
-                    (out/f'{h}-mcp-calls.json').write_text(json.dumps(transcript,indent=2)+'\n')
-                    supported_has_events(events(i),h)
-                    require_mcp_calls(calls)
-                    require_mcp_event_match(transcript,events(i),h)
-                    results[h].update({'capability':'supported','exit':p.returncode})
-                except Failure as exc:
-                    errors=[]
-                    for line in p.stdout.splitlines():
-                        try: item=json.loads(line)
-                        except (ValueError,TypeError): continue
-                        if item.get('type')=='tool_result' and ('error' in str(item.get('status','')).lower()
-                                or '"ok":false' in str(item.get('output','')).replace(' ','')):
-                            errors.append(str(item.get('output','')))
-                    results[h].update({'capability':'unsupported','exit':p.returncode,
-                                       'error':str(exc),
-                                       'detail':scrub(errors[-1] if errors else p.stderr or p.stdout)[-2000:]})
+                record_capability_result(out,results,h,i,p,events(i),scrub)
         if 'claude' in instances and 'codex' in instances:
             comparison,_=cli('claude','flow','spine','--instance',instances['claude'],'--against',instances['codex'],ok=False)
             (out/'spines.json').write_text(json.dumps(comparison,indent=2)+'\n'); equal_spines(comparison)

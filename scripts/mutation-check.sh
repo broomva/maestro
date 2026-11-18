@@ -2295,8 +2295,9 @@ mutate scripts/conformance/phase1.py '    if any(path.iterdir()):' '    if False
 mutate scripts/conformance/phase1.py "    return f'{shlex.quote(str(maestro))} flow stop-gate --harness {harness} | tee -a {shlex.quote(str(hook))}'" "    return f'{maestro} flow stop-gate --harness {harness} | tee -a {shlex.quote(str(hook))}'"
 mutate scripts/conformance/phase1.py "        return {**server,'tools':{'exclude':['run_shell_command']}}" "        return {**server,'tools':{'exclude':[]}}"
 mutate scripts/conformance/phase1.py "        if harness=='gemini' and item.get('type')=='tool_use' and item.get('tool_name')=='run_shell_command':" '        if False:'
-mutate scripts/conformance/phase1.py "        if harness=='agy' and item.get('event')=='step_update' and item.get('step_update',{}).get('tool_name')=='run_command':" '        if False:'
-mutate scripts/conformance/phase1.py "    if not claim or not complete or claim[0]!='Claimed' or complete[0]!='Completed' or claim[1:]!=complete[1:]:" '    if False:'
+mutate scripts/conformance/phase1.py "        if harness=='agy' and item.get('event')=='step_update' and not agy_step_allowed(item.get('step_update')):" '        if False:'
+mutate scripts/conformance/phase1.py "        if verb=='maestro_flow_claim' and args.get('node_id')!=body.get('node'):" '        if False:'
+mutate scripts/conformance/phase1.py "    if not claim or not complete or claim[0]!='Claimed' or complete[0]!='Completed' or claim[1:3]!=complete[1:3] or not isinstance(claim[3],int) or not isinstance(complete[3],int) or claim[3]>=complete[3]:" '    if False:'
 mutate scripts/conformance/phase1.py "    if not result.get('ok') or result.get('equal') is not True:" '    if False:'
 mutate scripts/conformance/phase1.py "    if any(e.get('kind') == 'Completed' and e.get('body', {}).get('node') == 'check' for e in events):" '    if False:'
 mutate scripts/conformance/phase1.py '               for _, node in found if node is not None):' '               for _, node in found if node is not None) and False:'
