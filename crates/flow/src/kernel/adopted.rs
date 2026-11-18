@@ -243,8 +243,8 @@ fn an_approved_adoption_hands_the_instance_to_the_new_owner() {
     let s = f.status(&fi);
     assert_eq!(s.owner.as_ref().map(ToString::to_string).as_deref(), Some("t3:-/other"));
     assert!(s.nodes.values().all(|n| n.state == State::Done));
-    // The new owner adopts nothing more; the former owner may propose to adopt it back.
-    assert_eq!(code(adopt(&mut f, &other(), &fi, Some(&proposing()))), "already_owner");
+    // The finished instance takes no further proposals.
+    assert_eq!(code(adopt(&mut f, &other(), &fi, Some(&proposing()))), "instance_terminal");
 }
 
 #[test]

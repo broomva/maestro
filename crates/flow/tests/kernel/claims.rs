@@ -208,12 +208,12 @@ fn a_claim_on_an_iteration_that_moved_on_or_ran_out_holds_nothing() {
     settle(&mut f, &fi, 0);
     assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &c.token)), "not_current_iteration");
     assert_eq!(f.claim(&fi, "s").iteration, [("r".to_string(), 1)].into());
-    // Its only iteration settles and the repeat is exhausted at that same iteration.
+    // Its only iteration settles, exhausting the repeat and latching terminal.
     let mut f = fx(&repeat(1));
     let fi = f.begin();
     let c = f.claim(&fi, "s");
     settle(&mut f, &fi, 0);
-    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &c.token)), "not_current_iteration");
+    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &c.token)), "instance_terminal");
 }
 
 /// A fixture claim on `head` with `attempt` and a lease ending at `until`.

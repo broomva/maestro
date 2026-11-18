@@ -982,6 +982,9 @@ mutate $fl/ledger.rs '        log::shallow(&event.body)?;' ''
 
 # Flow kernel (BRO-3633 PR 3b1): definitions, the compiler, guard checks and the read-only scheduler.
 fk=crates/flow/src/kernel
+# BRO-3870: terminal stays latched and all writes cross the refusal barrier.
+mutate $fk/replay.rs 'let terminal = self.latched_at.is_some()' 'let terminal = false'
+mutate $fk/write.rs '    if super::replay::latched(log, started)? {' '    if false && super::replay::latched(log, started)? {'
 # Compile rejections: unknown references, loops without a bound, undeclared switch cases,
 # effects without reconcile, repeated or malformed ids, phase 2 reuse, class rules, size.
 mutate $fk/definition.rs '#[serde(deny_unknown_fields)]

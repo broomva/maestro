@@ -366,7 +366,7 @@ pub fn record(
         open_instances: open_instances.iter().take(MAX_NAMED).cloned().collect(),
         reason,
     };
-    Ok(Recorded::Appended(guard.append(instance, log.seq(), event.to_event()?)?))
+    Ok(Recorded::Appended(super::write::append_writable(&mut guard, instance, log.seq(), event.to_event()?)?))
 }
 
 /// The unfinished instances (neither terminal nor retired) whose owner is one of `threads`, by
@@ -416,6 +416,7 @@ pub fn record_unverified(
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
+    super::write::check_writable(&log, &started)?;
     if adoption::owners(&log, &started)?.retired.is_some() {
         return Err(crate::FlowError::Retired { instance: instance.to_string() }.into());
     }
@@ -426,7 +427,7 @@ pub fn record_unverified(
             return Ok(Recorded::Already { seq: last.seq });
         }
     }
-    Ok(Recorded::Appended(guard.append(instance, log.seq(), event.to_event()?)?))
+    Ok(Recorded::Appended(super::write::append_writable(&mut guard, instance, log.seq(), event.to_event()?)?))
 }
 
 /// The block reason for `refusing`: what the agent does next, at most `max` instances named.

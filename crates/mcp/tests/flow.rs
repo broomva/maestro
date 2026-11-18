@@ -171,6 +171,20 @@ fn a_verified_direct_session_runs_a_flow_through_the_tools() {
     );
 }
 
+#[test]
+fn terminal_write_is_an_unrecorded_mcp_refusal() {
+    let f = fx();
+    let definition =
+        "flow: f\nversion: 1\nparams: [dir]\nworkdir: \"{{params.dir}}\"\nnodes:\n  a: {class: pure, run: ['true']}\n";
+    let started = f.d1(START, json!({"definition": definition, "params": {"dir": f.work}}));
+    let fi = started["instance"].as_str().unwrap();
+    let token = f.claim(fi, "a");
+    let result = f.d1(COMPLETE, json!({"claim_token": token, "outputs": {}}));
+    assert_eq!(result["ok"], true, "{result}");
+    let refused = f.d1(CLAIM, json!({"instance": fi, "node_id": "a"}));
+    assert_eq!((code(&refused), &refused["recorded"]), ("instance_terminal", &json!(false)));
+}
+
 /// BRO-3624 item 4: an unverified caller is refused every write verb and still reads; a claim
 /// that does not verify is refused too. Neither writes anything.
 #[test]

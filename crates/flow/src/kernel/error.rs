@@ -85,6 +85,9 @@ pub enum KernelError {
 /// is a normal result: the code says why, and the caller decides what to do next.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
+    /// A terminal instance takes no further writes.
+    #[error("Instance {instance} is terminal, so nothing was recorded.")]
+    InstanceTerminal { instance: String },
     /// The session carries no owner marker (or an empty one), so it can own and write no flow.
     #[error("The session has no owner marker, so it writes no flow.")]
     NoOwnerMarker,
@@ -222,6 +225,7 @@ pub enum Refusal {
 impl Refusal {
     pub fn code(&self) -> &'static str {
         match self {
+            Refusal::InstanceTerminal { .. } => "instance_terminal",
             Refusal::NoOwnerMarker => "no_owner_marker",
             Refusal::NoOwner { .. } => "no_owner",
             Refusal::NotOwner { .. } => "not_owner",

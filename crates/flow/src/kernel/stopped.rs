@@ -130,6 +130,48 @@ fn freshness_expiry_before_terminal_reenables_pin() {
 }
 
 #[test]
+fn terminal_survives_deleting_the_subject() {
+    let test_clock = crate::clock::TestClock::install();
+    let mut f = fx(None, "");
+    let subject = f.ws.join("subject");
+    std::fs::create_dir(&subject).unwrap();
+    f.flow = compile("flow: verify\nversion: 1\nparams: [repo]\nworkdir: '{{params.repo}}'\nnodes:\n  pin: {class: observe, run: ['true'], fresh_for: 1m, exit_map: {0: ok}}\n  check: {class: pure, needs: [pin], run: ['true']}\n").unwrap();
+    let fi = start(&mut f.ledger, &f.me, &f.flow, json!({"repo": subject})).unwrap().instance;
+    done(&mut f, &fi, "pin");
+    done(&mut f, &fi, "check");
+    std::fs::remove_dir_all(&subject).unwrap();
+    test_clock.set(clock::now() + jiff::SignedDuration::from_secs(61));
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let guard = reader.lock().unwrap();
+    assert!(status(&guard, &fi, clock::now()).unwrap().terminal);
+    assert!(next(&guard, &fi, clock::now()).unwrap().enabled.is_empty());
+    drop(guard);
+    assert!(open_for(&f, &f.me).instances.is_empty());
+    assert!(!judge(&f, &fi).refuses_stop());
+}
+
+#[test]
+fn terminal_instance_refuses_every_kernel_write() {
+    let (mut f, fi) = with(RELAY);
+    let me = f.me.clone();
+    let claim_one = claim(&mut f.ledger, &me, &fi, "one").unwrap();
+    complete(&mut f.ledger, &me, &claim_one.token, Value::Null, &Limits::default()).unwrap();
+    done(&mut f, &fi, "two");
+    let seq = f.ledger.lock().unwrap().log(&fi).unwrap().seq();
+    let codes = [
+        claim(&mut f.ledger, &me, &fi, "one").unwrap_err().code(),
+        heartbeat(&mut f.ledger, &me, &claim_one.token).unwrap_err().code(),
+        complete(&mut f.ledger, &me, &claim_one.token, Value::Null, &Limits::default()).unwrap_err().code(),
+        choose(&mut f.ledger, &me, &claim_one.token, "x").unwrap_err().code(),
+        ask(&mut f.ledger, &f.paths, &me, &fi, "owner", None).unwrap_err().code(),
+        propose_adoption(&mut f.ledger, &f.paths, &me, &fi, Proposing::default()).unwrap_err().code(),
+        propose_retirement(&mut f.ledger, &f.paths, &me, &fi, Proposing::default()).unwrap_err().code(),
+    ];
+    assert_eq!(codes, ["instance_terminal"; 7]);
+    assert_eq!(f.ledger.lock().unwrap().log(&fi).unwrap().seq(), seq);
+}
+
+#[test]
 fn a_pending_verdict_is_work_a_claim_retries() {
     let (mut f, fi) = with(LOOP);
     // The body settled, and no verdict was written: the repeat awaits it.

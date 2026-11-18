@@ -409,6 +409,11 @@ pub fn next(guard: &ReadGuard, instance: &InstanceId, now: Timestamp) -> Result<
     next_of(&log, &started, now)
 }
 
+/// Whether replay found a terminal position in the log, independent of the read clock.
+pub(crate) fn latched(log: &Log, started: &Started) -> Result<bool, KernelError> {
+    Ok(Fold::replay(log, started)?.latched_at.is_some())
+}
+
 /// [`next`] over a log already read and pinned: the writers' view of what is enabled now.
 pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Next, KernelError> {
     Ok(read_both(log, started, now)?.1)
