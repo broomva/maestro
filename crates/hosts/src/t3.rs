@@ -173,6 +173,23 @@ pub struct T3Registry {
 const SQLITE_READER_PY: &str = r#"
 import json, pathlib, sqlite3, sys
 
+class PayloadError(Exception):
+    pass
+
+def payload_of(raw, what):
+    # The one parser of a thread's or a provider row's payload, in every mode (BRO-3846): the
+    # payload carries archivedAt, deletedAt, node and nativeThreadRef, so one that is NULL,
+    # empty, blank, not JSON or not an object is an error (`registry_unavailable`), never `{}`.
+    if raw is None or not str(raw).strip():
+        raise PayloadError(f"{what} is empty")
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        raise PayloadError(f"{what} does not parse")
+    if not isinstance(payload, dict):
+        raise PayloadError(f"{what} is not an object")
+    return payload
+
 def main():
     mode = sys.argv[1]
     db_path = pathlib.Path(sys.argv[2])
@@ -186,24 +203,7 @@ def main():
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
     def build_thread(row):
-        # For attribution a payload that does not read is an error, never `{}`: it holds the
-        # thread's archivedAt, deletedAt and node, which `{}` would silently drop. An empty or
-        # NULL payload is no payload either: attribution refuses it as it refuses a corrupt one.
-        if mode == "attr" and (row["payload_json"] is None or not str(row["payload_json"]).strip()):
-            sys.stderr.write(f"sqlite_error: thread {row['thread_id']}'s payload is empty\n")
-            sys.exit(2)
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except Exception:
-            if mode == "attr":
-                sys.stderr.write(f"sqlite_error: thread {row['thread_id']}'s payload does not parse\n")
-                sys.exit(2)
-            payload = {}
-        if not isinstance(payload, dict):
-            if mode == "attr":
-                sys.stderr.write(f"sqlite_error: thread {row['thread_id']}'s payload is not an object\n")
-                sys.exit(2)
-            payload = {}
+        payload = payload_of(row["payload_json"], f"thread {row['thread_id']}'s payload")
         cwd = payload.get("worktreePath")
         if not cwd and "projection_projects" in tables:
             proj = conn.execute(
@@ -293,8 +293,7 @@ def main():
             sys.stderr.write(f"sqlite_error: missing table(s) {', '.join(missing)}\n")
             sys.exit(2)
         def unreadable(thread_id, why):
-            sys.stderr.write(f"sqlite_error: the active provider row of thread {thread_id} {why}\n")
-            sys.exit(2)
+            raise PayloadError(f"the active provider row of thread {thread_id} {why}")
         out = []
         rows = conn.execute(
             "SELECT t.thread_id AS thread_id, t.payload_json AS thread_payload, "
@@ -307,30 +306,12 @@ def main():
         for r in rows:
             # A thread archived or deleted in its payload only (`archivedAt`, `deletedAt`, as
             # `build_thread` reads them) is no live thread either. Its payload must read to tell.
-            raw = r["thread_payload"]
-            if raw is None or not str(raw).strip():
-                sys.stderr.write(f"sqlite_error: thread {r['thread_id']}'s payload is empty\n")
-                sys.exit(2)
-            try:
-                thread_payload = json.loads(raw)
-            except Exception:
-                sys.stderr.write(f"sqlite_error: thread {r['thread_id']}'s payload does not parse\n")
-                sys.exit(2)
-            if not isinstance(thread_payload, dict):
-                sys.stderr.write(f"sqlite_error: thread {r['thread_id']}'s payload is not an object\n")
-                sys.exit(2)
+            thread_payload = payload_of(r["thread_payload"], f"thread {r['thread_id']}'s payload")
             if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):
                 continue
             if r["provider_thread_id"] is None:
                 unreadable(r["thread_id"], "is missing")
-            if r["payload_json"] is None or not str(r["payload_json"]).strip():
-                unreadable(r["thread_id"], "is empty")
-            try:
-                payload = json.loads(r["payload_json"])
-            except Exception:
-                unreadable(r["thread_id"], "does not parse")
-            if not isinstance(payload, dict):
-                unreadable(r["thread_id"], "is not an object")
+            payload = payload_of(r["payload_json"], f"the active provider row of thread {r['thread_id']}")
             ref = payload.get("nativeThreadRef")
             if ref is None:
                 continue
@@ -353,7 +334,12 @@ def main():
                 "SELECT rowid AS _rowid, thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
                 "FROM orchestration_v2_projection_threads ORDER BY updated_at DESC"
             ):
-                built = build_thread(row)
+                # The listing feeds permission prompts, not identity: a thread whose payload does
+                # not read is left out, so it cannot hide every other thread's prompts.
+                try:
+                    built = build_thread(row)
+                except PayloadError:
+                    continue
                 if built is not None:
                     out.append(built)
         print(json.dumps(out))
@@ -430,6 +416,10 @@ try:
     main()
 except SystemExit:
     raise
+except PayloadError as exc:
+    # A payload that does not read: exit 4, which every reader maps to `registry_unavailable`.
+    sys.stderr.write(f"sqlite_error: {exc}\n")
+    sys.exit(4)
 except Exception as exc:
     sys.stderr.write(f"sqlite_error: {exc}\n")
     sys.exit(2)
@@ -562,6 +552,36 @@ impl T3Registry {
         }
     }
 
+    /// Every row of a JSON snapshot, by the one rule the SQLite reader's `payload_of` applies to a
+    /// thread's payload (BRO-3846). A file that does not read or is not a JSON array is
+    /// `registry_disconnected`, as an unreadable database is. A row that is not an object, whose
+    /// `cwd` is neither missing, null nor a string, or that does not deserialize, is
+    /// `registry_unavailable`: never skipped, never read as `{}`. A missing or null `cwd` is none.
+    fn snapshot_rows(json_file: &Path) -> Result<Vec<RawT3Thread>, IdentityRefusal> {
+        let disconnected =
+            |e: String| IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("T3 JSON registry {e}."));
+        let unavailable =
+            |e: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, format!("T3 JSON registry {e}."));
+        let text = std::fs::read_to_string(json_file).map_err(|e| disconnected(format!("could not be read: {e}")))?;
+        let rows: Vec<Value> = serde_json::from_str(&text).map_err(|e| disconnected(format!("is malformed: {e}")))?;
+        rows.into_iter()
+            .map(|mut row| {
+                let id = row.get("id").and_then(Value::as_str).unwrap_or("?").to_string();
+                let Some(o) = row.as_object_mut() else {
+                    return Err(unavailable("has a row that is not an object".to_string()));
+                };
+                match o.get("cwd") {
+                    None | Some(Value::Null) => {
+                        o.insert("cwd".into(), Value::String(String::new()));
+                    }
+                    Some(Value::String(_)) => {}
+                    Some(_) => return Err(unavailable(format!("row {id} has a cwd that is not a string"))),
+                }
+                serde_json::from_value(row).map_err(|e| unavailable(format!("row {id} is malformed: {e}")))
+            })
+            .collect()
+    }
+
     /// A JSON snapshot's row: one with no environment of its own is in the snapshot's environment
     /// (`environment-id` beside it), as every `statev2.sqlite` row is in its database's.
     fn snapshot_row(raw: RawT3Thread, environment: &Option<String>) -> T3Thread {
@@ -589,10 +609,7 @@ impl T3Registry {
             return Err(unreadable("T3 registry is disconnected.".to_string()));
         }
         if let Some(json_file) = self.json_path() {
-            let text = std::fs::read_to_string(json_file)
-                .map_err(|e| unreadable(format!("T3 JSON registry could not be read: {e}.")))?;
-            let rows: Vec<RawT3Thread> =
-                serde_json::from_str(&text).map_err(|e| unreadable(format!("T3 JSON registry is malformed: {e}.")))?;
+            let rows = Self::snapshot_rows(&json_file).map_err(|e| unreadable(e.message))?;
             let mut out: Vec<String> = Vec::new();
             for raw in rows {
                 let Some(active) = raw.active_provider_thread_id.as_deref() else { continue };
@@ -699,43 +716,11 @@ impl T3Registry {
         if !is_safe_t3_id(id) {
             return Ok(None);
         }
-        if let Some(json_file) = self.json_path().filter(|_| attributed) {
-            let malformed =
-                |e: String| IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("T3 JSON registry {e}."));
-            let text = std::fs::read_to_string(json_file).map_err(|e| malformed(format!("could not be read: {e}")))?;
-            let rows: Vec<Value> = serde_json::from_str(&text).map_err(|e| malformed(format!("is malformed: {e}")))?;
-            let Some(mut row) = rows.into_iter().find(|r| r.get("id").and_then(Value::as_str) == Some(id)) else {
-                return Ok(None);
-            };
-            // Only a missing or null folder defaults to none; any other non-string one is malformed.
-            if let Some(o) = row.as_object_mut() {
-                match o.get("cwd") {
-                    None | Some(Value::Null) => {
-                        o.insert("cwd".into(), Value::String(String::new()));
-                    }
-                    Some(Value::String(_)) => {}
-                    Some(_) => return Err(malformed(format!("row {id} has a cwd that is not a string"))),
-                }
-            }
-            let raw: RawT3Thread =
-                serde_json::from_value(row).map_err(|e| malformed(format!("has a malformed row: {e}")))?;
-            return Ok(Some(Self::snapshot_row(raw, &self.environment_id())));
-        }
         if let Some(json_file) = self.json_path() {
-            let text = std::fs::read_to_string(json_file).map_err(|e| {
-                IdentityRefusal::new(
-                    RefusalReason::RegistryDisconnected,
-                    format!("T3 JSON registry could not be read: {e}."),
-                )
-            })?;
-            let rows: Vec<RawT3Thread> = serde_json::from_str(&text).map_err(|e| {
-                IdentityRefusal::new(
-                    RefusalReason::RegistryDisconnected,
-                    format!("T3 JSON registry is malformed: {e}."),
-                )
-            })?;
             let env = self.environment_id();
-            return Ok(rows.into_iter().find(|raw| raw.id == id).map(|raw| Self::snapshot_row(raw, &env)));
+            let found = Self::snapshot_rows(&json_file)?.into_iter().find(|raw| raw.id == id);
+            // The credentialed reader needs the thread's folder; attribution never does.
+            return Ok(found.filter(|raw| attributed || !raw.cwd.is_empty()).map(|raw| Self::snapshot_row(raw, &env)));
         }
         if let Some(db_file) = self.sqlite_path() {
             let out = Command::new("python3")
@@ -766,6 +751,14 @@ impl T3Registry {
                     return Ok(Some(Self::from_raw(raw)));
                 }
                 Some(3) => return Ok(None),
+                // A thread's payload that does not read (BRO-3846): its liveness and folder are
+                // unknown, so neither reader may take the thread as found, or as absent.
+                Some(4) => {
+                    return Err(IdentityRefusal::new(
+                        RefusalReason::RegistryUnavailable,
+                        format!("T3 registry: {}", String::from_utf8_lossy(&out.stderr).trim()),
+                    ));
+                }
                 _ => {
                     return Err(IdentityRefusal::new(
                         RefusalReason::RegistryDisconnected,
@@ -794,10 +787,7 @@ impl T3Registry {
             return Vec::new();
         }
         if let Some(json_file) = self.json_path() {
-            let Ok(text) = std::fs::read_to_string(json_file) else {
-                return Vec::new();
-            };
-            let Ok(rows) = serde_json::from_str::<Vec<RawT3Thread>>(&text) else {
+            let Ok(rows) = Self::snapshot_rows(&json_file) else {
                 return Vec::new();
             };
             let env = self.environment_id();

@@ -2380,18 +2380,11 @@ mutate $ht '        if missing:
 ' '        if False:
 '
 mutate $ht '            if r["provider_thread_id"] is None:' '            if False:'
-mutate $ht '            except Exception:
-                unreadable(r["thread_id"], "does not parse")' '            except Exception:
-                continue'
-mutate $ht '            if not isinstance(payload, dict):
-                unreadable(' '            if False:
-                unreadable('
 mutate $ht '                if !raw.provider_threads.iter().any(|p| p.provider_thread_id == active) {' '                if false {'
 mutate $ht '            if mode != "attr":' '            if True:'
 mutate $ht '            if cwd or mode == "attr":' '            if cwd:'
 mutate $ht '    if mode == "attr" and not (' '    if False and not ('
 mutate $ht '.arg(if attributed { "attr" } else { "get" })' '.arg("get")'
-mutate $ht '        if let Some(json_file) = self.json_path().filter(|_| attributed) {' '        if let Some(json_file) = self.json_path().filter(|_| false) {'
 mutate $ht '            .lookup_attributed(&thread_id)' '            .lookup(&thread_id)'
 mutate $ht '        let Some(thread) = self.lookup_attributed(thread_id)? else {' '        let Some(thread) = self.lookup(thread_id)? else {'
 mutate $gt '            if session.surface == Surface::T3 && !self.hook_vars(input).is_empty() {' '            if false {'
@@ -2418,9 +2411,6 @@ mutate $gt '            if session.surface != Surface::T3 && self.hosts.has_surf
 mutate $gt '                if let Some(first) = threads.first() {' '                if let Some(first) = threads.first().filter(|_| false) {'
 mutate $gt '                    return self.unbound(&threads, &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));' '                    return self.unbound(&[], &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));'
 mutate $gt 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unreadable(_)))' 'each.iter().find(|_| false)'
-mutate $ht $'            if mode == "attr":\n                sys.stderr.write(f"sqlite_error: thread {row[\'thread_id\']}\'s payload does not parse' $'            if False:\n                sys.stderr.write(f"sqlite_error: thread {row[\'thread_id\']}\'s payload does not parse'
-mutate $ht $'            if mode == "attr":\n                sys.stderr.write(f"sqlite_error: thread {row[\'thread_id\']}\'s payload is not an object' $'            if False:\n                sys.stderr.write(f"sqlite_error: thread {row[\'thread_id\']}\'s payload is not an object'
-mutate $ht '                    Some(_) => return Err(malformed(format!("row {id} has a cwd that is not a string"))),' '                    Some(_) => {}'
 mutate $ht ' AND t.archived_at IS NULL AND t.deleted_at IS NULL"' ' AND t.deleted_at IS NULL"'
 mutate $ht ' AND t.archived_at IS NULL AND t.deleted_at IS NULL"' ' AND t.archived_at IS NULL"'
 mutate $ht '                if raw.archived_at.is_some() || raw.deleted_at.is_some() {
@@ -2435,14 +2425,20 @@ mutate $ht '            if not isinstance(ref, dict):
                 unreadable('
 mutate $gt '                let key = format!("fail_open\n{workspace}\n{code}\n{}", day.get(..10).unwrap_or_default());' '                let key = format!("fail_open\n{workspace}\n{code}\n{}\n{s}", day.get(..10).unwrap_or_default());'
 # Joint round 3 (BRO-3846, Codex at 25e3007): an empty, blank or NULL payload is no payload, never {}.
-mutate $ht '        if mode == "attr" and (row["payload_json"] is None or not str(row["payload_json"]).strip()):' '        if False:'
-mutate $ht '            if r["payload_json"] is None or not str(r["payload_json"]).strip():' '            if False:'
 # Joint round 3 (BRO-3846, Gemini at 25e3007): a thread archived or deleted in its payload only is
 # no live thread to the native scan, whose own payload must read to tell.
 mutate $ht '            if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):' '            if False:'
 mutate $ht '            if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):' '            if thread_payload.get("archivedAt"):'
-mutate $ht '            if raw is None or not str(raw).strip():' '            if False:'
 mutate $ht '    #[serde(default, alias = "archivedAt")]' '    #[serde(default)]'
+# Joint round 4 (BRO-3846, Codex at c897e60): one payload parser for every mode, the credentialed
+# one included, and one snapshot helper: an unreadable payload or row is registry_unavailable.
+mutate $ht $'    if raw is None or not str(raw).strip():\n        raise PayloadError' $'    if False:\n        raise PayloadError'
+mutate $ht $'    except Exception:\n        raise PayloadError(f"{what} does not parse")' $'    except Exception:\n        return {}'
+mutate $ht $'    if not isinstance(payload, dict):\n        raise PayloadError' $'    if False:\n        raise PayloadError'
+mutate $ht 'except PayloadError as exc:' 'except ZeroDivisionError as exc:'
+mutate $ht '                    Some(_) => return Err(unavailable(format!("row {id} has a cwd that is not a string"))),' '                    Some(_) => {}'
+mutate $ht '                    return Err(unavailable("has a row that is not an object".to_string()));' '                    return Ok(None);'
+mutate $ht '.filter(|raw| attributed || !raw.cwd.is_empty())' '.filter(|_| true)'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

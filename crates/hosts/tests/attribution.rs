@@ -408,6 +408,7 @@ fn a_live_thread_with_no_cwd_is_attributed() {
     let t3 = T3Registry::new(&path);
     assert_eq!(resolved(t3.resolve("mcp:nocwd", false).unwrap()), "mcp:nocwd");
     assert!(t3.verify_attributed("mcp:nocwd", None).is_ok());
+    assert!(t3.find("mcp:nocwd").is_none(), "the credentialed reader needs a folder in a snapshot too");
 }
 
 /// The legacy `projection_threads` schema: a thread with no folder is attributed there too; and a
@@ -462,6 +463,9 @@ fn a_corrupt_payload_is_unavailable_for_attribution() {
         assert!(t3.find("mcp:bad").is_none(), "{name}");
     }
     let path = tmp.path().join("threads.json");
+    // A snapshot row that is not an object is a bad row, never skipped (Codex's joint round 4).
+    std::fs::write(&path, serde_json::json!([7, { "id": "mcp:a", "cwd": "/w" }]).to_string()).unwrap();
+    assert!(unavailable(T3Registry::new(&path).resolve("mcp:a", false)).contains("a row that is not an object"));
     for (cwd, ok) in
         [(serde_json::json!(7), false), (serde_json::Value::Null, true), (serde_json::json!(["/w"]), false)]
     {
@@ -551,4 +555,64 @@ fn a_thread_archived_in_its_payload_only_is_not_scanned() {
     ]);
     std::fs::write(&path, rows.to_string()).unwrap();
     assert_eq!(resolved(T3Registry::new(&path).resolve("native-n", true).unwrap()), "mcp:a");
+}
+
+/// Codex's joint round 4: the credentialed reader reads a thread's payload by the one rule too. A
+/// credential minted while the payload read must stop verifying once it is emptied or NULLed (the
+/// project root would otherwise still give the thread a folder, and the payload's `archivedAt`
+/// would be lost); a thread archived in its payload only is not live.
+#[test]
+fn a_credentialed_claim_fails_closed_on_an_unreadable_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("t3");
+    let work = std::fs::canonicalize(tmp.path()).unwrap().join("work");
+    std::fs::create_dir_all(root.join("userdata")).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    let db = root.join("userdata/statev2.sqlite");
+    let sql = |statement: &str, arg: &str| {
+        let script = "import sqlite3, sys\nc = sqlite3.connect(sys.argv[1])\nc.executescript(sys.argv[2].replace('@', sys.argv[3]))\nc.commit()\n";
+        let out = std::process::Command::new("python3")
+            .args(["-I", "-c", script])
+            .arg(&db)
+            .arg(statement)
+            .arg(arg)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    sql(
+        "CREATE TABLE projection_projects (project_id TEXT, workspace_root TEXT);
+         INSERT INTO projection_projects VALUES ('p', '@');
+         CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, project_id TEXT, default_provider TEXT,
+           created_at TEXT, updated_at TEXT, archived_at TEXT, deleted_at TEXT, payload_json TEXT);
+         INSERT INTO orchestration_v2_projection_threads VALUES
+           ('mcp:c', 'p', 'codex', '2026-11-17T00:00:00Z', '2026-11-17T00:00:00Z', NULL, NULL, '{}');
+         CREATE TABLE orchestration_v2_projection_runs (run_id TEXT, thread_id TEXT, ordinal INTEGER, status TEXT);
+         INSERT INTO orchestration_v2_projection_runs VALUES ('run-1', 'mcp:c', 1, 'running');",
+        work.to_str().unwrap(),
+    );
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(&root)), None)
+        .with_bridge_secret("round-4-secret")
+        .with_identity_mode(IdentityMode::Strict);
+    let w = work.to_string_lossy().into_owned();
+    let peer = maestro_hosts::PeerCredentials { pid: std::process::id(), uid: 1000 };
+    let verified = hosts.verify_caller(&CallerClaim::t3(Some("mcp:c"), Some(w.clone())).with_peer(peer)).unwrap();
+    assert_eq!(verified.cwd(), w, "the folder is the project root");
+    let node: maestro_hosts::NodeId = "node-1".parse().unwrap();
+    let now = maestro_hosts::current_time_ms();
+    let cred = hosts.issue_bridge_credential(&verified, node.clone(), now - 5_000, now + 60_000).unwrap();
+    let signed = CallerClaim::t3(Some("mcp:c"), Some(w.clone())).with_credential(cred).with_node(node);
+    hosts.verify_caller(&signed).unwrap();
+    for (name, payload) in [("empty", "''"), ("blank", "'  '"), ("null", "NULL"), ("corrupt", "'{x'")] {
+        sql(&format!("UPDATE orchestration_v2_projection_threads SET payload_json = {payload}"), "");
+        let e = hosts.verify_caller(&signed).unwrap_err();
+        assert_eq!(e.reason, RefusalReason::RegistryUnavailable, "{name}: {e:?}");
+        assert!(e.message.contains("thread mcp:c's payload"), "{name}: {}", e.message);
+    }
+    // Archived in its payload only: the credentialed reader sees it, so the thread is not live.
+    sql(
+        "UPDATE orchestration_v2_projection_threads SET payload_json = '{\"archivedAt\": \"2026-11-17T01:00:00Z\"}'",
+        "",
+    );
+    assert_eq!(hosts.verify_caller(&signed).unwrap_err().reason, RefusalReason::NotLive);
 }
