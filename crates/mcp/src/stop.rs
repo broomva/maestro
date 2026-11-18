@@ -50,12 +50,12 @@
 
 use crate::{Ambient, Check};
 use maestro_core::request::RequestKind;
-use maestro_core::session::{IdentityRefusal, SessionRef, Surface, VerifiedSession};
+use maestro_core::session::{IdentityRefusal, RefusalReason, SessionRef, Surface, VerifiedSession};
 use maestro_flow::kernel::events::{StopUnverified, Unblockable, digest};
 use maestro_flow::kernel::stop::{self as kstop, Assessment, Recorded, Refusals};
 use maestro_flow::kernel::{self, KernelError};
 use maestro_flow::{Ledger, Options, Reader};
-use maestro_hosts::{Attributed, IdentityMode, STDIN_SESSION_ID, ThreadVar, VarOutcome};
+use maestro_hosts::{Attributed, IdentityMode, STDIN_SESSION_ID, ThreadVars, VarOutcome};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -231,7 +231,7 @@ impl Run<'_> {
     fn judge(&mut self, input: &[u8]) {
         let named = self.gate.session.clone().filter(|s| !s.trim().is_empty());
         let Some(text) = named else {
-            return self.bind(input);
+            return self.bind(None, input);
         };
         let session: SessionRef = match text.parse() {
             Ok(s) => s,
@@ -240,48 +240,147 @@ impl Run<'_> {
         if let Err(e) = payload(input) {
             return self.fail_open(Some(&session), "input_malformed", &e);
         }
+        // Attributed mode (BRO-3846): a named session is bound through the hook's own thread
+        // variables too, the stdin `session_id` of a Codex hook included, and must be their thread.
+        if self.hosts.identity_mode() == IdentityMode::Attributed {
+            if session.surface == Surface::T3 && !self.hook_vars(input).is_empty() {
+                return self.bind(Some(session), input);
+            }
+            // Beside a Paseo or Direct session, the hook's stdin `session_id` is Codex's own id,
+            // which any Codex session has: it contradicts the session only once it resolves to a
+            // T3 thread. (Its environment's variables are the caller check's to judge.)
+            let stdin = ThreadVars::default().with_native(STDIN_SESSION_ID, self.hook_stdin(input).as_deref());
+            for (_, outcome) in self.hosts.resolve_each(&stdin) {
+                if let VarOutcome::Thread { id, environment } = outcome {
+                    let environment = environment.or_else(|| self.hosts.t3_environment());
+                    let thread = SessionRef { surface: Surface::T3, environment, id };
+                    let why = format!(
+                        "the hook's stdin session_id names T3 thread {}, never the session {session}",
+                        thread.id
+                    );
+                    return self.unbound(&[thread], &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));
+                }
+            }
+        }
         let me = match crate::verified_caller(self.hosts, Some(&session), self.claim, self.ambient, Check::Write) {
             Ok(Some(me)) => me,
             Ok(None) => {
                 let why = format!("session {session} is not verified: no launch token or bridge credential");
                 return self.fail_open(Some(&session), "caller_unverified", &why);
             }
-            Err(e) => return self.fail_open(Some(&session), "caller_refused", &e.message),
+            Err(e) => return self.refused_named(&session, &[], e),
         };
         self.gated(&session, &me);
     }
 
-    /// No session named (BRO-3846): the stop is bound through the hook's own thread variable,
-    /// `T3CODE_THREAD_ID` (Claude), or the `session_id` a Codex Stop hook reads on stdin, resolved
-    /// as every attributed write resolves it. No variable: never bound, and the stop goes through
-    /// silently. Variables that disagree or do not resolve, or a registry that does not read: the
-    /// binding is unavailable ([`Run::unbound`]). Strict identity binds nothing.
-    fn bind(&mut self, input: &[u8]) {
+    /// The hook's thread variables: the registry's captured ones, and a Codex hook's stdin
+    /// `session_id` on a host with a T3 registry (elsewhere it is no T3 thread's).
+    fn hook_vars(&self, input: &[u8]) -> ThreadVars {
+        let stdin = self.hook_stdin(input).filter(|_| self.hosts.has_surface(&Surface::T3));
+        self.hosts.thread_vars().clone().with_native(STDIN_SESSION_ID, stdin.as_deref())
+    }
+
+    /// A Codex hook's stdin `session_id`: Codex's native thread id. A Claude hook's is Claude's own
+    /// and binds nothing.
+    fn hook_stdin(&self, input: &[u8]) -> Option<String> {
+        match self.gate.harness {
+            Harness::Codex => payload(input).ok().and_then(|p| p.harness_session),
+            Harness::Claude => None,
+        }
+    }
+
+    /// A named session's caller check refused: an attribution or a T3 registry failure is a
+    /// binding that is unavailable ([`Run::unbound`], with `candidates` and the named T3 session);
+    /// any other refusal (a credential that does not verify) fails open as before.
+    fn refused_named(&mut self, session: &SessionRef, candidates: &[SessionRef], e: rmcp::ErrorData) {
+        let reason = e.data.as_ref().and_then(|d| d.get("reason")).cloned();
+        let reason = reason.and_then(|r| serde_json::from_value::<RefusalReason>(r).ok());
+        let registry = matches!(reason, Some(RefusalReason::RegistryUnavailable | RefusalReason::RegistryDisconnected));
+        match reason {
+            Some(r) if r.is_attribution() || (registry && session.surface == Surface::T3) => {
+                let mut all = candidates.to_vec();
+                self.add_candidate(&mut all, session);
+                self.unbound(&all, &IdentityRefusal::new(r, e.message.to_string()));
+            }
+            _ => self.fail_open(Some(session), "caller_refused", &e.message),
+        }
+    }
+
+    /// `session` as a candidate thread, canonical, when it is a T3 session not yet listed.
+    fn add_candidate(&self, candidates: &mut Vec<SessionRef>, session: &SessionRef) {
+        if session.surface != Surface::T3 {
+            return;
+        }
+        let s = session.canonical(self.hosts.t3_environment().as_deref());
+        if !candidates.contains(&s) {
+            candidates.push(s);
+        }
+    }
+
+    /// The stop bound through the hook's thread variables (BRO-3846): `T3CODE_THREAD_ID`
+    /// (Claude), or the `session_id` a Codex Stop hook reads on stdin, resolved as every attributed
+    /// write resolves it. No variable and no session named: never bound, and the stop goes through
+    /// silently. With `named`, the variables' thread must be that session, once canonical. Variables
+    /// that disagree, do not resolve, or name another thread than `named`, a registry that does not
+    /// read, or a verification of the resolved thread that fails: the binding is unavailable
+    /// ([`Run::unbound`]), with every thread known so far as a candidate. Strict identity binds
+    /// nothing.
+    fn bind(&mut self, named: Option<SessionRef>, input: &[u8]) {
         let unnamed = "no Maestro session is named (--session or MAESTRO_SESSION)";
         if self.hosts.identity_mode() == IdentityMode::Strict {
             return self.note(format!("{unnamed}, so there is no flow to gate."));
         }
-        let stdin_session = match self.gate.harness {
-            Harness::Codex => payload(input).ok().and_then(|p| p.harness_session),
-            Harness::Claude => None,
-        };
-        let vars = self.hosts.thread_vars().clone().with_native(STDIN_SESSION_ID, stdin_session.as_deref());
-        let each = self.hosts.resolve_each(&vars);
-        let a = match maestro_hosts::attribution::combine(&each) {
+        let each = self.hosts.resolve_each(&self.hook_vars(input));
+        let host = self.hosts.t3_environment();
+        let mut candidates: Vec<SessionRef> = Vec::new();
+        for (_, outcome) in &each {
+            if let VarOutcome::Thread { id, environment } = outcome {
+                let environment = environment.clone().or_else(|| host.clone());
+                let s = SessionRef { surface: Surface::T3, environment, id: id.clone() };
+                if !candidates.contains(&s) {
+                    candidates.push(s);
+                }
+            }
+        }
+        if let Some(n) = &named {
+            self.add_candidate(&mut candidates, n);
+        }
+        let (a, environment) = match maestro_hosts::attribution::combine(&each) {
             Attributed::Absent => {
                 let why = "and no thread variable binds this stop, so there is no flow to gate.";
                 return self.note(format!("{unnamed} {why}"));
             }
-            Attributed::Refused(refusal) => return self.unbound(&each, &refusal),
-            Attributed::Resolved { attribution, .. } => attribution,
+            Attributed::Refused(refusal) => return self.unbound(&candidates, &refusal),
+            Attributed::Resolved { attribution, environment } => (attribution, environment),
         };
-        let thread =
-            SessionRef { surface: Surface::T3, environment: self.hosts.t3_environment(), id: a.thread.clone() };
-        let mut claim = maestro_hosts::CallerClaim::t3(Some(a.thread.clone()), None::<String>);
-        claim.attribution = Some(a);
-        let me = match self.hosts.verify_caller(&claim) {
-            Ok(me) => me,
-            Err(r) => return self.fail_open(Some(&thread), "caller_refused", &r.message),
+        let thread = SessionRef { surface: Surface::T3, environment: environment.or(host), id: a.thread.clone() };
+        if let Some(n) = &named
+            && n.canonical(thread.environment.as_deref()) != thread
+        {
+            let why = format!("{} names T3 thread {}, but the stop's session is {n}", a.variable, a.thread);
+            return self.unbound(&candidates, &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));
+        }
+        // A named session that presents a credential is verified by it, in full; any other by its
+        // resolved thread.
+        let me = match &named {
+            Some(n) if crate::presents_credential(self.claim, self.ambient) => {
+                match crate::verified_caller(self.hosts, Some(n), self.claim, self.ambient, Check::Write) {
+                    Ok(Some(me)) => me,
+                    Ok(None) => {
+                        let why = format!("session {n} is not verified: no launch token or bridge credential");
+                        return self.fail_open(Some(n), "caller_unverified", &why);
+                    }
+                    Err(e) => return self.refused_named(n, &candidates, e),
+                }
+            }
+            _ => {
+                let mut claim = maestro_hosts::CallerClaim::t3(Some(a.thread.clone()), None::<String>);
+                claim.attribution = Some(a);
+                match self.hosts.verify_caller(&claim) {
+                    Ok(me) => me,
+                    Err(r) => return self.unbound(&candidates, &r),
+                }
+            }
         };
         if let Err(why) = payload(input) {
             return self.fail_open(Some(&thread), "input_malformed", &why);
@@ -294,23 +393,14 @@ impl Run<'_> {
     /// to every unfinished instance any candidate thread owns, and the fleet alert is filed, keyed
     /// by the workspace and the reason, as an unverified caller (a caller check would fail for the
     /// same reason). A record that fails still lets the stop through, and the alert names it.
-    fn unbound(&mut self, each: &[(ThreadVar, VarOutcome)], refusal: &IdentityRefusal) {
+    fn unbound(&mut self, candidates: &[SessionRef], refusal: &IdentityRefusal) {
         let code = refusal.reason.code();
         let message = refusal.message.trim_end_matches('.').to_string();
         self.note(format!(
             "binding_unavailable: {code}: {message}. The stop goes through (the gate fails open), recorded as StopUnverified."
         ));
         let host = self.hosts.t3_environment();
-        let mut candidates: Vec<SessionRef> = Vec::new();
-        for (_, outcome) in each {
-            if let VarOutcome::Thread { id, environment } = outcome {
-                let environment = environment.clone().or_else(|| host.clone());
-                let s = SessionRef { surface: Surface::T3, environment, id: id.clone() };
-                if !candidates.contains(&s) {
-                    candidates.push(s);
-                }
-            }
-        }
+        let candidates = candidates.to_vec();
         let (mut made, mut failed) = (Vec::new(), Vec::new());
         if !candidates.is_empty()
             && let Ok(root) = crate::flow::flows_root(&self.paths.workspace)

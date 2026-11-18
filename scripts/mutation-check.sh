@@ -2315,8 +2315,8 @@ mutate $ht " | b'.' | b'%'))" " | b'.'))"
 mutate $ht "        && bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.' | b'%'))" "        && bytes[1..].iter().all(|b| *b != b'.' || true)"
 mutate $ht '                [one] => one.clone(),' '                [one, ..] => one.clone(),'
 mutate $ht '.any(|p| p.provider_thread_id == active && p.native_id.as_deref() == Some(native_id));' '.any(|p| p.native_id.as_deref() == Some(native_id));'
-mutate $ht '"ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id"' '"ON p.thread_id = t.thread_id"'
-mutate $ht '"ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id"' '"ON p.provider_thread_id = t.active_provider_thread_id"'
+mutate $ht '"ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id "' '"ON p.thread_id = t.thread_id "'
+mutate $ht '"ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id "' '"ON p.provider_thread_id = t.active_provider_thread_id "'
 mutate $ht '            Some(t) if t.archived_at.is_some() => {' '            Some(t) if false => {'
 mutate $ht '            Some(t) if t.deleted_at.is_some() => {' '            Some(t) if false => {'
 mutate $ht '        if thread.archived_at.is_some() || thread.deleted_at.is_some() {' '        if false {'
@@ -2373,6 +2373,38 @@ mutate $stp '            Ok(!status.terminal)' '            Ok(true)'
 mutate $stp 'owners.owner.as_ref().filter(|_| owners.retired.is_none()) else' 'owners.owner.as_ref() else'
 mutate $stp '    if adoption::owners(&log, &started)?.retired.is_some() {' '    if false {'
 mutate $stp '        if prior.is_some_and(|p| p.reason == event.reason && p.candidates == event.candidates) {' '        if false {'
+# Joint review (BRO-3846, Codex at 15b53d8): a native id's uniqueness needs every active provider
+# row read; attribution needs no folder; the Stop gate binds a named session through the hook's
+# identity, and every attribution or registry failure there is a binding that is unavailable.
+mutate $ht '        if missing:
+' '        if False:
+'
+mutate $ht '            if r["provider_thread_id"] is None:' '            if False:'
+mutate $ht '            except Exception:
+                unreadable(r["thread_id"], "does not parse")' '            except Exception:
+                continue'
+mutate $ht '            if not isinstance(payload, dict):
+                unreadable(' '            if False:
+                unreadable('
+mutate $ht '            if not isinstance(ref, dict) or not isinstance(ref.get("nativeId"), str):' '            if False:'
+mutate $ht '                if !raw.provider_threads.iter().any(|p| p.provider_thread_id == active) {' '                if false {'
+mutate $ht '            if mode != "attr":' '            if True:'
+mutate $ht '            if cwd or mode == "attr":' '            if cwd:'
+mutate $ht '    if mode == "attr" and not (' '    if False and not ('
+mutate $ht '.arg(if attributed { "attr" } else { "get" })' '.arg("get")'
+mutate $ht '        if let Some(json_file) = self.json_path().filter(|_| attributed) {' '        if let Some(json_file) = self.json_path().filter(|_| false) {'
+mutate $ht '            .lookup_attributed(&thread_id)' '            .lookup(&thread_id)'
+mutate $ht '        let Some(thread) = self.lookup_attributed(thread_id)? else {' '        let Some(thread) = self.lookup(thread_id)? else {'
+mutate $gt '            if session.surface == Surface::T3 && !self.hook_vars(input).is_empty() {' '            if false {'
+mutate $gt '.filter(|_| self.hosts.has_surface(&Surface::T3));' ';'
+mutate $gt '            && n.canonical(thread.environment.as_deref()) != thread' '            && false'
+mutate $gt '                    return self.unbound(&[thread], &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));' '                    let _ = (thread, why);'
+mutate $gt '            Some(n) if crate::presents_credential(self.claim, self.ambient) => {' '            Some(n) if false => {'
+mutate $gt '            Some(r) if r.is_attribution() || (registry && session.surface == Surface::T3) => {' '            Some(r) if r.is_attribution() => {'
+mutate $gt '            Some(r) if r.is_attribution() || (registry && session.surface == Surface::T3) => {' '            Some(r) if registry && session.surface == Surface::T3 => {'
+mutate $gt '                    Err(r) => return self.unbound(&candidates, &r),' '                    Err(r) => return self.fail_open(Some(&thread), "caller_refused", &r.message),'
+mutate $gt '            self.add_candidate(&mut candidates, n);' ''
+mutate $gt '                self.add_candidate(&mut all, session);' ''
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

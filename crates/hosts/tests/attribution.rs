@@ -170,8 +170,6 @@ provider("pt-del", "mcp:deleted", "native-del")
 # Two active rows with one native id.
 thread("mcp:dup-1", "pt-d1"); provider("pt-d1", "mcp:dup-1", "native-dup")
 thread("mcp:dup-2", "pt-d2"); provider("pt-d2", "mcp:dup-2", "native-dup")
-# A provider row that names an active id but belongs to another thread never attributes it.
-thread("mcp:borrower", "pt-lent"); provider("pt-lent", "mcp:switched", "native-lent")
 # Runs: the latest by ordinal is the status, whatever the insert order.
 run("mcp:switched", 2, "completed"); run("mcp:switched", 3, "running"); run("mcp:switched", 1, "failed")
 conn.commit()
@@ -202,7 +200,6 @@ fn native_ids_resolve_through_the_active_provider_row_only() {
     assert_eq!(resolved(t3.resolve("native-new", true).unwrap()), "mcp:switched");
     assert!(unresolved(t3.resolve("native-old", true).unwrap()).contains("no T3 thread"));
     assert!(unresolved(t3.resolve("native-dup", true).unwrap()).contains("2 active provider rows"));
-    assert!(unresolved(t3.resolve("native-lent", true).unwrap()).contains("no T3 thread"));
     // Liveness for attribution: archived_at and deleted_at, never settled_at.
     assert_eq!(resolved(t3.resolve("native-settled", true).unwrap()), "mcp:settled");
     assert_eq!(resolved(t3.resolve("mcp:settled", false).unwrap()), "mcp:settled");
@@ -279,4 +276,156 @@ fn process_facts_record_unread_facts_as_null_with_a_reason() {
     let ancestors = facts.ancestors.unwrap();
     assert_eq!(ancestors.last().map(|a| (a.pid, a.command.clone())), Some((12, None)));
     assert!(facts.unread["ancestors"].contains("process 12"), "{:?}", facts.unread);
+}
+
+/// A `statev2.sqlite` with the threads and provider tables (`provider: false` leaves the provider
+/// table out), then `inserts`, Python run with `thread(tid, active, payload)` and
+/// `provider(ptid, tid, payload_json)` in scope.
+fn partial_db(dir: &Path, provider: bool, inserts: &str) -> PathBuf {
+    let userdata = dir.join("userdata");
+    std::fs::create_dir_all(&userdata).unwrap();
+    let db = userdata.join("statev2.sqlite");
+    let provider_table = if provider {
+        "CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id TEXT PRIMARY KEY, thread_id TEXT, payload_json TEXT);"
+    } else {
+        ""
+    };
+    let script = format!(
+        r#"
+import json, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.executescript("""
+CREATE TABLE orchestration_v2_projection_threads (
+  thread_id TEXT PRIMARY KEY, project_id TEXT, title TEXT, default_provider TEXT,
+  active_provider_thread_id TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT,
+  deleted_at TEXT, payload_json TEXT);
+{provider_table}
+""")
+def thread(tid, active, payload):
+    conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (tid, "p", "t", "codex", active, "2026-11-17T00:00:00Z", "2026-11-17T00:00:00Z", None, None, json.dumps(payload)))
+def provider(ptid, tid, payload_json):
+    conn.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?)", (ptid, tid, payload_json))
+def native(n):
+    return json.dumps({{"nativeThreadRef": {{"driver": "codex", "nativeId": n}}}})
+{inserts}
+conn.commit()
+"#
+    );
+    let out = std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&db).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    dir.to_path_buf()
+}
+
+fn unavailable(r: Result<Resolution, maestro_hosts::IdentityRefusal>) -> String {
+    match r {
+        Err(e) if e.reason == RefusalReason::RegistryUnavailable => e.message,
+        other => panic!("not registry_unavailable: {other:?}"),
+    }
+}
+
+/// Uniqueness of a native id needs every active provider row read (BRO-3846 review): a missing
+/// provider table, an active row whose payload does not parse or whose `nativeThreadRef` is
+/// malformed, or an active pointer with no row is `registry_unavailable`, even beside a match.
+#[test]
+fn a_partial_read_of_the_active_rows_is_registry_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = partial_db(&tmp.path().join("missing"), false, r#"thread("mcp:a", "pt-a", {"worktreePath": "/w"})"#);
+    let why = unavailable(T3Registry::new(missing).resolve("native-a", true));
+    assert!(why.contains("missing table(s) orchestration_v2_projection_provider_threads"), "{why}");
+    let good = r#"
+thread("mcp:a", "pt-a", {"worktreePath": "/w"}); provider("pt-a", "mcp:a", native("native-a"))
+"#;
+    for (name, bad, says) in [
+        ("unparsed", r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", "{not json")"#, "does not parse"),
+        ("not an object", r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", "[1]")"#, "is not an object"),
+        (
+            "malformed ref",
+            r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", json.dumps({"nativeThreadRef": "native-a"}))"#,
+            "has a malformed nativeThreadRef",
+        ),
+        (
+            "no native id",
+            r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", json.dumps({"nativeThreadRef": {"nativeId": 7}}))"#,
+            "has a malformed nativeThreadRef",
+        ),
+        ("dangling", r#"thread("mcp:b", "pt-b", {})"#, "is missing"),
+        // An active pointer at another thread's row never attributes that row: it is dangling.
+        ("borrowed", r#"thread("mcp:b", "pt-a", {})"#, "is missing"),
+    ] {
+        let db = partial_db(&tmp.path().join(name), true, &format!("{good}\n{bad}"));
+        let why = unavailable(T3Registry::new(db).resolve("native-a", true));
+        assert!(why.contains(&format!("the active provider row of thread mcp:b {says}")), "{name}: {why}");
+    }
+    // A row with no `nativeThreadRef` at all has no native id yet: not a partial read.
+    let fresh = partial_db(
+        &tmp.path().join("fresh"),
+        true,
+        &format!("{good}\n{}", r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", "{}")"#),
+    );
+    assert_eq!(resolved(T3Registry::new(fresh).resolve("native-a", true).unwrap()), "mcp:a");
+}
+
+/// The JSON snapshot: an active pointer with no provider row is a partial read too.
+#[test]
+fn a_snapshot_active_pointer_with_no_row_is_registry_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("threads.json");
+    let rows = serde_json::json!([
+        { "id": "mcp:a", "cwd": "/w", "active_provider_thread_id": "pt-a",
+          "provider_threads": [{ "provider_thread_id": "pt-a", "native_id": "native-a" }] },
+        { "id": "mcp:b", "cwd": "/w", "active_provider_thread_id": "pt-b", "provider_threads": [] },
+    ]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    unavailable(T3Registry::new(&path).resolve("native-a", true));
+}
+
+/// A live thread with no usable folder (no `worktreePath`, no project root) is still the thread its
+/// variable names (BRO-3846 review); the credentialed reader still needs the folder.
+#[test]
+fn a_live_thread_with_no_cwd_is_attributed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = partial_db(
+        tmp.path(),
+        true,
+        r#"thread("mcp:nocwd", "pt-n", {}); provider("pt-n", "mcp:nocwd", native("native-n"))"#,
+    );
+    let t3 = T3Registry::new(db);
+    assert_eq!(resolved(t3.resolve("mcp:nocwd", false).unwrap()), "mcp:nocwd");
+    assert_eq!(resolved(t3.resolve("native-n", true).unwrap()), "mcp:nocwd");
+    let v = t3.verify_attributed("mcp:nocwd", None).unwrap();
+    assert_eq!(v.owner_marker(), Some("t3-owner:mcp:nocwd:2026-11-17T00:00:00Z"));
+    assert!(t3.find("mcp:nocwd").is_none(), "the credentialed reader needs a folder");
+    // The JSON snapshot: a row with no cwd at all.
+    let path = tmp.path().join("threads.json");
+    let rows = serde_json::json!([{ "id": "mcp:nocwd", "created_at": "2026-11-17T00:00:00Z", "run_id": "r" }]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    let t3 = T3Registry::new(&path);
+    assert_eq!(resolved(t3.resolve("mcp:nocwd", false).unwrap()), "mcp:nocwd");
+    assert!(t3.verify_attributed("mcp:nocwd", None).is_ok());
+}
+
+/// The legacy `projection_threads` schema: a thread with no folder is attributed there too; and a
+/// database with no thread table at all is unavailable, not "no such thread".
+#[test]
+fn the_legacy_schema_attributes_and_no_thread_table_is_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let make = |name: &str, sql: &str| {
+        let dir = tmp.path().join(name).join("userdata");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script =
+            "import sqlite3, sys\nc = sqlite3.connect(sys.argv[1])\nc.executescript(sys.argv[2])\nc.commit()\n";
+        let db = dir.join("statev2.sqlite");
+        let out = std::process::Command::new("python3").args(["-I", "-c", script]).arg(&db).arg(sql).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        T3Registry::new(tmp.path().join(name))
+    };
+    let legacy = make(
+        "legacy",
+        "CREATE TABLE projection_threads (thread_id TEXT, project_id TEXT, worktree_path TEXT, created_at TEXT, archived_at TEXT, deleted_at TEXT, settled_at TEXT); INSERT INTO projection_threads VALUES ('mcp:old', 'p', NULL, '2026-11-17T00:00:00Z', NULL, NULL, NULL);",
+    );
+    assert_eq!(resolved(legacy.resolve("mcp:old", false).unwrap()), "mcp:old");
+    let empty = make("empty", "CREATE TABLE other (x TEXT);");
+    let why = unavailable(empty.resolve("mcp:old", false));
+    assert!(why.contains("no thread table"), "{why}");
 }

@@ -1087,3 +1087,138 @@ fn the_driver_skill_says_how_codex_and_gemini_write() {
         assert!(skill.contains(needle), "{needle}");
     }
 }
+
+/// The gate with `session` named (`--session` / `MAESTRO_SESSION`), unsigned.
+fn gate_named(f: &Fx, hosts: &SurfaceRegistry, harness: Harness, session: &str, input: &[u8]) -> Outcome {
+    let g = Gate { harness, cannot_block: false, session: Some(session.into()), alert_ledger: "ledger.yaml".into() };
+    stop::gate(&f.paths, hosts, Ambient::Caller, &json!({}), &g, input)
+}
+
+fn last_kind(f: &Fx, fi: &str) -> String {
+    f.events(fi).last().unwrap()["kind"].as_str().unwrap().to_string()
+}
+
+/// BRO-3846 review, finding 1: a named session is bound through a Codex hook's stdin `session_id`
+/// too, and compared with the canonical named session. Matching: the stop is refused over open
+/// work. Mismatching or unresolved: the binding is unavailable, recorded and alerted.
+#[test]
+fn a_named_session_is_bound_through_a_codex_hooks_stdin() {
+    let f = fx();
+    let c = f.begin_as((CXV, "native-c"));
+    let a = f.begin_as((T3V, A));
+    let hosts = f.hosts(ATTRIB, &[], Reg::Good, false);
+    for named in [format!("t3:{ENV}/{C}"), format!("t3:local/{C}")] {
+        let out = gate_named(&f, &hosts, Harness::Codex, &named, &codex_stop("native-c"));
+        assert!(out.blocked && out.stdout.contains(&c), "{named}: {out:?}");
+    }
+    // Mismatching: the named thread and the stdin's are both candidates.
+    let out = gate_named(&f, &hosts, Harness::Codex, &format!("t3:{ENV}/{A}"), &codex_stop("native-c"));
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: thread_mismatch")), "{out:?}");
+    assert_eq!((last_kind(&f, &a), last_kind(&f, &c)), ("StopUnverified".into(), "StopUnverified".into()));
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    // Unresolved: the named thread is the candidate.
+    let out = gate_named(&f, &hosts, Harness::Codex, &format!("t3:{ENV}/{A}"), &codex_stop("native-nobody"));
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: attribution_unresolved")), "{out:?}");
+    let last = f.events(&a).pop().unwrap();
+    assert!(last["body"]["reason"].as_str().unwrap().starts_with("attribution_unresolved"), "{last}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// Beside a named Direct session, a Codex hook's stdin `session_id` is Codex's own id: it binds
+/// nothing unless it resolves to a T3 thread, which the Direct session can never be.
+#[test]
+fn a_direct_sessions_codex_stdin_contradicts_it_only_as_a_t3_thread() {
+    let f = fx();
+    let hosts = f.hosts(ATTRIB, &[], Reg::Good, false);
+    let v = f.call(&hosts, START, f.direct(f.start_args(Some("direct:-/d1"))));
+    let d = v["instance"].as_str().unwrap().to_string();
+    let g = Gate {
+        harness: Harness::Codex,
+        cannot_block: false,
+        session: Some("direct:-/d1".into()),
+        alert_ledger: "ledger.yaml".into(),
+    };
+    let claim = json!({ "token": "tok-1", "cwd": f.work });
+    let out = stop::gate(&f.paths, &hosts, Ambient::Shared, &claim, &g, &codex_stop("01a1-not-t3"));
+    assert!(out.blocked && out.stdout.contains(&d), "{out:?}");
+    let out = stop::gate(&f.paths, &hosts, Ambient::Shared, &claim, &g, &codex_stop("native-c"));
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: thread_mismatch")), "{out:?}");
+}
+
+/// BRO-3846 review, finding 2: a failure after resolution, a named session's attribution failure,
+/// and a registry failure each make the binding unavailable: `StopUnverified` on the known
+/// candidates, and the alert filed as an unverified caller.
+#[test]
+fn every_attribution_failure_of_the_gate_is_a_binding_unavailable() {
+    let f = fx();
+    let a = f.begin_as((T3V, A));
+    let unverified = |f: &Fx| {
+        let journal = std::fs::read_to_string(maestro_store::requests::journal(&f.paths)).unwrap_or_default();
+        journal.lines().filter(|l| l.contains("\"verified\":false")).count()
+    };
+    // Resolved, then the verification fails: the thread has no incarnation marker.
+    let hosts = f.hosts(ATTRIB, &[(T3V, "mcp:thread-bare")], Reg::Good, false);
+    let out = gate(&f, &hosts, Harness::Claude, &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: invalid_token")), "{out:?}");
+    assert_eq!((out.alerts.len(), unverified(&f)), (1, 1), "{out:?}");
+    // A named T3 session that does not verify (no variable, no credential).
+    let bare = f.hosts(ATTRIB, &[], Reg::Good, false);
+    let out = gate_named(&f, &bare, Harness::Claude, &format!("t3:{ENV}/{A}"), &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: attribution_missing")), "{out:?}");
+    assert_eq!(last_kind(&f, &a), "StopUnverified");
+    assert_eq!((out.alerts.len(), unverified(&f)), (1, 2), "{out:?}");
+    // A named session whose registry does not read.
+    let broken = f.hosts(ATTRIB, &[(T3V, A)], Reg::Broken, false);
+    let out = gate_named(&f, &broken, Harness::Claude, &format!("t3:{ENV}/{A}"), &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: registry_unavailable")), "{out:?}");
+    let last = f.events(&a).pop().unwrap();
+    assert!(last["body"]["reason"].as_str().unwrap().starts_with("registry_unavailable"), "{last}");
+    assert_eq!((out.alerts.len(), unverified(&f)), (1, 3), "{out:?}");
+}
+
+/// On a host with no T3 registry, a Codex hook's stdin `session_id` is no T3 thread's: with no
+/// session named, the stop goes through silently, as before BRO-3846.
+#[test]
+fn without_t3_a_codex_hooks_stdin_binds_nothing() {
+    let f = fx();
+    let hosts = SurfaceRegistry::new(None, None, None).with_identity_mode(ATTRIB);
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a1"));
+    allowed(&out);
+    assert!(out.alerts.is_empty() && out.recorded.is_empty(), "{out:?}");
+}
+
+/// A named T3 session that presents a credential is judged by it alone: a bad one, beside its own
+/// matching variable, fails open as a credential refusal, never attributed; and one checked
+/// against a registry that does not read is a binding that is unavailable.
+#[test]
+fn a_named_sessions_credential_is_final_at_the_gate() {
+    let f = fx();
+    let a = f.begin_as((T3V, A));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, true);
+    let mut cred = f.t3_credential(&hosts, A);
+    cred.signature = "00".repeat(32);
+    let g = Gate {
+        harness: Harness::Claude,
+        cannot_block: false,
+        session: Some(format!("t3:{ENV}/{A}")),
+        alert_ledger: "ledger.yaml".into(),
+    };
+    let claim = json!({ "cwd": f.work, "node": "node-1", "credential": cred });
+    let out = stop::gate(&f.paths, &hosts, Ambient::Caller, &claim, &g, &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("caller_refused") && n.contains("InvalidToken")), "{out:?}");
+    assert_eq!(last_kind(&f, &a), "Started", "a credential refusal records nothing");
+    let good = f.t3_credential(&hosts, A);
+    let broken = f.hosts(ATTRIB, &[], Reg::Broken, true);
+    let claim = json!({ "cwd": f.work, "node": "node-1", "credential": good });
+    let out = stop::gate(&f.paths, &broken, Ambient::Caller, &claim, &g, &claude_stop());
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: registry_disconnected")), "{out:?}");
+    assert_eq!(last_kind(&f, &a), "StopUnverified");
+}

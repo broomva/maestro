@@ -201,7 +201,11 @@ def main():
             if proj:
                 cwd = proj["workspace_root"]
         if not isinstance(cwd, str) or not cwd:
-            return None
+            # Attribution picks a thread by its variable, never by a folder: a live thread with
+            # no worktree and no project root is still the thread.
+            if mode != "attr":
+                return None
+            cwd = ""
         run_status = payload.get("status")
         latest_run_id = None
         if "orchestration_v2_projection_runs" in tables:
@@ -270,22 +274,39 @@ def main():
     if mode == "native":
         # The threads whose ACTIVE provider-thread row carries this native id (a Codex
         # CODEX_THREAD_ID, or a Stop hook's session_id). A retired provider row never attributes.
+        # Uniqueness needs every active row read: a missing table, an active pointer with no row,
+        # or a payload that does not parse is an error, never a skipped row.
+        missing = sorted({"orchestration_v2_projection_threads", "orchestration_v2_projection_provider_threads"} - tables)
+        if missing:
+            sys.stderr.write(f"sqlite_error: missing table(s) {', '.join(missing)}\n")
+            sys.exit(2)
+        def unreadable(thread_id, why):
+            sys.stderr.write(f"sqlite_error: the active provider row of thread {thread_id} {why}\n")
+            sys.exit(2)
         out = []
-        if "orchestration_v2_projection_threads" in tables and "orchestration_v2_projection_provider_threads" in tables:
-            rows = conn.execute(
-                "SELECT t.thread_id AS thread_id, p.payload_json AS payload_json "
-                "FROM orchestration_v2_projection_threads t "
-                "JOIN orchestration_v2_projection_provider_threads p "
-                "ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id"
-            )
-            for r in rows:
-                try:
-                    payload = json.loads(r["payload_json"] or "{}")
-                except Exception:
-                    continue
-                ref = payload.get("nativeThreadRef") if isinstance(payload, dict) else None
-                if isinstance(ref, dict) and ref.get("nativeId") == target_id and r["thread_id"] not in out:
-                    out.append(r["thread_id"])
+        rows = conn.execute(
+            "SELECT t.thread_id AS thread_id, p.provider_thread_id AS provider_thread_id, p.payload_json AS payload_json "
+            "FROM orchestration_v2_projection_threads t "
+            "LEFT JOIN orchestration_v2_projection_provider_threads p "
+            "ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id "
+            "WHERE t.active_provider_thread_id IS NOT NULL"
+        )
+        for r in rows:
+            if r["provider_thread_id"] is None:
+                unreadable(r["thread_id"], "is missing")
+            try:
+                payload = json.loads(r["payload_json"] or "{}")
+            except Exception:
+                unreadable(r["thread_id"], "does not parse")
+            if not isinstance(payload, dict):
+                unreadable(r["thread_id"], "is not an object")
+            ref = payload.get("nativeThreadRef")
+            if ref is None:
+                continue
+            if not isinstance(ref, dict) or not isinstance(ref.get("nativeId"), str):
+                unreadable(r["thread_id"], "has a malformed nativeThreadRef")
+            if ref["nativeId"] == target_id and r["thread_id"] not in out:
+                out.append(r["thread_id"])
         print(json.dumps(out))
         sys.exit(0)
 
@@ -301,6 +322,10 @@ def main():
                     out.append(built)
         print(json.dumps(out))
         sys.exit(0)
+
+    if mode == "attr" and not ({"orchestration_v2_projection_threads", "projection_threads"} & tables):
+        sys.stderr.write("sqlite_error: no thread table\n")
+        sys.exit(2)
 
     if "orchestration_v2_projection_threads" in tables:
         row = conn.execute(
@@ -345,10 +370,10 @@ def main():
                     provider = srow["provider_name"]
                     status = srow["status"]
                     session_id = srow["session_id"]
-            if cwd:
+            if cwd or mode == "attr":
                 print(json.dumps({
                     "id": prow["thread_id"],
-                    "cwd": cwd,
+                    "cwd": cwd or "",
                     "environment_id": env_id,
                     "node": None,
                     "provider": provider,
@@ -535,6 +560,9 @@ impl T3Registry {
             let mut out: Vec<String> = Vec::new();
             for raw in rows {
                 let Some(active) = raw.active_provider_thread_id.as_deref() else { continue };
+                if !raw.provider_threads.iter().any(|p| p.provider_thread_id == active) {
+                    return Err(unreadable(format!("The active provider row of thread {} is missing.", raw.id)));
+                }
                 let hit = raw
                     .provider_threads
                     .iter()
@@ -601,8 +629,9 @@ impl T3Registry {
         if self.disconnected {
             return Err(IdentityRefusal::new(RefusalReason::RegistryUnavailable, "T3 registry is disconnected."));
         }
-        let thread =
-            self.lookup(&thread_id).map_err(|r| IdentityRefusal::new(RefusalReason::RegistryUnavailable, r.message))?;
+        let thread = self
+            .lookup_attributed(&thread_id)
+            .map_err(|r| IdentityRefusal::new(RefusalReason::RegistryUnavailable, r.message))?;
         Ok(match thread {
             None => Resolution::Unresolved(format!("no T3 thread has the id {}", short_id(&thread_id))),
             Some(t) if t.archived_at.is_some() => {
@@ -616,8 +645,36 @@ impl T3Registry {
     }
 
     fn lookup(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {
+        self.lookup_in(id, false)
+    }
+
+    /// The thread `id`, for attribution (BRO-3846): as [`Self::lookup`], which the credentialed
+    /// reader keeps, except that a thread with no usable folder (no `worktreePath`, no project
+    /// root) is still the thread, with an empty `cwd`. The variable picks it, never a folder.
+    fn lookup_attributed(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {
+        self.lookup_in(id, true)
+    }
+
+    fn lookup_in(&self, id: &str, attributed: bool) -> Result<Option<T3Thread>, IdentityRefusal> {
         if !is_safe_t3_id(id) {
             return Ok(None);
+        }
+        if let Some(json_file) = self.json_path().filter(|_| attributed) {
+            let malformed =
+                |e: String| IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("T3 JSON registry {e}."));
+            let text = std::fs::read_to_string(json_file).map_err(|e| malformed(format!("could not be read: {e}")))?;
+            let rows: Vec<Value> = serde_json::from_str(&text).map_err(|e| malformed(format!("is malformed: {e}")))?;
+            let Some(mut row) = rows.into_iter().find(|r| r.get("id").and_then(Value::as_str) == Some(id)) else {
+                return Ok(None);
+            };
+            if let Some(o) = row.as_object_mut()
+                && !o.get("cwd").is_some_and(Value::is_string)
+            {
+                o.insert("cwd".into(), Value::String(String::new()));
+            }
+            let raw: RawT3Thread =
+                serde_json::from_value(row).map_err(|e| malformed(format!("has a malformed row: {e}")))?;
+            return Ok(Some(Self::snapshot_row(raw, &self.environment_id())));
         }
         if let Some(json_file) = self.json_path() {
             let text = std::fs::read_to_string(json_file).map_err(|e| {
@@ -640,7 +697,7 @@ impl T3Registry {
                 .arg("-I")
                 .arg("-c")
                 .arg(SQLITE_READER_PY)
-                .arg("get")
+                .arg(if attributed { "attr" } else { "get" })
                 .arg(&db_file)
                 .arg(id)
                 .output()
@@ -735,7 +792,7 @@ impl T3Registry {
         if self.disconnected {
             return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
         }
-        let Some(thread) = self.lookup(thread_id)? else {
+        let Some(thread) = self.lookup_attributed(thread_id)? else {
             return Err(IdentityRefusal::new(
                 RefusalReason::AttributionUnresolved,
                 format!("No T3 thread has the id {}.", short_id(thread_id)),
