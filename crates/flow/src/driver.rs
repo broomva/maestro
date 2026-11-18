@@ -137,15 +137,13 @@ fn codes<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
 }
 
 /// The agents the flow's performers name, by name.
-fn agents_of(flow: &CompiledFlow) -> Result<BTreeMap<String, &'static agents::Agent>, DriverError> {
+fn agents_of(flow: &CompiledFlow) -> Result<BTreeMap<String, agents::AgentLaunch>, DriverError> {
     let mut out = BTreeMap::new();
     for (id, node) in &flow.ir().nodes {
         let Some(launch) = node.class.launch() else { continue };
         match agents::launch_spec(launch) {
             Some(LaunchSpec::Agent(spec)) => {
-                if let Some(agent) = agents::find(&spec.agent) {
-                    out.insert(spec.agent, agent);
-                }
+                out.insert(spec.agent.clone(), *spec);
             }
             Some(LaunchSpec::UnknownAgent { agent, .. }) => {
                 return Err(DriverError::UnknownAgent { node: id.clone(), agent });
@@ -262,11 +260,10 @@ fn node_section(out: &mut String, ir: &Ir, id: &str, node: &Node) {
     let _ = writeln!(out, "- Do: {todo}\n");
 }
 
-fn agent_section(out: &mut String, agent: &agents::Agent) {
-    let spec = agent.launch(None);
-    let _ = writeln!(out, "### {}\n", code(&agent.name));
-    let _ = writeln!(out, "{}\n", agent.description.trim());
-    let _ = writeln!(out, "Its source is `{}`. Launch it through your harness:\n", agent.source);
+fn agent_section(out: &mut String, spec: &agents::AgentLaunch) {
+    let _ = writeln!(out, "### {}\n", code(&spec.agent));
+    let _ = writeln!(out, "{}\n", spec.description.trim());
+    let _ = writeln!(out, "Its source is `{}`. Launch it through your harness:\n", spec.source);
     let subagent = |n: &agents::NativeLaunch| match (&n.subagent_type, &n.agent_name) {
         (Some(t), _) => format!(" with `subagent_type: \"{t}\"`"),
         (None, Some(a)) => format!(" with `agent_name: \"{a}\"` and the node's task as `prompt`"),
@@ -352,7 +349,7 @@ pub fn generate(flow: &CompiledFlow) -> Result<String, DriverError> {
     );
     let _ = writeln!(
         out,
-        "- Start over MCP: `maestro_flow_start` with `definition` holding the definition's YAML text itself, never a path, and `params` as a JSON object."
+        "- Start over MCP: `maestro_flow_start` with `definition` holding the definition's YAML text itself, never a path, and `params` as a JSON object. When the definition declares `agents:`, also pass its absolute file path as `definition_path`."
     );
     let _ = writeln!(
         out,

@@ -73,7 +73,7 @@ pub use adoption::{
     MAX_PROPOSALS, PROPOSAL_NOT_FILED, ProposalStatus, Proposed, Proposing, propose_adoption, propose_retirement,
 };
 pub use asks::{ASK_NOT_FILED, AnswerSeen, Asked, Filing, ask, landing, seen};
-pub use compile::{CompiledFlow, MAX_SOURCE, compile};
+pub use compile::{CompiledFlow, MAX_SOURCE, compile, compile_with_path};
 pub use error::{CompileError, KernelError, Refusal};
 pub use exec::Limits;
 pub use guard::guard_entry;

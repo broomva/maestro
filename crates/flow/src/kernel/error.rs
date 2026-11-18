@@ -6,6 +6,12 @@ use crate::error::FlowError;
 /// Why a definition does not compile. Nothing is written for a definition that fails.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
+    #[error("The definition path does not match the supplied definition.")]
+    DefinitionPathMismatch,
+    #[error("An agents root requires an absolute definition path.")]
+    AgentsRootNeedsPath,
+    #[error("Agent name {name} conflicts with a builtin.")]
+    AgentNameConflict { name: String },
     /// The YAML does not parse or does not fit the definition schema.
     #[error("The definition is not valid: {detail}.")]
     Invalid { detail: String },
@@ -40,6 +46,9 @@ pub enum CompileError {
 impl CompileError {
     pub fn code(&self) -> &'static str {
         match self {
+            CompileError::DefinitionPathMismatch => "definition_path_mismatch",
+            CompileError::AgentsRootNeedsPath => "agents_root_needs_path",
+            CompileError::AgentNameConflict { .. } => "agent_name_conflict",
             CompileError::Invalid { .. } => "definition_invalid",
             CompileError::Unsupported { .. } => "unsupported",
             CompileError::DuplicateId { .. } => "duplicate_id",

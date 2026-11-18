@@ -1610,11 +1610,14 @@ mutate $mf '        Err(e) => {
             let identity = e.data'
 mutate $mf '    if !std::fs::symlink_metadata(&broomva).is_ok_and(|m| m.is_dir()) {' '    if false {'
 mutate $mf '    if std::fs::symlink_metadata(workspace.join(".git")).is_ok_and(|m| !m.is_dir()) {' '    if false {'
+mutate $mf '                    if bytes != a.definition.as_bytes() {' '                    if false {'
 mutate $mf '        if !self.may_create && std::fs::symlink_metadata(&self.root).is_err() {' '        if false {'
-mutate $mf '                let flow = kernel::compile(&a.definition)?;
+mutate $mf '                let flow =
+                    kernel::compile_with_path(&a.definition, a.definition_path.as_deref().map(std::path::Path::new))?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
                 let begun = kernel::start(&mut w.ledger()?, &w.me, &flow, params)?;' '                let mut ledger = w.ledger()?;
-                let flow = kernel::compile(&a.definition)?;
+                let flow =
+                    kernel::compile_with_path(&a.definition, a.definition_path.as_deref().map(std::path::Path::new))?;
                 let params = a.params.clone().unwrap_or_else(|| json!({}));
                 let begun = kernel::start(&mut ledger, &w.me, &flow, params)?;'
 mutate $mf '    let root = flows_root(&paths.workspace)?;
@@ -1985,7 +1988,7 @@ mutate $fk/snapshot.rs '&left(limits, deadline), Feed { search: Search::Caller, 
 mutate $fx '        Some(Ok(file)) => cmd.stdin(Stdio::from(file)),' '        Some(Ok(_)) => cmd.stdin(Stdio::null()),'
 mutate $fk/write.rs '        judges.then(|| serde_json::to_vec(outputs).unwrap_or_default())' '        false.then(|| serde_json::to_vec(outputs).unwrap_or_default())'
 mutate $fk/write.rs '            guard_input(&held.log, &held.started, &held.rec.node).map_err(|e| ("input_invalid", e.to_string()))?;' '            serde_json::json!({});'
-mutate $fk/ir.rs '    if ir.receipt_stdin {' '    if false {'
+mutate $fk/ir.rs '    } else if ir.receipt_stdin {' '    } else if false {'
 mutate $fk/write.rs '    let stdin = if ir.receipt_stdin' '    let stdin = if false'
 mutate $fk/write.rs 'Some(Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. })' 'Some(Class::Observe { .. } | Class::Work { .. })'
 mutate $fk/write.rs 'Some(Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. })' 'Some(Class::Pure { .. } | Class::Work { .. })'
@@ -2148,16 +2151,27 @@ mutate $cli '        if let Some(drift) = agents::check(root)? {' '        if le
 # does not compile, at any call; `next` gives an agent performer its launch spec, and an agent a
 # pinned IR names that this build lacks is an unknown_agent spec, never none.
 mutate $agt '    performer.strip_prefix(PERFORMER)' '    Some(performer)'
-mutate $fk/compile.rs '            && crate::agents::find(agent).is_none()' '            && false'
-mutate $fk/compile.rs '    check_agents(&ir)?;
-' ''
+mutate $fk/compile.rs '                .find(|a| a.name == name)' '                .find(|_| false)'
+mutate $fk/compile.rs '                .or_else(|| crate::agents::find(name))' '                .or_else(|| crate::agents::find("verifier"))'
+mutate $fk/compile.rs '    let path = path.filter(|p| p.is_absolute()).ok_or(CompileError::AgentsRootNeedsPath)?;' '    let path = path.unwrap_or(std::path::Path::new("/missing-definition"));'
+mutate $agt '    Some(match find(name) {' '    Some(match find("missing") {'
+mutate $fk/compile.rs '            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,' '            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,'
+mutate $fk/compile.rs '        if FileType::from_raw_mode(stat.st_mode as _) != FileType::RegularFile {' '        if false && FileType::from_raw_mode(stat.st_mode as _) != FileType::RegularFile {'
+mutate $fk/compile.rs '        if bytes.len() > crate::agents::MAX_SOURCE {' '        if false {'
+mutate $fk/compile.rs '        if !file_path.starts_with(&repo) {' '        if false {'
+mutate $fk/compile.rs '        if crate::agents::find(&agent.name).is_some() {' '        if false {'
+mutate $fk/compile.rs '        if !file.ends_with(".agent.yaml") {' '        if false {'
+mutate $agt '        source_sha256: sha256(text.as_bytes()),' '        source_sha256: sha256(b""),'
+mutate $fk/compile.rs '    if !root.starts_with(&repo) {' '    if false {'
+mutate $agt '    if let Some(pinned) = &launch.pinned_agent {' '    if let Some(pinned) = &None::<AgentLaunch> {'
+mutate $fk/compile.rs '            launch.pinned_agent = Some(agent.launch(launch.skill.as_deref()));' '            launch.pinned_agent = None; let _ = agent;'
+
 mutate $replay '                launch_spec: class.and_then(Class::launch).and_then(agents::launch_spec),' '                launch_spec: None,'
-mutate $agt '    Some(match find(name) {' '    find(name)?;
-    Some(match find(name) {'
 # The driver skill's order is the IR's: a node after everything it waits on, its switch's subject
 # and a needed repeat's body included; a skill name past the spec's length is refused; --check
 # exits 1 on a skill that is not what the IR generates.
 drv=$fl/driver.rs
+mutate $drv '                out.insert(spec.agent.clone(), *spec);' '                let _ = spec;'
 mutate $drv '.map(|d| at(ir, d, memo) + 1).max().unwrap_or(0);' '.map(|d| at(ir, d, memo) * 0).max().unwrap_or(0);'
 mutate $drv '    on.extend(node.switch.as_ref().map(|c| c.on.as_str()));
 ' ''
