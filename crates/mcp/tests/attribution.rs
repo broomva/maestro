@@ -1370,24 +1370,45 @@ fn fail_open_alerts_do_not_multiply_with_the_named_session() {
     assert_eq!(ids[0], ids[1]);
 }
 
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let target = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_tree(&e.path(), &target);
+        } else {
+            std::fs::copy(e.path(), target).unwrap();
+        }
+    }
+}
+
 /// Codex's joint round 5: the owner's views never show live permission prompts as complete when
 /// some did not read. A snapshot row that does not read is an error of the needs section in
-/// `maestro_snapshot` and `maestro_needs_list`, and an unread source of `maestro_context`; the
-/// prompts that did read are still listed.
+/// `maestro_snapshot` and `maestro_needs_list`, and an unread source of `maestro_context`, whose
+/// needs are then incomplete; the prompts that did read are still listed. The workspace is the
+/// machine fixture without its two deliberately malformed ledgers, so its needs read complete.
 #[test]
 fn the_owners_views_say_when_prompts_did_not_read() {
     let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("machine");
+    copy_tree(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine"), &root);
+    for ledger in ["broken.yaml", "alt-key.yaml"] {
+        std::fs::remove_file(root.join("workspace/.control/asks").join(ledger)).unwrap();
+    }
+    let store = Store::new(Paths::under(&root), TreeSource::WorkingTree);
     let path = tmp.path().join("threads.json");
-    let rows = json!([
-        7,
-        { "id": "mcp:good", "cwd": "/w", "created_at": CREATED, "status": "running",
-          "pending_permissions": [{ "name": "Bash", "input": { "command": "cargo test" } }] },
-    ]);
-    std::fs::write(&path, rows.to_string()).unwrap();
+    let good = json!({ "id": "mcp:good", "cwd": "/w", "created_at": CREATED, "status": "running",
+        "pending_permissions": [{ "name": "Bash", "input": { "command": "cargo test" } }] });
     let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(&path)), None);
-    let machine = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine");
-    let store = Store::new(Paths::under(machine), TreeSource::WorkingTree);
     let call = |tool: &str| call_with_hosts(&store, &hosts, tool, json!({})).unwrap();
+    // Every row reads: the views are complete.
+    std::fs::write(&path, json!([good.clone()]).to_string()).unwrap();
+    let context = call("maestro_context");
+    assert_eq!(context["packet"]["needs_complete"], true, "{context}");
+    assert!(call("maestro_snapshot")["needs"].get("errors").is_none());
+    // One row does not read: the good prompt is still listed, and every view says so.
+    std::fs::write(&path, json!([7, good]).to_string()).unwrap();
     for (tool, section) in [("maestro_snapshot", "/needs"), ("maestro_needs_list", "")] {
         let v = call(tool);
         let needs = v.pointer(section).unwrap();
