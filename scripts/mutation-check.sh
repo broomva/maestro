@@ -1604,6 +1604,7 @@ mutate $mf '        Err(e) => {
             let identity = e.data'
 mutate $mf '    if !std::fs::symlink_metadata(&broomva).is_ok_and(|m| m.is_dir()) {' '    if false {'
 mutate $mf '    if std::fs::symlink_metadata(workspace.join(".git")).is_ok_and(|m| !m.is_dir()) {' '    if false {'
+mutate $mf '                    if bytes != a.definition.as_bytes() {' '                    if false {'
 mutate $mf '        if !self.may_create && std::fs::symlink_metadata(&self.root).is_err() {' '        if false {'
 mutate $mf '                let flow =
                     kernel::compile_with_path(&a.definition, a.definition_path.as_deref().map(std::path::Path::new))?;
@@ -2116,6 +2117,13 @@ mutate $fk/compile.rs '                .find(|a| a.name == name)' '             
 mutate $fk/compile.rs '                .or_else(|| crate::agents::find(name))' '                .or_else(|| crate::agents::find("verifier"))'
 mutate $fk/compile.rs '    let path = path.filter(|p| p.is_absolute()).ok_or(CompileError::AgentsRootNeedsPath)?;' '    let path = path.unwrap_or(std::path::Path::new("/missing-definition"));'
 mutate $agt '    Some(match find(name) {' '    Some(match find("missing") {'
+mutate $fk/compile.rs '            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,' '            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,'
+mutate $fk/compile.rs '        if FileType::from_raw_mode(stat.st_mode as _) != FileType::RegularFile {' '        if false && FileType::from_raw_mode(stat.st_mode as _) != FileType::RegularFile {'
+mutate $fk/compile.rs '        if bytes.len() > crate::agents::MAX_SOURCE {' '        if false {'
+mutate $fk/compile.rs '        if !file_path.starts_with(&repo) {' '        if false {'
+mutate $fk/compile.rs '        if crate::agents::find(&agent.name).is_some() {' '        if false {'
+mutate $fk/compile.rs '        if !file.ends_with(".agent.yaml") {' '        if false {'
+mutate $agt '        source_sha256: sha256(text.as_bytes()),' '        source_sha256: sha256(b""),'
 mutate $fk/compile.rs '    if !root.starts_with(&repo) {' '    if false {'
 mutate $agt '    if let Some(pinned) = &launch.pinned_agent {' '    if let Some(pinned) = &None::<AgentLaunch> {'
 mutate $fk/compile.rs '            launch.pinned_agent = Some(agent.launch(launch.skill.as_deref()));' '            launch.pinned_agent = None; let _ = agent;'
@@ -2125,6 +2133,7 @@ mutate $replay '                launch_spec: class.and_then(Class::launch).and_t
 # and a needed repeat's body included; a skill name past the spec's length is refused; --check
 # exits 1 on a skill that is not what the IR generates.
 drv=$fl/driver.rs
+mutate $drv '                out.insert(spec.agent.clone(), *spec);' '                let _ = spec;'
 mutate $drv '.map(|d| at(ir, d, memo) + 1).max().unwrap_or(0);' '.map(|d| at(ir, d, memo) * 0).max().unwrap_or(0);'
 mutate $drv '    on.extend(node.switch.as_ref().map(|c| c.on.as_str()));
 ' ''

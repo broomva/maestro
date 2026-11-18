@@ -1423,16 +1423,20 @@ fn external_agents_are_pinned_for_the_running_instance() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(repo).status().unwrap().success());
-    std::fs::create_dir(repo.join("agents")).unwrap();
+    std::fs::create_dir_all(repo.join("nested/agents")).unwrap();
+    std::fs::write(repo.join("nested/agents/ignore.txt"), "not an agent").unwrap();
     let source = include_str!("../../../../agents/verifier.agent.yaml").replace("name: verifier", "name: x");
-    let agent_file = repo.join("agents/x.agent.yaml");
+    let agent_file = repo.join("nested/agents/x.agent.yaml");
     std::fs::write(&agent_file, &source).unwrap();
-    let definition = repo.join("flow.yaml");
+    let definition = repo.join("nested/flow.yaml");
     let yaml =
         "flow: f\nversion: 1\nagents: agents\nnodes:\n  a: {class: work, verify: [true], performer: 'agent:x'}\n";
     std::fs::write(&definition, yaml).unwrap();
     let flow = maestro_flow::kernel::compile_with_path(yaml, Some(&definition)).unwrap();
     assert_eq!(flow.ir().ir_version, 8);
+    let skill = maestro_flow::driver::generate(&flow).unwrap();
+    assert!(skill.contains("### `x`"), "{skill}");
+    assert!(skill.contains("nested/agents/x.agent.yaml"), "{skill}");
     assert_eq!(maestro_flow::kernel::compile(yaml).unwrap_err().code(), "agents_root_needs_path");
     assert_eq!(
         maestro_flow::kernel::compile_with_path(&yaml.replace("agent:x", "agent:missing"), Some(&definition))
@@ -1441,7 +1445,7 @@ fn external_agents_are_pinned_for_the_running_instance() {
         "unknown_agent"
     );
     assert!(
-        maestro_flow::kernel::compile_with_path(&yaml.replace("agents: agents", "agents: .."), Some(&definition))
+        maestro_flow::kernel::compile_with_path(&yaml.replace("agents: agents", "agents: ../.."), Some(&definition))
             .is_err()
     );
     let mut f = fx("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [true]}\n");
@@ -1450,8 +1454,12 @@ fn external_agents_are_pinned_for_the_running_instance() {
     let before = f.next(&fi, Timestamp::now());
     let Some(LaunchSpec::Agent(spec)) = &before.enabled[0].launch_spec else { panic!() };
     assert_eq!(spec.source_sha256, maestro_flow::agents::parse("x.agent.yaml", &source).unwrap().source_sha256);
-    std::fs::write(repo.join("agents/verifier.agent.yaml"), include_str!("../../../../agents/verifier.agent.yaml"))
-        .unwrap();
+    assert_eq!(spec.source, "nested/agents/x.agent.yaml");
+    std::fs::write(
+        repo.join("nested/agents/verifier.agent.yaml"),
+        include_str!("../../../../agents/verifier.agent.yaml"),
+    )
+    .unwrap();
     assert_eq!(
         maestro_flow::kernel::compile_with_path(yaml, Some(&definition)).unwrap_err().code(),
         "agent_name_conflict"
@@ -1488,4 +1496,84 @@ fn old_ir_replays_builtin_agent_with_the_current_binary() {
         n.enabled[0].launch_spec,
         Some(LaunchSpec::Agent(Box::new(maestro_flow::agents::find("verifier").unwrap().launch(None))))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn external_agent_source_symlink_cannot_escape_its_repository() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join("agents")).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&repo).status().unwrap().success());
+    let outside = tmp.path().join("x.agent.yaml");
+    std::fs::write(
+        &outside,
+        include_str!("../../../../agents/verifier.agent.yaml").replace("name: verifier", "name: x"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("agents/x.agent.yaml")).unwrap();
+    let yaml =
+        "flow: f\nversion: 1\nagents: agents\nnodes:\n  a: {class: work, verify: [true], performer: 'agent:x'}\n";
+    let definition = repo.join("flow.yaml");
+    std::fs::write(&definition, yaml).unwrap();
+    let error = maestro_flow::kernel::compile_with_path(yaml, Some(&definition)).unwrap_err();
+    assert!(error.to_string().contains("agent source escapes repository"), "{error}");
+    std::fs::remove_file(repo.join("agents/x.agent.yaml")).unwrap();
+    let inside = repo.join("source.yaml");
+    std::fs::copy(&outside, &inside).unwrap();
+    std::os::unix::fs::symlink(&inside, repo.join("agents/x.agent.yaml")).unwrap();
+    assert!(maestro_flow::kernel::compile_with_path(yaml, Some(&definition)).is_err());
+}
+
+#[test]
+fn old_and_new_verify_instances_have_a_definition_mismatch() {
+    let mut f = fx(VERIFY);
+    let mut old = f.flow.ir().clone();
+    for node in old.nodes.values_mut() {
+        if let maestro_flow::kernel::ir::Class::Work { launch, .. } = &mut node.class {
+            launch.pinned_agent = None;
+        }
+    }
+    old.ir_version = maestro_flow::kernel::ir::version_for(&old);
+    assert_eq!(old.ir_version, 4);
+    assert_eq!(f.flow.ir().ir_version, 8);
+    let started = Started {
+        flow: f.flow.name(),
+        ir_hash: content_hash(&old).unwrap(),
+        ir: old,
+        params: verify_params(true),
+        owner: None,
+        audit: None,
+    };
+    let old_id = id("fi_old_verify");
+    f.ledger.lock().unwrap().append(&old_id, 0, started.to_event().unwrap()).unwrap();
+    let new_id = f.begin(verify_params(true));
+    let reader = Reader::new(&f.root, Options::default()).unwrap();
+    let guard = reader.lock().unwrap();
+    let old_spine = maestro_flow::kernel::spine(&guard, &old_id).unwrap();
+    let new_spine = maestro_flow::kernel::spine(&guard, &new_id).unwrap();
+    let mismatch = maestro_flow::kernel::definition_mismatch(&old_spine, &new_spine).unwrap();
+    assert_eq!(mismatch.flow, "verify@1");
+    assert_ne!(mismatch.ir_hash, mismatch.against_ir_hash);
+}
+
+#[cfg(unix)]
+#[test]
+fn agent_source_fifo_and_oversized_non_utf8_are_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    std::fs::create_dir(repo.join("agents")).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(repo).status().unwrap().success());
+    let yaml =
+        "flow: f\nversion: 1\nagents: agents\nnodes:\n  a: {class: work, verify: [true], performer: 'agent:x'}\n";
+    let definition = repo.join("flow.yaml");
+    std::fs::write(&definition, yaml).unwrap();
+    let source = repo.join("agents/x.agent.yaml");
+    assert!(std::process::Command::new("mkfifo").arg(&source).status().unwrap().success());
+    let e = maestro_flow::kernel::compile_with_path(yaml, Some(&definition)).unwrap_err();
+    assert!(e.to_string().contains("not a regular file"), "{e}");
+    std::fs::remove_file(&source).unwrap();
+    std::fs::write(&source, vec![0xff; maestro_flow::agents::MAX_SOURCE + 1]).unwrap();
+    let e = maestro_flow::kernel::compile_with_path(yaml, Some(&definition)).unwrap_err();
+    assert!(e.to_string().contains("exceeds maximum size"), "{e}");
 }

@@ -299,7 +299,12 @@ fn load_agents(root: Option<&str>, path: Option<&std::path::Path>) -> Result<Vec
     let path = path.filter(|p| p.is_absolute()).ok_or(CompileError::AgentsRootNeedsPath)?;
     let definition = path.canonicalize().map_err(|e| CompileError::invalid(e.to_string()))?;
     let dir = definition.parent().ok_or_else(|| CompileError::invalid("definition has no parent"))?;
-    let output = std::process::Command::new("git")
+    maestro_store::tree::check_root_owned(std::path::Path::new(maestro_store::tree::git()))
+        .map_err(CompileError::invalid)?;
+    let output = std::process::Command::new(maestro_store::tree::git())
+        .env_clear()
+        .env("PATH", maestro_store::tree::git_path())
+        .env("xcrun_nocache", "1")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(dir)
         .output()
@@ -320,27 +325,52 @@ fn load_agents(root: Option<&str>, path: Option<&std::path::Path>) -> Result<Vec
     if !root.starts_with(&repo) {
         return Err(CompileError::invalid("agents root escapes repository"));
     }
+    use rustix::fs::{FileType, Mode, OFlags};
+    let walk = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut dir_fd = rustix::fs::open(&repo, walk, Mode::empty()).map_err(|e| CompileError::invalid(e.to_string()))?;
+    for component in root.strip_prefix(&repo).map_err(|e| CompileError::invalid(e.to_string()))?.components() {
+        dir_fd = rustix::fs::openat(&dir_fd, component.as_os_str(), walk, Mode::empty())
+            .map_err(|e| CompileError::invalid(e.to_string()))?;
+    }
     let mut result = Vec::new();
-    for entry in std::fs::read_dir(&root).map_err(|e| CompileError::invalid(e.to_string()))? {
+    let entries = rustix::fs::Dir::read_from(&dir_fd).map_err(|e| CompileError::invalid(e.to_string()))?;
+    for entry in entries {
         let entry = entry.map_err(|e| CompileError::invalid(e.to_string()))?;
         let file = entry.file_name().to_string_lossy().into_owned();
         if !file.ends_with(".agent.yaml") {
             continue;
         }
-        let file_path = entry.path().canonicalize().map_err(|e| CompileError::invalid(e.to_string()))?;
+        let file_path = root.join(&file).canonicalize().map_err(|e| CompileError::invalid(e.to_string()))?;
         if !file_path.starts_with(&repo) {
             return Err(CompileError::invalid("agent source escapes repository"));
         }
         use std::io::Read;
         let mut bytes = Vec::new();
-        std::fs::File::open(file_path)
-            .map_err(|e| CompileError::invalid(e.to_string()))?
+        let fd = rustix::fs::openat(
+            &dir_fd,
+            file.as_str(),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| CompileError::invalid(e.to_string()))?;
+        let stat = rustix::fs::fstat(&fd).map_err(|e| CompileError::invalid(e.to_string()))?;
+        if FileType::from_raw_mode(stat.st_mode as _) != FileType::RegularFile {
+            return Err(CompileError::invalid("agent source is not a regular file"));
+        }
+        std::fs::File::from(fd)
             .take(crate::agents::MAX_SOURCE as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| CompileError::invalid(e.to_string()))?;
+        if bytes.len() > crate::agents::MAX_SOURCE {
+            return Err(CompileError::invalid("agent source exceeds maximum size"));
+        }
         let text = String::from_utf8(bytes).map_err(|e| CompileError::invalid(e.to_string()))?;
         let mut agent = crate::agents::parse(&file, &text).map_err(|e| CompileError::invalid(e.to_string()))?;
-        agent.source = relative.join(&file).to_string_lossy().into_owned();
+        agent.source = file_path
+            .strip_prefix(&repo)
+            .map_err(|e| CompileError::invalid(e.to_string()))?
+            .to_string_lossy()
+            .into_owned();
         if crate::agents::find(&agent.name).is_some() {
             return Err(CompileError::AgentNameConflict { name: agent.name });
         }

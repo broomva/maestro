@@ -521,6 +521,7 @@ impl Agent {
         let file = |dir: &str| format!("{dir}/{}.md", self.name);
         AgentLaunch {
             agent: self.name.clone(),
+            description: self.description.clone(),
             skill: skill.map(str::to_string),
             source: self.source.clone(),
             source_sha256: self.source_sha256.clone(),
@@ -576,6 +577,8 @@ pub struct NativeLaunch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLaunch {
     pub agent: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     /// The node's own skill.
     pub skill: Option<String>,
     pub source: String,

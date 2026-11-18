@@ -371,6 +371,16 @@ fn the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record() {
         args["cwd"] = json!(root);
         maestro_mcp::call_with_hosts(&store, &hosts, tool, args).unwrap_or_else(|e| panic!("{tool}: {}", e.message))
     };
+    let path = root.join("definition.yaml");
+    std::fs::write(&path, "flow: other\nversion: 1\nnodes: {}\n").unwrap();
+    let before_mismatch = tree(&root);
+    let mismatch = call(
+        "maestro_flow_start",
+        json!({ "definition": "flow: f\nversion: 1\nagents: agents\nnodes: {}\n", "definition_path": path }),
+    );
+    assert_eq!(mismatch["code"], "definition_path_mismatch");
+    assert_eq!(mismatch["recorded"], false);
+    assert_eq!(tree(&root), before_mismatch);
     let missing_path = call(
         "maestro_flow_start",
         json!({ "definition": "flow: f\nversion: 1\nagents: agents\nnodes:\n  a: {class: work, verify: [true], performer: 'agent:x'}\n" }),
