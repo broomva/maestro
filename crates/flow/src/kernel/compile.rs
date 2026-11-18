@@ -181,6 +181,7 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
         flow: def.flow,
         version: def.version,
         params: params.into_iter().map(|(name, required)| (name.to_string(), required)).collect(),
+        types: def.types,
         nodes,
         repeats,
         workdir: def.workdir,

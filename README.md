@@ -104,6 +104,8 @@ maestro flow driver-skill --definition F.yaml [--out SKILL.md] [--check]   # the
 maestro agents render [--root DIR] [--check]                 # agents/*.agent.yaml to each harness's agent file; --check exits 1 at the first drift
 ```
 
+Definitions declare params as a list (`params: [repo, head, surface?]`); `?` makes a param optional. An optional `types` map constrains declared params at start, for example `types: {head: sha256, repo: string}`. `sha256` means `sha256:` followed by 64 lowercase hexadecimal digits. Untyped params accept any JSON value. A typed optional param given `null` is treated as absent.
+
 - **Human steps (BRO-3635).** A waiting `human` node is the owner's. `flow ask` (MCP
   `maestro_flow_ask`) files its ask on the first call: the kernel mints the id, takes the question
   from the definition and `asked_at` from its own clock, adds your `--ask` fields (what the

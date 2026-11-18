@@ -198,6 +198,34 @@ fn start_pins_the_ir_and_refuses_params_that_do_not_fit() {
     assert_eq!(started.flow, "verify@1");
 }
 
+#[test]
+fn typed_params_are_checked_before_start() {
+    let mut f = fx(
+        "flow: f\nversion: 1\nparams: [digest, free]\ntypes: {digest: sha256}\nnodes:\n  a: {class: pure, run: [x]}\n",
+    );
+    assert_eq!(f.flow.ir().ir_version, 5);
+    for digest in ["a".repeat(64), format!("sha256:{}", "A".repeat(64)), "sha256:abc".into()] {
+        assert_eq!(
+            start(&mut f.ledger, &agent("a", "m"), &f.flow, json!({"digest": digest, "free": {}})).unwrap_err().code(),
+            "param_invalid"
+        );
+    }
+    f.begin(json!({"digest": format!("sha256:{}", "a".repeat(64)), "free": {"any": true}}));
+}
+
+#[test]
+fn string_typed_params_refuse_non_strings() {
+    let mut f =
+        fx("flow: f\nversion: 1\nparams: [name]\ntypes: {name: string}\nnodes:\n  a: {class: pure, run: [x]}\n");
+    for value in [json!(42), json!({}), json!([])] {
+        assert_eq!(
+            start(&mut f.ledger, &agent("a", "m"), &f.flow, json!({"name": value})).unwrap_err().code(),
+            "param_invalid"
+        );
+    }
+    f.begin(json!({"name": "valid"}));
+}
+
 const CHAIN: &str = "flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n  b: {class: pure, run: [x], needs: [a]}\n  c: {class: pure, run: [x], needs: [b]}\n";
 
 #[test]

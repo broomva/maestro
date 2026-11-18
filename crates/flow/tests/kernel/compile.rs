@@ -450,3 +450,9 @@ fn a_node_needed_twice_is_needed_once() {
     let needs = &flow.ir().nodes["c"].needs;
     assert_eq!(needs, &vec![Need::Node { node: "a".into() }, Need::Node { node: "b".into() }]);
 }
+
+#[test]
+fn types_must_name_declared_params() {
+    let yaml = "flow: f\nversion: 1\nparams: [name]\ntypes: {other: string}\nnodes:\n  a: {class: pure, run: [x]}\n";
+    assert!(compile(yaml).is_err());
+}

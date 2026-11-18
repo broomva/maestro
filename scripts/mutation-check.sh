@@ -1069,6 +1069,9 @@ mutate $fk/jq.rs '        Tok::Word if BANNED_WORDS.contains(s) => Some(*s),' ' 
 mutate $fk/jq.rs "        Tok::Sym if s.starts_with('*') => Some(*s)," '        Tok::Sym if false => Some(*s),'
 mutate $fk/jq.rs '        Tok::Block(inner) => banned(inner),' '        Tok::Block(_) => None,'
 mutate $fk/jq.rs '            StrPart::Term(t) => banned(std::slice::from_ref(t)),' '            StrPart::Term(_) => None,'
+mutate $fk/replay.rs '                ir::ParamType::String => value.is_string(),' '                ir::ParamType::String => true,'
+mutate $fk/ir.rs '        param("types", name)?;' '        let _ = name;'
+mutate $fk/replay.rs '            if !valid {' '            if false {'
 # start: params that do not fit are refused before anything is written; null is absent; params
 # have a byte bound so a flow that compiles can always start.
 mutate $fk/replay.rs '.find(|(name, required)| **required && !supplied(params, name))' '.find(|_| false)'
@@ -1962,7 +1965,7 @@ mutate $fk/snapshot.rs "            .any(|line| line.split(|b| *b == b' ').nth(1
 mutate $fk/snapshot.rs "            return Some(\"the check rewrote the snapshot's HEAD log\".into());" '            return None;'
 mutate $fk/snapshot.rs '        let _ = std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));' '        let _ = &dir;'
 mutate $fk/ir.rs '        if n.snapshot.is_some() && !matches!(n.class, Class::Pure { .. }) {' '        if false {'
-mutate $fk/ir.rs '    if ir.nodes.values().any(|n| n.snapshot.is_some()) {' '    if false {'
+mutate $fk/ir.rs '    } else if ir.nodes.values().any(|n| n.snapshot.is_some()) {' '    } else if false {'
 # The receipt verifier, dogfood-receipt@1: the outputs name the receipt and its digest, within
 # their bound; each file is opened without following a link and without blocking, and read only
 # when regular; the receipt hashes to the named digest (the log pins it), within its bound, well
