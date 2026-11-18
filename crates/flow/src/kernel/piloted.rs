@@ -270,7 +270,7 @@ nodes:
   observe: {class: observe, needs: [source], inputs: [source], run: [sh, -c, "{{params.check}}"], exit_map: {0: yes}}
 "#;
     let (mut f, _clock, head) = pilot(yaml);
-    assert_eq!(f.flow.ir().ir_version, 5);
+    assert_eq!(f.flow.ir().ir_version, 7);
     let check = r#"read -r input; case "$input" in *'"expected":"yes"'*'"outputs":null'*) exit 0;; *) exit 1;; esac"#;
     let fi = begin(&mut f, &head, check);
     let source = f.claim(&fi, "source");

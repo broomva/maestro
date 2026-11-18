@@ -91,6 +91,26 @@ fn an_ir_is_written_in_the_lowest_version_that_expresses_it() {
 }
 
 #[test]
+fn typed_params_human_asks_and_receipt_stdin_choose_their_minimum_ir_versions() {
+    let typed = "flow: f\nversion: 1\nparams: [name]\ntypes: {name: string}\nnodes:\n  a: {class: pure, run: [x]}\n";
+    let ask = "flow: f\nversion: 1\nparams: [name]\nnodes:\n  owner: {class: human, ask: 'Review {{params.name}}?'}\n";
+    let required =
+        "flow: f\nversion: 1\nnodes:\n  owner: {class: human, ask: Review?, required_body_fields: [evidence]}\n";
+    let receipt = "flow: f\nversion: 1\nreceipt_stdin: true\nnodes:\n  a: {class: pure, run: [x]}\n";
+    let combined = "flow: f\nversion: 1\nparams: [name]\ntypes: {name: string}\nreceipt_stdin: true\nnodes:\n  owner: {class: human, ask: 'Review {{params.name}}?', required_body_fields: [evidence]}\n";
+    for (yaml, minimum) in [(typed, 5), (ask, 6), (required, 6), (receipt, 7), (combined, 7)] {
+        let ir = compile(yaml).unwrap().ir().clone();
+        assert_eq!(ir.ir_version, minimum, "{yaml}");
+        assert!(maestro_flow::kernel::ir::validate(&ir).is_ok());
+        for version in 1..minimum {
+            let mut older = ir.clone();
+            older.ir_version = version;
+            assert!(maestro_flow::kernel::ir::validate(&older).is_err(), "v{version}: {yaml}");
+        }
+    }
+}
+
+#[test]
 fn only_a_pure_node_runs_in_a_snapshot() {
     // BRO-3636: the project's own command, against one commit's content. A definition says so
     // only on a pure node; an IR that says so elsewhere, pinned by hand, does not validate.
