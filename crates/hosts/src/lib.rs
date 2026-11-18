@@ -573,18 +573,34 @@ impl DirectRegistry {
     }
 
     pub fn list_live_sessions(&self) -> Vec<DirectSession> {
-        let mut combined: HashMap<String, DirectSession> = self.sessions.lock().unwrap().clone();
-        if let Some(path) = &self.file_path
-            && let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
-        {
-            for s in rows {
-                combined.insert(s.id.clone(), s);
+        self.list_live_report().0
+    }
+
+    /// The live sessions, and what could not be read (BRO-3846): a configured registry file that
+    /// is missing, does not read or does not parse is unread, never only the in-memory sessions
+    /// shown as complete.
+    pub fn list_live_report(&self) -> (Vec<DirectSession>, Vec<(String, String)>) {
+        let mut combined: HashMap<String, DirectSession> = self.sessions.lock().map(|s| s.clone()).unwrap_or_default();
+        let mut unread = Vec::new();
+        if let Some(path) = &self.file_path {
+            let at = format!("direct registry {}", path.display());
+            match std::fs::read_to_string(path).map_err(|e| format!("the registry file does not read: {e}")).and_then(
+                |text| {
+                    serde_json::from_str::<Vec<DirectSession>>(&text)
+                        .map_err(|e| format!("the registry file does not parse: {e}"))
+                },
+            ) {
+                Ok(rows) => {
+                    for s in rows {
+                        combined.insert(s.id.clone(), s);
+                    }
+                }
+                Err(why) => unread.push((at, why)),
             }
         }
         let mut out: Vec<DirectSession> = combined.into_values().filter(|s| s.liveness.is_live()).collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
-        out
+        (out, unread)
     }
 
     pub fn verify(&self, claim: &CallerClaim) -> Result<VerifiedSession, IdentityRefusal> {
@@ -1357,35 +1373,47 @@ impl SurfaceRegistry {
     /// a T3 registry that did not read at all. A view must not show the needs as complete while
     /// `unreadable` holds anything.
     pub fn live_permission_report(&self, project: Option<&str>, since: Option<&str>) -> PermissionNeeds {
-        let mut unreadable = Vec::new();
-        let mut out = Vec::new();
+        // The one boundary (BRO-3846): every configured surface's read failure becomes an unread
+        // source here: a registry missing, inaccessible or disconnected, or an entry that does not
+        // read. A surface with no registry configured has nothing to read and adds nothing.
+        let mut report = PermissionNeeds::default();
+        let (project, since) = (project.map(str::to_string), since.map(str::to_string));
+        let mut add = |surface: Surface, id: String, prompts: &[PermissionPrompt], environment: Option<String>| {
+            let sref = SessionRef { surface, environment, id };
+            for prompt in prompts {
+                report.needs.push(prompt.to_need(&sref, project.clone(), since.clone()));
+            }
+        };
+        let mut unread: Vec<UnreadSource> = Vec::new();
+        let mut unreadable = |surface: Surface, list: Vec<(String, String)>| {
+            unread.extend(
+                list.into_iter()
+                    .map(|(at, reason)| UnreadSource { surface: surface.clone(), error: SourceError { at, reason } }),
+            );
+        };
         if let Some(paseo) = &self.paseo {
-            for agent in paseo.list_live_agents() {
-                let sref = SessionRef { surface: Surface::Paseo, environment: None, id: agent.id };
-                for prompt in &agent.pending_permissions {
-                    out.push(prompt.to_need(&sref, project.map(str::to_string), since.map(str::to_string)));
-                }
+            let (agents, failed) = paseo.list_live_report();
+            unreadable(Surface::Paseo, failed);
+            for agent in agents {
+                add(Surface::Paseo, agent.id, &agent.pending_permissions, None);
             }
         }
         if let Some(t3) = &self.t3 {
             let listed = t3.list_live_report();
-            unreadable.extend(listed.unreadable.into_iter().map(|(at, reason)| SourceError { at, reason }));
+            unreadable(Surface::T3, listed.unreadable);
             for thread in listed.threads {
-                let sref = SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id };
-                for prompt in &thread.pending_permissions {
-                    out.push(prompt.to_need(&sref, project.map(str::to_string), since.map(str::to_string)));
-                }
+                add(Surface::T3, thread.id, &thread.pending_permissions, thread.environment_id);
             }
         }
         if let Some(direct) = &self.direct {
-            for session in direct.list_live_sessions() {
-                let sref = SessionRef { surface: Surface::Direct, environment: None, id: session.id };
-                for prompt in &session.pending_permissions {
-                    out.push(prompt.to_need(&sref, project.map(str::to_string), since.map(str::to_string)));
-                }
+            let (sessions, failed) = direct.list_live_report();
+            unreadable(Surface::Direct, failed);
+            for session in sessions {
+                add(Surface::Direct, session.id, &session.pending_permissions, None);
             }
         }
-        PermissionNeeds { needs: out, unreadable }
+        report.unreadable = unread;
+        report
     }
 }
 
@@ -1393,5 +1421,32 @@ impl SurfaceRegistry {
 #[derive(Debug, Clone, Default)]
 pub struct PermissionNeeds {
     pub needs: Vec<Need>,
-    pub unreadable: Vec<SourceError>,
+    pub unreadable: Vec<UnreadSource>,
+}
+
+impl PermissionNeeds {
+    /// The unread sources as a section's errors.
+    pub fn errors(&self) -> Vec<SourceError> {
+        self.unreadable.iter().map(|u| u.error.clone()).collect()
+    }
+
+    /// Each surface with an unread source, and how many, in surface order: what a view names as
+    /// unread so its needs never look complete when they are not.
+    pub fn degraded_surfaces(&self) -> Vec<(Surface, usize)> {
+        let mut out: Vec<(Surface, usize)> = Vec::new();
+        for u in &self.unreadable {
+            match out.iter_mut().find(|(s, _)| *s == u.surface) {
+                Some((_, n)) => *n += 1,
+                None => out.push((u.surface.clone(), 1)),
+            }
+        }
+        out
+    }
+}
+
+/// A source a permission listing could not read, and the surface it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadSource {
+    pub surface: Surface,
+    pub error: SourceError,
 }

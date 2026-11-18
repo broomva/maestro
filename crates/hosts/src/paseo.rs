@@ -188,18 +188,39 @@ impl PaseoRegistry {
 
     /// Enumerate all live Paseo agents in the registry.
     pub fn list_live_agents(&self) -> Vec<PaseoAgent> {
+        self.list_live_report().0
+    }
+
+    /// The live agents, and what could not be read (BRO-3846): a disconnected registry, an agents
+    /// folder or agent folder that does not read, or an agent file that does not read, does not
+    /// parse, or names another agent than its file. The listing feeds the owner's permission
+    /// prompts, so none of these may look like an empty, complete list. Files that are no agent
+    /// record (not `*.json`, or not an agent id) are not read failures.
+    pub fn list_live_report(&self) -> (Vec<PaseoAgent>, Vec<(String, String)>) {
+        let mut unread = Vec::new();
+        let at = |p: &Path| format!("paseo registry {}", p.display());
         if self.disconnected {
-            return Vec::new();
+            unread.push((at(&self.dir), "the Paseo registry is disconnected".to_string()));
+            return (Vec::new(), unread);
         }
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return Vec::new();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                unread.push((at(&self.dir), format!("the agents folder does not read: {e}")));
+                return (Vec::new(), unread);
+            }
         };
         let mut folders: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
         folders.sort();
         let mut out = Vec::new();
         for folder in folders {
-            let Ok(files) = std::fs::read_dir(&folder) else {
-                continue;
+            let files = match std::fs::read_dir(&folder) {
+                Ok(files) => files,
+                Err(e) if folder.is_dir() => {
+                    unread.push((at(&folder), format!("the agent folder does not read: {e}")));
+                    continue;
+                }
+                Err(_) => continue,
             };
             let mut paths: Vec<PathBuf> = files.filter_map(|e| e.ok().map(|e| e.path())).collect();
             paths.sort();
@@ -213,14 +234,21 @@ impl PaseoRegistry {
                 if !is_safe_id(stem) {
                     continue;
                 }
-                if let Some(agent) = Self::read_file(&path, stem)
-                    && agent.liveness().is_live()
-                {
-                    out.push(agent);
+                match Self::read_agent(&path, stem) {
+                    Ok(agent) if agent.liveness().is_live() => out.push(agent),
+                    Ok(_) => {}
+                    Err(why) => unread.push((at(&path), why)),
                 }
             }
         }
-        out
+        (out, unread)
+    }
+
+    /// One agent file, or why it does not read.
+    fn read_agent(path: &Path, expected_id: &str) -> Result<PaseoAgent, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("the agent file does not read: {e}"))?;
+        serde_json::from_str::<RawRegistryFile>(&text).map_err(|e| format!("the agent file does not parse: {e}"))?;
+        Self::read_file(path, expected_id).ok_or_else(|| format!("the agent file does not name agent {expected_id}"))
     }
 
     fn read_file(path: &Path, expected_id: &str) -> Option<PaseoAgent> {

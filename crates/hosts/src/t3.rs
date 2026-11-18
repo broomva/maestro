@@ -837,10 +837,18 @@ impl T3Registry {
     /// Every live thread, and what could not be read (see [`LiveThreads`]).
     pub fn list_live_report(&self) -> LiveThreads {
         let mut report = LiveThreads::default();
-        if !self.is_connected() {
+        // A configured registry that is disconnected, missing or inaccessible is unread, never
+        // empty: only a host with no T3 registry at all has nothing to read.
+        let at = format!("t3 registry {}", self.root.display());
+        if self.disconnected {
+            report.unreadable.push((at, "the T3 registry is disconnected".to_string()));
             return report;
         }
-        let at = self.root.display().to_string();
+        if self.json_path().is_none() && self.sqlite_path().is_none() {
+            let why = format!("no T3 registry database or snapshot is readable at {}", self.root.display());
+            report.unreadable.push((at, why));
+            return report;
+        }
         if let Some(json_file) = self.json_path() {
             let rows = match Self::snapshot_each(&json_file) {
                 Ok(rows) => rows,

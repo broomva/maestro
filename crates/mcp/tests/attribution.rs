@@ -1383,6 +1383,17 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// The machine fixture without its two deliberately malformed ledgers: a workspace whose needs
+/// read complete, so a view's `needs_complete` flips only for what a test does.
+fn complete_store(tmp: &Path) -> Store {
+    let root = tmp.join("machine");
+    copy_tree(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine"), &root);
+    for ledger in ["broken.yaml", "alt-key.yaml"] {
+        std::fs::remove_file(root.join("workspace/.control/asks").join(ledger)).unwrap();
+    }
+    Store::new(Paths::under(&root), TreeSource::WorkingTree)
+}
+
 /// Codex's joint round 5: the owner's views never show live permission prompts as complete when
 /// some did not read. A snapshot row that does not read is an error of the needs section in
 /// `maestro_snapshot` and `maestro_needs_list`, and an unread source of `maestro_context`, whose
@@ -1391,12 +1402,7 @@ fn copy_tree(from: &Path, to: &Path) {
 #[test]
 fn the_owners_views_say_when_prompts_did_not_read() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("machine");
-    copy_tree(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine"), &root);
-    for ledger in ["broken.yaml", "alt-key.yaml"] {
-        std::fs::remove_file(root.join("workspace/.control/asks").join(ledger)).unwrap();
-    }
-    let store = Store::new(Paths::under(&root), TreeSource::WorkingTree);
+    let store = complete_store(tmp.path());
     let path = tmp.path().join("threads.json");
     let good = json!({ "id": "mcp:good", "cwd": "/w", "created_at": CREATED, "status": "running",
         "pending_permissions": [{ "name": "Bash", "input": { "command": "cargo test" } }] });
@@ -1420,4 +1426,72 @@ fn the_owners_views_say_when_prompts_did_not_read() {
     assert_eq!(context["packet"]["needs_complete"], false, "{context}");
     assert!(context["packet"]["degraded"].to_string().contains("t3 permission prompts (1 unread)"), "{context}");
     assert!(context["markdown"].as_str().unwrap().contains("t3 permission prompts"), "{context}");
+}
+
+/// Codex's joint round 6: `live_permission_report` is the one boundary where every read failure of
+/// a configured registry becomes an unread source: a T3 registry missing, inaccessible,
+/// disconnected or not a JSON array; a Paseo agents folder missing or an agent file that does not
+/// parse; a Direct registry file missing. Each leaves the context's needs incomplete, naming the
+/// surface. A host with no registry configured has nothing to read and stays complete.
+#[test]
+fn a_configured_registry_that_does_not_read_is_never_empty_and_complete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = complete_store(tmp.path());
+    let context = |hosts: &SurfaceRegistry| {
+        let v = call_with_hosts(&store, hosts, "maestro_context", json!({})).unwrap();
+        (v["packet"]["needs_complete"].clone(), v["packet"]["degraded"].clone())
+    };
+    let snapshot_errors = |hosts: &SurfaceRegistry| {
+        let v = call_with_hosts(&store, hosts, "maestro_snapshot", json!({})).unwrap();
+        v["needs"]["errors"].to_string()
+    };
+    // Nothing configured: complete.
+    let none = SurfaceRegistry::new(None, None, None);
+    assert_eq!(context(&none), (json!(true), Value::Null));
+    let t3 = |registry: T3Registry| SurfaceRegistry::new(None, Some(registry), None);
+    let missing = tmp.path().join("no-such-t3");
+    let not_array = tmp.path().join("object.json");
+    std::fs::write(&not_array, "{}").unwrap();
+    let locked = tmp.path().join("locked.json");
+    std::fs::write(&locked, "[]").unwrap();
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let cases = [
+        ("missing", t3(T3Registry::new(&missing)), "no T3 registry database or snapshot"),
+        ("disconnected", t3(T3Registry::new(&not_array).with_disconnected(true)), "disconnected"),
+        ("not an array", t3(T3Registry::new(&not_array)), "is malformed"),
+        ("inaccessible", t3(T3Registry::new(&locked)), "could not be read"),
+    ];
+    for (name, hosts, says) in &cases {
+        if *name == "inaccessible" && std::fs::read(&locked).is_ok() {
+            continue; // Running as root: a mode-000 file still reads.
+        }
+        assert_eq!(context(hosts), (json!(false), json!(["t3 permission prompts (1 unread)"])), "{name}");
+        let errors = snapshot_errors(hosts);
+        assert!(errors.contains("t3 registry") && errors.contains(says), "{name}: {errors}");
+    }
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    // Paseo: an agents folder that is not there, and an agent file that does not parse.
+    let paseo = |dir: &Path| SurfaceRegistry::new(Some(PaseoRegistry::new(dir)), None, None);
+    let gone = paseo(&tmp.path().join("no-such-agents"));
+    assert_eq!(context(&gone), (json!(false), json!(["paseo permission prompts (1 unread)"])));
+    let agents = tmp.path().join("agents");
+    std::fs::create_dir_all(agents.join("work")).unwrap();
+    std::fs::write(agents.join("work/agent-x.json"), "{ not json").unwrap();
+    assert_eq!(context(&paseo(&agents)), (json!(false), json!(["paseo permission prompts (1 unread)"])));
+    assert!(snapshot_errors(&paseo(&agents)).contains("does not parse"));
+    // A disconnected Paseo registry, and an agent folder that does not read.
+    let off = SurfaceRegistry::new(Some(PaseoRegistry::new(&agents).with_disconnected(true)), None, None);
+    assert!(snapshot_errors(&off).contains("the Paseo registry is disconnected"));
+    std::fs::remove_file(agents.join("work/agent-x.json")).unwrap();
+    std::fs::create_dir_all(agents.join("shut")).unwrap();
+    std::fs::set_permissions(agents.join("shut"), std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let blocked = std::fs::read_dir(agents.join("shut")).is_err(); // not as root
+    let shut = snapshot_errors(&paseo(&agents));
+    std::fs::set_permissions(agents.join("shut"), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    if blocked {
+        assert!(shut.contains("the agent folder does not read"), "{shut}");
+    }
+    // Direct: a configured registry file that is not there.
+    let direct = SurfaceRegistry::new(None, None, Some(DirectRegistry::from_file(tmp.path().join("no-such.json"))));
+    assert_eq!(context(&direct), (json!(false), json!(["direct permission prompts (1 unread)"])));
 }

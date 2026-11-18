@@ -2451,11 +2451,23 @@ mutate $ht '                    Err(e) => report.unreadable.push((at.clone(), e.
 mutate $ht '            let rows = match Self::snapshot_each(&json_file) {' '            let rows = match Self::snapshot_rows(&json_file).map(|r| r.into_iter().map(Ok::<RawT3Thread, IdentityRefusal>).collect::<Vec<_>>()) {'
 mutate $ht '                    report.unreadable.push((at, e.message));' ''
 mutate $ht '                report.unreadable.push((at, format!("the T3 SQLite database is unreadable: {why}")));' ''
-mutate $hlb '            unreadable.extend(listed.unreadable.into_iter().map(|(at, reason)| SourceError { at, reason }));' ''
-mutate $mcp '            snap.needs.errors.extend(live.unreadable);' ''
-mutate $mcp '                    section.errors.extend(live.unreadable);' ''
+mutate $hlb '            unreadable(Surface::T3, listed.unreadable);' ''
+mutate $mcp '            snap.needs.errors.extend(live.errors());' ''
+mutate $mcp '                    section.errors.extend(live.errors());' ''
 mutate $mcp '                    packet.needs_complete = false;' ''
-mutate $mcp '                    packet.degraded.push(format!("t3 permission prompts ({} unread)", live.unreadable.len()));' ''
+mutate $mcp '                    packet.degraded.push(format!("{} permission prompts ({n} unread)", surface.as_str()));' ''
+# Joint round 6 (BRO-3846, Codex at 2ca2c86): live_permission_report is the one boundary where a
+# configured registry's every read failure (missing, inaccessible, disconnected, a bad entry)
+# becomes an unread source, on every surface; nothing configured is complete.
+mutate $ht '            report.unreadable.push((at, "the T3 registry is disconnected".to_string()));' ''
+mutate $ht '            report.unreadable.push((at, why));' ''
+mutate $hp '            unread.push((at(&self.dir), "the Paseo registry is disconnected".to_string()));' ''
+mutate $hp '                unread.push((at(&self.dir), format!("the agents folder does not read: {e}")));' ''
+mutate $hp '                    unread.push((at(&folder), format!("the agent folder does not read: {e}")));' ''
+mutate $hp '                    Err(why) => unread.push((at(&path), why)),' '                    Err(_) => {}'
+mutate $hlb '                Err(why) => unread.push((at, why)),' '                Err(_) => {}'
+mutate $hlb '            unreadable(Surface::Paseo, failed);' ''
+mutate $hlb '            unreadable(Surface::Direct, failed);' ''
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
