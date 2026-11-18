@@ -1,0 +1,60 @@
+{
+  "ok": true,
+  "relay": [],
+  "status": {
+    "flow": "verify@1",
+    "instance": "fi_d4bd37528747cd37f63f1b99db50bf5f",
+    "ir_hash": "sha256:1157788fc938603b8d1f6e3756cd276d3236ba8972da3d2d9a57dc0eb57b86f4",
+    "nodes": {
+      "check": {
+        "class": "pure",
+        "inputs": {
+          "pin": "sha256:3f7b4b3716c3ae5361a990d3027de667cd54866a4fcb4ba084e0dd4f3e4681c2"
+        },
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "check": "sha256:23668a0ff1ecf9b5f07881700868817716c755dbb7670a268567dc8bf90f68b7",
+          "surface": "sha256:434f28a9ce0ad05de3cb459fb80e9e0274038c27596b3381a1e0c4533e1c45c4"
+        },
+        "iteration": {},
+        "state": "blocked",
+        "unmet": [
+          {
+            "case": "declared",
+            "on": "surface",
+            "reason": "switch",
+            "took": "none"
+          }
+        ]
+      },
+      "pin": {
+        "class": "observe",
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "surface": {
+        "class": "observe",
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      }
+    },
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "493baa7d-3bee-423f-946a-3c07bac908cf",
+      "surface": "t3"
+    },
+    "rejected": [],
+    "repeats": {},
+    "seq": 7,
+    "terminal": true
+  },
+  "waiting": [],
+  "work": []
+}

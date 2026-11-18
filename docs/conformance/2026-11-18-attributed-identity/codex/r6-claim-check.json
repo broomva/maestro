@@ -1,0 +1,13 @@
+{
+  "attempt": 1,
+  "claim_token": "<redacted: lease token of a finished claim>",
+  "inputs": {
+    "pin": "sha256:3f7b4b3716c3ae5361a990d3027de667cd54866a4fcb4ba084e0dd4f3e4681c2"
+  },
+  "instance": "fi_215c086784710fa9a435fe4338d17541",
+  "iteration": {},
+  "lease_until": "2026-11-18T16:21:57.417533Z",
+  "node_id": "check",
+  "ok": true,
+  "seq": 4
+}

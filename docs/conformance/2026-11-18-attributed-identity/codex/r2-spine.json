@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "spine": {
+    "flow": "verify@1",
+    "instance": "fi_91e91794e75c887e81a993852e5addd6",
+    "ir_hash": "sha256:1157788fc938603b8d1f6e3756cd276d3236ba8972da3d2d9a57dc0eb57b86f4",
+    "records": [
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "pin"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "check"
+      },
+      {
+        "edge": null,
+        "exit": 1,
+        "iteration": {},
+        "node": "surface"
+      }
+    ]
+  }
+}
