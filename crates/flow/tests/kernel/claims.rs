@@ -214,6 +214,15 @@ fn a_claim_on_an_iteration_that_moved_on_or_ran_out_holds_nothing() {
     let c = f.claim(&fi, "s");
     settle(&mut f, &fi, 0);
     assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &c.token)), "instance_terminal");
+    // The repeat runs out while a node outside it still has work: the instance is not terminal,
+    // so the iteration rule, not the latch, is what refuses the claim on the exhausted iteration.
+    let mut f = fx(
+        "flow: r\nversion: 1\nparams: [dir]\nworkdir: \"{{params.dir}}\"\nnodes:\n  s: {class: work, verify: [true]}\n  t: {class: work, verify: [true]}\nrepeats:\n  r: {max: 1, body: [s]}\n",
+    );
+    let fi = f.begin();
+    let c = f.claim(&fi, "s");
+    settle(&mut f, &fi, 0);
+    assert_eq!(code(heartbeat(&mut f.ledger, &f.me, &c.token)), "not_current_iteration");
 }
 
 /// A fixture claim on `head` with `attempt` and a lease ending at `until`.

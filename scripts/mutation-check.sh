@@ -1216,10 +1216,12 @@ mutate $fk/write.rs '    let Some(owner) = &owners.owner else {' '    let Some(o
 mutate $fk/write.rs '    if !same_owner(owner, &me) {' '    if false {'
 mutate $fk/write.rs '    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)' '    stored.marker_sha256 == me.marker_sha256'
 mutate $fk/write.rs '    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)' '    stored.session.canonical(host) == me.session.canonical(host)'
-mutate $fk/write.rs '    check_owner(&log, &started, instance, session)?;
-    let now = wall(&log)?;
-    let Some(n) = started.ir.nodes.get(node) else {' '    let now = wall(&log)?;
-    let Some(n) = started.ir.nodes.get(node) else {'
+mutate $fk/write.rs '    } else {
+        check_owner(&log, &started, instance, session)?;
+    }
+    let now = wall(&log)?;' '    } else {
+    }
+    let now = wall(&log)?;'
 mutate $fk/write.rs '    let owners = check_owner(&log, &started, instance, session)?;
     let claims = Claims::fold(&log)?;' '    let owners = super::adoption::owners(&log, &started)?;
     let claims = Claims::fold(&log)?;'
@@ -1440,13 +1442,14 @@ mutate $fk/write.rs '    let verdicts = settled(ledger, session, &instance);
 # Until verdicts: written after a receipt, and by a claim first (a crash left one unwritten),
 # only by the owner, at a clock not behind the log once the until ran, only while
 # the repeat awaits it at that iteration over the input it judged, with that input's digest.
-mutate $fk/write.rs '    settle(ledger, session, instance)?;
-    let mut guard = ledger.lock()?;' '    let mut guard = ledger.lock()?;'
+mutate $fk/write.rs '    let verdicts = settle(ledger, session, instance)?;
+    let mut guard = ledger.lock()?;' '    let verdicts: Vec<Verdict> = Vec::new();
+    let mut guard = ledger.lock()?;'
 mutate $fk/write.rs '    let verdicts = settled(ledger, session, &instance);
     Ok(Completion::Completed' '    let verdicts = Vec::new();
     Ok(Completion::Completed'
 mutate $fk/write.rs '        check_owner(&log, &started, instance, session)?;
-        let pending' '        let pending'
+        (started, pending)' '        (started, pending)'
 mutate $fk/write.rs '        wall(&log)?;
         let verdict = match judged {' '        let verdict = match judged {'
 mutate $fk/write.rs '.any(|a| a.repeat == awaited.repeat && a.iteration' '.any(|a| a.iteration'
@@ -1478,7 +1481,7 @@ mutate $fk/write.rs '            Err(unfit) => return refuse(&mut guard, &held, 
         let intent' '            Err(_) => None,
         };
         let intent'
-mutate $fk/write.rs '        guard.append(&instance, held.log.seq(), intent.to_event()?)?;' ''
+mutate $fk/write.rs '        append_writable(&mut guard, &instance, held.log.seq(), intent.to_event()?)?;' ''
 mutate $fk/write.rs '                    claims.effects.insert((started.node, started.iteration, started.inputs), started.attempt);' ''
 mutate $fk/write.rs 'let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));' 'let effect_started = false;'
 mutate $fk/write.rs '        Some(Class::Effect { reconcile, .. }) if held.effect_started =>' '        Some(Class::Effect { reconcile, .. }) if false =>'
