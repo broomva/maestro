@@ -187,7 +187,11 @@ def main():
 
     def build_thread(row):
         # For attribution a payload that does not read is an error, never `{}`: it holds the
-        # thread's archivedAt, deletedAt and node, which `{}` would silently drop.
+        # thread's archivedAt, deletedAt and node, which `{}` would silently drop. An empty or
+        # NULL payload is no payload either: attribution refuses it as it refuses a corrupt one.
+        if mode == "attr" and (row["payload_json"] is None or not str(row["payload_json"]).strip()):
+            sys.stderr.write(f"sqlite_error: thread {row['thread_id']}'s payload is empty\n")
+            sys.exit(2)
         try:
             payload = json.loads(row["payload_json"] or "{}")
         except Exception:
@@ -302,8 +306,10 @@ def main():
         for r in rows:
             if r["provider_thread_id"] is None:
                 unreadable(r["thread_id"], "is missing")
+            if r["payload_json"] is None or not str(r["payload_json"]).strip():
+                unreadable(r["thread_id"], "is empty")
             try:
-                payload = json.loads(r["payload_json"] or "{}")
+                payload = json.loads(r["payload_json"])
             except Exception:
                 unreadable(r["thread_id"], "does not parse")
             if not isinstance(payload, dict):

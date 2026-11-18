@@ -340,6 +340,9 @@ thread("mcp:a", "pt-a", {"worktreePath": "/w"}); provider("pt-a", "mcp:a", nativ
 "#;
     for (name, bad, says) in [
         ("unparsed", r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", "{not json")"#, "does not parse"),
+        ("empty", r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", "")"#, "is empty"),
+        ("blank", r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", " ")"#, "is empty"),
+        ("null", r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", None)"#, "is empty"),
         ("not an object", r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", "[1]")"#, "is not an object"),
         (
             "malformed ref",
@@ -443,11 +446,20 @@ fn a_corrupt_payload_is_unavailable_for_attribution() {
             r#"conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)", ("{tid}", "p", "t", "codex", None, "2026-11-17T00:00:00Z", "2026-11-17T00:00:00Z", None, None, {payload}))"#
         )
     };
-    for (name, payload, says) in [("unparsed", r#""{bad""#, "does not parse"), ("list", r#""[1]""#, "is not an object")]
-    {
+    for (name, payload, says) in [
+        ("unparsed", r#""{bad""#, "does not parse"),
+        ("list", r#""[1]""#, "is not an object"),
+        // Codex's joint round 3: empty, blank and NULL are no payload, never `{}`.
+        ("empty", r#""""#, "is empty"),
+        ("blank", r#""  ""#, "is empty"),
+        ("null", "None", "is empty"),
+    ] {
         let db = partial_db(&tmp.path().join(name), true, &raw("mcp:bad", payload));
-        let why = unavailable(T3Registry::new(db).resolve("mcp:bad", false));
+        let t3 = T3Registry::new(db);
+        let why = unavailable(t3.resolve("mcp:bad", false));
         assert!(why.contains(&format!("thread mcp:bad's payload {says}")), "{name}: {why}");
+        // The credentialed reader keeps its `{}` fallback: no folder, so no thread, never an error.
+        assert!(t3.find("mcp:bad").is_none(), "{name}");
     }
     let path = tmp.path().join("threads.json");
     for (cwd, ok) in

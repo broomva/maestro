@@ -2434,6 +2434,9 @@ mutate $ht '            if not isinstance(ref, dict):
                 unreadable(' '            if False:
                 unreadable('
 mutate $gt '                let key = format!("fail_open\n{workspace}\n{code}\n{}", day.get(..10).unwrap_or_default());' '                let key = format!("fail_open\n{workspace}\n{code}\n{}\n{s}", day.get(..10).unwrap_or_default());'
+# Joint round 3 (BRO-3846, Codex at 25e3007): an empty, blank or NULL payload is no payload, never {}.
+mutate $ht '        if mode == "attr" and (row["payload_json"] is None or not str(row["payload_json"]).strip()):' '        if False:'
+mutate $ht '            if r["payload_json"] is None or not str(r["payload_json"]).strip():' '            if False:'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
