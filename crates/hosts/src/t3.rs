@@ -7,6 +7,7 @@
 //! project `workspace_root`), environment id, and pending permission prompts.
 
 use crate::paseo::{PermissionLike, check_peer, describe_permission, permission_request_id, short_id, within};
+use crate::read::{self, Read};
 use maestro_core::session::{
     BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, RefusalReason,
     SessionLiveness, SessionRef, Surface, VerifiedSession,
@@ -169,6 +170,13 @@ struct RawProviderThread {
     native_id: Option<String>,
 }
 
+/// Where a T3 registry is: a JSON snapshot, or a `statev2.sqlite`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Located {
+    Json(PathBuf),
+    Sqlite(PathBuf),
+}
+
 /// What one thread variable resolved to (BRO-3846).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
@@ -213,7 +221,11 @@ def main():
     target_id = sys.argv[3] if len(sys.argv) > 3 else ""
 
     env_file = db_path.parent / "environment-id"
-    env_id = env_file.read_text().strip() if env_file.is_file() else None
+    # The read rule: only a missing file is absent; any other error is the database's unread.
+    try:
+        env_id = env_file.read_text().strip() or None
+    except FileNotFoundError:
+        env_id = None
 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -496,7 +508,9 @@ impl T3Registry {
 
     /// Discover T3 runtime version, transport, environment id, and connection state.
     pub fn discover(&self) -> BridgeDiscovery {
-        let userdata = if self.root.join("userdata").is_dir() {
+        // A `userdata` folder that cannot be told is taken as the one: the reads under it then fail
+        // visibly, never as a folder that is not there.
+        let userdata = if !matches!(read::is_dir(&self.root.join("userdata")), Read::Present(false) | Read::Absent) {
             self.root.join("userdata")
         } else if self.sqlite_path().and_then(|p| p.parent().map(Path::to_path_buf)).is_some() {
             self.sqlite_path().unwrap().parent().unwrap().to_path_buf()
@@ -504,17 +518,17 @@ impl T3Registry {
             self.root.clone()
         };
 
-        let env_id = std::fs::read_to_string(userdata.join("environment-id"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        let runtime_json = std::fs::read_to_string(userdata.join("server-runtime.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
-        let service_json = std::fs::read_to_string(self.root.join("runtime/service-state.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        // Discovery reports what it can: a file that does not read is not reported. The registry's
+        // own reads (`locate`, the readers) are what fail on an unreadable registry.
+        let text = |path: PathBuf| match read::read_text(&path) {
+            Read::Present(t) => Some(t),
+            Read::Absent | Read::Unreadable(_) => None,
+        };
+        let env_id = text(userdata.join("environment-id")).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let runtime_json =
+            text(userdata.join("server-runtime.json")).and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        let service_json =
+            text(self.root.join("runtime/service-state.json")).and_then(|t| serde_json::from_str::<Value>(&t).ok());
 
         let version = runtime_json
             .as_ref()
@@ -550,18 +564,42 @@ impl T3Registry {
         }
     }
 
+    /// Where the registry is (BRO-3846): a JSON snapshot (`<root>` or `<root>/threads.json`), else a
+    /// `statev2.sqlite` (`<root>`, `<root>/statev2.sqlite`, `<root>/userdata/statev2.sqlite`),
+    /// each probed by the [`read`](crate::read) rule: a candidate whose metadata does not read
+    /// makes the registry unreadable, never "not there".
+    fn locate(&self) -> Read<Located> {
+        let json = [self.root.clone(), self.root.join("threads.json")].map(|c| (c, true));
+        let sqlite = [self.root.clone(), self.root.join("statev2.sqlite"), self.root.join("userdata/statev2.sqlite")]
+            .map(|c| (c, false));
+        for (candidate, is_json) in json.into_iter().chain(sqlite) {
+            let ext = candidate.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            if !(if is_json { ext == "json" } else { ext == "sqlite" || ext == "db" }) {
+                continue;
+            }
+            match read::is_file(&candidate) {
+                Read::Present(true) => {
+                    return Read::Present(if is_json { Located::Json(candidate) } else { Located::Sqlite(candidate) });
+                }
+                Read::Present(false) | Read::Absent => {}
+                Read::Unreadable(why) => return Read::Unreadable(why),
+            }
+        }
+        Read::Absent
+    }
+
     fn sqlite_path(&self) -> Option<PathBuf> {
-        [self.root.clone(), self.root.join("statev2.sqlite"), self.root.join("userdata/statev2.sqlite")]
-            .into_iter()
-            .find(|candidate| {
-                candidate.is_file() && candidate.extension().is_some_and(|ext| ext == "sqlite" || ext == "db")
-            })
+        match self.locate() {
+            Read::Present(Located::Sqlite(p)) => Some(p),
+            _ => None,
+        }
     }
 
     fn json_path(&self) -> Option<PathBuf> {
-        [self.root.clone(), self.root.join("threads.json")]
-            .into_iter()
-            .find(|candidate| candidate.is_file() && candidate.extension().is_some_and(|ext| ext == "json"))
+        match self.locate() {
+            Read::Present(Located::Json(p)) => Some(p),
+            _ => None,
+        }
     }
 
     fn from_raw(raw: RawT3Thread) -> T3Thread {
@@ -609,7 +647,13 @@ impl T3Registry {
             |e: String| IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("T3 JSON registry {e}."));
         let unavailable =
             |e: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, format!("T3 JSON registry {e}."));
-        let text = std::fs::read_to_string(json_file).map_err(|e| disconnected(format!("could not be read: {e}")))?;
+        let text = match read::read_text(json_file) {
+            Read::Present(text) => text,
+            Read::Absent => {
+                return Err(disconnected(format!("could not be read: {} is not there", json_file.display())));
+            }
+            Read::Unreadable(why) => return Err(disconnected(format!("could not be read: {why}"))),
+        };
         let rows: Vec<Value> = serde_json::from_str(&text).map_err(|e| disconnected(format!("is malformed: {e}")))?;
         Ok(rows
             .into_iter()
@@ -645,8 +689,11 @@ impl T3Registry {
     pub fn environment_id(&self) -> Option<String> {
         self.discover().environment_id.or_else(|| {
             // A JSON snapshot's root is the file: its `environment-id` sits beside it.
-            let beside = self.root.parent().filter(|_| self.root.is_file())?.join("environment-id");
-            std::fs::read_to_string(beside).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            let beside = self.root.parent().filter(|_| matches!(read::is_file(&self.root), Read::Present(true)))?;
+            match read::read_text(&beside.join("environment-id")) {
+                Read::Present(s) => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
+                Read::Absent | Read::Unreadable(_) => None,
+            }
         })
     }
 
@@ -655,6 +702,9 @@ impl T3Registry {
         let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
         if self.disconnected {
             return Err(unreadable("T3 registry is disconnected.".to_string()));
+        }
+        if let Read::Unreadable(why) = self.locate() {
+            return Err(unreadable(format!("T3 registry is unreadable: {why}.")));
         }
         if let Some(json_file) = self.json_path() {
             let rows = Self::snapshot_rows(&json_file).map_err(|e| unreadable(e.message))?;
@@ -764,6 +814,13 @@ impl T3Registry {
         if !is_safe_t3_id(id) {
             return Ok(None);
         }
+        // A registry whose location cannot be told is not "no thread": identity fails closed.
+        if let Read::Unreadable(why) = self.locate() {
+            return Err(IdentityRefusal::new(
+                RefusalReason::RegistryDisconnected,
+                format!("T3 registry is unreadable: {why}."),
+            ));
+        }
         if let Some(json_file) = self.json_path() {
             let env = self.environment_id();
             let found = Self::snapshot_rows(&json_file)?.into_iter().find(|raw| raw.id == id);
@@ -844,10 +901,17 @@ impl T3Registry {
             report.unreadable.push((at, "the T3 registry is disconnected".to_string()));
             return report;
         }
-        if self.json_path().is_none() && self.sqlite_path().is_none() {
-            let why = format!("no T3 registry database or snapshot is readable at {}", self.root.display());
-            report.unreadable.push((at, why));
-            return report;
+        match self.locate() {
+            Read::Present(_) => {}
+            Read::Absent => {
+                let why = format!("no T3 registry database or snapshot is readable at {}", self.root.display());
+                report.unreadable.push((at, why));
+                return report;
+            }
+            Read::Unreadable(why) => {
+                report.unreadable.push((at, why));
+                return report;
+            }
         }
         if let Some(json_file) = self.json_path() {
             let rows = match Self::snapshot_each(&json_file) {

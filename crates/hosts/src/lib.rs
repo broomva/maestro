@@ -15,6 +15,7 @@
 
 pub mod attribution;
 pub mod paseo;
+pub mod read;
 pub mod t3;
 
 pub use attribution::{
@@ -36,6 +37,7 @@ pub use t3::{LiveThreads, MAX_T3_ID, Resolution, T3Registry, T3Thread, is_safe_t
 use maestro_core::SourceError;
 use maestro_core::need::Need;
 use paseo::{check_peer, is_safe_id, short_id};
+use read::Read;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -527,15 +529,25 @@ impl DirectRegistry {
 
     pub fn from_file(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
+        // What reads now; every later read of the file goes through the read rule again.
         let mut sessions = HashMap::new();
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
-        {
+        if let Ok(rows) = Self::rows_in(&path) {
             for s in rows {
                 sessions.insert(s.id.clone(), s);
             }
         }
         Self { sessions: Mutex::new(sessions), file_path: Some(path), expected_uid: None }
+    }
+
+    /// The registry file's sessions by the [`read`] rule: none when it is not there; an error, with
+    /// why, when it does not read or parse.
+    fn rows_in(path: &Path) -> Result<Vec<DirectSession>, String> {
+        match read::read_text(path) {
+            Read::Absent => Ok(Vec::new()),
+            Read::Present(text) => serde_json::from_str::<Vec<DirectSession>>(&text)
+                .map_err(|e| format!("the registry file does not parse: {e}")),
+            Read::Unreadable(why) => Err(why),
+        }
     }
 
     pub fn with_expected_uid(mut self, uid: u32) -> Self {
@@ -559,17 +571,24 @@ impl DirectRegistry {
     }
 
     pub fn find(&self, id: &str) -> Option<DirectSession> {
+        self.lookup(id).ok().flatten()
+    }
+
+    /// Session `id`, or why the registry file did not read (BRO-3846): a configured file that does
+    /// not read or parse fails identity closed, never falls back to the sessions held in memory.
+    fn lookup(&self, id: &str) -> Result<Option<DirectSession>, IdentityRefusal> {
         if !is_safe_id(id) {
-            return None;
+            return Ok(None);
         }
-        if let Some(path) = &self.file_path
-            && let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
-            && let Some(found) = rows.into_iter().find(|s| s.id == id)
-        {
-            return Some(found);
+        if let Some(path) = &self.file_path {
+            let rows = Self::rows_in(path).map_err(|why| {
+                IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("Direct registry: {why}."))
+            })?;
+            if let Some(found) = rows.into_iter().find(|s| s.id == id) {
+                return Ok(Some(found));
+            }
         }
-        self.sessions.lock().unwrap().get(id).cloned()
+        Ok(self.sessions.lock().map(|s| s.get(id).cloned()).unwrap_or_default())
     }
 
     pub fn list_live_sessions(&self) -> Vec<DirectSession> {
@@ -584,12 +603,12 @@ impl DirectRegistry {
         let mut unread = Vec::new();
         if let Some(path) = &self.file_path {
             let at = format!("direct registry {}", path.display());
-            match std::fs::read_to_string(path).map_err(|e| format!("the registry file does not read: {e}")).and_then(
-                |text| {
-                    serde_json::from_str::<Vec<DirectSession>>(&text)
-                        .map_err(|e| format!("the registry file does not parse: {e}"))
-                },
-            ) {
+            // Configured but not there is unread too: the listing cannot show its sessions.
+            let rows = match read::is_file(path) {
+                Read::Absent => Err(format!("the registry file {} is not there", path.display())),
+                _ => Self::rows_in(path),
+            };
+            match rows {
                 Ok(rows) => {
                     for s in rows {
                         combined.insert(s.id.clone(), s);
@@ -626,7 +645,7 @@ impl DirectRegistry {
                 format!("The shell's folder must be an absolute path, not {cwd}."),
             ));
         }
-        let session = match (self.find(id), claim.token.as_deref().filter(|t| !t.is_empty())) {
+        let session = match (self.lookup(id)?, claim.token.as_deref().filter(|t| !t.is_empty())) {
             (Some(s), Some(t))
                 if !s.token.is_empty() && Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes()) =>
             {
@@ -706,7 +725,9 @@ impl SurfaceRegistry {
     }
 
     /// The T3 registry root (BRO-3846): `MAESTRO_T3_HOME`, then `T3CODE_HOME` (which T3 sets), then
-    /// `~/.t3` when it exists. The flag says whether it was found rather than configured.
+    /// `~/.t3` when it exists. The flag says whether it was found rather than configured. `~/.t3` is
+    /// probed by the [`read`] rule: one whose metadata does not read (an inaccessible home) is a
+    /// registry found but unreadable, which every reader then reports, never "no registry".
     pub fn t3_root_from(
         maestro_t3_home: Option<&str>,
         t3code_home: Option<&str>,
@@ -718,7 +739,11 @@ impl SurfaceRegistry {
         if let Some(p) = t3code_home.filter(|s| !s.is_empty()) {
             return Some((PathBuf::from(p), true));
         }
-        home.map(|h| h.join(".t3")).filter(|p| p.is_dir()).map(|p| (p, true))
+        let t3 = home?.join(".t3");
+        match read::is_dir(&t3) {
+            Read::Present(true) | Read::Unreadable(_) => Some((t3, true)),
+            Read::Present(false) | Read::Absent => None,
+        }
     }
 
     /// Construct a `SurfaceRegistry` from environment variables (`MAESTRO_PASEO_AGENTS_DIR`,

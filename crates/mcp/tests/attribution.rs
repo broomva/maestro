@@ -1495,3 +1495,60 @@ fn a_configured_registry_that_does_not_read_is_never_empty_and_complete() {
     let direct = SurfaceRegistry::new(None, None, Some(DirectRegistry::from_file(tmp.path().join("no-such.json"))));
     assert_eq!(context(&direct), (json!(false), json!(["direct permission prompts (1 unread)"])));
 }
+
+/// Codex's joint round 7: discovery reads by the one rule too. A home that cannot be read, with
+/// `~/.t3` beneath it and neither `MAESTRO_T3_HOME` nor `T3CODE_HOME` set, is a T3 registry found
+/// but unreadable: the owner's needs are incomplete, naming T3, never "no registry". Identity on
+/// the same registry, and on unreadable Paseo and Direct registries, fails closed.
+#[test]
+fn a_registry_that_discovery_cannot_read_is_unread_never_absent() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = complete_store(tmp.path());
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(home.join(".t3/userdata")).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let blocked = std::fs::metadata(home.join(".t3")).is_err(); // not as root
+    let found = SurfaceRegistry::t3_root_from(None, None, Some(&home));
+    let t3 = found.as_ref().map(|(root, _)| T3Registry::new(root));
+    let identity = t3.as_ref().map(|t3| t3.resolve(A, false));
+    let hosts = SurfaceRegistry::new(None, t3, None).with_t3_found(true);
+    let v = call_with_hosts(&store, &hosts, "maestro_context", json!({})).unwrap();
+    let errors = call_with_hosts(&store, &hosts, "maestro_snapshot", json!({})).unwrap()["needs"]["errors"].to_string();
+    let native = hosts.t3.as_ref().map(|t3| t3.resolve("native-x", true));
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if blocked {
+        assert_eq!(found.as_ref().map(|(root, f)| (root.clone(), *f)), Some((home.join(".t3"), true)));
+        assert_eq!(v["packet"]["needs_complete"], false, "{v}");
+        assert_eq!(v["packet"]["degraded"], json!(["t3 permission prompts (1 unread)"]), "{v}");
+        // The reason is the read's own, never "no registry".
+        assert!(errors.contains("does not read") && errors.contains("ermission denied"), "{errors}");
+        for refused in [identity.unwrap().unwrap_err(), native.unwrap().unwrap_err()] {
+            assert_eq!(refused.reason, maestro_hosts::RefusalReason::RegistryUnavailable, "{refused:?}");
+            assert!(refused.message.contains("unreadable"), "{refused:?}");
+        }
+    }
+    // Paseo and Direct registries that do not read fail identity closed, not "no such session".
+    let agents = tmp.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let direct_file = tmp.path().join("direct.json");
+    std::fs::write(&direct_file, "[]").unwrap();
+    for path in [&agents, &direct_file] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let blocked = std::fs::read_dir(&agents).is_err();
+    let w = tmp.path().to_string_lossy().into_owned();
+    let paseo = SurfaceRegistry::new(Some(PaseoRegistry::new(&agents)), None, None)
+        .verify_caller(&CallerClaim::paseo(Some("agent-p"), Some(w.clone())));
+    let direct = SurfaceRegistry::new(None, None, Some(DirectRegistry::from_file(&direct_file)))
+        .verify_caller(&CallerClaim::direct(Some("d1"), Some(w), Some("tok-1")));
+    for path in [&agents, &direct_file] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    if blocked {
+        for (name, result) in [("paseo", paseo), ("direct", direct)] {
+            let refused = result.unwrap_err();
+            assert_eq!(refused.reason, maestro_hosts::RefusalReason::RegistryDisconnected, "{name}: {refused:?}");
+        }
+    }
+}

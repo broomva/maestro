@@ -203,6 +203,17 @@ Three deliberate exceptions:
 - The legacy `projection_threads` table has no payload column.
     - **Native resolution reads live threads only.** Archived and deleted threads' provider rows are not scanned, so a pruned one breaks nothing. That includes a thread archived or deleted only in its payload (`archivedAt`, `deletedAt`, which the thread reader honours; joint round 3, Gemini), so its native id never collides with a live thread's. That thread payload must read to tell: NULL, empty, blank or corrupt is `registry_unavailable`. The JSON snapshot takes `archivedAt` and `deletedAt` as aliases of its columns. A `nativeThreadRef.nativeId` of `null` (not yet assigned) matches nothing. A malformed row of a live thread is still `registry_unavailable`.
     - **Fail-open alerts are keyed by the workspace,** the code and the UTC day, never the named session, which is the caller's own string when it does not verify.
+16. **One read rule** (joint round 7, Codex: the fourth layer of "a read failure becomes absence", ended with one primitive rather than another guard).
+    - `maestro_hosts::read` defines `Read<T>`: `Absent` (`NotFound`, or `NotADirectory` when a parent is a file), `Present`, and `Unreadable(why)` for any other error, never absence.
+    - Every registry probe and enumeration goes through it:
+      - the `~/.t3` discovery probe;
+      - T3's `locate` (snapshot or database), `discover`, the snapshot read and `environment_id`;
+      - Paseo's agents folder, its entries (a `read_dir` entry that fails is an unread item, never dropped), its agent folders and agent files;
+      - the Direct registry file;
+      - the reader's `environment-id` (only a missing file is absent).
+    - Discovery that cannot read (an inaccessible home) yields a found registry that is unreadable. It reaches `live_permission_report` as an unread source naming the surface. Identity on it fails closed: `registry_disconnected` from a lookup, `registry_unavailable` from a variable's resolution, never "no such session".
+    - Plugin parity holds. A Paseo agent file that reads but does not parse, or names another agent, is still "no such session" to identity, as `callers-golden.json` requires. The listing reports it unread.
+    - `crates/hosts/tests/read_guard.rs` fails if a raw `is_dir`, `is_file`, `exists`, `read_dir`, `read_to_string`, or a dropped entry error comes back in those functions.
 13. **Existing tests.** The authority suites (`crates/mcp/tests/{authority,dispatch}.rs`, `crates/cli/tests/requests.rs`) are unchanged. Three tests outside them changed: `crates/mcp/tests/flow.rs` `verified_t3_and_paseo_sessions_write` now runs in both modes (attributed refuses the unsigned T3 claim `attribution_missing`). `crates/mcp/tests/stop.rs` and `transports.rs` name `paseo:-/nobody` for their unverified `flow open`, so they hold in any environment. The stop test also asserts the T3 case's `attribution_missing`.
 
 ## Alternatives considered

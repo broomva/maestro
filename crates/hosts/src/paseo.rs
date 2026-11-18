@@ -18,6 +18,8 @@ use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::read::{self, Read};
+
 /// Label key recording which Paseo agent started a child session (`server/labels.ts`).
 pub const PARENT_AGENT_LABEL: &str = "paseo.parent-agent-id";
 
@@ -154,7 +156,7 @@ impl PaseoRegistry {
     }
 
     pub fn is_connected(&self) -> bool {
-        !self.disconnected && self.dir.is_dir()
+        !self.disconnected && matches!(read::is_dir(&self.dir), Read::Present(true))
     }
 
     pub fn dir(&self) -> &Path {
@@ -163,27 +165,51 @@ impl PaseoRegistry {
 
     /// Look up `id` in the Paseo registry (`Callers.find`).
     pub fn find(&self, id: &str) -> Option<PaseoAgent> {
+        self.lookup(id).ok().flatten()
+    }
+
+    /// Agent `id`, or why the registry did not read (BRO-3846), by the [`read`](crate::read) rule:
+    /// an agents folder, an entry of it, or the agent's own file that does not read (or does not
+    /// parse, or names another agent) fails identity closed, never reads as "no such agent".
+    fn lookup(&self, id: &str) -> Result<Option<PaseoAgent>, IdentityRefusal> {
+        let unread =
+            |why: String| IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("Paseo registry: {why}."));
         if self.disconnected || !is_safe_id(id) {
-            return None;
+            return Ok(None);
         }
-        let known = self.found.lock().unwrap().get(id).cloned();
+        let known = self.found.lock().ok().and_then(|f| f.get(id).cloned());
         if let Some(path) = known {
-            if let Some(agent) = Self::read_file(&path, id) {
-                return Some(agent);
+            if let Read::Present(Ok(agent)) = Self::agent_at(&path, id) {
+                return Ok(Some(agent));
             }
-            self.found.lock().unwrap().remove(id);
+            if let Ok(mut f) = self.found.lock() {
+                f.remove(id);
+            }
         }
-        let entries = std::fs::read_dir(&self.dir).ok()?;
-        let mut folders: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-        folders.sort();
+        let folders = match read::dir_entries(&self.dir) {
+            Read::Present(folders) => folders,
+            Read::Absent => return Ok(None),
+            Read::Unreadable(why) => return Err(unread(why)),
+        };
         for folder in folders {
+            let folder = match folder {
+                Read::Present(folder) => folder,
+                Read::Absent => continue,
+                Read::Unreadable(why) => return Err(unread(why)),
+            };
             let path = folder.join(format!("{id}.json"));
-            if let Some(agent) = Self::read_file(&path, id) {
-                self.found.lock().unwrap().insert(id.to_string(), path);
-                return Some(agent);
+            match Self::agent_at(&path, id) {
+                Read::Present(Ok(agent)) => {
+                    if let Ok(mut f) = self.found.lock() {
+                        f.insert(id.to_string(), path);
+                    }
+                    return Ok(Some(agent));
+                }
+                Read::Present(Err(_)) | Read::Absent => {}
+                Read::Unreadable(why) => return Err(unread(why)),
             }
         }
-        None
+        Ok(None)
     }
 
     /// Enumerate all live Paseo agents in the registry.
@@ -197,34 +223,67 @@ impl PaseoRegistry {
     /// prompts, so none of these may look like an empty, complete list. Files that are no agent
     /// record (not `*.json`, or not an agent id) are not read failures.
     pub fn list_live_report(&self) -> (Vec<PaseoAgent>, Vec<(String, String)>) {
+        self.list_with(&read::dir_entries)
+    }
+
+    /// [`Self::list_live_report`] over `list_dir` (tests inject an entry that does not read).
+    fn list_with(
+        &self,
+        list_dir: &dyn Fn(&Path) -> Read<Vec<Read<PathBuf>>>,
+    ) -> (Vec<PaseoAgent>, Vec<(String, String)>) {
         let mut unread = Vec::new();
         let at = |p: &Path| format!("paseo registry {}", p.display());
         if self.disconnected {
             unread.push((at(&self.dir), "the Paseo registry is disconnected".to_string()));
             return (Vec::new(), unread);
         }
-        let entries = match std::fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                unread.push((at(&self.dir), format!("the agents folder does not read: {e}")));
+        let folders = match list_dir(&self.dir) {
+            Read::Present(folders) => folders,
+            Read::Absent => {
+                unread.push((at(&self.dir), "the agents folder does not read: it is not there".to_string()));
+                return (Vec::new(), unread);
+            }
+            Read::Unreadable(why) => {
+                unread.push((at(&self.dir), format!("the agents folder does not read: {why}")));
                 return (Vec::new(), unread);
             }
         };
-        let mut folders: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-        folders.sort();
         let mut out = Vec::new();
         for folder in folders {
-            let files = match std::fs::read_dir(&folder) {
-                Ok(files) => files,
-                Err(e) if folder.is_dir() => {
-                    unread.push((at(&folder), format!("the agent folder does not read: {e}")));
+            let folder = match folder {
+                Read::Present(folder) => folder,
+                Read::Absent => continue,
+                Read::Unreadable(why) => {
+                    unread.push((at(&self.dir), why));
                     continue;
                 }
-                Err(_) => continue,
             };
-            let mut paths: Vec<PathBuf> = files.filter_map(|e| e.ok().map(|e| e.path())).collect();
-            paths.sort();
+            // An entry that is no folder holds no agents; one whose kind cannot be told is unread.
+            match read::is_dir(&folder) {
+                Read::Present(true) => {}
+                Read::Present(false) | Read::Absent => continue,
+                Read::Unreadable(why) => {
+                    unread.push((at(&folder), why));
+                    continue;
+                }
+            }
+            let paths = match list_dir(&folder) {
+                Read::Present(paths) => paths,
+                Read::Absent => continue,
+                Read::Unreadable(why) => {
+                    unread.push((at(&folder), format!("the agent folder does not read: {why}")));
+                    continue;
+                }
+            };
             for path in paths {
+                let path = match path {
+                    Read::Present(path) => path,
+                    Read::Absent => continue,
+                    Read::Unreadable(why) => {
+                        unread.push((at(&folder), why));
+                        continue;
+                    }
+                };
                 if path.extension().and_then(|e| e.to_str()) != Some("json") {
                     continue;
                 }
@@ -234,28 +293,33 @@ impl PaseoRegistry {
                 if !is_safe_id(stem) {
                     continue;
                 }
-                match Self::read_agent(&path, stem) {
-                    Ok(agent) if agent.liveness().is_live() => out.push(agent),
-                    Ok(_) => {}
-                    Err(why) => unread.push((at(&path), why)),
+                match Self::agent_at(&path, stem) {
+                    Read::Present(Ok(agent)) if agent.liveness().is_live() => out.push(agent),
+                    Read::Present(Ok(_)) | Read::Absent => {}
+                    Read::Present(Err(why)) | Read::Unreadable(why) => unread.push((at(&path), why)),
                 }
             }
         }
         (out, unread)
     }
 
-    /// One agent file, or why it does not read.
-    fn read_agent(path: &Path, expected_id: &str) -> Result<PaseoAgent, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("the agent file does not read: {e}"))?;
-        serde_json::from_str::<RawRegistryFile>(&text).map_err(|e| format!("the agent file does not parse: {e}"))?;
-        Self::read_file(path, expected_id).ok_or_else(|| format!("the agent file does not name agent {expected_id}"))
+    /// The agent file at `path` by the [`read`](crate::read) rule: absent when it is not there;
+    /// unreadable, with why, when it does not read. A file that reads but does not parse, or names
+    /// another agent, is `Present(Err(why))`: identity takes it as no such agent (the plugin's own
+    /// rule, `callers-golden.json`), the listing as an unread entry.
+    fn agent_at(path: &Path, expected_id: &str) -> Read<Result<PaseoAgent, String>> {
+        match read::read_text(path) {
+            Read::Absent => Read::Absent,
+            Read::Unreadable(why) => Read::Unreadable(format!("the agent file does not read: {why}")),
+            Read::Present(text) => Read::Present(Self::parse_agent(&text, expected_id)),
+        }
     }
 
-    fn read_file(path: &Path, expected_id: &str) -> Option<PaseoAgent> {
-        let text = std::fs::read_to_string(path).ok()?;
-        let parsed: RawRegistryFile = serde_json::from_str(&text).ok()?;
+    fn parse_agent(text: &str, expected_id: &str) -> Result<PaseoAgent, String> {
+        let parsed: RawRegistryFile =
+            serde_json::from_str(text).map_err(|e| format!("the agent file does not parse: {e}"))?;
         if parsed.id != expected_id {
-            return None;
+            return Err(format!("the agent file does not name agent {expected_id}"));
         }
         let parent = parsed
             .labels
@@ -274,7 +338,7 @@ impl PaseoRegistry {
                 PermissionPrompt { request_id, title, detail }
             })
             .collect();
-        Some(PaseoAgent {
+        Ok(PaseoAgent {
             id: parsed.id,
             cwd: parsed.cwd,
             archived_at: parsed.archived_at,
@@ -318,7 +382,7 @@ impl PaseoRegistry {
                 format!("The shell's folder must be an absolute path, not {cwd}."),
             ));
         }
-        let Some(agent) = self.find(agent_id) else {
+        let Some(agent) = self.lookup(agent_id)? else {
             return Err(IdentityRefusal::new(
                 RefusalReason::NotFound,
                 format!("No Paseo session has the id {agent_id}."),
@@ -579,4 +643,36 @@ pub fn permission_request_id(raw: &PermissionLike, prefix: &str) -> String {
         let _ = write!(&mut hex, "{b:02x}");
     }
     format!("{prefix}-{hex}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Codex's joint round 7: a directory entry whose read fails is an unread item of the listing,
+    /// never an agent silently left out. A real `read_dir` cannot be made to fail one entry, so the
+    /// lister is injected; the agent beside it is still listed.
+    #[test]
+    fn a_directory_entry_that_does_not_read_is_unread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let agent = serde_json::json!({ "id": "agent-a", "cwd": "/w", "lastStatus": "running" });
+        std::fs::write(work.join("agent-a.json"), agent.to_string()).unwrap();
+        let registry = PaseoRegistry::new(tmp.path());
+        let failing = |dir: &Path| match read::dir_entries(dir) {
+            Read::Present(mut entries) => {
+                entries.push(Read::Unreadable(format!("an entry of {} does not read: injected", dir.display())));
+                Read::Present(entries)
+            }
+            other => other,
+        };
+        let (agents, unread) = registry.list_with(&failing);
+        assert_eq!(agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["agent-a"]);
+        // One at the agents folder, one at the agent folder: each entry that did not read.
+        assert_eq!(unread.len(), 2, "{unread:?}");
+        assert!(unread.iter().all(|(_, why)| why.contains("injected")), "{unread:?}");
+        let (_, clean) = registry.list_live_report();
+        assert!(clean.is_empty(), "{clean:?}");
+    }
 }

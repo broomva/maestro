@@ -2321,7 +2321,7 @@ mutate $ht '            Some(t) if t.archived_at.is_some() => {' '            So
 mutate $ht '            Some(t) if t.deleted_at.is_some() => {' '            Some(t) if false => {'
 mutate $ht '        if thread.archived_at.is_some() || thread.deleted_at.is_some() {' '        if false {'
 mutate $hlb '        if let Some(p) = t3code_home.filter(|s| !s.is_empty()) {' '        if let Some(p) = t3code_home.filter(|_| false) {'
-mutate $hlb '        home.map(|h| h.join(".t3")).filter(|p| p.is_dir())' '        home.map(|h| h.join(".t3")).filter(|_| true)'
+mutate $hlb '            Read::Present(true) | Read::Unreadable(_) => Some((t3, true)),' '            Read::Present(true) | Read::Unreadable(_) | Read::Present(false) | Read::Absent => Some((t3, true)),'
 mutate $hlb '            std::env::var("T3CODE_HOME").ok().as_deref(),' '            std::env::var("T3CODE_HOME_UNSET").ok().as_deref(),'
 mutate $hlb '        self.has_surface(surface) && !(surface == &Surface::T3 && self.t3_found)' '        self.has_surface(surface)'
 mutate $hlb '            .with_identity_mode(IdentityMode::parse(std::env::var("MAESTRO_IDENTITY").ok().as_deref()))' '            .with_identity_mode(IdentityMode::Attributed)'
@@ -2460,14 +2460,25 @@ mutate $mcp '                    packet.degraded.push(format!("{} permission pro
 # configured registry's every read failure (missing, inaccessible, disconnected, a bad entry)
 # becomes an unread source, on every surface; nothing configured is complete.
 mutate $ht '            report.unreadable.push((at, "the T3 registry is disconnected".to_string()));' ''
-mutate $ht '            report.unreadable.push((at, why));' ''
+mutate $ht $'                let why = format!("no T3 registry database or snapshot is readable at {}", self.root.display());\n                report.unreadable.push((at, why));' $'                let why = format!("no T3 registry database or snapshot is readable at {}", self.root.display());\n                let _ = (at, why);'
 mutate $hp '            unread.push((at(&self.dir), "the Paseo registry is disconnected".to_string()));' ''
-mutate $hp '                unread.push((at(&self.dir), format!("the agents folder does not read: {e}")));' ''
-mutate $hp '                    unread.push((at(&folder), format!("the agent folder does not read: {e}")));' ''
-mutate $hp '                    Err(why) => unread.push((at(&path), why)),' '                    Err(_) => {}'
+mutate $hp '                unread.push((at(&self.dir), format!("the agents folder does not read: {why}")));' ''
+mutate $hp '                    unread.push((at(&folder), format!("the agent folder does not read: {why}")));' ''
+mutate $hp '                    Read::Present(Err(why)) | Read::Unreadable(why) => unread.push((at(&path), why)),' '                    Read::Present(Err(_)) | Read::Unreadable(_) => {}'
 mutate $hlb '                Err(why) => unread.push((at, why)),' '                Err(_) => {}'
 mutate $hlb '            unreadable(Surface::Paseo, failed);' ''
 mutate $hlb '            unreadable(Surface::Direct, failed);' ''
+# Joint round 7 (BRO-3846, Codex at 875c1af): one read rule (crate::read) for every registry probe
+# and enumeration: NotFound is absent, any other error unreadable, never absence. Discovery that
+# cannot read reaches the boundary as unread; identity on it fails closed.
+hrd=crates/hosts/src/read.rs
+mutate $hrd '            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => Read::Absent,' '            Err(_) => Read::Absent,'
+mutate $hrd '            Err(e) => Read::Unreadable(format!("an entry of {} does not read: {e}", dir.display())),' '            Err(_) => Read::Absent,'
+mutate $hlb '            Read::Present(true) | Read::Unreadable(_) => Some((t3, true)),' $'            Read::Present(true) => Some((t3, true)),\n            Read::Unreadable(_) => None,'
+mutate $ht '                Read::Unreadable(why) => return Read::Unreadable(why),' '                Read::Unreadable(_) => {}'
+mutate $hp $'            Read::Absent => return Ok(None),\n            Read::Unreadable(why) => return Err(unread(why)),' $'            Read::Absent | Read::Unreadable(_) => return Ok(None),'
+mutate $hp '                    unread.push((at(&self.dir), why));' ''
+mutate $hlb '            Read::Unreadable(why) => Err(why),' '            Read::Unreadable(_) => Ok(Vec::new()),'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
