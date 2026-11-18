@@ -1025,3 +1025,21 @@ fn an_evaluator_a_choose_started_ends_itself_when_its_kernel_is_killed() {
         panic!("the orphaned evaluator outlived its deadline");
     }
 }
+
+#[test]
+fn pure_receipt_is_reused_only_for_unchanged_consumed_receipts() {
+    let yaml = CHAIN.replace("version: 1", "version: 1\nreceipt_stdin: true");
+    let (mut f, test_clock) = clocked(&yaml);
+    let fi = f.begin();
+    let at = f.done(&fi, "head");
+    f.done(&fi, "build");
+    assert_eq!(f.status(&fi, clock::now()).nodes["build"].state, State::Done);
+    test_clock.set(at + secs(61));
+    let c = f.claim(&fi, "head");
+    assert_eq!(outcome(&f.complete(&c.token, Value::Null)), "completed");
+    assert_eq!(f.status(&fi, clock::now()).nodes["build"].state, State::Done);
+    test_clock.shift(secs(61));
+    let c = f.claim(&fi, "head");
+    assert_eq!(outcome(&f.complete(&c.token, json!({"changed": true}))), "completed");
+    assert_ne!(f.status(&fi, clock::now()).nodes["build"].state, State::Done);
+}

@@ -18,9 +18,9 @@
 //!   toolchain faked there takes the user-level write that can already replace Maestro's own
 //!   binary, the residual risk the owner accepted (BRO-3635, "Set the floor").
 //! - **No inherited secrets.** The environment is cleared, then only the names in [`ENV_ALLOW`]
-//!   are copied from the kernel's own (`PATH` as above). Standard input is empty, except a work
-//!   node's verify's, which reads the outputs it judges as JSON ([`Feed::stdin`]): bytes in an
-//!   unlinked file, so writing them never blocks and needs no thread.
+//!   are copied from the kernel's own (`PATH` as above). Commands receive the JSON selected by
+//!   their pinned definition via [`Feed::stdin`], or empty input. The bytes live in an unlinked
+//!   file, so writing them never blocks and needs no thread.
 //! - **A working directory the flow declares** (`workdir` in the definition), absolute and an
 //!   existing directory, checked by the caller.
 //! - **A timeout, and a process group.** The command leads a new process group. When it exits,
@@ -110,7 +110,7 @@ pub(crate) enum Search {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Feed<'a> {
     pub search: Search,
-    /// A work node's verify's: the outputs it judges, as JSON. Empty input otherwise.
+    /// The command's JSON input, or empty input when absent.
     pub stdin: Option<&'a [u8]>,
 }
 

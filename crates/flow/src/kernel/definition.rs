@@ -26,6 +26,9 @@ pub(crate) struct Definition {
     pub repeats: Vec<(String, RepeatDef)>,
     /// The directory every command runs in (`workdir: "{{params.repo}}"`).
     pub workdir: Option<String>,
+    /// Opt in to the receipt-aware command stdin contract.
+    #[serde(default)]
+    pub receipt_stdin: bool,
     /// Traits (`uses: [verified-finish@1]`): phase 2.
     pub uses: Option<serde_yaml::Value>,
     /// Templates: phase 2.

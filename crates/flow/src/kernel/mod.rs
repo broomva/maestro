@@ -23,8 +23,9 @@
 //!   ([`exec`], bounded in time, output and environment, with the flows lock released) and appends
 //!   the receipt or a refusal; an effect's command runs at most once per iteration, and after a
 //!   run with no receipt its `reconcile` runs instead. `maestro`, `sh`, `git` and `test` are never
-//!   taken from the caller's `PATH`, a work node's verify reads the outputs it judges on its
-//!   standard input, and a pure node with a `snapshot` runs in a snapshot of one commit, never in
+//!   taken from the caller's `PATH`. A work verify reads its outputs on stdin; definitions may
+//!   opt in to receipt-aware stdin for verifies and pure and observe runs. A pure node with a
+//!   `snapshot` runs in a snapshot of one commit, never in
 //!   the working tree (`snapshot`, BRO-3636). `choose` appends a choice node's edge when
 //!   its guard holds. Both write a repeat's `until` verdict when their receipt settles an
 //!   iteration. See `write`'s module docs for ownership, tokens, leases, retry and cancel.

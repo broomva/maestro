@@ -185,6 +185,7 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
         nodes,
         repeats,
         workdir: def.workdir,
+        receipt_stdin: def.receipt_stdin,
     };
     ir.ir_version = ir::version_for(&ir);
     ir::validate(&ir)?;

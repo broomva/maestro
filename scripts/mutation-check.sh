@@ -1237,11 +1237,13 @@ mutate $fk/write.rs '    let now = wall(&log)?;
     check_verb(&held, false)?;' '    let now = wall(&log)? - SignedDuration::from_secs(30);
     let mut held = hold(log, session, &instance, &sha, now)?;
     check_verb(&held, false)?;'
-mutate $fk/write.rs '    let ran_at = clock::now();' '    let ran_at = clock::now() + SignedDuration::from_secs(30);'
+mutate $fk/write.rs '    drop(guard);
+    let ran_at = clock::now();' '    drop(guard);
+    let ran_at = clock::now() + SignedDuration::from_secs(30);'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = wall(&log)? - SignedDuration::from_secs(30);'
 mutate $fk/write.rs '    let ran_at = clock::now();
     let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
         None => exec::run(&plan.argv, &plan.cwd, limits, feed),
     };
     pause!("command_ran");
@@ -1252,7 +1254,7 @@ mutate $fk/write.rs '    let ran_at = clock::now();
     let after = wall(&log)?;' '    let ran_at = clock::now();
     let began = std::time::Instant::now();
     let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
         None => exec::run(&plan.argv, &plan.cwd, limits, feed),
     };
     pause!("command_ran");
@@ -1335,19 +1337,19 @@ mutate $fk/write.rs '    if !held.next.enabled.iter().any(|e| e.node == held.rec
 mutate $fk/write.rs '    drop(guard);
     let ran_at = clock::now();
     let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
         None => exec::run(&plan.argv, &plan.cwd, limits, feed),
     };' '    let ran_at = clock::now();
     let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),
+        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
         None => exec::run(&plan.argv, &plan.cwd, limits, feed),
     };
     drop(guard);'
 mutate $fk/write.rs '    let held = hold(log, session, &instance, &sha, after)?;' '    let _ = (log, after);
     let held = held;'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = now;'
-mutate $fk/write.rs '    // The command is a function of the pinned IR and params, so only the rest can have changed.
-    if let Err(unfit) = prepare(&held, &outputs) {' '    // The command is a function of the pinned IR and params, so only the rest can have changed.
+mutate $fk/write.rs '    // The command and its input are bound to the pinned IR, params and claim inputs.
+    if let Err(unfit) = prepare(&held, &outputs) {' '    // The command and its input are bound to the pinned IR, params and claim inputs.
     if let Err(unfit) = Ok::<(), Unfit>(()) {'
 mutate $fk/write.rs '    let Some(exit) = code else {' '    let Some(exit) = code.or(Some(0)) else {'
 mutate $fk/write.rs 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|m| m.exit == exit))' 'Class::Observe { exit_map, .. } => (!exit_map.iter().any(|_| true))'
@@ -1928,13 +1930,23 @@ mutate $fx '            .and_then(|real| maestro_store::tree::check_root_owned(&
 mutate $fx '            std::os::unix::process::CommandExt::arg0(&mut cmd, name);' ''
 mutate $fx '            cmd.env("PATH", maestro_store::tree::git_path());' '            cmd.env("PATH", std::env::var_os("PATH").unwrap_or_default());'
 mutate $fk/write.rs '    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref() };' '    let feed = Feed { search: Search::Caller, stdin: plan.stdin.as_deref() };'
-mutate $fk/snapshot.rs '&left(limits, deadline), Feed { search: Search::Caller, stdin: None });' '&left(limits, deadline), Feed { search: Search::Trusted, stdin: None });'
-# A work node's verify reads the outputs it judges as JSON on its standard input, from a file that
-# never blocks the kernel; no other command reads them, and `{{outputs.*}}` in any command, a
+mutate $fk/snapshot.rs '&left(limits, deadline), Feed { search: Search::Caller, stdin });' '&left(limits, deadline), Feed { search: Search::Trusted, stdin });'
+# A work verify reads outputs on stdin; opt-in definitions also feed consumed receipts to verifies
+# and pure and observe runs. The file never blocks the kernel; `{{outputs.*}}` in any command, a
 # snapshot or the workdir is refused at compile time (an IR pinned before keeps its run-time
 # refusal).
 mutate $fx '        Some(Ok(file)) => cmd.stdin(Stdio::from(file)),' '        Some(Ok(_)) => cmd.stdin(Stdio::null()),'
-mutate $fk/write.rs '    let stdin = judges.then(|| serde_json::to_vec(outputs).unwrap_or_default());' '    let stdin = false.then(|| serde_json::to_vec(outputs).unwrap_or_default());'
+mutate $fk/write.rs '        judges.then(|| serde_json::to_vec(outputs).unwrap_or_default())' '        false.then(|| serde_json::to_vec(outputs).unwrap_or_default())'
+mutate $fk/write.rs '            guard_input(&held.log, &held.started, &held.rec.node).map_err(|e| ("input_invalid", e.to_string()))?;' '            serde_json::json!({});'
+mutate $fk/ir.rs '    if ir.receipt_stdin {' '    if false {'
+mutate $fk/write.rs '    let stdin = if ir.receipt_stdin' '    let stdin = if false'
+mutate $fk/write.rs 'Some(Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. })' 'Some(Class::Observe { .. } | Class::Work { .. })'
+mutate $fk/write.rs 'Some(Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. })' 'Some(Class::Pure { .. } | Class::Work { .. })'
+mutate $fk/write.rs 'Some(Class::Pure { .. } | Class::Observe { .. } | Class::Work { .. })' 'Some(Class::Pure { .. } | Class::Observe { .. })'
+mutate $fk/write.rs 'snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref())' 'snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, None)'
+mutate $fk/write.rs '        let own = if judges { outputs.clone() } else { Value::Null };' '        let own = Value::Null;'
+mutate $fk/write.rs '        let own = if judges { outputs.clone() } else { Value::Null };' '        let own = outputs.clone();'
+mutate $fk/snapshot.rs 'Feed { search: Search::Caller, stdin }' 'Feed { search: Search::Caller, stdin: None }'
 mutate $fk/write.rs '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, false),' '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, true),'
 mutate $fk/write.rs '        Some(Class::Work { verify, .. }) => (verify, Step::Command, true),' '        Some(Class::Work { verify, .. }) => (verify, Step::Command, false),'
 mutate $fk/compile.rs '    check_no_outputs_placeholders(&ir)?;' ''
@@ -1946,7 +1958,7 @@ mutate $fk/compile.rs '.chain(&n.snapshot)' '.chain(&None::<String>)'
 # checked out detached, removed whatever the command came to, a read-only tree included. The
 # history is there, so a check could check out another commit; the run is then `snapshot_moved`
 # (below). Only a pure node runs in one, in IR version 4.
-mutate $fk/write.rs '        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits),' '        Some(_) => exec::run(&plan.argv, &plan.cwd, limits, Feed { search: Search::Caller, stdin: None }),'
+mutate $fk/write.rs '        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),' '        Some(_) => exec::run(&plan.argv, &plan.cwd, limits, Feed { search: Search::Caller, stdin: None }),'
 mutate $fk/write.rs '            if !snapshot::is_object_id(&commit) {' '            if false {'
 mutate $fk/snapshot.rs '    matches!(commit.len(), 40 | 64) && ' '    true && '
 mutate $fk/snapshot.rs '        remove(&self.root);' ''

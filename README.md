@@ -157,6 +157,12 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   and `--again` proposes anew. One session pins at most eight proposals on an instance
   (`proposals_exhausted`). `flow next` and `flow status` list each standing
   proposal (`proposals`: kind, ask, proposer, state) and the current `owner`.
+- **Receipt-aware command input (BRO-3827).** A definition may set `receipt_stdin: true` to
+  opt in to IR version 7. Its work verifies and pure and observe runs read JSON on stdin with
+  `outputs` (the work outputs, or null for runs) and `inputs` (params and consumed node receipts,
+  in the same form guards read). A pure node in a snapshot receives the same input. Definitions
+  without this field retain their original stdin contract, including verify@1.
+
 - **The verifier pilot (BRO-3636).** `crates/flow/flows/verify.yaml` is `verify@1`: `pin`
   observes that the repository is at `params.head` (fresh for 10 minutes); `check` runs
   `params.check` in a snapshot of `params.head`, never in the working tree; and `exercise`, only
