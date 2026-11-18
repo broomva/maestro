@@ -96,6 +96,7 @@ fn an_instance_that_records_no_owner_takes_no_write() {
         ir: flow.ir().clone(),
         params: json!({ "dir": f.dir.to_str().unwrap() }),
         owner: None,
+        audit: None,
     };
     f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
     assert_eq!(code(claim(&mut f.ledger, &f.me, &fi, "head")), "no_owner");
@@ -188,6 +189,7 @@ fn settle(f: &mut Fx, fi: &InstanceId, i: u32) {
         verify: None,
         performer: None,
         tool_use_id: None,
+        audit: None,
     };
     f.append(fi, other.to_event().unwrap());
 }
@@ -226,6 +228,7 @@ fn claimed(attempt: u32, until: Timestamp, token: &str) -> NewEvent {
         performer: None,
         tool_use_id: None,
         cancel_at: None,
+        audit: None,
     };
     c.to_event().unwrap()
 }
@@ -421,6 +424,7 @@ fn an_outputs_placeholder_pinned_before_the_rule_is_refused_as_it_was() {
             session: "t3:-/owner".parse().unwrap(),
             marker_sha256: maestro_flow::kernel::events::marker_digest("marker-1"),
         }),
+        audit: None,
     };
     let fi = InstanceId::new("fi_pinned_outputs").unwrap();
     f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();

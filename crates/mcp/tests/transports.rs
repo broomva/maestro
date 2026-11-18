@@ -170,8 +170,10 @@ async fn every_tool_scenario_is_identical_over_stdio_and_http() {
             "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
             // A flow read with no ledger is a result: ok false, no_ledger.
             "maestro_flow_next" | "maestro_flow_status" | "maestro_flow_spine" => json!({ "instance": "fi_none" }),
-            // An unverified session's open flows are a result: ok false, caller_unverified.
-            "maestro_flow_open" => json!({ "session": "t3:-/nobody" }),
+            // An unverified session's open flows are a result: ok false, caller_unverified. A Paseo
+            // one, so the result is the same whatever thread variable the test process carries: an
+            // unsigned T3 claim is attributed over stdio and never over HTTP (BRO-3846).
+            "maestro_flow_open" => json!({ "session": "paseo:-/nobody" }),
             _ => json!({}),
         };
         let got = agree(&t, &store, spec.name, args).await;

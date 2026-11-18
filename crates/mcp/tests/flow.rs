@@ -4,7 +4,7 @@
 
 use maestro_core::session::PeerCredentials;
 use maestro_hosts::{CallerClaim, DirectRegistry, DirectSession, PaseoRegistry, SessionLiveness, SurfaceRegistry};
-use maestro_hosts::{NodeId, T3Registry};
+use maestro_hosts::{IdentityMode, NodeId, T3Registry};
 use maestro_mcp::call_with_hosts;
 use maestro_mcp::flow::{ASK, CHOOSE, CLAIM, COMPLETE, HEARTBEAT, MAX_NAME, NEXT, SPINE, START, STATUS};
 use maestro_store::{Paths, Store, TreeSource};
@@ -377,16 +377,25 @@ fn write_paseo_agent(dir: &Path, id: &str, cwd: &Path) {
 }
 
 /// BRO-3624 item 4: verified T3 and Paseo sessions write, each through a signed bridge
-/// credential, and the same session with no credential is refused.
+/// credential, and the same session with no credential is refused. In both identity modes
+/// (BRO-3846): strict refuses it `caller_refused`, as before; attributed refuses the unsigned T3
+/// claim `attribution_missing`, since this process carries no thread variable.
 #[test]
 fn verified_t3_and_paseo_sessions_write() {
+    for mode in [IdentityMode::Strict, IdentityMode::Attributed] {
+        verified_t3_and_paseo_sessions_write_in(mode);
+    }
+}
+
+fn verified_t3_and_paseo_sessions_write_in(mode: IdentityMode) {
     let f = fx();
     let threads = f.root.join("threads.json");
     write_t3_thread(&threads, &f.work);
     let agents = f.root.join("agents");
     write_paseo_agent(&agents, "agent-flow", &f.work);
     let hosts = SurfaceRegistry::new(Some(PaseoRegistry::new(&agents)), Some(T3Registry::new(&threads)), None)
-        .with_bridge_secret("flow-bridge-secret");
+        .with_bridge_secret("flow-bridge-secret")
+        .with_identity_mode(mode);
     let node: NodeId = "node-flow".parse().unwrap();
     let peer = PeerCredentials { pid: std::process::id(), uid: 1000 };
     let cwd = f.work.to_string_lossy().into_owned();
@@ -400,7 +409,11 @@ fn verified_t3_and_paseo_sessions_write() {
         let credential = hosts.issue_bridge_credential(&verified, node.clone(), now - 5_000, now + 60_000).unwrap();
         let start = json!({ "session": session, "definition": DECIDE, "params": { "dir": f.work } });
         let unsigned = call_with_hosts(&f.store, &hosts, START, start.clone()).unwrap();
-        assert_eq!(code(&unsigned), "caller_refused", "{session}: {unsigned}");
+        let want = match (mode, session.starts_with("t3:")) {
+            (IdentityMode::Attributed, true) => "attribution_missing",
+            _ => "caller_refused",
+        };
+        assert_eq!(code(&unsigned), want, "{mode:?} {session}: {unsigned}");
 
         let mut signed = start;
         signed["cwd"] = json!(cwd);

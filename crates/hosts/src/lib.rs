@@ -13,9 +13,16 @@
 //!   session generations to refuse ID reuse, refuses cross-surface spoofing, and projects
 //!   live permission prompts into [`Need`]s.
 
+pub mod attribution;
 pub mod paseo;
+pub mod read;
 pub mod t3;
 
+pub use attribution::{
+    Attributed, CODEX_THREAD_ID, IdentityMode, ProcStat, ProcessReader, STDIN_SESSION_ID, SystemProcesses,
+    T3CODE_THREAD_ID, ThreadVar, ThreadVars, VarOutcome,
+};
+pub use maestro_core::session::{Attribution, Audit, IdentityFacts, ProcessFacts};
 pub use maestro_core::session::{
     BridgeCredential, BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal,
     MAX_BRIDGE_CREDENTIAL_TTL_MS, NodeId, PeerCredentials, PermissionPrompt, RefusalReason, SessionError,
@@ -25,10 +32,12 @@ pub use paseo::{
     PARENT_AGENT_LABEL, PaseoAgent, PaseoRegistry, PermissionLike, describe_permission, permission_request_id,
     resolve_real, within,
 };
-pub use t3::{T3Registry, T3Thread, is_safe_t3_id};
+pub use t3::{LiveThreads, MAX_T3_ID, Resolution, T3Registry, T3Thread, is_safe_t3_id};
 
+use maestro_core::SourceError;
 use maestro_core::need::Need;
 use paseo::{check_peer, is_safe_id, short_id};
+use read::Read;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -39,7 +48,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,15 +529,25 @@ impl DirectRegistry {
 
     pub fn from_file(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
+        // What reads now; every later read of the file goes through the read rule again.
         let mut sessions = HashMap::new();
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
-        {
+        if let Ok(rows) = Self::rows_in(&path) {
             for s in rows {
                 sessions.insert(s.id.clone(), s);
             }
         }
         Self { sessions: Mutex::new(sessions), file_path: Some(path), expected_uid: None }
+    }
+
+    /// The registry file's sessions by the [`read`] rule: none when it is not there; an error, with
+    /// why, when it does not read or parse.
+    fn rows_in(path: &Path) -> Result<Vec<DirectSession>, String> {
+        match read::read_text(path) {
+            Read::Absent => Ok(Vec::new()),
+            Read::Present(text) => serde_json::from_str::<Vec<DirectSession>>(&text)
+                .map_err(|e| format!("the registry file does not parse: {e}")),
+            Read::Unreadable(why) => Err(why),
+        }
     }
 
     pub fn with_expected_uid(mut self, uid: u32) -> Self {
@@ -552,32 +571,55 @@ impl DirectRegistry {
     }
 
     pub fn find(&self, id: &str) -> Option<DirectSession> {
+        self.lookup(id).ok().flatten()
+    }
+
+    /// Session `id`, or why the registry file did not read (BRO-3846): a configured file that does
+    /// not read or parse fails identity closed, never falls back to the sessions held in memory.
+    fn lookup(&self, id: &str) -> Result<Option<DirectSession>, IdentityRefusal> {
         if !is_safe_id(id) {
-            return None;
+            return Ok(None);
         }
-        if let Some(path) = &self.file_path
-            && let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
-            && let Some(found) = rows.into_iter().find(|s| s.id == id)
-        {
-            return Some(found);
+        if let Some(path) = &self.file_path {
+            let rows = Self::rows_in(path).map_err(|why| {
+                IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("Direct registry: {why}."))
+            })?;
+            if let Some(found) = rows.into_iter().find(|s| s.id == id) {
+                return Ok(Some(found));
+            }
         }
-        self.sessions.lock().unwrap().get(id).cloned()
+        Ok(self.sessions.lock().map(|s| s.get(id).cloned()).unwrap_or_default())
     }
 
     pub fn list_live_sessions(&self) -> Vec<DirectSession> {
-        let mut combined: HashMap<String, DirectSession> = self.sessions.lock().unwrap().clone();
-        if let Some(path) = &self.file_path
-            && let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(rows) = serde_json::from_str::<Vec<DirectSession>>(&text)
-        {
-            for s in rows {
-                combined.insert(s.id.clone(), s);
+        self.list_live_report().0
+    }
+
+    /// The live sessions, and what could not be read (BRO-3846): a configured registry file that
+    /// is missing, does not read or does not parse is unread, never only the in-memory sessions
+    /// shown as complete.
+    pub fn list_live_report(&self) -> (Vec<DirectSession>, Vec<(String, String)>) {
+        let mut combined: HashMap<String, DirectSession> = self.sessions.lock().map(|s| s.clone()).unwrap_or_default();
+        let mut unread = Vec::new();
+        if let Some(path) = &self.file_path {
+            let at = format!("direct registry {}", path.display());
+            // Configured but not there is unread too: the listing cannot show its sessions.
+            let rows = match read::is_file(path) {
+                Read::Absent => Err(format!("the registry file {} is not there", path.display())),
+                _ => Self::rows_in(path),
+            };
+            match rows {
+                Ok(rows) => {
+                    for s in rows {
+                        combined.insert(s.id.clone(), s);
+                    }
+                }
+                Err(why) => unread.push((at, why)),
             }
         }
         let mut out: Vec<DirectSession> = combined.into_values().filter(|s| s.liveness.is_live()).collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
-        out
+        (out, unread)
     }
 
     pub fn verify(&self, claim: &CallerClaim) -> Result<VerifiedSession, IdentityRefusal> {
@@ -603,7 +645,7 @@ impl DirectRegistry {
                 format!("The shell's folder must be an absolute path, not {cwd}."),
             ));
         }
-        let session = match (self.find(id), claim.token.as_deref().filter(|t| !t.is_empty())) {
+        let session = match (self.lookup(id)?, claim.token.as_deref().filter(|t| !t.is_empty())) {
             (Some(s), Some(t))
                 if !s.token.is_empty() && Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes()) =>
             {
@@ -657,6 +699,15 @@ pub struct SurfaceRegistry {
     bridge_secret: Option<Vec<u8>>,
     generations_file: Option<PathBuf>,
     generations: Mutex<GenerationLedger>,
+    /// `MAESTRO_IDENTITY` (BRO-3846).
+    mode: IdentityMode,
+    /// The claiming process's thread variables, captured once at start (BRO-3846).
+    thread_vars: ThreadVars,
+    /// The T3 root was found (`T3CODE_HOME` or `~/.t3`) rather than configured (`MAESTRO_T3_HOME`):
+    /// a claimless agent request is then unverified, as it was before the root was found.
+    t3_found: bool,
+    /// Where the audit facts are read from; `None` is the running system.
+    processes: Option<Arc<dyn ProcessReader>>,
 }
 
 impl SurfaceRegistry {
@@ -673,19 +724,56 @@ impl SurfaceRegistry {
         }
     }
 
+    /// The T3 registry root (BRO-3846): `MAESTRO_T3_HOME`, then `T3CODE_HOME` (which T3 sets), then
+    /// `~/.t3` when a registry is there. The flag says whether it was found rather than configured.
+    ///
+    /// An explicit `MAESTRO_T3_HOME` or `T3CODE_HOME` is configured: a registry missing there is
+    /// unread. The `~/.t3` fallback is found only when a registry database or snapshot is under it,
+    /// by T3's own `locate` and the [`read`] rule: one there is found; one whose probe does not read
+    /// (an inaccessible home, an unreadable folder) is found but unreadable, which every reader then
+    /// reports; none there (a `~/.t3` of client config, logs or worktrees only) is no registry, and
+    /// the owner's views stay complete.
+    pub fn t3_root_from(
+        maestro_t3_home: Option<&str>,
+        t3code_home: Option<&str>,
+        home: Option<&Path>,
+    ) -> Option<(PathBuf, bool)> {
+        if let Some(p) = maestro_t3_home.filter(|s| !s.is_empty()) {
+            return Some((PathBuf::from(p), false));
+        }
+        if let Some(p) = t3code_home.filter(|s| !s.is_empty()) {
+            return Some((PathBuf::from(p), true));
+        }
+        let t3 = home?.join(".t3");
+        match T3Registry::new(&t3).locate() {
+            Read::Present(_) | Read::Unreadable(_) => Some((t3, true)),
+            Read::Absent => None,
+        }
+    }
+
     /// Construct a `SurfaceRegistry` from environment variables (`MAESTRO_PASEO_AGENTS_DIR`,
-    /// `MAESTRO_T3_HOME`, `MAESTRO_DIRECT_REGISTRY`, `MAESTRO_GENERATIONS_FILE`,
-    /// `MAESTRO_NODE`, `MAESTRO_BRIDGE_SECRET`).
+    /// `MAESTRO_T3_HOME` or `T3CODE_HOME` or `~/.t3`, `MAESTRO_DIRECT_REGISTRY`,
+    /// `MAESTRO_GENERATIONS_FILE`, `MAESTRO_NODE`, `MAESTRO_BRIDGE_SECRET`, `MAESTRO_IDENTITY`), and
+    /// the claiming process's thread variables (`T3CODE_THREAD_ID`, `CODEX_THREAD_ID`).
     pub fn from_env() -> Self {
         let paseo = std::env::var("MAESTRO_PASEO_AGENTS_DIR")
             .ok()
             .filter(|s| !s.is_empty())
             .map(|p| PaseoRegistry::new(PathBuf::from(p)));
-        let t3 =
-            std::env::var("MAESTRO_T3_HOME").ok().filter(|s| !s.is_empty()).map(|p| T3Registry::new(PathBuf::from(p)));
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+        let root = Self::t3_root_from(
+            std::env::var("MAESTRO_T3_HOME").ok().as_deref(),
+            std::env::var("T3CODE_HOME").ok().as_deref(),
+            home.as_deref(),
+        );
+        let t3_found = root.as_ref().is_some_and(|(_, found)| *found);
+        let t3 = root.map(|(p, _)| T3Registry::new(p));
         let direct =
             std::env::var("MAESTRO_DIRECT_REGISTRY").ok().filter(|s| !s.is_empty()).map(DirectRegistry::from_file);
-        let mut reg = Self::new(paseo, t3, direct);
+        let mut reg = Self::new(paseo, t3, direct)
+            .with_identity_mode(IdentityMode::parse(std::env::var("MAESTRO_IDENTITY").ok().as_deref()))
+            .with_thread_vars(ThreadVars::from_env());
+        reg.t3_found = t3_found;
         if let Ok(gen_file) = std::env::var("MAESTRO_GENERATIONS_FILE")
             && !gen_file.is_empty()
         {
@@ -702,6 +790,94 @@ impl SurfaceRegistry {
             reg = reg.with_bridge_secret(secret.into_bytes());
         }
         reg
+    }
+
+    pub fn with_identity_mode(mut self, mode: IdentityMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn identity_mode(&self) -> IdentityMode {
+        self.mode
+    }
+
+    /// The claiming process's thread variables, as captured (tests pass their own).
+    pub fn with_thread_vars(mut self, vars: ThreadVars) -> Self {
+        self.thread_vars = vars;
+        self
+    }
+
+    pub fn thread_vars(&self) -> &ThreadVars {
+        &self.thread_vars
+    }
+
+    /// Mark the T3 root as found (`T3CODE_HOME`, `~/.t3`) rather than configured.
+    pub fn with_t3_found(mut self, found: bool) -> Self {
+        self.t3_found = found;
+        self
+    }
+
+    /// Where the audit facts are read from (tests inject a reader).
+    pub fn with_process_reader(mut self, reader: Arc<dyn ProcessReader>) -> Self {
+        self.processes = Some(reader);
+        self
+    }
+
+    /// Whether `surface` has a registry here that was configured, not merely found: a claimless
+    /// agent request from a surface with none is unverified, never refused (BRO-3846 keeps that
+    /// for the T3 root it now finds through `T3CODE_HOME` or `~/.t3`).
+    pub fn has_configured_surface(&self, surface: &Surface) -> bool {
+        self.has_surface(surface) && !(surface == &Surface::T3 && self.t3_found)
+    }
+
+    /// This host's T3 environment id, the canonical form of a `local` or `-` T3 session.
+    pub fn t3_environment(&self) -> Option<String> {
+        self.t3.as_ref().and_then(T3Registry::environment_id)
+    }
+
+    /// What each of `vars` resolves to in T3's registry (BRO-3846). With no T3 registry here, each
+    /// is unreadable, never absent.
+    pub fn resolve_each(&self, vars: &ThreadVars) -> Vec<(ThreadVar, VarOutcome)> {
+        let environment = self.t3_environment();
+        vars.iter()
+            .map(|v| {
+                let outcome = match &self.t3 {
+                    None => VarOutcome::Unreadable("no T3 registry is found on this host".to_string()),
+                    Some(t3) => match t3.resolve(&v.value, v.native) {
+                        Ok(Resolution::Thread(t)) => VarOutcome::Thread {
+                            id: t.id,
+                            environment: t.environment_id.or_else(|| environment.clone()),
+                        },
+                        Ok(Resolution::Unresolved(why)) => VarOutcome::Unresolved(why),
+                        Err(r) => VarOutcome::Unreadable(r.message),
+                    },
+                };
+                (v.clone(), outcome)
+            })
+            .collect()
+    }
+
+    /// The captured variables, resolved and combined by the spec's precedence.
+    pub fn attribution(&self) -> Attributed {
+        attribution::combine(&self.resolve_each(&self.thread_vars))
+    }
+
+    /// The audit facts for a write accepted under `mode` (`t3-attributed`, `bridge-credential`,
+    /// `direct-token`), about this process: the claiming process.
+    pub fn audit(&self, mode: &str, attribution: Option<&Attribution>) -> Audit {
+        let system = SystemProcesses;
+        let reader: &dyn ProcessReader = match &self.processes {
+            Some(r) => r.as_ref(),
+            None => &system,
+        };
+        Audit {
+            identity: IdentityFacts {
+                mode: mode.to_string(),
+                variable: attribution.map(|a| a.variable.clone()),
+                thread: attribution.map(|a| a.thread.clone()),
+            },
+            process: attribution::process_facts(reader, std::process::id(), self.thread_vars.names()),
+        }
     }
 
     pub fn with_expected_node(mut self, node: NodeId) -> Self {
@@ -954,10 +1130,14 @@ impl SurfaceRegistry {
         {
             return Err(SessionError::WrongNode { expected: want_node.clone(), actual: actual_node.clone() });
         }
+        // The one exception (BRO-3846): an unsigned T3 claim the caller check attributed from the
+        // claiming process's own thread variable. `attribution` is never read from arguments.
+        let attributed = claim.surface == Surface::T3 && claim.attribution.is_some();
         if self.bridge_secret.is_some()
             && claim.surface != Surface::Direct
             && claim.credential.is_none()
             && claim.peer.is_none()
+            && !attributed
         {
             return Err(SessionError::Refused(IdentityRefusal::new(
                 RefusalReason::InvalidToken,
@@ -1118,7 +1298,19 @@ impl SurfaceRegistry {
                         detail: "T3 registry is not configured on this host".to_string(),
                     });
                 };
-                t3.verify(claim).map_err(Into::into)
+                match (&claim.attribution, &claim.credential) {
+                    (Some(a), None) => {
+                        if claim.session_id.as_deref() != Some(a.thread.as_str()) {
+                            return Err(IdentityRefusal::new(
+                                RefusalReason::ThreadMismatch,
+                                format!("{} names thread {}, not the claimed session.", a.variable, a.thread),
+                            )
+                            .into());
+                        }
+                        t3.verify_attributed(&a.thread, claim.node.as_ref()).map_err(Into::into)
+                    }
+                    _ => t3.verify(claim).map_err(Into::into),
+                }
             }
             Surface::Direct => {
                 let Some(direct) = &self.direct else {
@@ -1203,31 +1395,88 @@ impl SurfaceRegistry {
     /// Enumerate all live permission prompts across configured Paseo, T3, and Direct registries
     /// and convert them into [`Need`] items.
     pub fn live_permission_needs(&self, project: Option<&str>, since: Option<&str>) -> Vec<Need> {
-        let mut out = Vec::new();
+        self.live_permission_report(project, since).needs
+    }
+
+    /// [`Self::live_permission_needs`], and what could not be read (BRO-3846): T3 threads whose
+    /// payload did not read (their prompts are still listed), snapshot rows that did not read, or
+    /// a T3 registry that did not read at all. A view must not show the needs as complete while
+    /// `unreadable` holds anything.
+    pub fn live_permission_report(&self, project: Option<&str>, since: Option<&str>) -> PermissionNeeds {
+        // The one boundary (BRO-3846): every configured surface's read failure becomes an unread
+        // source here: a registry missing, inaccessible or disconnected, or an entry that does not
+        // read. A surface with no registry configured has nothing to read and adds nothing.
+        let mut report = PermissionNeeds::default();
+        let (project, since) = (project.map(str::to_string), since.map(str::to_string));
+        let mut add = |surface: Surface, id: String, prompts: &[PermissionPrompt], environment: Option<String>| {
+            let sref = SessionRef { surface, environment, id };
+            for prompt in prompts {
+                report.needs.push(prompt.to_need(&sref, project.clone(), since.clone()));
+            }
+        };
+        let mut unread: Vec<UnreadSource> = Vec::new();
+        let mut unreadable = |surface: Surface, list: Vec<(String, String)>| {
+            unread.extend(
+                list.into_iter()
+                    .map(|(at, reason)| UnreadSource { surface: surface.clone(), error: SourceError { at, reason } }),
+            );
+        };
         if let Some(paseo) = &self.paseo {
-            for agent in paseo.list_live_agents() {
-                let sref = SessionRef { surface: Surface::Paseo, environment: None, id: agent.id };
-                for prompt in &agent.pending_permissions {
-                    out.push(prompt.to_need(&sref, project.map(str::to_string), since.map(str::to_string)));
-                }
+            let (agents, failed) = paseo.list_live_report();
+            unreadable(Surface::Paseo, failed);
+            for agent in agents {
+                add(Surface::Paseo, agent.id, &agent.pending_permissions, None);
             }
         }
         if let Some(t3) = &self.t3 {
-            for thread in t3.list_live_threads() {
-                let sref = SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id };
-                for prompt in &thread.pending_permissions {
-                    out.push(prompt.to_need(&sref, project.map(str::to_string), since.map(str::to_string)));
-                }
+            let listed = t3.list_live_report();
+            unreadable(Surface::T3, listed.unreadable);
+            for thread in listed.threads {
+                add(Surface::T3, thread.id, &thread.pending_permissions, thread.environment_id);
             }
         }
         if let Some(direct) = &self.direct {
-            for session in direct.list_live_sessions() {
-                let sref = SessionRef { surface: Surface::Direct, environment: None, id: session.id };
-                for prompt in &session.pending_permissions {
-                    out.push(prompt.to_need(&sref, project.map(str::to_string), since.map(str::to_string)));
-                }
+            let (sessions, failed) = direct.list_live_report();
+            unreadable(Surface::Direct, failed);
+            for session in sessions {
+                add(Surface::Direct, session.id, &session.pending_permissions, None);
+            }
+        }
+        report.unreadable = unread;
+        report
+    }
+}
+
+/// Live permission prompts as needs, and the sources that could not be read for them.
+#[derive(Debug, Clone, Default)]
+pub struct PermissionNeeds {
+    pub needs: Vec<Need>,
+    pub unreadable: Vec<UnreadSource>,
+}
+
+impl PermissionNeeds {
+    /// The unread sources as a section's errors.
+    pub fn errors(&self) -> Vec<SourceError> {
+        self.unreadable.iter().map(|u| u.error.clone()).collect()
+    }
+
+    /// Each surface with an unread source, and how many, in surface order: what a view names as
+    /// unread so its needs never look complete when they are not.
+    pub fn degraded_surfaces(&self) -> Vec<(Surface, usize)> {
+        let mut out: Vec<(Surface, usize)> = Vec::new();
+        for u in &self.unreadable {
+            match out.iter_mut().find(|(s, _)| *s == u.surface) {
+                Some((_, n)) => *n += 1,
+                None => out.push((u.surface.clone(), 1)),
             }
         }
         out
     }
+}
+
+/// A source a permission listing could not read, and the surface it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadSource {
+    pub surface: Surface,
+    pub error: SourceError,
 }

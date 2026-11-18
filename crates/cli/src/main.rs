@@ -190,8 +190,9 @@ enum Command {
     #[command(hide = true)]
     ParityEval,
     /// A flow's steps, through the flow kernel. Each prints the JSON its maestro_flow tool returns,
-    /// and exits 1 on a refusal. Writes need a verified session:
-    /// a Direct launch token (MAESTRO_DIRECT_TOKEN) or a bridge credential (MAESTRO_BRIDGE_CREDENTIAL).
+    /// and exits 1 on a refusal. Writes need a verified session: a Direct launch token
+    /// (MAESTRO_DIRECT_TOKEN), a bridge credential (MAESTRO_BRIDGE_CREDENTIAL), or, in a T3 thread,
+    /// the thread's own variable (T3CODE_THREAD_ID or CODEX_THREAD_ID), which needs no --session.
     Flow {
         #[command(subcommand)]
         command: FlowCommand,
@@ -247,7 +248,7 @@ enum FlowCommand {
     /// Start an instance of a flow, owned by this session.
     Start {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         /// The definition's YAML file; `-` reads it from stdin.
         #[arg(long)]
         definition: String,
@@ -263,7 +264,7 @@ enum FlowCommand {
     /// Claim an enabled node.
     Claim {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         #[arg(long)]
         instance: String,
         #[arg(long)]
@@ -272,7 +273,7 @@ enum FlowCommand {
     /// Finish a claim: the kernel runs the node's command and records the receipt if it passes.
     Complete {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         #[arg(long)]
         claim_token: String,
         /// The node's outputs as a JSON object.
@@ -285,7 +286,7 @@ enum FlowCommand {
     /// Take a declared edge of a claimed choice node, if its guard holds.
     Choose {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         #[arg(long)]
         claim_token: String,
         #[arg(long)]
@@ -323,7 +324,7 @@ enum FlowCommand {
     /// Extend a claim's lease.
     Heartbeat {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         #[arg(long)]
         claim_token: String,
     },
@@ -331,7 +332,7 @@ enum FlowCommand {
     /// answers ledger once there is one. Call it again until it says answered.
     Ask {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         #[arg(long)]
         instance: String,
         #[arg(long)]
@@ -349,7 +350,7 @@ enum FlowCommand {
     /// --ledger and --ask) asks again.
     ProposeAdoption {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         #[arg(long)]
         instance: String,
         /// The asks ledger to file into (first call, or with --again).
@@ -368,7 +369,7 @@ enum FlowCommand {
     /// again.
     ProposeRetirement {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         #[arg(long)]
         instance: String,
         /// The asks ledger to file into (first call, or with --again).
@@ -386,7 +387,7 @@ enum FlowCommand {
     /// writes nothing.
     Open {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
     },
     /// The Stop-hook gate: run by Claude Code or Codex as a Stop hook. Reads the hook's JSON on
     /// stdin and refuses the final message, in the harness's format, while an instance this
@@ -444,6 +445,15 @@ struct SessionArg {
     /// This session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`.
     #[arg(long, env = "MAESTRO_SESSION")]
     session: String,
+}
+
+/// A flow verb's session: optional (BRO-3846). Omitted in a T3 thread, the verb acts for the thread
+/// the process's own thread variable names (`T3CODE_THREAD_ID`, or a Codex shell's `CODEX_THREAD_ID`).
+#[derive(clap::Args)]
+struct FlowSessionArg {
+    /// This session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread.
+    #[arg(long, env = "MAESTRO_SESSION")]
+    session: Option<String>,
 }
 
 #[derive(Subcommand)]

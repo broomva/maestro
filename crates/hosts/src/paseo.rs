@@ -18,6 +18,8 @@ use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::read::{self, Read};
+
 /// Label key recording which Paseo agent started a child session (`server/labels.ts`).
 pub const PARENT_AGENT_LABEL: &str = "paseo.parent-agent-id";
 
@@ -47,6 +49,120 @@ pub struct PermissionLike {
     pub input: Option<serde_json::Map<String, Value>>,
 }
 
+/// The one rule for a pending permission record (BRO-3863), for every surface: Paseo agent files,
+/// T3 snapshot rows and T3 runtime requests alike. It reads keys by presence and type, never by
+/// truthiness. The tool name is `toolName` when that key is present, else `name` when that key is
+/// present; the first present key governs, and it must hold a non-blank string, else the record
+/// is unread (`""`, `"   "`, `0`, `false`, `null`, `[]` all are). A record with neither key is a
+/// prompt named by its `kind` (a T3 runtime request's); one with neither key nor kind is unread.
+/// `id`, `title`, `description` and `input` are optional and typed: a wrong type is ignored.
+pub(crate) fn permission_record(
+    record: &serde_json::Map<String, Value>,
+    kind: Option<&str>,
+) -> Result<PermissionLike, String> {
+    let name = if let Some(v) = record.get("toolName") {
+        tool_name(v, "toolName")?
+    } else if let Some(v) = record.get("name") {
+        tool_name(v, "name")?
+    } else {
+        match kind.map(str::trim).filter(|k| !k.is_empty()) {
+            Some(k) => k.to_string(),
+            None => return Err("names no tool".to_string()),
+        }
+    };
+    let text = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_string);
+    Ok(PermissionLike {
+        id: text("id"),
+        name,
+        title: text("title"),
+        description: text("description"),
+        input: record.get("input").and_then(Value::as_object).cloned(),
+    })
+}
+
+fn tool_name(value: &Value, key: &str) -> Result<String, String> {
+    match value.as_str().filter(|s| !s.trim().is_empty()) {
+        Some(name) => Ok(name.to_string()),
+        None => Err(format!("has a tool name that is not a non-blank string (`{key}`)")),
+    }
+}
+
+/// A session's pending permission records, each a prompt or an unread record with why, never
+/// dropped (BRO-3863): a record that is not an object is unread, any other reads by
+/// [`permission_record`]. Records carry no kind, so one naming no tool is unread. Identity is
+/// unaffected: a verified session carries the prompts that decoded, and its lookup's outcome does
+/// not depend on them; only the owner's permission listing reports the unread ones.
+pub(crate) fn decode_permissions(raw: Vec<Value>, cwd: &str, prefix: &str) -> (Vec<PermissionPrompt>, Vec<String>) {
+    let mut prompts = Vec::new();
+    let mut unread = Vec::new();
+    for (i, value) in raw.iter().enumerate() {
+        let Some(record) = value.as_object() else {
+            unread.push(format!("permission record {i} is not an object"));
+            continue;
+        };
+        match permission_record(record, None) {
+            Ok(p) => prompts.push(prompt_of(&p, cwd, prefix)),
+            Err(why) => unread.push(format!("permission record {i} {why}")),
+        }
+    }
+    (prompts, unread)
+}
+
+/// One pending T3 runtime request, raw, as the SQLite reader emits it: the reader does not
+/// interpret its payload (BRO-3863 round 11).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct RawRuntimeRequest {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub payload_json: Option<String>,
+}
+
+/// A T3 thread's pending runtime requests, by the same rule: a payload that is NULL, blank, not
+/// JSON or not an object is unread; any other reads by [`permission_record`] with the request's
+/// kind, so a payload naming no tool (`{}`) is a prompt named by its kind. The request's own id
+/// is the prompt's when it is non-blank, else the payload's `id`.
+pub(crate) fn decode_runtime_requests(
+    raw: Vec<RawRuntimeRequest>,
+    thread: &str,
+    cwd: &str,
+    prefix: &str,
+) -> (Vec<PermissionPrompt>, Vec<String>) {
+    let mut prompts = Vec::new();
+    let mut unread = Vec::new();
+    for req in raw {
+        let what = format!("permission request {} of thread {thread}", req.id.as_deref().unwrap_or("-"));
+        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {
+            None => Err("is empty"),
+            Some(text) => match serde_json::from_str::<Value>(text) {
+                Err(_) => Err("does not parse"),
+                Ok(Value::Object(record)) => Ok(record),
+                Ok(_) => Err("is not an object"),
+            },
+        };
+        let decoded =
+            payload.map_err(str::to_string).and_then(|record| permission_record(&record, req.kind.as_deref()));
+        match decoded {
+            Ok(mut p) => {
+                if let Some(id) = req.id.as_deref().filter(|s| !s.trim().is_empty()) {
+                    p.id = Some(id.to_string());
+                }
+                prompts.push(prompt_of(&p, cwd, prefix));
+            }
+            Err(why) => unread.push(format!("{what} {why}")),
+        }
+    }
+    (prompts, unread)
+}
+
+fn prompt_of(p: &PermissionLike, cwd: &str, prefix: &str) -> PermissionPrompt {
+    let (title, detail) = describe_permission(p, Some(cwd));
+    let request_id = permission_request_id(p, prefix);
+    PermissionPrompt { request_id, title, detail }
+}
+
 /// What Maestro reads from a Paseo registry file (`server/callers.ts` `RegistryAgent`).
 /// Bearer tokens and `persistence` credentials are never read into this struct.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +182,10 @@ pub struct PaseoAgent {
     pub handle_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
+    /// Pending permission records that did not decode, each with why (BRO-3863): never dropped,
+    /// so the owner's permission listing reports them unread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_permissions: Vec<String>,
 }
 
 impl PaseoAgent {
@@ -154,7 +274,7 @@ impl PaseoRegistry {
     }
 
     pub fn is_connected(&self) -> bool {
-        !self.disconnected && self.dir.is_dir()
+        !self.disconnected && matches!(read::is_dir(&self.dir), Read::Present(true))
     }
 
     pub fn dir(&self) -> &Path {
@@ -163,47 +283,125 @@ impl PaseoRegistry {
 
     /// Look up `id` in the Paseo registry (`Callers.find`).
     pub fn find(&self, id: &str) -> Option<PaseoAgent> {
+        self.lookup(id).ok().flatten()
+    }
+
+    /// Agent `id`, or why the registry did not read (BRO-3846), by the [`read`](crate::read) rule:
+    /// an agents folder, an entry of it, or the agent's own file that does not read (or does not
+    /// parse, or names another agent) fails identity closed, never reads as "no such agent".
+    fn lookup(&self, id: &str) -> Result<Option<PaseoAgent>, IdentityRefusal> {
+        let unread =
+            |why: String| IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("Paseo registry: {why}."));
         if self.disconnected || !is_safe_id(id) {
-            return None;
+            return Ok(None);
         }
-        let known = self.found.lock().unwrap().get(id).cloned();
+        let known = self.found.lock().ok().and_then(|f| f.get(id).cloned());
         if let Some(path) = known {
-            if let Some(agent) = Self::read_file(&path, id) {
-                return Some(agent);
+            if let Read::Present(Ok(agent)) = Self::agent_at(&path, id) {
+                return Ok(Some(agent));
             }
-            self.found.lock().unwrap().remove(id);
+            if let Ok(mut f) = self.found.lock() {
+                f.remove(id);
+            }
         }
-        let entries = std::fs::read_dir(&self.dir).ok()?;
-        let mut folders: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-        folders.sort();
+        let folders = match read::dir_entries(&self.dir) {
+            Read::Present(folders) => folders,
+            Read::Absent => return Ok(None),
+            Read::Unreadable(why) => return Err(unread(why)),
+        };
         for folder in folders {
+            let folder = match folder {
+                Read::Present(folder) => folder,
+                Read::Absent => continue,
+                Read::Unreadable(why) => return Err(unread(why)),
+            };
             let path = folder.join(format!("{id}.json"));
-            if let Some(agent) = Self::read_file(&path, id) {
-                self.found.lock().unwrap().insert(id.to_string(), path);
-                return Some(agent);
+            match Self::agent_at(&path, id) {
+                Read::Present(Ok(agent)) => {
+                    if let Ok(mut f) = self.found.lock() {
+                        f.insert(id.to_string(), path);
+                    }
+                    return Ok(Some(agent));
+                }
+                Read::Present(Err(_)) | Read::Absent => {}
+                Read::Unreadable(why) => return Err(unread(why)),
             }
         }
-        None
+        Ok(None)
     }
 
     /// Enumerate all live Paseo agents in the registry.
     pub fn list_live_agents(&self) -> Vec<PaseoAgent> {
+        self.list_live_report().0
+    }
+
+    /// The live agents, and what could not be read (BRO-3846): a disconnected registry, an agents
+    /// folder or agent folder that does not read, or an agent file that does not read, does not
+    /// parse, or names another agent than its file. The listing feeds the owner's permission
+    /// prompts, so none of these may look like an empty, complete list. Files that are no agent
+    /// record (not `*.json`, or not an agent id) are not read failures.
+    pub fn list_live_report(&self) -> (Vec<PaseoAgent>, Vec<(String, String)>) {
+        self.list_with(&read::dir_entries)
+    }
+
+    /// [`Self::list_live_report`] over `list_dir` (tests inject an entry that does not read).
+    fn list_with(
+        &self,
+        list_dir: &dyn Fn(&Path) -> Read<Vec<Read<PathBuf>>>,
+    ) -> (Vec<PaseoAgent>, Vec<(String, String)>) {
+        let mut unread = Vec::new();
+        let at = |p: &Path| format!("paseo registry {}", p.display());
         if self.disconnected {
-            return Vec::new();
+            unread.push((at(&self.dir), "the Paseo registry is disconnected".to_string()));
+            return (Vec::new(), unread);
         }
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return Vec::new();
+        let folders = match list_dir(&self.dir) {
+            Read::Present(folders) => folders,
+            Read::Absent => {
+                unread.push((at(&self.dir), "the agents folder does not read: it is not there".to_string()));
+                return (Vec::new(), unread);
+            }
+            Read::Unreadable(why) => {
+                unread.push((at(&self.dir), format!("the agents folder does not read: {why}")));
+                return (Vec::new(), unread);
+            }
         };
-        let mut folders: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-        folders.sort();
         let mut out = Vec::new();
         for folder in folders {
-            let Ok(files) = std::fs::read_dir(&folder) else {
-                continue;
+            let folder = match folder {
+                Read::Present(folder) => folder,
+                Read::Absent => continue,
+                Read::Unreadable(why) => {
+                    unread.push((at(&self.dir), why));
+                    continue;
+                }
             };
-            let mut paths: Vec<PathBuf> = files.filter_map(|e| e.ok().map(|e| e.path())).collect();
-            paths.sort();
+            // An entry that is no folder holds no agents; one whose kind cannot be told is unread.
+            match read::is_dir(&folder) {
+                Read::Present(true) => {}
+                Read::Present(false) | Read::Absent => continue,
+                Read::Unreadable(why) => {
+                    unread.push((at(&folder), why));
+                    continue;
+                }
+            }
+            let paths = match list_dir(&folder) {
+                Read::Present(paths) => paths,
+                Read::Absent => continue,
+                Read::Unreadable(why) => {
+                    unread.push((at(&folder), format!("the agent folder does not read: {why}")));
+                    continue;
+                }
+            };
             for path in paths {
+                let path = match path {
+                    Read::Present(path) => path,
+                    Read::Absent => continue,
+                    Read::Unreadable(why) => {
+                        unread.push((at(&folder), why));
+                        continue;
+                    }
+                };
                 if path.extension().and_then(|e| e.to_str()) != Some("json") {
                     continue;
                 }
@@ -213,21 +411,38 @@ impl PaseoRegistry {
                 if !is_safe_id(stem) {
                     continue;
                 }
-                if let Some(agent) = Self::read_file(&path, stem)
-                    && agent.liveness().is_live()
-                {
-                    out.push(agent);
+                match Self::agent_at(&path, stem) {
+                    Read::Present(Ok(agent)) if agent.liveness().is_live() => {
+                        for why in &agent.unread_permissions {
+                            unread.push((at(&path), why.clone()));
+                        }
+                        out.push(agent);
+                    }
+                    Read::Present(Ok(_)) | Read::Absent => {}
+                    Read::Present(Err(why)) | Read::Unreadable(why) => unread.push((at(&path), why)),
                 }
             }
         }
-        out
+        (out, unread)
     }
 
-    fn read_file(path: &Path, expected_id: &str) -> Option<PaseoAgent> {
-        let text = std::fs::read_to_string(path).ok()?;
-        let parsed: RawRegistryFile = serde_json::from_str(&text).ok()?;
+    /// The agent file at `path` by the [`read`](crate::read) rule: absent when it is not there;
+    /// unreadable, with why, when it does not read. A file that reads but does not parse, or names
+    /// another agent, is `Present(Err(why))`: identity takes it as no such agent (the plugin's own
+    /// rule, `callers-golden.json`), the listing as an unread entry.
+    fn agent_at(path: &Path, expected_id: &str) -> Read<Result<PaseoAgent, String>> {
+        match read::read_text(path) {
+            Read::Absent => Read::Absent,
+            Read::Unreadable(why) => Read::Unreadable(format!("the agent file does not read: {why}")),
+            Read::Present(text) => Read::Present(Self::parse_agent(&text, expected_id)),
+        }
+    }
+
+    fn parse_agent(text: &str, expected_id: &str) -> Result<PaseoAgent, String> {
+        let parsed: RawRegistryFile =
+            serde_json::from_str(text).map_err(|e| format!("the agent file does not parse: {e}"))?;
         if parsed.id != expected_id {
-            return None;
+            return Err(format!("the agent file does not name agent {expected_id}"));
         }
         let parent = parsed
             .labels
@@ -235,18 +450,9 @@ impl PaseoRegistry {
             .and_then(|labels| labels.get(PARENT_AGENT_LABEL))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let pending_permissions = parsed
-            .pending_permissions
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|raw| serde_json::from_value::<PermissionLike>(raw).ok())
-            .map(|raw| {
-                let (title, detail) = describe_permission(&raw, Some(&parsed.cwd));
-                let request_id = permission_request_id(&raw, "perm");
-                PermissionPrompt { request_id, title, detail }
-            })
-            .collect();
-        Some(PaseoAgent {
+        let (pending_permissions, unread_permissions) =
+            decode_permissions(parsed.pending_permissions.unwrap_or_default(), &parsed.cwd, "perm");
+        Ok(PaseoAgent {
             id: parsed.id,
             cwd: parsed.cwd,
             archived_at: parsed.archived_at,
@@ -257,6 +463,7 @@ impl PaseoRegistry {
             pid: parsed.pid,
             handle_id: parsed.persistence.and_then(|p| p.session_id),
             pending_permissions,
+            unread_permissions,
         })
     }
 
@@ -290,7 +497,7 @@ impl PaseoRegistry {
                 format!("The shell's folder must be an absolute path, not {cwd}."),
             ));
         }
-        let Some(agent) = self.find(agent_id) else {
+        let Some(agent) = self.lookup(agent_id)? else {
             return Err(IdentityRefusal::new(
                 RefusalReason::NotFound,
                 format!("No Paseo session has the id {agent_id}."),
@@ -551,4 +758,57 @@ pub fn permission_request_id(raw: &PermissionLike, prefix: &str) -> String {
         let _ = write!(&mut hex, "{b:02x}");
     }
     format!("{prefix}-{hex}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BRO-3863 round 11: a runtime request's own id is its prompt's when non-blank; a blank one
+    /// gives way to the payload's `id`, and with neither the prompt's id is derived.
+    #[test]
+    fn a_runtime_request_is_known_by_its_own_id_else_its_payloads() {
+        let req = |id: Option<&str>, payload: &str| RawRuntimeRequest {
+            id: id.map(str::to_string),
+            kind: Some("approval".to_string()),
+            payload_json: Some(payload.to_string()),
+        };
+        let raw = vec![
+            req(Some("req-1"), r#"{"id": "p-1", "toolName": "Deploy"}"#),
+            req(Some("  "), r#"{"id": "p-2", "toolName": "Deploy"}"#),
+            req(None, r#"{"toolName": "Deploy"}"#),
+        ];
+        let (prompts, unread) = decode_runtime_requests(raw, "mcp:a", "/w", "t3-perm");
+        assert!(unread.is_empty(), "{unread:?}");
+        let ids: Vec<&str> = prompts.iter().map(|p| p.request_id.as_str()).collect();
+        assert_eq!(ids[..2], ["req-1", "p-2"]);
+        assert!(ids[2].starts_with("t3-perm-"), "{ids:?}");
+    }
+
+    /// Codex's joint round 7: a directory entry whose read fails is an unread item of the listing,
+    /// never an agent silently left out. A real `read_dir` cannot be made to fail one entry, so the
+    /// lister is injected; the agent beside it is still listed.
+    #[test]
+    fn a_directory_entry_that_does_not_read_is_unread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let agent = serde_json::json!({ "id": "agent-a", "cwd": "/w", "lastStatus": "running" });
+        std::fs::write(work.join("agent-a.json"), agent.to_string()).unwrap();
+        let registry = PaseoRegistry::new(tmp.path());
+        let failing = |dir: &Path| match read::dir_entries(dir) {
+            Read::Present(mut entries) => {
+                entries.push(Read::Unreadable(format!("an entry of {} does not read: injected", dir.display())));
+                Read::Present(entries)
+            }
+            other => other,
+        };
+        let (agents, unread) = registry.list_with(&failing);
+        assert_eq!(agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["agent-a"]);
+        // One at the agents folder, one at the agent folder: each entry that did not read.
+        assert_eq!(unread.len(), 2, "{unread:?}");
+        assert!(unread.iter().all(|(_, why)| why.contains("injected")), "{unread:?}");
+        let (_, clean) = registry.list_live_report();
+        assert!(clean.is_empty(), "{clean:?}");
+    }
 }

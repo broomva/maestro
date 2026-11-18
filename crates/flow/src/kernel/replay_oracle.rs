@@ -283,8 +283,14 @@ fn gen_event(rng: &mut Rng, ir: &Ir, st: &Status, seq: u64, at: Timestamp) -> Ev
 fn run_def(name: &str, yaml: &str, seeds: u64, len: usize) -> (usize, usize) {
     let flow = compile(yaml).unwrap_or_else(|e| panic!("{name}: {e}"));
     let params = if name == "verify" { json!({"repo": "r", "head": "h", "check": "c"}) } else { json!({}) };
-    let started =
-        Started { flow: flow.name(), ir_hash: flow.hash().into(), ir: flow.ir().clone(), params, owner: None };
+    let started = Started {
+        flow: flow.name(),
+        ir_hash: flow.hash().into(),
+        ir: flow.ir().clone(),
+        params,
+        owner: None,
+        audit: None,
+    };
     let ir = flow.ir();
     let mut checks = 0;
     let mut accepted = 0;
@@ -394,6 +400,7 @@ fn cross3_outside_reader_of_body_node_sees_verdict_revoked_by_upstream_of_other_
         ir: flow.ir().clone(),
         params: json!({}),
         owner: None,
+        audit: None,
     };
     let mut events = vec![mk(1, t0(), "Started", serde_json::to_value(&started).unwrap())];
     let push = |events: &mut Vec<Event>, kind: &str, body: Value| {

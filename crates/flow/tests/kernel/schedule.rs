@@ -88,6 +88,7 @@ impl Fx {
             verify,
             performer: None,
             tool_use_id: None,
+            audit: None,
         };
         let at = self.append(fi, c.to_event().unwrap());
         if exit.is_some() { ran.min(at) } else { at }
@@ -96,8 +97,16 @@ impl Fx {
     fn choose(&mut self, fi: &InstanceId, node: &str, at: &[(&str, u32)], edge: &str) {
         let inputs = self.inputs(fi, node);
         let (iteration, edge) = (iter(at), edge.into());
-        let c =
-            Chosen { node: node.into(), iteration, attempt: 1, edge, inputs, tool_use_id: None, guard_digest: None };
+        let c = Chosen {
+            node: node.into(),
+            iteration,
+            attempt: 1,
+            edge,
+            inputs,
+            tool_use_id: None,
+            guard_digest: None,
+            audit: None,
+        };
         self.append(fi, c.to_event().unwrap());
     }
 
@@ -676,8 +685,14 @@ fn an_agent_this_build_lacks_is_an_unknown_agent_launch_spec_never_none() {
             launch.performer = Some("agent:ghost".into());
         }
     }
-    let started =
-        Started { flow: f.flow.name(), ir_hash: content_hash(&ir).unwrap(), ir, params: json!({}), owner: None };
+    let started = Started {
+        flow: f.flow.name(),
+        ir_hash: content_hash(&ir).unwrap(),
+        ir,
+        params: json!({}),
+        owner: None,
+        audit: None,
+    };
     let fi = id("fi_ghost");
     f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
     let n = f.next(&fi, Timestamp::now());
@@ -891,7 +906,14 @@ fn an_event_naming_an_undeclared_node_or_repeat_counts_for_nothing_whatever_its_
         f.append(&fi, ghost(kind));
     }
     f.verdict(&fi, "ghost", 0, true);
-    let refused = Refused { node: "a".into(), iteration: iter(&[]), attempt: 1, code: "x".into(), reason: "x".into() };
+    let refused = Refused {
+        node: "a".into(),
+        iteration: iter(&[]),
+        attempt: 1,
+        code: "x".into(),
+        reason: "x".into(),
+        audit: None,
+    };
     f.append(&fi, refused.to_event().unwrap());
     let s = f.try_status(&fi).unwrap();
     let ghosts: Vec<_> =
@@ -910,6 +932,7 @@ fn an_instance_that_does_not_replay_is_an_error_never_an_empty_flow() {
         ir: f.flow.ir().clone(),
         params: json!({}),
         owner: None,
+        audit: None,
     };
     let fresh = |f: &mut Fx, name: &str, first: NewEvent| {
         let fi = id(name);
@@ -1316,6 +1339,7 @@ fn params_and_outputs_nested_too_deep_to_read_back_are_refused_before_anything_i
         verify: None,
         performer: None,
         tool_use_id: None,
+        audit: None,
     };
     let mut guard = f.ledger.lock().unwrap();
     let seq = guard.log(&fi).unwrap().seq();

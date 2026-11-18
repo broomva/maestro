@@ -1109,6 +1109,7 @@ dependencies = [
  "maestro-core",
  "maestro-mcp",
  "maestro-store",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

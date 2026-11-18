@@ -471,3 +471,66 @@ fn a_proposal_is_filed_through_the_cli() {
     // The owner goes on writing.
     ok(m.verified().args(["flow", "claim", "--instance", &fi, "--node-id", "review"]));
 }
+
+/// BRO-3846: in a T3 thread the CLI needs no --session and no credential. The registry is found
+/// through `T3CODE_HOME` and the thread through `T3CODE_THREAD_ID`, or a Codex shell's
+/// `CODEX_THREAD_ID` through its thread's active provider row. `MAESTRO_IDENTITY=strict` turns
+/// attribution off.
+#[test]
+fn a_t3_thread_writes_through_the_cli_by_its_own_variable() {
+    let m = machine();
+    let home = m.root.join("t3home");
+    std::fs::create_dir_all(&home).unwrap();
+    let thread = |id: &str, native: &str| {
+        json!({ "id": id, "cwd": m.work, "provider": "codex", "created_at": "2026-11-17T00:00:00Z",
+                "run_id": "run-1", "active_provider_thread_id": format!("pt:{id}"),
+                "provider_threads": [{ "provider_thread_id": format!("pt:{id}"), "native_id": native }] })
+    };
+    let threads = json!([thread("mcp:thread-a", "native-a"), thread("mcp:thread-c", "native-c")]);
+    std::fs::write(home.join("threads.json"), threads.to_string()).unwrap();
+    std::fs::write(home.join("environment-id"), "env-cli\n").unwrap();
+    let in_thread = |vars: &[(&str, &str)]| {
+        let mut cmd = m.bare();
+        cmd.env_remove("MAESTRO_SESSION").env("T3CODE_HOME", &home);
+        for (k, v) in vars {
+            cmd.env(k, v);
+        }
+        cmd.args(["flow", "start", "--definition"])
+            .arg(m.root.join("decide.yaml"))
+            .args(["--params", &json!({ "dir": m.work }).to_string()]);
+        cmd
+    };
+    let owner = |v: &Value| {
+        let fi = v["instance"].as_str().unwrap();
+        let log = m.root.join("workspace/.broomva/flows/instances").join(fi).join("events.jsonl");
+        let started: Value =
+            serde_json::from_str(std::fs::read_to_string(log).unwrap().lines().next().unwrap()).unwrap();
+        (started["body"]["owner"]["session"]["id"].clone(), started["body"]["audit"]["identity"].clone())
+    };
+    let v = ok(&mut in_thread(&[("T3CODE_THREAD_ID", "mcp:thread-a")]));
+    let (id, identity) = owner(&v);
+    assert_eq!(id, "mcp:thread-a");
+    assert_eq!(identity, json!({ "mode": "t3-attributed", "variable": "T3CODE_THREAD_ID", "thread": "mcp:thread-a" }));
+    let v = ok(&mut in_thread(&[("CODEX_THREAD_ID", "native-c")]));
+    assert_eq!(owner(&v).0, "mcp:thread-c");
+    // `flow open` with no session.
+    let mut open = m.bare();
+    open.env_remove("MAESTRO_SESSION").env("T3CODE_HOME", &home).env("CODEX_THREAD_ID", "native-c");
+    let listed = ok(open.args(["flow", "open"]));
+    assert_eq!(listed["open"]["session"], "t3:env-cli/mcp:thread-c", "{listed}");
+    // Refused: no variable; a variable another thread's session contradicts; strict mode.
+    assert_eq!(refused(&mut in_thread(&[])), "attribution_missing");
+    let mut other = in_thread(&[("T3CODE_THREAD_ID", "mcp:thread-a")]);
+    other.args(["--session", "t3:env-cli/mcp:thread-c"]);
+    assert_eq!(refused(&mut other), "thread_mismatch");
+    let strict = &mut in_thread(&[("T3CODE_THREAD_ID", "mcp:thread-a"), ("MAESTRO_IDENTITY", "strict")]);
+    assert_eq!(refused(strict), "caller_refused");
+    // A Direct launch token from a T3 shell is a claim the variable contradicts.
+    let mut direct = m.verified();
+    direct.env("T3CODE_HOME", &home).env("T3CODE_THREAD_ID", "mcp:thread-a");
+    direct
+        .args(["flow", "start", "--definition"])
+        .arg(m.root.join("decide.yaml"))
+        .args(["--params", &json!({ "dir": m.work }).to_string()]);
+    assert_eq!(refused(&mut direct), "thread_mismatch");
+}

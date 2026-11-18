@@ -555,7 +555,7 @@ mutate $request '            (Self::AskFile, _) => Disposition::Applied,' '     
 mutate $request '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Held,' '            (Self::WorkQueue | Self::ActionRequest, _) => Disposition::Recorded,'
 mutate $mcp '        None => (session.clone(), Principal::Unverified),' '        None => (session.clone(), Principal::Owner { via: "mcp".into() }),'
 # A filed ask whose journal line fails is a failed request; a busy lock exits 75 to retry (P20 r1).
-mutate $mcp '            if let Err(e) = requests::record(&disk.paths, &record) {' '            if let Some(e) = requests::record(&disk.paths, &record).err().filter(|_| false) {'
+mutate $mcp '    if let Err(e) = requests::record(&disk.paths, &record) {' '    if let Some(e) = requests::record(&disk.paths, &record).err().filter(|_| false) {'
 mutate $mcp '        Some(json!({ "filed": { "ledger": ledger, "id": id } })),' '        Some(json!({ "filed": { "ledger": ledger, "id": id }, "busy": true })),'
 mutate $mcp '        Some(json!({ "filed": { "ledger": ledger, "id": id } })),' '        Some(json!({ "filed": { "ledger": ledger, "id": id }, "busy": is_busy(e) })),'
 mutate $locks '        Some(text) => holder_alive(text),' '        Some(_text) => false,'
@@ -714,7 +714,13 @@ mutate $hlb 'if in_t3 && !in_paseo {' 'if false {'
 mutate $hlb 'if in_paseo && !in_t3 {' 'if false {'
 mutate $hlb 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())' 'true'
 mutate $hlb 'if cred.generation != current_gen {' 'if false {'
-mutate $ht 'if self.disconnected {' 'if false {'
+mutate $ht 'if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        check_peer(' 'if false {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        check_peer('
 mutate $ht '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
 mutate $ht '            .filter(|s| !s.trim().is_empty())
             .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));' '            .or(Some(""))
@@ -728,8 +734,11 @@ mutate $hp '            .as_deref()
 mutate $hp 'format!("paseo-owner:{}:{handle_id}", agent.id)' 'format!("paseo-owner:{}:{handle_id}:{:?}", agent.id, agent.pid)'
 mutate $hlb 'format!("direct-owner:{}", hex_sha256(session.token.as_bytes()))' 'format!("direct-owner:{}:{}", session.cwd, hex_sha256(session.token.as_bytes()))'
 mutate $session '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
-mutate $mcp 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if true {'
-mutate $mcp 'if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {' 'if false {'
+mutate $mcp 'if !hosts.has_configured_surface(&session.surface) && !has_claim_meta && !attributed {' 'if true {'
+mutate $mcp '    if arg_cred.is_none()
+        && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none())
+        && !attributed
+    {' '    if false {'
 mutate $mcp 'if packet.scope.project.is_none() && packet.scope.initiative.is_none() {' 'if true {'
 mutate $hlb 'if effective_now_ms < cred.issued_at_ms || effective_now_ms >= cred.expires_at_ms {' 'if false {'
 mutate $hlb 'if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {' 'if false {'
@@ -1201,9 +1210,9 @@ mutate $fk/replay.rs '            seq: log.seq(),
 mutate $fk/write.rs '    let marker = session.owner_marker().filter(|m| !m.is_empty()).ok_or(Refusal::NoOwnerMarker)?;' '    let marker = session.owner_marker().ok_or(Refusal::NoOwnerMarker)?;'
 mutate $fk/replay.rs '    let owner = Some(write::owner(session)?);' '    let owner = write::owner(session).ok();'
 mutate $fk/write.rs '    let Some(owner) = &owners.owner else {' '    let Some(owner) = owners.owner.as_ref().or(Some(&me)) else {'
-mutate $fk/write.rs '    if *owner != me {' '    if false {'
-mutate $fk/write.rs '    if *owner != me {' '    if owner.marker_sha256 != me.marker_sha256 {'
-mutate $fk/write.rs '    if *owner != me {' '    if owner.session != me.session {'
+mutate $fk/write.rs '    if !same_owner(owner, &me) {' '    if false {'
+mutate $fk/write.rs '    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)' '    stored.marker_sha256 == me.marker_sha256'
+mutate $fk/write.rs '    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)' '    stored.session.canonical(host) == me.session.canonical(host)'
 mutate $fk/write.rs '    check_owner(&log, &started, instance, session)?;
     let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {' '    let now = wall(&log)?;
@@ -1585,14 +1594,14 @@ mutate $fx '        if self.max_output == 0 || self.max_output > MAX_OUTPUT {' '
 mf=crates/mcp/src/flow.rs
 mutate $mf '        Ok(Some(me)) => me,
         Ok(None) => {' '        Ok(Some(me)) => me,
-        Ok(None) => VerifiedSession::new(session.clone(), "/", None, None, vec![]).with_owner_marker("forged"),
+        Ok(None) => VerifiedSession::new(session.cloned().unwrap_or_else(|| SessionRef { surface: Surface::T3, environment: None, id: "forged".into() }), "/", None, None, vec![]).with_owner_marker("forged"),
         #[allow(unreachable_patterns)]
         Ok(None) => {'
 mutate $mf '        Err(e) => {
-            let mut v = refusal("caller_refused"' '        Err(_) => VerifiedSession::new(session.clone(), "/", None, None, vec![]).with_owner_marker("forged"),
+            let identity = e.data' '        Err(_) => VerifiedSession::new(session.cloned().unwrap_or_else(|| SessionRef { surface: Surface::T3, environment: None, id: "forged".into() }), "/", None, None, vec![]).with_owner_marker("forged"),
         #[allow(unreachable_patterns)]
         Err(e) => {
-            let mut v = refusal("caller_refused"'
+            let identity = e.data'
 mutate $mf '    if !std::fs::symlink_metadata(&broomva).is_ok_and(|m| m.is_dir()) {' '    if false {'
 mutate $mf '    if std::fs::symlink_metadata(workspace.join(".git")).is_ok_and(|m| !m.is_dir()) {' '    if false {'
 mutate $mf '        if !self.may_create && std::fs::symlink_metadata(&self.root).is_err() {' '        if false {'
@@ -2182,7 +2191,7 @@ mutate $stp '            Some(c) if c.seq < since => waiting.push(Waiting::Lease
 mutate $stp '        if let (true, Some(node)) = (r.awaiting_verdict, first) {' '        if let (true, Some(node)) = (false, first) {'
 mutate $stp '                Reason::Unfiled { .. } => work.push(Work::Ask { node: id.clone(), iteration }),' '                Reason::Unfiled { .. } => {}'
 mutate $stp '                        AnswerSeen::Landed => work.push(Work::Answer { node, iteration, ask_id, ledger }),' '                        AnswerSeen::Landed => waiting.push(Waiting::Owner { node, iteration, ask_id, ledger, landing: None }),'
-mutate $stp '            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {' '            if owners.retired.is_some() {'
+mutate $stp '            if !owners.owner.as_ref().is_some_and(|o| same_owner(o, &me)) || owners.retired.is_some() {' '            if owners.retired.is_some() {'
 mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| !a.terminal))' '            Ok(Some(assess(&log, &started, now, seen)?))'
 mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
@@ -2219,8 +2228,8 @@ mutate $gt '    if input.len() > MAX_INPUT {' '    if false {'
 mutate $gt '            if unread.is_some() {' '            if false {'
 mutate $gt '            if let Err(e) = counts.save(&guard, &me) {' '            if let (true, Err(e)) = (false, counts.save(&guard, &me)) {'
 mutate $gt '            Err(e) if e.code() == "no_ledger" => {' '            Err(_) if true => {'
-mutate $gt '                self.alert(s, &key, UNCHECKED, &words);' ''
-mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words);' ''
+mutate $gt '                self.alert(s, &key, UNCHECKED, &words, &Principal::Unverified);' ''
+mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);' ''
 mutate $gt '            Err(e) if e.message.contains("already has an ask") => {' '            Err(e) if false => {'
 mutate $gt 'let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));' 'let maestro = words.next().is_some();'
 mutate $gt '    maestro && verb && flag && !words.iter().any(|w| *w == "--check-install" || w.starts_with("--check-install="))' '    maestro && verb && flag && !words.contains(&"--check-install")'
@@ -2253,7 +2262,7 @@ mutate $lay 'pub(crate) const STOP_GATE: &str = "stop-gate";' 'pub(crate) const 
 mutate $stp '    Ok(if parsed.epoch == epoch { parsed.counts } else { BTreeMap::new() })' '    Ok(parsed.counts)'
 mutate $stp '        if self.was_empty && self.counts.is_empty() {' '        if false {'
 mutate $stp '    let retired = owners.retired.is_some();' '    let retired = false;'
-mutate $stp '            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {' '            if owners.owner.as_ref() != Some(&me) {'
+mutate $stp '            if !owners.owner.as_ref().is_some_and(|o| same_owner(o, &me)) || owners.retired.is_some() {' '            if !owners.owner.as_ref().is_some_and(|o| same_owner(o, &me)) {'
 mutate $stp '    wall(&log)?;' ''
 mutate $stp '    let Some(bytes) = read_beside(root, STOP_GATE, name, MAX_REFUSALS_FILE, "refusal-count file")? else {' '    let Some(bytes) = read_beside(root, STOP_GATE, name, u64::MAX, "refusal-count file")? else {'
 mutate $stp '        open_instances: open_instances.iter().take(MAX_NAMED).cloned().collect(),' '        open_instances: open_instances.to_vec(),'
@@ -2293,6 +2302,216 @@ mutate scripts/conformance/phase1.py "        raise Failure('capability harness 
 mutate scripts/conformance/phase1.py "        if harness=='gemini' and item.get('type')=='tool_use':" '        if False:'
 mutate scripts/conformance/phase1.py "        elif harness=='agy' and item.get('event')=='step_update':" '        elif False:'
 mutate scripts/conformance/phase1.py "        return isinstance(args,dict) and (args.get('instance')==instance if verb=='maestro_flow_claim'" "        return isinstance(args,dict) and (True if verb=='maestro_flow_claim'"
+# Attributed session identity (BRO-3846, docs/specs/2026-11-17-auth-a-session-attestations.md):
+# T3 ids and the registry root, resolution through the active provider row, the precedence, the
+# bridge-secret exception, the credential-first caller check and its contradiction check, canonical
+# sessions, and the Stop gate's binding and StopUnverified.
+hat=crates/hosts/src/attribution.rs
+mutate $ht '    if bytes.is_empty() || bytes.len() > MAX_T3_ID {' '    if bytes.is_empty() {'
+mutate $ht '    !id.contains("..")
+        && bytes[1..]' '    true
+        && bytes[1..]'
+mutate $ht " | b'.' | b'%'))" " | b'.'))"
+mutate $ht "        && bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.' | b'%'))" "        && bytes[1..].iter().all(|b| *b != b'.' || true)"
+mutate $ht '                [one] => one.clone(),' '                [one, ..] => one.clone(),'
+mutate $ht '.any(|p| p.provider_thread_id == active && p.native_id.as_deref() == Some(native_id));' '.any(|p| p.native_id.as_deref() == Some(native_id));'
+mutate $ht '"ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id "' '"ON p.thread_id = t.thread_id "'
+mutate $ht '"ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id "' '"ON p.provider_thread_id = t.active_provider_thread_id "'
+mutate $ht '            Some(t) if t.archived_at.is_some() => {' '            Some(t) if false => {'
+mutate $ht '            Some(t) if t.deleted_at.is_some() => {' '            Some(t) if false => {'
+mutate $ht '        if thread.archived_at.is_some() || thread.deleted_at.is_some() {' '        if false {'
+mutate $hlb '        if let Some(p) = t3code_home.filter(|s| !s.is_empty()) {' '        if let Some(p) = t3code_home.filter(|_| false) {'
+mutate $hlb '            Read::Present(_) | Read::Unreadable(_) => Some((t3, true)),' '            Read::Present(_) | Read::Unreadable(_) | Read::Absent => Some((t3, true)),'
+mutate $hlb '            std::env::var("T3CODE_HOME").ok().as_deref(),' '            std::env::var("T3CODE_HOME_UNSET").ok().as_deref(),'
+mutate $hlb '        self.has_surface(surface) && !(surface == &Surface::T3 && self.t3_found)' '        self.has_surface(surface)'
+mutate $hlb '            .with_identity_mode(IdentityMode::parse(std::env::var("MAESTRO_IDENTITY").ok().as_deref()))' '            .with_identity_mode(IdentityMode::Attributed)'
+mutate $hlb '            .with_thread_vars(ThreadVars::from_env());' '            .with_thread_vars(ThreadVars::default());'
+mutate $hat '            _ => Self::Strict,' '            _ => Self::Attributed,'
+mutate $hat '                .filter(|(_, v)| !v.is_empty())' '                .filter(|_| true)'
+mutate $hlb '                    None => VarOutcome::Unreadable("no T3 registry is found on this host".to_string()),' '                    None => VarOutcome::Unresolved("no T3 registry is found on this host".to_string()),'
+mutate $hat 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unreadable(_))) {' 'each.iter().find(|_| false) {'
+mutate $hat 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unresolved(_))) {' 'each.iter().find(|_| false) {'
+mutate $hat '    if let Some((other, other_id, _)) = threads.iter().find(|(_, t, _)| t != id) {' '    if let Some((other, other_id, _)) = threads.iter().find(|_| false) {'
+mutate $hat '    while next != 0 && ancestors.len() < MAX_ANCESTORS {' '    while next != 0 {'
+mutate $hlb '            && claim.peer.is_none()
+            && !attributed
+' '            && claim.peer.is_none()
+'
+mutate $hlb '        let attributed = claim.surface == Surface::T3 && claim.attribution.is_some();' '        let attributed = claim.attribution.is_some();'
+mutate $hlb '                        if claim.session_id.as_deref() != Some(a.thread.as_str()) {' '                        if false {'
+mutate $mcp '    if !write || hosts.identity_mode() == IdentityMode::Strict {' '    if !write {'
+mutate $mcp '    if !write || hosts.identity_mode() == IdentityMode::Strict {' '    if hosts.identity_mode() == IdentityMode::Strict {'
+mutate $mcp '    let has_vars = ambient == Ambient::Caller && !hosts.thread_vars().is_empty();' '    let has_vars = !hosts.thread_vars().is_empty();'
+mutate $mcp '            if let Some(named) = session.as_ref().filter(|s| s.surface != Surface::T3) {' '            if let Some(named) = session.as_ref().filter(|_| false) {'
+mutate $mcp '                Attributed::Absent => {}
+                Attributed::Refused(r) => return Err(refused(r)),' '                Attributed::Absent => {}
+                Attributed::Refused(_) => {}'
+mutate $mcp '                    check_named(named, &a, &environment)?;
+                    attribution = Some(a);' '                    attribution = Some(a);'
+mutate $mcp '    if let Some(named) = session {
+        check_named(named, &a, &environment)?;
+    }' ''
+mutate $mcp '        if named.canonical(thread.environment.as_deref()) != thread {' '        if named.id != thread.id {'
+mutate $mcp '    if !has_vars {' '    if false {'
+mutate $mcp '        && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none())
+        && !attributed' '        && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none())'
+mutate $mcp '&& !has_claim_meta && !attributed {' '&& !has_claim_meta {'
+mutate $mcp '        attribution,
+    };' '        attribution: None,
+    };'
+mutate $mf '                Some(r) if r.is_attribution() => r.code(),' '                Some(r) if false => r.code(),'
+mutate $session '            None | Some("local") | Some("-") => SessionRef {' '            None | Some("-") => SessionRef {'
+mutate $session '    #[serde(skip)]
+    pub attribution: Option<Attribution>,' '    pub attribution: Option<Attribution>,'
+mutate $gt '        if self.hosts.identity_mode() == IdentityMode::Strict {' '        if false {'
+mutate $gt '            Harness::Claude => None,' '            Harness::Claude => payload(input).ok().and_then(|p| p.harness_session),'
+mutate $gt '        self.alert(&session, &key, UNCHECKED, &words, &Principal::Unverified);' '        self.alert(&session, &key, UNCHECKED, &words, &Principal::Agent { session: session.clone() });'
+mutate $gt 'kstop::record_unverified(&mut ledger, &id, &event)' 'Err(KernelError::Encode("skipped".into()))'
+mutate $gt '            words.push_str(&format!(" StopUnverified could not be recorded on: {}.", failed.join(", ")));' ''
+mutate $stp '            if !wanted.contains(&owner.session.canonical(host)) {' '            if false {'
+mutate $stp '            Ok(!status.terminal)' '            Ok(true)'
+mutate $stp 'owners.owner.as_ref().filter(|_| owners.retired.is_none()) else' 'owners.owner.as_ref() else'
+mutate $stp '    if adoption::owners(&log, &started)?.retired.is_some() {' '    if false {'
+mutate $stp '        if prior.is_some_and(|p| p.reason == event.reason && p.candidates == event.candidates) {' '        if false {'
+# Joint review (BRO-3846, Codex at 15b53d8): a native id's uniqueness needs every active provider
+# row read; attribution needs no folder; the Stop gate binds a named session through the hook's
+# identity, and every attribution or registry failure there is a binding that is unavailable.
+mutate $ht '        if missing:
+' '        if False:
+'
+mutate $ht '            if r["provider_thread_id"] is None:' '            if False:'
+mutate $ht '                if !raw.provider_threads.iter().any(|p| p.provider_thread_id == active) {' '                if false {'
+mutate $ht '            if mode not in ("attr", "list"):' '            if mode not in ("list",):'
+mutate $ht '            if cwd or mode == "attr":' '            if cwd:'
+mutate $ht '    if mode == "attr" and not (' '    if False and not ('
+mutate $ht '.arg(if attributed { "attr" } else { "get" })' '.arg("get")'
+mutate $ht '            .lookup_attributed(&thread_id)' '            .lookup(&thread_id)'
+mutate $ht '        let Some(thread) = self.lookup_attributed(thread_id)? else {' '        let Some(thread) = self.lookup(thread_id)? else {'
+mutate $gt '            if session.surface == Surface::T3 && !self.hook_vars(input).is_empty() {' '            if false {'
+mutate $gt '.filter(|_| self.hosts.has_surface(&Surface::T3));' ';'
+mutate $gt '            && n.canonical(thread.environment.as_deref()) != thread' '            && false'
+mutate $gt '            Some(r) if r.is_attribution() || (registry && session.surface == Surface::T3) => {' '            Some(r) if r.is_attribution() => {'
+mutate $gt '            Some(r) if r.is_attribution() || (registry && session.surface == Surface::T3) => {' '            Some(r) if registry && session.surface == Surface::T3 => {'
+mutate $gt '                    Err(r) => return self.unbound(&candidates, &r),' '                    Err(r) => return self.fail_open(Some(&thread), "caller_refused", &r.message),'
+mutate $gt '            self.add_candidate(&mut candidates, n);' ''
+mutate $gt '                self.add_candidate(&mut all, session);' ''
+# Gemini's joint review (BRO-3846): every Stop-gate alert path files as an unverified caller,
+# never through a caller check, so an alert whose session's claim does not verify still lands.
+mutate $gt '                self.alert(s, &key, UNCHECKED, &words, &Principal::Unverified);' '                self.alert(s, &key, UNCHECKED, &words, &Principal::Agent { session: s.clone() });'
+mutate $gt '        self.alert(session, &key, UNCHECKED, &words, &Principal::Unverified);' '        self.alert(session, &key, UNCHECKED, &words, &Principal::Agent { session: session.clone() });'
+mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);' '        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Agent { session: session.clone() });'
+mutate $gt '        let filed = crate::file_ask_as(&store, session.clone(), caller, &self.gate.alert_ledger, &ask);' '        let filed = crate::verified_caller(self.hosts, Some(session), self.claim, self.ambient, Check::Request).and_then(|_| crate::file_ask_as(&store, session.clone(), caller, &self.gate.alert_ledger, &ask));'
+# Joint round 2 (BRO-3846, Gemini at fc6dcfa): credential first at the gate even when the credential
+# does not parse; a named Paseo or Direct session inside a T3 thread is unbound with that thread a
+# candidate; attribution never reads a corrupt payload as {}; native resolution reads live threads
+# only and skips unassigned ids; a fail-open alert is keyed by the workspace.
+mutate $mcp '    Presented::read(args, ambient).map(|p| p.credentialed())' '    Ok(Presented::read(args, ambient).is_ok_and(|p| p.credentialed()))'
+mutate $gt '        let me = match crate::presented_credential(self.claim, self.ambient) {' '        let me = match crate::presented_credential(self.claim, self.ambient).or(Ok::<bool, rmcp::ErrorData>(false)) {'
+mutate $gt '            if session.surface != Surface::T3 && self.hosts.has_surface(&Surface::T3) {' '            if false {'
+mutate $gt '                if let Some(first) = threads.first() {' '                if let Some(first) = threads.first().filter(|_| false) {'
+mutate $gt '                    return self.unbound(&threads, &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));' '                    return self.unbound(&[], &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));'
+mutate $gt 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unreadable(_)))' 'each.iter().find(|_| false)'
+mutate $ht ' AND t.archived_at IS NULL AND t.deleted_at IS NULL"' ' AND t.deleted_at IS NULL"'
+mutate $ht ' AND t.archived_at IS NULL AND t.deleted_at IS NULL"' ' AND t.archived_at IS NULL"'
+mutate $ht '                if raw.archived_at.is_some() || raw.deleted_at.is_some() {
+                    continue;' '                if false {
+                    continue;'
+mutate $ht '            if ref.get("nativeId") is None:
+                continue' '            if False:
+                continue'
+mutate $ht '            if not isinstance(ref.get("nativeId"), str):' '            if False:'
+mutate $ht '            if not isinstance(ref, dict):
+                unreadable(' '            if False:
+                unreadable('
+mutate $gt '                let key = format!("fail_open\n{workspace}\n{code}\n{}", day.get(..10).unwrap_or_default());' '                let key = format!("fail_open\n{workspace}\n{code}\n{}\n{s}", day.get(..10).unwrap_or_default());'
+# Joint round 3 (BRO-3846, Codex at 25e3007): an empty, blank or NULL payload is no payload, never {}.
+# Joint round 3 (BRO-3846, Gemini at 25e3007): a thread archived or deleted in its payload only is
+# no live thread to the native scan, whose own payload must read to tell.
+mutate $ht '            if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):' '            if False:'
+mutate $ht '            if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):' '            if thread_payload.get("archivedAt"):'
+mutate $ht '    #[serde(default, alias = "archivedAt")]' '    #[serde(default)]'
+# Joint round 4 (BRO-3846, Codex at c897e60): one payload parser for every mode, the credentialed
+# one included, and one snapshot helper: an unreadable payload or row is registry_unavailable.
+mutate $ht $'    if raw is None or not str(raw).strip():\n        raise PayloadError' $'    if False:\n        raise PayloadError'
+mutate $ht $'    except Exception:\n        raise PayloadError(f"{what} does not parse")' $'    except Exception:\n        return {}'
+mutate $ht $'    if not isinstance(payload, dict):\n        raise PayloadError' $'    if False:\n        raise PayloadError'
+mutate $ht $'except PayloadError as exc:\n    # A payload that does not read' $'except ZeroDivisionError as exc:\n    # A payload that does not read'
+mutate $ht '                    Some(_) => return Err(unavailable(format!("row {id} has a cwd that is not a string"))),' '                    Some(_) => {}'
+mutate $ht '                    return Err(unavailable("has a row that is not an object".to_string()));' '                    return serde_json::from_value(serde_json::json!({ "id": "", "cwd": "" })).map_err(|e| unavailable(e.to_string()));'
+mutate $ht '.filter(|raw| attributed || !raw.cwd.is_empty())' '.filter(|_| true)'
+# Joint round 5 (BRO-3846, Codex at 5ced368): the permission-prompt listing fails open with a
+# signal: an unreadable thread keeps its prompts, a bad snapshot row hides no other, and every
+# view says what did not read.
+mutate $ht $'                except PayloadError as exc:\n                    built = {' $'                except PayloadError as exc:\n                    continue\n                    built = {'
+mutate $ht '                        "runtime_requests": runtime_requests_of(row["thread_id"]),' '                        "runtime_requests": [],'
+mutate $ht '                        "unreadable": str(exc),' '                        "unreadable": None,'
+mutate $ht '            if mode not in ("attr", "list"):' '            if mode not in ("attr",):'
+mutate $ht '                    report.unreadable.push((format!("t3 thread {}", raw.id), why));' ''
+mutate $ht '                    Err(e) => report.unreadable.push((at.clone(), e.message)),' '                    Err(_) => {}'
+mutate $ht '            let rows = match Self::snapshot_each(&json_file) {' '            let rows = match Self::snapshot_rows(&json_file).map(|r| r.into_iter().map(Ok::<RawT3Thread, IdentityRefusal>).collect::<Vec<_>>()) {'
+mutate $ht '                    report.unreadable.push((at, e.message));' ''
+mutate $ht '                report.unreadable.push((at, format!("the T3 SQLite database is unreadable: {why}")));' ''
+mutate $hlb '            unreadable(Surface::T3, listed.unreadable);' ''
+mutate $mcp '            snap.needs.errors.extend(live.errors());' ''
+mutate $mcp '                    section.errors.extend(live.errors());' ''
+mutate $mcp '                    packet.needs_complete = false;' ''
+mutate $mcp '                    packet.degraded.push(format!("{} permission prompts ({n} unread)", surface.as_str()));' ''
+# Joint round 6 (BRO-3846, Codex at 2ca2c86): live_permission_report is the one boundary where a
+# configured registry's every read failure (missing, inaccessible, disconnected, a bad entry)
+# becomes an unread source, on every surface; nothing configured is complete.
+mutate $ht '            report.unreadable.push((at, "the T3 registry is disconnected".to_string()));' ''
+mutate $ht $'                let why = format!("no T3 registry database or snapshot is readable at {}", self.root.display());\n                report.unreadable.push((at, why));' $'                let why = format!("no T3 registry database or snapshot is readable at {}", self.root.display());\n                let _ = (at, why);'
+mutate $hp '            unread.push((at(&self.dir), "the Paseo registry is disconnected".to_string()));' ''
+mutate $hp '                unread.push((at(&self.dir), format!("the agents folder does not read: {why}")));' ''
+mutate $hp '                    unread.push((at(&folder), format!("the agent folder does not read: {why}")));' ''
+mutate $hp '                    Read::Present(Err(why)) | Read::Unreadable(why) => unread.push((at(&path), why)),' '                    Read::Present(Err(_)) | Read::Unreadable(_) => {}'
+mutate $hlb '                Err(why) => unread.push((at, why)),' '                Err(_) => {}'
+mutate $hlb '            unreadable(Surface::Paseo, failed);' ''
+mutate $hlb '            unreadable(Surface::Direct, failed);' ''
+# Joint round 7 (BRO-3846, Codex at 875c1af): one read rule (crate::read) for every registry probe
+# and enumeration: NotFound is absent, any other error unreadable, never absence. Discovery that
+# cannot read reaches the boundary as unread; identity on it fails closed.
+hrd=crates/hosts/src/read.rs
+mutate $hrd '            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => Read::Absent,' '            Err(_) => Read::Absent,'
+mutate $hrd '            Err(e) => Read::Unreadable(format!("an entry of {} does not read: {e}", dir.display())),' '            Err(_) => Read::Absent,'
+mutate $hlb '            Read::Present(_) | Read::Unreadable(_) => Some((t3, true)),' $'            Read::Present(_) => Some((t3, true)),\n            Read::Unreadable(_) => None,'
+mutate $ht '                Read::Unreadable(why) => return Read::Unreadable(why),' '                Read::Unreadable(_) => {}'
+mutate $hp $'            Read::Absent => return Ok(None),\n            Read::Unreadable(why) => return Err(unread(why)),' $'            Read::Absent | Read::Unreadable(_) => return Ok(None),'
+mutate $hp '                    unread.push((at(&self.dir), why));' ''
+mutate $hlb '            Read::Unreadable(why) => Err(why),' '            Read::Unreadable(_) => Ok(Vec::new()),'
+# Gemini's joint round 7 (BRO-3846, at 875c1af): the ~/.t3 fallback is a registry only when one is
+# located under it; a Direct registry file that does not parse is unread.
+mutate $hlb '        match T3Registry::new(&t3).locate() {' '        match read::is_dir(&t3).map(|_| ()) {'
+mutate $hlb '                .map_err(|e| format!("the registry file does not parse: {e}")),' '                .or_else(|_| Ok::<Vec<DirectSession>, serde_json::Error>(Vec::new())).map_err(|e| format!("the registry file does not parse: {e}")),'
+# Round 9, BRO-3863 folded in: a pending permission record that does not decode is an unread item of
+# the owner's listing, tagged with its surface and session, never dropped; identity is unaffected.
+mutate $hp $'            pending_permissions,\n            unread_permissions,\n        })' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        })'
+mutate $hp '                            unread.push((at(&path), why.clone()));' ''
+mutate $ht $'            pending_permissions,\n            unread_permissions,\n        }' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        }'
+mutate $ht '            self.unreadable.push((format!("t3 thread {}", thread.id), why.clone()));' ''
+# Round 11 (the owner's decision after round 10): one permission rule, in Rust, for every surface;
+# the reader emits each pending runtime request raw. Keys by presence and type: the first present
+# of toolName and name governs and must be a non-blank string; neither is a prompt named by its kind.
+mutate $ht $'                    requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})' $'                    requests.append({"id": req["runtime_request_id"], "kind": None, "payload_json": req["payload_json"]})'
+mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n        }' $'            "runtime_requests": [],\n        }'
+mutate $ht '        pending_permissions.extend(requested);' ''
+mutate $ht '        unread_permissions.extend(unread_requests);' ''
+mutate $hp '    let name = if let Some(v) = record.get("toolName") {' '    let name = if let Some(v) = record.get("toolName").filter(|_| false) {'
+mutate $hp '    } else if let Some(v) = record.get("name") {' '    } else if let Some(v) = record.get("name").filter(|_| false) {'
+mutate $hp '            Some(k) => k.to_string(),' '            Some(_) => return Err("names no tool".to_string()),'
+mutate $hp '            None => return Err("names no tool".to_string()),' '            None => String::new(),'
+mutate $hp '    match value.as_str().filter(|s| !s.trim().is_empty()) {' '    match value.as_str() {'
+mutate $hp $'        None => Err(format!("has a tool name that is not a non-blank string (`{key}`)")),' '        None => Ok(String::new()),'
+mutate $hp '        title: text("title"),' '        title: None,'
+mutate $hp '            unread.push(format!("permission record {i} is not an object"));' ''
+mutate $hp '            Err(why) => unread.push(format!("permission record {i} {why}")),' '            Err(_) => {}'
+mutate $hp '        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {' '        let payload = match req.payload_json.as_deref() {'
+mutate $hp '            None => Err("is empty"),' '            None => Ok(serde_json::Map::new()),'
+mutate $hp '                Err(_) => Err("does not parse"),' '                Err(_) => Ok(serde_json::Map::new()),'
+mutate $hp '                Ok(_) => Err("is not an object"),' '                Ok(_) => Ok(serde_json::Map::new()),'
+mutate $hp '                if let Some(id) = req.id.as_deref().filter(|s| !s.trim().is_empty()) {' '                if let Some(id) = req.id.as_deref() {'
+mutate $hp '                    p.id = Some(id.to_string());' ''
+mutate $hp '            Err(why) => unread.push(format!("{what} {why}")),' '            Err(_) => {}'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

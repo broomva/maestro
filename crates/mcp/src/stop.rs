@@ -42,19 +42,23 @@
 //!
 //! # The alert
 //!
-//! A fleet alert is a Maestro ask, filed through `maestro_ask_file`, the agent path every ask takes
-//! (its writer of record, `ask_ledger.py file`, validates it), into `--alert-ledger`. An ask is
+//! A fleet alert is a Maestro ask, filed into `--alert-ledger` through the asks ledger's writer of
+//! record (`ask_ledger.py file`, which validates it) and journalled, as `maestro_ask_file` files an
+//! ask, but as an unverified caller with no caller check (BRO-3846): an alert reports that the gate
+//! could not check or keep a session, often because its claim did not verify, which a caller check
+//! would refuse again. An ask is
 //! what the owner's Decisions view lists; an escalation is recorded in the requests journal, which
 //! no screen shows. Its id is a digest of what it is about, so the same alert is filed once: for a
 //! `StopUnblockable`, its instance and position; for a failure, the session, the code and the day.
 
-use crate::Ambient;
-use maestro_core::request::RequestKind;
-use maestro_core::session::{SessionRef, VerifiedSession};
-use maestro_flow::kernel::events::{Unblockable, digest};
+use crate::{Ambient, Check};
+use maestro_core::authority::Principal;
+use maestro_core::session::{IdentityRefusal, RefusalReason, SessionRef, Surface, VerifiedSession};
+use maestro_flow::kernel::events::{StopUnverified, Unblockable, digest};
 use maestro_flow::kernel::stop::{self as kstop, Assessment, Recorded, Refusals};
 use maestro_flow::kernel::{self, KernelError};
 use maestro_flow::{Ledger, Options, Reader};
+use maestro_hosts::{Attributed, IdentityMode, STDIN_SESSION_ID, ThreadVars, VarOutcome};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -206,11 +210,14 @@ impl Run<'_> {
         match session {
             Some(s) => {
                 let day = maestro_flow::clock::now().to_string();
-                let key = format!("fail_open\n{s}\n{code}\n{}", day.get(..10).unwrap_or_default());
+                // Keyed by the workspace, never the named session: a session that does not verify
+                // is the caller's own string, and naming it would mint an alert per string.
+                let workspace = self.paths.workspace.display();
+                let key = format!("fail_open\n{workspace}\n{code}\n{}", day.get(..10).unwrap_or_default());
                 let words = format!(
                     "The flow stop gate could not check session {s}, so it let the session stop without knowing whether a flow instance it owns had work left. Why: {code}, {reason}."
                 );
-                self.alert(s, &key, UNCHECKED, &words);
+                self.alert(s, &key, UNCHECKED, &words, &Principal::Unverified);
             }
             None => self.note("no session to file the alert as, so none was filed."),
         }
@@ -224,14 +231,13 @@ impl Run<'_> {
         let words = format!(
             "The flow stop gate could not read flow instance(s) {list} while it checked session {session}, so it could not tell whether they had work left. Repair or retire them; until then the gate cannot check them."
         );
-        self.alert(session, &key, UNCHECKED, &words);
+        self.alert(session, &key, UNCHECKED, &words, &Principal::Unverified);
     }
 
     fn judge(&mut self, input: &[u8]) {
         let named = self.gate.session.clone().filter(|s| !s.trim().is_empty());
         let Some(text) = named else {
-            self.note("no Maestro session is named (--session or MAESTRO_SESSION), so there is no flow to gate.");
-            return;
+            return self.bind(None, input);
         };
         let session: SessionRef = match text.parse() {
             Ok(s) => s,
@@ -240,14 +246,252 @@ impl Run<'_> {
         if let Err(e) = payload(input) {
             return self.fail_open(Some(&session), "input_malformed", &e);
         }
-        let me = match crate::verified_caller(self.hosts, &session, self.claim, self.ambient) {
+        // Attributed mode (BRO-3846): a named session is bound through the hook's own thread
+        // variables too, the stdin `session_id` of a Codex hook included, and must be their thread.
+        if self.hosts.identity_mode() == IdentityMode::Attributed {
+            if session.surface == Surface::T3 && !self.hook_vars(input).is_empty() {
+                return self.bind(Some(session), input);
+            }
+            // Beside a Paseo or Direct session, on a host with a T3 registry: a hook variable (the
+            // environment's, or a Codex hook's stdin `session_id`) that resolves to a T3 thread names
+            // a thread the session can never be, so the binding is unavailable, with that thread a
+            // candidate. A registry that does not read is unavailable too. One that names no thread
+            // is Codex's own id, which any Codex session has: it binds nothing.
+            if session.surface != Surface::T3 && self.hosts.has_surface(&Surface::T3) {
+                let each = self.hosts.resolve_each(&self.hook_vars(input));
+                let threads = self.threads_of(&each);
+                if let Some(first) = threads.first() {
+                    let why = format!("a hook variable names T3 thread {}, never the session {session}", first.id);
+                    return self.unbound(&threads, &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));
+                }
+                if let Some((v, VarOutcome::Unreadable(why))) =
+                    each.iter().find(|(_, o)| matches!(o, VarOutcome::Unreadable(_)))
+                {
+                    let why = format!("{} could not be resolved: T3's registry did not read ({why})", v.name);
+                    return self.unbound(&[], &IdentityRefusal::new(RefusalReason::RegistryUnavailable, why));
+                }
+            }
+        }
+        let me = match crate::verified_caller(self.hosts, Some(&session), self.claim, self.ambient, Check::Write) {
             Ok(Some(me)) => me,
             Ok(None) => {
                 let why = format!("session {session} is not verified: no launch token or bridge credential");
                 return self.fail_open(Some(&session), "caller_unverified", &why);
             }
-            Err(e) => return self.fail_open(Some(&session), "caller_refused", &e.message),
+            Err(e) => return self.refused_named(&session, &[], e),
         };
+        self.gated(&session, &me);
+    }
+
+    /// The hook's thread variables: the registry's captured ones, and a Codex hook's stdin
+    /// `session_id` on a host with a T3 registry (elsewhere it is no T3 thread's).
+    fn hook_vars(&self, input: &[u8]) -> ThreadVars {
+        let stdin = self.hook_stdin(input).filter(|_| self.hosts.has_surface(&Surface::T3));
+        self.hosts.thread_vars().clone().with_native(STDIN_SESSION_ID, stdin.as_deref())
+    }
+
+    /// A Codex hook's stdin `session_id`: Codex's native thread id. A Claude hook's is Claude's own
+    /// and binds nothing.
+    fn hook_stdin(&self, input: &[u8]) -> Option<String> {
+        match self.gate.harness {
+            Harness::Codex => payload(input).ok().and_then(|p| p.harness_session),
+            Harness::Claude => None,
+        }
+    }
+
+    /// A named session's caller check refused: an attribution or a T3 registry failure is a
+    /// binding that is unavailable ([`Run::unbound`], with `candidates` and the named T3 session);
+    /// any other refusal (a credential that does not verify) fails open as before.
+    fn refused_named(&mut self, session: &SessionRef, candidates: &[SessionRef], e: rmcp::ErrorData) {
+        let reason = e.data.as_ref().and_then(|d| d.get("reason")).cloned();
+        let reason = reason.and_then(|r| serde_json::from_value::<RefusalReason>(r).ok());
+        let registry = matches!(reason, Some(RefusalReason::RegistryUnavailable | RefusalReason::RegistryDisconnected));
+        match reason {
+            Some(r) if r.is_attribution() || (registry && session.surface == Surface::T3) => {
+                let mut all = candidates.to_vec();
+                self.add_candidate(&mut all, session);
+                self.unbound(&all, &IdentityRefusal::new(r, e.message.to_string()));
+            }
+            _ => self.fail_open(Some(session), "caller_refused", &e.message),
+        }
+    }
+
+    /// The T3 threads the hook's variables resolved to, each canonical, once.
+    fn threads_of(&self, each: &[(maestro_hosts::ThreadVar, VarOutcome)]) -> Vec<SessionRef> {
+        let host = self.hosts.t3_environment();
+        let mut threads: Vec<SessionRef> = Vec::new();
+        for (_, outcome) in each {
+            if let VarOutcome::Thread { id, environment } = outcome {
+                let environment = environment.clone().or_else(|| host.clone());
+                let s = SessionRef { surface: Surface::T3, environment, id: id.clone() };
+                if !threads.contains(&s) {
+                    threads.push(s);
+                }
+            }
+        }
+        threads
+    }
+
+    /// `session` as a candidate thread, canonical, when it is a T3 session not yet listed.
+    fn add_candidate(&self, candidates: &mut Vec<SessionRef>, session: &SessionRef) {
+        if session.surface != Surface::T3 {
+            return;
+        }
+        let s = session.canonical(self.hosts.t3_environment().as_deref());
+        if !candidates.contains(&s) {
+            candidates.push(s);
+        }
+    }
+
+    /// The stop bound through the hook's thread variables (BRO-3846): `T3CODE_THREAD_ID`
+    /// (Claude), or the `session_id` a Codex Stop hook reads on stdin, resolved as every attributed
+    /// write resolves it. No variable and no session named: never bound, and the stop goes through
+    /// silently. With `named`, the variables' thread must be that session, once canonical. Variables
+    /// that disagree, do not resolve, or name another thread than `named`, a registry that does not
+    /// read, or a verification of the resolved thread that fails: the binding is unavailable
+    /// ([`Run::unbound`]), with every thread known so far as a candidate. Strict identity binds
+    /// nothing.
+    fn bind(&mut self, named: Option<SessionRef>, input: &[u8]) {
+        let unnamed = "no Maestro session is named (--session or MAESTRO_SESSION)";
+        if self.hosts.identity_mode() == IdentityMode::Strict {
+            return self.note(format!("{unnamed}, so there is no flow to gate."));
+        }
+        let each = self.hosts.resolve_each(&self.hook_vars(input));
+        let host = self.hosts.t3_environment();
+        let mut candidates = self.threads_of(&each);
+        if let Some(n) = &named {
+            self.add_candidate(&mut candidates, n);
+        }
+        let (a, environment) = match maestro_hosts::attribution::combine(&each) {
+            Attributed::Absent => {
+                let why = "and no thread variable binds this stop, so there is no flow to gate.";
+                return self.note(format!("{unnamed} {why}"));
+            }
+            Attributed::Refused(refusal) => return self.unbound(&candidates, &refusal),
+            Attributed::Resolved { attribution, environment } => (attribution, environment),
+        };
+        let thread = SessionRef { surface: Surface::T3, environment: environment.or(host), id: a.thread.clone() };
+        if let Some(n) = &named
+            && n.canonical(thread.environment.as_deref()) != thread
+        {
+            let why = format!("{} names T3 thread {}, but the stop's session is {n}", a.variable, a.thread);
+            return self.unbound(&candidates, &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));
+        }
+        // Credential first: a session that presents a credential or token is verified by it, in
+        // full, and one whose credential does not parse is refused by that error; neither is ever
+        // attributed. Any other is verified by its resolved thread.
+        let named_or_thread = named.clone().unwrap_or_else(|| thread.clone());
+        let me = match crate::presented_credential(self.claim, self.ambient) {
+            Err(e) => return self.fail_open(Some(&named_or_thread), "caller_refused", &e.message),
+            Ok(true) => {
+                match crate::verified_caller(self.hosts, named.as_ref(), self.claim, self.ambient, Check::Write) {
+                    Ok(Some(me)) => me,
+                    Ok(None) => {
+                        let why =
+                            format!("session {named_or_thread} is not verified: no launch token or bridge credential");
+                        return self.fail_open(Some(&named_or_thread), "caller_unverified", &why);
+                    }
+                    Err(e) => return self.refused_named(&named_or_thread, &candidates, e),
+                }
+            }
+            Ok(false) => {
+                let mut claim = maestro_hosts::CallerClaim::t3(Some(a.thread.clone()), None::<String>);
+                claim.attribution = Some(a);
+                match self.hosts.verify_caller(&claim) {
+                    Ok(me) => me,
+                    Err(r) => return self.unbound(&candidates, &r),
+                }
+            }
+        };
+        if let Err(why) = payload(input) {
+            return self.fail_open(Some(&thread), "input_malformed", &why);
+        }
+        let session = me.session().clone();
+        self.gated(&session, &me);
+    }
+
+    /// The binding is unavailable (BRO-3846): the stop goes through, `StopUnverified` is appended
+    /// to every unfinished instance any candidate thread owns, and the fleet alert is filed, keyed
+    /// by the workspace and the reason, as an unverified caller (a caller check would fail for the
+    /// same reason). A record that fails still lets the stop through, and the alert names it.
+    fn unbound(&mut self, candidates: &[SessionRef], refusal: &IdentityRefusal) {
+        let code = refusal.reason.code();
+        let message = refusal.message.trim_end_matches('.').to_string();
+        self.note(format!(
+            "binding_unavailable: {code}: {message}. The stop goes through (the gate fails open), recorded as StopUnverified."
+        ));
+        let host = self.hosts.t3_environment();
+        let candidates = candidates.to_vec();
+        let (mut made, mut failed) = (Vec::new(), Vec::new());
+        if !candidates.is_empty()
+            && let Ok(root) = crate::flow::flows_root(&self.paths.workspace)
+        {
+            let owned = Reader::new(&root, Options { lock_wait: kstop::REFUSALS_WAIT })
+                .and_then(|r| r.lock())
+                .map_err(KernelError::from)
+                .and_then(|guard| kstop::owned_by_threads(&guard, &candidates, host.as_deref()));
+            match owned {
+                Ok((owned, unread)) => {
+                    for u in unread {
+                        failed.push(format!("{} ({})", u.instance, u.code));
+                    }
+                    let event = StopUnverified {
+                        harness: self.gate.harness.name().to_string(),
+                        reason: format!("{code}: {message}"),
+                        candidates: candidates.clone(),
+                        audit: Some(self.hosts.audit("unbound", None)),
+                    };
+                    for instance in owned {
+                        let recorded =
+                            maestro_flow::InstanceId::new(&instance).map_err(KernelError::from).and_then(|id| {
+                                let mut ledger =
+                                    self.ledger(&root).map_err(|(c, w)| KernelError::Encode(format!("{c}: {w}")))?;
+                                kstop::record_unverified(&mut ledger, &id, &event)
+                            });
+                        match recorded {
+                            Ok(Recorded::Appended(a)) => made.push((instance, a.event.seq)),
+                            Ok(Recorded::Already { seq }) => {
+                                self.note(format!("{instance} has not moved since its StopUnverified at event {seq}."))
+                            }
+                            Err(e) => {
+                                let c = busy_code(e.code()).to_string();
+                                self.note(format!("StopUnverified was not recorded on {instance} ({c}: {e})."));
+                                failed.push(format!("{instance} ({c})"));
+                            }
+                        }
+                    }
+                }
+                Err(missing) if missing.code() == "no_ledger" => {}
+                Err(e) => failed.push(format!("the flow ledger ({}: {e})", busy_code(e.code()))),
+            }
+        }
+        let session = candidates.first().cloned().unwrap_or_else(|| SessionRef {
+            surface: Surface::T3,
+            environment: None,
+            id: "unverified".to_string(),
+        });
+        let day = maestro_flow::clock::now().to_string();
+        let day = day.get(..10).unwrap_or_default();
+        let mut key = format!("unverified\n{}\n{code}\n{day}", self.paths.workspace.display());
+        let mut words = format!(
+            "The flow stop gate could not tell which T3 thread was stopping ({code}: {message}), so it let the stop through without checking that thread's flow work."
+        );
+        let list = record_list(&made);
+        if !list.is_empty() {
+            words.push_str(&format!(" Recorded as StopUnverified on: {}.", list.join(", ")));
+        }
+        if !failed.is_empty() {
+            words.push_str(&format!(" StopUnverified could not be recorded on: {}.", failed.join(", ")));
+            key.push_str(&format!("\nunrecorded\n{}", failed.join("\n")));
+        }
+        self.out.recorded.extend(made);
+        self.alert(&session, &key, UNCHECKED, &words, &Principal::Unverified);
+    }
+
+    /// The gate's judgment for a verified session `me`, named as `session`.
+    fn gated(&mut self, session: &SessionRef, me: &VerifiedSession) {
+        let session = session.clone();
+        let me = me.clone();
         let root = match crate::flow::flows_root(&self.paths.workspace) {
             Ok(root) => root,
             Err(v) if v["code"] == "workspace_unready" => {
@@ -440,21 +684,20 @@ impl Run<'_> {
             key.push_str(&format!("\nunrecorded\n{session}\n{reason:?}\n{}\n{day}", failed.join("\n")));
         }
         self.out.recorded.extend(made);
-        self.alert(&session, &key, LEFT_WORK, &words);
+        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);
     }
 
-    /// Files the alert ask, once per `key` (see the module docs).
-    fn alert(&mut self, session: &SessionRef, key: &str, headline: &str, words: &str) {
+    /// Files the alert ask, once per `key` (see the module docs), straight through the asks
+    /// ledger's writer of record as `caller`, never through a caller check (BRO-3846): an alert
+    /// reports that the gate could not check or keep a session, often because its claim did not
+    /// verify, so a caller check would refuse the alert for the reason it reports. Every call site
+    /// files as [`Principal::Unverified`]: the gate vouches for no one.
+    fn alert(&mut self, session: &SessionRef, key: &str, headline: &str, words: &str, caller: &Principal) {
         let id = alert_id(key);
-        let mut args = match self.claim.as_object() {
-            Some(o) => o.clone(),
-            None => Map::new(),
-        };
-        args.insert("session".into(), json!(session.to_string()));
-        args.insert("ledger".into(), json!(self.gate.alert_ledger));
-        args.insert("ask".into(), Value::Object(alert_ask(&id, headline, words)));
+        let ask = alert_ask(&id, headline, words);
         let store = Store::new(self.paths.clone(), TreeSource::WorkingTree);
-        match crate::agent_request_in(&store, self.hosts, self.ambient, RequestKind::AskFile, Value::Object(args)) {
+        let filed = crate::file_ask_as(&store, session.clone(), caller, &self.gate.alert_ledger, &ask);
+        match filed {
             Ok(_) => {
                 self.note(format!("filed alert ask {id} in {}.", self.gate.alert_ledger));
                 self.out.alerts.push(id);

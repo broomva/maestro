@@ -592,8 +592,12 @@ fn dispatch(
     match name {
         "maestro_snapshot" => {
             let mut snap = views::snapshot(store);
+            // Live prompts fail open with a signal (BRO-3846): what did not read is an error of
+            // the section, so the needs never look complete when they are not.
+            let live = hosts.live_permission_report(None, None);
+            snap.needs.errors.extend(live.errors());
             if let Some(list) = snap.needs.data.as_mut() {
-                list.extend(hosts.live_permission_needs(None, None));
+                list.extend(live.needs);
             }
             Ok(json!(snap))
         }
@@ -603,7 +607,9 @@ fn dispatch(
             let mut section = snap.needs;
             if let Some(list) = section.data.as_mut() {
                 if a.project.is_none() {
-                    list.extend(hosts.live_permission_needs(None, None));
+                    let live = hosts.live_permission_report(None, None);
+                    section.errors.extend(live.errors());
+                    list.extend(live.needs);
                 } else if let Some(p) = a.project.as_deref() {
                     list.retain(|n| n.project.as_deref() == Some(p));
                 }
@@ -760,9 +766,14 @@ fn dispatch(
             let mut packet =
                 views::context(store, ContextScope { cwd: a.cwd, project: a.project, initiative: a.initiative });
             if packet.scope.project.is_none() && packet.scope.initiative.is_none() {
-                let live_needs = hosts.live_permission_needs(None, None);
-                if !live_needs.is_empty() {
-                    packet.needs.extend(live_needs);
+                let live = hosts.live_permission_report(None, None);
+                let degraded = live.degraded_surfaces();
+                packet.needs.extend(live.needs);
+                if !degraded.is_empty() {
+                    packet.needs_complete = false;
+                }
+                for (surface, n) in degraded {
+                    packet.degraded.push(format!("{} permission prompts ({n} unread)", surface.as_str()));
                 }
             }
             let markdown = packet.render_markdown(a.max_needs.unwrap_or(8));
@@ -801,48 +812,231 @@ fn resolve_caller(
     args: &Value,
     ambient: Ambient,
 ) -> Result<(maestro_core::session::SessionRef, Principal), McpError> {
-    Ok(match verified_caller(hosts, session, args, ambient)? {
+    Ok(match verified_caller(hosts, Some(session), args, ambient, Check::Request)? {
         Some(verified) => (verified.session().clone(), maestro_hosts::verified_identity(&verified)),
         None => (session.clone(), Principal::Unverified),
     })
+}
+
+/// Which caller check a call needs. Attributed identity (BRO-3846) applies only to flow writes
+/// (`Authority::AgentWrite`, `flow open`, the stop gate); an agent request keeps the rules it had,
+/// so a claimless one stays [`Principal::Unverified`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Check {
+    Request,
+    Write,
+}
+
+/// The claim fields a caller presented: from its arguments or, in its own process, the caller
+/// variables.
+struct Presented {
+    cwd: Option<String>,
+    token: Option<String>,
+    node: Option<String>,
+    credential: Option<maestro_hosts::BridgeCredential>,
+}
+
+impl Presented {
+    fn read(args: &Value, ambient: Ambient) -> Result<Self, McpError> {
+        let var = |key: &str| match ambient {
+            Ambient::Caller => std::env::var(key).ok().filter(|s| !s.is_empty()),
+            Ambient::Shared => None,
+        };
+        let cwd = args.get("cwd").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_CALLER_CWD"));
+        let token =
+            args.get("token").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_DIRECT_TOKEN"));
+        let node = args.get("node").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_CALLER_NODE"));
+        let credential: Option<maestro_hosts::BridgeCredential> = match args.get("credential") {
+            Some(v) => Some(
+                serde_json::from_value(v.clone())
+                    .map_err(|e| McpError::invalid_params(format!("`credential`: {e}"), None))?,
+            ),
+            None => match var("MAESTRO_BRIDGE_CREDENTIAL") {
+                Some(raw) => Some(
+                    serde_json::from_str(&raw)
+                        .map_err(|e| McpError::invalid_params(format!("MAESTRO_BRIDGE_CREDENTIAL: {e}"), None))?,
+                ),
+                None => None,
+            },
+        };
+        Ok(Self { cwd, token, node, credential })
+    }
+
+    /// A credential or token was presented: the credential verifier decides, in full.
+    fn credentialed(&self) -> bool {
+        self.credential.is_some() || self.token.is_some()
+    }
+}
+
+/// Whether a caller presents a credential or a token, in `args` or (in its own process) the caller
+/// variables: then the credential verifier decides its identity, never attribution. A credential
+/// that does not parse is presented all the same: its parse error is the refusal, never `false`.
+pub(crate) fn presented_credential(args: &Value, ambient: Ambient) -> Result<bool, McpError> {
+    Presented::read(args, ambient).map(|p| p.credentialed())
+}
+
+/// A refused caller, as every caller check reports one.
+fn refused(refusal: maestro_hosts::IdentityRefusal) -> McpError {
+    McpError::invalid_params(
+        format!("caller identity refused ({:?}): {}", refusal.reason, refusal.message),
+        Some(json!({ "reason": refusal.reason, "refused": true })),
+    )
+}
+
+fn refuse(reason: maestro_hosts::RefusalReason, message: impl Into<String>) -> McpError {
+    refused(maestro_hosts::IdentityRefusal::new(reason, message))
 }
 
 /// The caller, verified against its surface's registry from the claim in `args` (or, in the
 /// caller's own process, the `MAESTRO_*` caller variables). `None` when its surface has no
 /// registry here and it makes no claim: an unverified caller. A claim that does not verify is an
 /// error.
+///
+/// A flow write in attributed mode (BRO-3846, the default; `MAESTRO_IDENTITY=strict` turns it off)
+/// follows the spec's decision matrix, credential first:
+/// - a presented credential or token runs the existing verifier in full, and its result is final:
+///   it never falls back to attribution. Before it, in the caller's own process, a thread variable
+///   that contradicts the claim is refused: one that does not resolve, or names another thread, or
+///   any T3 variable beside a Paseo or Direct claim (a T3 thread is never such a session);
+/// - with none, a T3 claim (or no session at all) is verified through the thread its process's
+///   own thread variable resolves to (`attribution_missing` with none), and the session, when
+///   named, must be that thread (`thread_mismatch`). A Paseo or Direct claim keeps its refusal.
+///
+/// The precedence is `registry_unavailable`, `attribution_unresolved`, `thread_mismatch`, then the
+/// result. A shared daemon has no caller environment, so it never attributes. `session` is `None`
+/// only for a flow write that names none: the thread's own session is derived.
 pub(crate) fn verified_caller(
     hosts: &maestro_hosts::SurfaceRegistry,
-    session: &maestro_core::session::SessionRef,
+    session: Option<&maestro_core::session::SessionRef>,
     args: &Value,
     ambient: Ambient,
+    check: Check,
 ) -> Result<Option<maestro_core::session::VerifiedSession>, McpError> {
-    let var = |key: &str| match ambient {
-        Ambient::Caller => std::env::var(key).ok().filter(|s| !s.is_empty()),
-        Ambient::Shared => None,
+    use maestro_core::session::{SessionRef, Surface};
+    use maestro_hosts::{Attributed, IdentityMode, RefusalReason};
+    let presented = Presented::read(args, ambient)?;
+    let write = check == Check::Write;
+    let mode = |p: &Presented| if p.credential.is_some() { "bridge-credential" } else { "direct-token" };
+    if !write || hosts.identity_mode() == IdentityMode::Strict {
+        let Some(session) = session else {
+            return Err(refuse(
+                RefusalReason::MissingSessionId,
+                "no session was named, and strict identity derives none: pass your session",
+            ));
+        };
+        // Strict mode ignores thread variables; a write still records its audit facts.
+        let audit = write.then(|| mode(&presented));
+        let verified = claimed(hosts, session, presented, None)?;
+        return Ok(verified.map(|v| match audit {
+            Some(m) => v.with_audit(hosts.audit(m, None)),
+            None => v,
+        }));
+    }
+    // Attributed: the caller's own variables, never a shared daemon's.
+    let has_vars = ambient == Ambient::Caller && !hosts.thread_vars().is_empty();
+    let host = hosts.t3_environment();
+    // The resolved thread's session: its registry environment id, the canonical one.
+    let thread_session = |thread: &str, environment: &Option<String>| SessionRef {
+        surface: Surface::T3,
+        environment: environment.clone().or_else(|| host.clone()),
+        id: thread.to_string(),
     };
-    let arg_cwd = args.get("cwd").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_CALLER_CWD"));
-    let arg_token =
-        args.get("token").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_DIRECT_TOKEN"));
-    let arg_node = args.get("node").and_then(Value::as_str).map(str::to_owned).or_else(|| var("MAESTRO_CALLER_NODE"));
-    let arg_cred: Option<maestro_hosts::BridgeCredential> = match args.get("credential") {
-        Some(v) => Some(
-            serde_json::from_value(v.clone())
-                .map_err(|e| McpError::invalid_params(format!("`credential`: {e}"), None))?,
-        ),
-        None => match var("MAESTRO_BRIDGE_CREDENTIAL") {
-            Some(raw) => Some(
-                serde_json::from_str(&raw)
-                    .map_err(|e| McpError::invalid_params(format!("MAESTRO_BRIDGE_CREDENTIAL: {e}"), None))?,
-            ),
-            None => None,
-        },
+    // The session named must be the resolved thread's, once canonical: `local`, `-` and the
+    // registry's environment id are one; another environment, or another thread, is a mismatch.
+    let check_named = |named: &SessionRef, a: &maestro_hosts::Attribution, env: &Option<String>| {
+        let thread = thread_session(&a.thread, env);
+        if named.canonical(thread.environment.as_deref()) != thread {
+            return Err(refuse(
+                RefusalReason::ThreadMismatch,
+                format!("{} names T3 thread {}, but the claimed session is {named}", a.variable, a.thread),
+            ));
+        }
+        Ok::<(), McpError>(())
     };
+    if presented.credentialed() {
+        let mut attribution = None;
+        let mut session = session.cloned();
+        if has_vars {
+            if let Some(named) = session.as_ref().filter(|s| s.surface != Surface::T3) {
+                return Err(refuse(
+                    RefusalReason::ThreadMismatch,
+                    format!(
+                        "this process carries a T3 thread variable ({}), which can never name the {} session {named}",
+                        hosts.thread_vars().names().join(", "),
+                        named.surface.as_str()
+                    ),
+                ));
+            }
+            match hosts.attribution() {
+                Attributed::Absent => {}
+                Attributed::Refused(r) => return Err(refused(r)),
+                Attributed::Resolved { attribution: a, environment } => {
+                    let named = session.get_or_insert_with(|| thread_session(&a.thread, &environment));
+                    check_named(named, &a, &environment)?;
+                    attribution = Some(a);
+                }
+            }
+        }
+        let Some(session) = session else {
+            return Err(refuse(
+                RefusalReason::AttributionMissing,
+                "no session was named and this process carries no T3 thread variable to derive one from",
+            ));
+        };
+        let session = session.canonical(host.as_deref());
+        let m = mode(&presented);
+        let verified = claimed(hosts, &session, presented, None)?;
+        return Ok(verified.map(|v| v.with_audit(hosts.audit(m, attribution.as_ref()))));
+    }
+    if let Some(named) = session.filter(|s| s.surface != Surface::T3) {
+        // A Paseo or Direct claim with no credential: refused as before.
+        return claimed(hosts, named, presented, None);
+    }
+    if !has_vars {
+        let why = match ambient {
+            Ambient::Shared => {
+                "a shared daemon has no caller environment, so an unsigned T3 write needs a bridge credential"
+            }
+            Ambient::Caller => {
+                "this process carries no T3 thread variable (T3CODE_THREAD_ID or CODEX_THREAD_ID), and no credential was presented"
+            }
+        };
+        return Err(refuse(RefusalReason::AttributionMissing, why));
+    }
+    let (a, environment) = match hosts.attribution() {
+        Attributed::Absent => {
+            return Err(refuse(RefusalReason::AttributionMissing, "this process carries no T3 thread variable"));
+        }
+        Attributed::Refused(r) => return Err(refused(r)),
+        Attributed::Resolved { attribution, environment } => (attribution, environment),
+    };
+    if let Some(named) = session {
+        check_named(named, &a, &environment)?;
+    }
+    let session = thread_session(&a.thread, &environment);
+    let verified = claimed(hosts, &session, presented, Some(a.clone()))?;
+    Ok(verified.map(|v| v.with_audit(hosts.audit("t3-attributed", Some(&a)))))
+}
+
+/// The credential verifier, as it ran before BRO-3846, for `session` and the presented claim. With
+/// `attribution` (an unsigned T3 claim the caller check resolved from this process's own thread
+/// variable), the pre-check lets it through to the registry, which verifies the thread.
+fn claimed(
+    hosts: &maestro_hosts::SurfaceRegistry,
+    session: &maestro_core::session::SessionRef,
+    presented: Presented,
+    attribution: Option<maestro_hosts::Attribution>,
+) -> Result<Option<maestro_core::session::VerifiedSession>, McpError> {
+    let Presented { cwd: arg_cwd, token: arg_token, node: arg_node, credential: arg_cred } = presented;
     let has_claim_meta = arg_cwd.is_some() || arg_token.is_some() || arg_node.is_some() || arg_cred.is_some();
-    if !hosts.has_surface(&session.surface) && !has_claim_meta {
+    let attributed = session.surface == maestro_core::session::Surface::T3 && attribution.is_some();
+    if !hosts.has_configured_surface(&session.surface) && !has_claim_meta && !attributed {
         return Ok(None);
     }
-    if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {
+    if arg_cred.is_none()
+        && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none())
+        && !attributed
+    {
         return Err(McpError::invalid_params(
             "caller identity refused (InvalidToken): authenticated bridge credential or launch token is required",
             Some(json!({ "reason": "invalid_token", "refused": true })),
@@ -857,6 +1051,7 @@ pub(crate) fn verified_caller(
         node: None,
         credential: arg_cred,
         generation: None,
+        attribution,
     };
     if let Some(raw_node) = arg_node {
         let parsed = raw_node
@@ -864,12 +1059,7 @@ pub(crate) fn verified_caller(
             .map_err(|e| McpError::invalid_params(format!("`node`: {e}"), None))?;
         claim = claim.with_node(parsed);
     }
-    let verified = hosts.verify_caller(&claim).map_err(|refusal| {
-        McpError::invalid_params(
-            format!("caller identity refused ({:?}): {}", refusal.reason, refusal.message),
-            Some(json!({ "reason": refusal.reason, "refused": true })),
-        )
-    })?;
+    let verified = hosts.verify_caller(&claim).map_err(refused)?;
     if session.environment.is_some() && session.environment != verified.session().environment {
         return Err(McpError::invalid_params(
             format!(
@@ -922,21 +1112,7 @@ pub(crate) fn agent_request_in(
             let a: AskFileArgs = parse(clean_args)?;
             let parsed_session = session_of(&a.session)?;
             let (session, caller) = resolve_caller(hosts, &parsed_session, &args, ambient)?;
-            // Writes go to the working tree, never to a git revision.
-            requests::compose_ask(&a.ask).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-            let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);
-            let rel = disk.rel(maestro_store::ASKS).map_err(|e| McpError::invalid_params(e, None))?;
-            let dir = disk.paths.workspace.join(rel);
-            let filed =
-                requests::file_ask(&disk.paths, &dir, &a.ledger, &a.ask, &session, &caller).map_err(file_error)?;
-            let mut record =
-                requests::new_record(kind, session, &caller, json!({ "ledger": a.ledger, "id": filed.id }));
-            record.result = Some(json!({ "ledger": filed.ledger, "id": filed.id }));
-            // The ask is written, so the request failed only if its journal line was not: say both.
-            if let Err(e) = requests::record(&disk.paths, &record) {
-                return Err(unjournalled(&filed.ledger, &filed.id, &e));
-            }
-            return Ok(json!({ "request": record, "validator": filed.validator }));
+            return file_ask_as(store, session, &caller, &a.ledger, &a.ask);
         }
         RequestKind::WorkQueue => json!(parse::<WorkQueueArgs>(clean_args)?),
         RequestKind::ActionRequest => json!(parse::<ActionRequestArgs>(clean_args)?),
@@ -949,6 +1125,30 @@ pub(crate) fn agent_request_in(
     let record = requests::new_record(kind, session, &caller, payload);
     requests::record(&store.paths, &record).map_err(file_error)?;
     Ok(json!({ "request": record, "journal": requests::journal(&store.paths) }))
+}
+
+/// Files `ask` into `ledger` for `session` as `caller`, through the writer of record, and journals
+/// the request. Writes go to the working tree, never to a git revision.
+pub(crate) fn file_ask_as(
+    store: &Store,
+    session: maestro_core::session::SessionRef,
+    caller: &Principal,
+    ledger: &str,
+    ask: &serde_json::Map<String, Value>,
+) -> Result<Value, McpError> {
+    requests::compose_ask(ask).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+    let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);
+    let rel = disk.rel(maestro_store::ASKS).map_err(|e| McpError::invalid_params(e, None))?;
+    let dir = disk.paths.workspace.join(rel);
+    let filed = requests::file_ask(&disk.paths, &dir, ledger, ask, &session, caller).map_err(file_error)?;
+    let mut record =
+        requests::new_record(RequestKind::AskFile, session, caller, json!({ "ledger": ledger, "id": filed.id }));
+    record.result = Some(json!({ "ledger": filed.ledger, "id": filed.id }));
+    // The ask is written, so the request failed only if its journal line was not: say both.
+    if let Err(e) = requests::record(&disk.paths, &record) {
+        return Err(unjournalled(&filed.ledger, &filed.id, &e));
+    }
+    Ok(json!({ "request": record, "validator": filed.validator }))
 }
 
 pub fn unjournalled(ledger: &std::path::Path, id: &str, e: &requests::FileError) -> McpError {

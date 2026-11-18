@@ -282,11 +282,20 @@ PY
   check_mutant "$hlb" 'if in_paseo && !in_t3 {' 'if false {'
   check_mutant "$hlb" 'Sha256::digest(t.as_bytes()) == Sha256::digest(s.token.as_bytes())' 'true'
   check_mutant "$hlb" 'if cred.generation != current_gen {' 'if false {'
-  check_mutant "$ht" 'if self.disconnected {' 'if false {'
+  check_mutant "$ht" 'if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        check_peer(' 'if false {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        check_peer('
   check_mutant "$ht" '        } else if self.settled_at.is_some() && self.status.as_deref() != Some("running") {' '        } else if false {'
   check_mutant "$session" '        self.pending_permissions' '        Vec::<PermissionPrompt>::new()'
-  check_mutant crates/mcp/src/lib.rs 'if !hosts.has_surface(&session.surface) && !has_claim_meta {' 'if true {'
-  check_mutant crates/mcp/src/lib.rs 'if arg_cred.is_none() && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none()) {' 'if false {'
+  check_mutant crates/mcp/src/lib.rs 'if !hosts.has_configured_surface(&session.surface) && !has_claim_meta && !attributed {' 'if true {'
+  check_mutant crates/mcp/src/lib.rs '    if arg_cred.is_none()
+        && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none())
+        && !attributed
+    {' '    if false {'
   check_mutant crates/mcp/src/lib.rs 'if packet.scope.project.is_none() && packet.scope.initiative.is_none() {' 'if true {'
   check_mutant "$hlb" 'if effective_now_ms < cred.issued_at_ms || effective_now_ms >= cred.expires_at_ms {' 'if false {'
   check_mutant "$hlb" 'if lock_dir_stale(&lock_dir, &lock_dir) == Some(true) {' 'if false {'

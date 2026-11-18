@@ -6,7 +6,8 @@
 //! to verify a T3 thread's existence, liveness, working directory (`worktreePath` or
 //! project `workspace_root`), environment id, and pending permission prompts.
 
-use crate::paseo::{PermissionLike, check_peer, describe_permission, permission_request_id, short_id, within};
+use crate::paseo::{RawRuntimeRequest, check_peer, decode_permissions, decode_runtime_requests, short_id, within};
+use crate::read::{self, Read};
 use maestro_core::session::{
     BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, RefusalReason,
     SessionLiveness, SessionRef, Surface, VerifiedSession,
@@ -16,17 +17,24 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Whether `id` is a plausible T3 thread id (e.g. `mcp:<uuid>` or `<uuid>` or token, with no path separators or NUL).
+/// The longest T3 thread id Maestro reads (BRO-3846): live delegated ids run 129 to 206 bytes.
+pub const MAX_T3_ID: usize = 512;
+
+/// Whether `id` is a plausible T3 thread id: `mcp:<uuid>`, `<uuid>`, or a percent-encoded composite
+/// such as `mcp:launch:abc%3Adef`. A leading alphanumeric, then alphanumerics and `-_:.%`, at most
+/// [`MAX_T3_ID`] bytes, never `/`, `..` or NUL. Ids are opaque: never percent-decoded, used only as
+/// SQL parameters and in comparisons, never as a path, so `%2F` is just three bytes.
 pub fn is_safe_t3_id(id: &str) -> bool {
     let bytes = id.as_bytes();
-    if bytes.is_empty() || bytes.len() > 128 {
+    if bytes.is_empty() || bytes.len() > MAX_T3_ID {
         return false;
     }
     if !bytes[0].is_ascii_alphanumeric() {
         return false;
     }
-    bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.'))
-        && !id.contains("..")
+    // The charset has no `/` and no NUL; `..` is the one sequence of allowed bytes refused.
+    !id.contains("..")
+        && bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.' | b'%'))
 }
 
 /// What Maestro reads of a T3 thread record.
@@ -56,6 +64,9 @@ pub struct T3Thread {
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
+    /// Pending permission records that did not decode, each with why (BRO-3863).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_permissions: Vec<String>,
 }
 
 impl T3Thread {
@@ -116,9 +127,9 @@ struct RawT3Thread {
     created_at: Option<String>,
     #[serde(default, alias = "runId", alias = "session_id", alias = "sessionId")]
     run_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "archivedAt")]
     archived_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "deletedAt")]
     deleted_at: Option<String>,
     #[serde(default)]
     settled_at: Option<String>,
@@ -128,6 +139,71 @@ struct RawT3Thread {
     parent_id: Option<String>,
     #[serde(default)]
     pending_permissions: Option<Vec<Value>>,
+    /// The thread's pending runtime requests, raw, as the SQLite reader emits them (BRO-3863).
+    #[serde(default)]
+    runtime_requests: Vec<RawRuntimeRequest>,
+    /// The thread's active provider-thread row (`active_provider_thread_id`).
+    #[serde(default)]
+    active_provider_thread_id: Option<String>,
+    /// The thread's provider-thread rows, active or retired, each with its native id
+    /// (`payload_json.$.nativeThreadRef.nativeId`), as `orchestration_v2_projection_provider_threads`
+    /// holds them.
+    #[serde(default)]
+    provider_threads: Vec<RawProviderThread>,
+    /// Set by the listing only (BRO-3846): why the thread's payload did not read. The thread is
+    /// listed from what is known, its permission prompts included, and the listing reports it.
+    #[serde(default)]
+    unreadable: Option<String>,
+}
+
+/// The live threads a listing found, and what it could not read (BRO-3846). The listing feeds
+/// the owner's permission prompts, not identity, so it fails open with a signal: a thread whose
+/// payload did not read is still in `threads`, prompts and all, and named in `unreadable`; a
+/// snapshot row that did not read is left out and named; a registry that did not read at all is
+/// named by its path. A consumer must not show the prompts as complete while `unreadable` holds
+/// anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveThreads {
+    pub threads: Vec<T3Thread>,
+    /// `(where, why)`: a thread id, or the registry's path.
+    pub unreadable: Vec<(String, String)>,
+}
+
+#[derive(Deserialize)]
+struct RawProviderThread {
+    provider_thread_id: String,
+    #[serde(default)]
+    native_id: Option<String>,
+}
+
+/// Where a T3 registry is: a JSON snapshot, or a `statev2.sqlite`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Located {
+    Json(PathBuf),
+    Sqlite(PathBuf),
+}
+
+impl LiveThreads {
+    /// A thread the listing read: listed when live, and each of its pending permission records
+    /// that did not decode reported unread (BRO-3863), never dropped.
+    fn take(&mut self, thread: T3Thread) {
+        if !thread.liveness().is_live() {
+            return;
+        }
+        for why in &thread.unread_permissions {
+            self.unreadable.push((format!("t3 thread {}", thread.id), why.clone()));
+        }
+        self.threads.push(thread);
+    }
+}
+
+/// What one thread variable resolved to (BRO-3846).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// Exactly one thread, neither archived nor deleted.
+    Thread(Box<T3Thread>),
+    /// No thread, more than one, or one archived or deleted: why.
+    Unresolved(String),
 }
 
 /// T3 thread registry reader (`statev2.sqlite` or JSON snapshot).
@@ -142,25 +218,57 @@ pub struct T3Registry {
 const SQLITE_READER_PY: &str = r#"
 import json, pathlib, sqlite3, sys
 
+class PayloadError(Exception):
+    pass
+
+def payload_of(raw, what):
+    # The one parser of a thread's or a provider row's payload, in every mode (BRO-3846): the
+    # payload carries archivedAt, deletedAt, node and nativeThreadRef, so one that is NULL,
+    # empty, blank, not JSON or not an object is an error (`registry_unavailable`), never `{}`.
+    if raw is None or not str(raw).strip():
+        raise PayloadError(f"{what} is empty")
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        raise PayloadError(f"{what} does not parse")
+    if not isinstance(payload, dict):
+        raise PayloadError(f"{what} is not an object")
+    return payload
+
 def main():
     mode = sys.argv[1]
     db_path = pathlib.Path(sys.argv[2])
     target_id = sys.argv[3] if len(sys.argv) > 3 else ""
 
     env_file = db_path.parent / "environment-id"
-    env_id = env_file.read_text().strip() if env_file.is_file() else None
+    # The read rule: only a missing file is absent; any other error is the database's unread.
+    try:
+        env_id = env_file.read_text().strip() or None
+    except FileNotFoundError:
+        env_id = None
 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
+    def runtime_requests_of(thread_id):
+        # A thread's pending permission requests, raw: stored apart from its payload, so they read
+        # even when the payload does not. The reader does not interpret them: the one rule for
+        # prompt or unread lives in Rust (`decode_runtime_requests`, BRO-3863 round 11).
+        requests = []
+        if "orchestration_v2_projection_runtime_requests" in tables:
+            for req in conn.execute(
+                "SELECT runtime_request_id, kind, status, payload_json "
+                "FROM orchestration_v2_projection_runtime_requests "
+                "WHERE thread_id = ? AND status = 'pending' ORDER BY created_at ASC",
+                (thread_id,),
+            ):
+                if req["kind"] in ("approval", "permission", "tool_approval"):
+                    requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})
+        return requests
+
     def build_thread(row):
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except Exception:
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
+        payload = payload_of(row["payload_json"], f"thread {row['thread_id']}'s payload")
         cwd = payload.get("worktreePath")
         if not cwd and "projection_projects" in tables:
             proj = conn.execute(
@@ -170,7 +278,12 @@ def main():
             if proj:
                 cwd = proj["workspace_root"]
         if not isinstance(cwd, str) or not cwd:
-            return None
+            # Attribution picks a thread by its variable, never by a folder: a live thread with
+            # no worktree and no project root is still the thread. The listing feeds permission
+            # prompts, which need no folder either.
+            if mode not in ("attr", "list"):
+                return None
+            cwd = ""
         run_status = payload.get("status")
         latest_run_id = None
         if "orchestration_v2_projection_runs" in tables:
@@ -190,34 +303,6 @@ def main():
         lineage = payload.get("lineage") or payload.get("forkedFrom")
         if isinstance(lineage, dict):
             parent_id = lineage.get("parentThreadId") or lineage.get("threadId")
-        perms = []
-        if "orchestration_v2_projection_runtime_requests" in tables:
-            for req in conn.execute(
-                "SELECT runtime_request_id, kind, status, payload_json "
-                "FROM orchestration_v2_projection_runtime_requests "
-                "WHERE thread_id = ? AND status = 'pending' ORDER BY created_at ASC",
-                (row["thread_id"],),
-            ):
-                if req["kind"] in ("approval", "permission", "tool_approval"):
-                    try:
-                        rp = json.loads(req["payload_json"] or "{}")
-                    except Exception:
-                        continue
-                    if not isinstance(rp, dict):
-                        continue
-                    name = rp.get("toolName") or rp.get("name") or req["kind"]
-                    if not isinstance(name, str) or not name.strip():
-                        continue
-                    req_id = req["runtime_request_id"]
-                    if not isinstance(req_id, str) or not req_id.strip():
-                        req_id = rp.get("id") if isinstance(rp.get("id"), str) else None
-                    perms.append({
-                        "id": req_id,
-                        "name": name,
-                        "title": rp.get("title") if isinstance(rp.get("title"), str) else None,
-                        "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
-                        "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
-                    })
         created_at = row["created_at"] if "created_at" in row.keys() and row["created_at"] else payload.get("createdAt")
         run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")
         return {
@@ -233,8 +318,53 @@ def main():
             "settled_at": settled_at,
             "status": run_status,
             "parent_id": parent_id,
-            "pending_permissions": perms,
+            "pending_permissions": [],
+            "runtime_requests": runtime_requests_of(row["thread_id"]),
         }
+
+    if mode == "native":
+        # The threads whose ACTIVE provider-thread row carries this native id (a Codex
+        # CODEX_THREAD_ID, or a Stop hook's session_id). A retired provider row never attributes.
+        # Uniqueness needs every active row read: a missing table, an active pointer with no row,
+        # or a payload that does not parse is an error, never a skipped row.
+        missing = sorted({"orchestration_v2_projection_threads", "orchestration_v2_projection_provider_threads"} - tables)
+        if missing:
+            sys.stderr.write(f"sqlite_error: missing table(s) {', '.join(missing)}\n")
+            sys.exit(2)
+        def unreadable(thread_id, why):
+            raise PayloadError(f"the active provider row of thread {thread_id} {why}")
+        out = []
+        rows = conn.execute(
+            "SELECT t.thread_id AS thread_id, t.payload_json AS thread_payload, "
+            "p.provider_thread_id AS provider_thread_id, p.payload_json AS payload_json "
+            "FROM orchestration_v2_projection_threads t "
+            "LEFT JOIN orchestration_v2_projection_provider_threads p "
+            "ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id "
+            "WHERE t.active_provider_thread_id IS NOT NULL AND t.archived_at IS NULL AND t.deleted_at IS NULL"
+        )
+        for r in rows:
+            # A thread archived or deleted in its payload only (`archivedAt`, `deletedAt`, as
+            # `build_thread` reads them) is no live thread either. Its payload must read to tell.
+            thread_payload = payload_of(r["thread_payload"], f"thread {r['thread_id']}'s payload")
+            if thread_payload.get("archivedAt") or thread_payload.get("deletedAt"):
+                continue
+            if r["provider_thread_id"] is None:
+                unreadable(r["thread_id"], "is missing")
+            payload = payload_of(r["payload_json"], f"the active provider row of thread {r['thread_id']}")
+            ref = payload.get("nativeThreadRef")
+            if ref is None:
+                continue
+            if not isinstance(ref, dict):
+                unreadable(r["thread_id"], "has a malformed nativeThreadRef")
+            # A native id not yet assigned matches nothing; any other non-string one is malformed.
+            if ref.get("nativeId") is None:
+                continue
+            if not isinstance(ref.get("nativeId"), str):
+                unreadable(r["thread_id"], "has a malformed nativeThreadRef")
+            if ref["nativeId"] == target_id and r["thread_id"] not in out:
+                out.append(r["thread_id"])
+        print(json.dumps(out))
+        sys.exit(0)
 
     if mode == "list":
         out = []
@@ -243,11 +373,38 @@ def main():
                 "SELECT rowid AS _rowid, thread_id, project_id, default_provider, created_at, archived_at, deleted_at, payload_json "
                 "FROM orchestration_v2_projection_threads ORDER BY updated_at DESC"
             ):
-                built = build_thread(row)
+                # The listing feeds permission prompts, not identity: it fails open, with a signal.
+                # A thread whose payload does not read is still listed, from what is known (its
+                # columns, and its prompts, stored apart), with the reason in `unreadable`; its
+                # payload fields are unknown. Its prompts are never dropped.
+                try:
+                    built = build_thread(row)
+                except PayloadError as exc:
+                    built = {
+                        "id": row["thread_id"],
+                        "cwd": "",
+                        "environment_id": env_id,
+                        "node": None,
+                        "provider": row["default_provider"],
+                        "created_at": row["created_at"],
+                        "run_id": None,
+                        "archived_at": row["archived_at"],
+                        "deleted_at": row["deleted_at"],
+                        "settled_at": None,
+                        "status": None,
+                        "parent_id": None,
+                        "pending_permissions": [],
+                        "runtime_requests": runtime_requests_of(row["thread_id"]),
+                        "unreadable": str(exc),
+                    }
                 if built is not None:
                     out.append(built)
         print(json.dumps(out))
         sys.exit(0)
+
+    if mode == "attr" and not ({"orchestration_v2_projection_threads", "projection_threads"} & tables):
+        sys.stderr.write("sqlite_error: no thread table\n")
+        sys.exit(2)
 
     if "orchestration_v2_projection_threads" in tables:
         row = conn.execute(
@@ -292,10 +449,10 @@ def main():
                     provider = srow["provider_name"]
                     status = srow["status"]
                     session_id = srow["session_id"]
-            if cwd:
+            if cwd or mode == "attr":
                 print(json.dumps({
                     "id": prow["thread_id"],
-                    "cwd": cwd,
+                    "cwd": cwd or "",
                     "environment_id": env_id,
                     "node": None,
                     "provider": provider,
@@ -316,6 +473,10 @@ try:
     main()
 except SystemExit:
     raise
+except PayloadError as exc:
+    # A payload that does not read: exit 4, which every reader maps to `registry_unavailable`.
+    sys.stderr.write(f"sqlite_error: {exc}\n")
+    sys.exit(4)
 except Exception as exc:
     sys.stderr.write(f"sqlite_error: {exc}\n")
     sys.exit(2)
@@ -351,7 +512,9 @@ impl T3Registry {
 
     /// Discover T3 runtime version, transport, environment id, and connection state.
     pub fn discover(&self) -> BridgeDiscovery {
-        let userdata = if self.root.join("userdata").is_dir() {
+        // A `userdata` folder that cannot be told is taken as the one: the reads under it then fail
+        // visibly, never as a folder that is not there.
+        let userdata = if !matches!(read::is_dir(&self.root.join("userdata")), Read::Present(false) | Read::Absent) {
             self.root.join("userdata")
         } else if self.sqlite_path().and_then(|p| p.parent().map(Path::to_path_buf)).is_some() {
             self.sqlite_path().unwrap().parent().unwrap().to_path_buf()
@@ -359,17 +522,19 @@ impl T3Registry {
             self.root.clone()
         };
 
-        let env_id = std::fs::read_to_string(userdata.join("environment-id"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        let runtime_json = std::fs::read_to_string(userdata.join("server-runtime.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
-        let service_json = std::fs::read_to_string(self.root.join("runtime/service-state.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        // Discovery reports what it can: a file that does not read is not reported. The registry's
+        // own reads (`locate`, the readers) are what fail on an unreadable registry.
+        let text = |path: PathBuf| match read::read_text(&path) {
+            Read::Present(t) => Some(t),
+            Read::Absent | Read::Unreadable(_) => None,
+        };
+        let env_id = text(userdata.join("environment-id")).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        // Display metadata only (the runtime's version and endpoint): a file that does not decode
+        // reports them unknown. Identity and needs never read these two files; the read guard lists
+        // this as its one reviewed exception.
+        let decode = |t: String| serde_json::from_str::<Value>(&t).ok();
+        let runtime_json = text(userdata.join("server-runtime.json")).and_then(decode);
+        let service_json = text(self.root.join("runtime/service-state.json")).and_then(decode);
 
         let version = runtime_json
             .as_ref()
@@ -405,32 +570,50 @@ impl T3Registry {
         }
     }
 
+    /// Where the registry is (BRO-3846): a JSON snapshot (`<root>` or `<root>/threads.json`), else a
+    /// `statev2.sqlite` (`<root>`, `<root>/statev2.sqlite`, `<root>/userdata/statev2.sqlite`),
+    /// each probed by the [`read`](crate::read) rule: a candidate whose metadata does not read
+    /// makes the registry unreadable, never "not there".
+    pub(crate) fn locate(&self) -> Read<Located> {
+        let json = [self.root.clone(), self.root.join("threads.json")].map(|c| (c, true));
+        let sqlite = [self.root.clone(), self.root.join("statev2.sqlite"), self.root.join("userdata/statev2.sqlite")]
+            .map(|c| (c, false));
+        for (candidate, is_json) in json.into_iter().chain(sqlite) {
+            let ext = candidate.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            if !(if is_json { ext == "json" } else { ext == "sqlite" || ext == "db" }) {
+                continue;
+            }
+            match read::is_file(&candidate) {
+                Read::Present(true) => {
+                    return Read::Present(if is_json { Located::Json(candidate) } else { Located::Sqlite(candidate) });
+                }
+                Read::Present(false) | Read::Absent => {}
+                Read::Unreadable(why) => return Read::Unreadable(why),
+            }
+        }
+        Read::Absent
+    }
+
     fn sqlite_path(&self) -> Option<PathBuf> {
-        [self.root.clone(), self.root.join("statev2.sqlite"), self.root.join("userdata/statev2.sqlite")]
-            .into_iter()
-            .find(|candidate| {
-                candidate.is_file() && candidate.extension().is_some_and(|ext| ext == "sqlite" || ext == "db")
-            })
+        match self.locate() {
+            Read::Present(Located::Sqlite(p)) => Some(p),
+            _ => None,
+        }
     }
 
     fn json_path(&self) -> Option<PathBuf> {
-        [self.root.clone(), self.root.join("threads.json")]
-            .into_iter()
-            .find(|candidate| candidate.is_file() && candidate.extension().is_some_and(|ext| ext == "json"))
+        match self.locate() {
+            Read::Present(Located::Json(p)) => Some(p),
+            _ => None,
+        }
     }
 
     fn from_raw(raw: RawT3Thread) -> T3Thread {
-        let pending_permissions = raw
-            .pending_permissions
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|val| serde_json::from_value::<PermissionLike>(val).ok())
-            .map(|p| {
-                let (title, detail) = describe_permission(&p, Some(&raw.cwd));
-                let request_id = permission_request_id(&p, "t3-perm");
-                PermissionPrompt { request_id, title, detail }
-            })
-            .collect();
+        let (mut pending_permissions, mut unread_permissions) =
+            decode_permissions(raw.pending_permissions.unwrap_or_default(), &raw.cwd, "t3-perm");
+        let (requested, unread_requests) = decode_runtime_requests(raw.runtime_requests, &raw.id, &raw.cwd, "t3-perm");
+        pending_permissions.extend(requested);
+        unread_permissions.extend(unread_requests);
         T3Thread {
             id: raw.id,
             cwd: raw.cwd,
@@ -445,34 +628,212 @@ impl T3Registry {
             status: raw.status,
             parent_id: raw.parent_id,
             pending_permissions,
+            unread_permissions,
         }
     }
 
-    fn lookup(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {
-        if !is_safe_t3_id(id) {
-            return Ok(None);
+    /// Every row of a JSON snapshot, by the one rule the SQLite reader's `payload_of` applies to a
+    /// thread's payload (BRO-3846). A file that does not read or is not a JSON array is
+    /// `registry_disconnected`, as an unreadable database is. A row that is not an object, whose
+    /// `cwd` is neither missing, null nor a string, or that does not deserialize, is
+    /// `registry_unavailable`: never skipped, never read as `{}`. A missing or null `cwd` is none.
+    fn snapshot_rows(json_file: &Path) -> Result<Vec<RawT3Thread>, IdentityRefusal> {
+        Self::snapshot_each(json_file)?.into_iter().collect()
+    }
+
+    /// [`Self::snapshot_rows`], each row's outcome kept apart: the listing leaves out only the row
+    /// that does not read, never every row.
+    fn snapshot_each(json_file: &Path) -> Result<Vec<Result<RawT3Thread, IdentityRefusal>>, IdentityRefusal> {
+        let disconnected =
+            |e: String| IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("T3 JSON registry {e}."));
+        let unavailable =
+            |e: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, format!("T3 JSON registry {e}."));
+        let text = match read::read_text(json_file) {
+            Read::Present(text) => text,
+            Read::Absent => {
+                return Err(disconnected(format!("could not be read: {} is not there", json_file.display())));
+            }
+            Read::Unreadable(why) => return Err(disconnected(format!("could not be read: {why}"))),
+        };
+        let rows: Vec<Value> = serde_json::from_str(&text).map_err(|e| disconnected(format!("is malformed: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|mut row| {
+                let id = row.get("id").and_then(Value::as_str).unwrap_or("?").to_string();
+                let Some(o) = row.as_object_mut() else {
+                    return Err(unavailable("has a row that is not an object".to_string()));
+                };
+                match o.get("cwd") {
+                    None | Some(Value::Null) => {
+                        o.insert("cwd".into(), Value::String(String::new()));
+                    }
+                    Some(Value::String(_)) => {}
+                    Some(_) => return Err(unavailable(format!("row {id} has a cwd that is not a string"))),
+                }
+                serde_json::from_value(row).map_err(|e| unavailable(format!("row {id} is malformed: {e}")))
+            })
+            .collect::<Vec<_>>())
+    }
+
+    /// A JSON snapshot's row: one with no environment of its own is in the snapshot's environment
+    /// (`environment-id` beside it), as every `statev2.sqlite` row is in its database's.
+    fn snapshot_row(raw: RawT3Thread, environment: &Option<String>) -> T3Thread {
+        let mut thread = Self::from_raw(raw);
+        if thread.environment_id.is_none() {
+            thread.environment_id = environment.clone();
+        }
+        thread
+    }
+
+    /// The environment id this host's T3 registry reports (`userdata/environment-id`), the
+    /// canonical form of a `local` or `-` T3 session (BRO-3846).
+    pub fn environment_id(&self) -> Option<String> {
+        self.discover().environment_id.or_else(|| {
+            // A JSON snapshot's root is the file: its `environment-id` sits beside it.
+            let beside = self.root.parent().filter(|_| matches!(read::is_file(&self.root), Read::Present(true)))?;
+            match read::read_text(&beside.join("environment-id")) {
+                Read::Present(s) => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
+                Read::Absent | Read::Unreadable(_) => None,
+            }
+        })
+    }
+
+    /// The threads whose active provider-thread row carries `native_id`, read from the registry.
+    fn native_threads(&self, native_id: &str) -> Result<Vec<String>, IdentityRefusal> {
+        let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
+        if self.disconnected {
+            return Err(unreadable("T3 registry is disconnected.".to_string()));
+        }
+        if let Read::Unreadable(why) = self.locate() {
+            return Err(unreadable(format!("T3 registry is unreadable: {why}.")));
         }
         if let Some(json_file) = self.json_path() {
-            let text = std::fs::read_to_string(json_file).map_err(|e| {
-                IdentityRefusal::new(
-                    RefusalReason::RegistryDisconnected,
-                    format!("T3 JSON registry could not be read: {e}."),
-                )
-            })?;
-            let rows: Vec<RawT3Thread> = serde_json::from_str(&text).map_err(|e| {
-                IdentityRefusal::new(
-                    RefusalReason::RegistryDisconnected,
-                    format!("T3 JSON registry is malformed: {e}."),
-                )
-            })?;
-            return Ok(rows.into_iter().find(|raw| raw.id == id).map(Self::from_raw));
+            let rows = Self::snapshot_rows(&json_file).map_err(|e| unreadable(e.message))?;
+            let mut out: Vec<String> = Vec::new();
+            for raw in rows {
+                let Some(active) = raw.active_provider_thread_id.as_deref() else { continue };
+                // Only live threads attribute, so only theirs need reading whole.
+                if raw.archived_at.is_some() || raw.deleted_at.is_some() {
+                    continue;
+                }
+                if !raw.provider_threads.iter().any(|p| p.provider_thread_id == active) {
+                    return Err(unreadable(format!("The active provider row of thread {} is missing.", raw.id)));
+                }
+                let hit = raw
+                    .provider_threads
+                    .iter()
+                    .any(|p| p.provider_thread_id == active && p.native_id.as_deref() == Some(native_id));
+                if hit && !out.contains(&raw.id) {
+                    out.push(raw.id);
+                }
+            }
+            return Ok(out);
         }
         if let Some(db_file) = self.sqlite_path() {
             let out = Command::new("python3")
                 .arg("-I")
                 .arg("-c")
                 .arg(SQLITE_READER_PY)
-                .arg("get")
+                .arg("native")
+                .arg(&db_file)
+                .arg(native_id)
+                .output()
+                .map_err(|e| unreadable(format!("T3 SQLite reader failed to launch: {e}.")))?;
+            if out.status.code() != Some(0) {
+                let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                return Err(unreadable(format!("T3 SQLite database is unreadable: {detail}")));
+            }
+            return serde_json::from_slice(&out.stdout)
+                .map_err(|e| unreadable(format!("T3 SQLite reader returned invalid JSON: {e}.")));
+        }
+        Err(unreadable(format!("No T3 registry database or snapshot at {}.", self.root.display())))
+    }
+
+    /// Resolves a thread variable to its thread (BRO-3846). `native` is false for
+    /// `T3CODE_THREAD_ID`, which names a thread row; true for `CODEX_THREAD_ID` or a Stop hook's
+    /// `session_id`, which name a provider's native thread and resolve through the thread's active
+    /// provider row only. Liveness is `archived_at` and `deleted_at` unset; `settled_at` and the run
+    /// status are ignored. A registry that does not read is `registry_unavailable`, never a fallback.
+    pub fn resolve(&self, value: &str, native: bool) -> Result<Resolution, IdentityRefusal> {
+        let thread_id = if native {
+            if value.is_empty() || value.len() > MAX_T3_ID || value.contains('\0') {
+                return Ok(Resolution::Unresolved(format!("{} is not a native thread id", short_id(value))));
+            }
+            let found = self.native_threads(value)?;
+            match found.as_slice() {
+                [] => {
+                    return Ok(Resolution::Unresolved(format!(
+                        "no T3 thread's active provider row is {}",
+                        short_id(value)
+                    )));
+                }
+                [one] => one.clone(),
+                many => {
+                    return Ok(Resolution::Unresolved(format!(
+                        "{} active provider rows carry {}",
+                        many.len(),
+                        short_id(value)
+                    )));
+                }
+            }
+        } else {
+            value.to_string()
+        };
+        if !is_safe_t3_id(&thread_id) {
+            return Ok(Resolution::Unresolved(format!("{} is not a T3 thread id", short_id(&thread_id))));
+        }
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryUnavailable, "T3 registry is disconnected."));
+        }
+        let thread = self
+            .lookup_attributed(&thread_id)
+            .map_err(|r| IdentityRefusal::new(RefusalReason::RegistryUnavailable, r.message))?;
+        Ok(match thread {
+            None => Resolution::Unresolved(format!("no T3 thread has the id {}", short_id(&thread_id))),
+            Some(t) if t.archived_at.is_some() => {
+                Resolution::Unresolved(format!("thread {} is archived", short_id(&t.id)))
+            }
+            Some(t) if t.deleted_at.is_some() => {
+                Resolution::Unresolved(format!("thread {} is deleted", short_id(&t.id)))
+            }
+            Some(t) => Resolution::Thread(Box::new(t)),
+        })
+    }
+
+    fn lookup(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {
+        self.lookup_in(id, false)
+    }
+
+    /// The thread `id`, for attribution (BRO-3846): as [`Self::lookup`], which the credentialed
+    /// reader keeps, except that a thread with no usable folder (no `worktreePath`, no project
+    /// root) is still the thread, with an empty `cwd`. The variable picks it, never a folder.
+    fn lookup_attributed(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {
+        self.lookup_in(id, true)
+    }
+
+    fn lookup_in(&self, id: &str, attributed: bool) -> Result<Option<T3Thread>, IdentityRefusal> {
+        if !is_safe_t3_id(id) {
+            return Ok(None);
+        }
+        // A registry whose location cannot be told is not "no thread": identity fails closed.
+        if let Read::Unreadable(why) = self.locate() {
+            return Err(IdentityRefusal::new(
+                RefusalReason::RegistryDisconnected,
+                format!("T3 registry is unreadable: {why}."),
+            ));
+        }
+        if let Some(json_file) = self.json_path() {
+            let env = self.environment_id();
+            let found = Self::snapshot_rows(&json_file)?.into_iter().find(|raw| raw.id == id);
+            // The credentialed reader needs the thread's folder; attribution never does.
+            return Ok(found.filter(|raw| attributed || !raw.cwd.is_empty()).map(|raw| Self::snapshot_row(raw, &env)));
+        }
+        if let Some(db_file) = self.sqlite_path() {
+            let out = Command::new("python3")
+                .arg("-I")
+                .arg("-c")
+                .arg(SQLITE_READER_PY)
+                .arg(if attributed { "attr" } else { "get" })
                 .arg(&db_file)
                 .arg(id)
                 .output()
@@ -496,6 +857,14 @@ impl T3Registry {
                     return Ok(Some(Self::from_raw(raw)));
                 }
                 Some(3) => return Ok(None),
+                // A thread's payload that does not read (BRO-3846): its liveness and folder are
+                // unknown, so neither reader may take the thread as found, or as absent.
+                Some(4) => {
+                    return Err(IdentityRefusal::new(
+                        RefusalReason::RegistryUnavailable,
+                        format!("T3 registry: {}", String::from_utf8_lossy(&out.stderr).trim()),
+                    ));
+                }
                 _ => {
                     return Err(IdentityRefusal::new(
                         RefusalReason::RegistryDisconnected,
@@ -520,33 +889,158 @@ impl T3Registry {
 
     /// Enumerate all live T3 threads in the registry.
     pub fn list_live_threads(&self) -> Vec<T3Thread> {
-        if !self.is_connected() {
-            return Vec::new();
+        self.list_live_report().threads
+    }
+
+    /// Every live thread, and what could not be read (see [`LiveThreads`]).
+    pub fn list_live_report(&self) -> LiveThreads {
+        let mut report = LiveThreads::default();
+        // A configured registry that is disconnected, missing or inaccessible is unread, never
+        // empty: only a host with no T3 registry at all has nothing to read.
+        let at = format!("t3 registry {}", self.root.display());
+        if self.disconnected {
+            report.unreadable.push((at, "the T3 registry is disconnected".to_string()));
+            return report;
+        }
+        match self.locate() {
+            Read::Present(_) => {}
+            Read::Absent => {
+                let why = format!("no T3 registry database or snapshot is readable at {}", self.root.display());
+                report.unreadable.push((at, why));
+                return report;
+            }
+            Read::Unreadable(why) => {
+                report.unreadable.push((at, why));
+                return report;
+            }
         }
         if let Some(json_file) = self.json_path() {
-            let Ok(text) = std::fs::read_to_string(json_file) else {
-                return Vec::new();
+            let rows = match Self::snapshot_each(&json_file) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    report.unreadable.push((at, e.message));
+                    return report;
+                }
             };
-            let Ok(rows) = serde_json::from_str::<Vec<RawT3Thread>>(&text) else {
-                return Vec::new();
-            };
-            return rows.into_iter().map(Self::from_raw).filter(|t| t.liveness().is_live()).collect();
+            let env = self.environment_id();
+            for row in rows {
+                match row {
+                    Ok(raw) => report.take(Self::snapshot_row(raw, &env)),
+                    Err(e) => report.unreadable.push((at.clone(), e.message)),
+                }
+            }
+            return report;
         }
         if let Some(db_file) = self.sqlite_path() {
-            let Ok(out) =
-                Command::new("python3").arg("-I").arg("-c").arg(SQLITE_READER_PY).arg("list").arg(&db_file).output()
-            else {
-                return Vec::new();
+            let out = match Command::new("python3")
+                .arg("-I")
+                .arg("-c")
+                .arg(SQLITE_READER_PY)
+                .arg("list")
+                .arg(&db_file)
+                .output()
+            {
+                Ok(out) => out,
+                Err(e) => {
+                    report.unreadable.push((at, format!("the T3 SQLite reader failed to launch: {e}")));
+                    return report;
+                }
             };
             if !out.status.success() {
-                return Vec::new();
+                let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                report.unreadable.push((at, format!("the T3 SQLite database is unreadable: {why}")));
+                return report;
             }
-            let Ok(rows) = serde_json::from_slice::<Vec<RawT3Thread>>(&out.stdout) else {
-                return Vec::new();
+            let rows = match serde_json::from_slice::<Vec<RawT3Thread>>(&out.stdout) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    report.unreadable.push((at, format!("the T3 SQLite reader returned invalid JSON: {e}")));
+                    return report;
+                }
             };
-            return rows.into_iter().map(Self::from_raw).filter(|t| t.liveness().is_live()).collect();
+            for raw in rows {
+                if let Some(why) = raw.unreadable.clone() {
+                    report.unreadable.push((format!("t3 thread {}", raw.id), why));
+                }
+                report.take(Self::from_raw(raw));
+            }
         }
-        Vec::new()
+        report
+    }
+
+    /// Verify the thread a claiming process's own thread variable resolved to (BRO-3846). Called
+    /// from `SurfaceRegistry::verify_session` for a T3 claim with an attribution and no credential,
+    /// so the node, environment, generation and cross-surface checks there still apply. It needs
+    /// no folder: the variable, not a cwd, picks the thread. Liveness is attribution's (`archived_at`
+    /// and `deleted_at` unset). It sets the same owner marker [`T3Registry::verify`] sets.
+    pub fn verify_attributed(
+        &self,
+        thread_id: &str,
+        node: Option<&NodeId>,
+    ) -> Result<VerifiedSession, IdentityRefusal> {
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        let Some(thread) = self.lookup_attributed(thread_id)? else {
+            return Err(IdentityRefusal::new(
+                RefusalReason::AttributionUnresolved,
+                format!("No T3 thread has the id {}.", short_id(thread_id)),
+            ));
+        };
+        self.check_node(&thread, node)?;
+        if thread.archived_at.is_some() || thread.deleted_at.is_some() {
+            return Err(IdentityRefusal::new(
+                RefusalReason::AttributionUnresolved,
+                format!("Thread {} is archived or deleted.", short_id(thread_id)),
+            ));
+        }
+        let Some(incarnation) = thread.incarnation() else {
+            return Err(IdentityRefusal::new(
+                RefusalReason::InvalidToken,
+                format!("Thread {thread_id} lacks an authoritative incarnation marker."),
+            ));
+        };
+        Ok(Self::verified(thread, incarnation))
+    }
+
+    /// The thread's node, and this host's, against the node the claim presents.
+    fn check_node(&self, thread: &T3Thread, node: Option<&NodeId>) -> Result<(), IdentityRefusal> {
+        let presented = node.or(self.expected_node.as_ref());
+        for (want, actual) in [(thread.node.as_ref(), presented), (self.expected_node.as_ref(), node)] {
+            if let (Some(want), Some(actual)) = (want, actual)
+                && want != actual
+            {
+                return Err(IdentityRefusal::new(
+                    RefusalReason::WrongNode,
+                    format!("Thread {} is bound to node {want}, not {actual}.", thread.id),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A verified T3 session for `thread`, with its owner marker (ADR flow-ledger decision 6): fixed
+    /// across turns and provider switches, new when the thread is recreated. The environment lives
+    /// in the SessionRef, not here. No `created_at`, no marker: writes are then `no_owner_marker`.
+    fn verified(thread: T3Thread, incarnation: String) -> VerifiedSession {
+        let harness = thread.harness();
+        let owner_marker = thread
+            .created_at
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));
+        let verified = VerifiedSession::new(
+            SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
+            thread.cwd,
+            harness,
+            thread.parent_id,
+            thread.pending_permissions,
+        )
+        .with_incarnation(incarnation);
+        match owner_marker {
+            Some(marker) => verified.with_owner_marker(marker),
+            None => verified,
+        }
     }
 
     /// Verify a caller claim against T3's thread registry.
@@ -582,17 +1076,7 @@ impl T3Registry {
         let Some(thread) = self.lookup(thread_id)? else {
             return Err(IdentityRefusal::new(RefusalReason::NotFound, format!("No T3 thread has the id {thread_id}.")));
         };
-        let presented = claim.node.as_ref().or(self.expected_node.as_ref());
-        for (want, actual) in [(thread.node.as_ref(), presented), (self.expected_node.as_ref(), claim.node.as_ref())] {
-            if let (Some(want), Some(actual)) = (want, actual)
-                && want != actual
-            {
-                return Err(IdentityRefusal::new(
-                    RefusalReason::WrongNode,
-                    format!("Thread {thread_id} is bound to node {want}, not {actual}."),
-                ));
-            }
-        }
+        self.check_node(&thread, claim.node.as_ref())?;
         let liveness = thread.liveness();
         if !liveness.is_live() {
             let short = short_id(thread_id);
@@ -617,25 +1101,6 @@ impl T3Registry {
                 format!("Thread {thread_id} lacks an authoritative incarnation marker."),
             ));
         };
-        let harness = thread.harness();
-        // Owner marker (ADR flow-ledger decision 6): fixed across turns and provider switches,
-        // new when the thread is recreated. The environment lives in the SessionRef, not here.
-        let owner_marker = thread
-            .created_at
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(|created_at| format!("t3-owner:{}:{created_at}", thread.id));
-        let verified = VerifiedSession::new(
-            SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
-            thread.cwd,
-            harness,
-            thread.parent_id,
-            thread.pending_permissions,
-        )
-        .with_incarnation(incarnation);
-        Ok(match owner_marker {
-            Some(marker) => verified.with_owner_marker(marker),
-            None => verified,
-        })
+        Ok(Self::verified(thread, incarnation))
     }
 }

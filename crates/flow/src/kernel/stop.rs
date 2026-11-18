@@ -54,21 +54,29 @@
 //! as its owner, with the checks every write makes. It changes no node: replay lists it and
 //! `status` reports it. A record whose instance has not moved since the same session's last record
 //! for the same reason is not written again ([`Recorded::Already`]).
+//!
+//! # A stop not bound to a thread (BRO-3846)
+//!
+//! When the gate binds a stop through a thread variable and that binding is unavailable (variables
+//! that disagree or do not resolve, or T3's registry unread), it lets the stop through and
+//! [`record_unverified`] appends `StopUnverified` to every unfinished instance any candidate thread
+//! owns ([`owned_by_threads`]). Like `StopUnblockable`, it changes nothing.
 
 use super::adoption;
 use super::asks::AnswerSeen;
 use super::error::KernelError;
-use super::events::{KernelEvent, StopUnblockable, Unblockable};
+use super::events::{KernelEvent, StopUnblockable, StopUnverified, Unblockable};
 use super::ir::Iteration;
 use super::replay::{Reason, State, pinned, read_both};
-use super::write::{check_owner, live_claims, owner, wall};
+use super::write::{check_owner, live_claims, owner, same_owner, wall};
 use crate::at::Dir;
+use crate::clock;
 use crate::ids::InstanceId;
 use crate::layout::STOP_GATE;
 use crate::ledger::{Appended, Ledger, ReadGuard, WriteGuard, read_beside, write_beside};
 use crate::log::Log;
 use jiff::Timestamp;
-use maestro_core::session::VerifiedSession;
+use maestro_core::session::{SessionRef, VerifiedSession};
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -304,7 +312,7 @@ pub fn open(
             let log = guard.log(&id)?;
             let started = pinned(&log)?;
             let owners = adoption::owners(&log, &started)?;
-            if owners.owner.as_ref() != Some(&me) || owners.retired.is_some() {
+            if !owners.owner.as_ref().is_some_and(|o| same_owner(o, &me)) || owners.retired.is_some() {
                 return Ok(None);
             }
             Ok(Some(assess(&log, &started, now, seen)?).filter(|a| !a.terminal))
@@ -358,6 +366,66 @@ pub fn record(
         open_instances: open_instances.iter().take(MAX_NAMED).cloned().collect(),
         reason,
     };
+    Ok(Recorded::Appended(guard.append(instance, log.seq(), event.to_event()?)?))
+}
+
+/// The unfinished instances (neither terminal nor retired) whose owner is one of `threads`, by
+/// canonical session alone (BRO-3846): the stop gate could not bind the stop to one verified thread,
+/// so no owner marker is known, and it records on every candidate's instance. `host` is this host's
+/// T3 environment id, for the aliases. Reads under the shared lock and writes nothing; an instance
+/// that does not read is listed as unread.
+pub fn owned_by_threads(
+    guard: &ReadGuard,
+    threads: &[SessionRef],
+    host: Option<&str>,
+) -> Result<(Vec<String>, Vec<Unread>), KernelError> {
+    let wanted: Vec<SessionRef> = threads.iter().map(|t| t.canonical(host)).collect();
+    let (mut owned, mut unread) = (Vec::new(), Vec::new());
+    for id in guard.instances()? {
+        let judged = || -> Result<bool, KernelError> {
+            let log = guard.log(&id)?;
+            let started = pinned(&log)?;
+            let owners = adoption::owners(&log, &started)?;
+            let Some(owner) = owners.owner.as_ref().filter(|_| owners.retired.is_none()) else { return Ok(false) };
+            if !wanted.contains(&owner.session.canonical(host)) {
+                return Ok(false);
+            }
+            let (status, _) = read_both(&log, &started, clock::now())?;
+            Ok(!status.terminal)
+        };
+        match judged() {
+            Ok(true) => owned.push(id.to_string()),
+            Ok(false) => {}
+            Err(e) => {
+                unread.push(Unread { instance: id.to_string(), code: e.code().to_string(), reason: e.to_string() })
+            }
+        }
+    }
+    Ok((owned, unread))
+}
+
+/// Appends `StopUnverified` to `instance` (BRO-3846): a stop the gate let through because it could
+/// not bind it to one thread. It changes nothing, so it takes no owner check (no owner is known);
+/// the log's own checks (host, epoch, sequence, clock) still apply, and a retired instance takes
+/// none. Not written again while the instance has not moved since an identical record.
+pub fn record_unverified(
+    ledger: &mut Ledger,
+    instance: &InstanceId,
+    event: &StopUnverified,
+) -> Result<Recorded, KernelError> {
+    let mut guard = ledger.lock()?;
+    let log = guard.log(instance)?;
+    let started = pinned(&log)?;
+    if adoption::owners(&log, &started)?.retired.is_some() {
+        return Err(crate::FlowError::Retired { instance: instance.to_string() }.into());
+    }
+    super::write::wall(&log)?;
+    if let Some(last) = log.events.last().filter(|e| e.kind == StopUnverified::KIND) {
+        let prior: Option<StopUnverified> = serde_json::from_value(last.body.clone()).ok();
+        if prior.is_some_and(|p| p.reason == event.reason && p.candidates == event.candidates) {
+            return Ok(Recorded::Already { seq: last.seq });
+        }
+    }
     Ok(Recorded::Appended(guard.append(instance, log.seq(), event.to_event()?)?))
 }
 
