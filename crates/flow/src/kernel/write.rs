@@ -536,6 +536,7 @@ pub fn claim(
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
     if verdicts.iter().any(|v| matches!(v, Verdict::Recorded { .. })) {
+        check_writable(&log, &started)?;
         check_owner_only(&log, &started, instance, session)?;
     } else {
         check_owner(&log, &started, instance, session)?;
@@ -1124,8 +1125,11 @@ fn settle(ledger: &mut Ledger, session: &VerifiedSession, instance: &InstanceId)
         if started.ir.repeats.values().all(|r| r.until.is_none()) {
             return Ok(Vec::new());
         }
-        check_owner(&log, &started, instance, session)?;
         let pending = awaiting(&log, &started)?;
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        check_owner(&log, &started, instance, session)?;
         (started, pending)
     };
     let mut out = Vec::new();

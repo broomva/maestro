@@ -185,6 +185,24 @@ fn terminal_write_is_an_unrecorded_mcp_refusal() {
     assert_eq!((code(&refused), &refused["recorded"]), ("instance_terminal", &json!(false)));
 }
 
+#[test]
+fn completion_with_an_unreached_repeat_has_no_spurious_verdict() {
+    let f = fx();
+    let definition = "flow: f\nversion: 1\nparams: [dir]\nworkdir: \"{{params.dir}}\"\nnodes:\n  a: {class: pure, run: ['true']}\n  b: {class: pure, run: ['true'], switch: {on: a, case: no}}\nrepeats:\n  r: {body: [b], max: 1, until: 'true'}\n";
+    // Use a choice so its untaken branch makes the repeat unreachable.
+    let definition = definition.replace(
+        "a: {class: pure, run: ['true']}",
+        "a: {class: observe, run: ['true'], fresh_for: 1h, exit_map: {0: yes, 1: no}}",
+    );
+    let started = f.d1(START, json!({"definition": definition, "params": {"dir": f.work}}));
+    assert_eq!(started["ok"], true, "{started}");
+    let fi = started["instance"].as_str().unwrap();
+    let token = f.claim(fi, "a");
+    let result = f.d1(COMPLETE, json!({"claim_token": token, "outputs": {}}));
+    assert_eq!(result["ok"], true, "{result}");
+    assert_eq!(result["verdicts"], json!([]), "{result}");
+}
+
 /// BRO-3624 item 4: an unverified caller is refused every write verb and still reads; a claim
 /// that does not verify is refused too. Neither writes anything.
 #[test]

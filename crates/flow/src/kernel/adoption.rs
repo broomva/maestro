@@ -497,8 +497,10 @@ fn look(ledger: &mut Ledger, instance: &InstanceId, proposal: Proposal, me: &Own
     let guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
-    check_writable(&log, &started)?;
     let owners = owners(&log, &started)?;
+    if owners.retired.is_none() {
+        check_writable(&log, &started)?;
+    }
     let (mut done, mut ready) = (Vec::new(), Vec::new());
     if owners.retired.is_none() {
         let Some(current) = &owners.owner else {

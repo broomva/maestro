@@ -734,7 +734,7 @@ impl<'a> Fold<'a> {
         let first = &log.events[0];
         let at: Timestamp =
             first.at.parse().map_err(|_| malformed(log, first.seq, format!("{} is not a timestamp", first.at)))?;
-        if fold.read(log, started, at).0.terminal {
+        if fold.terminal_at(at) {
             fold.latched_at = Some(first.seq);
         }
         for e in log.events.iter().skip(1) {
@@ -749,7 +749,7 @@ impl<'a> Fold<'a> {
                     fold.rejected.push(Rejected { seq: e.seq, kind: e.kind.clone(), subject, reason: reason.into() });
                 }
             }
-            if fold.latched_at.is_none() && fold.read(log, started, at).0.terminal {
+            if fold.latched_at.is_none() && fold.terminal_at(at) {
                 fold.latched_at = Some(e.seq);
             }
         }
@@ -1064,6 +1064,26 @@ impl<'a> Fold<'a> {
             self.forget();
             self.phases.extend(moves);
         }
+    }
+
+    /// Evaluate terminality without constructing the status report or copying its event lists.
+    fn terminal_at(&self, now: Timestamp) -> bool {
+        if self.latched_at.is_some() {
+            return true;
+        }
+        let mut eval = Eval::new(self, now);
+        for id in self.ir.nodes.keys() {
+            let (status, _) = eval.status(id);
+            let exhausted = self.exhausted(id, now, &status.inputs).is_some()
+                && !matches!(status.state, State::Done | State::Exhausted);
+            if !exhausted && matches!(status.state, State::Ready | State::Stale | State::Waiting) {
+                return false;
+            }
+        }
+        !self.ir.repeats.keys().any(|rid| match eval.phase(rid) {
+            Loop::Running(i) => eval.settled(rid, i),
+            _ => false,
+        })
     }
 
     /// Every node's state at `now`, and each node's stale set (for `next`'s re-run rule).
