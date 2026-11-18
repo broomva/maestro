@@ -248,6 +248,30 @@ def main():
     conn.row_factory = sqlite3.Row
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
+    def permission_of(req, thread_id):
+        # One pending request: a prompt, or a marker the Rust side reports unread, never skipped
+        # (BRO-3863); its payload reads by the one rule, `payload_of`. A payload that names no tool
+        # (`{}`) is a prompt named by its kind, never hidden and never unread; only a tool name that
+        # is present but not a non-blank string is unread.
+        what = f"permission request {req['runtime_request_id']} of thread {thread_id}"
+        try:
+            rp = payload_of(req["payload_json"], what)
+        except PayloadError as exc:
+            return {"unreadable": str(exc)}
+        name = rp.get("toolName") or rp.get("name") or req["kind"]
+        if not isinstance(name, str) or not name.strip():
+            return {"unreadable": f"{what} has a tool name that is not a non-blank string"}
+        req_id = req["runtime_request_id"]
+        if not isinstance(req_id, str) or not req_id.strip():
+            req_id = rp.get("id") if isinstance(rp.get("id"), str) else None
+        return {
+            "id": req_id,
+            "name": name,
+            "title": rp.get("title") if isinstance(rp.get("title"), str) else None,
+            "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
+            "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
+        }
+
     def permissions_of(thread_id):
         # A thread's pending permission prompts: stored apart from its payload, so they read
         # even when the payload does not.
@@ -260,28 +284,7 @@ def main():
                 (thread_id,),
             ):
                 if req["kind"] in ("approval", "permission", "tool_approval"):
-                    # A record that does not decode is a marker the Rust side reports unread, never
-                    # skipped (BRO-3863); its payload reads by the one rule, `payload_of`.
-                    what = f"permission request {req['runtime_request_id']} of thread {thread_id}"
-                    try:
-                        rp = payload_of(req["payload_json"], what)
-                    except PayloadError as exc:
-                        perms.append({"unreadable": str(exc)})
-                        continue
-                    name = rp.get("toolName") or rp.get("name") or req["kind"]
-                    if not isinstance(name, str) or not name.strip():
-                        perms.append({"unreadable": f"{what} names no tool"})
-                        continue
-                    req_id = req["runtime_request_id"]
-                    if not isinstance(req_id, str) or not req_id.strip():
-                        req_id = rp.get("id") if isinstance(rp.get("id"), str) else None
-                    perms.append({
-                        "id": req_id,
-                        "name": name,
-                        "title": rp.get("title") if isinstance(rp.get("title"), str) else None,
-                        "description": rp.get("description") if isinstance(rp.get("description"), str) else None,
-                        "input": rp.get("input") if isinstance(rp.get("input"), dict) else None,
-                    })
+                    perms.append(permission_of(req, thread_id))
         return perms
 
     def build_thread(row):

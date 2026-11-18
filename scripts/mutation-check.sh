@@ -2491,8 +2491,12 @@ mutate $hp $'            pending_permissions,\n            unread_permissions,\n
 mutate $hp '                            unread.push((at(&path), why.clone()));' ''
 mutate $ht $'            pending_permissions,\n            unread_permissions,\n        }' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        }'
 mutate $ht '            self.unreadable.push((format!("t3 thread {}", thread.id), why.clone()));' ''
-mutate $ht '                        perms.append({"unreadable": str(exc)})' '                        pass'
-mutate $ht '                        perms.append({"unreadable": f"{what} names no tool"})' '                        pass'
+mutate $ht '            return {"unreadable": str(exc)}' '            return None'
+mutate $ht '        if not isinstance(name, str) or not name.strip():' '        if False:'
+mutate $ht '                    perms.append(permission_of(req, thread_id))' '                    perms.extend(p for p in [permission_of(req, thread_id)] if "unreadable" not in p)'
+# Round 10 (the owner's decision after round 9): a payload that names no tool is a prompt named by
+# its kind, never hidden and never unread.
+mutate $ht '        name = rp.get("toolName") or rp.get("name") or req["kind"]' '        name = rp.get("toolName") or rp.get("name")'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

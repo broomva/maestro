@@ -764,7 +764,7 @@ fn a_t3_runtime_request_that_does_not_decode_is_unread() {
 conn.executescript("""CREATE TABLE orchestration_v2_projection_runtime_requests (
   runtime_request_id TEXT, thread_id TEXT, kind TEXT, status TEXT, created_at TEXT, payload_json TEXT);""")
 thread("mcp:a", None, {"worktreePath": "/w"})
-for rid, payload in [("req-bad", "{bad"), ("req-null", None), ("req-list", "[1]"), ("req-tool", json.dumps({"toolName": 7})),
+for rid, payload in [("req-bad", "{bad"), ("req-null", None), ("req-list", "[1]"), ("req-tool", json.dumps({"toolName": 7})), ("req-blank", json.dumps({"toolName": "   "})),
                      ("req-good", json.dumps({"toolName": "Bash", "input": {"command": "ls"}}))]:
     conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
         (rid, "mcp:a", "approval", "pending", "2026-11-17T00:00:00Z", payload))
@@ -773,12 +773,13 @@ for rid, payload in [("req-bad", "{bad"), ("req-null", None), ("req-list", "[1]"
     let t3 = T3Registry::new(db);
     let (needs, unread) = unread_reasons(&SurfaceRegistry::new(None, Some(t3.clone()), None));
     assert_eq!(needs, 1, "req-good is listed");
-    assert_eq!(unread.len(), 4, "{unread:?}");
+    assert_eq!(unread.len(), 5, "{unread:?}");
     for (rid, says) in [
         ("req-bad", "does not parse"),
         ("req-null", "is empty"),
         ("req-list", "is not an object"),
-        ("req-tool", "names no tool"),
+        ("req-tool", "has a tool name that is not a non-blank string"),
+        ("req-blank", "has a tool name that is not a non-blank string"),
     ] {
         assert!(
             unread.iter().any(|u| u.contains(&format!("permission request {rid} of thread mcp:a {says}"))),

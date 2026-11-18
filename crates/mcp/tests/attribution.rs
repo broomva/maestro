@@ -1613,3 +1613,45 @@ fn a_permission_record_that_does_not_decode_leaves_the_views_incomplete() {
     assert!(needs["data"].to_string().contains("mcp:good"), "{needs}");
     assert!(needs["errors"].to_string().contains("does not decode"), "{needs}");
 }
+
+/// The owner's decision after round 9: a pending approval whose payload names no tool (`{}`) is a
+/// prompt named by its kind, never hidden and never an unread record, so the views stay complete.
+/// Removing the reader's fallback to the kind makes it unread and fails this test.
+#[test]
+fn an_approval_that_names_no_tool_is_a_prompt_named_by_its_kind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = complete_store(tmp.path());
+    let root = tmp.path().join("t3");
+    std::fs::create_dir_all(root.join("userdata")).unwrap();
+    let script = r#"
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.executescript("""
+CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, project_id TEXT, title TEXT, default_provider TEXT,
+  active_provider_thread_id TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT, deleted_at TEXT, payload_json TEXT);
+INSERT INTO orchestration_v2_projection_threads VALUES
+  ('mcp:a', 'p', 't', 'claudeAgent', NULL, '2026-11-17T00:00:00Z', '2026-11-17T00:00:00Z', NULL, NULL, '{"worktreePath": "/w"}');
+CREATE TABLE orchestration_v2_projection_runtime_requests (
+  runtime_request_id TEXT, thread_id TEXT, kind TEXT, status TEXT, created_at TEXT, payload_json TEXT);
+INSERT INTO orchestration_v2_projection_runtime_requests VALUES
+  ('req-empty', 'mcp:a', 'approval', 'pending', '2026-11-17T00:00:00Z', '{}');
+""")
+c.commit()
+"#;
+    let db = root.join("userdata/statev2.sqlite");
+    let out = std::process::Command::new("python3").args(["-I", "-c", script]).arg(&db).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let t3 = T3Registry::new(&root);
+    let hosts = SurfaceRegistry::new(None, Some(t3.clone()), None);
+    let live = hosts.live_permission_report(None, None);
+    assert!(live.unreadable.is_empty(), "not an unread record: {:?}", live.unreadable);
+    assert_eq!(live.needs.len(), 1);
+    assert_eq!(live.needs[0].title, "approval", "named by its kind");
+    assert!(live.needs[0].key.ends_with("#req-empty"), "{}", live.needs[0].key);
+    let context = call_with_hosts(&store, &hosts, "maestro_context", json!({})).unwrap();
+    assert_eq!(context["packet"]["needs_complete"], true, "{context}");
+    assert!(context["packet"].get("degraded").is_none(), "{context}");
+    // Identity carries the same prompt.
+    let v = t3.verify_attributed("mcp:a", None).unwrap();
+    assert_eq!(v.pending_permissions().iter().map(|p| p.title.as_str()).collect::<Vec<_>>(), ["approval"]);
+}
