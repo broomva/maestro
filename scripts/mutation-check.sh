@@ -1732,8 +1732,8 @@ mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOU
 mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha, READ_TIMEOUT).map_err(unread)? {' '    if false {'
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
 mutate $replay '                    Class::Human { .. } => return Ok(Err("wrong_class")),' ''
-mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == a.inputs) {' 'if false {'
-mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == a.inputs) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {'
+mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == inputs) {' 'if false {'
+mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == inputs) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id) {'
 # Every other code `ask` adds, by its guard: ask_body_invalid (ledger name, size, nesting),
 # ask_ledger_unread, ask_id_exhausted, ask_not_filed, ask_unconfirmed, ask_ambiguous,
 # answer_mismatch, answers_unread, answer_too_large and ask_changed.
@@ -1849,12 +1849,20 @@ mutate $asks '    let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map
         let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;'
 mutate $asks '        Some(s) if s.state == State::Waiting => Ok((s.iteration.clone(), s.inputs.clone())),' '        Some(s) => Ok((s.iteration.clone(), s.inputs.clone())),'
 mutate $asks 'let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };' 'let at = log.seq();'
-mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == p.inputs) {' '                if false {'
-mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == p.inputs) {' '                if self.asks.contains_key(&(id, i)) {'
+mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {' '                if false {'
+mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {' '                if self.asks.contains_key(&(id, i)) {'
 mutate $replay 'Some(r) if !r.linked && r.ask_id == l.ask_id && r.body_hash == l.body_hash => {' 'Some(r) if !r.linked && r.ask_id == l.ask_id => {'
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| !r.linked && r.ask_id == w.ask_id) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.ask_id == w.ask_id) {'
 mutate $replay 'Some(r) if r.linked => {' 'Some(r) if true => {'
 # Re-ask when a human node's inputs change, and revalidation when they return (BRO-3655).
+mutate $replay '                let inputs = match e.body.get("inputs") {
+                    Some(_) => a.inputs,
+                    None => Eval::new(self, at).node(id, i).inputs(),
+                };' '                let inputs = a.inputs;'
+mutate $replay '                let inputs = match p.inputs {
+                    Some(inputs) => inputs,
+                    None => Eval::new(self, at).node(id, i).inputs(),
+                };' '                let inputs = p.inputs.unwrap_or_default();'
 mutate $replay '                if let Some(prev) = self.prior_asks.get_mut(&(id, i)).and_then(Vec::pop) {
                     self.asks.insert((id, i), prev);
                 }' ''
@@ -1866,7 +1874,7 @@ mutate $replay '        if matches!(n.class, Class::Human { .. }) && !out.reason
             out.form = Form::Open;
             return out;
         }' ''
-mutate $replay '                    if supersedes.is_some() || !reasons.is_empty() {
+mutate $replay '                    if supersedes.is_some() || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. })) {
                         human.push(Reason::InputsChanged { supersedes });
                     }' ''
 mutate $replay '        .filter(|r| &r.inputs == inputs)' '        .filter(|_| true)'
@@ -1875,7 +1883,7 @@ mutate $asks '    if let Some(prev) = &supersedes {
         body.insert("supersedes".into(), Value::String(prev.clone()));
         body.insert("reason".into(), Value::String("inputs_changed".into()));
     }' ''
-mutate $asks '    let pin = AskPinned { iteration, inputs, ..pin };' '    let pin = AskPinned { iteration, ..pin };'
+mutate $asks '    let pin = AskPinned { iteration, inputs: Some(inputs.clone()), ..pin };' '    let pin = AskPinned { iteration, inputs: Some(BTreeMap::new()), ..pin };'
 mutate $asks 'let mut out: String = text.chars().take(MAX_ECHO).collect();' 'let mut out: String = text.chars().collect();'
 mutate $asks ' || !filing.ledger.bytes().all(|b| b.is_ascii_graphic())' ''
 mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Value> = None;'

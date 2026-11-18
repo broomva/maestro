@@ -954,19 +954,27 @@ impl<'a> Fold<'a> {
                 if !matches!(node.class, Class::Human { .. }) {
                     return Ok(Err("wrong_class"));
                 }
+                let inputs = match e.body.get("inputs") {
+                    Some(_) => a.inputs,
+                    None => Eval::new(self, at).node(id, i).inputs(),
+                };
                 // Only an answer to the linked ask counts.
-                if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == a.inputs) {
+                if !self.asks.get(&(id, i)).is_some_and(|r| r.linked && r.ask_id == a.ask_id && r.inputs == inputs) {
                     return Ok(Err("not_linked"));
                 }
-                (Receipt::new(e.seq, at, &a.outputs, None, None, a.inputs), 0)
+                (Receipt::new(e.seq, at, &a.outputs, None, None, inputs), 0)
             }
             AskPinned::KIND => {
                 let p: AskPinned = body(log, e)?;
                 if !matches!(node.class, Class::Human { .. }) {
                     return Ok(Err("wrong_class"));
                 }
+                let inputs = match p.inputs {
+                    Some(inputs) => inputs,
+                    None => Eval::new(self, at).node(id, i).inputs(),
+                };
                 // A pin stands until it is withdrawn; a linked one is replaced only when inputs changed.
-                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == p.inputs) {
+                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {
                     return Ok(Err("already_pinned"));
                 }
                 let rec = AskRec {
@@ -974,7 +982,7 @@ impl<'a> Fold<'a> {
                     ledger: p.ledger,
                     body: p.body,
                     body_hash: p.body_hash,
-                    inputs: p.inputs,
+                    inputs,
                     supersedes: p.supersedes,
                     reason: p.reason,
                     linked: false,
@@ -1298,6 +1306,10 @@ impl Core<'_> {
             observed: BTreeSet::new(),
         }
     }
+
+    fn inputs(&self) -> BTreeMap<String, String> {
+        self.consumed.iter().map(|(k, v)| ((*k).to_string(), (**v).to_string())).collect()
+    }
 }
 
 /// A node's state at a clock.
@@ -1478,7 +1490,7 @@ impl<'f, 'a> Eval<'f, 'a> {
                         Some(r) => r.supersedes.clone(),
                         None => latest.map(|r| r.ask_id.clone()),
                     };
-                    if supersedes.is_some() || !reasons.is_empty() {
+                    if supersedes.is_some() || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. })) {
                         human.push(Reason::InputsChanged { supersedes });
                     }
                     human.extend(reasons);

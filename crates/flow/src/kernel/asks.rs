@@ -433,7 +433,7 @@ fn pin(
         ledger: filing.ledger.clone(),
         body: Value::Object(body),
         body_hash,
-        inputs: BTreeMap::new(),
+        inputs: None,
         supersedes,
         reason,
         audit: audit.cloned(),
@@ -443,7 +443,7 @@ fn pin(
     let started = pinned(&log)?;
     check_writable(&log, &started)?;
     let (iteration, inputs) = waiting(&log, &started, node)?;
-    let pin = AskPinned { iteration, inputs, ..pin };
+    let pin = AskPinned { iteration, inputs: Some(inputs.clone()), ..pin };
     // Nothing appended since `look`, or the pin is not appended (`stale_seq`): the only concurrency
     // rule. Another session's proposal bookkeeping changes nothing the pin depends on, so a
     // stranger's proposal cannot make the owner's ask fail.
@@ -454,7 +454,7 @@ fn pin(
         ledger: pin.ledger,
         body: pin.body,
         body_hash: pin.body_hash,
-        inputs: pin.inputs,
+        inputs,
         supersedes: pin.supersedes,
         reason: pin.reason,
         linked: false,

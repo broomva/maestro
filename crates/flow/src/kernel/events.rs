@@ -223,9 +223,10 @@ pub struct AskPinned {
     pub ledger: String,
     pub body: Value,
     pub body_hash: String,
-    /// Node id to the digest its receipt had when this ask was pinned (BRO-3655).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub inputs: BTreeMap<String, String>,
+    /// Node id to the digest its receipt had when this ask was pinned (BRO-3655). Absent in logs
+    /// written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<BTreeMap<String, String>>,
     /// The earlier ask id at this node and iteration that this ask replaces when inputs changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,

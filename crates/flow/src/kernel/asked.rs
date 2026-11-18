@@ -1370,7 +1370,12 @@ fn a_human_node_whose_inputs_changed_is_re_askable_and_revalidates() {
         assert!(matches!(done, crate::kernel::Completion::Completed { .. }), "{done:?}");
     };
     observe(&mut f, &fi, serde_json::json!({ "v": 1 }));
-    let d1 = f.status(&fi).nodes["owner"].inputs["probe"].clone();
+    let s = f.status(&fi);
+    assert_eq!(
+        s.nodes["owner"].unmet,
+        [crate::kernel::Reason::Unfiled { ask: "Ship it?".into(), ask_id: None, ledger: None }]
+    );
+    let d1 = s.nodes["owner"].inputs["probe"].clone();
     let first_id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
     f.answer_in_worktree(&first_id);
     f.land_on_main();
@@ -1518,4 +1523,89 @@ fn a_human_node_whose_inputs_changed_is_re_askable_and_revalidates() {
     assert!(f.status(&fi).terminal);
     clock.shift(jiff::SignedDuration::from_secs(11));
     assert_eq!(code(f.ask(&fi, Some(&filing()))), "instance_terminal");
+}
+
+#[test]
+fn legacy_asks_and_answers_without_inputs_bind_to_consumed_digests_at_their_log_position() {
+    let mut f = fx(None, "");
+    f.flow = compile(
+        "flow: gate\nversion: 1\nworkdir: \"/tmp\"\nnodes:\n  probe: {class: observe, run: ['true'], fresh_for: 10s, exit_map: {0: ok, 1: moved}}\n  owner: {class: human, ask: 'Ship it?', needs: [probe]}\n  ship: {class: pure, run: ['true'], needs: [owner]}\n",
+    )
+    .unwrap();
+    let fi = f.begin();
+    let c = crate::kernel::claim(&mut f.ledger, &f.me, &fi, "probe").unwrap();
+    let done = crate::kernel::complete(
+        &mut f.ledger,
+        &f.me,
+        &c.token,
+        serde_json::json!({ "v": 1 }),
+        &crate::kernel::Limits::default(),
+    )
+    .unwrap();
+    assert!(matches!(done, crate::kernel::Completion::Completed { .. }), "{done:?}");
+
+    let append = |f: &mut Fx, kind: &str, body: Value| {
+        let mut guard = f.ledger.lock().unwrap();
+        let seq = guard.log(&fi).unwrap().seq();
+        guard.append(&fi, seq, crate::NewEvent::new(kind, body)).unwrap();
+    };
+    let legacy_id = "flow-owner-legacy000001";
+    let mut pin_body = body();
+    pin_body.insert("id".into(), Value::String(legacy_id.into()));
+    pin_body.insert("ask".into(), Value::String("Ship it?".into()));
+    pin_body.insert("asked_at".into(), Value::String("2026-11-09T00:00:00Z".into()));
+    let pin_body = requests::compose_ask(&pin_body).unwrap();
+    let body_hash = comparable_hash(&JsValue::from(Value::Object(pin_body.clone())));
+    append(
+        &mut f,
+        "AskPinned",
+        serde_json::json!({
+            "node": "owner",
+            "iteration": {},
+            "ask_id": legacy_id,
+            "ledger": "ledger.yaml",
+            "body": pin_body,
+            "body_hash": body_hash,
+        }),
+    );
+
+    let s = f.status(&fi);
+    assert_eq!(s.nodes["owner"].state, State::Waiting);
+    assert_eq!(
+        s.nodes["owner"].unmet,
+        [crate::kernel::Reason::Unfiled {
+            ask: "Ship it?".into(),
+            ask_id: Some(legacy_id.into()),
+            ledger: Some("ledger.yaml".into()),
+        }]
+    );
+    match f.ask(&fi, None).unwrap() {
+        Asked::Waiting { ask_id, supersedes, reason, appended: Some(_), .. } => {
+            assert_eq!(ask_id, legacy_id);
+            assert!(supersedes.is_none());
+            assert!(reason.is_none());
+        }
+        other => panic!("{other:?}"),
+    }
+
+    append(
+        &mut f,
+        "Answered",
+        serde_json::json!({
+            "node": "owner",
+            "iteration": {},
+            "ask_id": legacy_id,
+            "ledger": "ledger.yaml",
+            "outputs": { "answer_option": "ship" },
+            "source": "main@0",
+            "row_hash": "r",
+        }),
+    );
+    let s = f.status(&fi);
+    assert_eq!(s.nodes["owner"].state, State::Done);
+    assert!(s.nodes["owner"].unmet.is_empty());
+    assert!(matches!(
+        f.ask(&fi, None),
+        Err(KernelError::Refused(Refusal::NotEnabled { ref node, ref state })) if node == "owner" && state == "done"
+    ));
 }
