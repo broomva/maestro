@@ -104,7 +104,7 @@ use super::events::{
     Started,
 };
 use super::replay::{AskRec, Rejected, next_of, pinned};
-use super::write::{owner, wall};
+use super::write::{check_writable, owner, wall};
 use crate::clock;
 use crate::error::FlowError;
 use crate::ids::InstanceId;
@@ -498,6 +498,9 @@ fn look(ledger: &mut Ledger, instance: &InstanceId, proposal: Proposal, me: &Own
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
     let owners = owners(&log, &started)?;
+    if owners.retired.is_none() {
+        check_writable(&log, &started)?;
+    }
     let (mut done, mut ready) = (Vec::new(), Vec::new());
     if owners.retired.is_none() {
         let Some(current) = &owners.owner else {
@@ -620,8 +623,10 @@ fn pin(
         body_hash,
     };
     let mut guard = ledger.lock()?;
-    // Nothing appended since `look`, or the pin is not appended (`stale_seq`): the only concurrency rule.
-    guard.append(instance, seen.seq, pin.to_event()?)?;
+    // Recheck after the unlocked preparation, before appending.
+    let log = guard.log(instance)?;
+    check_writable(&log, &pinned(&log)?)?;
+    super::write::append_writable(&mut guard, instance, seen.seq, pin.to_event()?)?;
     let ask =
         AskRec { ask_id: pin.ask_id, ledger: pin.ledger, body: pin.body, body_hash: pin.body_hash, linked: false };
     Ok(ProposalRec { proposal, by: pin.by, owner: pin.owner, epoch: pin.epoch, ask })
@@ -637,6 +642,7 @@ fn standing(
 ) -> Result<(Log, Owners, Option<ProposalRec>), KernelError> {
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
+    check_writable(&log, &started)?;
     let owners = owners(&log, &started)?;
     if owners.retired.is_some() {
         return Err(FlowError::Retired { instance: instance.to_string() }.into());
@@ -672,7 +678,7 @@ fn file_and_link(
             Confirmed::NotFiled { reason } => {
                 let withdrawn =
                     ProposalWithdrawn { ask_id: rec.ask.ask_id.clone(), code: PROPOSAL_NOT_FILED.into(), reason };
-                let appended = guard.append(instance, log.seq(), withdrawn.to_event()?)?;
+                let appended = super::write::append_writable(&mut guard, instance, log.seq(), withdrawn.to_event()?)?;
                 Proposed::Withdrawn {
                     proposal: rec.proposal,
                     ask_id: rec.ask.ask_id.clone(),
@@ -688,7 +694,7 @@ fn file_and_link(
                     ledger: rec.ask.ledger.clone(),
                     body_hash: rec.ask.body_hash.clone(),
                 };
-                let appended = guard.append(instance, log.seq(), linked.to_event()?)?;
+                let appended = super::write::append_writable(&mut guard, instance, log.seq(), linked.to_event()?)?;
                 waiting(&rec, Some(appended), None)
             }
         })
@@ -720,12 +726,12 @@ fn apply(
     match rec.proposal {
         Proposal::Adoption => {
             let adopted = Adopted { from: rec.owner.clone(), to: rec.by.clone(), approval, audit: audit.cloned() };
-            let appended = guard.append(instance, log.seq(), adopted.to_event()?)?;
+            let appended = super::write::append_writable(&mut guard, instance, log.seq(), adopted.to_event()?)?;
             Ok(Proposed::Adopted { ask_id, ledger: ledger_name, from: adopted.from, to: adopted.to, source, appended })
         }
         Proposal::Retirement => {
             let retired = Retired { by: rec.by.clone(), approval, audit: audit.cloned() };
-            let appended = guard.append(instance, log.seq(), retired.to_event()?)?;
+            let appended = super::write::append_writable(&mut guard, instance, log.seq(), retired.to_event()?)?;
             crate::operator::retire_held(&guard, instance)?;
             Ok(Proposed::Retired { ask_id, ledger: ledger_name, source: Some(source), appended: Some(appended) })
         }

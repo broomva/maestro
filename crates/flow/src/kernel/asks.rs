@@ -100,7 +100,7 @@ use super::error::{KernelError, Refusal};
 use super::events::{Answered, AskLinked, AskPinned, AskWithdrawn, KernelEvent, Started};
 use super::ir::{Class, Iteration};
 use super::replay::{AskRec, State, ask_of, next_of, pinned};
-use super::write::{MAX_OUTPUTS, check_owner, wall};
+use super::write::{MAX_OUTPUTS, check_owner, check_writable, wall};
 use crate::clock;
 use crate::ids::InstanceId;
 use crate::ledger::{Appended, Ledger, random_epoch};
@@ -315,7 +315,7 @@ fn append_if(
         }
     }
     let ev = event(&iteration, &inputs)?;
-    Ok(Some(guard.append(instance, log.seq(), ev)?))
+    Ok(Some(super::write::append_writable(&mut guard, instance, log.seq(), ev)?))
 }
 
 /// The hash a row is compared by: the plugin's entry hash of the row without the keys a filer
@@ -407,13 +407,14 @@ fn pin(
     let mut guard = ledger.lock()?;
     let log = guard.log(instance)?;
     let started = pinned(&log)?;
+    check_writable(&log, &started)?;
     let (iteration, _) = waiting(&log, &started, node)?;
     let pin = AskPinned { iteration, ..pin };
     // Nothing appended since `look`, or the pin is not appended (`stale_seq`): the only concurrency
     // rule. Another session's proposal bookkeeping changes nothing the pin depends on, so a
     // stranger's proposal cannot make the owner's ask fail.
     let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };
-    guard.append(instance, at, pin.to_event()?)?;
+    super::write::append_writable(&mut guard, instance, at, pin.to_event()?)?;
     Ok(AskRec { ask_id: pin.ask_id, ledger: pin.ledger, body: pin.body, body_hash: pin.body_hash, linked: false })
 }
 

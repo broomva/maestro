@@ -544,7 +544,7 @@ fn a_stale_observation_blocks_every_dependent() {
     assert_eq!((state(&s, "check"), state(&s, "exercise")), (State::Stale, State::Stale));
     assert_eq!(unmet(&s, "check"), vec![Reason::Stale { node: "pin".into() }]);
     assert_eq!(unmet(&s, "exercise"), vec![Reason::Stale { node: "pin".into() }]);
-    assert_eq!(enabled(&f.next(&fi, t + mins(11))), vec!["pin"], "pin is re-run; its dependents wait for it");
+    assert!(enabled(&f.next(&fi, t + mins(11))).is_empty(), "terminal remains latched");
 
     // A fresh observation with the same result re-validates them without a re-run.
     let t2 = f.observe(&fi, "pin", &[], 0);
@@ -557,7 +557,7 @@ fn a_stale_observation_blocks_every_dependent() {
 #[test]
 fn only_the_stale_observation_furthest_upstream_is_re_run() {
     let mut f = fx(
-        "flow: f\nversion: 1\nnodes:\n  o1: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: ok}}\n  o2: {class: observe, run: [x], fresh_for: 1m, needs: [o1], exit_map: {0: ok}}\n",
+        "flow: f\nversion: 1\nnodes:\n  o1: {class: observe, run: [x], fresh_for: 1m, exit_map: {0: ok}}\n  o2: {class: observe, run: [x], fresh_for: 1m, needs: [o1], exit_map: {0: ok}}\n  pending: {class: human, ask: Continue?}\n",
     );
     let fi = f.begin(json!({}));
     f.observe(&fi, "o1", &[], 0);
@@ -1373,11 +1373,11 @@ fn terminal_is_the_kernels_no_node_ready_stale_or_waiting() {
     // The field the driver skill reads is `terminal`, in both.
     assert_eq!(serde_json::to_value(&s).unwrap()["terminal"], true);
     assert_eq!(serde_json::to_value(f.next(&fi, t)).unwrap()["terminal"], true);
-    // Once pin is stale it can be run again: no longer terminal.
+    // Pin can become stale as information after terminal is latched.
     let later = t.checked_add(SignedDuration::from_mins(11)).unwrap();
     assert_eq!(state(&f.status(&fi, later), "pin"), State::Stale);
-    assert!(!f.status(&fi, later).terminal);
-    assert!(!f.next(&fi, later).terminal);
+    assert!(f.status(&fi, later).terminal);
+    assert!(f.next(&fi, later).terminal);
 
     // A human node waiting on the owner is not terminal.
     let mut f = fx("flow: h\nversion: 1\nnodes:\n  q: {class: human, ask: Go?}\n");
