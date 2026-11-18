@@ -503,10 +503,10 @@ impl T3Registry {
 
     /// A JSON snapshot's row: one with no environment of its own is in the snapshot's environment
     /// (`environment-id` beside it), as every `statev2.sqlite` row is in its database's.
-    fn snapshot_row(&self, raw: RawT3Thread) -> T3Thread {
+    fn snapshot_row(raw: RawT3Thread, environment: &Option<String>) -> T3Thread {
         let mut thread = Self::from_raw(raw);
         if thread.environment_id.is_none() {
-            thread.environment_id = self.environment_id();
+            thread.environment_id = environment.clone();
         }
         thread
     }
@@ -632,7 +632,8 @@ impl T3Registry {
                     format!("T3 JSON registry is malformed: {e}."),
                 )
             })?;
-            return Ok(rows.into_iter().find(|raw| raw.id == id).map(|raw| self.snapshot_row(raw)));
+            let env = self.environment_id();
+            return Ok(rows.into_iter().find(|raw| raw.id == id).map(|raw| Self::snapshot_row(raw, &env)));
         }
         if let Some(db_file) = self.sqlite_path() {
             let out = Command::new("python3")
@@ -697,7 +698,12 @@ impl T3Registry {
             let Ok(rows) = serde_json::from_str::<Vec<RawT3Thread>>(&text) else {
                 return Vec::new();
             };
-            return rows.into_iter().map(|raw| self.snapshot_row(raw)).filter(|t| t.liveness().is_live()).collect();
+            let env = self.environment_id();
+            return rows
+                .into_iter()
+                .map(|raw| Self::snapshot_row(raw, &env))
+                .filter(|t| t.liveness().is_live())
+                .collect();
         }
         if let Some(db_file) = self.sqlite_path() {
             let Ok(out) =

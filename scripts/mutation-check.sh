@@ -2302,6 +2302,77 @@ mutate scripts/conformance/phase1.py "        raise Failure('capability harness 
 mutate scripts/conformance/phase1.py "        if harness=='gemini' and item.get('type')=='tool_use':" '        if False:'
 mutate scripts/conformance/phase1.py "        elif harness=='agy' and item.get('event')=='step_update':" '        elif False:'
 mutate scripts/conformance/phase1.py "        return isinstance(args,dict) and (args.get('instance')==instance if verb=='maestro_flow_claim'" "        return isinstance(args,dict) and (True if verb=='maestro_flow_claim'"
+# Attributed session identity (BRO-3846, docs/specs/2026-11-17-auth-a-session-attestations.md):
+# T3 ids and the registry root, resolution through the active provider row, the precedence, the
+# bridge-secret exception, the credential-first caller check and its contradiction check, canonical
+# sessions, and the Stop gate's binding and StopUnverified.
+hat=crates/hosts/src/attribution.rs
+mutate $ht '    if bytes.is_empty() || bytes.len() > MAX_T3_ID {' '    if bytes.is_empty() {'
+mutate $ht '    !id.contains("..")
+        && bytes[1..]' '    true
+        && bytes[1..]'
+mutate $ht " | b'.' | b'%'))" " | b'.'))"
+mutate $ht "        && bytes[1..].iter().all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b':' | b'.' | b'%'))" "        && bytes[1..].iter().all(|b| *b != b'.' || true)"
+mutate $ht '                [one] => one.clone(),' '                [one, ..] => one.clone(),'
+mutate $ht '.any(|p| p.provider_thread_id == active && p.native_id.as_deref() == Some(native_id));' '.any(|p| p.native_id.as_deref() == Some(native_id));'
+mutate $ht '"ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id"' '"ON p.thread_id = t.thread_id"'
+mutate $ht '"ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id"' '"ON p.provider_thread_id = t.active_provider_thread_id"'
+mutate $ht '            Some(t) if t.archived_at.is_some() => {' '            Some(t) if false => {'
+mutate $ht '            Some(t) if t.deleted_at.is_some() => {' '            Some(t) if false => {'
+mutate $ht '        if thread.archived_at.is_some() || thread.deleted_at.is_some() {' '        if false {'
+mutate $hlb '        if let Some(p) = t3code_home.filter(|s| !s.is_empty()) {' '        if let Some(p) = t3code_home.filter(|_| false) {'
+mutate $hlb '        home.map(|h| h.join(".t3")).filter(|p| p.is_dir())' '        home.map(|h| h.join(".t3")).filter(|_| true)'
+mutate $hlb '            std::env::var("T3CODE_HOME").ok().as_deref(),' '            std::env::var("T3CODE_HOME_UNSET").ok().as_deref(),'
+mutate $hlb '        self.has_surface(surface) && !(surface == &Surface::T3 && self.t3_found)' '        self.has_surface(surface)'
+mutate $hlb '            .with_identity_mode(IdentityMode::parse(std::env::var("MAESTRO_IDENTITY").ok().as_deref()))' '            .with_identity_mode(IdentityMode::Attributed)'
+mutate $hlb '            .with_thread_vars(ThreadVars::from_env());' '            .with_thread_vars(ThreadVars::default());'
+mutate $hat '            _ => Self::Strict,' '            _ => Self::Attributed,'
+mutate $hat '                .filter(|(_, v)| !v.is_empty())' '                .filter(|_| true)'
+mutate $hlb '                    None => VarOutcome::Unreadable("no T3 registry is found on this host".to_string()),' '                    None => VarOutcome::Unresolved("no T3 registry is found on this host".to_string()),'
+mutate $hat 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unreadable(_))) {' 'each.iter().find(|_| false) {'
+mutate $hat 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unresolved(_))) {' 'each.iter().find(|_| false) {'
+mutate $hat '    if let Some((other, other_id, _)) = threads.iter().find(|(_, t, _)| t != id) {' '    if let Some((other, other_id, _)) = threads.iter().find(|_| false) {'
+mutate $hat '    while next != 0 && ancestors.len() < MAX_ANCESTORS {' '    while next != 0 {'
+mutate $hlb '            && claim.peer.is_none()
+            && !attributed
+' '            && claim.peer.is_none()
+'
+mutate $hlb '        let attributed = claim.surface == Surface::T3 && claim.attribution.is_some();' '        let attributed = claim.attribution.is_some();'
+mutate $hlb '                        if claim.session_id.as_deref() != Some(a.thread.as_str()) {' '                        if false {'
+mutate $mcp '    if !write || hosts.identity_mode() == IdentityMode::Strict {' '    if !write {'
+mutate $mcp '    if !write || hosts.identity_mode() == IdentityMode::Strict {' '    if hosts.identity_mode() == IdentityMode::Strict {'
+mutate $mcp '    let has_vars = ambient == Ambient::Caller && !hosts.thread_vars().is_empty();' '    let has_vars = !hosts.thread_vars().is_empty();'
+mutate $mcp '            if let Some(named) = session.as_ref().filter(|s| s.surface != Surface::T3) {' '            if let Some(named) = session.as_ref().filter(|_| false) {'
+mutate $mcp '                Attributed::Absent => {}
+                Attributed::Refused(r) => return Err(refused(r)),' '                Attributed::Absent => {}
+                Attributed::Refused(_) => {}'
+mutate $mcp '                    check_named(named, &a, &environment)?;
+                    attribution = Some(a);' '                    attribution = Some(a);'
+mutate $mcp '    if let Some(named) = session {
+        check_named(named, &a, &environment)?;
+    }' ''
+mutate $mcp '        if named.canonical(thread.environment.as_deref()) != thread {' '        if named.id != thread.id {'
+mutate $mcp '    if !has_vars {' '    if false {'
+mutate $mcp '        && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none())
+        && !attributed' '        && (session.surface != maestro_core::session::Surface::Direct || arg_token.is_none())'
+mutate $mcp '&& !has_claim_meta && !attributed {' '&& !has_claim_meta {'
+mutate $mcp '        attribution,
+    };' '        attribution: None,
+    };'
+mutate $mf '                Some(r) if r.is_attribution() => r.code(),' '                Some(r) if false => r.code(),'
+mutate $session '            None | Some("local") | Some("-") => SessionRef {' '            None | Some("-") => SessionRef {'
+mutate $session '    #[serde(skip)]
+    pub attribution: Option<Attribution>,' '    pub attribution: Option<Attribution>,'
+mutate $gt '        if self.hosts.identity_mode() == IdentityMode::Strict {' '        if false {'
+mutate $gt '            Harness::Claude => None,' '            Harness::Claude => payload(input).ok().and_then(|p| p.harness_session),'
+mutate $gt '        self.alert_as(&session, &key, UNCHECKED, &words, true);' '        self.alert_as(&session, &key, UNCHECKED, &words, false);'
+mutate $gt 'kstop::record_unverified(&mut ledger, &id, &event)' 'Err(KernelError::Encode("skipped".into()))'
+mutate $gt '            words.push_str(&format!(" StopUnverified could not be recorded on: {}.", failed.join(", ")));' ''
+mutate $stp '            if !wanted.contains(&owner.session.canonical(host)) {' '            if false {'
+mutate $stp '            Ok(!status.terminal)' '            Ok(true)'
+mutate $stp 'owners.owner.as_ref().filter(|_| owners.retired.is_none()) else' 'owners.owner.as_ref() else'
+mutate $stp '    if adoption::owners(&log, &started)?.retired.is_some() {' '    if false {'
+mutate $stp '        if prior.is_some_and(|p| p.reason == event.reason && p.candidates == event.candidates) {' '        if false {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
