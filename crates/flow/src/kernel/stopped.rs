@@ -97,6 +97,38 @@ fn a_finished_instance_has_no_work_and_is_not_open() {
     assert!(open_for(&f, &f.me.clone()).instances.is_empty());
 }
 
+const FRESH: &str = "flow: fresh\nversion: 1\nworkdir: {dir}\nnodes:\n  pin: {class: observe, run: ['true'], fresh_for: 1m, exit_map: {0: ok}}\n  check: {class: pure, run: ['true'], needs: [pin]}\n";
+
+#[test]
+fn terminal_stays_latched_after_freshness_expires() {
+    let test_clock = crate::clock::TestClock::install();
+    let (mut f, fi) = with(FRESH);
+    done(&mut f, &fi, "pin");
+    done(&mut f, &fi, "check");
+    test_clock.set(clock::now() + jiff::SignedDuration::from_secs(61));
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let guard = reader.lock().unwrap();
+    let status = status(&guard, &fi, clock::now()).unwrap();
+    assert!(status.terminal);
+    assert_eq!(status.nodes["pin"].state, State::Stale);
+    assert!(next(&guard, &fi, clock::now()).unwrap().enabled.is_empty());
+    drop(guard);
+    assert!(open_for(&f, &f.me).instances.is_empty());
+}
+
+#[test]
+fn freshness_expiry_before_terminal_reenables_pin() {
+    let test_clock = crate::clock::TestClock::install();
+    let (mut f, fi) = with(FRESH);
+    done(&mut f, &fi, "pin");
+    test_clock.set(clock::now() + jiff::SignedDuration::from_secs(61));
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let guard = reader.lock().unwrap();
+    assert!(!status(&guard, &fi, clock::now()).unwrap().terminal);
+    let next = next(&guard, &fi, clock::now()).unwrap();
+    assert_eq!(next.enabled.iter().map(|n| n.node.as_str()).collect::<Vec<_>>(), ["pin"]);
+}
+
 #[test]
 fn a_pending_verdict_is_work_a_claim_retries() {
     let (mut f, fi) = with(LOOP);

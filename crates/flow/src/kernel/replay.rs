@@ -3,8 +3,8 @@
 //!
 //! Replay folds the log once, in order: each event is accepted only if it fits the state the
 //! events before it built, and anything else is set aside as rejected and changes nothing. An
-//! event's `at` matters only as the time a receipt was taken (for freshness at a read) and as the
-//! time a verdict's iteration is checked to have settled. An observation was taken when its
+//! event's `at` is also used to determine the first terminal position, and to judge receipts and
+//! verdicts at their positions. An observation was taken when its
 //! command started, so its freshness counts from its `verify.ran_at`, or from the event's `at`
 //! when that is earlier or `ran_at` is missing or unreadable. Replay never runs a command (a node's
 //! `run`, `verify` and `reconcile` are data here), never evaluates a guard (an `until` verdict is
@@ -21,7 +21,7 @@
 //!   recorded again while it is done (a re-run). A node whose receipt is stale at that `at`,
 //!   because something upstream had expired by then, is not done, so a new receipt replaces it.
 //! - `Claimed`, `Heartbeat`, `Refused`, `EffectStarted` and every rejected event change nothing and
-//!   cost no evaluation; only an accepted receipt or verdict can move a repeat on.
+//!   do not advance repeats; only an accepted receipt or verdict can move a repeat on.
 //! - `Guarded` records a repeat's `until` verdict for its current iteration once that iteration
 //!   has settled, with the digest of the body it judged; a second verdict on a body already judged
 //!   is set aside. A false verdict moves the repeat on; a repeat with no `until` moves on as soon
@@ -272,8 +272,7 @@ pub struct Status {
     /// `until` verdict: nothing in the flow can be done now, so a driver stops (BRO-3636). Every
     /// other node is done, failed, exhausted, or blocked on one of those or on a branch not taken.
     /// A repeat awaiting a verdict (its `until` erred or timed out after its body settled) is not
-    /// terminal: the next write (`claim` first of all) judges it again. It holds at the read's
-    /// clock: an observation that goes stale later makes the instance not terminal again.
+    /// terminal: latched at the first log position terminal at its recorded time.
     pub terminal: bool,
     pub nodes: BTreeMap<String, NodeStatus>,
     pub repeats: BTreeMap<String, RepeatStatus>,
@@ -426,7 +425,7 @@ pub(crate) fn read_both(log: &Log, started: &Started, now: Timestamp) -> Result<
     for (id, s) in status.nodes {
         // A stale receipt is redone only when nothing upstream of it is stale.
         let rerun = s.state == State::Stale && stale.get(&id).is_some_and(|set| set.iter().all(|s| *s == id));
-        if s.state == State::Ready || rerun {
+        if !whole.terminal && (s.state == State::Ready || rerun) {
             let class = started.ir.nodes.get(&id).map(|n| &n.class);
             enabled.push(Enabled {
                 inputs: s.inputs,
@@ -669,6 +668,8 @@ struct Fold<'a> {
     owners: Owners,
     /// The stops the gate could not refuse (`StopUnblockable`), in log order.
     unblockable: Vec<StopRecord>,
+    /// First log position at which the event-time projection became terminal.
+    latched_at: Option<u64>,
 }
 
 /// A human node's ask as the log has it: pinned (`AskPinned`), and linked once confirmed
@@ -723,7 +724,14 @@ impl<'a> Fold<'a> {
             asks: BTreeMap::new(),
             owners: adoption::owners(log, started)?,
             unblockable: Vec::new(),
+            latched_at: None,
         };
+        let first = &log.events[0];
+        let at: Timestamp =
+            first.at.parse().map_err(|_| malformed(log, first.seq, format!("{} is not a timestamp", first.at)))?;
+        if fold.read(log, started, at).0.terminal {
+            fold.latched_at = Some(first.seq);
+        }
         for e in log.events.iter().skip(1) {
             let at: Timestamp =
                 e.at.parse().map_err(|_| malformed(log, e.seq, format!("{} is not a timestamp", e.at)))?;
@@ -735,6 +743,9 @@ impl<'a> Fold<'a> {
                     let subject = subject.and_then(Value::as_str).unwrap_or_default().to_string();
                     fold.rejected.push(Rejected { seq: e.seq, kind: e.kind.clone(), subject, reason: reason.into() });
                 }
+            }
+            if fold.latched_at.is_none() && fold.read(log, started, at).0.terminal {
+                fold.latched_at = Some(e.seq);
             }
         }
         Ok(fold)
@@ -1086,8 +1097,8 @@ impl<'a> Fold<'a> {
         rejected.sort_by_key(|r| r.seq);
         // A repeat whose `until` could not be judged (an error, a timeout) after its body settled
         // stays running and awaits its verdict, which the next write tries again: not terminal.
-        let terminal =
-            !nodes.values().any(|n: &NodeStatus| matches!(n.state, State::Ready | State::Stale | State::Waiting))
+        let terminal = self.latched_at.is_some()
+            || !nodes.values().any(|n: &NodeStatus| matches!(n.state, State::Ready | State::Stale | State::Waiting))
                 && !repeats.values().any(|r| r.awaiting_verdict);
         let status = Status {
             instance: log.instance.to_string(),
@@ -1548,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn inert_and_rejected_events_never_advance_or_evaluate() {
+    fn inert_and_rejected_events_never_advance() {
         let flow = compile("flow: f\nversion: 1\nnodes:\n  a: {class: pure, run: [x]}\n  b: {class: pure, run: [x]}\nrepeats:\n  r: {max: 2, body: [b]}\n").unwrap();
         let started = Started {
             flow: flow.name(),
@@ -1573,7 +1584,7 @@ mod tests {
         ));
         let log = Log { instance: InstanceId::new("fi_x").unwrap(), events, last_hash: None };
         let fold = Fold::replay(&log, &started).unwrap();
-        assert_eq!((fold.advances, fold.evaluations.get()), (0, 0));
+        assert_eq!(fold.advances, 0);
         assert_eq!(fold.rejected.len(), 3);
 
         // An accepted receipt is evaluated once and advances once.
@@ -1587,7 +1598,7 @@ mod tests {
     #[test]
     fn a_re_run_with_the_same_result_redoes_no_core() {
         // A bounded cost, counted rather than timed: re-running an observation everything depends
-        // on with the same result, then asking for the last node, computes each core once.
+        // on with the same result keeps a bounded number of core evaluations.
         let flow = compile("flow: f\nversion: 1\nnodes:\n  head: {class: observe, run: [x], fresh_for: 10m, exit_map: {0: a, 1: b}}\n  a: {class: pure, run: [x], needs: [head]}\n  b: {class: pure, run: [x], needs: [a]}\n").unwrap();
         let started = Started {
             flow: flow.name(),
@@ -1606,8 +1617,8 @@ mod tests {
         }
         let log = Log { instance: InstanceId::new("fi_x").unwrap(), events, last_hash: None };
         let fold = Fold::replay(&log, &started).unwrap();
-        // head before its first receipt and after it, then a and b: four, however many re-runs.
-        assert_eq!(fold.cores.get(), 4, "cores computed");
+        // Event-time terminal checks evaluate the graph before and after the first receipt.
+        assert_eq!(fold.cores.get(), 6, "cores computed");
 
         // A new result each time redoes them, and no more than them, each time.
         let mut log = log;
@@ -1617,6 +1628,6 @@ mod tests {
             }
         }
         let fold = Fold::replay(&log, &started).unwrap();
-        assert!(fold.cores.get() <= 1 + 3 * 50, "{} cores", fold.cores.get());
+        assert!(fold.cores.get() <= 3 + 3 * 50, "{} cores", fold.cores.get());
     }
 }
