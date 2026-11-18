@@ -203,7 +203,9 @@ fn native_ids_resolve_through_the_active_provider_row_only() {
     // Liveness for attribution: archived_at and deleted_at, never settled_at.
     assert_eq!(resolved(t3.resolve("native-settled", true).unwrap()), "mcp:settled");
     assert_eq!(resolved(t3.resolve("mcp:settled", false).unwrap()), "mcp:settled");
-    assert!(unresolved(t3.resolve("native-arch", true).unwrap()).contains("archived"));
+    // An archived thread's rows are not scanned at all: its native id names no live thread.
+    assert!(unresolved(t3.resolve("native-arch", true).unwrap()).contains("no T3 thread"));
+    assert!(unresolved(t3.resolve("mcp:archived", false).unwrap()).contains("archived"));
     assert!(unresolved(t3.resolve("mcp:deleted", false).unwrap()).contains("deleted"));
     assert!(unresolved(t3.resolve("mcp:nobody", false).unwrap()).contains("no T3 thread"));
     assert!(unresolved(t3.resolve(&id_of(513), false).unwrap()).contains("not a T3 thread id"));
@@ -428,4 +430,73 @@ fn the_legacy_schema_attributes_and_no_thread_table_is_unavailable() {
     let empty = make("empty", "CREATE TABLE other (x TEXT);");
     let why = unavailable(empty.resolve("mcp:old", false));
     assert!(why.contains("no thread table"), "{why}");
+}
+
+/// Gemini's joint review, MINOR 1: for attribution a thread payload that does not parse, or is not
+/// an object, is `registry_unavailable`, never `{}` (which drops archivedAt, deletedAt, node); and
+/// a snapshot row's folder defaults only when missing or null.
+#[test]
+fn a_corrupt_payload_is_unavailable_for_attribution() {
+    let tmp = tempfile::tempdir().unwrap();
+    let raw = |tid: &str, payload: &str| {
+        format!(
+            r#"conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)", ("{tid}", "p", "t", "codex", None, "2026-11-17T00:00:00Z", "2026-11-17T00:00:00Z", None, None, {payload}))"#
+        )
+    };
+    for (name, payload, says) in [("unparsed", r#""{bad""#, "does not parse"), ("list", r#""[1]""#, "is not an object")]
+    {
+        let db = partial_db(&tmp.path().join(name), true, &raw("mcp:bad", payload));
+        let why = unavailable(T3Registry::new(db).resolve("mcp:bad", false));
+        assert!(why.contains(&format!("thread mcp:bad's payload {says}")), "{name}: {why}");
+    }
+    let path = tmp.path().join("threads.json");
+    for (cwd, ok) in
+        [(serde_json::json!(7), false), (serde_json::Value::Null, true), (serde_json::json!(["/w"]), false)]
+    {
+        let rows =
+            serde_json::json!([{ "id": "mcp:a", "cwd": cwd, "created_at": "2026-11-17T00:00:00Z", "run_id": "r" }]);
+        std::fs::write(&path, rows.to_string()).unwrap();
+        let got = T3Registry::new(&path).resolve("mcp:a", false);
+        if ok {
+            assert_eq!(resolved(got.unwrap()), "mcp:a");
+        } else {
+            assert!(unavailable(got).contains("cwd that is not a string"), "{cwd}");
+        }
+    }
+}
+
+/// Gemini's joint review, MINOR 2: native resolution reads only live threads' active rows, so an
+/// archived or deleted thread whose provider row was pruned breaks nothing; a `nativeId` not yet
+/// assigned (null) matches nothing; a malformed row of a live thread is still unavailable.
+#[test]
+fn native_resolution_reads_only_live_threads_and_skips_unassigned_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let live = r#"thread("mcp:a", "pt-a", {"worktreePath": "/w"}); provider("pt-a", "mcp:a", native("native-a"))"#;
+    let gone = |column: &str| {
+        format!(
+            r#"conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)", ("mcp:gone", "p", "t", "codex", "pt-pruned", "c", "u", {}, {}, "{{}}"))"#,
+            if column == "archived" { r#""2026-11-17T01:00:00Z""# } else { "None" },
+            if column == "deleted" { r#""2026-11-17T01:00:00Z""# } else { "None" },
+        )
+    };
+    for case in ["archived", "deleted"] {
+        let db = partial_db(&tmp.path().join(case), true, &format!("{live}\n{}", gone(case)));
+        assert_eq!(resolved(T3Registry::new(db).resolve("native-a", true).unwrap()), "mcp:a", "{case}");
+    }
+    let unassigned = r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", json.dumps({"nativeThreadRef": {"driver": "codex", "nativeId": None}}))"#;
+    let db = partial_db(&tmp.path().join("unassigned"), true, &format!("{live}\n{unassigned}"));
+    assert_eq!(resolved(T3Registry::new(db).resolve("native-a", true).unwrap()), "mcp:a");
+    let malformed = r#"thread("mcp:b", "pt-b", {}); provider("pt-b", "mcp:b", json.dumps({"nativeThreadRef": []}))"#;
+    let db = partial_db(&tmp.path().join("malformed"), true, &format!("{live}\n{malformed}"));
+    unavailable(T3Registry::new(db).resolve("native-a", true));
+    // The snapshot: an archived row with a pruned provider row breaks nothing either.
+    let path = tmp.path().join("threads.json");
+    let rows = serde_json::json!([
+        { "id": "mcp:a", "cwd": "/w", "active_provider_thread_id": "pt-a",
+          "provider_threads": [{ "provider_thread_id": "pt-a", "native_id": "native-a" }] },
+        { "id": "mcp:gone", "cwd": "/w", "archived_at": "2026-11-17T01:00:00Z",
+          "active_provider_thread_id": "pt-pruned", "provider_threads": [] },
+    ]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    assert_eq!(resolved(T3Registry::new(&path).resolve("native-a", true).unwrap()), "mcp:a");
 }

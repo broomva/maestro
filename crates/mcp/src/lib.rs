@@ -858,9 +858,10 @@ impl Presented {
 }
 
 /// Whether a caller presents a credential or a token, in `args` or (in its own process) the caller
-/// variables: then the credential verifier decides its identity, never attribution.
-pub(crate) fn presents_credential(args: &Value, ambient: Ambient) -> bool {
-    Presented::read(args, ambient).is_ok_and(|p| p.credentialed())
+/// variables: then the credential verifier decides its identity, never attribution. A credential
+/// that does not parse is presented all the same: its parse error is the refusal, never `false`.
+pub(crate) fn presented_credential(args: &Value, ambient: Ambient) -> Result<bool, McpError> {
+    Presented::read(args, ambient).map(|p| p.credentialed())
 }
 
 /// A refused caller, as every caller check reports one.

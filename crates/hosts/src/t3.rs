@@ -186,11 +186,19 @@ def main():
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
     def build_thread(row):
+        # For attribution a payload that does not read is an error, never `{}`: it holds the
+        # thread's archivedAt, deletedAt and node, which `{}` would silently drop.
         try:
             payload = json.loads(row["payload_json"] or "{}")
         except Exception:
+            if mode == "attr":
+                sys.stderr.write(f"sqlite_error: thread {row['thread_id']}'s payload does not parse\n")
+                sys.exit(2)
             payload = {}
         if not isinstance(payload, dict):
+            if mode == "attr":
+                sys.stderr.write(f"sqlite_error: thread {row['thread_id']}'s payload is not an object\n")
+                sys.exit(2)
             payload = {}
         cwd = payload.get("worktreePath")
         if not cwd and "projection_projects" in tables:
@@ -289,7 +297,7 @@ def main():
             "FROM orchestration_v2_projection_threads t "
             "LEFT JOIN orchestration_v2_projection_provider_threads p "
             "ON p.provider_thread_id = t.active_provider_thread_id AND p.thread_id = t.thread_id "
-            "WHERE t.active_provider_thread_id IS NOT NULL"
+            "WHERE t.active_provider_thread_id IS NOT NULL AND t.archived_at IS NULL AND t.deleted_at IS NULL"
         )
         for r in rows:
             if r["provider_thread_id"] is None:
@@ -303,7 +311,12 @@ def main():
             ref = payload.get("nativeThreadRef")
             if ref is None:
                 continue
-            if not isinstance(ref, dict) or not isinstance(ref.get("nativeId"), str):
+            if not isinstance(ref, dict):
+                unreadable(r["thread_id"], "has a malformed nativeThreadRef")
+            # A native id not yet assigned matches nothing; any other non-string one is malformed.
+            if ref.get("nativeId") is None:
+                continue
+            if not isinstance(ref.get("nativeId"), str):
                 unreadable(r["thread_id"], "has a malformed nativeThreadRef")
             if ref["nativeId"] == target_id and r["thread_id"] not in out:
                 out.append(r["thread_id"])
@@ -560,6 +573,10 @@ impl T3Registry {
             let mut out: Vec<String> = Vec::new();
             for raw in rows {
                 let Some(active) = raw.active_provider_thread_id.as_deref() else { continue };
+                // Only live threads attribute, so only theirs need reading whole.
+                if raw.archived_at.is_some() || raw.deleted_at.is_some() {
+                    continue;
+                }
                 if !raw.provider_threads.iter().any(|p| p.provider_thread_id == active) {
                     return Err(unreadable(format!("The active provider row of thread {} is missing.", raw.id)));
                 }
@@ -667,10 +684,15 @@ impl T3Registry {
             let Some(mut row) = rows.into_iter().find(|r| r.get("id").and_then(Value::as_str) == Some(id)) else {
                 return Ok(None);
             };
-            if let Some(o) = row.as_object_mut()
-                && !o.get("cwd").is_some_and(Value::is_string)
-            {
-                o.insert("cwd".into(), Value::String(String::new()));
+            // Only a missing or null folder defaults to none; any other non-string one is malformed.
+            if let Some(o) = row.as_object_mut() {
+                match o.get("cwd") {
+                    None | Some(Value::Null) => {
+                        o.insert("cwd".into(), Value::String(String::new()));
+                    }
+                    Some(Value::String(_)) => {}
+                    Some(_) => return Err(malformed(format!("row {id} has a cwd that is not a string"))),
+                }
             }
             let raw: RawT3Thread =
                 serde_json::from_value(row).map_err(|e| malformed(format!("has a malformed row: {e}")))?;

@@ -1276,3 +1276,96 @@ fn every_stop_gate_alert_lands_when_the_claim_does_not_verify() {
     assert_eq!(last_kind(&f, &a), "StopUnblockable");
     landed(&f, &out, "unblockable");
 }
+
+/// Gemini's joint round 2, MAJOR 1(a): a presented credential that does not parse is presented
+/// all the same. Its parse error refuses the caller; the matching thread variable never attributes
+/// it, at the Stop gate (named or not) or at a flow write.
+#[test]
+fn a_malformed_credential_is_refused_never_attributed() {
+    let f = fx();
+    let a = f.begin_as((T3V, A));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, true);
+    let claim = json!({ "credential": "not a credential" });
+    for session in [Some(format!("t3:{ENV}/{A}")), None] {
+        let g = Gate {
+            harness: Harness::Claude,
+            cannot_block: false,
+            session: session.clone(),
+            alert_ledger: "ledger.yaml".into(),
+        };
+        let out = stop::gate(&f.paths, &hosts, Ambient::Caller, &claim, &g, &claude_stop());
+        allowed(&out);
+        assert!(
+            out.notes.iter().any(|n| n.contains("caller_refused") && n.contains("`credential`")),
+            "{session:?}: {out:?}"
+        );
+    }
+    assert_eq!(last_kind(&f, &a), "Started", "nothing recorded as A");
+    let mut args = f.start_args(SA);
+    args["credential"] = json!("not a credential");
+    let v = f.call(&hosts, START, args);
+    assert_eq!((v["ok"].clone(), v["code"].clone()), (json!(false), json!("caller_refused")), "{v}");
+    assert!(v["reason"].as_str().unwrap().contains("`credential`"), "{v}");
+}
+
+/// Gemini's joint round 2, MAJOR 1(b): a named Paseo or Direct session whose hook carries a T3
+/// thread variable is a binding that is unavailable, with that thread a candidate: unsigned, or
+/// with its launch token. A registry that does not read for the stdin `session_id` is unavailable.
+#[test]
+fn a_named_non_t3_session_inside_a_t3_thread_is_unbound() {
+    let f = fx();
+    let a = f.begin_as((T3V, A));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let token = json!({ "token": "tok-1", "cwd": f.work });
+    for (claim, n) in [(json!({}), 1), (token.clone(), 2)] {
+        let g = Gate {
+            harness: Harness::Claude,
+            cannot_block: false,
+            session: Some("direct:-/d1".into()),
+            alert_ledger: "ledger.yaml".into(),
+        };
+        let out = stop::gate(&f.paths, &hosts, Ambient::Shared, &claim, &g, &claude_stop());
+        allowed(&out);
+        assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: thread_mismatch")), "{claim}: {out:?}");
+        // Recorded on A, or found already recorded on A (the same reason and candidates).
+        let on_a = out.recorded.iter().any(|(i, _)| *i == a)
+            || out.notes.iter().any(|x| x.contains(&format!("{a} has not moved since its StopUnverified")));
+        assert!(on_a, "run {n} ({claim}): {out:?}");
+        assert_eq!(last_kind(&f, &a), "StopUnverified");
+    }
+    // The stdin session_id against a T3 registry that does not read.
+    let broken = f.hosts(ATTRIB, &[], Reg::Broken, false);
+    let v = f.call(&f.hosts(ATTRIB, &[], Reg::Good, false), START, f.direct(f.start_args(Some("direct:-/d1"))));
+    assert_eq!(v["ok"], true, "{v}");
+    let g = Gate {
+        harness: Harness::Codex,
+        cannot_block: false,
+        session: Some("direct:-/d1".into()),
+        alert_ledger: "ledger.yaml".into(),
+    };
+    let out = stop::gate(&f.paths, &broken, Ambient::Shared, &token, &g, &codex_stop("native-c"));
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: registry_unavailable")), "{out:?}");
+}
+
+/// Gemini's joint round 2, MINOR 3: a fail-open alert is keyed by the workspace, the code and the
+/// day, never the caller's own session string: two sessions that do not verify file one alert.
+#[test]
+fn fail_open_alerts_do_not_multiply_with_the_named_session() {
+    let f = fx();
+    let hosts = f.hosts(ATTRIB, &[], Reg::Good, false);
+    let mut ids = Vec::new();
+    for fake in ["direct:-/fake-1", "direct:-/fake-2"] {
+        let g = Gate {
+            harness: Harness::Claude,
+            cannot_block: false,
+            session: Some(fake.into()),
+            alert_ledger: "ledger.yaml".into(),
+        };
+        let out = stop::gate(&f.paths, &hosts, Ambient::Shared, &json!({}), &g, &claude_stop());
+        allowed(&out);
+        assert_eq!(out.alerts.len(), 1, "{fake}: {out:?}");
+        ids.push(out.alerts[0].clone());
+    }
+    assert_eq!(ids[0], ids[1]);
+}

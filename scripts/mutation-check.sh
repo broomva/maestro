@@ -2386,7 +2386,6 @@ mutate $ht '            except Exception:
 mutate $ht '            if not isinstance(payload, dict):
                 unreadable(' '            if False:
                 unreadable('
-mutate $ht '            if not isinstance(ref, dict) or not isinstance(ref.get("nativeId"), str):' '            if False:'
 mutate $ht '                if !raw.provider_threads.iter().any(|p| p.provider_thread_id == active) {' '                if false {'
 mutate $ht '            if mode != "attr":' '            if True:'
 mutate $ht '            if cwd or mode == "attr":' '            if cwd:'
@@ -2398,8 +2397,6 @@ mutate $ht '        let Some(thread) = self.lookup_attributed(thread_id)? else {
 mutate $gt '            if session.surface == Surface::T3 && !self.hook_vars(input).is_empty() {' '            if false {'
 mutate $gt '.filter(|_| self.hosts.has_surface(&Surface::T3));' ';'
 mutate $gt '            && n.canonical(thread.environment.as_deref()) != thread' '            && false'
-mutate $gt '                    return self.unbound(&[thread], &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));' '                    let _ = (thread, why);'
-mutate $gt '            Some(n) if crate::presents_credential(self.claim, self.ambient) => {' '            Some(n) if false => {'
 mutate $gt '            Some(r) if r.is_attribution() || (registry && session.surface == Surface::T3) => {' '            Some(r) if r.is_attribution() => {'
 mutate $gt '            Some(r) if r.is_attribution() || (registry && session.surface == Surface::T3) => {' '            Some(r) if registry && session.surface == Surface::T3 => {'
 mutate $gt '                    Err(r) => return self.unbound(&candidates, &r),' '                    Err(r) => return self.fail_open(Some(&thread), "caller_refused", &r.message),'
@@ -2411,6 +2408,32 @@ mutate $gt '                self.alert(s, &key, UNCHECKED, &words, &Principal::U
 mutate $gt '        self.alert(session, &key, UNCHECKED, &words, &Principal::Unverified);' '        self.alert(session, &key, UNCHECKED, &words, &Principal::Agent { session: session.clone() });'
 mutate $gt '        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);' '        self.alert(&session, &key, LEFT_WORK, &words, &Principal::Agent { session: session.clone() });'
 mutate $gt '        let filed = crate::file_ask_as(&store, session.clone(), caller, &self.gate.alert_ledger, &ask);' '        let filed = crate::verified_caller(self.hosts, Some(session), self.claim, self.ambient, Check::Request).and_then(|_| crate::file_ask_as(&store, session.clone(), caller, &self.gate.alert_ledger, &ask));'
+# Joint round 2 (BRO-3846, Gemini at fc6dcfa): credential first at the gate even when the credential
+# does not parse; a named Paseo or Direct session inside a T3 thread is unbound with that thread a
+# candidate; attribution never reads a corrupt payload as {}; native resolution reads live threads
+# only and skips unassigned ids; a fail-open alert is keyed by the workspace.
+mutate $mcp '    Presented::read(args, ambient).map(|p| p.credentialed())' '    Ok(Presented::read(args, ambient).is_ok_and(|p| p.credentialed()))'
+mutate $gt '        let me = match crate::presented_credential(self.claim, self.ambient) {' '        let me = match crate::presented_credential(self.claim, self.ambient).or(Ok::<bool, rmcp::ErrorData>(false)) {'
+mutate $gt '            if session.surface != Surface::T3 && self.hosts.has_surface(&Surface::T3) {' '            if false {'
+mutate $gt '                if let Some(first) = threads.first() {' '                if let Some(first) = threads.first().filter(|_| false) {'
+mutate $gt '                    return self.unbound(&threads, &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));' '                    return self.unbound(&[], &IdentityRefusal::new(RefusalReason::ThreadMismatch, why));'
+mutate $gt 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unreadable(_)))' 'each.iter().find(|_| false)'
+mutate $ht $'            if mode == "attr":\n                sys.stderr.write(f"sqlite_error: thread {row[\'thread_id\']}\'s payload does not parse' $'            if False:\n                sys.stderr.write(f"sqlite_error: thread {row[\'thread_id\']}\'s payload does not parse'
+mutate $ht $'            if mode == "attr":\n                sys.stderr.write(f"sqlite_error: thread {row[\'thread_id\']}\'s payload is not an object' $'            if False:\n                sys.stderr.write(f"sqlite_error: thread {row[\'thread_id\']}\'s payload is not an object'
+mutate $ht '                    Some(_) => return Err(malformed(format!("row {id} has a cwd that is not a string"))),' '                    Some(_) => {}'
+mutate $ht ' AND t.archived_at IS NULL AND t.deleted_at IS NULL"' ' AND t.deleted_at IS NULL"'
+mutate $ht ' AND t.archived_at IS NULL AND t.deleted_at IS NULL"' ' AND t.archived_at IS NULL"'
+mutate $ht '                if raw.archived_at.is_some() || raw.deleted_at.is_some() {
+                    continue;' '                if false {
+                    continue;'
+mutate $ht '            if ref.get("nativeId") is None:
+                continue' '            if False:
+                continue'
+mutate $ht '            if not isinstance(ref.get("nativeId"), str):' '            if False:'
+mutate $ht '            if not isinstance(ref, dict):
+                unreadable(' '            if False:
+                unreadable('
+mutate $gt '                let key = format!("fail_open\n{workspace}\n{code}\n{}", day.get(..10).unwrap_or_default());' '                let key = format!("fail_open\n{workspace}\n{code}\n{}\n{s}", day.get(..10).unwrap_or_default());'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
