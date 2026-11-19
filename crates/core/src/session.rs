@@ -468,6 +468,40 @@ impl PermissionPrompt {
     }
 }
 
+/// A question an agent put to the owner in its own session and that waits there (BRO-3936): a T3
+/// AskUserQuestion card. It is a hold on the owner like a permission prompt, but it is answered in
+/// the session, never through Maestro, so it carries no approval verb.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionPrompt {
+    pub request_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// When the card was put to the owner, as the surface recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_at: Option<String>,
+}
+
+impl QuestionPrompt {
+    /// Turn a waiting question into a [`crate::need::Need`]: an ask whose source is the session.
+    pub fn to_need(&self, session: &SessionRef, project: Option<String>, since: Option<String>) -> crate::need::Need {
+        let title = match &self.detail {
+            Some(detail) if !detail.is_empty() => format!("{}: {detail}", self.title),
+            _ => self.title.clone(),
+        };
+        crate::need::Need {
+            kind: crate::need::NeedKind::Ask,
+            source: crate::need::NeedSource::Questions,
+            key: format!("question:{session}#{}", self.request_id),
+            title,
+            since: self.asked_at.clone().or(since),
+            ask: None,
+            project,
+            unblocks: vec![session.to_string()],
+        }
+    }
+}
+
 /// Point-in-time registry snapshot of a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSnapshot {

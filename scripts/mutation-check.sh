@@ -1666,7 +1666,7 @@ mutate $mcp '        authority: Authority::Read,
     ToolSpec {
         name: flow::CLAIM,'
 # A shared daemon (serve --http) takes no caller claim from its own environment.
-mutate $http '    let server = MaestroServer::new(store).shared();' '    let server = MaestroServer::new(store);'
+mutate $http '    let server = server.shared();' ''
 mutate $mcp '        Ambient::Shared => None,' '        Ambient::Shared => std::env::var(key).ok().filter(|s| !s.is_empty()),'
 mutate $mcp '        None => match var("MAESTRO_BRIDGE_CREDENTIAL") {' '        None => match std::env::var("MAESTRO_BRIDGE_CREDENTIAL").ok().filter(|s| !s.is_empty()) {'
 mutate $mcp '            Some(kind) => agent_request_in(store, hosts, ambient, kind, args),' '            Some(kind) => agent_request_in(store, hosts, Ambient::Caller, kind, args),'
@@ -2556,13 +2556,13 @@ mutate $hlb '                .map_err(|e| format!("the registry file does not pa
 # the owner's listing, tagged with its surface and session, never dropped; identity is unaffected.
 mutate $hp $'            pending_permissions,\n            unread_permissions,\n        })' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        })'
 mutate $hp '                            unread.push((at(&path), why.clone()));' ''
-mutate $ht $'            pending_permissions,\n            unread_permissions,\n        }' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        }'
+mutate $ht $'            pending_permissions,\n            unread_permissions,\n            pending_questions,\n        }' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n            pending_questions,\n        }'
 mutate $ht '            self.unreadable.push((format!("t3 thread {}", thread.id), why.clone()));' ''
 # Round 11 (the owner's decision after round 10): one permission rule, in Rust, for every surface;
 # the reader emits each pending runtime request raw. Keys by presence and type: the first present
 # of toolName and name governs and must be a non-blank string; neither is a prompt named by its kind.
 mutate $ht $'                    requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})' $'                    requests.append({"id": req["runtime_request_id"], "kind": None, "payload_json": req["payload_json"]})'
-mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n        }' $'            "runtime_requests": [],\n        }'
+mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n            "pending_questions": pending_questions_of(row["thread_id"]),\n        }' $'            "runtime_requests": [],\n            "pending_questions": pending_questions_of(row["thread_id"]),\n        }'
 mutate $ht '        pending_permissions.extend(requested);' ''
 mutate $ht '        unread_permissions.extend(unread_requests);' ''
 mutate $hp '    let name = if let Some(v) = record.get("toolName") {' '    let name = if let Some(v) = record.get("toolName").filter(|_| false) {'
@@ -2573,6 +2573,31 @@ mutate $hp '    match value.as_str().filter(|s| !s.trim().is_empty()) {' '    ma
 mutate $hp $'        None => Err(format!("has a tool name that is not a non-blank string (`{key}`)")),' '        None => Ok(String::new()),'
 mutate $hp '        title: text("title"),' '        title: None,'
 mutate $hp '            unread.push(format!("permission record {i} is not an object"));' ''
+# BRO-3936: a waiting AskUserQuestion card in a T3 thread is a need on the owner (an ask whose
+# source is the session), listed beside its permission prompts; an answered card is not; a card
+# that does not read is still listed, titled so, and named unread; a request with no id is unread.
+mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n            "pending_questions": pending_questions_of(row["thread_id"]),\n        }' $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n            "pending_questions": [],\n        }'
+mutate $ht $'            "WHERE thread_id = ? AND status = \'pending\' AND kind = \'user_input\' ORDER BY created_at ASC",' $'            "WHERE thread_id = ? AND kind = \'user_input\' ORDER BY created_at ASC",'
+mutate $ht '        unread_permissions.extend(unread_questions);' ''
+mutate $ht $'            Err(why) => {\n                unread.push(format!("{at} {why}"));\n                ("Question waiting (its card did not read)".to_string(), None)\n            }' $'            Err(_) => continue,'
+mutate $ht '            unread.push(format!("question request {i} of thread {thread} has no id"));' ''
+mutate $ht '        let mut cut: String = q.chars().take(QUESTION_DETAIL_CHARS).collect();' '        let mut cut: String = q.to_string();'
+mutate $ht '            unread.push(format!("question request {i} of thread {thread} is not an object"));' ''
+mutate $ht $'                        "pending_questions": pending_questions_of(row["thread_id"]),\n                        "unreadable": str(exc),' $'                        "pending_questions": [],\n                        "unreadable": str(exc),'
+mutate $hlb '        report.needs.extend(questions);' '        drop(questions);'
+mutate $session '            source: crate::need::NeedSource::Questions,' '            source: crate::need::NeedSource::Approvals,'
+mutate $session '            since: self.asked_at.clone().or(since),' '            since,'
+# P20 narrowed round 2 (Codex), hoisted: one field rule reads every request and card-question
+# field; a field that does not read is named unread and the need stays; only a missing id drops.
+mutate $ht '        Some(Value::String(s)) if s.trim().is_empty() => Field::Missing,' ''
+mutate $ht '        Some(_) => Field::NotText,' '        Some(_) => Field::Missing,'
+mutate $ht '            unread.push(format!("question {n} has no {key}"));' ''
+mutate $ht '            unread.push(format!("question {n} has a {key} that is not text"));' ''
+mutate $ht '        return Question { header: None, text: None, unread: vec![format!("question {n} is not an object")] };' '        return Question { header: None, text: None, unread: vec![] };'
+mutate $ht '                    if !missing.is_empty() {' '                    if false {'
+mutate $ht '                if qs.iter().any(|q| q.text.is_some()) {' '                if true {'
+mutate $ht '            Field::NotText => Err("has a card that is not text"),' '            Field::NotText => continue,'
+mutate $ht '                unread.push(format!("{at} has a created_at that is not text"));' ''
 mutate $hp '            Err(why) => unread.push(format!("permission record {i} {why}")),' '            Err(_) => {}'
 mutate $hp '        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {' '        let payload = match req.payload_json.as_deref() {'
 mutate $hp '            None => Err("is empty"),' '            None => Ok(serde_json::Map::new()),'

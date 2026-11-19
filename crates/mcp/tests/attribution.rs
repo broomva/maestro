@@ -1657,3 +1657,30 @@ c.commit()
     let v = t3.verify_attributed("mcp:a", None).unwrap();
     assert_eq!(v.pending_permissions().iter().map(|p| p.title.as_str()).collect::<Vec<_>>(), ["approval"]);
 }
+
+/// P20 narrowed round 3 (Codex): `http::serve_server` serves a server its caller built, and
+/// `MaestroServer::new` is caller mode. Over HTTP it must still verify nobody by this process's
+/// own thread variables: an unsigned call is `attribution_missing`, end to end over a real
+/// listener and a real MCP client.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_mode_server_served_over_http_attributes_nobody() {
+    use rmcp::ServiceExt;
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    let f = fx();
+    // Caller mode, deliberately not `.shared()`, with this process's T3 variable naming thread A.
+    let server = MaestroServer::new(f.store.clone()).with_hosts(f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, true));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let bind = maestro_mcp::http::Bind::named("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = maestro_mcp::http::listen(bind).await.unwrap();
+    let url = format!("http://{}{}", listener.local_addr().unwrap(), maestro_mcp::http::PATH);
+    tokio::spawn(maestro_mcp::http::serve_server(server, listener, cancel.clone()));
+    let transport = StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(url));
+    let client = ().serve(transport).await.unwrap();
+    let mut params = CallToolRequestParams::new(START.to_string());
+    params.arguments = f.start_args(SA).as_object().cloned();
+    let result = serde_json::to_value(client.call_tool(params).await.unwrap()).unwrap();
+    check("caller-mode server over HTTP", &result["structuredContent"], MISSING);
+    cancel.cancel();
+}

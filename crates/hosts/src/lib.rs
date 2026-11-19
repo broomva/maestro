@@ -1479,6 +1479,7 @@ impl SurfaceRegistry {
         // read. A surface with no registry configured has nothing to read and adds nothing.
         let mut report = PermissionNeeds::default();
         let (project, since) = (project.map(str::to_string), since.map(str::to_string));
+        let mut questions: Vec<Need> = Vec::new();
         let mut add = |surface: Surface, id: String, prompts: &[PermissionPrompt], environment: Option<String>| {
             let sref = SessionRef { surface, environment, id };
             for prompt in prompts {
@@ -1503,6 +1504,15 @@ impl SurfaceRegistry {
             let listed = t3.list_live_report();
             unreadable(Surface::T3, listed.unreadable);
             for thread in listed.threads {
+                // Waiting AskUserQuestion cards are holds on the owner too (BRO-3936), answered in
+                // the thread itself; they list beside its permission prompts.
+                let sref = SessionRef {
+                    surface: Surface::T3,
+                    environment: thread.environment_id.clone(),
+                    id: thread.id.clone(),
+                };
+                questions
+                    .extend(thread.pending_questions.iter().map(|q| q.to_need(&sref, project.clone(), since.clone())));
                 add(Surface::T3, thread.id, &thread.pending_permissions, thread.environment_id);
             }
         }
@@ -1513,6 +1523,7 @@ impl SurfaceRegistry {
                 add(Surface::Direct, session.id, &session.pending_permissions, None);
             }
         }
+        report.needs.extend(questions);
         report.unreadable = unread;
         report
     }

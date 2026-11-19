@@ -23,10 +23,28 @@ fn maestro() -> Command {
     cmd
 }
 
+/// An empty T3 registry, so a live session's waiting prompts or questions on the machine running
+/// the tests (a developer's Mac, a CI runner that also hosts T3) never reach the fixture's counts
+/// (BRO-3936). An empty file is an empty SQLite database. Removed when the guard drops.
+fn empty_t3_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("userdata")).unwrap();
+    std::fs::write(home.path().join("userdata/statev2.sqlite"), "").unwrap();
+    home
+}
+
 #[test]
 fn mcp_handshake_lists_and_calls_tools() {
-    let mut child =
-        maestro().arg("mcp").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+    let t3_home = empty_t3_home();
+    let mut child = maestro()
+        .env_remove("MAESTRO_T3_HOME")
+        .env("T3CODE_HOME", t3_home.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut out = BufReader::new(child.stdout.take().unwrap());
     let mut send = |v: Value| {

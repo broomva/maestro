@@ -1462,8 +1462,20 @@ where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
+    serve_io_with(MaestroServer::new(store), io).await
+}
+
+/// [`serve_io`] for a server the caller built, such as one with its own surface registry.
+pub async fn serve_io_with<R, W>(
+    server: MaestroServer,
+    io: (R, W),
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
     use rmcp::ServiceExt;
-    let service = MaestroServer::new(store).serve(io).await?;
+    let service = server.serve(io).await?;
     service.waiting().await?;
     Ok(())
 }
