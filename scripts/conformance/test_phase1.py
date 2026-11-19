@@ -132,7 +132,8 @@ class Guards(unittest.TestCase):
         calls,_=mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"thinking","state":"DONE"}}\n'+agy,'agy','fi_test')
         self.assertEqual(calls,['maestro_flow_claim'])
         for documented in ('user_input','agent_response','checkpoint'):
-            calls,_=mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"%s","state":"DONE"}}\n'%documented+agy,'agy','fi_test')
+            try: calls,_=mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"%s","state":"DONE"}}\n'%documented+agy,'agy','fi_test')
+            except Failure as exc: self.fail(f'documented step type {documented} was refused: {exc}')
             self.assertEqual(calls,['maestro_flow_claim'],documented)
         with self.assertRaises(Failure):
             mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"checkpoint","tool_name":"run_command"}}','agy','fi_test')
