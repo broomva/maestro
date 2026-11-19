@@ -98,7 +98,7 @@ impl T3Thread {
     /// rows the registry does not report, has none; its default provider is never taken for it.
     pub fn performed_harness(&self) -> Option<Harness> {
         let rows = self.providers.as_ref()?;
-        let first = rows.first()?;
+        let first = rows.first().filter(|p| !p.is_empty())?;
         rows.iter().all(|p| p == first).then(|| harness_of(first))
     }
 }
@@ -336,7 +336,8 @@ def main():
         # performer is attested only when they are one provider, never by the thread's default.
         providers = None
         if provider_column:
-            providers = [p["provider"] for p in conn.execute(
+            # A provider that is not text (NULL) names none: it reads, and confirms nobody.
+            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(
                 "SELECT provider FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
                 (row["thread_id"],),
             )]

@@ -2609,6 +2609,8 @@ mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if start
 mutate $fk/replay.rs '                if routed(ir, id) {' '                if false {'
 mutate $ht '        rows.iter().all(|p| p == first).then(|| harness_of(first))' '        Some(harness_of(first))'
 mutate $ht '        if provider_column:' '        if False:'
+mutate $ht '        let first = rows.first().filter(|p| !p.is_empty())?;' '        let first = rows.first()?;'
+mutate $ht $'            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(' $'            providers = [p["provider"] for p in conn.execute('
 mutate crates/flow/src/driver.rs '    if let Some(refs) = node.class.launch().map(|l| &l.different_from).filter(|r| !r.is_empty()) {' '    if let Some(refs) = None::<&Vec<RouteRef>> {'
 # The registry attests a performer only as the owner's child, on this host, not closed.
 mutate $ht '        if thread.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'

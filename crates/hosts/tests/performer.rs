@@ -121,10 +121,11 @@ fn a_child_attests_only_one_provider_it_ran_never_its_default() {
         row("switched", Some("owner"), json!({"provider": "codex", "providers": ["codex", "claudeAgent"]})),
         row("unrecorded", Some("owner"), json!({"provider": "codex", "providers": null})),
         row("none", Some("owner"), json!({"provider": "codex", "providers": []})),
+        row("blank", Some("owner"), json!({"provider": "codex", "providers": [""]})),
         row("moved", Some("owner"), json!({"provider": "codex", "providers": ["claudeAgent"]})),
     ]));
     let me = owner_t3();
-    for id in ["switched", "unrecorded", "none"] {
+    for id in ["switched", "unrecorded", "none", "blank"] {
         let r = reg.performer(&me, &named(&format!("t3:env-mac/{id}")));
         assert_eq!(refused(r), RefusalReason::PerformerUnverified, "{id}");
     }
@@ -162,6 +163,7 @@ def provider(ptid, tid, name, status):
     conn.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}", name, name))
 thread("moved", "pt-m"); provider("pt-m", "moved", "claudeAgent", "active")
+thread("nullrow", "pt-n"); provider("pt-n", "nullrow", None, "active")
 thread("switched", "pt-s2"); provider("pt-s1", "switched", "codex", "retired"); provider("pt-s2", "switched", "claudeAgent", "active")
 conn.commit()
 "#;
@@ -173,6 +175,8 @@ conn.commit()
     let moved = reg.performer(&me, &named("t3:env-mac/moved")).unwrap();
     assert_eq!(moved.harness(), Some(&Harness::ClaudeCode));
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/switched"))), RefusalReason::PerformerUnverified);
+    // P20 round 2: a NULL provider reads (the registry is not unavailable) and confirms nobody.
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/nullrow"))), RefusalReason::PerformerUnverified);
 }
 
 #[test]
