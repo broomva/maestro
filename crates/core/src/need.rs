@@ -23,6 +23,9 @@ pub enum NeedSource {
     Reviews,
     Answers,
     Approvals,
+    /// A question an agent put to the owner in its own session (a T3 AskUserQuestion card) that
+    /// waits for an answer there (BRO-3936). Read-only here: the answer is given in T3.
+    Questions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

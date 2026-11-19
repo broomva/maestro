@@ -2,6 +2,7 @@
 //! the identity mode, the precedence of what thread variables resolve to, resolution through
 //! `statev2.sqlite`'s active provider row, the T3 reader's run status, and the audit facts.
 
+use maestro_core::need::{NeedKind, NeedSource};
 use maestro_hosts::attribution::{MAX_ANCESTORS, combine, process_facts};
 use maestro_hosts::{
     Attributed, CallerClaim, IdentityMode, ProcStat, ProcessReader, RefusalReason, Resolution, Surface,
@@ -920,4 +921,92 @@ fn one_permission_rule_answers_alike_on_every_surface() {
             }
         }
     }
+}
+
+/// BRO-3936: a `statev2.sqlite` whose thread `mcp:q` waits on four AskUserQuestion cards (one
+/// readable with two questions, one with no card item, one whose card holds no questions, one
+/// with a 200-character question) and holds one answered card and one permission prompt.
+fn questions_db(dir: &Path) -> PathBuf {
+    partial_db(
+        dir,
+        true,
+        r#"
+conn.executescript("""CREATE TABLE orchestration_v2_projection_runtime_requests (
+  runtime_request_id TEXT, thread_id TEXT, kind TEXT, status TEXT, created_at TEXT, payload_json TEXT);
+CREATE TABLE orchestration_v2_projection_turn_items (
+  turn_item_id TEXT, thread_id TEXT, type TEXT, payload_json TEXT);""")
+thread("mcp:q", None, {"worktreePath": "/w"})
+def req(rid, kind, status, at, payload=None):
+    conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
+        (rid, "mcp:q", kind, status, at, json.dumps(payload or {"id": rid, "kind": kind})))
+def card(rid, questions):
+    conn.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES (?,?,?,?)",
+        ("item-" + rid, "mcp:q", "user_input_request", json.dumps({"requestId": rid, "questions": questions})))
+req("q-wait", "user_input", "pending", "2026-11-19T10:00:00Z")
+card("q-wait", [{"header": "Deploy", "question": "Ship tonight?"}, {"header": "Font", "question": "Which font?"}])
+req("q-done", "user_input", "resolved", "2026-11-19T09:00:00Z")
+card("q-done", [{"header": "Old", "question": "Answered already?"}])
+req("q-nocard", "user_input", "pending", "2026-11-19T10:01:00Z")
+req("q-empty", "user_input", "pending", "2026-11-19T10:02:00Z")
+card("q-empty", [])
+req("q-long", "user_input", "pending", "2026-11-19T10:03:00Z")
+card("q-long", [{"question": "x" * 200}])
+req("perm", "approval", "pending", "2026-11-19T10:04:00Z", {"toolName": "Bash", "input": {"command": "ls"}})
+"#,
+    )
+}
+
+/// BRO-3936: every waiting AskUserQuestion card is a need on the owner, an ask whose source is the
+/// thread, listed beside the thread's permission prompts; an answered card is not.
+#[test]
+fn a_waiting_question_card_is_a_need() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(questions_db(tmp.path()))), None);
+    let live = hosts.live_permission_report(None, None);
+    let questions: Vec<_> = live.needs.iter().filter(|n| n.key.starts_with("question:")).collect();
+    let keys: Vec<&str> = questions.iter().map(|n| n.key.as_str()).collect();
+    assert_eq!(questions.len(), 4, "{keys:?}");
+    assert!(!keys.iter().any(|k| k.contains("q-done")), "an answered card is not a need: {keys:?}");
+    assert_eq!(live.needs.len(), 5, "the permission prompt still lists: {:?}", live.needs);
+    let wait = questions.iter().find(|n| n.key.ends_with("#q-wait")).unwrap();
+    assert_eq!((wait.kind, wait.source), (NeedKind::Ask, NeedSource::Questions));
+    assert_eq!(wait.title, "Question: Deploy · Font: Ship tonight? (2 questions)");
+    assert_eq!(wait.since.as_deref(), Some("2026-11-19T10:00:00Z"), "when the card was asked");
+    assert!(wait.ask.is_none(), "not a ledger ask");
+    assert_eq!(wait.unblocks, vec![wait.key.trim_start_matches("question:").split('#').next().unwrap().to_string()]);
+    let long = questions.iter().find(|n| n.key.ends_with("#q-long")).unwrap();
+    assert_eq!(long.title, format!("Question: question: {}…", "x".repeat(160)), "cut at 160 characters");
+}
+
+/// BRO-3936: a waiting card that does not read is still a need, titled so, and the listing names
+/// it unread with why; a request with no id is unread too. Nothing is dropped.
+#[test]
+fn a_question_card_that_does_not_read_is_listed_and_named() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(questions_db(tmp.path()))), None);
+    let live = hosts.live_permission_report(None, None);
+    for id in ["q-nocard", "q-empty"] {
+        let n = live.needs.iter().find(|n| n.key.ends_with(&format!("#{id}"))).expect(id);
+        assert_eq!(n.title, "Question waiting (its card did not read)", "{id}");
+    }
+    let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
+    assert_eq!(why.len(), 2, "{why:?}");
+    assert!(why.iter().any(|w| w.contains("q-nocard") && w.contains("has no card")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("q-empty") && w.contains("no questions")), "{why:?}");
+    // A JSON snapshot carries the same raw records: a card that does not parse, and one with no id.
+    let path = tmp.path().join("threads.json");
+    let rows = serde_json::json!([{ "id": "mcp:j", "cwd": "/w", "created_at": "2026-11-19T00:00:00Z", "status": "running",
+        "pending_questions": [
+            { "id": "j1", "created_at": "2026-11-19T11:00:00Z",
+              "item_payload_json": "{\"questions\": [{\"header\": \"H\", \"question\": \"Q?\"}]}" },
+            { "id": "j2", "item_payload_json": "{not json" },
+            { "item_payload_json": "{}" } ] }]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    let live = SurfaceRegistry::new(None, Some(T3Registry::new(&path)), None).live_permission_report(None, None);
+    let titles: Vec<&str> = live.needs.iter().map(|n| n.title.as_str()).collect();
+    assert_eq!(titles, ["Question: H: Q?", "Question waiting (its card did not read)"]);
+    let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
+    assert_eq!(why.len(), 2, "{why:?}");
+    assert!(why.iter().any(|w| w.contains("j2") && w.contains("does not parse")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("has no id")), "{why:?}");
 }

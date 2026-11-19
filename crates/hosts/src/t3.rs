@@ -9,8 +9,8 @@
 use crate::paseo::{RawRuntimeRequest, check_peer, decode_permissions, decode_runtime_requests, short_id, within};
 use crate::read::{self, Read};
 use maestro_core::session::{
-    BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, RefusalReason,
-    SessionLiveness, SessionRef, Surface, VerifiedSession,
+    BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, QuestionPrompt,
+    RefusalReason, SessionLiveness, SessionRef, Surface, VerifiedSession,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,9 +64,13 @@ pub struct T3Thread {
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
-    /// Pending permission records that did not decode, each with why (BRO-3863).
+    /// Pending permission records that did not decode, each with why (BRO-3863), and waiting
+    /// questions whose cards did not read (BRO-3936).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unread_permissions: Vec<String>,
+    /// AskUserQuestion cards waiting for the owner in this thread (BRO-3936).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_questions: Vec<QuestionPrompt>,
 }
 
 impl T3Thread {
@@ -142,6 +146,10 @@ struct RawT3Thread {
     /// The thread's pending runtime requests, raw, as the SQLite reader emits them (BRO-3863).
     #[serde(default)]
     runtime_requests: Vec<RawRuntimeRequest>,
+    /// The thread's pending `user_input` requests (AskUserQuestion cards), raw, each with its
+    /// card's turn-item payload when one was found (BRO-3936).
+    #[serde(default)]
+    pending_questions: Vec<RawQuestionRequest>,
     /// The thread's active provider-thread row (`active_provider_thread_id`).
     #[serde(default)]
     active_provider_thread_id: Option<String>,
@@ -154,6 +162,71 @@ struct RawT3Thread {
     /// listed from what is known, its permission prompts included, and the listing reports it.
     #[serde(default)]
     unreadable: Option<String>,
+}
+
+/// A pending `user_input` request as the SQLite reader emits it (BRO-3936).
+#[derive(Deserialize)]
+struct RawQuestionRequest {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    item_payload_json: Option<String>,
+}
+
+/// How much of a card's first question a need's title carries.
+const QUESTION_DETAIL_CHARS: usize = 160;
+
+/// A thread's waiting AskUserQuestion cards as prompts (BRO-3936). A card always becomes a prompt,
+/// so the owner sees that a question waits even when its card does not read: then its title says
+/// so and the listing reports it unread with why. A request with no id cannot be keyed; it is
+/// reported unread, never dropped silently.
+fn decode_questions(raw: Vec<RawQuestionRequest>, thread: &str) -> (Vec<QuestionPrompt>, Vec<String>) {
+    let mut prompts = Vec::new();
+    let mut unread = Vec::new();
+    for req in raw {
+        let Some(id) = req.id.filter(|s| !s.trim().is_empty()) else {
+            unread.push(format!("question request - of thread {thread} has no id"));
+            continue;
+        };
+        let card = match req.item_payload_json.as_deref().filter(|s| !s.trim().is_empty()) {
+            None => Err("has no card (no user_input_request item)"),
+            Some(text) => match serde_json::from_str::<Value>(text) {
+                Err(_) => Err("has a card that does not parse"),
+                Ok(v) => match v.get("questions").and_then(Value::as_array) {
+                    Some(qs) if !qs.is_empty() => Ok(qs.clone()),
+                    _ => Err("has a card with no questions"),
+                },
+            },
+        };
+        let (title, detail) = match card {
+            Ok(qs) => describe_questions(&qs),
+            Err(why) => {
+                unread.push(format!("question request {id} of thread {thread} {why}"));
+                ("Question waiting (its card did not read)".to_string(), None)
+            }
+        };
+        prompts.push(QuestionPrompt { request_id: id, title, detail, asked_at: req.created_at });
+    }
+    (prompts, unread)
+}
+
+/// `Question: <header> · <header>` and the first question, cut at [`QUESTION_DETAIL_CHARS`].
+fn describe_questions(qs: &[Value]) -> (String, Option<String>) {
+    let text = |q: &Value, key: &str| {
+        q.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    };
+    let headers: Vec<String> = qs.iter().map(|q| text(q, "header").unwrap_or_else(|| "question".into())).collect();
+    let first = qs.iter().find_map(|q| text(q, "question"));
+    let detail = first.map(|q| {
+        let mut cut: String = q.chars().take(QUESTION_DETAIL_CHARS).collect();
+        if q.chars().count() > QUESTION_DETAIL_CHARS {
+            cut.push('…');
+        }
+        if qs.len() > 1 { format!("{cut} ({} questions)", qs.len()) } else { cut }
+    });
+    (format!("Question: {}", headers.join(" · ")), detail)
 }
 
 /// The live threads a listing found, and what it could not read (BRO-3846). The listing feeds
@@ -267,6 +340,33 @@ def main():
                     requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})
         return requests
 
+    def pending_questions_of(thread_id):
+        # A thread's waiting AskUserQuestion cards (BRO-3936): pending `user_input` requests, raw,
+        # each with the payload of its `user_input_request` turn item (the questions) or None when
+        # none was found. Stored apart from the payload, like permission requests. The reader does
+        # not interpret the card: Rust does (`decode_questions`).
+        out = []
+        if "orchestration_v2_projection_runtime_requests" not in tables:
+            return out
+        has_items = "orchestration_v2_projection_turn_items" in tables
+        for req in conn.execute(
+            "SELECT runtime_request_id, created_at "
+            "FROM orchestration_v2_projection_runtime_requests "
+            "WHERE thread_id = ? AND status = 'pending' AND kind = 'user_input' ORDER BY created_at ASC",
+            (thread_id,),
+        ):
+            item = None
+            if has_items:
+                hit = conn.execute(
+                    "SELECT payload_json FROM orchestration_v2_projection_turn_items "
+                    "WHERE thread_id = ? AND type = 'user_input_request' AND json_valid(payload_json) "
+                    "AND json_extract(payload_json, '$.requestId') = ? LIMIT 1",
+                    (thread_id, req["runtime_request_id"]),
+                ).fetchone()
+                item = hit["payload_json"] if hit else None
+            out.append({"id": req["runtime_request_id"], "created_at": req["created_at"], "item_payload_json": item})
+        return out
+
     def build_thread(row):
         payload = payload_of(row["payload_json"], f"thread {row['thread_id']}'s payload")
         cwd = payload.get("worktreePath")
@@ -320,6 +420,7 @@ def main():
             "parent_id": parent_id,
             "pending_permissions": [],
             "runtime_requests": runtime_requests_of(row["thread_id"]),
+            "pending_questions": pending_questions_of(row["thread_id"]),
         }
 
     if mode == "native":
@@ -395,6 +496,7 @@ def main():
                         "parent_id": None,
                         "pending_permissions": [],
                         "runtime_requests": runtime_requests_of(row["thread_id"]),
+                        "pending_questions": pending_questions_of(row["thread_id"]),
                         "unreadable": str(exc),
                     }
                 if built is not None:
@@ -614,6 +716,8 @@ impl T3Registry {
         let (requested, unread_requests) = decode_runtime_requests(raw.runtime_requests, &raw.id, &raw.cwd, "t3-perm");
         pending_permissions.extend(requested);
         unread_permissions.extend(unread_requests);
+        let (pending_questions, unread_questions) = decode_questions(raw.pending_questions, &raw.id);
+        unread_permissions.extend(unread_questions);
         T3Thread {
             id: raw.id,
             cwd: raw.cwd,
@@ -629,6 +733,7 @@ impl T3Registry {
             parent_id: raw.parent_id,
             pending_permissions,
             unread_permissions,
+            pending_questions,
         }
     }
 

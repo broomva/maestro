@@ -2573,6 +2573,19 @@ mutate $hp '    match value.as_str().filter(|s| !s.trim().is_empty()) {' '    ma
 mutate $hp $'        None => Err(format!("has a tool name that is not a non-blank string (`{key}`)")),' '        None => Ok(String::new()),'
 mutate $hp '        title: text("title"),' '        title: None,'
 mutate $hp '            unread.push(format!("permission record {i} is not an object"));' ''
+# BRO-3936: a waiting AskUserQuestion card in a T3 thread is a need on the owner (an ask whose
+# source is the session), listed beside its permission prompts; an answered card is not; a card
+# that does not read is still listed, titled so, and named unread; a request with no id is unread.
+mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n            "pending_questions": pending_questions_of(row["thread_id"]),\n        }' $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n            "pending_questions": [],\n        }'
+mutate $ht $'            "WHERE thread_id = ? AND status = \'pending\' AND kind = \'user_input\' ORDER BY created_at ASC",' $'            "WHERE thread_id = ? AND kind = \'user_input\' ORDER BY created_at ASC",'
+mutate $ht '        unread_permissions.extend(unread_questions);' ''
+mutate $ht '                ("Question waiting (its card did not read)".to_string(), None)' '                continue'
+mutate $ht '            unread.push(format!("question request - of thread {thread} has no id"));' ''
+mutate $ht '        let mut cut: String = q.chars().take(QUESTION_DETAIL_CHARS).collect();' '        let mut cut: String = q.clone();'
+mutate $ht '                    Some(qs) if !qs.is_empty() => Ok(qs.clone()),' '                    Some(qs) => Ok(qs.clone()),'
+mutate $hlb '        report.needs.extend(questions);' '        drop(questions);'
+mutate $session '            source: crate::need::NeedSource::Questions,' '            source: crate::need::NeedSource::Approvals,'
+mutate $session '            since: self.asked_at.clone().or(since),' '            since,'
 mutate $hp '            Err(why) => unread.push(format!("permission record {i} {why}")),' '            Err(_) => {}'
 mutate $hp '        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {' '        let payload = match req.payload_json.as_deref() {'
 mutate $hp '            None => Err("is empty"),' '            None => Ok(serde_json::Map::new()),'
