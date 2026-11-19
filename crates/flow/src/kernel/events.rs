@@ -223,6 +223,16 @@ pub struct AskPinned {
     pub ledger: String,
     pub body: Value,
     pub body_hash: String,
+    /// Node id to the digest its receipt had when this ask was pinned (BRO-3655). Absent in logs
+    /// written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<BTreeMap<String, String>>,
+    /// The earlier ask id at this node and iteration that this ask replaces when inputs changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// Why this ask supersedes the earlier one (`inputs_changed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
     /// the spine and every check ignore. Absent in logs written before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

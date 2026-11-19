@@ -261,8 +261,16 @@ impl Owners {
                     }
                     self.proposals.remove(i);
                 }
-                let ask =
-                    AskRec { ask_id: p.ask_id, ledger: p.ledger, body: p.body, body_hash: p.body_hash, linked: false };
+                let ask = AskRec {
+                    ask_id: p.ask_id,
+                    ledger: p.ledger,
+                    body: p.body,
+                    body_hash: p.body_hash,
+                    inputs: Default::default(),
+                    supersedes: None,
+                    reason: None,
+                    linked: false,
+                };
                 self.pins.push(p.by.clone());
                 self.proposals.push(ProposalRec {
                     proposal: p.proposal,
@@ -627,8 +635,16 @@ fn pin(
     let log = guard.log(instance)?;
     check_writable(&log, &pinned(&log)?)?;
     super::write::append_writable(&mut guard, instance, seen.seq, pin.to_event()?)?;
-    let ask =
-        AskRec { ask_id: pin.ask_id, ledger: pin.ledger, body: pin.body, body_hash: pin.body_hash, linked: false };
+    let ask = AskRec {
+        ask_id: pin.ask_id,
+        ledger: pin.ledger,
+        body: pin.body,
+        body_hash: pin.body_hash,
+        inputs: Default::default(),
+        supersedes: None,
+        reason: None,
+        linked: false,
+    };
     Ok(ProposalRec { proposal, by: pin.by, owner: pin.owner, epoch: pin.epoch, ask })
 }
 
