@@ -1190,33 +1190,6 @@ pub fn live_needs(hosts: &maestro_hosts::SurfaceRegistry) -> maestro_view::LiveN
     maestro_view::LiveNeeds { errors: live.errors(), needs: live.needs }
 }
 
-/// How long a web page waits for live sessions (BRO-3936, P20 round 3). The T3 reader is a
-/// subprocess with no timeout of its own; a page must not hang on it.
-pub const LIVE_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// [`live_needs`] within `budget`. A read that does not finish in time is an unread source: the
-/// page renders without the live holds, and its counts read as unknown, never as complete. The
-/// late read finishes on its own thread and is dropped.
-pub fn live_needs_within(server: &MaestroServer, budget: std::time::Duration) -> maestro_view::LiveNeeds {
-    let hosts = server.hosts.clone();
-    within(move || live_needs(&hosts), budget).unwrap_or_else(|| maestro_view::LiveNeeds {
-        needs: Vec::new(),
-        errors: vec![maestro_core::section::SourceError {
-            at: "live sessions".into(),
-            reason: format!("did not answer within {} ms; their holds are not shown", budget.as_millis()),
-        }],
-    })
-}
-
-/// `f`'s value if it finishes within `budget`, else `None` (it keeps running on its own thread).
-pub fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static, budget: std::time::Duration) -> Option<T> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    rx.recv_timeout(budget).ok()
-}
-
 fn render_summary(r: &maestro_view::Rendered) -> String {
     let mut out = format!("Rendered from {} (revision {}).", r.tree, r.revision.get(..12).unwrap_or_default());
     if r.drops.is_empty() {
@@ -1250,8 +1223,6 @@ pub struct MaestroServer {
     source: maestro_store::TreeSource,
     hosts: Arc<maestro_hosts::SurfaceRegistry>,
     ambient: Ambient,
-    /// How long a web page waits for live sessions ([`LIVE_READ_BUDGET`] unless set).
-    live_budget: std::time::Duration,
 }
 
 impl MaestroServer {
@@ -1262,7 +1233,6 @@ impl MaestroServer {
             source: store.tree.source,
             hosts: Arc::new(maestro_hosts::SurfaceRegistry::from_env()),
             ambient: Ambient::Caller,
-            live_budget: LIVE_READ_BUDGET,
         }
     }
 
@@ -1279,16 +1249,6 @@ impl MaestroServer {
 
     pub fn hosts(&self) -> &maestro_hosts::SurfaceRegistry {
         &self.hosts
-    }
-
-    /// How long this server's web pages wait for live sessions before rendering them unread.
-    pub fn with_live_budget(mut self, budget: std::time::Duration) -> Self {
-        self.live_budget = budget;
-        self
-    }
-
-    pub fn live_budget(&self) -> std::time::Duration {
-        self.live_budget
     }
 
     /// The store one request reads: resolved now, consistent within the request.

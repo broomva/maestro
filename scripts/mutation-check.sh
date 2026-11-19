@@ -487,7 +487,6 @@ mutate $port '                            repos = m.next_value::<Option<Keys>>()
 # the page fetches nothing; an unchanged poll sends no html; the poll is offered to the App only.
 cat=crates/view/src/catalog.rs
 render=crates/view/src/render.rs
-vweb=crates/view/src/screens/web.rs
 page=crates/view/src/page.rs
 mutate $cat 'if let Some(extra) = raw.keys().find(|k| !matches!(k.as_str(), "type" | "props" | "children")) {' 'if let Some(extra) = None::<&String> {'
 mutate $cat '        if self.placed.contains(id) {' '        if false {'
@@ -2598,13 +2597,6 @@ mutate $web '        Some(maestro_view::render::render_web_live(&store, &validat
 mutate $mcp '    maestro_view::LiveNeeds { errors: live.errors(), needs: live.needs }' '    maestro_view::LiveNeeds { errors: live.errors(), needs: Vec::new() }'
 mutate $mcp $'            let v = maestro_view::validate(&spec).map_err(|e| McpError::invalid_params(e, None))?;\n            let r = maestro_view::render_live(store, &v, &live_needs(hosts));' $'            let v = maestro_view::validate(&spec).map_err(|e| McpError::invalid_params(e, None))?;\n            let r = maestro_view::render(store, &v);'
 mutate $mcp $'            let v = maestro_view::validate(&a.spec).map_err(|e| McpError::invalid_params(e, None))?;\n            let r = maestro_view::render_live(store, &v, &live_needs(hosts));' $'            let v = maestro_view::validate(&a.spec).map_err(|e| McpError::invalid_params(e, None))?;\n            let r = maestro_view::render(store, &v);'
-# P20 round 3 (Codex): with a ledger ask open, the decisions queue lists live holds in an "in
-# sessions" group; a page waits for live sessions at most LIVE_READ_BUDGET, then shows them unread.
-mutate $vweb '            @if !live.is_empty() {' '            @if live.is_empty() {'
-mutate $vweb '        .filter(|n| matches!(n.source, NeedSource::Questions | NeedSource::Approvals))' '        .filter(|n| matches!(n.source, NeedSource::Approvals))'
-mutate $mcp '    rx.recv_timeout(budget).ok()' '    rx.recv().ok()'
-mutate $mcp '    within(move || live_needs(&hosts), budget).unwrap_or_else(|| maestro_view::LiveNeeds {' '    within(move || live_needs(&hosts), budget).or_else(|| Some(maestro_view::LiveNeeds::default())).unwrap_or_else(|| maestro_view::LiveNeeds {'
-mutate $web '        let live = crate::live_needs_within(&server, server.live_budget());' '        let live = crate::live_needs(server.hosts());'
 mutate $hp '            Err(why) => unread.push(format!("permission record {i} {why}")),' '            Err(_) => {}'
 mutate $hp '        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {' '        let payload = match req.payload_json.as_deref() {'
 mutate $hp '            None => Err("is empty"),' '            None => Ok(serde_json::Map::new()),'
