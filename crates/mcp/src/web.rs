@@ -159,9 +159,7 @@ async fn page_of(
             return None;
         }
         let at = maestro_store::views::now();
-        // The pages count live holds too (BRO-3936): waiting cards and permission prompts.
-        let live = crate::live_needs(server.hosts());
-        Some(maestro_view::render::render_web_live(&store, &validated, at, thread.as_deref(), Some(&live)))
+        Some(maestro_view::render::render_web(&store, &validated, at, thread.as_deref()))
     })
     .await;
     match rendered {

@@ -113,17 +113,9 @@ pub async fn listen(bind: Bind) -> std::io::Result<TcpListener> {
 
 /// Serve MCP on `listener` at [`PATH`] until `cancel` fires, then for at most [`SHUTDOWN_GRACE`].
 pub async fn serve(store: Store, listener: TcpListener, cancel: CancellationToken) -> std::io::Result<()> {
-    // A daemon serves every caller on the machine: its own caller variables verify none of them.
-    serve_server(MaestroServer::new(store).shared(), listener, cancel).await
-}
-
-/// [`serve`] for a server built by the caller, such as one with its own surface registry.
-pub async fn serve_server(
-    server: MaestroServer,
-    listener: TcpListener,
-    cancel: CancellationToken,
-) -> std::io::Result<()> {
     let local = listener.local_addr()?;
+    // A daemon serves every caller on the machine: its own caller variables verify none of them.
+    let server = MaestroServer::new(store).shared();
     let mcp = service(server.clone(), local, cancel.child_token());
     // The web pages (BRO-3588) share the listener and its bind rule; `/mcp` is unchanged.
     let router = crate::web::router(server, local).nest_service(PATH, mcp);

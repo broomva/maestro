@@ -2589,14 +2589,6 @@ mutate $ht $'                        "pending_questions": pending_questions_of(r
 mutate $hlb '        report.needs.extend(questions);' '        drop(questions);'
 mutate $session '            source: crate::need::NeedSource::Questions,' '            source: crate::need::NeedSource::Approvals,'
 mutate $session '            since: self.asked_at.clone().or(since),' '            since,'
-# P20 round 2 (Codex): the owner's pages and the UI tools count the live holds the needs list
-# holds, so a waiting card reaches "Needs you" and its unread sources keep the count unknown.
-mutate $render '                list.extend(live.needs.iter().cloned());' ''
-mutate $render '            snap.needs.errors.extend(live.errors.iter().cloned());' ''
-mutate $web '        Some(maestro_view::render::render_web_live(&store, &validated, at, thread.as_deref(), Some(&live)))' '        Some(maestro_view::render::render_web_live(&store, &validated, at, thread.as_deref(), None.filter(|_: &&maestro_view::LiveNeeds| live.needs.is_empty())))'
-mutate $mcp '    maestro_view::LiveNeeds { errors: live.errors(), needs: live.needs }' '    maestro_view::LiveNeeds { errors: live.errors(), needs: Vec::new() }'
-mutate $mcp $'            let v = maestro_view::validate(&spec).map_err(|e| McpError::invalid_params(e, None))?;\n            let r = maestro_view::render_live(store, &v, &live_needs(hosts));' $'            let v = maestro_view::validate(&spec).map_err(|e| McpError::invalid_params(e, None))?;\n            let r = maestro_view::render(store, &v);'
-mutate $mcp $'            let v = maestro_view::validate(&a.spec).map_err(|e| McpError::invalid_params(e, None))?;\n            let r = maestro_view::render_live(store, &v, &live_needs(hosts));' $'            let v = maestro_view::validate(&a.spec).map_err(|e| McpError::invalid_params(e, None))?;\n            let r = maestro_view::render(store, &v);'
 mutate $hp '            Err(why) => unread.push(format!("permission record {i} {why}")),' '            Err(_) => {}'
 mutate $hp '        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {' '        let payload = match req.payload_json.as_deref() {'
 mutate $hp '            None => Err("is empty"),' '            None => Ok(serde_json::Map::new()),'

@@ -740,7 +740,7 @@ fn dispatch(
             };
             let spec = json!({ "root": a.root, "blocks": a.blocks });
             let v = maestro_view::validate(&spec).map_err(|e| McpError::invalid_params(e, None))?;
-            let r = maestro_view::render_live(store, &v, &live_needs(hosts));
+            let r = maestro_view::render(store, &v);
             let mut out = json!(r);
             out["text"] = if snapshot {
                 Value::String(maestro_view::page::snapshot(&r.html, theme))
@@ -752,7 +752,7 @@ fn dispatch(
         "maestro_ui_poll" => {
             let a: UiPollArgs = parse(args)?;
             let v = maestro_view::validate(&a.spec).map_err(|e| McpError::invalid_params(e, None))?;
-            let r = maestro_view::render_live(store, &v, &live_needs(hosts));
+            let r = maestro_view::render(store, &v);
             if a.revision.as_deref() == Some(r.revision.as_str()) {
                 Ok(json!({ "revision": r.revision, "changed": false, "tree": r.tree }))
             } else {
@@ -1183,13 +1183,6 @@ fn file_error(e: requests::FileError) -> McpError {
 }
 
 /// What a render placed and dropped, for the model; the App shows the html itself.
-/// The holds live sessions report, for a render (BRO-3936): the same report `maestro_snapshot`
-/// and `maestro_needs_list` add to the ledgers' needs.
-pub fn live_needs(hosts: &maestro_hosts::SurfaceRegistry) -> maestro_view::LiveNeeds {
-    let live = hosts.live_permission_report(None, None);
-    maestro_view::LiveNeeds { errors: live.errors(), needs: live.needs }
-}
-
 fn render_summary(r: &maestro_view::Rendered) -> String {
     let mut out = format!("Rendered from {} (revision {}).", r.tree, r.revision.get(..12).unwrap_or_default());
     if r.drops.is_empty() {
