@@ -1108,7 +1108,10 @@ impl T3Registry {
         let Some(thread) = self.lookup_attributed(id)? else {
             return Err(unverified(format!("no T3 thread on this host has the id {id}")));
         };
-        if self.check_node(&thread, None).is_err() {
+        // A child runs on its owner's node: against the registry's expected node, and against the
+        // owner's own whenever both are known (P20 round 4: the expected node may be unset).
+        let foreign = matches!((owner.node(), thread.node.as_ref()), (Some(o), Some(c)) if o != c);
+        if foreign || self.check_node(&thread, None).is_err() {
             return Err(unverified(format!("thread {} is bound to another node", short_id(id))));
         }
         if thread.liveness() == SessionLiveness::Closed {

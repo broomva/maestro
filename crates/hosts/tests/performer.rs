@@ -229,3 +229,15 @@ fn a_verified_t3_session_runs_the_provider_its_rows_name_not_its_default() {
     assert_eq!(thread(json!([])).session_harness(), None, "no rows yet");
     assert_eq!(thread(json!(null)).session_harness(), Some(Harness::Codex), "no history reported: the default");
 }
+
+#[test]
+fn a_child_on_another_node_than_its_owner_is_not_attested_without_an_expected_node() {
+    // P20 round 4 (MAJOR): with no expected node configured, the child's node is still the owner's.
+    let (_tmp, reg) = t3(json!([
+        row("here", Some("owner"), json!({"node": "mac-1"})),
+        row("there", Some("owner"), json!({"node": "nuc-1"}))
+    ]));
+    let me = owner_t3().with_node_and_generation(Some("mac-1".parse().unwrap()), 0);
+    assert!(reg.performer(&me, &named("t3:env-mac/here")).is_ok());
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/there"))), RefusalReason::PerformerUnverified);
+}
