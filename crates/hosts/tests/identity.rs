@@ -1546,6 +1546,7 @@ fn direct_sessions_and_peer_credentials_are_verified() {
         liveness: SessionLiveness::Live,
         harness: Some(Harness::ClaudeCode),
         pending_permissions: vec![],
+        parent_id: None,
     });
     direct.register(DirectSession {
         id: "direct-closed".to_string(),
@@ -1554,6 +1555,7 @@ fn direct_sessions_and_peer_credentials_are_verified() {
         liveness: SessionLiveness::Closed,
         harness: Some(Harness::Codex),
         pending_permissions: vec![],
+        parent_id: None,
     });
 
     let registry = SurfaceRegistry::new(None, None, Some(direct));
@@ -1626,6 +1628,7 @@ fn direct_sessions_and_peer_credentials_are_verified() {
         liveness: SessionLiveness::Live,
         harness: Some(Harness::ClaudeCode),
         pending_permissions: vec![],
+        parent_id: None,
     };
     let dbg_str = format!("{sample:?}");
     assert!(dbg_str.contains("<redacted>"));

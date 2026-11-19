@@ -497,6 +497,10 @@ pub struct DirectSession {
     pub liveness: SessionLiveness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<Harness>,
+    /// The direct session that launched this one, if any: its owner may name it as the attested
+    /// performer of a node (BRO-3828).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
 }
@@ -509,6 +513,7 @@ impl fmt::Debug for DirectSession {
             .field("token", &"<redacted>")
             .field("liveness", &self.liveness)
             .field("harness", &self.harness)
+            .field("parent_id", &self.parent_id)
             .field("pending_permissions", &self.pending_permissions)
             .finish()
     }
@@ -622,6 +627,32 @@ impl DirectRegistry {
         (out, unread)
     }
 
+    /// The direct session `id` as the attested performer of a node `owner` drives (BRO-3828): a
+    /// registered session, not closed, whose `parent_id` is the owner's id. Its token is not
+    /// asked: the owner names it, and only the registry's record of it is trusted.
+    pub fn performer(&self, owner: &VerifiedSession, id: &str) -> Result<VerifiedSession, IdentityRefusal> {
+        let unverified = |detail: String| IdentityRefusal::new(RefusalReason::PerformerUnverified, detail);
+        if owner.session().surface != Surface::Direct {
+            return Err(unverified("only a direct owner names a direct performer".into()));
+        }
+        let Some(session) = self.lookup(id)? else {
+            return Err(unverified(format!("no direct session has the id {id}")));
+        };
+        if session.liveness == SessionLiveness::Closed {
+            return Err(unverified(format!("direct session {} is closed", short_id(id))));
+        }
+        if session.parent_id.as_deref() != Some(owner.session().id.as_str()) {
+            return Err(unverified(format!("direct session {} is not a child of the owner", short_id(id))));
+        }
+        Ok(VerifiedSession::new(
+            SessionRef { surface: Surface::Direct, environment: None, id: session.id },
+            session.cwd,
+            session.harness,
+            session.parent_id,
+            Vec::new(),
+        ))
+    }
+
     pub fn verify(&self, claim: &CallerClaim) -> Result<VerifiedSession, IdentityRefusal> {
         if claim.surface != Surface::Direct {
             return Err(IdentityRefusal::new(
@@ -711,6 +742,35 @@ pub struct SurfaceRegistry {
 }
 
 impl SurfaceRegistry {
+    /// The session `performer` names, as the attested performer of a node `owner` drives
+    /// (BRO-3828): on the owner's surface and this host, and the owner's child in its registry
+    /// (`T3Registry::performer`, `DirectRegistry::performer`). Anything else is refused
+    /// `performer_unverified`, so a reviewer's provider is never taken from its own word.
+    pub fn performer(
+        &self,
+        owner: &VerifiedSession,
+        performer: &SessionRef,
+    ) -> Result<VerifiedSession, IdentityRefusal> {
+        let unverified = |detail: &str| IdentityRefusal::new(RefusalReason::PerformerUnverified, detail.to_string());
+        if performer.surface != owner.session().surface {
+            return Err(unverified("the performer is not on the owner's surface"));
+        }
+        let resolved = match performer.surface {
+            Surface::T3 => {
+                self.t3.as_ref().ok_or_else(|| unverified("no T3 registry"))?.performer(owner, &performer.id)?
+            }
+            Surface::Direct => {
+                self.direct.as_ref().ok_or_else(|| unverified("no direct registry"))?.performer(owner, &performer.id)?
+            }
+            _ => return Err(unverified("only a T3 or direct session is named as a performer")),
+        };
+        let host = owner.session().environment.as_deref();
+        if performer.canonical(host) != resolved.session().canonical(host) {
+            return Err(unverified("the performer is not a session on this host"));
+        }
+        Ok(resolved)
+    }
+
     pub fn new(paseo: Option<PaseoRegistry>, t3: Option<T3Registry>, direct: Option<DirectRegistry>) -> Self {
         Self {
             paseo,

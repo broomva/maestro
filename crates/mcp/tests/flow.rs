@@ -56,6 +56,7 @@ fn fx() -> Fx {
             liveness: SessionLiveness::Live,
             harness: None,
             pending_permissions: vec![],
+            parent_id: None,
         });
     }
     let store = Store::new(Paths::under(&root), TreeSource::WorkingTree);

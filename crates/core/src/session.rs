@@ -723,6 +723,8 @@ pub enum RefusalReason {
     ThreadMismatch,
     /// T3's registry could not be read to resolve a thread variable; never a fallback.
     RegistryUnavailable,
+    /// A named performer session (BRO-3828) that is not a child of the owner on this host.
+    PerformerUnverified,
 }
 
 impl RefusalReason {
@@ -747,6 +749,7 @@ impl RefusalReason {
             Self::AttributionUnresolved => "attribution_unresolved",
             Self::ThreadMismatch => "thread_mismatch",
             Self::RegistryUnavailable => "registry_unavailable",
+            Self::PerformerUnverified => "performer_unverified",
         }
     }
 

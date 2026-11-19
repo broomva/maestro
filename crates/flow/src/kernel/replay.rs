@@ -536,7 +536,12 @@ fn document(log: &Log, started: &Started, read: Vec<(&str, Rc<Core>)>) -> Result
         let index = usize::try_from(seq.saturating_sub(1)).unwrap_or(usize::MAX);
         let e = log.events.get(index).filter(|e| e.seq == seq).ok_or_else(|| malformed(log, seq, "no such event"))?;
         let outputs = e.body.get("outputs").cloned().unwrap_or(Value::Null);
-        nodes.insert(id.to_string(), serde_json::json!({ "outputs": outputs, "value": core.value }));
+        let mut entry = serde_json::json!({ "outputs": outputs, "value": core.value });
+        // IR version 9 (BRO-3828): the performer the receipt records, attested by the kernel.
+        if started.ir.ir_version >= 9 {
+            entry["performer"] = e.body.get("performer").cloned().unwrap_or(Value::Null);
+        }
+        nodes.insert(id.to_string(), entry);
     }
     Ok(serde_json::json!({ "params": started.params, "nodes": nodes }))
 }

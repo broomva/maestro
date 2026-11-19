@@ -162,6 +162,7 @@ fn a_launch_spec_is_given_only_for_an_agent_performer() {
         performer: performer.map(str::to_string),
         skill: Some("dogfood".into()),
         routing: Default::default(),
+        different_from: Vec::new(),
     };
     let Some(LaunchSpec::Agent(spec)) = agents::launch_spec(&launch(Some("agent:verifier"))) else { panic!() };
     assert_eq!(spec.agent, "verifier");

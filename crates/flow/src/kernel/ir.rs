@@ -12,15 +12,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The newest IR version: 2 added workdir, 3 effect runs, 4 snapshots, 5 parameter types,
-/// 6 human ask templating and required fields, 7 receipt-aware stdin, and 8 pinned agents.
-pub const IR_VERSION: u32 = 8;
+/// 6 human ask templating and required fields, 7 receipt-aware stdin, 8 pinned agents, and 9
+/// enforced routing (`different_from`, BRO-3828).
+pub const IR_VERSION: u32 = 9;
 
 /// The lowest IR version that expresses all features in this definition. Older shapes retain
 /// their original version and hash, and continue to replay under their pinned rules.
 pub fn version_for(ir: &Ir) -> u32 {
     let runs_effect = ir.nodes.values().any(|n| matches!(&n.class, Class::Effect { run, .. } if !run.is_empty()));
-    if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| l.pinned_agent.is_some())) {
+    if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| !l.different_from.is_empty())) {
         IR_VERSION
+    } else if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| l.pinned_agent.is_some())) {
+        8
     } else if ir.receipt_stdin {
         7
     } else if ir.nodes.values().any(|n| matches!(&n.class, Class::Human { fill_ask, required_body_fields, .. } if *fill_ask || !required_body_fields.is_empty())) {
@@ -222,6 +225,20 @@ pub struct Launch {
     pub performer: Option<String>,
     pub skill: Option<String>,
     pub routing: BTreeMap<String, String>,
+    /// `routing.provider: different_from(...)`, parsed (IR version 9): the providers the node's
+    /// performer must differ from. The kernel enforces it at claim and complete (BRO-3828); the
+    /// `routing` text stays the hint `next` returns. Empty, and left out of the JSON, otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub different_from: Vec<RouteRef>,
+}
+
+/// One argument of `different_from`: a node whose receipt records the performer to differ from
+/// (a work node the referencing node needs), or a param naming a provider.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "snake_case")]
+pub enum RouteRef {
+    Node { node: String },
+    Param { name: String },
 }
 
 /// A declared external wait: what the node waits on, and how often its claim must heartbeat.
@@ -244,6 +261,46 @@ pub struct Repeat {
 pub fn content_hash(ir: &Ir) -> Result<String, CompileError> {
     let bytes = serde_json::to_vec(ir).map_err(|e| CompileError::invalid(format!("the IR does not serialize: {e}")))?;
     Ok(crate::log::line_hash(&bytes))
+}
+
+/// The rules of `different_from` (IR version 9, BRO-3828): only a work node routes by it; each
+/// argument is a declared param, or a work node this node needs directly, so the performer it
+/// names is recorded in a receipt the node consumes and fixed at the node's log position; the
+/// list is non-empty and has no repeats.
+fn check_route(ir: &Ir, id: &str, n: &Node, refs: &[RouteRef]) -> Result<(), CompileError> {
+    if !matches!(n.class, Class::Work { .. }) {
+        return Err(CompileError::invalid(format!("node {id} routes by different_from, which only a work node does")));
+    }
+    if refs.is_empty() {
+        return Err(CompileError::invalid(format!("node {id} names nothing in different_from")));
+    }
+    let mut seen = BTreeSet::new();
+    for r in refs {
+        if !seen.insert(r) {
+            return Err(CompileError::invalid(format!("node {id} names {r:?} twice in different_from")));
+        }
+        match r {
+            RouteRef::Param { name } => {
+                if !ir.params.contains_key(name) {
+                    return Err(unknown(format!("node {id} different_from"), &format!("params.{name}")));
+                }
+            }
+            RouteRef::Node { node: m } => {
+                let Some(target) = ir.nodes.get(m) else {
+                    return Err(unknown(format!("node {id} different_from"), m));
+                };
+                if !matches!(target.class, Class::Work { .. }) {
+                    return Err(CompileError::invalid(format!(
+                        "node {id} differs from {m}, which is not a work node and records no performer"
+                    )));
+                }
+                if !n.needs.contains(&Need::Node { node: m.clone() }) {
+                    return Err(CompileError::invalid(format!("node {id} differs from {m} without needing it")));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn unknown(from: impl Into<String>, name: &str) -> CompileError {
@@ -339,6 +396,9 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
         }
         if n.retry == Some(0) {
             return Err(CompileError::invalid(format!("node {id} allows 0 attempts")));
+        }
+        if let Some(launch) = n.class.launch().filter(|l| !l.different_from.is_empty()) {
+            check_route(ir, id, n, &launch.different_from)?;
         }
         if n.snapshot.is_some() && !matches!(n.class, Class::Pure { .. }) {
             return Err(CompileError::invalid(format!("node {id} runs in a snapshot, which only a pure node does")));

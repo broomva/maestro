@@ -1043,6 +1043,31 @@ impl T3Registry {
         }
     }
 
+    /// The thread `id` as the attested performer of a node `owner` drives (BRO-3828): a thread on
+    /// this host, not deleted or closed, whose parent is the owner's thread. A delegated child has
+    /// usually settled by the time its owner completes, so a settled or archived child still
+    /// attests; nothing about the child's own process is asked, only the registry's record of it.
+    pub fn performer(&self, owner: &VerifiedSession, id: &str) -> Result<VerifiedSession, IdentityRefusal> {
+        let unverified = |detail: String| IdentityRefusal::new(RefusalReason::PerformerUnverified, detail);
+        if owner.session().surface != Surface::T3 {
+            return Err(unverified("only a T3 owner names a T3 performer".into()));
+        }
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        let Some(thread) = self.lookup_attributed(id)? else {
+            return Err(unverified(format!("no T3 thread on this host has the id {id}")));
+        };
+        if thread.liveness() == SessionLiveness::Closed {
+            return Err(unverified(format!("thread {} is closed", short_id(id))));
+        }
+        if thread.parent_id.as_deref() != Some(owner.session().id.as_str()) {
+            return Err(unverified(format!("thread {} is not a child of the owner's thread", short_id(id))));
+        }
+        let incarnation = thread.incarnation().unwrap_or_default();
+        Ok(Self::verified(thread, incarnation))
+    }
+
     /// Verify a caller claim against T3's thread registry.
     pub fn verify(&self, claim: &CallerClaim) -> Result<VerifiedSession, IdentityRefusal> {
         if claim.surface != Surface::T3 {
