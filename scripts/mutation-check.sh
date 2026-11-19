@@ -2596,8 +2596,6 @@ mutate $fk/write.rs '    if let Some((from, _)) = excluded.iter().find(|(_, p)| 
 mutate $fk/write.rs '    if let Err(detail) = route(&log, &started, node, who.as_ref()) {' '    if let Err(detail) = Ok::<(), String>(()) {'
 mutate $fk/write.rs $'    check_verb(&held, false)?;\n    if let Err(detail) = route(&held.log, &held.started, &held.rec.node, Some(&held.who)) {' $'    check_verb(&held, false)?;\n    if let Err(detail) = Ok::<(), String>(()) {'
 mutate $fk/write.rs '            held.who = who.clone();' ''
-mutate $fk/write.rs '        Some(p) if p.session.as_deref() != Some(me.as_str()) => p.clone(),' '        Some(p) if false => p.clone(),'
-mutate $fk/write.rs '        Some(p) if p.session.as_deref() != Some(me.as_str()) => p.clone(),' '        Some(p) => p.clone(),'
 # At IR 9 the verify's envelope and the guards' document carry the performer, and below it never.
 mutate $fk/write.rs '        if ir.ir_version >= 9 {' '        if ir.ir_version >= 10 {'
 mutate $fk/write.rs '        if ir.ir_version >= 9 {' '        if ir.ir_version >= 1 {'

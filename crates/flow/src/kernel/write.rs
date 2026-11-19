@@ -408,8 +408,6 @@ struct ClaimRec {
     cancel_at: Option<Timestamp>,
     inputs: BTreeMap<String, String>,
     spent: bool,
-    /// The performer the claim recorded: the owner, or the session it named (BRO-3828).
-    performer: Option<Performer>,
 }
 
 /// Every claim in an instance's log, folded in log order.
@@ -479,7 +477,6 @@ impl Claims {
                         cancel_at,
                         inputs: c.inputs,
                         spent: false,
-                        performer: c.performer,
                     };
                     claims.latest.insert(key, c.token_sha256.clone());
                     claims.recs.insert(c.token_sha256, rec);
@@ -595,8 +592,9 @@ pub fn claim(
 
 /// [`claim`], naming the session that will do the work (BRO-3828): `performer`, which the caller
 /// has resolved as the owner's attested child (`SurfaceRegistry::performer`). The claim records it,
-/// and a node that routes by `different_from` refuses it here, `routing_violated`. With none, the
-/// claim records the owner, and such a node checks only that its arguments resolve.
+/// and a node that routes by `different_from` refuses it here, `routing_violated`: an early check,
+/// not a binding, since the completion names its performer again. With none, the claim records
+/// the owner, and such a node checks only that its arguments resolve.
 pub fn claim_as(
     ledger: &mut Ledger,
     session: &VerifiedSession,
@@ -741,13 +739,10 @@ fn hold(
         return Err(Refusal::InputsChanged { node: rec.node }.into());
     }
     let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));
-    // A performer the claim named is a session other than the owner; the owner's own claim names
-    // itself, and its receipt records the session that completes it, as it is now.
-    let me = session.session().to_string();
-    let who = match &rec.performer {
-        Some(p) if p.session.as_deref() != Some(me.as_str()) => p.clone(),
-        _ => performer(session),
-    };
+    // The completing session, as it is now; `complete_as` replaces it with the performer it names.
+    // A performer named at claim is not carried over: its attestation was of that moment
+    // (BRO-3828, P20 round 3), so a completion names its performer again.
+    let who = performer(session);
     Ok(Held { log, started, rec, next, effect_started, audit: session.audit().cloned(), who })
 }
 
@@ -1009,7 +1004,7 @@ pub fn complete(
 }
 
 /// [`complete`], naming the session that did the work (BRO-3828), resolved by the caller as the
-/// owner's attested child; with none, the performer the claim recorded. A node that routes by
+/// owner's attested child; with none, the completing session. A node that routes by
 /// `different_from` refuses the work, `routing_violated`, unless that performer's provider is
 /// attested and differs from each the route names. It is checked before the command runs; after
 /// it, `hold` refuses any change to the receipts the route read (`inputs_changed`), and the params

@@ -219,7 +219,7 @@ fn node_section(out: &mut String, ir: &Ir, id: &str, node: &Node) {
             .collect();
         let _ = writeln!(
             out,
-            "- Routed (BRO-3828): its performer's provider must differ from {}. Delegate the work to a child session of yours (a T3 thread you delegate to, or a direct session you launch) on another provider, and name it on `flow claim` or `flow complete` with `--performer-session <its session>` (`performer_session`). Completed without one, the performer is you, and the kernel refuses `routing_violated` when your provider is excluded; `performer_unverified` means the session is not your child on this host, or ran more than one provider.",
+            "- Routed (BRO-3828): its performer's provider must differ from {}. Delegate the work to a child session of yours (a T3 thread you delegate to, or a direct session you launch) on another provider, and name it on `flow complete` with `--performer-session <its session>` (`performer_session`); naming it on `flow claim` too only checks it early. Completed without one, the performer is you, and the kernel refuses `routing_violated` when your provider is excluded; `performer_unverified` means the session is not your child on this host, or ran more than one provider.",
             names.join(" and ")
         );
     }

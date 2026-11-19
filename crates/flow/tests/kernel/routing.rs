@@ -157,14 +157,17 @@ fn a_claim_naming_an_excluded_performer_is_refused_before_anything_is_written() 
 }
 
 #[test]
-fn the_performer_named_at_claim_does_the_work_when_complete_names_none() {
-    let (mut f, fi) = routed("claude");
+fn a_performer_named_at_claim_is_not_carried_into_the_completion() {
+    // P20 round 3 (MAJOR): a child attested at claim may switch providers before the work is
+    // done, so the completion names its performer again; naming none, the performer is the owner.
+    let (mut f, fi) = routed("codex");
     let c = claim_as(&mut f.ledger, &f.me, &fi, "review_a", Some(&child("x", Harness::Gemini))).unwrap();
-    let done = complete_as(&mut f.ledger, &f.me, &c.token, Value::Null, &quick(), None).unwrap();
-    assert_eq!(outcome(&done), "completed");
+    // The owner is codex, the excluded provider: completing without naming the child is refused.
+    let refused = complete_as(&mut f.ledger, &f.me, &c.token, Value::Null, &quick(), None).unwrap();
+    assert_eq!(outcome(&refused), "routing_violated");
+    let done = complete_as(&mut f.ledger, &f.me, &c.token, Value::Null, &quick(), Some(&child("x", Harness::Gemini)));
+    assert_eq!(outcome(&done.unwrap()), "completed");
     assert_eq!(f.last_body(&fi)["performer"]["harness"], "gemini");
-    // The owner (codex) is not who did it: review_b may then be codex's.
-    assert_eq!(perform(&mut f, &fi, "review_b", Some(&child("y", Harness::Codex))), "completed");
 }
 
 #[test]
