@@ -130,6 +130,11 @@ fn the_providers_are_attested_ones() {
     assert_eq!(provider_of("claude-code"), Some("claude"));
     assert_eq!(provider_of("codex"), Some("codex"));
     assert_eq!(provider_of("gemini"), Some("gemini"));
+    // P20 round 4 (Gemini): every provider a param may name is one a performer can run.
+    for p in PROVIDERS {
+        let harness = if p == "claude" { "claude-code" } else { p };
+        assert_eq!(provider_of(harness), Some(p), "{p}");
+    }
     assert_eq!(provider_of("claude"), None, "a provider name is not a harness");
     assert_eq!(PROVIDERS, ["claude", "codex", "gemini", "grok"]);
 }

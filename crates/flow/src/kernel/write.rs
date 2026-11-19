@@ -317,6 +317,7 @@ pub fn provider_of(harness: &str) -> Option<&'static str> {
         "claude-code" => Some("claude"),
         "codex" => Some("codex"),
         "gemini" => Some("gemini"),
+        "grok" => Some("grok"),
         _ => None,
     }
 }

@@ -2589,6 +2589,7 @@ mutate $fk/ir.rs $'                if !n.needs.contains(&Need::Node { node: m.cl
 # The route: a param names an allowed provider, a node its receipt's performer's; the performer's
 # provider is attested and differs from each; a claim checks it, and so does a completion.
 mutate $fk/write.rs '        "claude-code" => Some("claude"),' '        "claude-code" => Some("claude-code"),'
+mutate $fk/write.rs '        "grok" => Some("grok"),' ''
 mutate $fk/replay.rs '        if !value.is_some_and(|v| super::write::PROVIDERS.contains(&v)) {' '        if false {'
 mutate $fk/write.rs '                excluded.push((m.clone(), p.to_string()));' ''
 mutate $fk/write.rs $'        return Err(format!("the performer\'s harness {} has no attested provider", who.harness));' '        return Ok(());'
