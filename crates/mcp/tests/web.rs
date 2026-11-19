@@ -315,6 +315,16 @@ async fn a_waiting_question_card_reaches_the_pages() {
     assert_page(&r, "today", "/today");
     let after = needs_pill(&r.body);
     assert_eq!(after.parse::<usize>().unwrap(), before.parse::<usize>().unwrap() + 1, "{before} -> {after}");
+    // P20 round 3: with a ledger ask open, `/decisions` shows that ask, and the queue column
+    // beside it lists the waiting card in its "in sessions" group.
+    let r = send(addr, "GET", "/decisions", &addr.to_string(), &[]).await;
+    assert_page(&r, "decisions", "/decisions");
+    assert!(r.body.contains("Merge the demo PR now"), "the open ask is shown: {}", r.body);
+    assert!(r.body.contains(r#"data-group="sessions""#), "the in-sessions group: {}", r.body);
+    assert!(r.body.contains("Question: Deploy: Ship tonight?"), "the card is listed beside the ask: {}", r.body);
+    // And on an ask's own page, whose layout has the same column.
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &addr.to_string(), &[]).await;
+    assert!(r.body.contains("Question: Deploy: Ship tonight?"), "beside a chosen ask too: {}", r.body);
     cancel.cancel();
 
     // A machine whose asks are all answered: `/decisions` falls back to the Needs card, which lists the card.
@@ -356,4 +366,60 @@ fn copy_tree(from: &Path, to: &Path) {
             std::fs::copy(entry.path(), dest).unwrap();
         }
     }
+}
+
+/// P20 round 3: a page never waits on a stalled live read past its budget. The work that runs
+/// late is dropped, and the caller learns it did not finish.
+#[test]
+fn a_late_live_read_is_dropped_at_its_budget() {
+    let started = std::time::Instant::now();
+    let late = maestro_mcp::within(
+        || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            1
+        },
+        std::time::Duration::from_millis(100),
+    );
+    assert_eq!(late, None);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+    assert_eq!(maestro_mcp::within(|| 7, std::time::Duration::from_secs(2)), Some(7));
+}
+
+/// The page side of the budget: a live read that does not finish in time is an unread source,
+/// so the page's counts read as unknown, never as complete (a zero budget cannot be met by the
+/// T3 reader, a subprocess).
+#[test]
+fn a_late_live_read_leaves_the_counts_unknown() {
+    let t3 = tempfile::tempdir().unwrap();
+    t3_with_a_waiting_card(t3.path());
+    let hosts = maestro_hosts::SurfaceRegistry::new(None, Some(maestro_hosts::T3Registry::new(t3.path())), None);
+    let server = maestro_mcp::MaestroServer::new(fixture()).with_hosts(hosts);
+    let late = maestro_mcp::live_needs_within(&server, std::time::Duration::ZERO);
+    assert!(late.needs.is_empty(), "{late:?}");
+    assert_eq!(late.errors.len(), 1, "{late:?}");
+    assert!(late.errors[0].reason.contains("did not answer within"), "{late:?}");
+    let on_time = maestro_mcp::live_needs_within(&server, std::time::Duration::from_secs(10));
+    assert!(on_time.errors.is_empty() && on_time.needs.iter().any(|n| n.key.starts_with("question:")), "{on_time:?}");
+}
+
+/// The pages use the server's budget: served with one the T3 reader cannot meet, `/today` does
+/// not count the card and marks its "needs you" count partial, never complete.
+#[tokio::test]
+async fn a_page_does_not_wait_past_its_live_budget() {
+    let t3 = tempfile::tempdir().unwrap();
+    t3_with_a_waiting_card(t3.path());
+    let hosts = maestro_hosts::SurfaceRegistry::new(None, Some(maestro_hosts::T3Registry::new(t3.path())), None);
+    let server = maestro_mcp::MaestroServer::new(fixture())
+        .shared()
+        .with_hosts(hosts)
+        .with_live_budget(std::time::Duration::ZERO);
+    let (addr, cancel) = serve_with(server).await;
+    let r = send(addr, "GET", "/today", &addr.to_string(), &[]).await;
+    assert_page(&r, "today", "/today");
+    // The card is not counted (the fixture's ledgers hold 3), and the count says it is partial.
+    assert_eq!(needs_pill(&r.body), "3", "the late card is not counted");
+    assert!(r.body.contains(r#"data-pill="needs you" data-partial="true""#), "the count reads as partial: {}", r.body);
+    let r = send(addr, "GET", "/decisions", &addr.to_string(), &[]).await;
+    assert!(!r.body.contains("Question: Deploy: Ship tonight?"), "{}", r.body);
+    cancel.cancel();
 }

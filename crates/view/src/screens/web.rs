@@ -184,9 +184,42 @@ fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, current: Opti
                     }
                 }
             }
+            // Holds a live session reports (BRO-3936): waiting AskUserQuestion cards and permission
+            // prompts. Answered in their session, so listed, never linked to a decision page.
+            @let live = in_sessions(cx);
+            @if !live.is_empty() {
+                section class="mv-qgroup" data-group="sessions" {
+                    p class="mv-qgroup-name bv-code" { "in sessions · " (live.len()) }
+                    ul class="mv-list" {
+                        @for n in &live {
+                            li class="mv-qrow" data-key=(n.key) {
+                                div {
+                                    span class="mv-qrow-title" { (n.title) }
+                                    span class="mv-qrow-meta bv-code" {
+                                        (crate::render::label(&n.kind)) " · answer in its session"
+                                        @if let Some(a) = n.since.as_deref().and_then(super::instant).and_then(|t| age(t, cx.at)) { " · " (a) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             footer class="mv-queue-foot bv-meta" { (read_state(cx, &section)) }
         }
     }
+}
+
+/// The needs a live session holds, in the order read: the queue's "in sessions" group.
+fn in_sessions<'a>(cx: &'a Ctx) -> Vec<&'a maestro_core::need::Need> {
+    use maestro_core::need::NeedSource;
+    cx.snap
+        .needs
+        .data
+        .iter()
+        .flatten()
+        .filter(|n| matches!(n.source, NeedSource::Questions | NeedSource::Approvals))
+        .collect()
 }
 
 /// What the queue stands on: answered counts, answers not yet landed, and every read error.
