@@ -182,6 +182,10 @@ fn at_version_9_the_verify_and_the_guards_see_the_performer() {
     assert_eq!(perform(&mut f, &fi, "review_b", Some(&child("z", Harness::Gemini))), "completed");
     let env: Value = serde_json::from_slice(&std::fs::read(f.dir.join("env_b")).unwrap()).unwrap();
     assert_eq!(env["performer"]["provider"], "gemini");
+    // The completing performer as its receipt will record it (P20 round 7): harness, model, session.
+    assert_eq!(env["performer"]["harness"], "gemini");
+    assert!(env["performer"].get("model").is_some(), "{env}");
+    assert_eq!(env["performer"]["session"], "t3:-/z");
     assert_eq!(env["inputs"]["nodes"]["review_a"]["performer"]["harness"], "codex");
     let c = claim_as(&mut f.ledger, &f.me, &fi, "gate", None).unwrap();
     match choose(&mut f.ledger, &f.me, &c.token, "go").unwrap() {

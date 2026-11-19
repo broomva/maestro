@@ -832,10 +832,11 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
         let own = if judges { outputs.clone() } else { Value::Null };
         let mut envelope = serde_json::json!({ "outputs": own, "inputs": inputs });
         if ir.ir_version >= 9 {
+            // The completing performer's record as its receipt will record it, and its provider.
             let who = &held.who;
-            envelope["performer"] = serde_json::json!({
-                "harness": who.harness, "provider": provider_of(&who.harness), "session": who.session,
-            });
+            let mut performer = serde_json::to_value(who).unwrap_or(Value::Null);
+            performer["provider"] = serde_json::json!(provider_of(&who.harness));
+            envelope["performer"] = performer;
         }
         Some(serde_json::to_vec(&envelope).unwrap_or_default())
     } else {
