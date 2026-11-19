@@ -10,6 +10,7 @@ mod claims;
 mod compile;
 mod deciding;
 mod driver;
+mod routing;
 mod schedule;
 
 /// Not a test: the guard evaluator's entry, which the kernel runs when it starts this binary again

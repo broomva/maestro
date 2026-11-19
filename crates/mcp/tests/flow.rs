@@ -2,7 +2,7 @@
 //! reads for anyone, refusals as results, the workspace rule for the flows root, and a guarded
 //! `choose` through the tool. Guards run in this binary again (`guard_process_entry`).
 
-use maestro_core::session::PeerCredentials;
+use maestro_core::session::{Harness, PeerCredentials};
 use maestro_hosts::{CallerClaim, DirectRegistry, DirectSession, PaseoRegistry, SessionLiveness, SurfaceRegistry};
 use maestro_hosts::{IdentityMode, NodeId, T3Registry};
 use maestro_mcp::call_with_hosts;
@@ -41,6 +41,11 @@ struct Fx {
 }
 
 fn fx() -> Fx {
+    fx_with(&[])
+}
+
+/// As [`fx`], with more Direct sessions in the work folder: `(id, harness, parent)`.
+fn fx_with(children: &[(&str, Harness, &str)]) -> Fx {
     maestro_flow::kernel::guard_entry();
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -57,6 +62,17 @@ fn fx() -> Fx {
             harness: None,
             pending_permissions: vec![],
             parent_id: None,
+        });
+    }
+    for (id, harness, parent) in children {
+        direct.register(DirectSession {
+            id: id.to_string(),
+            cwd: work.to_string_lossy().into_owned(),
+            token: format!("tok-{id}"),
+            liveness: SessionLiveness::Live,
+            harness: Some(harness.clone()),
+            pending_permissions: vec![],
+            parent_id: Some(parent.to_string()),
         });
     }
     let store = Store::new(Paths::under(&root), TreeSource::WorkingTree);
@@ -590,4 +606,31 @@ fn next_returns_a_launch_spec_for_an_agent_performer_and_start_refuses_an_unknow
     let v = f.d1(START, json!({ "definition": flow("agent:ghost"), "params": { "dir": f.work } }));
     assert_eq!((&v["ok"], &v["code"]), (&json!(false), &json!("unknown_agent")), "{v}");
     assert_eq!(f.tree(), before);
+}
+
+/// BRO-3828 through the tools: the owner names the session that does a routed node's work; the
+/// registry attests it as the owner's child, and the kernel compares its provider.
+#[test]
+fn a_named_performer_is_attested_and_routed_through_the_tools() {
+    let f = fx_with(&[
+        ("kid", Harness::Gemini, "d1"),
+        ("same", Harness::ClaudeCode, "d1"),
+        ("stray", Harness::Codex, "d2"),
+    ]);
+    let routed = "flow: routed\nversion: 1\nparams: [dir, writer]\nworkdir: \"{{params.dir}}\"\nnodes:\n  write: {class: work, verify: ['true']}\n  review: {class: work, needs: [write], routing: {provider: \"different_from(params.writer)\"}, verify: ['true']}\n";
+    let v = f.d1(START, json!({ "definition": routed, "params": { "dir": f.work, "writer": "claude" } }));
+    assert_eq!(v["ok"], true, "{v}");
+    let instance = v["instance"].as_str().unwrap().to_string();
+    let write = f.claim(&instance, "write");
+    assert_eq!(f.d1(COMPLETE, json!({ "claim_token": write }))["ok"], true);
+
+    let early = f.d1(CLAIM, json!({ "instance": instance, "node_id": "review", "performer_session": "direct:-/same" }));
+    assert_eq!(code(&early), "routing_violated", "{early}");
+    let token = f.claim(&instance, "review");
+    let stray = f.d1(COMPLETE, json!({ "claim_token": token, "performer_session": "direct:-/stray" }));
+    assert_eq!(code(&stray), "performer_unverified", "{stray}");
+    let same = f.d1(COMPLETE, json!({ "claim_token": token, "performer_session": "direct:-/same" }));
+    assert_eq!(code(&same), "routing_violated", "{same}");
+    let kid = f.d1(COMPLETE, json!({ "claim_token": token, "performer_session": "direct:-/kid" }));
+    assert_eq!(kid["ok"], true, "{kid}");
 }
