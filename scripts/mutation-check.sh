@@ -2630,7 +2630,8 @@ mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if start
 # P20 round 1: a routed node's receipt binds its performer, so a re-run by another provider with the
 # same outputs changes its consumers' inputs; a T3 child attests only the one provider it ran; a
 # routed node's driver skill says how to name its performer.
-mutate $fk/replay.rs '                if routed(ir, id) {' '                if false {'
+mutate $fk/replay.rs '                if ir.ir_version >= 9 && c.performer.is_some() {' '                if false {'
+mutate $fk/replay.rs '                if ir.ir_version >= 9 && c.performer.is_some() {' '                if ir.ir_version >= 10 && c.performer.is_some() {'
 mutate $ht '        rows.iter().all(|p| p == first).then(|| harness_of(first))' '        Some(harness_of(first))'
 mutate $ht '        if provider_column:' '        if False:'
 mutate $ht '        let first = rows.first().filter(|p| !p.is_empty())?;' '        let first = rows.first()?;'

@@ -630,15 +630,6 @@ impl Receipt {
     }
 }
 
-/// Whether some node's `different_from` names node `id` (IR version 9, BRO-3828).
-fn routed(ir: &Ir, id: &str) -> bool {
-    ir.nodes
-        .values()
-        .filter_map(|n| n.class.launch())
-        .flat_map(|l| &l.different_from)
-        .any(|r| matches!(r, RouteRef::Node { node } if node == id))
-}
-
 /// A repeat's place in the fold: the iteration it is at, or the one it ran out at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -932,8 +923,10 @@ impl<'a> Fold<'a> {
                     _ => at,
                 };
                 let mut receipt = Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs);
-                // A node another routes `different_from` binds its performer too (BRO-3828).
-                if routed(ir, id) {
+                // At IR 9 a receipt binds the performer it records (BRO-3828): the guard document
+                // and the verify's input show every consumed receipt's performer, so a re-run by
+                // another performer with the same outputs changes its consumers' inputs.
+                if ir.ir_version >= 9 && c.performer.is_some() {
                     let harness = c.performer.as_ref().map(|p| p.harness.as_str());
                     receipt.digest = Rc::from(routed_receipt_digest(&c.outputs, receipt.value.as_deref(), harness));
                 }

@@ -234,12 +234,10 @@ nodes:
   b: {class: work, needs: [a], routing: {provider: "different_from(a)"}, verify: [sh, -c, 'touch started; while [ ! -f done ]; do sleep 0.05; done']}
 "#;
 
-#[test]
-fn a_node_redone_by_the_performers_provider_while_its_route_is_judged_refuses_the_work() {
-    // P20 round 1 (BLOCKER): b was judged against a's Gemini performer; while b's command ran, a was
-    // redone by Codex with the same outputs. a's receipt now binds its performer, so b's inputs
-    // changed and its completion is refused, though a's outputs did not.
-    let mut f = fx(RERUN);
+/// b claimed over a's Gemini receipt; while b's command runs, a is redone by Codex with the same
+/// outputs (its upstream observation moved, so it can run again). b's completion's outcome.
+fn redone_while_judged(yaml: &str) -> String {
+    let mut f = fx(yaml);
     std::fs::write(f.dir.join("n"), "0").unwrap();
     let fi = f.begin();
     f.done(&fi, "source");
@@ -273,5 +271,36 @@ fn a_node_redone_by_the_performers_provider_while_its_route_is_judged_refuses_th
         code(complete_as(&mut f.ledger, &f.me, &b, Value::Null, &quick(), Some(&child("c2", Harness::Codex))));
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     rerun.join().unwrap();
-    assert_eq!(outcome_b, "inputs_changed");
+    outcome_b
+}
+
+#[test]
+fn a_node_redone_by_the_performers_provider_while_its_route_is_judged_refuses_the_work() {
+    // P20 round 1 (BLOCKER): a's receipt binds its performer, so b's inputs changed and its
+    // completion is refused, though a's outputs did not.
+    assert_eq!(redone_while_judged(RERUN), "inputs_changed");
+}
+
+/// As [`RERUN`], with b unrouted in a flow another route makes IR 9: b's verify still sees a's
+/// performer (`receipt_stdin`), so a's receipt must bind it whether or not a route names a.
+const RERUN_UNROUTED: &str = r#"
+flow: rerun
+version: 1
+params: [dir]
+workdir: "{{params.dir}}"
+receipt_stdin: true
+nodes:
+  source: {class: observe, fresh_for: 1s, run: [sh, -c, 'exit $(cat n)'], exit_map: {0: zero, 1: one}}
+  a: {class: work, needs: [source], verify: ['true']}
+  b: {class: work, needs: [a], verify: [sh, -c, 'touch started; while [ ! -f done ]; do sleep 0.05; done']}
+  x: {class: work, verify: ['true']}
+  r: {class: work, needs: [x], routing: {provider: "different_from(x)"}, verify: ['true']}
+"#;
+
+#[test]
+fn a_receipt_whose_performer_a_verify_sees_binds_it_whether_or_not_a_route_names_it() {
+    // P20 round 5 (MAJOR): only receipts a route named bound their performer, yet every consumed
+    // receipt's performer was shown to verifies and guards.
+    assert_eq!(compile(RERUN_UNROUTED).unwrap().ir().ir_version, 9);
+    assert_eq!(redone_while_judged(RERUN_UNROUTED), "inputs_changed");
 }
