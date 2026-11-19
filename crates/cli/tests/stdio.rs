@@ -25,19 +25,20 @@ fn maestro() -> Command {
 
 /// An empty T3 registry, so a live session's waiting prompts or questions on the machine running
 /// the tests (a developer's Mac, a CI runner that also hosts T3) never reach the fixture's counts
-/// (BRO-3936). An empty file is an empty SQLite database.
-fn empty_t3_home() -> std::path::PathBuf {
-    let home = std::env::temp_dir().join(format!("maestro-stdio-t3-{}", std::process::id()));
-    std::fs::create_dir_all(home.join("userdata")).unwrap();
-    std::fs::write(home.join("userdata/statev2.sqlite"), "").unwrap();
+/// (BRO-3936). An empty file is an empty SQLite database. Removed when the guard drops.
+fn empty_t3_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("userdata")).unwrap();
+    std::fs::write(home.path().join("userdata/statev2.sqlite"), "").unwrap();
     home
 }
 
 #[test]
 fn mcp_handshake_lists_and_calls_tools() {
+    let t3_home = empty_t3_home();
     let mut child = maestro()
         .env_remove("MAESTRO_T3_HOME")
-        .env("T3CODE_HOME", empty_t3_home())
+        .env("T3CODE_HOME", t3_home.path())
         .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -147,9 +147,10 @@ struct RawT3Thread {
     #[serde(default)]
     runtime_requests: Vec<RawRuntimeRequest>,
     /// The thread's pending `user_input` requests (AskUserQuestion cards), raw, each with its
-    /// card's turn-item payload when one was found (BRO-3936).
+    /// card's turn-item payload when one was found (BRO-3936). Raw values, as permission records
+    /// are: one that does not decode is unread, and never fails the thread's row (P20 r1).
     #[serde(default)]
-    pending_questions: Vec<RawQuestionRequest>,
+    pending_questions: Option<Vec<Value>>,
     /// The thread's active provider-thread row (`active_provider_thread_id`).
     #[serde(default)]
     active_provider_thread_id: Option<String>,
@@ -182,10 +183,17 @@ const QUESTION_DETAIL_CHARS: usize = 160;
 /// so the owner sees that a question waits even when its card does not read: then its title says
 /// so and the listing reports it unread with why. A request with no id cannot be keyed; it is
 /// reported unread, never dropped silently.
-fn decode_questions(raw: Vec<RawQuestionRequest>, thread: &str) -> (Vec<QuestionPrompt>, Vec<String>) {
+fn decode_questions(raw: Vec<Value>, thread: &str) -> (Vec<QuestionPrompt>, Vec<String>) {
     let mut prompts = Vec::new();
     let mut unread = Vec::new();
-    for req in raw {
+    for (i, value) in raw.into_iter().enumerate() {
+        let req = match serde_json::from_value::<RawQuestionRequest>(value) {
+            Ok(req) => req,
+            Err(e) => {
+                unread.push(format!("question request {i} of thread {thread} does not decode: {e}"));
+                continue;
+            }
+        };
         let Some(id) = req.id.filter(|s| !s.trim().is_empty()) else {
             unread.push(format!("question request - of thread {thread} has no id"));
             continue;
@@ -195,7 +203,8 @@ fn decode_questions(raw: Vec<RawQuestionRequest>, thread: &str) -> (Vec<Question
             Some(text) => match serde_json::from_str::<Value>(text) {
                 Err(_) => Err("has a card that does not parse"),
                 Ok(v) => match v.get("questions").and_then(Value::as_array) {
-                    Some(qs) if !qs.is_empty() => Ok(qs.clone()),
+                    Some(qs) if qs.iter().any(readable_question) => Ok(qs.clone()),
+                    Some(qs) if !qs.is_empty() => Err("has a card with no readable question"),
                     _ => Err("has a card with no questions"),
                 },
             },
@@ -210,6 +219,11 @@ fn decode_questions(raw: Vec<RawQuestionRequest>, thread: &str) -> (Vec<Question
         prompts.push(QuestionPrompt { request_id: id, title, detail, asked_at: req.created_at });
     }
     (prompts, unread)
+}
+
+/// A question object with a non-blank `question` string (P20 r1: `[7]` or `[{}]` is no card).
+fn readable_question(q: &Value) -> bool {
+    q.get("question").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
 }
 
 /// `Question: <header> · <header>` and the first question, cut at [`QUESTION_DETAIL_CHARS`].
@@ -359,8 +373,8 @@ def main():
             if has_items:
                 hit = conn.execute(
                     "SELECT payload_json FROM orchestration_v2_projection_turn_items "
-                    "WHERE thread_id = ? AND type = 'user_input_request' AND json_valid(payload_json) "
-                    "AND json_extract(payload_json, '$.requestId') = ? LIMIT 1",
+                    "WHERE thread_id = ? AND type = 'user_input_request' "
+                    "AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.requestId') END = ? LIMIT 1",
                     (thread_id, req["runtime_request_id"]),
                 ).fetchone()
                 item = hit["payload_json"] if hit else None
@@ -716,7 +730,8 @@ impl T3Registry {
         let (requested, unread_requests) = decode_runtime_requests(raw.runtime_requests, &raw.id, &raw.cwd, "t3-perm");
         pending_permissions.extend(requested);
         unread_permissions.extend(unread_requests);
-        let (pending_questions, unread_questions) = decode_questions(raw.pending_questions, &raw.id);
+        let (pending_questions, unread_questions) =
+            decode_questions(raw.pending_questions.unwrap_or_default(), &raw.id);
         unread_permissions.extend(unread_questions);
         T3Thread {
             id: raw.id,

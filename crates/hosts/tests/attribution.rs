@@ -923,9 +923,11 @@ fn one_permission_rule_answers_alike_on_every_surface() {
     }
 }
 
-/// BRO-3936: a `statev2.sqlite` whose thread `mcp:q` waits on four AskUserQuestion cards (one
+/// BRO-3936: a `statev2.sqlite` whose thread `mcp:q` waits on six AskUserQuestion cards (one
 /// readable with two questions, one with no card item, one whose card holds no questions, one
-/// with a 200-character question) and holds one answered card and one permission prompt.
+/// with a 200-character question, two whose questions hold nothing readable) and holds one
+/// answered card and one permission prompt; and whose thread `mcp:qbad`, with a payload that does
+/// not read, waits on one readable card (P20 r1).
 fn questions_db(dir: &Path) -> PathBuf {
     partial_db(
         dir,
@@ -952,6 +954,17 @@ card("q-empty", [])
 req("q-long", "user_input", "pending", "2026-11-19T10:03:00Z")
 card("q-long", [{"question": "x" * 200}])
 req("perm", "approval", "pending", "2026-11-19T10:04:00Z", {"toolName": "Bash", "input": {"command": "ls"}})
+req("q-noq", "user_input", "pending", "2026-11-19T10:05:00Z")
+card("q-noq", [7, {}])
+req("q-blank", "user_input", "pending", "2026-11-19T10:06:00Z")
+card("q-blank", [{"header": "Scope", "question": "   "}])
+conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ("mcp:qbad", "p", "t", "codex", None, "2026-11-17T00:00:00Z", "2026-11-17T00:00:00Z", None, None, "{corrupt"))
+conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
+    ("q-bad-thread", "mcp:qbad", "user_input", "pending", "2026-11-19T10:07:00Z", "{}"))
+conn.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES (?,?,?,?)",
+    ("item-q-bad-thread", "mcp:qbad", "user_input_request",
+     json.dumps({"requestId": "q-bad-thread", "questions": [{"header": "Kept", "question": "Still listed?"}]})))
 "#,
     )
 }
@@ -965,9 +978,12 @@ fn a_waiting_question_card_is_a_need() {
     let live = hosts.live_permission_report(None, None);
     let questions: Vec<_> = live.needs.iter().filter(|n| n.key.starts_with("question:")).collect();
     let keys: Vec<&str> = questions.iter().map(|n| n.key.as_str()).collect();
-    assert_eq!(questions.len(), 4, "{keys:?}");
+    assert_eq!(questions.len(), 7, "{keys:?}");
     assert!(!keys.iter().any(|k| k.contains("q-done")), "an answered card is not a need: {keys:?}");
-    assert_eq!(live.needs.len(), 5, "the permission prompt still lists: {:?}", live.needs);
+    assert_eq!(live.needs.len(), 8, "the permission prompt still lists: {:?}", live.needs);
+    // A thread whose payload does not read keeps its waiting cards, as it keeps its prompts (P20 r1).
+    let kept = questions.iter().find(|n| n.key.ends_with("#q-bad-thread")).expect("listed from what is known");
+    assert_eq!(kept.title, "Question: Kept: Still listed?");
     let wait = questions.iter().find(|n| n.key.ends_with("#q-wait")).unwrap();
     assert_eq!((wait.kind, wait.source), (NeedKind::Ask, NeedSource::Questions));
     assert_eq!(wait.title, "Question: Deploy · Font: Ship tonight? (2 questions)");
@@ -985,28 +1001,44 @@ fn a_question_card_that_does_not_read_is_listed_and_named() {
     let tmp = tempfile::tempdir().unwrap();
     let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(questions_db(tmp.path()))), None);
     let live = hosts.live_permission_report(None, None);
-    for id in ["q-nocard", "q-empty"] {
+    for id in ["q-nocard", "q-empty", "q-noq", "q-blank"] {
         let n = live.needs.iter().find(|n| n.key.ends_with(&format!("#{id}"))).expect(id);
         assert_eq!(n.title, "Question waiting (its card did not read)", "{id}");
     }
     let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
-    assert_eq!(why.len(), 2, "{why:?}");
+    // Four cards, and mcp:qbad's payload.
+    assert_eq!(why.len(), 5, "{why:?}");
     assert!(why.iter().any(|w| w.contains("q-nocard") && w.contains("has no card")), "{why:?}");
     assert!(why.iter().any(|w| w.contains("q-empty") && w.contains("no questions")), "{why:?}");
+    for id in ["q-noq", "q-blank"] {
+        assert!(why.iter().any(|w| w.contains(id) && w.contains("no readable question")), "{id}: {why:?}");
+    }
     // A JSON snapshot carries the same raw records: a card that does not parse, and one with no id.
     let path = tmp.path().join("threads.json");
+    // P20 r1: records that do not decode (a number, a non-string id) are unread items; they never
+    // fail the thread's row, so its permission prompt still lists and its identity still resolves.
     let rows = serde_json::json!([{ "id": "mcp:j", "cwd": "/w", "created_at": "2026-11-19T00:00:00Z", "status": "running",
+        "pending_permissions": [{ "name": "Bash", "input": { "command": "ls" } }],
         "pending_questions": [
             { "id": "j1", "created_at": "2026-11-19T11:00:00Z",
               "item_payload_json": "{\"questions\": [{\"header\": \"H\", \"question\": \"Q?\"}]}" },
             { "id": "j2", "item_payload_json": "{not json" },
-            { "item_payload_json": "{}" } ] }]);
+            { "item_payload_json": "{}" },
+            7,
+            { "id": 9 } ] }]);
     std::fs::write(&path, rows.to_string()).unwrap();
-    let live = SurfaceRegistry::new(None, Some(T3Registry::new(&path)), None).live_permission_report(None, None);
+    let t3 = T3Registry::new(&path);
+    let live = SurfaceRegistry::new(None, Some(t3.clone()), None).live_permission_report(None, None);
     let titles: Vec<&str> = live.needs.iter().map(|n| n.title.as_str()).collect();
-    assert_eq!(titles, ["Question: H: Q?", "Question waiting (its card did not read)"]);
+    assert_eq!(titles.len(), 3, "{titles:?}");
+    assert!(
+        titles.contains(&"Question: H: Q?") && titles.contains(&"Question waiting (its card did not read)"),
+        "{titles:?}"
+    );
     let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
-    assert_eq!(why.len(), 2, "{why:?}");
+    assert_eq!(why.len(), 4, "{why:?}");
     assert!(why.iter().any(|w| w.contains("j2") && w.contains("does not parse")), "{why:?}");
     assert!(why.iter().any(|w| w.contains("has no id")), "{why:?}");
+    assert_eq!(why.iter().filter(|w| w.contains("does not decode")).count(), 2, "{why:?}");
+    assert!(t3.find("mcp:j").is_some(), "identity is untouched by an undecodable question record");
 }
