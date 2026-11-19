@@ -131,6 +131,11 @@ class Guards(unittest.TestCase):
         require_mcp_calls(calls); self.assertEqual(excerpt[1]['arguments']['claim_token'],'[redacted]')
         calls,_=mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"thinking","state":"DONE"}}\n'+agy,'agy','fi_test')
         self.assertEqual(calls,['maestro_flow_claim'])
+        for documented in ('user_input','agent_response','checkpoint'):
+            calls,_=mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"%s","state":"DONE"}}\n'%documented+agy,'agy','fi_test')
+            self.assertEqual(calls,['maestro_flow_claim'],documented)
+        with self.assertRaises(Failure):
+            mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"checkpoint","tool_name":"run_command"}}','agy','fi_test')
         with self.assertRaises(Failure): mcp_tool_calls('{"type":"tool_use","tool_name":"run_shell_command"}','gemini','fi_test')
         with self.assertRaises(Failure): mcp_tool_calls('{"event":"step_update","step_update":{"tool_name":"run_command"}}','agy','fi_test')
         with self.assertRaises(Failure): mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"command","tool_name":"bash"}}','agy','fi_test')

@@ -62,8 +62,10 @@ def require_mcp_calls(calls):
         raise Failure('MCP claim and complete tool calls are required')
 
 def agy_step_allowed(step):
-    # This allowlist is not yet confirmed against a raw agy transcript, so it fails closed.
-    if not isinstance(step,dict) or step.get('step_type') not in ('tool','thinking','text','message','user_input','planner_response'):
+    # Documented headless step types (antigravity.google/docs/cli/headless): user_input,
+    # agent_response, tool, checkpoint. The rest are kept from earlier guesses. Anything else
+    # fails closed until a raw agy transcript confirms it.
+    if not isinstance(step,dict) or step.get('step_type') not in ('tool','user_input','agent_response','checkpoint','thinking','text','message','planner_response'):
         return False
     return (step.get('step_type')!='tool' and step.get('tool_name') is None) or step.get('tool_name')=='call_mcp_tool'
 
