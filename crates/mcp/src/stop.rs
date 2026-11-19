@@ -807,11 +807,118 @@ pub struct Install {
     pub detail: String,
 }
 
+/// Whether `name` is a shell identifier matching `^[A-Za-z_][A-Za-z0-9_]*$`.
+fn is_ident(name: &[u8]) -> bool {
+    let mut chars = name.iter().copied();
+    let head_ok = chars.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_');
+    let tail_ok = chars.all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    head_ok && tail_ok
+}
+
+/// Whether `word` is a `NAME=value` assignment matching `^[A-Za-z_][A-Za-z0-9_]*=`.
+fn is_env_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| is_ident(name.as_bytes()))
+}
+
+/// Byte length of a `$NAME` or `${NAME}` variable expansion starting at `bytes[0] == b'$'`.
+fn dollar_var_len(bytes: &[u8]) -> Option<usize> {
+    if bytes.get(1) == Some(&b'{') {
+        let end = 2 + bytes[2..].iter().take_while(|b| **b != b'}').count();
+        (bytes.get(end) == Some(&b'}') && is_ident(&bytes[2..end])).then_some(end + 1)
+    } else {
+        let end = 1 + bytes[1..].iter().take_while(|b| b.is_ascii_alphanumeric() || **b == b'_').count();
+        is_ident(&bytes[1..end]).then_some(end)
+    }
+}
+
+/// Scans `command` once, tracking quotes: refuses unquoted shell control characters, cuts at the
+/// first unquoted `|`, and counts leading unquoted words before the first quote or escape.
+fn scan_command(command: &str) -> Option<(&str, usize)> {
+    let bytes = command.as_bytes();
+    let (mut i, mut end, mut unquoted_prefix, mut in_prefix) = (0, None, 0, true);
+    while i < bytes.len() {
+        if matches!(bytes[i], b' ' | b'\t') {
+            i += 1;
+            continue;
+        }
+        let word_start = i;
+        let mut word_quoted = false;
+        while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t') {
+            let is_pipe = bytes[i] == b'|';
+            let is_amp = bytes[i] == b'&';
+            let is_semi = bytes[i] == b';';
+            let is_redir = matches!(bytes[i], b'<' | b'>');
+            let is_sub = bytes[i] == b'$' && dollar_var_len(&bytes[i..]).is_none();
+            let is_paren = matches!(bytes[i], b'(' | b')');
+            let is_nl = matches!(bytes[i], b'\n' | b'\r');
+            let is_tick = bytes[i] == b'`';
+            if is_amp || is_semi || is_redir || is_sub || is_paren || is_nl || is_tick {
+                return None;
+            }
+            if is_pipe {
+                break;
+            }
+            match bytes[i] {
+                b'$' => i += dollar_var_len(&bytes[i..]).unwrap_or(1),
+                b'\'' => {
+                    word_quoted = true;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'\'' {
+                        i += 1;
+                    }
+                    i += usize::from(i < bytes.len());
+                }
+                b'"' => {
+                    word_quoted = true;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        i += 1 + usize::from(bytes[i] == b'\\' && i + 1 < bytes.len());
+                    }
+                    i += usize::from(i < bytes.len());
+                }
+                b'\\' => {
+                    word_quoted = true;
+                    i += 1 + usize::from(i + 1 < bytes.len());
+                }
+                _ => i += 1,
+            }
+        }
+        if end.is_none() && i > word_start {
+            if in_prefix && !word_quoted {
+                unquoted_prefix += 1;
+            } else {
+                in_prefix = false;
+            }
+        }
+        if i < bytes.len() && bytes[i] == b'|' {
+            if end.replace(i).is_some() {
+                return None;
+            }
+            i += 1;
+        }
+    }
+    // Allow `| tee -a <path>` because the conformance runner captures the hook's output that way.
+    if let Some(at) = end
+        && !shlex::split(&command[at + 1..])
+            .is_some_and(|w| matches!(w.iter().map(String::as_str).collect::<Vec<_>>().as_slice(), ["tee", "-a", _]))
+    {
+        return None;
+    }
+    Some((&command[..end.unwrap_or(bytes.len())], unquoted_prefix))
+}
+
 /// Whether `command` runs this gate for `harness`.
 fn runs_gate(command: &str, harness: Harness) -> bool {
-    // The program is the first word after any `env` and `NAME=value` words: maestro itself.
-    let Some(parsed) = shlex::split(command) else { return false };
-    let mut words = parsed.iter().map(String::as_str).skip_while(|w| *w == "env" || w.contains('='));
+    // The program is the first word after any `env` and unquoted `NAME=value` words: maestro itself.
+    let Some((head, unquoted_prefix)) = scan_command(command) else { return false };
+    let parsed = shlex::split(head);
+    let Some(parsed) = parsed else { return false };
+    let mut words = parsed
+        .iter()
+        .map(String::as_str)
+        .enumerate()
+        .skip_while(|(i, w)| *i < unquoted_prefix && (*w == "env" || is_env_assignment(w)))
+        .map(|(_, w)| w);
     let maestro = words.next().is_some_and(|w| Path::new(w).file_name().is_some_and(|n| n == "maestro"));
     let words: Vec<&str> = words.collect();
     let flag = words.windows(2).any(|w| w == ["--harness", harness.name()])

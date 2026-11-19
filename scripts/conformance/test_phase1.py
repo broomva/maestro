@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from phase1 import (Failure, capability_environment, capability_settings, codex_skill_evidence, codex_skill_read, control_not_completed, equal_spines, hook_blocked,
-                    kill_marked_processes, mcp_tool_calls, prepare_evidence_dir, require_capability_isolation, require_driver,
+                    kill_marked_processes, mcp_tool_calls, prepare_evidence_dir, record_capability_result, require_capability_isolation, require_driver,
                     require_driver_trace, require_mcp_calls, require_mcp_event_match, stop_hook_command, supported_has_events)
 
 class Guards(unittest.TestCase):
@@ -129,17 +129,59 @@ class Guards(unittest.TestCase):
         complete=agy.replace('maestro_flow_claim','maestro_flow_complete').replace('"instance":"fi_test"','"claim_token":"fi_test.secret"')
         calls,excerpt=mcp_tool_calls(agy+'\n'+complete,'agy','fi_test')
         require_mcp_calls(calls); self.assertEqual(excerpt[1]['arguments']['claim_token'],'[redacted]')
+        calls,_=mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"thinking","state":"DONE"}}\n'+agy,'agy','fi_test')
+        self.assertEqual(calls,['maestro_flow_claim'])
+        for documented in ('user_input','agent_response','checkpoint'):
+            try: calls,_=mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"%s","state":"DONE"}}\n'%documented+agy,'agy','fi_test')
+            except Failure as exc: self.fail(f'documented step type {documented} was refused: {exc}')
+            self.assertEqual(calls,['maestro_flow_claim'],documented)
+        with self.assertRaises(Failure):
+            mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"checkpoint","tool_name":"run_command"}}','agy','fi_test')
         with self.assertRaises(Failure): mcp_tool_calls('{"type":"tool_use","tool_name":"run_shell_command"}','gemini','fi_test')
         with self.assertRaises(Failure): mcp_tool_calls('{"event":"step_update","step_update":{"tool_name":"run_command"}}','agy','fi_test')
+        with self.assertRaises(Failure): mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"command","tool_name":"bash"}}','agy','fi_test')
+        with self.assertRaises(Failure): mcp_tool_calls('{"event":"step_update","step_update":{"step_type":"tool","tool_name":"execute_command"}}','agy','fi_test')
 
     def test_mcp_sequences_match_ledger(self):
         events=[{'seq':2,'kind':'Claimed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}},
                 {'seq':3,'kind':'Completed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}}]
-        calls=[{'mcp_tool':'maestro_flow_claim','result':{'seq':2}}, {'mcp_tool':'maestro_flow_complete','result':{'seq':3}}]
+        calls=[{'mcp_tool':'maestro_flow_claim','arguments':{'node_id':'pin'},'result':{'seq':2}},
+               {'mcp_tool':'maestro_flow_complete','result':{'seq':3}}]
         require_mcp_event_match(calls,events,'agy')
+        gemini_events=[{'seq':2,'kind':'Claimed','body':{'node':'pin','iteration':{},'performer':{'harness':'gemini'}}},
+                       {'seq':3,'kind':'Completed','body':{'node':'pin','iteration':{},'performer':{'harness':'gemini'}}}]
+        gemini_calls=[{'tool_name':'mcp_maestro_maestro_flow_claim','parameters':{'node_id':'pin'},'result':{'seq':2}},
+                      {'tool_name':'mcp_maestro_maestro_flow_complete','result':{'seq':3}}]
+        require_mcp_event_match(gemini_calls,gemini_events,'gemini')
         with self.assertRaises(Failure): require_mcp_event_match(calls[:1],events,'agy')
         with self.assertRaises(Failure): require_mcp_event_match(calls,events,'gemini')
         with self.assertRaises(Failure): require_mcp_event_match(calls,[events[0],{**events[1],'seq':4}],'agy')
+        with self.assertRaises(Failure):
+            require_mcp_event_match([{**calls[0],'arguments':{'node_id':'other'}},calls[1]],events,'agy')
+        with self.assertRaises(Failure):
+            reversed_events=[{'seq':3,'kind':'Claimed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}},
+                             {'seq':2,'kind':'Completed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}}]
+            require_mcp_event_match([{**calls[0],'result':{'seq':3}},{**calls[1],'result':{'seq':2}}],reversed_events,'agy')
+
+    def test_a_non_integer_mcp_sequence_is_refused_not_crashed_or_coerced(self):
+        events=[{'seq':1,'kind':'Claimed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}},
+                {'seq':3,'kind':'Completed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}}]
+        for bad in ([],True,'1',1.0):
+            calls=[{'mcp_tool':'maestro_flow_claim','arguments':{'node_id':'pin'},'result':{'seq':bad}},
+                   {'mcp_tool':'maestro_flow_complete','result':{'seq':3}}]
+            try: require_mcp_event_match(calls,events,'agy')
+            except Failure: continue
+            except Exception as exc: self.fail(f'seq {bad!r} crashed instead of being refused: {exc!r}')
+            self.fail(f'seq {bad!r} was accepted')
+
+    def test_malformed_transcript_line_reports_result_without_attribute_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp); results={'gemini':{'preflight':'available'}}
+            proc=subprocess.CompletedProcess(['gemini'],0,'[1, 2, 3]\n{"type":"tool_result","status":"error","output":"denied"}\n','')
+            record_capability_result(out,results,'gemini','fi_test',proc,[])
+            self.assertEqual(results['gemini']['capability'],'unsupported')
+            self.assertIn('malformed transcript',results['gemini']['error'])
+            self.assertEqual(results['gemini']['detail'],'denied')
 
     def test_driver_availability(self):
         require_driver('codex',True); require_driver('gemini',False)
