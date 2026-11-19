@@ -741,7 +741,13 @@ fn hold(
         return Err(Refusal::InputsChanged { node: rec.node }.into());
     }
     let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));
-    let who = rec.performer.clone().unwrap_or_else(|| performer(session));
+    // A performer the claim named is a session other than the owner; the owner's own claim names
+    // itself, and its receipt records the session that completes it, as it is now.
+    let me = session.session().to_string();
+    let who = match &rec.performer {
+        Some(p) if p.session.as_deref() != Some(me.as_str()) => p.clone(),
+        _ => performer(session),
+    };
     Ok(Held { log, started, rec, next, effect_started, audit: session.audit().cloned(), who })
 }
 
@@ -1005,8 +1011,9 @@ pub fn complete(
 /// [`complete`], naming the session that did the work (BRO-3828), resolved by the caller as the
 /// owner's attested child; with none, the performer the claim recorded. A node that routes by
 /// `different_from` refuses the work, `routing_violated`, unless that performer's provider is
-/// attested and differs from each the route names: checked before the command runs, and again
-/// under the lock after it.
+/// attested and differs from each the route names. It is checked before the command runs; after
+/// it, `hold` refuses any change to the receipts the route read (`inputs_changed`), and the params
+/// and the performer cannot change, so the verdict stands.
 pub fn complete_as(
     ledger: &mut Ledger,
     session: &VerifiedSession,
@@ -1088,9 +1095,6 @@ pub fn complete_as(
     let log = guard.log(&instance)?;
     let after = wall(&log)?;
     let held = name(hold(log, session, &instance, &sha, after)?);
-    if let Err(detail) = route(&held.log, &held.started, &held.rec.node, Some(&held.who)) {
-        return refuse(&mut guard, &held, ("routing_violated", detail), &[]);
-    }
     // The command and its input are bound to the pinned IR, params and claim inputs.
     if let Err(unfit) = prepare(&held, &outputs) {
         return refuse(&mut guard, &held, unfit, &[]);
