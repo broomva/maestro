@@ -241,3 +241,14 @@ fn a_child_on_another_node_than_its_owner_is_not_attested_without_an_expected_no
     assert!(reg.performer(&me, &named("t3:env-mac/here")).is_ok());
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/there"))), RefusalReason::PerformerUnverified);
 }
+
+#[test]
+fn with_no_node_known_for_this_host_a_child_that_names_one_is_not_attested() {
+    // CodeRabbit (round 6): neither the owner's node nor an expected node is known, so a child
+    // that names a node names one this host cannot confirm; a child that names none claims no
+    // other host.
+    let (_tmp, reg) =
+        t3(json!([row("named", Some("owner"), json!({"node": "nuc-1"})), row("plain", Some("owner"), json!({}))]));
+    assert_eq!(refused(reg.performer(&owner_t3(), &named("t3:env-mac/named"))), RefusalReason::PerformerUnverified);
+    assert!(reg.performer(&owner_t3(), &named("t3:env-mac/plain")).is_ok());
+}

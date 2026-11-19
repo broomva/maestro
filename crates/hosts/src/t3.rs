@@ -1278,9 +1278,15 @@ impl T3Registry {
         let Some(thread) = self.lookup_attributed(id)? else {
             return Err(unverified(format!("no T3 thread on this host has the id {id}")));
         };
-        // A child runs on its owner's node: against the registry's expected node, and against the
-        // owner's own whenever both are known (P20 round 4: the expected node may be unset).
-        let foreign = matches!((owner.node(), thread.node.as_ref()), (Some(o), Some(c)) if o != c);
+        // A child runs on this host's node: the owner's, else the registry's expected one. A child
+        // that names a node this host cannot confirm is foreign (P20 round 4, CodeRabbit round 6);
+        // one that names none claims no other host.
+        let here = owner.node().or(self.expected_node.as_ref());
+        let foreign = match (thread.node.as_ref(), here) {
+            (Some(child), Some(here)) => child != here,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
         if foreign || self.check_node(&thread, None).is_err() {
             return Err(unverified(format!("thread {} is bound to another node", short_id(id))));
         }
