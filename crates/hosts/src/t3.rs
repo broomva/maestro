@@ -165,42 +165,42 @@ struct RawT3Thread {
     unreadable: Option<String>,
 }
 
-/// A pending `user_input` request as the SQLite reader emits it (BRO-3936).
-#[derive(Deserialize)]
-struct RawQuestionRequest {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    created_at: Option<String>,
-    #[serde(default)]
-    item_payload_json: Option<String>,
-}
-
 /// How much of a card's first question a need's title carries.
 const QUESTION_DETAIL_CHARS: usize = 160;
 
 /// A thread's waiting AskUserQuestion cards as prompts (BRO-3936). A card always becomes a prompt,
 /// so the owner sees that a question waits even when its card does not read: then its title says
-/// so and the listing reports it unread with why. A request with no id cannot be keyed; it is
-/// reported unread, never dropped silently.
+/// so and the listing reports it unread with why. Fields are read one at a time (P20 narrowed r1):
+/// a request is dropped only when it has no id to key it by, and is then reported unread; any
+/// other field that does not read is reported unread and the need stays. A card that reads only in
+/// part is listed from what read, and the part that did not is reported unread.
 fn decode_questions(raw: Vec<Value>, thread: &str) -> (Vec<QuestionPrompt>, Vec<String>) {
     let mut prompts = Vec::new();
     let mut unread = Vec::new();
     for (i, value) in raw.into_iter().enumerate() {
-        let req = match serde_json::from_value::<RawQuestionRequest>(value) {
-            Ok(req) => req,
-            Err(e) => {
-                unread.push(format!("question request {i} of thread {thread} does not decode: {e}"));
+        let Some(record) = value.as_object() else {
+            unread.push(format!("question request {i} of thread {thread} is not an object"));
+            continue;
+        };
+        let id = match record.get("id") {
+            Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+            _ => {
+                unread.push(format!("question request {i} of thread {thread} has no id"));
                 continue;
             }
         };
-        let Some(id) = req.id.filter(|s| !s.trim().is_empty()) else {
-            unread.push(format!("question request - of thread {thread} has no id"));
-            continue;
+        let asked_at = match record.get("created_at") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                unread.push(format!("question request {id} of thread {thread} has a created_at that is not text"));
+                None
+            }
         };
-        let card = match req.item_payload_json.as_deref().filter(|s| !s.trim().is_empty()) {
-            None => Err("has no card (no user_input_request item)"),
-            Some(text) => match serde_json::from_str::<Value>(text) {
+        let card = match record.get("item_payload_json") {
+            None | Some(Value::Null) => Err("has no card (no user_input_request item)"),
+            Some(Value::String(text)) if text.trim().is_empty() => Err("has no card (no user_input_request item)"),
+            Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
                 Err(_) => Err("has a card that does not parse"),
                 Ok(v) => match v.get("questions").and_then(Value::as_array) {
                     Some(qs) if qs.iter().any(readable_question) => Ok(qs.clone()),
@@ -208,15 +208,25 @@ fn decode_questions(raw: Vec<Value>, thread: &str) -> (Vec<QuestionPrompt>, Vec<
                     _ => Err("has a card with no questions"),
                 },
             },
+            Some(_) => Err("has a card that is not text"),
         };
         let (title, detail) = match card {
-            Ok(qs) => describe_questions(&qs),
+            Ok(qs) => {
+                let missing = qs.iter().filter(|q| !readable_question(q)).count();
+                if missing > 0 {
+                    unread.push(format!(
+                        "question request {id} of thread {thread} has {missing} of {} questions that did not read",
+                        qs.len()
+                    ));
+                }
+                describe_questions(&qs)
+            }
             Err(why) => {
                 unread.push(format!("question request {id} of thread {thread} {why}"));
                 ("Question waiting (its card did not read)".to_string(), None)
             }
         };
-        prompts.push(QuestionPrompt { request_id: id, title, detail, asked_at: req.created_at });
+        prompts.push(QuestionPrompt { request_id: id, title, detail, asked_at });
     }
     (prompts, unread)
 }

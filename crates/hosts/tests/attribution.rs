@@ -1025,20 +1025,35 @@ fn a_question_card_that_does_not_read_is_listed_and_named() {
             { "id": "j2", "item_payload_json": "{not json" },
             { "item_payload_json": "{}" },
             7,
-            { "id": 9 } ] }]);
+            { "id": 9 },
+            // P20 narrowed r1: a bad optional field never drops a keyable request.
+            { "id": "known", "created_at": 7, "item_payload_json": "{\"questions\": [{\"header\": \"K\", \"question\": \"Kept?\"}]}" },
+            { "id": "objcard", "item_payload_json": { "questions": [] } },
+            // A card that reads in part is listed from what read, and the rest is named unread.
+            { "id": "partial", "item_payload_json": "{\"questions\": [{\"header\": \"A\", \"question\": \"Readable?\"}, {\"header\": \"B\", \"question\": \"\"}]}" } ] }]);
     std::fs::write(&path, rows.to_string()).unwrap();
     let t3 = T3Registry::new(&path);
     let live = SurfaceRegistry::new(None, Some(t3.clone()), None).live_permission_report(None, None);
     let titles: Vec<&str> = live.needs.iter().map(|n| n.title.as_str()).collect();
-    assert_eq!(titles.len(), 3, "{titles:?}");
+    // The prompt, j1, j2, known, objcard and partial: every request with an id is a need.
+    assert_eq!(titles.len(), 6, "{titles:?}");
     assert!(
         titles.contains(&"Question: H: Q?") && titles.contains(&"Question waiting (its card did not read)"),
         "{titles:?}"
     );
+    assert!(titles.contains(&"Question: K: Kept?"), "a bad created_at keeps the need: {titles:?}");
+    assert!(titles.contains(&"Question: A · B: Readable? (2 questions)"), "{titles:?}");
+    let keys: Vec<&str> = live.needs.iter().map(|n| n.key.as_str()).collect();
+    for id in ["#known", "#objcard", "#partial"] {
+        assert!(keys.iter().any(|k| k.ends_with(id)), "{id}: {keys:?}");
+    }
     let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
-    assert_eq!(why.len(), 4, "{why:?}");
+    assert_eq!(why.len(), 7, "{why:?}");
     assert!(why.iter().any(|w| w.contains("j2") && w.contains("does not parse")), "{why:?}");
-    assert!(why.iter().any(|w| w.contains("has no id")), "{why:?}");
-    assert_eq!(why.iter().filter(|w| w.contains("does not decode")).count(), 2, "{why:?}");
+    assert_eq!(why.iter().filter(|w| w.contains("has no id")).count(), 2, "an id-less record and a number id: {why:?}");
+    assert!(why.iter().any(|w| w.contains("is not an object")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("known") && w.contains("created_at that is not text")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("objcard") && w.contains("card that is not text")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("partial") && w.contains("1 of 2 questions that did not read")), "{why:?}");
     assert!(t3.find("mcp:j").is_some(), "identity is untouched by an undecodable question record");
 }

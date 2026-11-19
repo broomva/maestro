@@ -2580,11 +2580,16 @@ mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"
 mutate $ht $'            "WHERE thread_id = ? AND status = \'pending\' AND kind = \'user_input\' ORDER BY created_at ASC",' $'            "WHERE thread_id = ? AND kind = \'user_input\' ORDER BY created_at ASC",'
 mutate $ht '        unread_permissions.extend(unread_questions);' ''
 mutate $ht '                ("Question waiting (its card did not read)".to_string(), None)' '                continue'
-mutate $ht '            unread.push(format!("question request - of thread {thread} has no id"));' ''
+mutate $ht '                unread.push(format!("question request {i} of thread {thread} has no id"));' ''
 mutate $ht '        let mut cut: String = q.chars().take(QUESTION_DETAIL_CHARS).collect();' '        let mut cut: String = q.clone();'
 mutate $ht '                    Some(qs) if qs.iter().any(readable_question) => Ok(qs.clone()),' '                    Some(qs) if !qs.is_empty() => Ok(qs.clone()),'
 mutate $ht '    q.get("question").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())' '    q.is_object()'
-mutate $ht '                unread.push(format!("question request {i} of thread {thread} does not decode: {e}"));' ''
+# P20 narrowed r1 (Codex): a bad optional field never drops a keyable request; a card that reads
+# in part is listed and the part that did not read is named unread.
+mutate $ht $'            Some(_) => {\n                unread.push(format!("question request {id} of thread {thread} has a created_at that is not text"));\n                None\n            }' $'            Some(_) => continue,'
+mutate $ht '                if missing > 0 {' '                if missing > 1 {'
+mutate $ht '            Some(_) => Err("has a card that is not text"),' '            Some(_) => continue,'
+mutate $ht '            unread.push(format!("question request {i} of thread {thread} is not an object"));' ''
 mutate $ht $'                        "pending_questions": pending_questions_of(row["thread_id"]),\n                        "unreadable": str(exc),' $'                        "pending_questions": [],\n                        "unreadable": str(exc),'
 mutate $hlb '        report.needs.extend(questions);' '        drop(questions);'
 mutate $session '            source: crate::need::NeedSource::Questions,' '            source: crate::need::NeedSource::Approvals,'
