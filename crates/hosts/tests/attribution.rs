@@ -1006,8 +1006,9 @@ fn a_question_card_that_does_not_read_is_listed_and_named() {
         assert_eq!(n.title, "Question waiting (its card did not read)", "{id}");
     }
     let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
-    // Four cards, and mcp:qbad's payload.
-    assert_eq!(why.len(), 5, "{why:?}");
+    // Four cards, q-long's missing header (named, never shown as complete), and mcp:qbad's payload.
+    assert_eq!(why.len(), 6, "{why:?}");
+    assert!(why.iter().any(|w| w.contains("q-long") && w.contains("question 1 has no header")), "{why:?}");
     assert!(why.iter().any(|w| w.contains("q-nocard") && w.contains("has no card")), "{why:?}");
     assert!(why.iter().any(|w| w.contains("q-empty") && w.contains("no questions")), "{why:?}");
     for id in ["q-noq", "q-blank"] {
@@ -1054,6 +1055,82 @@ fn a_question_card_that_does_not_read_is_listed_and_named() {
     assert!(why.iter().any(|w| w.contains("is not an object")), "{why:?}");
     assert!(why.iter().any(|w| w.contains("known") && w.contains("created_at that is not text")), "{why:?}");
     assert!(why.iter().any(|w| w.contains("objcard") && w.contains("card that is not text")), "{why:?}");
-    assert!(why.iter().any(|w| w.contains("partial") && w.contains("1 of 2 questions that did not read")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("partial") && w.contains("question 2 has no question")), "{why:?}");
     assert!(t3.find("mcp:j").is_some(), "identity is untouched by an undecodable question record");
+}
+
+/// P20 narrowed round 2, hoisted: every field a question request or its card carries is read by one
+/// rule. This breaks each field of a valid card in each way a field can fail (a number, an object,
+/// a list, null, empty, blank) and asserts the same outcome every time: the need stays, keyed by its
+/// request, and the field is named unread. An id that does not read is the one field that drops
+/// the request, and that is reported too.
+#[test]
+fn every_card_field_that_does_not_read_is_named_and_the_need_stays() {
+    use serde_json::{Value, json};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("threads.json");
+    let read = |request: Value| {
+        let rows = json!([{ "id": "mcp:g", "cwd": "/w", "created_at": "2026-11-19T00:00:00Z", "status": "running",
+            "pending_questions": [request] }]);
+        std::fs::write(&path, rows.to_string()).unwrap();
+        let live = SurfaceRegistry::new(None, Some(T3Registry::new(&path)), None).live_permission_report(None, None);
+        let keys: Vec<String> = live.needs.iter().map(|n| n.key.clone()).collect();
+        let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
+        (keys, why)
+    };
+    let card = |qs: &Value| json!({ "questions": qs }).to_string();
+    let request =
+        |payload: Value, created: Value| json!({ "id": "g", "created_at": created, "item_payload_json": payload });
+    let good = json!([{ "header": "H1", "question": "Q1?" }, { "header": "H2", "question": "Q2?" }]);
+    let (keys, why) = read(request(Value::String(card(&good)), json!("2026-11-19T10:00:00Z")));
+    assert_eq!((keys.len(), why.len()), (1, 0), "the valid card reads whole: {why:?}");
+
+    let bad = [json!(7), json!({}), json!([]), Value::Null, json!(""), json!("   ")];
+    let mut cases = 0;
+    for n in 0..2 {
+        for key in ["header", "question"] {
+            for value in &bad {
+                let mut qs = good.clone();
+                qs[n][key] = value.clone();
+                let (keys, why) = read(request(Value::String(card(&qs)), json!("2026-11-19T10:00:00Z")));
+                let case = format!("question {} {key} = {value}", n + 1);
+                assert_eq!(keys.len(), 1, "{case}: the need stays");
+                assert!(keys[0].ends_with("#g"), "{case}: {keys:?}");
+                let named = |w: &String| {
+                    w.contains(&format!("question {} has no {key}", n + 1))
+                        || w.contains(&format!("question {} has a {key} that is not text", n + 1))
+                };
+                assert_eq!(why.len(), 1, "{case}: {why:?}");
+                assert!(named(&why[0]), "{case}: the field is named: {why:?}");
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, 24);
+    // A question that is not an object at all.
+    let (keys, why) =
+        read(request(Value::String(card(&json!([7, { "header": "H2", "question": "Q2?" }]))), Value::Null));
+    assert_eq!(keys.len(), 1);
+    assert!(why.len() == 1 && why[0].contains("question 1 is not an object"), "{why:?}");
+    // The request's own fields: each that does not read is named, and the need stays.
+    for (payload, created, says) in [
+        (Value::String(card(&good)), json!(7), "created_at that is not text"),
+        (Value::String(card(&good)), json!({}), "created_at that is not text"),
+        (json!(7), Value::Null, "card that is not text"),
+        (json!({ "questions": [] }), Value::Null, "card that is not text"),
+        (json!(""), Value::Null, "has no card"),
+        (json!("{not json"), Value::Null, "card that does not parse"),
+        (json!("{\"questions\": {}}"), Value::Null, "questions are not a list"),
+        (json!("{\"questions\": []}"), Value::Null, "card with no questions"),
+    ] {
+        let (keys, why) = read(request(payload.clone(), created.clone()));
+        assert_eq!(keys.len(), 1, "{payload} / {created}: the need stays");
+        assert!(why.len() == 1 && why[0].contains(says), "{payload} / {created}: {why:?}");
+    }
+    // The id is the one field that drops a request, and that is reported.
+    for id in [json!(7), json!(""), Value::Null, json!({})] {
+        let (keys, why) = read(json!({ "id": id, "item_payload_json": card(&good) }));
+        assert!(keys.is_empty(), "{id}");
+        assert!(why.len() == 1 && why[0].contains("has no id"), "{id}: {why:?}");
+    }
 }

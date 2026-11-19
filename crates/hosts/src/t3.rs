@@ -168,12 +168,58 @@ struct RawT3Thread {
 /// How much of a card's first question a need's title carries.
 const QUESTION_DETAIL_CHARS: usize = 160;
 
-/// A thread's waiting AskUserQuestion cards as prompts (BRO-3936). A card always becomes a prompt,
-/// so the owner sees that a question waits even when its card does not read: then its title says
-/// so and the listing reports it unread with why. Fields are read one at a time (P20 narrowed r1):
-/// a request is dropped only when it has no id to key it by, and is then reported unread; any
-/// other field that does not read is reported unread and the need stays. A card that reads only in
-/// part is listed from what read, and the part that did not is reported unread.
+/// One field of a question request or of a card's question, as the one rule every field follows
+/// reads it (P20 narrowed round 2, hoisted): a non-blank string reads; absent, null or blank is
+/// missing; any other value does not read. Each caller says whether a missing field is unread.
+enum Field {
+    Text(String),
+    Missing,
+    NotText,
+}
+
+fn field(record: &serde_json::Map<String, Value>, key: &str) -> Field {
+    match record.get(key) {
+        None | Some(Value::Null) => Field::Missing,
+        Some(Value::String(s)) if s.trim().is_empty() => Field::Missing,
+        Some(Value::String(s)) => Field::Text(s.clone()),
+        Some(_) => Field::NotText,
+    }
+}
+
+/// A card's question, read field by field: its header and text where they read, and a reason
+/// for every field that did not. Both fields are required: a card question always has them.
+struct Question {
+    header: Option<String>,
+    text: Option<String>,
+    unread: Vec<String>,
+}
+
+fn read_question(n: usize, q: &Value) -> Question {
+    let Some(q) = q.as_object() else {
+        return Question { header: None, text: None, unread: vec![format!("question {n} is not an object")] };
+    };
+    let mut unread = Vec::new();
+    let mut required = |key: &str| match field(q, key) {
+        Field::Text(s) => Some(s),
+        Field::Missing => {
+            unread.push(format!("question {n} has no {key}"));
+            None
+        }
+        Field::NotText => {
+            unread.push(format!("question {n} has a {key} that is not text"));
+            None
+        }
+    };
+    let header = required("header");
+    let text = required("question");
+    Question { header, text, unread }
+}
+
+/// A thread's waiting AskUserQuestion cards as prompts (BRO-3936). Every field is read by
+/// [`field`], so one rule decides what read and what did not. A request is dropped only when it
+/// has no id to key it by, and that is reported unread. A field that did not read anywhere else is
+/// reported unread by name, and the need stays: a card that reads in part is listed from what
+/// read, and one with no readable question is listed as a card that did not read.
 fn decode_questions(raw: Vec<Value>, thread: &str) -> (Vec<QuestionPrompt>, Vec<String>) {
     let mut prompts = Vec::new();
     let mut unread = Vec::new();
@@ -182,47 +228,48 @@ fn decode_questions(raw: Vec<Value>, thread: &str) -> (Vec<QuestionPrompt>, Vec<
             unread.push(format!("question request {i} of thread {thread} is not an object"));
             continue;
         };
-        let id = match record.get("id") {
-            Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
-            _ => {
-                unread.push(format!("question request {i} of thread {thread} has no id"));
-                continue;
-            }
+        let Field::Text(id) = field(record, "id") else {
+            unread.push(format!("question request {i} of thread {thread} has no id"));
+            continue;
         };
-        let asked_at = match record.get("created_at") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(_) => {
-                unread.push(format!("question request {id} of thread {thread} has a created_at that is not text"));
+        let at = format!("question request {id} of thread {thread}");
+        let asked_at = match field(record, "created_at") {
+            Field::Text(s) => Some(s),
+            Field::Missing => None,
+            Field::NotText => {
+                unread.push(format!("{at} has a created_at that is not text"));
                 None
             }
         };
-        let card = match record.get("item_payload_json") {
-            None | Some(Value::Null) => Err("has no card (no user_input_request item)"),
-            Some(Value::String(text)) if text.trim().is_empty() => Err("has no card (no user_input_request item)"),
-            Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+        let card = match field(record, "item_payload_json") {
+            Field::Missing => Err("has no card (no user_input_request item)"),
+            Field::NotText => Err("has a card that is not text"),
+            Field::Text(text) => match serde_json::from_str::<Value>(&text) {
                 Err(_) => Err("has a card that does not parse"),
-                Ok(v) => match v.get("questions").and_then(Value::as_array) {
-                    Some(qs) if qs.iter().any(readable_question) => Ok(qs.clone()),
-                    Some(qs) if !qs.is_empty() => Err("has a card with no readable question"),
-                    _ => Err("has a card with no questions"),
+                Ok(v) => match v.get("questions") {
+                    Some(Value::Array(qs)) if !qs.is_empty() => {
+                        Ok(qs.iter().enumerate().map(|(n, q)| read_question(n + 1, q)).collect::<Vec<_>>())
+                    }
+                    Some(Value::Array(_)) | None => Err("has a card with no questions"),
+                    Some(_) => Err("has a card whose questions are not a list"),
                 },
             },
-            Some(_) => Err("has a card that is not text"),
         };
         let (title, detail) = match card {
             Ok(qs) => {
-                let missing = qs.iter().filter(|q| !readable_question(q)).count();
-                if missing > 0 {
-                    unread.push(format!(
-                        "question request {id} of thread {thread} has {missing} of {} questions that did not read",
-                        qs.len()
-                    ));
+                let missing: Vec<String> = qs.iter().flat_map(|q| q.unread.iter().cloned()).collect();
+                if qs.iter().any(|q| q.text.is_some()) {
+                    if !missing.is_empty() {
+                        unread.push(format!("{at} has fields that did not read: {}", missing.join("; ")));
+                    }
+                    describe_questions(&qs)
+                } else {
+                    unread.push(format!("{at} has a card with no readable question: {}", missing.join("; ")));
+                    ("Question waiting (its card did not read)".to_string(), None)
                 }
-                describe_questions(&qs)
             }
             Err(why) => {
-                unread.push(format!("question request {id} of thread {thread} {why}"));
+                unread.push(format!("{at} {why}"));
                 ("Question waiting (its card did not read)".to_string(), None)
             }
         };
@@ -231,18 +278,11 @@ fn decode_questions(raw: Vec<Value>, thread: &str) -> (Vec<QuestionPrompt>, Vec<
     (prompts, unread)
 }
 
-/// A question object with a non-blank `question` string (P20 r1: `[7]` or `[{}]` is no card).
-fn readable_question(q: &Value) -> bool {
-    q.get("question").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
-}
-
-/// `Question: <header> · <header>` and the first question, cut at [`QUESTION_DETAIL_CHARS`].
-fn describe_questions(qs: &[Value]) -> (String, Option<String>) {
-    let text = |q: &Value, key: &str| {
-        q.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
-    };
-    let headers: Vec<String> = qs.iter().map(|q| text(q, "header").unwrap_or_else(|| "question".into())).collect();
-    let first = qs.iter().find_map(|q| text(q, "question"));
+/// `Question: <header> · <header>` and the first question that read, cut at
+/// [`QUESTION_DETAIL_CHARS`]. A header that did not read shows as `question`; it is reported.
+fn describe_questions(qs: &[Question]) -> (String, Option<String>) {
+    let headers: Vec<&str> = qs.iter().map(|q| q.header.as_deref().unwrap_or("question")).collect();
+    let first = qs.iter().find_map(|q| q.text.as_deref());
     let detail = first.map(|q| {
         let mut cut: String = q.chars().take(QUESTION_DETAIL_CHARS).collect();
         if q.chars().count() > QUESTION_DETAIL_CHARS {
