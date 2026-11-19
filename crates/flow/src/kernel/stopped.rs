@@ -202,6 +202,8 @@ fn an_unfiled_ask_is_work_a_filed_one_waits_on_the_owner() {
         ask_id: ask_id.clone(),
         ledger: "ledger.yaml".into(),
         landing: None,
+        supersedes: None,
+        reason: None,
     };
     assert_eq!(a.waiting, [owner]);
     // On the answers branch only: it has not landed, so it still waits on the owner.
@@ -584,4 +586,56 @@ fn the_first_save_syncs_the_root_that_holds_its_new_folder() {
     assert!(first.contains(&f.flows.join("stop-gate")), "{first:?}");
     count_stop(&mut f.ledger, &me, &[&at("fi_a", 4)]);
     assert!(!synced().contains(&f.flows), "the folder is already there");
+}
+
+#[test]
+fn open_shows_a_re_ask_with_inputs_changed() {
+    let clock = crate::clock::TestClock::install();
+    let mut f = fx(None, "");
+    f.flow = compile(
+        "flow: gate\nversion: 1\nworkdir: \"/tmp\"\nnodes:\n  probe: {class: observe, run: ['true'], fresh_for: 10s, exit_map: {0: ok, 1: moved}}\n  owner: {class: human, ask: 'Ship it?', needs: [probe]}\n  ship: {class: pure, run: ['true'], needs: [owner]}\n",
+    )
+    .unwrap();
+    let fi = f.begin();
+    let observe = |f: &mut Fx, fi: &InstanceId, outputs: serde_json::Value| {
+        let c = claim(&mut f.ledger, &f.me, fi, "probe").unwrap();
+        complete(&mut f.ledger, &f.me, &c.token, outputs, &Limits::default()).unwrap();
+    };
+    observe(&mut f, &fi, json!({ "v": 1 }));
+    let Asked::Waiting { ask_id: first_id, .. } = f.ask(&fi, Some(&filing())).unwrap() else {
+        panic!("expected waiting");
+    };
+    f.answer_in_worktree(&first_id);
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { .. }));
+
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, &fi, json!({ "v": 2 }));
+    let a = judge(&f, &fi);
+    assert_eq!(
+        a.work,
+        [Work::Ask {
+            node: "owner".into(),
+            iteration: Iteration::default(),
+            supersedes: Some(first_id.clone()),
+            reason: Some("inputs_changed".into()),
+        }]
+    );
+    let Asked::Waiting { ask_id: second_id, .. } = f.ask(&fi, None).unwrap() else {
+        panic!("expected waiting");
+    };
+    let a = judge(&f, &fi);
+    assert!(a.work.is_empty(), "{a:?}");
+    assert_eq!(
+        a.waiting,
+        [Waiting::Owner {
+            node: "owner".into(),
+            iteration: Iteration::default(),
+            ask_id: second_id,
+            ledger: "ledger.yaml".into(),
+            landing: None,
+            supersedes: Some(first_id),
+            reason: Some("inputs_changed".into()),
+        }]
+    );
 }
