@@ -96,6 +96,17 @@ impl T3Thread {
     /// The harness the thread did its work under, attested (BRO-3828): every provider-thread row
     /// it has, active or retired, names one provider. A thread that switched providers, or whose
     /// rows the registry does not report, has none; its default provider is never taken for it.
+    /// The harness a verified session of this thread runs (BRO-3828): with provider rows reported,
+    /// the one provider they all name ([`Self::performed_harness`]), else none; a registry that
+    /// reports no rows (a JSON snapshot, a schema without the column) leaves the thread's default.
+    /// The thread's default provider is not what ran it once it has switched.
+    pub fn session_harness(&self) -> Option<Harness> {
+        match &self.providers {
+            Some(_) => self.performed_harness(),
+            None => self.harness(),
+        }
+    }
+
     pub fn performed_harness(&self) -> Option<Harness> {
         let rows = self.providers.as_ref()?;
         let first = rows.first().filter(|p| !p.is_empty())?;
@@ -1062,7 +1073,7 @@ impl T3Registry {
     /// across turns and provider switches, new when the thread is recreated. The environment lives
     /// in the SessionRef, not here. No `created_at`, no marker: writes are then `no_owner_marker`.
     fn verified(thread: T3Thread, incarnation: String) -> VerifiedSession {
-        let harness = thread.harness();
+        let harness = thread.session_harness();
         let owner_marker = thread
             .created_at
             .as_deref()

@@ -215,3 +215,17 @@ fn a_child_thread_bound_to_another_node_is_not_attested() {
     assert!(reg.performer(&me, &named("t3:env-mac/here")).is_ok());
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/there"))), RefusalReason::PerformerUnverified);
 }
+
+#[test]
+fn a_verified_t3_session_runs_the_provider_its_rows_name_not_its_default() {
+    // CodeRabbit (maestro#55, round 4): an owner completing a routed node itself was judged by its
+    // default provider. A verified T3 session's harness is the one its provider rows name.
+    let thread = |providers: serde_json::Value| -> maestro_hosts::T3Thread {
+        serde_json::from_value(json!({"id": "t", "cwd": "/tmp", "provider": "codex", "providers": providers})).unwrap()
+    };
+    assert_eq!(thread(json!(["claudeAgent"])).session_harness(), Some(Harness::ClaudeCode));
+    assert_eq!(thread(json!(["codex", "claudeAgent"])).session_harness(), None, "switched");
+    assert_eq!(thread(json!([""])).session_harness(), None, "a NULL row");
+    assert_eq!(thread(json!([])).session_harness(), None, "no rows yet");
+    assert_eq!(thread(json!(null)).session_harness(), Some(Harness::Codex), "no history reported: the default");
+}

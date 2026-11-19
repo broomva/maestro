@@ -241,8 +241,15 @@ fn a_node_redone_by_the_performers_provider_while_its_route_is_judged_refuses_th
     assert_eq!(perform(&mut f, &fi, "a", Some(&child("g", Harness::Gemini))), "completed");
     let b = take(&mut f, &fi, "b");
     let (root, dir, inst) = (f.root.clone(), f.dir.clone(), fi.clone());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
     let rerun = std::thread::spawn(move || {
+        // b's command may never start (a refusal before it runs): bounded, and told to stop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !dir.join("started").exists() {
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) || std::time::Instant::now() > deadline {
+                return;
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -259,6 +266,7 @@ fn a_node_redone_by_the_performers_provider_while_its_route_is_judged_refuses_th
     });
     let outcome_b =
         code(complete_as(&mut f.ledger, &f.me, &b, Value::Null, &quick(), Some(&child("c2", Harness::Codex))));
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
     rerun.join().unwrap();
     assert_eq!(outcome_b, "inputs_changed");
 }
