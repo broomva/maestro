@@ -2,6 +2,7 @@
 //! the identity mode, the precedence of what thread variables resolve to, resolution through
 //! `statev2.sqlite`'s active provider row, the T3 reader's run status, and the audit facts.
 
+use maestro_core::need::{NeedKind, NeedSource};
 use maestro_hosts::attribution::{MAX_ANCESTORS, combine, process_facts};
 use maestro_hosts::{
     Attributed, CallerClaim, IdentityMode, ProcStat, ProcessReader, RefusalReason, Resolution, Surface,
@@ -919,5 +920,217 @@ fn one_permission_rule_answers_alike_on_every_surface() {
                 assert!(same(&got, want), "{surface} {payload:?}: {got:?}, want {want:?}");
             }
         }
+    }
+}
+
+/// BRO-3936: a `statev2.sqlite` whose thread `mcp:q` waits on six AskUserQuestion cards (one
+/// readable with two questions, one with no card item, one whose card holds no questions, one
+/// with a 200-character question, two whose questions hold nothing readable) and holds one
+/// answered card and one permission prompt; and whose thread `mcp:qbad`, with a payload that does
+/// not read, waits on one readable card (P20 r1).
+fn questions_db(dir: &Path) -> PathBuf {
+    partial_db(
+        dir,
+        true,
+        r#"
+conn.executescript("""CREATE TABLE orchestration_v2_projection_runtime_requests (
+  runtime_request_id TEXT, thread_id TEXT, kind TEXT, status TEXT, created_at TEXT, payload_json TEXT);
+CREATE TABLE orchestration_v2_projection_turn_items (
+  turn_item_id TEXT, thread_id TEXT, type TEXT, payload_json TEXT);""")
+thread("mcp:q", None, {"worktreePath": "/w"})
+def req(rid, kind, status, at, payload=None):
+    conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
+        (rid, "mcp:q", kind, status, at, json.dumps(payload or {"id": rid, "kind": kind})))
+def card(rid, questions):
+    conn.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES (?,?,?,?)",
+        ("item-" + rid, "mcp:q", "user_input_request", json.dumps({"requestId": rid, "questions": questions})))
+req("q-wait", "user_input", "pending", "2026-11-19T10:00:00Z")
+card("q-wait", [{"header": "Deploy", "question": "Ship tonight?"}, {"header": "Font", "question": "Which font?"}])
+req("q-done", "user_input", "resolved", "2026-11-19T09:00:00Z")
+card("q-done", [{"header": "Old", "question": "Answered already?"}])
+req("q-nocard", "user_input", "pending", "2026-11-19T10:01:00Z")
+req("q-empty", "user_input", "pending", "2026-11-19T10:02:00Z")
+card("q-empty", [])
+req("q-long", "user_input", "pending", "2026-11-19T10:03:00Z")
+card("q-long", [{"question": "x" * 200}])
+req("perm", "approval", "pending", "2026-11-19T10:04:00Z", {"toolName": "Bash", "input": {"command": "ls"}})
+req("q-noq", "user_input", "pending", "2026-11-19T10:05:00Z")
+card("q-noq", [7, {}])
+req("q-blank", "user_input", "pending", "2026-11-19T10:06:00Z")
+card("q-blank", [{"header": "Scope", "question": "   "}])
+conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ("mcp:qbad", "p", "t", "codex", None, "2026-11-17T00:00:00Z", "2026-11-17T00:00:00Z", None, None, "{corrupt"))
+conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
+    ("q-bad-thread", "mcp:qbad", "user_input", "pending", "2026-11-19T10:07:00Z", "{}"))
+conn.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES (?,?,?,?)",
+    ("item-q-bad-thread", "mcp:qbad", "user_input_request",
+     json.dumps({"requestId": "q-bad-thread", "questions": [{"header": "Kept", "question": "Still listed?"}]})))
+"#,
+    )
+}
+
+/// BRO-3936: every waiting AskUserQuestion card is a need on the owner, an ask whose source is the
+/// thread, listed beside the thread's permission prompts; an answered card is not.
+#[test]
+fn a_waiting_question_card_is_a_need() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(questions_db(tmp.path()))), None);
+    let live = hosts.live_permission_report(None, None);
+    let questions: Vec<_> = live.needs.iter().filter(|n| n.key.starts_with("question:")).collect();
+    let keys: Vec<&str> = questions.iter().map(|n| n.key.as_str()).collect();
+    assert_eq!(questions.len(), 7, "{keys:?}");
+    assert!(!keys.iter().any(|k| k.contains("q-done")), "an answered card is not a need: {keys:?}");
+    assert_eq!(live.needs.len(), 8, "the permission prompt still lists: {:?}", live.needs);
+    // A thread whose payload does not read keeps its waiting cards, as it keeps its prompts (P20 r1).
+    let kept = questions.iter().find(|n| n.key.ends_with("#q-bad-thread")).expect("listed from what is known");
+    assert_eq!(kept.title, "Question: Kept: Still listed?");
+    let wait = questions.iter().find(|n| n.key.ends_with("#q-wait")).unwrap();
+    assert_eq!((wait.kind, wait.source), (NeedKind::Ask, NeedSource::Questions));
+    assert_eq!(wait.title, "Question: Deploy · Font: Ship tonight? (2 questions)");
+    assert_eq!(wait.since.as_deref(), Some("2026-11-19T10:00:00Z"), "when the card was asked");
+    assert!(wait.ask.is_none(), "not a ledger ask");
+    assert_eq!(wait.unblocks, vec![wait.key.trim_start_matches("question:").split('#').next().unwrap().to_string()]);
+    let long = questions.iter().find(|n| n.key.ends_with("#q-long")).unwrap();
+    assert_eq!(long.title, format!("Question: question: {}…", "x".repeat(160)), "cut at 160 characters");
+}
+
+/// BRO-3936: a waiting card that does not read is still a need, titled so, and the listing names
+/// it unread with why; a request with no id is unread too. Nothing is dropped.
+#[test]
+fn a_question_card_that_does_not_read_is_listed_and_named() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(questions_db(tmp.path()))), None);
+    let live = hosts.live_permission_report(None, None);
+    for id in ["q-nocard", "q-empty", "q-noq", "q-blank"] {
+        let n = live.needs.iter().find(|n| n.key.ends_with(&format!("#{id}"))).expect(id);
+        assert_eq!(n.title, "Question waiting (its card did not read)", "{id}");
+    }
+    let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
+    // Four cards, q-long's missing header (named, never shown as complete), and mcp:qbad's payload.
+    assert_eq!(why.len(), 6, "{why:?}");
+    assert!(why.iter().any(|w| w.contains("q-long") && w.contains("question 1 has no header")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("q-nocard") && w.contains("has no card")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("q-empty") && w.contains("no questions")), "{why:?}");
+    for id in ["q-noq", "q-blank"] {
+        assert!(why.iter().any(|w| w.contains(id) && w.contains("no readable question")), "{id}: {why:?}");
+    }
+    // A JSON snapshot carries the same raw records: a card that does not parse, and one with no id.
+    let path = tmp.path().join("threads.json");
+    // P20 r1: records that do not decode (a number, a non-string id) are unread items; they never
+    // fail the thread's row, so its permission prompt still lists and its identity still resolves.
+    let rows = serde_json::json!([{ "id": "mcp:j", "cwd": "/w", "created_at": "2026-11-19T00:00:00Z", "status": "running",
+        "pending_permissions": [{ "name": "Bash", "input": { "command": "ls" } }],
+        "pending_questions": [
+            { "id": "j1", "created_at": "2026-11-19T11:00:00Z",
+              "item_payload_json": "{\"questions\": [{\"header\": \"H\", \"question\": \"Q?\"}]}" },
+            { "id": "j2", "item_payload_json": "{not json" },
+            { "item_payload_json": "{}" },
+            7,
+            { "id": 9 },
+            // P20 narrowed r1: a bad optional field never drops a keyable request.
+            { "id": "known", "created_at": 7, "item_payload_json": "{\"questions\": [{\"header\": \"K\", \"question\": \"Kept?\"}]}" },
+            { "id": "objcard", "item_payload_json": { "questions": [] } },
+            // A card that reads in part is listed from what read, and the rest is named unread.
+            { "id": "partial", "item_payload_json": "{\"questions\": [{\"header\": \"A\", \"question\": \"Readable?\"}, {\"header\": \"B\", \"question\": \"\"}]}" } ] }]);
+    std::fs::write(&path, rows.to_string()).unwrap();
+    let t3 = T3Registry::new(&path);
+    let live = SurfaceRegistry::new(None, Some(t3.clone()), None).live_permission_report(None, None);
+    let titles: Vec<&str> = live.needs.iter().map(|n| n.title.as_str()).collect();
+    // The prompt, j1, j2, known, objcard and partial: every request with an id is a need.
+    assert_eq!(titles.len(), 6, "{titles:?}");
+    assert!(
+        titles.contains(&"Question: H: Q?") && titles.contains(&"Question waiting (its card did not read)"),
+        "{titles:?}"
+    );
+    assert!(titles.contains(&"Question: K: Kept?"), "a bad created_at keeps the need: {titles:?}");
+    assert!(titles.contains(&"Question: A · B: Readable? (2 questions)"), "{titles:?}");
+    let keys: Vec<&str> = live.needs.iter().map(|n| n.key.as_str()).collect();
+    for id in ["#known", "#objcard", "#partial"] {
+        assert!(keys.iter().any(|k| k.ends_with(id)), "{id}: {keys:?}");
+    }
+    let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
+    assert_eq!(why.len(), 7, "{why:?}");
+    assert!(why.iter().any(|w| w.contains("j2") && w.contains("does not parse")), "{why:?}");
+    assert_eq!(why.iter().filter(|w| w.contains("has no id")).count(), 2, "an id-less record and a number id: {why:?}");
+    assert!(why.iter().any(|w| w.contains("is not an object")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("known") && w.contains("created_at that is not text")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("objcard") && w.contains("card that is not text")), "{why:?}");
+    assert!(why.iter().any(|w| w.contains("partial") && w.contains("question 2 has no question")), "{why:?}");
+    assert!(t3.find("mcp:j").is_some(), "identity is untouched by an undecodable question record");
+}
+
+/// P20 narrowed round 2, hoisted: every field a question request or its card carries is read by one
+/// rule. This breaks each field of a valid card in each way a field can fail (a number, an object,
+/// a list, null, empty, blank) and asserts the same outcome every time: the need stays, keyed by its
+/// request, and the field is named unread. An id that does not read is the one field that drops
+/// the request, and that is reported too.
+#[test]
+fn every_card_field_that_does_not_read_is_named_and_the_need_stays() {
+    use serde_json::{Value, json};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("threads.json");
+    let read = |request: Value| {
+        let rows = json!([{ "id": "mcp:g", "cwd": "/w", "created_at": "2026-11-19T00:00:00Z", "status": "running",
+            "pending_questions": [request] }]);
+        std::fs::write(&path, rows.to_string()).unwrap();
+        let live = SurfaceRegistry::new(None, Some(T3Registry::new(&path)), None).live_permission_report(None, None);
+        let keys: Vec<String> = live.needs.iter().map(|n| n.key.clone()).collect();
+        let why: Vec<String> = live.errors().iter().map(|e| e.reason.clone()).collect();
+        (keys, why)
+    };
+    let card = |qs: &Value| json!({ "questions": qs }).to_string();
+    let request =
+        |payload: Value, created: Value| json!({ "id": "g", "created_at": created, "item_payload_json": payload });
+    let good = json!([{ "header": "H1", "question": "Q1?" }, { "header": "H2", "question": "Q2?" }]);
+    let (keys, why) = read(request(Value::String(card(&good)), json!("2026-11-19T10:00:00Z")));
+    assert_eq!((keys.len(), why.len()), (1, 0), "the valid card reads whole: {why:?}");
+
+    let bad = [json!(7), json!({}), json!([]), Value::Null, json!(""), json!("   ")];
+    let mut cases = 0;
+    for n in 0..2 {
+        for key in ["header", "question"] {
+            for value in &bad {
+                let mut qs = good.clone();
+                qs[n][key] = value.clone();
+                let (keys, why) = read(request(Value::String(card(&qs)), json!("2026-11-19T10:00:00Z")));
+                let case = format!("question {} {key} = {value}", n + 1);
+                assert_eq!(keys.len(), 1, "{case}: the need stays");
+                assert!(keys[0].ends_with("#g"), "{case}: {keys:?}");
+                let named = |w: &String| {
+                    w.contains(&format!("question {} has no {key}", n + 1))
+                        || w.contains(&format!("question {} has a {key} that is not text", n + 1))
+                };
+                assert_eq!(why.len(), 1, "{case}: {why:?}");
+                assert!(named(&why[0]), "{case}: the field is named: {why:?}");
+                cases += 1;
+            }
+        }
+    }
+    assert_eq!(cases, 24);
+    // A question that is not an object at all.
+    let (keys, why) =
+        read(request(Value::String(card(&json!([7, { "header": "H2", "question": "Q2?" }]))), Value::Null));
+    assert_eq!(keys.len(), 1);
+    assert!(why.len() == 1 && why[0].contains("question 1 is not an object"), "{why:?}");
+    // The request's own fields: each that does not read is named, and the need stays.
+    for (payload, created, says) in [
+        (Value::String(card(&good)), json!(7), "created_at that is not text"),
+        (Value::String(card(&good)), json!({}), "created_at that is not text"),
+        (json!(7), Value::Null, "card that is not text"),
+        (json!({ "questions": [] }), Value::Null, "card that is not text"),
+        (json!(""), Value::Null, "has no card"),
+        (json!("{not json"), Value::Null, "card that does not parse"),
+        (json!("{\"questions\": {}}"), Value::Null, "questions are not a list"),
+        (json!("{\"questions\": []}"), Value::Null, "card with no questions"),
+    ] {
+        let (keys, why) = read(request(payload.clone(), created.clone()));
+        assert_eq!(keys.len(), 1, "{payload} / {created}: the need stays");
+        assert!(why.len() == 1 && why[0].contains(says), "{payload} / {created}: {why:?}");
+    }
+    // The id is the one field that drops a request, and that is reported.
+    for id in [json!(7), json!(""), Value::Null, json!({})] {
+        let (keys, why) = read(json!({ "id": id, "item_payload_json": card(&good) }));
+        assert!(keys.is_empty(), "{id}");
+        assert!(why.len() == 1 && why[0].contains("has no id"), "{id}: {why:?}");
     }
 }

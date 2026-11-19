@@ -9,8 +9,8 @@
 use crate::paseo::{RawRuntimeRequest, check_peer, decode_permissions, decode_runtime_requests, short_id, within};
 use crate::read::{self, Read};
 use maestro_core::session::{
-    BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, RefusalReason,
-    SessionLiveness, SessionRef, Surface, VerifiedSession,
+    BridgeDiscovery, BridgeTransport, CallerClaim, Harness, IdentityRefusal, NodeId, PermissionPrompt, QuestionPrompt,
+    RefusalReason, SessionLiveness, SessionRef, Surface, VerifiedSession,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,9 +64,13 @@ pub struct T3Thread {
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
-    /// Pending permission records that did not decode, each with why (BRO-3863).
+    /// Pending permission records that did not decode, each with why (BRO-3863), and waiting
+    /// questions whose cards did not read (BRO-3936).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unread_permissions: Vec<String>,
+    /// AskUserQuestion cards waiting for the owner in this thread (BRO-3936).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_questions: Vec<QuestionPrompt>,
 }
 
 impl T3Thread {
@@ -142,6 +146,11 @@ struct RawT3Thread {
     /// The thread's pending runtime requests, raw, as the SQLite reader emits them (BRO-3863).
     #[serde(default)]
     runtime_requests: Vec<RawRuntimeRequest>,
+    /// The thread's pending `user_input` requests (AskUserQuestion cards), raw, each with its
+    /// card's turn-item payload when one was found (BRO-3936). Raw values, as permission records
+    /// are: one that does not decode is unread, and never fails the thread's row (P20 r1).
+    #[serde(default)]
+    pending_questions: Option<Vec<Value>>,
     /// The thread's active provider-thread row (`active_provider_thread_id`).
     #[serde(default)]
     active_provider_thread_id: Option<String>,
@@ -154,6 +163,134 @@ struct RawT3Thread {
     /// listed from what is known, its permission prompts included, and the listing reports it.
     #[serde(default)]
     unreadable: Option<String>,
+}
+
+/// How much of a card's first question a need's title carries.
+const QUESTION_DETAIL_CHARS: usize = 160;
+
+/// One field of a question request or of a card's question, as the one rule every field follows
+/// reads it (P20 narrowed round 2, hoisted): a non-blank string reads; absent, null or blank is
+/// missing; any other value does not read. Each caller says whether a missing field is unread.
+enum Field {
+    Text(String),
+    Missing,
+    NotText,
+}
+
+fn field(record: &serde_json::Map<String, Value>, key: &str) -> Field {
+    match record.get(key) {
+        None | Some(Value::Null) => Field::Missing,
+        Some(Value::String(s)) if s.trim().is_empty() => Field::Missing,
+        Some(Value::String(s)) => Field::Text(s.clone()),
+        Some(_) => Field::NotText,
+    }
+}
+
+/// A card's question, read field by field: its header and text where they read, and a reason
+/// for every field that did not. Both fields are required: a card question always has them.
+struct Question {
+    header: Option<String>,
+    text: Option<String>,
+    unread: Vec<String>,
+}
+
+fn read_question(n: usize, q: &Value) -> Question {
+    let Some(q) = q.as_object() else {
+        return Question { header: None, text: None, unread: vec![format!("question {n} is not an object")] };
+    };
+    let mut unread = Vec::new();
+    let mut required = |key: &str| match field(q, key) {
+        Field::Text(s) => Some(s),
+        Field::Missing => {
+            unread.push(format!("question {n} has no {key}"));
+            None
+        }
+        Field::NotText => {
+            unread.push(format!("question {n} has a {key} that is not text"));
+            None
+        }
+    };
+    let header = required("header");
+    let text = required("question");
+    Question { header, text, unread }
+}
+
+/// A thread's waiting AskUserQuestion cards as prompts (BRO-3936). Every field is read by
+/// [`field`], so one rule decides what read and what did not. A request is dropped only when it
+/// has no id to key it by, and that is reported unread. A field that did not read anywhere else is
+/// reported unread by name, and the need stays: a card that reads in part is listed from what
+/// read, and one with no readable question is listed as a card that did not read.
+fn decode_questions(raw: Vec<Value>, thread: &str) -> (Vec<QuestionPrompt>, Vec<String>) {
+    let mut prompts = Vec::new();
+    let mut unread = Vec::new();
+    for (i, value) in raw.into_iter().enumerate() {
+        let Some(record) = value.as_object() else {
+            unread.push(format!("question request {i} of thread {thread} is not an object"));
+            continue;
+        };
+        let Field::Text(id) = field(record, "id") else {
+            unread.push(format!("question request {i} of thread {thread} has no id"));
+            continue;
+        };
+        let at = format!("question request {id} of thread {thread}");
+        let asked_at = match field(record, "created_at") {
+            Field::Text(s) => Some(s),
+            Field::Missing => None,
+            Field::NotText => {
+                unread.push(format!("{at} has a created_at that is not text"));
+                None
+            }
+        };
+        let card = match field(record, "item_payload_json") {
+            Field::Missing => Err("has no card (no user_input_request item)"),
+            Field::NotText => Err("has a card that is not text"),
+            Field::Text(text) => match serde_json::from_str::<Value>(&text) {
+                Err(_) => Err("has a card that does not parse"),
+                Ok(v) => match v.get("questions") {
+                    Some(Value::Array(qs)) if !qs.is_empty() => {
+                        Ok(qs.iter().enumerate().map(|(n, q)| read_question(n + 1, q)).collect::<Vec<_>>())
+                    }
+                    Some(Value::Array(_)) | None => Err("has a card with no questions"),
+                    Some(_) => Err("has a card whose questions are not a list"),
+                },
+            },
+        };
+        let (title, detail) = match card {
+            Ok(qs) => {
+                let missing: Vec<String> = qs.iter().flat_map(|q| q.unread.iter().cloned()).collect();
+                if qs.iter().any(|q| q.text.is_some()) {
+                    if !missing.is_empty() {
+                        unread.push(format!("{at} has fields that did not read: {}", missing.join("; ")));
+                    }
+                    describe_questions(&qs)
+                } else {
+                    unread.push(format!("{at} has a card with no readable question: {}", missing.join("; ")));
+                    ("Question waiting (its card did not read)".to_string(), None)
+                }
+            }
+            Err(why) => {
+                unread.push(format!("{at} {why}"));
+                ("Question waiting (its card did not read)".to_string(), None)
+            }
+        };
+        prompts.push(QuestionPrompt { request_id: id, title, detail, asked_at });
+    }
+    (prompts, unread)
+}
+
+/// `Question: <header> · <header>` and the first question that read, cut at
+/// [`QUESTION_DETAIL_CHARS`]. A header that did not read shows as `question`; it is reported.
+fn describe_questions(qs: &[Question]) -> (String, Option<String>) {
+    let headers: Vec<&str> = qs.iter().map(|q| q.header.as_deref().unwrap_or("question")).collect();
+    let first = qs.iter().find_map(|q| q.text.as_deref());
+    let detail = first.map(|q| {
+        let mut cut: String = q.chars().take(QUESTION_DETAIL_CHARS).collect();
+        if q.chars().count() > QUESTION_DETAIL_CHARS {
+            cut.push('…');
+        }
+        if qs.len() > 1 { format!("{cut} ({} questions)", qs.len()) } else { cut }
+    });
+    (format!("Question: {}", headers.join(" · ")), detail)
 }
 
 /// The live threads a listing found, and what it could not read (BRO-3846). The listing feeds
@@ -267,6 +404,33 @@ def main():
                     requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})
         return requests
 
+    def pending_questions_of(thread_id):
+        # A thread's waiting AskUserQuestion cards (BRO-3936): pending `user_input` requests, raw,
+        # each with the payload of its `user_input_request` turn item (the questions) or None when
+        # none was found. Stored apart from the payload, like permission requests. The reader does
+        # not interpret the card: Rust does (`decode_questions`).
+        out = []
+        if "orchestration_v2_projection_runtime_requests" not in tables:
+            return out
+        has_items = "orchestration_v2_projection_turn_items" in tables
+        for req in conn.execute(
+            "SELECT runtime_request_id, created_at "
+            "FROM orchestration_v2_projection_runtime_requests "
+            "WHERE thread_id = ? AND status = 'pending' AND kind = 'user_input' ORDER BY created_at ASC",
+            (thread_id,),
+        ):
+            item = None
+            if has_items:
+                hit = conn.execute(
+                    "SELECT payload_json FROM orchestration_v2_projection_turn_items "
+                    "WHERE thread_id = ? AND type = 'user_input_request' "
+                    "AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.requestId') END = ? LIMIT 1",
+                    (thread_id, req["runtime_request_id"]),
+                ).fetchone()
+                item = hit["payload_json"] if hit else None
+            out.append({"id": req["runtime_request_id"], "created_at": req["created_at"], "item_payload_json": item})
+        return out
+
     def build_thread(row):
         payload = payload_of(row["payload_json"], f"thread {row['thread_id']}'s payload")
         cwd = payload.get("worktreePath")
@@ -320,6 +484,7 @@ def main():
             "parent_id": parent_id,
             "pending_permissions": [],
             "runtime_requests": runtime_requests_of(row["thread_id"]),
+            "pending_questions": pending_questions_of(row["thread_id"]),
         }
 
     if mode == "native":
@@ -395,6 +560,7 @@ def main():
                         "parent_id": None,
                         "pending_permissions": [],
                         "runtime_requests": runtime_requests_of(row["thread_id"]),
+                        "pending_questions": pending_questions_of(row["thread_id"]),
                         "unreadable": str(exc),
                     }
                 if built is not None:
@@ -614,6 +780,9 @@ impl T3Registry {
         let (requested, unread_requests) = decode_runtime_requests(raw.runtime_requests, &raw.id, &raw.cwd, "t3-perm");
         pending_permissions.extend(requested);
         unread_permissions.extend(unread_requests);
+        let (pending_questions, unread_questions) =
+            decode_questions(raw.pending_questions.unwrap_or_default(), &raw.id);
+        unread_permissions.extend(unread_questions);
         T3Thread {
             id: raw.id,
             cwd: raw.cwd,
@@ -629,6 +798,7 @@ impl T3Registry {
             parent_id: raw.parent_id,
             pending_permissions,
             unread_permissions,
+            pending_questions,
         }
     }
 

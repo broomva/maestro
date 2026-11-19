@@ -7,8 +7,8 @@
 //! one that opens with `server/discover` (2026-07-28, stateless over HTTP).
 
 use maestro_core::authority::OwnerVerb;
+use maestro_mcp::MaestroServer;
 use maestro_mcp::http::{self, Bind};
-use maestro_mcp::{MaestroServer, call};
 use maestro_store::{Paths, Store, TreeSource};
 use rmcp::model::{CallToolRequestParams, GetPromptRequestParams, ProtocolVersion, ReadResourceRequestParams};
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService};
@@ -44,13 +44,14 @@ impl Transports {
         let cancel = CancellationToken::new();
         let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
         let url = format!("http://{}{}", listener.local_addr().unwrap(), http::PATH);
-        tokio::spawn(http::serve(store.clone(), listener, cancel.clone()));
+        let server = MaestroServer::new(store.clone()).shared().with_hosts(isolated());
+        tokio::spawn(http::serve_server(server, listener, cancel.clone()));
 
         let mut clients = Vec::new();
         for (name, lifecycle) in [("stdio/initialize", initialize()), ("stdio/discover", discover())] {
             let (server_end, client_end) = tokio::io::duplex(1 << 20);
-            let store = store.clone();
-            tokio::spawn(async move { maestro_mcp::serve_io(store, tokio::io::split(server_end)).await });
+            let server = MaestroServer::new(store.clone()).with_hosts(isolated());
+            tokio::spawn(async move { maestro_mcp::serve_io_with(server, tokio::io::split(server_end)).await });
             clients.push((name, ().serve_with_lifecycle(client_end, lifecycle).await.expect(name)));
         }
         for (name, lifecycle) in [("http/initialize", initialize()), ("http/discover", discover())] {
@@ -82,8 +83,15 @@ impl Transports {
 }
 
 /// What the in-process dispatch says a tool call returns, in `CallToolResult` terms.
+/// No live session registry (BRO-3936, P20 narrowed round 2): every transport and the expected
+/// dispatch read the same empty one, so a session going live on the machine running the tests
+/// cannot change one read and not another.
+fn isolated() -> maestro_hosts::SurfaceRegistry {
+    maestro_hosts::SurfaceRegistry::new(None, None, None)
+}
+
 fn expected(store: &Store, tool: &str, args: &Value) -> (bool, Value) {
-    match call(store, tool, args.clone()) {
+    match maestro_mcp::call_with_hosts(store, &isolated(), tool, args.clone()) {
         Ok(v) => (false, v),
         Err(e) => (true, Value::String(e.message.to_string())),
     }
@@ -402,7 +410,7 @@ async fn http_takes_the_bound_address_as_host() {
     // address from a loopback socket: `Host` is checked against the address the service was given.
     let tailnet: std::net::SocketAddr = "100.100.100.100:7171".parse().unwrap();
     let cancel = CancellationToken::new();
-    let mcp = http::service(MaestroServer::new(fixture()), tailnet, cancel.clone());
+    let mcp = http::service(MaestroServer::new(fixture()).with_hosts(isolated()), tailnet, cancel.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let stop = cancel.clone();
