@@ -2598,6 +2598,9 @@ mutate $ht '                    if !missing.is_empty() {' '                    i
 mutate $ht '                if qs.iter().any(|q| q.text.is_some()) {' '                if true {'
 mutate $ht '            Field::NotText => Err("has a card that is not text"),' '            Field::NotText => continue,'
 mutate $ht '                unread.push(format!("{at} has a created_at that is not text"));' ''
+# P20 narrowed round 3 (Codex): http::serve_server serves any server SHARED, so a caller-mode
+# server over HTTP attributes nobody by the daemon's own thread variables.
+mutate crates/mcp/src/http.rs '    let server = server.shared();' ''
 mutate $hp '            Err(why) => unread.push(format!("permission record {i} {why}")),' '            Err(_) => {}'
 mutate $hp '        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {' '        let payload = match req.payload_json.as_deref() {'
 mutate $hp '            None => Err("is empty"),' '            None => Ok(serde_json::Map::new()),'
