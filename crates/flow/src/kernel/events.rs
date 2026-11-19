@@ -492,10 +492,11 @@ pub fn receipt_digest(outputs: &Value, value: Option<&str>) -> String {
 }
 
 /// The digest of a receipt that records a performer, at IR version 9 (BRO-3828):
-/// [`receipt_digest`]'s content and the harness of that performer. A consumer
-/// binds it like any input, so a re-run by another performer with the same outputs changes the
-/// consumer's inputs, and a claim or completion judged against the old performer is refused
-/// (`inputs_changed`), whenever it lands.
-pub fn routed_receipt_digest(outputs: &Value, value: Option<&str>, harness: Option<&str>) -> String {
-    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": harness }))
+/// [`receipt_digest`]'s content and that performer exactly as its event records it, which is the
+/// value the guard document and the verify's input show. A consumer binds it like any input, so a
+/// re-run by another performer (another provider, or another session of the same one) with the
+/// same outputs changes the consumer's inputs, and a claim or completion judged against the old
+/// performer is refused (`inputs_changed`), whenever it lands.
+pub fn performer_receipt_digest(outputs: &Value, value: Option<&str>, performer: &Value) -> String {
+    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer }))
 }

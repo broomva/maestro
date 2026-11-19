@@ -236,7 +236,7 @@ nodes:
 
 /// b claimed over a's Gemini receipt; while b's command runs, a is redone by Codex with the same
 /// outputs (its upstream observation moved, so it can run again). b's completion's outcome.
-fn redone_while_judged(yaml: &str) -> String {
+fn redone_while_judged(yaml: &str, again: Harness) -> String {
     let mut f = fx(yaml);
     std::fs::write(f.dir.join("n"), "0").unwrap();
     let fi = f.begin();
@@ -261,7 +261,7 @@ fn redone_while_judged(yaml: &str) -> String {
         std::fs::write(dir.join("n"), "1").unwrap();
         for node in ["source", "a"] {
             let c = claim_as(&mut ledger, &me, &inst, node, None).unwrap();
-            let codex = (node == "a").then(|| child("c", Harness::Codex));
+            let codex = (node == "a").then(|| child("c", again.clone()));
             let done = complete_as(&mut ledger, &me, &c.token, Value::Null, &quick(), codex.as_ref()).unwrap();
             assert_eq!(outcome(&done), "completed", "{node}");
         }
@@ -278,7 +278,7 @@ fn redone_while_judged(yaml: &str) -> String {
 fn a_node_redone_by_the_performers_provider_while_its_route_is_judged_refuses_the_work() {
     // P20 round 1 (BLOCKER): a's receipt binds its performer, so b's inputs changed and its
     // completion is refused, though a's outputs did not.
-    assert_eq!(redone_while_judged(RERUN), "inputs_changed");
+    assert_eq!(redone_while_judged(RERUN, Harness::Codex), "inputs_changed");
 }
 
 /// As [`RERUN`], with b unrouted in a flow another route makes IR 9: b's verify still sees a's
@@ -302,5 +302,8 @@ fn a_receipt_whose_performer_a_verify_sees_binds_it_whether_or_not_a_route_names
     // P20 round 5 (MAJOR): only receipts a route named bound their performer, yet every consumed
     // receipt's performer was shown to verifies and guards.
     assert_eq!(compile(RERUN_UNROUTED).unwrap().ir().ir_version, 9);
-    assert_eq!(redone_while_judged(RERUN_UNROUTED), "inputs_changed");
+    assert_eq!(redone_while_judged(RERUN_UNROUTED, Harness::Codex), "inputs_changed");
+    // P20 round 6 (MAJOR): another session of the same provider is another performer, and the
+    // verify sees its session, so the receipt binds that too.
+    assert_eq!(redone_while_judged(RERUN_UNROUTED, Harness::Gemini), "inputs_changed");
 }

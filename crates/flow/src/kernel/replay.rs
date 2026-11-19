@@ -91,8 +91,8 @@ use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
     Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat,
-    KernelEvent, Refused, Started, StopUnblockable, StopUnverified, Unblockable, digest, receipt_digest,
-    routed_receipt_digest,
+    KernelEvent, Refused, Started, StopUnblockable, StopUnverified, Unblockable, digest, performer_receipt_digest,
+    receipt_digest,
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, RouteRef, Wait};
 use super::write;
@@ -923,12 +923,13 @@ impl<'a> Fold<'a> {
                     _ => at,
                 };
                 let mut receipt = Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs);
-                // At IR 9 a receipt binds the performer it records (BRO-3828): the guard document
-                // and the verify's input show every consumed receipt's performer, so a re-run by
-                // another performer with the same outputs changes its consumers' inputs.
-                if ir.ir_version >= 9 && c.performer.is_some() {
-                    let harness = c.performer.as_ref().map(|p| p.harness.as_str());
-                    receipt.digest = Rc::from(routed_receipt_digest(&c.outputs, receipt.value.as_deref(), harness));
+                // At IR 9 a receipt binds the performer it records (BRO-3828), the very value
+                // `document` shows the guards and the verify, so what they see is what is bound.
+                if ir.ir_version >= 9
+                    && let Some(performer) = e.body.get("performer").filter(|p| !p.is_null())
+                {
+                    receipt.digest =
+                        Rc::from(performer_receipt_digest(&c.outputs, receipt.value.as_deref(), performer));
                 }
                 (receipt, c.attempt)
             }
