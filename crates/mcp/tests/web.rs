@@ -241,3 +241,119 @@ async fn without_an_answer_thread_the_decision_stays_read_only() {
     assert!(!r.body.contains("data-handoff") && !r.body.contains("t3code://"));
     cancel.cancel();
 }
+
+/// A T3 registry (`statev2.sqlite`) with one live thread waiting on one AskUserQuestion card.
+fn t3_with_a_waiting_card(dir: &Path) {
+    std::fs::create_dir_all(dir.join("userdata")).unwrap();
+    let script = r#"
+import json, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.executescript("""
+CREATE TABLE orchestration_v2_projection_threads (
+  thread_id TEXT PRIMARY KEY, project_id TEXT, title TEXT, default_provider TEXT,
+  active_provider_thread_id TEXT, created_at TEXT, updated_at TEXT, archived_at TEXT,
+  deleted_at TEXT, payload_json TEXT);
+CREATE TABLE orchestration_v2_projection_runtime_requests (
+  runtime_request_id TEXT, thread_id TEXT, kind TEXT, status TEXT, created_at TEXT, payload_json TEXT);
+CREATE TABLE orchestration_v2_projection_turn_items (
+  turn_item_id TEXT, thread_id TEXT, type TEXT, payload_json TEXT);
+""")
+conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ("mcp:q", "p", "t", "claude", None, "2026-11-19T00:00:00Z", "2026-11-19T00:00:00Z", None, None,
+     json.dumps({"worktreePath": "/w"})))
+conn.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)",
+    ("req-1", "mcp:q", "user_input", "pending", "2026-11-19T10:00:00Z", "{}"))
+conn.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES (?,?,?,?)",
+    ("item-1", "mcp:q", "user_input_request",
+     json.dumps({"requestId": "req-1", "questions": [{"header": "Deploy", "question": "Ship tonight?"}]})))
+conn.commit()
+"#;
+    let out = std::process::Command::new("python3")
+        .arg("-I")
+        .arg("-c")
+        .arg(script)
+        .arg(dir.join("userdata/statev2.sqlite"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// The "needs you" pill's value on `/today`.
+fn needs_pill(body: &str) -> String {
+    let at = body.find(r#"data-pill="needs you""#).expect("the needs pill");
+    let rest = &body[at..];
+    let v = rest.find(r#"class="mv-pill-value"#).expect("a value");
+    let open = rest[v..].find('>').unwrap() + v + 1;
+    rest[open..open + rest[open..].find('<').unwrap()].to_string()
+}
+
+async fn serve_with(server: maestro_mcp::MaestroServer) -> (SocketAddr, CancellationToken) {
+    let cancel = CancellationToken::new();
+    let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(http::serve_server(server, listener, cancel.clone()));
+    (addr, cancel)
+}
+
+/// BRO-3936 (P20 round 2): the owner's pages count a waiting AskUserQuestion card a live T3
+/// session holds, and every surface that lists needs lists it: the daemon's own registry reads
+/// T3, `/today`'s "needs you" counts one more than without it, `/decisions` lists it in "Needs
+/// you" once no ledger ask is open, and `maestro_ui_render` and `maestro_needs_list` list it.
+#[tokio::test]
+async fn a_waiting_question_card_reaches_the_pages() {
+    let t3 = tempfile::tempdir().unwrap();
+    t3_with_a_waiting_card(t3.path());
+    let with_t3 = || maestro_hosts::SurfaceRegistry::new(None, Some(maestro_hosts::T3Registry::new(t3.path())), None);
+    let without_t3 = maestro_hosts::SurfaceRegistry::new(None, None, None);
+
+    let (addr, cancel) = serve_with(maestro_mcp::MaestroServer::new(fixture()).shared().with_hosts(without_t3)).await;
+    let before = needs_pill(&send(addr, "GET", "/today", &addr.to_string(), &[]).await.body);
+    cancel.cancel();
+    let server = maestro_mcp::MaestroServer::new(fixture()).shared().with_hosts(with_t3());
+    let (addr, cancel) = serve_with(server.clone()).await;
+    let r = send(addr, "GET", "/today", &addr.to_string(), &[]).await;
+    assert_page(&r, "today", "/today");
+    let after = needs_pill(&r.body);
+    assert_eq!(after.parse::<usize>().unwrap(), before.parse::<usize>().unwrap() + 1, "{before} -> {after}");
+    cancel.cancel();
+
+    // A machine whose asks are all answered: `/decisions` falls back to the Needs card, which lists the card.
+    let calm = tempfile::tempdir().unwrap();
+    copy_tree(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/machine"), calm.path());
+    let asks = calm.path().join("workspace/.control/asks");
+    for entry in std::fs::read_dir(&asks).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let store = Store::new(Paths::under(calm.path().to_path_buf()), TreeSource::WorkingTree);
+    let (addr, cancel) = serve_with(maestro_mcp::MaestroServer::new(store).shared().with_hosts(with_t3())).await;
+    let r = send(addr, "GET", "/decisions", &addr.to_string(), &[]).await;
+    assert_page(&r, "decisions", "/decisions");
+    assert!(r.body.contains("Question: Deploy: Ship tonight?"), "the card is in Needs you: {}", r.body);
+    assert!(r.body.contains("question:t3:"), "keyed by its session: {}", r.body);
+    assert!(!r.body.contains(r#"class="mv-calm""#), "a waiting card is not calm: {}", r.body);
+    cancel.cancel();
+
+    let rendered = server
+        .call("maestro_ui_render", serde_json::json!({ "root": "n", "blocks": { "n": { "type": "needs" } } }))
+        .unwrap();
+    assert!(rendered["html"].as_str().unwrap().contains("Question: Deploy: Ship tonight?"), "{rendered}");
+    // The poll is the render's second call site: it renders the same live holds.
+    let spec = serde_json::json!({ "root": "n", "blocks": { "n": { "type": "needs" } } });
+    let polled = server.call("maestro_ui_poll", serde_json::json!({ "spec": spec })).unwrap();
+    assert!(polled.to_string().contains("Question: Deploy: Ship tonight?"), "{polled}");
+    let needs = server.call("maestro_needs_list", serde_json::json!({})).unwrap();
+    assert!(needs.to_string().contains("Question: Deploy: Ship tonight?"), "{needs}");
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dest = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}

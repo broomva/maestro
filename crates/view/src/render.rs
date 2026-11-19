@@ -90,6 +90,21 @@ pub fn render_at(store: &Store, v: &Validated, at: jiff::Timestamp) -> Rendered 
     render_with(store, v, at, None)
 }
 
+/// Holds on the owner that live sessions report and the ledgers do not hold: permission prompts
+/// and waiting AskUserQuestion cards (BRO-3936), with the sources that could not be read for them.
+/// A render given them counts them in "Needs you" exactly as `maestro_snapshot` does.
+#[derive(Debug, Clone, Default)]
+pub struct LiveNeeds {
+    pub needs: Vec<maestro_core::need::Need>,
+    pub errors: Vec<maestro_core::section::SourceError>,
+}
+
+/// [`render`] with the live needs added to the snapshot every block reads (BRO-3936).
+pub fn render_live(store: &Store, v: &Validated, live: &LiveNeeds) -> Rendered {
+    let cx = Ctx::new(store, views::now(), None, Some(live));
+    finish(&cx, v, node(&cx, &v.root))
+}
+
 /// Render as of `at`, with open decisions offering the T3 answer handoff to `answer_thread`.
 pub fn render_with(
     store: &Store,
@@ -97,7 +112,7 @@ pub fn render_with(
     at: jiff::Timestamp,
     answer_thread: Option<&crate::handoff::AnswerThread>,
 ) -> Rendered {
-    let cx = Ctx::new(store, at, answer_thread);
+    let cx = Ctx::new(store, at, answer_thread, None);
     finish(&cx, v, node(&cx, &v.root))
 }
 
@@ -110,7 +125,19 @@ pub fn render_web(
     at: jiff::Timestamp,
     answer_thread: Option<&crate::handoff::AnswerThread>,
 ) -> (Rendered, crate::page::Shell) {
-    let cx = Ctx::new(store, at, answer_thread);
+    render_web_live(store, v, at, answer_thread, None)
+}
+
+/// [`render_web`] with the live needs added (BRO-3936): the pages and their header count the
+/// holds live sessions report, as `maestro_snapshot` does.
+pub fn render_web_live(
+    store: &Store,
+    v: &Validated,
+    at: jiff::Timestamp,
+    answer_thread: Option<&crate::handoff::AnswerThread>,
+    live: Option<&LiveNeeds>,
+) -> (Rendered, crate::page::Shell) {
+    let cx = Ctx::new(store, at, answer_thread, live);
     let screen = match &v.root.block {
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
         Block::Decision(p) => crate::screens::web::decide(&cx, &v.root.id, &p.ledger, &p.id),
@@ -121,9 +148,22 @@ pub fn render_web(
 }
 
 impl<'a> Ctx<'a> {
-    fn new(store: &'a Store, at: jiff::Timestamp, answer_thread: Option<&crate::handoff::AnswerThread>) -> Self {
+    fn new(
+        store: &'a Store,
+        at: jiff::Timestamp,
+        answer_thread: Option<&crate::handoff::AnswerThread>,
+        live: Option<&LiveNeeds>,
+    ) -> Self {
         let reads = Reads::of(store);
-        let snap = views::snapshot_of(store, &reads, at);
+        let mut snap = views::snapshot_of(store, &reads, at);
+        // Live holds join the ledgers' needs as `maestro_snapshot` adds them (BRO-3936): what did
+        // not read is an error of the section, so the card never looks complete when it is not.
+        if let Some(live) = live {
+            snap.needs.errors.extend(live.errors.iter().cloned());
+            if let Some(list) = snap.needs.data.as_mut() {
+                list.extend(live.needs.iter().cloned());
+            }
+        }
         Ctx {
             store,
             reads,

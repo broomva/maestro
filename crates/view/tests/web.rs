@@ -440,3 +440,42 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
         "the web page runs and fetches nothing"
     );
 }
+
+/// BRO-3936: a waiting AskUserQuestion card a live session reports is a hold on the owner. Given
+/// as live needs, it is listed in "Needs you" and counted in the header, so the calm screen never
+/// shows while a card waits; a live source that did not read keeps the count unknown.
+#[test]
+fn a_live_question_is_a_need_on_the_page_and_in_the_header() {
+    use maestro_core::need::{Need, NeedKind, NeedSource};
+    use maestro_core::section::SourceError;
+    use maestro_view::{LiveNeeds, render_web_live};
+    let calm = all_answered(false);
+    let store = worktree(calm.path());
+    let v = validate(&spec(json!({ "type": "decisions" }))).unwrap();
+    let question = Need {
+        kind: NeedKind::Ask,
+        source: NeedSource::Questions,
+        key: "question:t3:env/thread-a#req-1".into(),
+        title: "Question: Deploy: Ship tonight?".into(),
+        since: Some("2026-11-19T10:00:00Z".into()),
+        ask: None,
+        project: None,
+        unblocks: vec!["t3:env/thread-a".into()],
+    };
+    let live = LiveNeeds { needs: vec![question], errors: vec![] };
+    let (r, shell) = render_web_live(&store, &v, at(), None, Some(&live));
+    assert!(!r.html.contains("mv-calm"), "a waiting card is not calm: {}", r.html);
+    assert!(r.html.contains("Question: Deploy: Ship tonight?"), "{}", r.html);
+    assert!(r.html.contains(r#"data-key="question:t3:env/thread-a#req-1""#), "{}", r.html);
+    assert_eq!(shell.needs, Some(1), "{shell:?}");
+    assert!(!shell.calm, "{shell:?}");
+    // The same page without it is calm: the live need is what changed it.
+    let (_, without) = render_web_live(&store, &v, at(), None, None);
+    assert!(without.calm && without.needs == Some(0), "{without:?}");
+    // A live source that did not read: the count is unknown and the card says so.
+    let unread =
+        LiveNeeds { needs: vec![], errors: vec![SourceError { at: "t3".into(), reason: "unreadable".into() }] };
+    let (r, shell) = render_web_live(&store, &v, at(), None, Some(&unread));
+    assert_eq!((shell.calm, shell.needs), (false, None), "{shell:?}");
+    assert!(r.html.contains("Nothing needs you in what could be read."), "{}", r.html);
+}
