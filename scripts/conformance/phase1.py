@@ -128,6 +128,8 @@ def require_mcp_event_match(excerpt, events, harness):
         verb=item.get('mcp_tool') or item.get('tool_name','').removeprefix('mcp_maestro_')
         args=item.get('arguments') if isinstance(item.get('arguments'),dict) else item.get('parameters') if isinstance(item.get('parameters'),dict) else {}
         seq=item.get('result',{}).get('seq')
+        if seq is not None and type(seq) is not int:
+            raise Failure('MCP result sequence must be an integer')
         e=by_seq.get(seq,{}); body=e.get('body',{})
         if verb=='maestro_flow_claim' and args.get('node_id')!=body.get('node'):
             continue

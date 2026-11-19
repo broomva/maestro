@@ -163,6 +163,17 @@ class Guards(unittest.TestCase):
                              {'seq':2,'kind':'Completed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}}]
             require_mcp_event_match([{**calls[0],'result':{'seq':3}},{**calls[1],'result':{'seq':2}}],reversed_events,'agy')
 
+    def test_a_non_integer_mcp_sequence_is_refused_not_crashed_or_coerced(self):
+        events=[{'seq':1,'kind':'Claimed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}},
+                {'seq':3,'kind':'Completed','body':{'node':'pin','iteration':{},'performer':{'harness':'agy'}}}]
+        for bad in ([],True,'1',1.0):
+            calls=[{'mcp_tool':'maestro_flow_claim','arguments':{'node_id':'pin'},'result':{'seq':bad}},
+                   {'mcp_tool':'maestro_flow_complete','result':{'seq':3}}]
+            try: require_mcp_event_match(calls,events,'agy')
+            except Failure: continue
+            except Exception as exc: self.fail(f'seq {bad!r} crashed instead of being refused: {exc!r}')
+            self.fail(f'seq {bad!r} was accepted')
+
     def test_malformed_transcript_line_reports_result_without_attribute_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp); results={'gemini':{'preflight':'available'}}
