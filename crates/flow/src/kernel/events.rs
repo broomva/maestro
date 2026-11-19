@@ -490,3 +490,12 @@ pub fn digest(value: &Value) -> String {
 pub fn receipt_digest(outputs: &Value, value: Option<&str>) -> String {
     digest(&serde_json::json!({ "outputs": outputs, "value": value }))
 }
+
+/// The digest of a work receipt that another node's `different_from` names (IR version 9,
+/// BRO-3828): [`receipt_digest`]'s content and the harness of the performer it records. A consumer
+/// binds it like any input, so a re-run by another performer with the same outputs changes the
+/// consumer's inputs, and a claim or completion judged against the old performer is refused
+/// (`inputs_changed`), whenever it lands.
+pub fn routed_receipt_digest(outputs: &Value, value: Option<&str>, harness: Option<&str>) -> String {
+    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": harness }))
+}

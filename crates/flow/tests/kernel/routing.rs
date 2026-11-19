@@ -135,10 +135,16 @@ fn the_providers_are_attested_ones() {
 }
 
 #[test]
-fn a_param_that_names_no_provider_refuses_the_claim() {
-    let (mut f, fi) = routed("gpt");
-    let r = claim_as(&mut f.ledger, &f.me, &fi, "review_a", None);
-    assert_eq!(code(r), "routing_violated");
+fn a_param_that_names_no_provider_starts_no_instance() {
+    // A route reads the param as a provider, and params never change: an instance with another
+    // value could never run its routed node, so it is never started.
+    let mut f = fx(ROUTED);
+    let dir = f.dir.to_str().unwrap().to_string();
+    for writer in [json!("gpt"), json!(7), json!("Claude")] {
+        let r = start(&mut f.ledger, &f.me, &f.flow, json!({ "dir": dir, "writer": writer }));
+        assert_eq!(code(r), "invalid_params", "{writer}");
+    }
+    assert!(start(&mut f.ledger, &f.me, &f.flow, json!({ "dir": dir, "writer": "grok" })).is_ok());
 }
 
 #[test]
@@ -206,4 +212,50 @@ fn the_completed_receipt_records_the_named_performer_not_the_owner() {
     let body = f.last_body(&fi);
     assert_eq!(body["performer"]["harness"], "gemini");
     assert_eq!(body["performer"]["session"], "t3:-/x");
+}
+
+/// source -> a -> b, where b routes `different_from(a)`; b's verify waits for a `done` file.
+const RERUN: &str = r#"
+flow: rerun
+version: 1
+params: [dir]
+workdir: "{{params.dir}}"
+nodes:
+  source: {class: observe, fresh_for: 1s, run: [sh, -c, 'exit $(cat n)'], exit_map: {0: zero, 1: one}}
+  a: {class: work, needs: [source], verify: ['true']}
+  b: {class: work, needs: [a], routing: {provider: "different_from(a)"}, verify: [sh, -c, 'touch started; while [ ! -f done ]; do sleep 0.05; done']}
+"#;
+
+#[test]
+fn a_node_redone_by_the_performers_provider_while_its_route_is_judged_refuses_the_work() {
+    // P20 round 1 (BLOCKER): b was judged against a's Gemini performer; while b's command ran, a was
+    // redone by Codex with the same outputs. a's receipt now binds its performer, so b's inputs
+    // changed and its completion is refused, though a's outputs did not.
+    let mut f = fx(RERUN);
+    std::fs::write(f.dir.join("n"), "0").unwrap();
+    let fi = f.begin();
+    f.done(&fi, "source");
+    assert_eq!(perform(&mut f, &fi, "a", Some(&child("g", Harness::Gemini))), "completed");
+    let b = take(&mut f, &fi, "b");
+    let (root, dir, inst) = (f.root.clone(), f.dir.clone(), fi.clone());
+    let rerun = std::thread::spawn(move || {
+        while !dir.join("started").exists() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let mut ledger = maestro_flow::Ledger::open(&root, &host("mac"), maestro_flow::Options::default()).unwrap();
+        let me = agent("owner", "marker-1");
+        std::fs::write(dir.join("n"), "1").unwrap();
+        for node in ["source", "a"] {
+            let c = claim_as(&mut ledger, &me, &inst, node, None).unwrap();
+            let codex = (node == "a").then(|| child("c", Harness::Codex));
+            let done = complete_as(&mut ledger, &me, &c.token, Value::Null, &quick(), codex.as_ref()).unwrap();
+            assert_eq!(outcome(&done), "completed", "{node}");
+        }
+        std::fs::write(dir.join("done"), "").unwrap();
+    });
+    let outcome_b =
+        code(complete_as(&mut f.ledger, &f.me, &b, Value::Null, &quick(), Some(&child("c2", Harness::Codex))));
+    rerun.join().unwrap();
+    assert_eq!(outcome_b, "inputs_changed");
 }

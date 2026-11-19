@@ -335,9 +335,9 @@ fn route(log: &Log, started: &Started, node: &str, who: Option<&Performer>) -> R
     for r in refs {
         match r {
             RouteRef::Param { name } => {
-                let value = started.params.get(name).and_then(Value::as_str);
-                let Some(p) = value.filter(|v| PROVIDERS.contains(v)) else {
-                    return Err(format!("params.{name} is {value:?}, not one of {}", PROVIDERS.join(", ")));
+                // `start` refused any other value (`check_params`), and params never change.
+                let Some(p) = started.params.get(name).and_then(Value::as_str) else {
+                    return Err(format!("params.{name} names no provider"));
                 };
                 excluded.push((format!("params.{name}"), p.to_string()));
             }

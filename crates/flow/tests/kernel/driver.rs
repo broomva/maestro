@@ -227,3 +227,25 @@ fn an_agent_flow_with_no_params_names_none() {
     assert!(!skill.contains("params ()"), "an empty list reads as nothing");
     assert!(skill.contains("- Params: none."));
 }
+
+#[test]
+fn a_routed_nodes_skill_tells_the_driver_to_name_its_performer() {
+    // P20 round 1 (MAJOR): a driver that completes a routed node itself is the performer, so the
+    // skill has to say how to name the child that did the work.
+    let routed = maestro_flow::kernel::compile(
+        "flow: r\nversion: 1\nparams: [writer]\nnodes:\n  a: {class: work, verify: ['true']}\n  b: {class: work, needs: [a], routing: {provider: \"different_from(params.writer, a)\"}, verify: ['true']}\n",
+    )
+    .unwrap();
+    let skill = driver::generate(&routed).unwrap();
+    let node = |id: &str| {
+        let from = format!("#### `{id}`");
+        let start = skill.find(&from).unwrap_or_else(|| panic!("no {from}"));
+        let rest = &skill[start + from.len()..];
+        let end = rest.find("\n#").map_or(skill.len(), |i| start + from.len() + i);
+        skill[start..end].to_string()
+    };
+    let b = node("b");
+    assert!(b.contains("--performer-session"), "{b}");
+    assert!(b.contains("`params.writer`") && b.contains("the provider that performed `a`"), "{b}");
+    assert!(!node("a").contains("--performer-session"), "an unrouted node names none");
+}

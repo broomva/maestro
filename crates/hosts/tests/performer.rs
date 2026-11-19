@@ -21,6 +21,7 @@ fn row(id: &str, parent: Option<&str>, extra: serde_json::Value) -> serde_json::
     let mut r = json!({
         "id": id, "cwd": "/tmp", "environment_id": "env-mac", "provider": "gemini-vertex",
         "created_at": "2026-11-19T00:00:00Z", "status": "running", "parent_id": parent,
+        "providers": ["gemini-vertex"],
     });
     r.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
     r
@@ -111,4 +112,102 @@ fn a_direct_child_is_attested_only_with_the_owner_as_its_parent() {
             "{id}"
         );
     }
+}
+
+#[test]
+fn a_child_attests_only_one_provider_it_ran_never_its_default() {
+    // P20 round 1 (BLOCKER): the default provider is not who did the work.
+    let (_tmp, reg) = t3(json!([
+        row("switched", Some("owner"), json!({"provider": "codex", "providers": ["codex", "claudeAgent"]})),
+        row("unrecorded", Some("owner"), json!({"provider": "codex", "providers": null})),
+        row("none", Some("owner"), json!({"provider": "codex", "providers": []})),
+        row("moved", Some("owner"), json!({"provider": "codex", "providers": ["claudeAgent"]})),
+    ]));
+    let me = owner_t3();
+    for id in ["switched", "unrecorded", "none"] {
+        let r = reg.performer(&me, &named(&format!("t3:env-mac/{id}")));
+        assert_eq!(refused(r), RefusalReason::PerformerUnverified, "{id}");
+    }
+    let moved = reg.performer(&me, &named("t3:env-mac/moved")).unwrap();
+    assert_eq!(moved.harness(), Some(&Harness::ClaudeCode), "the provider it ran, not its default");
+}
+
+/// A `statev2.sqlite` as T3 writes it: a child whose default provider is codex while its provider
+/// rows say otherwise, read through the registry's own reader.
+#[test]
+fn the_sqlite_reader_reports_every_provider_a_child_ran() {
+    let tmp = tempfile::tempdir().unwrap();
+    let userdata = tmp.path().join("userdata");
+    std::fs::create_dir_all(&userdata).unwrap();
+    std::fs::write(userdata.join("environment-id"), "env-mac\n").unwrap();
+    let script = r#"
+import json, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.executescript("""
+CREATE TABLE orchestration_v2_projection_threads (
+  thread_id TEXT PRIMARY KEY, project_id TEXT, title TEXT, default_provider TEXT, runtime_mode TEXT,
+  interaction_mode TEXT, active_provider_thread_id TEXT, created_at TEXT, updated_at TEXT,
+  archived_at TEXT, deleted_at TEXT, payload_json TEXT, provider_instance_id TEXT);
+CREATE TABLE orchestration_v2_projection_provider_threads (
+  provider_thread_id TEXT PRIMARY KEY, thread_id TEXT, owner_node_id TEXT, provider TEXT,
+  provider_session_id TEXT, status TEXT, first_run_ordinal INTEGER, last_run_ordinal INTEGER,
+  updated_at TEXT, payload_json TEXT, driver TEXT, provider_instance_id TEXT);
+""")
+def thread(tid, active):
+    payload = {"worktreePath": "/work", "lineage": {"parentThreadId": "owner"}}
+    conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tid, "p", "t", "codex", "full", "default", active, "2026-11-19T00:00:00Z", "2026-11-19T00:00:00Z",
+         None, None, json.dumps(payload), "codex"))
+def provider(ptid, tid, name, status):
+    conn.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}", name, name))
+thread("moved", "pt-m"); provider("pt-m", "moved", "claudeAgent", "active")
+thread("switched", "pt-s2"); provider("pt-s1", "switched", "codex", "retired"); provider("pt-s2", "switched", "claudeAgent", "active")
+conn.commit()
+"#;
+    let db = userdata.join("statev2.sqlite");
+    let out = std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&db).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let reg = SurfaceRegistry::new(None, Some(T3Registry::new(tmp.path())), None);
+    let me = owner_t3();
+    let moved = reg.performer(&me, &named("t3:env-mac/moved")).unwrap();
+    assert_eq!(moved.harness(), Some(&Harness::ClaudeCode));
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/switched"))), RefusalReason::PerformerUnverified);
+}
+
+#[test]
+fn a_direct_child_the_registry_file_no_longer_holds_is_not_attested() {
+    // CodeRabbit (maestro#55): the file is the registry; the rows loaded from it earlier are not.
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("direct.json");
+    let row = |id: &str| json!({"id": id, "cwd": "/tmp", "token": "t", "liveness": "live", "harness": "codex", "parent_id": "owner"});
+    std::fs::write(&file, json!([row("kid"), row("gone")]).to_string()).unwrap();
+    let reg = DirectRegistry::from_file(&file);
+    std::fs::write(&file, json!([row("kid")]).to_string()).unwrap();
+    let surfaces = SurfaceRegistry::new(None, None, Some(reg));
+    let me = VerifiedSession::new(
+        SessionRef { surface: Surface::Direct, environment: None, id: "owner".into() },
+        "/tmp",
+        Some(Harness::ClaudeCode),
+        None,
+        vec![],
+    );
+    assert!(surfaces.performer(&me, &named("direct:-/kid")).is_ok());
+    assert_eq!(refused(surfaces.performer(&me, &named("direct:-/gone"))), RefusalReason::PerformerUnverified);
+}
+
+#[test]
+fn a_child_thread_bound_to_another_node_is_not_attested() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("threads.json");
+    let rows = json!([
+        row("here", Some("owner"), json!({"node": "mac-1"})),
+        row("there", Some("owner"), json!({"node": "nuc-1"}))
+    ]);
+    std::fs::write(&file, rows.to_string()).unwrap();
+    let t3 = T3Registry::new(&file).with_expected_node("mac-1".parse().unwrap());
+    let reg = SurfaceRegistry::new(None, Some(t3), None);
+    let me = owner_t3();
+    assert!(reg.performer(&me, &named("t3:env-mac/here")).is_ok());
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/there"))), RefusalReason::PerformerUnverified);
 }

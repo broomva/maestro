@@ -635,7 +635,18 @@ impl DirectRegistry {
         if owner.session().surface != Surface::Direct {
             return Err(unverified("only a direct owner names a direct performer".into()));
         }
-        let Some(session) = self.lookup(id)? else {
+        // The file, when one is configured, is the registry: a row it no longer holds is absent,
+        // never the copy held in memory since the registry was loaded.
+        let found = match &self.file_path {
+            Some(path) if is_safe_id(id) => Self::rows_in(path)
+                .map_err(|why| {
+                    IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("Direct registry: {why}."))
+                })?
+                .into_iter()
+                .find(|s| s.id == id),
+            _ => self.lookup(id)?,
+        };
+        let Some(session) = found else {
             return Err(unverified(format!("no direct session has the id {id}")));
         };
         if session.liveness == SessionLiveness::Closed {

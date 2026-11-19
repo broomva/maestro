@@ -2589,7 +2589,7 @@ mutate $fk/ir.rs $'                if !n.needs.contains(&Need::Node { node: m.cl
 # The route: a param names an allowed provider, a node its receipt's performer's; the performer's
 # provider is attested and differs from each; a claim checks it, and so does a completion.
 mutate $fk/write.rs '        "claude-code" => Some("claude"),' '        "claude-code" => Some("claude-code"),'
-mutate $fk/write.rs '                let Some(p) = value.filter(|v| PROVIDERS.contains(v)) else {' '                let Some(p) = value else {'
+mutate $fk/replay.rs '        if !value.is_some_and(|v| super::write::PROVIDERS.contains(&v)) {' '        if false {'
 mutate $fk/write.rs '                excluded.push((m.clone(), p.to_string()));' ''
 mutate $fk/write.rs $'        return Err(format!("the performer\'s harness {} has no attested provider", who.harness));' '        return Ok(());'
 mutate $fk/write.rs '    if let Some((from, _)) = excluded.iter().find(|(_, p)| p == mine) {' '    if let Some((from, _)) = excluded.iter().find(|_| false) {'
@@ -2603,6 +2603,13 @@ mutate $fk/write.rs '        if ir.ir_version >= 9 {' '        if ir.ir_version 
 mutate $fk/write.rs '        if ir.ir_version >= 9 {' '        if ir.ir_version >= 1 {'
 mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if started.ir.ir_version >= 10 {'
 mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if started.ir.ir_version >= 1 {'
+# P20 round 1: a routed node's receipt binds its performer, so a re-run by another provider with the
+# same outputs changes its consumers' inputs; a T3 child attests only the one provider it ran; a
+# routed node's driver skill says how to name its performer.
+mutate $fk/replay.rs '                if routed(ir, id) {' '                if false {'
+mutate $ht '        rows.iter().all(|p| p == first).then(|| harness_of(first))' '        Some(harness_of(first))'
+mutate $ht '        if provider_column:' '        if False:'
+mutate crates/flow/src/driver.rs '    if let Some(refs) = node.class.launch().map(|l| &l.different_from).filter(|r| !r.is_empty()) {' '    if let Some(refs) = None::<&Vec<RouteRef>> {'
 # The registry attests a performer only as the owner's child, on this host, not closed.
 mutate $ht '        if thread.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'
 mutate $ht '        if thread.liveness() == SessionLiveness::Closed {' '        if false {'

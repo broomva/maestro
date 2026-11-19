@@ -92,8 +92,9 @@ use super::error::KernelError;
 use super::events::{
     Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat,
     KernelEvent, Refused, Started, StopUnblockable, StopUnverified, Unblockable, digest, receipt_digest,
+    routed_receipt_digest,
 };
-use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
+use super::ir::{self, Class, Ir, Iteration, Launch, Need, RouteRef, Wait};
 use super::write;
 use crate::agents::{self, LaunchSpec};
 use crate::ids::InstanceId;
@@ -390,6 +391,16 @@ fn check_params(ir: &Ir, params: &Value) -> Result<(), KernelError> {
             }
         }
     }
+    // A route's param names a provider (BRO-3828): one that does not would refuse every claim of
+    // the routed node, and params never change, so such an instance is never started.
+    for route in ir.nodes.values().filter_map(|n| n.class.launch()).flat_map(|l| &l.different_from) {
+        let RouteRef::Param { name } = route else { continue };
+        let value = given.get(name).and_then(Value::as_str);
+        if !value.is_some_and(|v| super::write::PROVIDERS.contains(&v)) {
+            let allowed = super::write::PROVIDERS.join(", ");
+            return Err(refuse(format!("{name} is {value:?}, which a route reads as a provider: one of {allowed}")));
+        }
+    }
     Ok(())
 }
 
@@ -617,6 +628,15 @@ impl Receipt {
         let digest = Rc::from(receipt_digest(outputs, value.as_deref()));
         Receipt { seq, at, value, failure, inputs, digest }
     }
+}
+
+/// Whether some node's `different_from` names node `id` (IR version 9, BRO-3828).
+fn routed(ir: &Ir, id: &str) -> bool {
+    ir.nodes
+        .values()
+        .filter_map(|n| n.class.launch())
+        .flat_map(|l| &l.different_from)
+        .any(|r| matches!(r, RouteRef::Node { node } if node == id))
 }
 
 /// A repeat's place in the fold: the iteration it is at, or the one it ran out at.
@@ -911,7 +931,13 @@ impl<'a> Fold<'a> {
                     }
                     _ => at,
                 };
-                (Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs), c.attempt)
+                let mut receipt = Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs);
+                // A node another routes `different_from` binds its performer too (BRO-3828).
+                if routed(ir, id) {
+                    let harness = c.performer.as_ref().map(|p| p.harness.as_str());
+                    receipt.digest = Rc::from(routed_receipt_digest(&c.outputs, receipt.value.as_deref(), harness));
+                }
+                (receipt, c.attempt)
             }
             Chosen::KIND => {
                 let c: Chosen = body(log, e)?;
