@@ -1666,7 +1666,7 @@ mutate $mcp '        authority: Authority::Read,
     ToolSpec {
         name: flow::CLAIM,'
 # A shared daemon (serve --http) takes no caller claim from its own environment.
-mutate $http '    let server = MaestroServer::new(store).shared();' '    let server = MaestroServer::new(store);'
+mutate $http '    let server = server.shared();' ''
 mutate $mcp '        Ambient::Shared => None,' '        Ambient::Shared => std::env::var(key).ok().filter(|s| !s.is_empty()),'
 mutate $mcp '        None => match var("MAESTRO_BRIDGE_CREDENTIAL") {' '        None => match std::env::var("MAESTRO_BRIDGE_CREDENTIAL").ok().filter(|s| !s.is_empty()) {'
 mutate $mcp '            Some(kind) => agent_request_in(store, hosts, ambient, kind, args),' '            Some(kind) => agent_request_in(store, hosts, Ambient::Caller, kind, args),'
@@ -2556,13 +2556,13 @@ mutate $hlb '                .map_err(|e| format!("the registry file does not pa
 # the owner's listing, tagged with its surface and session, never dropped; identity is unaffected.
 mutate $hp $'            pending_permissions,\n            unread_permissions,\n        })' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        })'
 mutate $hp '                            unread.push((at(&path), why.clone()));' ''
-mutate $ht $'            pending_permissions,\n            unread_permissions,\n        }' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n        }'
+mutate $ht $'            pending_permissions,\n            unread_permissions,\n            pending_questions,\n        }' $'            pending_permissions,\n            unread_permissions: Vec::new(),\n            pending_questions,\n        }'
 mutate $ht '            self.unreadable.push((format!("t3 thread {}", thread.id), why.clone()));' ''
 # Round 11 (the owner's decision after round 10): one permission rule, in Rust, for every surface;
 # the reader emits each pending runtime request raw. Keys by presence and type: the first present
 # of toolName and name governs and must be a non-blank string; neither is a prompt named by its kind.
 mutate $ht $'                    requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})' $'                    requests.append({"id": req["runtime_request_id"], "kind": None, "payload_json": req["payload_json"]})'
-mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n        }' $'            "runtime_requests": [],\n        }'
+mutate $ht $'            "runtime_requests": runtime_requests_of(row["thread_id"]),\n            "pending_questions": pending_questions_of(row["thread_id"]),\n        }' $'            "runtime_requests": [],\n            "pending_questions": pending_questions_of(row["thread_id"]),\n        }'
 mutate $ht '        pending_permissions.extend(requested);' ''
 mutate $ht '        unread_permissions.extend(unread_requests);' ''
 mutate $hp '    let name = if let Some(v) = record.get("toolName") {' '    let name = if let Some(v) = record.get("toolName").filter(|_| false) {'
@@ -2598,9 +2598,6 @@ mutate $ht '                    if !missing.is_empty() {' '                    i
 mutate $ht '                if qs.iter().any(|q| q.text.is_some()) {' '                if true {'
 mutate $ht '            Field::NotText => Err("has a card that is not text"),' '            Field::NotText => continue,'
 mutate $ht '                unread.push(format!("{at} has a created_at that is not text"));' ''
-# P20 narrowed round 3 (Codex): http::serve_server serves any server SHARED, so a caller-mode
-# server over HTTP attributes nobody by the daemon's own thread variables.
-mutate crates/mcp/src/http.rs '    let server = server.shared();' ''
 mutate $hp '            Err(why) => unread.push(format!("permission record {i} {why}")),' '            Err(_) => {}'
 mutate $hp '        let payload = match req.payload_json.as_deref().filter(|s| !s.trim().is_empty()) {' '        let payload = match req.payload_json.as_deref() {'
 mutate $hp '            None => Err("is empty"),' '            None => Ok(serde_json::Map::new()),'
