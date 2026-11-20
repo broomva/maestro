@@ -2705,13 +2705,13 @@ mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if start
 # routed node's driver skill says how to name its performer.
 mutate $fk/replay.rs '                if ir.ir_version >= 9' '                if ir.ir_version >= 10'
 mutate crates/flow/src/kernel/events.rs '    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer }))' '    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer["harness"] }))'
-mutate $ht '        rows.iter().all(|p| p == first).then(|| harness_of(first))' '        Some(harness_of(first))'
+mutate $ht '        if !rows.iter().all(|p| p == first) {' '        if false {'
 mutate $ht '        if provider_column:' '        if False:'
 mutate $ht '        let first = rows.first().filter(|p| !p.is_empty())?;' '        let first = rows.first()?;'
 mutate $ht '            Some(_) => self.performed_harness(),' '            Some(_) => self.harness(),'
 mutate $ht '            (Some(child), Some(here)) => child != here,' '            (Some(child), Some(here)) => false,'
 mutate $ht '            (Some(_), None) => true,' '            (Some(_), None) => false,'
-mutate $ht $'            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(' $'            providers = [p["provider"] for p in conn.execute('
+mutate $ht $'            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in rows]' $'            providers = [p["provider"] for p in rows]'
 mutate crates/flow/src/driver.rs '    if let Some(refs) = node.class.launch().map(|l| &l.different_from).filter(|r| !r.is_empty()) {' '    if let Some(refs) = None::<&Vec<RouteRef>> {'
 # The registry attests a performer only as the owner's child, on this host, not closed.
 mutate $ht '        if thread.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'
