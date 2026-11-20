@@ -233,7 +233,7 @@ version: 1
 params: [dir]
 workdir: "{{params.dir}}"
 nodes:
-  source: {class: observe, fresh_for: 1s, run: [sh, -c, 'exit $(cat n)'], exit_map: {0: zero, 1: one}}
+  source: {class: observe, fresh_for: 4s, run: [sh, -c, 'exit $(cat n)'], exit_map: {0: zero, 1: one}}
   a: {class: work, needs: [source], verify: ['true']}
   b: {class: work, needs: [a], routing: {provider: "different_from(a)"}, verify: [sh, -c, 'touch started; while [ ! -f done ]; do sleep 0.05; done']}
 "#;
@@ -259,20 +259,37 @@ fn redone_while_judged(yaml: &str, again: Harness) -> String {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        std::thread::sleep(std::time::Duration::from_millis(1200));
         let mut ledger = maestro_flow::Ledger::open(&root, &host("mac"), maestro_flow::Options::default()).unwrap();
         let me = agent("owner", "marker-1");
         std::fs::write(dir.join("n"), "1").unwrap();
+        // source can run again once its observation is stale. Wait for that by claiming it, not
+        // by a fixed sleep: its freshness must outlast the main thread's claims before b starts,
+        // which a loaded host can stretch (a 1 s window failed on a CI mutation shard).
+        let stale_by = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let source = loop {
+            match claim_as(&mut ledger, &me, &inst, "source", None) {
+                Ok(c) => break c,
+                Err(e) if std::time::Instant::now() > stale_by => panic!("source never went stale: {e}"),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        };
+        let mut source = Some(source);
         for node in ["source", "a"] {
-            let c = claim_as(&mut ledger, &me, &inst, node, None).unwrap();
+            let c = match source.take() {
+                Some(c) => c,
+                None => claim_as(&mut ledger, &me, &inst, node, None).unwrap(),
+            };
             let codex = (node == "a").then(|| child("c", again.clone()));
             let done = complete_as(&mut ledger, &me, &c.token, Value::Null, &quick(), codex.as_ref()).unwrap();
             assert_eq!(outcome(&done), "completed", "{node}");
         }
         std::fs::write(dir.join("done"), "").unwrap();
     });
+    // b's command runs until the rerun thread is done, which first waits for source to go stale
+    // (up to its 4 s freshness): the default 5 s timeout would race that (P20 round 2).
+    let patient = maestro_flow::kernel::Limits { timeout: std::time::Duration::from_secs(60), ..quick() };
     let outcome_b =
-        code(complete_as(&mut f.ledger, &f.me, &b, Value::Null, &quick(), Some(&child("c2", Harness::Codex))));
+        code(complete_as(&mut f.ledger, &f.me, &b, Value::Null, &patient, Some(&child("c2", Harness::Codex))));
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     rerun.join().unwrap();
     outcome_b
@@ -294,7 +311,7 @@ params: [dir]
 workdir: "{{params.dir}}"
 receipt_stdin: true
 nodes:
-  source: {class: observe, fresh_for: 1s, run: [sh, -c, 'exit $(cat n)'], exit_map: {0: zero, 1: one}}
+  source: {class: observe, fresh_for: 4s, run: [sh, -c, 'exit $(cat n)'], exit_map: {0: zero, 1: one}}
   a: {class: work, needs: [source], verify: ['true']}
   b: {class: work, needs: [a], verify: [sh, -c, 'touch started; while [ ! -f done ]; do sleep 0.05; done']}
   x: {class: work, verify: ['true']}

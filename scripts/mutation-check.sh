@@ -2092,6 +2092,65 @@ mutate $vy '    switch: {on: surface, case: declared}
 ' ''
 mutate $vy '    run: [test, -n, "{{params.surface}}"]' '    run: [test, -z, "{{params.surface}}"]'
 mutate $vy '"--head={{params.head}}"' '"--head={{params.repo}}"'
+# kernel-ready@1 (BRO-3842), crates/cli/tests/kernel_ready.rs: every check node refuses its
+# subject broken. pin refuses another head and a tracked change; the checks run the script
+# committed at the head, not the working tree's; the chain is one order (the driver test's steps);
+# exercise is routed away from the writer's provider and its receipt is bound to the head. The observe nodes' exit_map and a refused pure command are the kernel guards proven
+# above for verify@1.
+ky=crates/flow/flows/kernel-ready.yaml
+mutate $ky 'test "$(git -C "$1" rev-parse HEAD)" = "$2" && ' ''
+mutate $ky ' && s=$(git -C "$1" status --porcelain --untracked-files=no) && test -z "$s"' ''
+mutate $ky 's=$(git -C "$1" status --porcelain --untracked-files=no) && test -z "$s"' 'test -z "$(git -C "$1" status --porcelain --untracked-files=no)"'
+mutate $ky '    needs: [suite]
+' ''
+mutate $ky '    routing: {provider: "different_from(params.writer_provider)"}
+' ''
+mutate $ky '"--head={{params.head}}"' '"--head={{params.repo}}"'
+mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" installed' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" installed'
+mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" mcp-tools' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" mcp-tools'
+mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" stop-gate' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" stop-gate'
+mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" consumers' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" consumers'
+# Its checks (scripts/kernel-ready.py): the installed binary's build commit is the head; the MCP
+# server lists every flow verb with a twin (and only clap's help, driver-skill and stop-gate have
+# none); the gate is wired for both harnesses through the installed binary itself, and Codex lists
+# that hook enabled and trusted; the consumer has a flow, its flows compile with current skills at
+# the names the binary gives them, and its agent renders match whenever agents/ or a render folder
+# exists (checked directly, not through its Makefile).
+kp=scripts/kernel-ready.py
+mutate $kp '    if commit != head:' '    if False:'
+mutate $kp '    missing = [n for n in expected if n not in names]' '    missing = []'
+mutate $kp 'NO_MCP_TWIN = {"help", "driver-skill", "stop-gate"}' 'NO_MCP_TWIN = {"help", "driver-skill", "stop-gate", "spine"}'
+mutate $kp '        if out.returncode != 0 or report.get("wired") is not True:' '        if False:'
+mutate $kp '    if not gates:' '    if False:'
+mutate $kp 'h.get("enabled") is not True or ' ''
+mutate $kp ' or h.get("trustStatus") != "trusted"' ''
+mutate $kp '        if not flows:' '        if False:'
+mutate $kp '            name = skill_name(maestro, flow.resolve())' '            name = f"flow-{flow.stem}-v1"'
+mutate $kp 'for line in lines[1:end] if line.startswith("name: ")' 'for line in lines if line.startswith("name: ")'
+mutate $kp '        agents = os.path.lexists(Path(root, "agents")) or any(os.path.lexists(Path(root, d)) for d in RENDER_DIRS)' '        agents = Path(root, "agents").is_dir()'
+mutate $kp 'RENDER_DIRS = (".claude/agents", ".gemini/agents", ".grok/agents")' 'RENDER_DIRS = (".claude/agents", ".gemini/agents")'
+mutate $kp '            if out.returncode != 0:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"{flow}' '            if False:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"{flow}'
+mutate $kp '            if out.returncode != 0:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"the agent renders' '            if False:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"the agent renders'
+mutate $kp '        foreign = [c for c in commands[harness] if not gate_command(c, maestro, harness)]' '        foreign = []'
+mutate $kp '        and words[1:] == ["flow", "stop-gate", "--harness", harness]' '        and words[1:5] == ["flow", "stop-gate", "--harness", harness]'
+# The build commit in `maestro --version` (crates/cli/build.rs): `-dirty` exactly when the checkout
+# differs from HEAD. A mutant here is itself such a difference, so the version test expects
+# `-dirty` and a build that drops it fails.
+br=crates/cli/build.rs
+bc=crates/cli/src/build_commit.rs
+mutate $bc '    let text = std::str::from_utf8(raw).ok()?;' '    let text = &*String::from_utf8_lossy(raw);'
+mutate $bc '    if entries.is_empty() || entries.iter().any(|e| e.chars().any(char::is_control)) {' '    if entries.is_empty() {'
+mutate $bc '    if entries.is_empty() || entries.iter().any(|e| e.chars().any(char::is_control)) {' '    if entries.iter().any(|e| e.chars().any(char::is_control)) {'
+mutate $br '                Some(Ok(out)) if out.status.success() && out.stdout.is_empty() => head,' '                _ => head,'
+mutate $br '                _ => format!("{head}-dirty"),' '                _ => head,'
 # The accepting spine: receipts replay accepted only; one record per (node, iteration), at its
 # first place with its latest result; choices and answers on it. Two runs are compared only as
 # runs of one definition (name and IR hash), a precondition reported on its own; then a record
