@@ -45,8 +45,17 @@ fn main() {
             }
             // Every top-level entry of the commit (a folder is watched whole), never the untracked
             // build output beside them, which would rerun this on every build.
-            // NUL-separated, so a name git would quote (non-ASCII, say) stays exact.
-            let listed = git(&top, &["ls-tree", "-z", "--name-only", "HEAD"]);
+            // NUL-separated and read raw, never trimmed or decoded lossily, so a name git would
+            // quote stays exact. Output that is not UTF-8 lists nothing, so the build is `-dirty`:
+            // a name it cannot pass on exactly is never read as clean (P20 round 7).
+            let listed = Command::new("git")
+                .arg("-C")
+                .arg(&top)
+                .args(["ls-tree", "-z", "--name-only", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok());
             let entries: Vec<&str> =
                 listed.as_deref().map_or_else(Vec::new, |l| l.split('\0').filter(|e| !e.is_empty()).collect());
             for entry in &entries {
