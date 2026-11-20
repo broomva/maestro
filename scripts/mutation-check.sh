@@ -2099,7 +2099,8 @@ mutate $vy '"--head={{params.head}}"' '"--head={{params.repo}}"'
 # above for verify@1.
 ky=crates/flow/flows/kernel-ready.yaml
 mutate $ky 'test "$(git -C "$1" rev-parse HEAD)" = "$2" && ' ''
-mutate $ky ' && test -z "$(git -C "$1" status --porcelain --untracked-files=no)"' ''
+mutate $ky ' && s=$(git -C "$1" status --porcelain --untracked-files=no) && test -z "$s"' ''
+mutate $ky 's=$(git -C "$1" status --porcelain --untracked-files=no) && test -z "$s"' 'test -z "$(git -C "$1" status --porcelain --untracked-files=no)"'
 mutate $ky '    needs: [suite]
 ' ''
 mutate $ky '    routing: {provider: "different_from(params.writer_provider)"}

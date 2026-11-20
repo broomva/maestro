@@ -312,6 +312,11 @@ fn pin_refuses_another_head_and_a_tracked_change() {
     let fi = r.start();
     std::fs::write(r.repo.join("scripts/kernel-ready.py"), "import sys; sys.exit(0)\n").unwrap();
     r.refused(&fi, "pin", "exit_unmapped");
+    // An index git cannot read: HEAD still resolves, `git status` fails, and that is not clean.
+    git(&r.repo, &["checkout", "--", "scripts/kernel-ready.py"]);
+    std::fs::write(r.repo.join(".git/index"), "not an index").unwrap();
+    let fi = r.start();
+    r.refused(&fi, "pin", "exit_unmapped");
 }
 
 /// The checks run the script as committed at the head: one replaced in the working tree after

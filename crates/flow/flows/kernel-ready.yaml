@@ -27,10 +27,11 @@ version: 1
 params: [repo, head, suite, consumer, writer_provider, surface]
 workdir: "{{params.repo}}"
 nodes:
-  # The repository is at params.head, with no tracked change.
+  # The repository is at params.head, with no tracked change; a `git status` that fails (an
+  # unreadable index) fails the node rather than reading as clean.
   pin:
     class: observe
-    run: [sh, -c, 'test "$(git -C "$1" rev-parse HEAD)" = "$2" && test -z "$(git -C "$1" status --porcelain --untracked-files=no)"', pin, "{{params.repo}}", "{{params.head}}"]
+    run: [sh, -c, 'test "$(git -C "$1" rev-parse HEAD)" = "$2" && s=$(git -C "$1" status --porcelain --untracked-files=no) && test -z "$s"', pin, "{{params.repo}}", "{{params.head}}"]
     fresh_for: 2h
     inputs: [params.head]
     exit_map: {0: pass}
