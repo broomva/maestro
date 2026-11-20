@@ -14,7 +14,6 @@ use maestro_core::session::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -67,6 +66,10 @@ pub struct T3Thread {
     /// (BRO-3828); `None` when the registry reports none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<Vec<String>>,
+    /// The driver each provider-thread row records it ran, in the order of `providers`
+    /// (BRO-4018); `None` when the registry records none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_drivers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
     /// Pending permission records that did not decode, each with why (BRO-3863), and waiting
@@ -76,11 +79,6 @@ pub struct T3Thread {
     /// AskUserQuestion cards waiting for the owner in this thread (BRO-3936).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_questions: Vec<QuestionPrompt>,
-    /// T3's provider instances, each id with the driver it runs (`providerInstances.<id>.driver` in
-    /// `<userdata>/settings.json`, BRO-4018); empty when the file did not read. Never serialized:
-    /// it is the registry's configuration, read alongside the thread, not part of its record.
-    #[serde(skip)]
-    pub drivers: BTreeMap<String, String>,
 }
 
 impl T3Thread {
@@ -100,25 +98,7 @@ impl T3Thread {
     }
 
     pub fn harness(&self) -> Option<Harness> {
-        self.provider.as_deref().map(|p| self.harness_named(p))
-    }
-
-    /// The harness a T3 provider instance runs (BRO-4018). The provider rows name an instance id,
-    /// which T3 lets the owner choose (`codex_team`), so the instance's driver decides, as T3's
-    /// settings record it. An `acpRegistry` instance names no agent there, and one may run any
-    /// model (`holon` runs Claude), so only the instances [`acp_harness`] names are attested; an
-    /// unknown driver attests none. An instance the settings do not list, or settings that did
-    /// not read, fall back to the instance id itself ([`harness_of`]).
-    fn harness_named(&self, instance: &str) -> Harness {
-        match self.drivers.get(instance).map(String::as_str) {
-            Some("codex") => Harness::Codex,
-            Some("claudeAgent") => Harness::ClaudeCode,
-            Some("antigravity") => Harness::Agy,
-            Some("grok") => Harness::Other("grok".to_string()),
-            Some("acpRegistry") => acp_harness(instance),
-            Some(driver) => Harness::Other(format!("{driver}:{instance}")),
-            None => harness_of(instance),
-        }
+        self.provider.as_deref().map(harness_of)
     }
 
     /// The harness the thread did its work under, attested (BRO-3828): every provider-thread row
@@ -138,12 +118,39 @@ impl T3Thread {
     pub fn performed_harness(&self) -> Option<Harness> {
         let rows = self.providers.as_ref()?;
         let first = rows.first().filter(|p| !p.is_empty())?;
-        rows.iter().all(|p| p == first).then(|| self.harness_named(first))
+        if !rows.iter().all(|p| p == first) {
+            return None;
+        }
+        // The driver each row recorded, when the registry records it (BRO-4018): every row must
+        // name the same one, and a row that names none attests nothing.
+        match &self.provider_drivers {
+            None => Some(harness_of(first)),
+            Some(drivers) => {
+                let driver = drivers.first().filter(|d| !d.is_empty())?;
+                (drivers.len() == rows.len() && drivers.iter().all(|d| d == driver))
+                    .then(|| harness_of_driver(first, driver))
+            }
+        }
     }
 }
 
-/// The `acpRegistry` instances whose agent is known (BRO-4018): `gemini-vertex` runs the Gemini
-/// CLI. Any other runs an agent T3's settings do not name, so it attests no provider.
+/// The harness a T3 provider instance ran, from the driver its provider-thread row recorded
+/// (BRO-4018). The instance id is the owner's name for it (`codex_team`); the driver is what ran.
+/// An `acpRegistry` instance names no agent in its driver, and one may run any model (`holon`
+/// runs Claude), so only the instances [`acp_harness`] names are attested; any other driver
+/// attests none.
+fn harness_of_driver(instance: &str, driver: &str) -> Harness {
+    match driver {
+        "codex" => Harness::Codex,
+        "claudeAgent" => Harness::ClaudeCode,
+        "antigravity" => Harness::Agy,
+        "grok" => Harness::Other("grok".to_string()),
+        "acpRegistry" => acp_harness(instance),
+        other => Harness::Other(format!("{other}:{instance}")),
+    }
+}
+
+/// The `acpRegistry` instances whose agent is known: `gemini-vertex` runs the Gemini CLI.
 fn acp_harness(instance: &str) -> Harness {
     match instance {
         "gemini-vertex" => Harness::Gemini,
@@ -220,6 +227,9 @@ struct RawT3Thread {
     /// Every provider its provider-thread rows name (BRO-3828).
     #[serde(default)]
     providers: Option<Vec<String>>,
+    /// The driver each of those rows ran, in the same order (BRO-4018).
+    #[serde(default)]
+    provider_drivers: Option<Vec<String>>,
     /// The thread's provider-thread rows, active or retired, each with its native id
     /// (`payload_json.$.nativeThreadRef.nativeId`), as `orchestration_v2_projection_provider_threads`
     /// holds them.
@@ -475,6 +485,11 @@ def main():
     provider_column = "orchestration_v2_projection_provider_threads" in tables and any(
         c["name"] == "provider" for c in conn.execute("PRAGMA table_info(orchestration_v2_projection_provider_threads)")
     )
+    # Whether those rows also record the driver each ran (BRO-4018): the provider names an
+    # instance the owner chose (`codex_team`), and the driver is what that instance ran then.
+    driver_column = provider_column and any(
+        c["name"] == "driver" for c in conn.execute("PRAGMA table_info(orchestration_v2_projection_provider_threads)")
+    )
 
     def pending_questions_of(thread_id):
         # A thread's waiting AskUserQuestion cards (BRO-3936): pending `user_input` requests, raw,
@@ -543,12 +558,18 @@ def main():
         # Every provider the thread has run under, active row and retired ones (BRO-3828): a
         # performer is attested only when they are one provider, never by the thread's default.
         providers = None
+        provider_drivers = None
         if provider_column:
             # A provider that is not text (NULL) names none: it reads, and confirms nobody.
-            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(
-                "SELECT provider FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
+            rows = conn.execute(
+                "SELECT provider" + (", driver" if driver_column else "")
+                + " FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
                 (row["thread_id"],),
-            )]
+            ).fetchall()
+            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in rows]
+            if driver_column:
+                # Each row's driver, in the same order; one that is not text names none.
+                provider_drivers = [p["driver"] if isinstance(p["driver"], str) else "" for p in rows]
         run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")
         return {
             "id": row["thread_id"],
@@ -557,6 +578,7 @@ def main():
             "node": payload.get("node") if isinstance(payload.get("node"), str) else None,
             "provider": row["default_provider"],
             "providers": providers,
+            "provider_drivers": provider_drivers,
             "created_at": created_at,
             "run_id": run_marker if isinstance(run_marker, str) and run_marker else None,
             "archived_at": row["archived_at"] or payload.get("archivedAt"),
@@ -879,10 +901,10 @@ impl T3Registry {
             status: raw.status,
             parent_id: raw.parent_id,
             providers: raw.providers,
+            provider_drivers: raw.provider_drivers,
             pending_permissions,
             unread_permissions,
             pending_questions,
-            drivers: BTreeMap::new(),
         }
     }
 
@@ -1065,47 +1087,7 @@ impl T3Registry {
         self.lookup_in(id, true)
     }
 
-    /// The thread `id`, with the registry's provider instances read beside it (BRO-4018).
     fn lookup_in(&self, id: &str, attributed: bool) -> Result<Option<T3Thread>, IdentityRefusal> {
-        let found = self.lookup_record(id, attributed)?;
-        Ok(found.map(|mut thread| {
-            thread.drivers = self.instance_drivers();
-            thread
-        }))
-    }
-
-    /// T3's provider instances and their drivers, from `<userdata>/settings.json` (BRO-4018). A file
-    /// that does not read or decode gives none: every instance then falls back to its id, and an id
-    /// that names no known provider attests none, so an unread file never attests more.
-    fn instance_drivers(&self) -> BTreeMap<String, String> {
-        // Beside the registry the reader uses (`<userdata>/statev2.sqlite` or a `threads.json`
-        // snapshot), else under the root's `userdata`.
-        let beside = self.sqlite_path().or_else(|| self.json_path()).and_then(|p| p.parent().map(Path::to_path_buf));
-        let candidates: Vec<PathBuf> = beside
-            .into_iter()
-            .map(|d| d.join("settings.json"))
-            .chain([self.root.join("userdata/settings.json")])
-            .collect();
-        let Some(text) = candidates.iter().find_map(|p| match read::read_text(p) {
-            Read::Present(t) => Some(t),
-            Read::Absent | Read::Unreadable(_) => None,
-        }) else {
-            return BTreeMap::new();
-        };
-        let Ok(settings) = serde_json::from_str::<Value>(&text) else { return BTreeMap::new() };
-        settings
-            .get("providerInstances")
-            .and_then(Value::as_object)
-            .map(|instances| {
-                instances
-                    .iter()
-                    .filter_map(|(id, v)| Some((id.clone(), v.get("driver")?.as_str()?.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn lookup_record(&self, id: &str, attributed: bool) -> Result<Option<T3Thread>, IdentityRefusal> {
         if !is_safe_t3_id(id) {
             return Ok(None);
         }
@@ -1186,18 +1168,8 @@ impl T3Registry {
         self.list_live_report().threads
     }
 
-    /// Every live thread, and what could not be read (see [`LiveThreads`]), with the registry's
-    /// provider instances read beside each thread (BRO-4018).
+    /// Every live thread, and what could not be read (see [`LiveThreads`]).
     pub fn list_live_report(&self) -> LiveThreads {
-        let mut report = self.list_live_records();
-        let drivers = self.instance_drivers();
-        for thread in &mut report.threads {
-            thread.drivers = drivers.clone();
-        }
-        report
-    }
-
-    fn list_live_records(&self) -> LiveThreads {
         let mut report = LiveThreads::default();
         // A configured registry that is disconnected, missing or inaccessible is unread, never
         // empty: only a host with no T3 registry at all has nothing to read.

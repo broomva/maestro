@@ -159,12 +159,17 @@ def thread(tid, active):
     conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tid, "p", "t", "codex", "full", "default", active, "2026-11-19T00:00:00Z", "2026-11-19T00:00:00Z",
          None, None, json.dumps(payload), "codex"))
-def provider(ptid, tid, name, status):
+def provider(ptid, tid, name, status, driver=None):
     conn.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}", name, name))
+        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}", driver or name, name))
 thread("moved", "pt-m"); provider("pt-m", "moved", "claudeAgent", "active")
 thread("nullrow", "pt-n"); provider("pt-n", "nullrow", None, "active")
 thread("switched", "pt-s2"); provider("pt-s1", "switched", "codex", "retired"); provider("pt-s2", "switched", "claudeAgent", "active")
+# BRO-4018: instances the owner named, each with the driver its row recorded.
+thread("team", "pt-t"); provider("pt-t", "team", "codex_team", "active", "codex")
+thread("vertex", "pt-v"); provider("pt-v", "vertex", "gemini-vertex", "active", "acpRegistry")
+thread("holon", "pt-h"); provider("pt-h", "holon", "holon", "active", "acpRegistry")
+thread("redriven", "pt-r2"); provider("pt-r1", "redriven", "codex_team", "retired", "claudeAgent"); provider("pt-r2", "redriven", "codex_team", "active", "codex")
 conn.commit()
 "#;
     let db = userdata.join("statev2.sqlite");
@@ -177,6 +182,13 @@ conn.commit()
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/switched"))), RefusalReason::PerformerUnverified);
     // P20 round 2: a NULL provider reads (the registry is not unavailable) and confirms nobody.
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/nullrow"))), RefusalReason::PerformerUnverified);
+    // BRO-4018: the driver each row recorded decides, whatever the owner named the instance.
+    let harness = |id: &str| reg.performer(&me, &named(&format!("t3:env-mac/{id}"))).unwrap().harness().cloned();
+    assert_eq!(harness("team"), Some(Harness::Codex));
+    assert_eq!(harness("vertex"), Some(Harness::Gemini));
+    assert_eq!(harness("holon"), Some(Harness::Other("acpRegistry:holon".into())), "an acp agent not named");
+    // One instance whose rows recorded two drivers ran two providers: none is attested.
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/redriven"))), RefusalReason::PerformerUnverified);
 }
 
 #[test]
@@ -253,63 +265,39 @@ fn with_no_node_known_for_this_host_a_child_that_names_one_is_not_attested() {
     assert!(reg.performer(&owner_t3(), &named("t3:env-mac/plain")).is_ok());
 }
 
-/// BRO-4018 (found by the kernel-ready@1 dogfood): the provider rows name a T3 provider *instance*,
-/// which the owner names (`codex_team`), so the instance's driver, as T3's settings record it,
-/// decides the harness. An `acpRegistry` instance is attested only when it is one whose agent is
-/// known; an unknown driver attests none; without settings the instance id is all there is.
+/// BRO-4018 (found by the kernel-ready@1 dogfood): a provider-thread row names the instance the
+/// owner chose (`codex_team`) and records the driver it ran; that driver decides the harness. An
+/// `acpRegistry` instance is attested only by name; an unknown driver attests none; rows that
+/// disagree, or a row with no driver, attest none; a registry that records no drivers keeps the
+/// instance id alone.
 #[test]
-fn a_t3_instance_runs_the_harness_its_driver_names() {
-    let thread = |instance: &str, drivers: &[(&str, &str)]| -> maestro_hosts::T3Thread {
-        let mut t: maestro_hosts::T3Thread =
-            serde_json::from_value(json!({"id": "t", "cwd": "/tmp", "provider": instance, "providers": [instance]}))
-                .unwrap();
-        t.drivers = drivers.iter().map(|(i, d)| (i.to_string(), d.to_string())).collect();
-        t
+fn a_t3_instance_runs_the_harness_its_recorded_driver_names() {
+    let thread = |providers: serde_json::Value, drivers: serde_json::Value| -> maestro_hosts::T3Thread {
+        serde_json::from_value(
+            json!({"id": "t", "cwd": "/tmp", "provider": "x", "providers": providers, "provider_drivers": drivers}),
+        )
+        .unwrap()
     };
-    let mac = [
-        ("codex_team", "codex"),
-        ("codex_carlos_personal_20261029", "codex"),
-        ("claudeAgent", "claudeAgent"),
-        ("antigravity-personal", "antigravity"),
-        ("gemini-vertex", "acpRegistry"),
-        ("holon", "acpRegistry"),
-        ("muse", "muse"),
-    ];
-    let harness = |instance: &str| thread(instance, &mac).session_harness();
-    assert_eq!(harness("codex_team"), Some(Harness::Codex));
-    assert_eq!(harness("codex_carlos_personal_20261029"), Some(Harness::Codex));
-    assert_eq!(harness("claudeAgent"), Some(Harness::ClaudeCode));
-    assert_eq!(harness("antigravity-personal"), Some(Harness::Agy));
-    assert_eq!(harness("gemini-vertex"), Some(Harness::Gemini));
-    // holon is an acpRegistry instance that runs Claude models: its agent is not known here.
-    assert_eq!(harness("holon"), Some(Harness::Other("acpRegistry:holon".into())));
-    assert_eq!(harness("muse"), Some(Harness::Other("muse:muse".into())));
-    // The driver wins over the id: an instance named like a provider runs what its driver says.
+    let one = |instance: &str, driver: &str| thread(json!([instance]), json!([driver])).performed_harness();
+    assert_eq!(one("codex_team", "codex"), Some(Harness::Codex));
+    assert_eq!(one("codex_carlos_personal_20261029", "codex"), Some(Harness::Codex));
+    assert_eq!(one("claudeAgent", "claudeAgent"), Some(Harness::ClaudeCode));
+    assert_eq!(one("antigravity-personal", "antigravity"), Some(Harness::Agy));
+    assert_eq!(one("grok", "grok"), Some(Harness::Other("grok".into())));
+    assert_eq!(one("gemini-vertex", "acpRegistry"), Some(Harness::Gemini));
+    assert_eq!(one("holon", "acpRegistry"), Some(Harness::Other("acpRegistry:holon".into())));
+    assert_eq!(one("muse", "muse"), Some(Harness::Other("muse:muse".into())));
+    // The driver wins over the name.
+    assert_eq!(one("codex", "acpRegistry"), Some(Harness::Other("acpRegistry:codex".into())));
+    assert_eq!(one("gemini-vertex", "codex"), Some(Harness::Codex));
+    // A row with no driver, rows that disagree, or a driver list that does not match the rows.
+    assert_eq!(one("codex_team", ""), None);
+    assert_eq!(thread(json!(["codex_team", "codex_team"]), json!(["codex", "claudeAgent"])).performed_harness(), None);
+    assert_eq!(thread(json!(["codex_team", "codex_team"]), json!(["codex"])).performed_harness(), None);
+    // No drivers recorded: the instance id alone, so a custom name attests nothing.
     assert_eq!(
-        thread("codex", &[("codex", "acpRegistry")]).session_harness(),
-        Some(Harness::Other("acpRegistry:codex".into()))
+        thread(json!(["codex_team"]), json!(null)).performed_harness(),
+        Some(Harness::Other("codex_team".into()))
     );
-    assert_eq!(thread("gemini-vertex", &[("gemini-vertex", "codex")]).session_harness(), Some(Harness::Codex));
-    // No settings read: the instance id alone, so a custom name attests nothing.
-    assert_eq!(thread("codex_team", &[]).session_harness(), Some(Harness::Other("codex_team".into())));
-    assert_eq!(thread("codex", &[]).session_harness(), Some(Harness::Codex));
-}
-
-/// The registry reads the drivers from `settings.json` beside it, so a child thread on a custom
-/// Codex instance is attested as Codex; without that file it is not.
-#[test]
-fn a_child_on_a_custom_codex_instance_is_attested_from_t3_settings() {
-    let child = row("kid", Some("owner"), json!({"provider": "codex_team", "providers": ["codex_team"]}));
-    let (tmp, reg) = t3(json!([child]));
-    let me = owner_t3();
-    let attested = reg.performer(&me, &named("t3:env-mac/kid")).unwrap();
-    assert_eq!(attested.harness(), Some(&Harness::Other("codex_team".into())), "no settings: the id alone");
-    let settings = json!({"providerInstances": {"codex_team": {"driver": "codex", "enabled": true}}});
-    std::fs::write(tmp.path().join("settings.json"), settings.to_string()).unwrap();
-    let attested = reg.performer(&me, &named("t3:env-mac/kid")).unwrap();
-    assert_eq!(attested.harness(), Some(&Harness::Codex));
-    // Settings that do not decode read as none: nothing more is attested.
-    std::fs::write(tmp.path().join("settings.json"), "{not json").unwrap();
-    let attested = reg.performer(&me, &named("t3:env-mac/kid")).unwrap();
-    assert_eq!(attested.harness(), Some(&Harness::Other("codex_team".into())));
+    assert_eq!(thread(json!(["codex"]), json!(null)).performed_harness(), Some(Harness::Codex));
 }
