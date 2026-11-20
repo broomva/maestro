@@ -232,8 +232,15 @@ def skill_name(maestro: Path, flow: Path) -> str:
         text = json.loads(out.stdout)["skill"]
     except (ValueError, KeyError, TypeError):
         raise Unsound(f"{flow} does not compile (exit {out.returncode}): {(out.stderr or '').strip()[-200:]}")
-    names = [json.loads(line[len("name: "):]) for line in text.splitlines() if line.startswith("name: ")]
-    if out.returncode != 0 or len(names) != 1 or not re.fullmatch(r"flow-[a-z0-9-]+", names[0]):
+    # Only the frontmatter names the skill: the body quotes node text (a human node's ask), which
+    # may hold a line of its own that reads `name: ...` (P20 round 5).
+    lines = text.splitlines()
+    end = lines.index("---", 1) if lines[:1] == ["---"] and "---" in lines[1:] else 0
+    try:
+        names = [json.loads(line[len("name: "):]) for line in lines[1:end] if line.startswith("name: ")]
+    except ValueError:
+        names = []
+    if out.returncode != 0 or len(names) != 1 or not isinstance(names[0], str) or not re.fullmatch(r"flow-[a-z0-9-]+", names[0]):
         raise Unsound(f"{flow}: the generated skill names no single skill (exit {out.returncode})")
     return names[0]
 

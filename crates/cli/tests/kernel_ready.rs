@@ -204,7 +204,10 @@ impl Rig {
             // names it, and a current copy where the file name would put it (flow-orders-v1) is a
             // decoy no check may read instead.
             let flow = consumer.join("flows/orders.yaml");
-            std::fs::write(&flow, "flow: c\nversion: 2\nnodes:\n  a: {class: pure, run: ['true']}\n").unwrap();
+            // Its human node's ask holds a line that reads like the skill's name: only the generated
+            // skill's frontmatter names it.
+            let definition = "flow: c\nversion: 2\nnodes:\n  a: {class: pure, run: ['true']}\n  h: {class: human, needs: [a], ask: \"Approve?\\nname: \\\"flow-other\\\"\"}\n";
+            std::fs::write(&flow, definition).unwrap();
             let skill = consumer.join("skills/flow-c-v2/SKILL.md");
             let decoy = consumer.join("skills/flow-orders-v1/SKILL.md");
             for out in [&skill, &decoy] {
