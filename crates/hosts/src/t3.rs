@@ -101,8 +101,9 @@ impl T3Thread {
     /// it has, active or retired, resolves to one harness. A thread that switched harnesses, or whose
     /// rows the registry does not report, has none; its default provider is never taken for it.
     /// The harness a verified session of this thread runs (BRO-3828): with provider rows reported,
-    /// the one provider they all name ([`Self::performed_harness`]), else none; a registry that
-    /// reports no rows (a JSON snapshot, a schema without the column) leaves the thread's default.
+    /// the one harness they all resolve to ([`Self::performed_harness`]), else none; a registry that
+    /// reports no rows (a JSON snapshot, a schema with no provider column at all) leaves the
+    /// thread's default. An older schema with only `provider` still reports rows (BRO-4007).
     /// The thread's default provider is not what ran it once it has switched.
     pub fn session_harness(&self) -> Option<Harness> {
         match &self.providers {
@@ -437,10 +438,12 @@ def main():
                     requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})
         return requests
 
-    # Whether provider-thread rows identify their driver and instance. A schema without the columns
-    # reports no providers, so no thread there attests a performer; identity reads go on.
+    # Whether provider-thread rows identify their driver and instance. An older schema with only
+    # `provider` keeps that column's reading (BRO-3828), so recorded history is never replaced by
+    # the thread's default. A schema with neither reports no providers; identity reads go on.
     provider_columns = {c["name"] for c in conn.execute("PRAGMA table_info(orchestration_v2_projection_provider_threads)")} if "orchestration_v2_projection_provider_threads" in tables else set()
-    provider_column = {"provider", "driver", "provider_instance_id"} <= provider_columns
+    provider_column = {"driver", "provider_instance_id"} <= provider_columns
+    legacy_provider_column = not provider_column and "provider" in provider_columns
 
     def pending_questions_of(thread_id):
         # A thread's waiting AskUserQuestion cards (BRO-3936): pending `user_input` requests, raw,
@@ -515,6 +518,12 @@ def main():
             providers = [(p["driver"] if p["driver"] in ("codex", "claudeAgent", "grok", "antigravity") else
                           p["provider_instance_id"] if p["driver"] == "acpRegistry" and p["provider_instance_id"] in ("claudeAgent", "claude-code", "claude", "codex", "gemini-vertex", "gemini", "antigravity", "agy", "grok") else "") for p in conn.execute(
                 "SELECT driver, provider_instance_id FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
+                (row["thread_id"],),
+            )]
+        elif legacy_provider_column:
+            # A provider that is not text (NULL) names none: it reads, and confirms nobody.
+            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(
+                "SELECT provider FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
                 (row["thread_id"],),
             )]
         run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")

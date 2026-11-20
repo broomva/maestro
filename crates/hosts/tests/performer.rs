@@ -272,3 +272,47 @@ fn with_no_node_known_for_this_host_a_child_that_names_one_is_not_attested() {
     assert_eq!(refused(reg.performer(&owner_t3(), &named("t3:env-mac/named"))), RefusalReason::PerformerUnverified);
     assert!(reg.performer(&owner_t3(), &named("t3:env-mac/plain")).is_ok());
 }
+
+/// BRO-4007 review: an older T3 schema whose provider rows have `provider` but no `driver` or
+/// `provider_instance_id` keeps reading `provider`, so a child that ran Claude under a codex default
+/// is still attested as Claude, never as its default.
+#[test]
+fn an_older_schema_with_only_provider_keeps_the_recorded_harness() {
+    let tmp = tempfile::tempdir().unwrap();
+    let userdata = tmp.path().join("userdata");
+    std::fs::create_dir_all(&userdata).unwrap();
+    std::fs::write(userdata.join("environment-id"), "env-mac\n").unwrap();
+    let script = r#"
+import json, sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.executescript("""
+CREATE TABLE orchestration_v2_projection_threads (
+  thread_id TEXT PRIMARY KEY, project_id TEXT, title TEXT, default_provider TEXT, runtime_mode TEXT,
+  interaction_mode TEXT, active_provider_thread_id TEXT, created_at TEXT, updated_at TEXT,
+  archived_at TEXT, deleted_at TEXT, payload_json TEXT, provider_instance_id TEXT);
+CREATE TABLE orchestration_v2_projection_provider_threads (
+  provider_thread_id TEXT PRIMARY KEY, thread_id TEXT, owner_node_id TEXT, provider TEXT,
+  provider_session_id TEXT, status TEXT, first_run_ordinal INTEGER, last_run_ordinal INTEGER,
+  updated_at TEXT, payload_json TEXT);
+""")
+def thread(tid, active):
+    payload = {"worktreePath": "/work", "lineage": {"parentThreadId": "owner"}}
+    conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tid, "p", "t", "codex", "full", "default", active, "2026-11-19T00:00:00Z", "2026-11-19T00:00:00Z",
+         None, None, json.dumps(payload), "codex"))
+def provider(ptid, tid, name):
+    conn.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (ptid, tid, None, name, None, "active", 1, 1, "2026-11-19T00:00:00Z", "{}"))
+thread("moved", "pt-m"); provider("pt-m", "moved", "claudeAgent")
+thread("switched", "pt-s2"); provider("pt-s1", "switched", "codex"); provider("pt-s2", "switched", "claudeAgent")
+conn.commit()
+"#;
+    let db = userdata.join("statev2.sqlite");
+    let out = std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&db).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let reg = SurfaceRegistry::new(None, Some(T3Registry::new(tmp.path())), None);
+    let me = owner_t3();
+    let moved = reg.performer(&me, &named("t3:env-mac/moved")).unwrap();
+    assert_eq!(moved.harness(), Some(&Harness::ClaudeCode), "the recorded harness, not the codex default");
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/switched"))), RefusalReason::PerformerUnverified);
+}
