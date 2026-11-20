@@ -14,6 +14,7 @@ use maestro_core::session::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -75,6 +76,11 @@ pub struct T3Thread {
     /// AskUserQuestion cards waiting for the owner in this thread (BRO-3936).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_questions: Vec<QuestionPrompt>,
+    /// T3's provider instances, each id with the driver it runs (`providerInstances.<id>.driver` in
+    /// `<userdata>/settings.json`, BRO-4018); empty when the file did not read. Never serialized:
+    /// it is the registry's configuration, read alongside the thread, not part of its record.
+    #[serde(skip)]
+    pub drivers: BTreeMap<String, String>,
 }
 
 impl T3Thread {
@@ -94,7 +100,25 @@ impl T3Thread {
     }
 
     pub fn harness(&self) -> Option<Harness> {
-        self.provider.as_deref().map(harness_of)
+        self.provider.as_deref().map(|p| self.harness_named(p))
+    }
+
+    /// The harness a T3 provider instance runs (BRO-4018). The provider rows name an instance id,
+    /// which T3 lets the owner choose (`codex_team`), so the instance's driver decides, as T3's
+    /// settings record it. An `acpRegistry` instance names no agent there, and one may run any
+    /// model (`holon` runs Claude), so only the instances [`acp_harness`] names are attested; an
+    /// unknown driver attests none. An instance the settings do not list, or settings that did
+    /// not read, fall back to the instance id itself ([`harness_of`]).
+    fn harness_named(&self, instance: &str) -> Harness {
+        match self.drivers.get(instance).map(String::as_str) {
+            Some("codex") => Harness::Codex,
+            Some("claudeAgent") => Harness::ClaudeCode,
+            Some("antigravity") => Harness::Agy,
+            Some("grok") => Harness::Other("grok".to_string()),
+            Some("acpRegistry") => acp_harness(instance),
+            Some(driver) => Harness::Other(format!("{driver}:{instance}")),
+            None => harness_of(instance),
+        }
     }
 
     /// The harness the thread did its work under, attested (BRO-3828): every provider-thread row
@@ -114,7 +138,16 @@ impl T3Thread {
     pub fn performed_harness(&self) -> Option<Harness> {
         let rows = self.providers.as_ref()?;
         let first = rows.first().filter(|p| !p.is_empty())?;
-        rows.iter().all(|p| p == first).then(|| harness_of(first))
+        rows.iter().all(|p| p == first).then(|| self.harness_named(first))
+    }
+}
+
+/// The `acpRegistry` instances whose agent is known (BRO-4018): `gemini-vertex` runs the Gemini
+/// CLI. Any other runs an agent T3's settings do not name, so it attests no provider.
+fn acp_harness(instance: &str) -> Harness {
+    match instance {
+        "gemini-vertex" => Harness::Gemini,
+        other => Harness::Other(format!("acpRegistry:{other}")),
     }
 }
 
@@ -849,6 +882,7 @@ impl T3Registry {
             pending_permissions,
             unread_permissions,
             pending_questions,
+            drivers: BTreeMap::new(),
         }
     }
 
@@ -1031,7 +1065,47 @@ impl T3Registry {
         self.lookup_in(id, true)
     }
 
+    /// The thread `id`, with the registry's provider instances read beside it (BRO-4018).
     fn lookup_in(&self, id: &str, attributed: bool) -> Result<Option<T3Thread>, IdentityRefusal> {
+        let found = self.lookup_record(id, attributed)?;
+        Ok(found.map(|mut thread| {
+            thread.drivers = self.instance_drivers();
+            thread
+        }))
+    }
+
+    /// T3's provider instances and their drivers, from `<userdata>/settings.json` (BRO-4018). A file
+    /// that does not read or decode gives none: every instance then falls back to its id, and an id
+    /// that names no known provider attests none, so an unread file never attests more.
+    fn instance_drivers(&self) -> BTreeMap<String, String> {
+        // Beside the registry the reader uses (`<userdata>/statev2.sqlite` or a `threads.json`
+        // snapshot), else under the root's `userdata`.
+        let beside = self.sqlite_path().or_else(|| self.json_path()).and_then(|p| p.parent().map(Path::to_path_buf));
+        let candidates: Vec<PathBuf> = beside
+            .into_iter()
+            .map(|d| d.join("settings.json"))
+            .chain([self.root.join("userdata/settings.json")])
+            .collect();
+        let Some(text) = candidates.iter().find_map(|p| match read::read_text(p) {
+            Read::Present(t) => Some(t),
+            Read::Absent | Read::Unreadable(_) => None,
+        }) else {
+            return BTreeMap::new();
+        };
+        let Ok(settings) = serde_json::from_str::<Value>(&text) else { return BTreeMap::new() };
+        settings
+            .get("providerInstances")
+            .and_then(Value::as_object)
+            .map(|instances| {
+                instances
+                    .iter()
+                    .filter_map(|(id, v)| Some((id.clone(), v.get("driver")?.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn lookup_record(&self, id: &str, attributed: bool) -> Result<Option<T3Thread>, IdentityRefusal> {
         if !is_safe_t3_id(id) {
             return Ok(None);
         }
@@ -1112,8 +1186,18 @@ impl T3Registry {
         self.list_live_report().threads
     }
 
-    /// Every live thread, and what could not be read (see [`LiveThreads`]).
+    /// Every live thread, and what could not be read (see [`LiveThreads`]), with the registry's
+    /// provider instances read beside each thread (BRO-4018).
     pub fn list_live_report(&self) -> LiveThreads {
+        let mut report = self.list_live_records();
+        let drivers = self.instance_drivers();
+        for thread in &mut report.threads {
+            thread.drivers = drivers.clone();
+        }
+        report
+    }
+
+    fn list_live_records(&self) -> LiveThreads {
         let mut report = LiveThreads::default();
         // A configured registry that is disconnected, missing or inaccessible is unread, never
         // empty: only a host with no T3 registry at all has nothing to read.

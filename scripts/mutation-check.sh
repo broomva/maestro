@@ -2151,6 +2151,16 @@ mutate $bc '    if entries.is_empty() || entries.iter().any(|e| e.chars().any(ch
 mutate $bc '    if entries.is_empty() || entries.iter().any(|e| e.chars().any(char::is_control)) {' '    if entries.iter().any(|e| e.chars().any(char::is_control)) {'
 mutate $br '                Some(Ok(out)) if out.status.success() && out.stdout.is_empty() => head,' '                _ => head,'
 mutate $br '                _ => format!("{head}-dirty"),' '                _ => head,'
+# BRO-4018 (crates/hosts/tests/performer.rs): a T3 provider instance's harness is its driver as T3's
+# settings record it; an acpRegistry instance is attested only by name; an unknown driver attests
+# none; the drivers are read from settings.json beside the registry.
+t3h=crates/hosts/src/t3.rs
+mutate $t3h '            Some("codex") => Harness::Codex,' '            Some("codex") => Harness::Other("codex".into()),'
+mutate $t3h '            Some("acpRegistry") => acp_harness(instance),' '            Some("acpRegistry") => harness_of(instance),'
+mutate $t3h '            Some(driver) => Harness::Other(format!("{driver}:{instance}")),' '            Some(_) => harness_of(instance),'
+mutate $t3h '        "gemini-vertex" => Harness::Gemini,
+        other => Harness::Other(format!("acpRegistry:{other}")),' '        other => harness_of(other),'
+mutate $t3h '            thread.drivers = self.instance_drivers();' '            thread.drivers = BTreeMap::new();'
 # The accepting spine: receipts replay accepted only; one record per (node, iteration), at its
 # first place with its latest result; choices and answers on it. Two runs are compared only as
 # runs of one definition (name and IR hash), a precondition reported on its own; then a record
