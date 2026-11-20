@@ -139,6 +139,13 @@ impl T3Thread {
 /// An `acpRegistry` instance names no agent in its driver, and one may run any model (`holon`
 /// runs Claude), so only the instances [`acp_harness`] names are attested; any other driver
 /// attests none.
+///
+/// What this attests is what T3 records the thread ran: the instance and its driver. Which agent
+/// an ACP instance runs, and what an instance named like a provider runs when no driver is
+/// recorded, are the owner's T3 configuration, as is the instance's name. That configuration is a
+/// user-level write, the same that can replace Maestro's binary: the floor the owner accepted as
+/// residual risk (BRO-3635). Attestation stops an agent misreporting its provider; it does not
+/// defend against the owner mislabelling an instance (P20 round 2 on maestro#61).
 fn harness_of_driver(instance: &str, driver: &str) -> Harness {
     match driver {
         "codex" => Harness::Codex,

@@ -161,7 +161,8 @@ def thread(tid, active):
          None, None, json.dumps(payload), "codex"))
 def provider(ptid, tid, name, status, driver=None):
     conn.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}", driver or name, name))
+        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}",
+         None if driver == "NULL" else (driver or name), name))
 thread("moved", "pt-m"); provider("pt-m", "moved", "claudeAgent", "active")
 thread("nullrow", "pt-n"); provider("pt-n", "nullrow", None, "active")
 thread("switched", "pt-s2"); provider("pt-s1", "switched", "codex", "retired"); provider("pt-s2", "switched", "claudeAgent", "active")
@@ -170,6 +171,7 @@ thread("team", "pt-t"); provider("pt-t", "team", "codex_team", "active", "codex"
 thread("vertex", "pt-v"); provider("pt-v", "vertex", "gemini-vertex", "active", "acpRegistry")
 thread("holon", "pt-h"); provider("pt-h", "holon", "holon", "active", "acpRegistry")
 thread("redriven", "pt-r2"); provider("pt-r1", "redriven", "codex_team", "retired", "claudeAgent"); provider("pt-r2", "redriven", "codex_team", "active", "codex")
+thread("undriven", "pt-u"); provider("pt-u", "undriven", "codex", "active", "NULL")
 conn.commit()
 "#;
     let db = userdata.join("statev2.sqlite");
@@ -189,6 +191,9 @@ conn.commit()
     assert_eq!(harness("holon"), Some(Harness::Other("acpRegistry:holon".into())), "an acp agent not named");
     // One instance whose rows recorded two drivers ran two providers: none is attested.
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/redriven"))), RefusalReason::PerformerUnverified);
+    // A row whose driver is NULL, though it names a provider, attests nothing: the column exists,
+    // so the name alone is not taken (Codex, P20 round 2).
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/undriven"))), RefusalReason::PerformerUnverified);
 }
 
 #[test]
