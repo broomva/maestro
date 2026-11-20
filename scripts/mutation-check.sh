@@ -2145,6 +2145,10 @@ mutate $kp '        and words[1:] == ["flow", "stop-gate", "--harness", harness]
 # differs from HEAD. A mutant here is itself such a difference, so the version test expects
 # `-dirty` and a build that drops it fails.
 br=crates/cli/build.rs
+bc=crates/cli/src/build_commit.rs
+mutate $bc '    let text = std::str::from_utf8(raw).ok()?;' '    let text = &*String::from_utf8_lossy(raw);'
+mutate $bc '    if entries.is_empty() || entries.iter().any(|e| e.chars().any(char::is_control)) {' '    if entries.is_empty() {'
+mutate $bc '    if entries.is_empty() || entries.iter().any(|e| e.chars().any(char::is_control)) {' '    if entries.iter().any(|e| e.chars().any(char::is_control)) {'
 mutate $br '                Some(Ok(out)) if out.status.success() && out.stdout.is_empty() => head,' '                _ => head,'
 mutate $br '                _ => format!("{head}-dirty"),' '                _ => head,'
 # The accepting spine: receipts replay accepted only; one record per (node, iteration), at its

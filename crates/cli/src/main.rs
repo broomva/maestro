@@ -15,6 +15,9 @@ use std::io::Read as _;
 use std::path::PathBuf;
 
 mod port;
+// The build commit's parsing, which build.rs includes; compiled here only for its tests.
+#[cfg(test)]
+mod build_commit;
 
 #[derive(Parser)]
 #[command(

@@ -21,6 +21,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+include!("src/build_commit.rs");
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -44,20 +46,18 @@ fn main() {
                 println!("cargo:rerun-if-changed={p}");
             }
             // Every top-level entry of the commit (a folder is watched whole), never the untracked
-            // build output beside them, which would rerun this on every build.
-            // NUL-separated and read raw, never trimmed or decoded lossily, so a name git would
-            // quote stays exact. Output that is not UTF-8 lists nothing, so the build is `-dirty`:
-            // a name it cannot pass on exactly is never read as clean (P20 round 7).
-            let listed = Command::new("git")
+            // build output beside them, which would rerun this on every build. Read raw and parsed
+            // by `top_entries` (src/build_commit.rs, which has the tests): a name it cannot pass on
+            // or watch exactly lists nothing, and an empty list is `-dirty`, never clean.
+            let entries = Command::new("git")
                 .arg("-C")
                 .arg(&top)
                 .args(["ls-tree", "-z", "--name-only", "HEAD"])
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
-                .and_then(|o| String::from_utf8(o.stdout).ok());
-            let entries: Vec<&str> =
-                listed.as_deref().map_or_else(Vec::new, |l| l.split('\0').filter(|e| !e.is_empty()).collect());
+                .and_then(|o| top_entries(&o.stdout))
+                .unwrap_or_default();
             for entry in &entries {
                 println!("cargo:rerun-if-changed={}", top.join(entry).display());
             }
@@ -68,7 +68,7 @@ fn main() {
                 .arg(&top)
                 .args(["--literal-pathspecs", "status", "--porcelain", "--untracked-files=normal", "--"])
                 .args(&entries);
-            match (listed.is_some() && !entries.is_empty()).then(|| status.output()) {
+            match (!entries.is_empty()).then(|| status.output()) {
                 Some(Ok(out)) if out.status.success() && out.stdout.is_empty() => head,
                 _ => format!("{head}-dirty"),
             }
