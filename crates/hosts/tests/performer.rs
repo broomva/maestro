@@ -306,6 +306,7 @@ def provider(ptid, tid, name):
 thread("moved", "pt-m"); provider("pt-m", "moved", "claudeAgent")
 thread("switched", "pt-s2"); provider("pt-s1", "switched", "codex"); provider("pt-s2", "switched", "claudeAgent")
 thread("nullrow", "pt-n"); provider("pt-n", "nullrow", None)
+thread("alias", "pt-a2"); provider("pt-a1", "alias", "claudeAgent"); provider("pt-a2", "alias", "claude-code")
 conn.commit()
 "#;
     let db = userdata.join("statev2.sqlite");
@@ -316,6 +317,9 @@ conn.commit()
     let moved = reg.performer(&me, &named("t3:env-mac/moved")).unwrap();
     assert_eq!(moved.harness(), Some(&Harness::ClaudeCode), "the recorded harness, not the codex default");
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/switched"))), RefusalReason::PerformerUnverified);
+    // Two provider names for one harness are one harness, not a switch (rows compare as harnesses).
+    let alias = reg.performer(&me, &named("t3:env-mac/alias")).unwrap();
+    assert_eq!(alias.harness(), Some(&Harness::ClaudeCode));
     // A NULL provider on the older schema reads (the registry is not unavailable) and confirms nobody.
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/nullrow"))), RefusalReason::PerformerUnverified);
 }
