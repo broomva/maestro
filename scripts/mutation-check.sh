@@ -1247,9 +1247,9 @@ mutate $fk/write.rs '    let now = wall(&log)?;
     let held = hold(log, session, &instance, &sha, now)?;
     let lease_until'
 mutate $fk/write.rs '    let now = wall(&log)?;
-    let mut held = hold(log, session, &instance, &sha, now)?;
+    let mut held = name(hold(log, session, &instance, &sha, now)?);
     check_verb(&held, false)?;' '    let now = wall(&log)? - SignedDuration::from_secs(30);
-    let mut held = hold(log, session, &instance, &sha, now)?;
+    let mut held = name(hold(log, session, &instance, &sha, now)?);
     check_verb(&held, false)?;'
 mutate $fk/write.rs '    drop(guard);
     let ran_at = clock::now();' '    drop(guard);
@@ -1289,9 +1289,9 @@ mutate $fk/write.rs '    let now = wall(&log)?;
     let held = hold(log, session, &instance, &sha, now)?;
     let lease_until'
 mutate $fk/write.rs '    let now = wall(&log)?;
-    let mut held = hold(log, session, &instance, &sha, now)?;
+    let mut held = name(hold(log, session, &instance, &sha, now)?);
     check_verb(&held, false)?;' '    let now = clock::now();
-    let mut held = hold(log, session, &instance, &sha, now)?;
+    let mut held = name(hold(log, session, &instance, &sha, now)?);
     check_verb(&held, false)?;'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = clock::now();'
 # Claims: every class but human, an enabled node only (out of order and write-time freshness),
@@ -1359,7 +1359,7 @@ mutate $fk/write.rs '    drop(guard);
         None => exec::run(&plan.argv, &plan.cwd, limits, feed),
     };
     drop(guard);'
-mutate $fk/write.rs '    let held = hold(log, session, &instance, &sha, after)?;' '    let _ = (log, after);
+mutate $fk/write.rs '    let held = name(hold(log, session, &instance, &sha, after)?);' '    let _ = (log, after);
     let held = held;'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = now;'
 mutate $fk/write.rs '    // The command and its input are bound to the pinned IR, params and claim inputs.
@@ -1468,7 +1468,7 @@ mutate $fk/write.rs '        if !holds {
             return Err(("precondition_false"' '        if false {
             return Err(("precondition_false"'
 mutate $fk/write.rs '    Ok(Some(digest(input)))' '    Ok(None)'
-mutate $fk/write.rs '        held = hold(log, session, &instance, &sha, judged_at)?;' '        let _ = (log, judged_at);'
+mutate $fk/write.rs '        held = name(hold(log, session, &instance, &sha, judged_at)?);' '        let _ = (log, judged_at);'
 mutate $fk/write.rs '        if held.effect_started {
             let reason' '        if false {
             let reason'
@@ -2606,6 +2606,45 @@ mutate $hp '                Ok(_) => Err("is not an object"),' '                
 mutate $hp '                if let Some(id) = req.id.as_deref().filter(|s| !s.trim().is_empty()) {' '                if let Some(id) = req.id.as_deref() {'
 mutate $hp '                    p.id = Some(id.to_string());' ''
 mutate $hp '            Err(why) => unread.push(format!("{what} {why}")),' '            Err(_) => {}'
+# BRO-3828: different_from is enforced against a performer the registry attests as the owner's
+# child. Compile: only declared params and needed work nodes; IR 9 only for a parsed route.
+mutate crates/flow/src/kernel/compile.rs '    let Some(rest) = provider.trim().strip_prefix("different_from(") else { return Ok(Vec::new()) };' '    let Some(rest) = provider.trim().strip_prefix("never(") else { return Ok(Vec::new()) };'
+mutate $fk/ir.rs '    if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| !l.different_from.is_empty())) {' '    if false {'
+mutate $fk/ir.rs $'                if !n.needs.contains(&Need::Node { node: m.clone() }) {\n                    return Err(CompileError::invalid(format!("node {id} differs from {m} without needing it")));' $'                if false {\n                    return Err(CompileError::invalid(format!("node {id} differs from {m} without needing it")));'
+# The route: a param names an allowed provider, a node its receipt's performer's; the performer's
+# provider is attested and differs from each; a claim checks it, and so does a completion.
+mutate $fk/write.rs '        "claude-code" => Some("claude"),' '        "claude-code" => Some("claude-code"),'
+mutate $fk/write.rs '        "grok" => Some("grok"),' ''
+mutate $fk/replay.rs '        if !value.is_some_and(|v| super::write::PROVIDERS.contains(&v)) {' '        if false {'
+mutate $fk/write.rs '                excluded.push((m.clone(), p.to_string()));' ''
+mutate $fk/write.rs $'        return Err(format!("the performer\'s harness {} has no attested provider", who.harness));' '        return Ok(());'
+mutate $fk/write.rs '    if let Some((from, _)) = excluded.iter().find(|(_, p)| p == mine) {' '    if let Some((from, _)) = excluded.iter().find(|_| false) {'
+mutate $fk/write.rs '    if let Err(detail) = route(&log, &started, node, who.as_ref()) {' '    if let Err(detail) = Ok::<(), String>(()) {'
+mutate $fk/write.rs $'    check_verb(&held, false)?;\n    if let Err(detail) = route(&held.log, &held.started, &held.rec.node, Some(&held.who)) {' $'    check_verb(&held, false)?;\n    if let Err(detail) = Ok::<(), String>(()) {'
+mutate $fk/write.rs '            held.who = who.clone();' ''
+# At IR 9 the verify's envelope and the guards' document carry the performer, and below it never.
+mutate $fk/write.rs '        if ir.ir_version >= 9 {' '        if ir.ir_version >= 10 {'
+mutate $fk/write.rs '        if ir.ir_version >= 9 {' '        if ir.ir_version >= 1 {'
+mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if started.ir.ir_version >= 10 {'
+mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if started.ir.ir_version >= 1 {'
+# P20 round 1: a routed node's receipt binds its performer, so a re-run by another provider with the
+# same outputs changes its consumers' inputs; a T3 child attests only the one provider it ran; a
+# routed node's driver skill says how to name its performer.
+mutate $fk/replay.rs '                if ir.ir_version >= 9' '                if ir.ir_version >= 10'
+mutate crates/flow/src/kernel/events.rs '    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer }))' '    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer["harness"] }))'
+mutate $ht '        rows.iter().all(|p| p == first).then(|| harness_of(first))' '        Some(harness_of(first))'
+mutate $ht '        if provider_column:' '        if False:'
+mutate $ht '        let first = rows.first().filter(|p| !p.is_empty())?;' '        let first = rows.first()?;'
+mutate $ht '            Some(_) => self.performed_harness(),' '            Some(_) => self.harness(),'
+mutate $ht '            (Some(child), Some(here)) => child != here,' '            (Some(child), Some(here)) => false,'
+mutate $ht '            (Some(_), None) => true,' '            (Some(_), None) => false,'
+mutate $ht $'            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(' $'            providers = [p["provider"] for p in conn.execute('
+mutate crates/flow/src/driver.rs '    if let Some(refs) = node.class.launch().map(|l| &l.different_from).filter(|r| !r.is_empty()) {' '    if let Some(refs) = None::<&Vec<RouteRef>> {'
+# The registry attests a performer only as the owner's child, on this host, not closed.
+mutate $ht '        if thread.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'
+mutate $ht '        if thread.liveness() == SessionLiveness::Closed {' '        if false {'
+mutate $hlb '        if session.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'
+mutate $hlb '        if performer.canonical(host) != resolved.session().canonical(host) {' '        if false {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

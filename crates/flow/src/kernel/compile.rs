@@ -4,7 +4,7 @@
 
 use super::definition::{ClassDef, Definition, NodeDef};
 use super::error::CompileError;
-use super::ir::{self, Case, Class, Exit, Input, Ir, Launch, Need, Node, Repeat, Wait};
+use super::ir::{self, Case, Class, Exit, Input, Ir, Launch, Need, Node, Repeat, RouteRef, Wait};
 use super::jq;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -219,9 +219,41 @@ pub fn compile_with_path(yaml: &str, path: Option<&std::path::Path>) -> Result<C
     Ok(CompiledFlow { ir, hash })
 }
 
+/// Parses `routing.provider` when it reads `different_from(a, params.b, ...)` (BRO-3828); any other
+/// provider text is a hint and parses to nothing. Each argument is `params.<name>` or a node id:
+/// `ir::validate` checks that the param is declared and the node is a work node this one needs.
+fn different_from(id: &str, provider: &str) -> Result<Vec<RouteRef>, CompileError> {
+    let Some(rest) = provider.trim().strip_prefix("different_from(") else { return Ok(Vec::new()) };
+    let Some(args) = rest.strip_suffix(')') else {
+        return Err(CompileError::invalid(format!("node {id} routing.provider {provider:?} does not close")));
+    };
+    let mut refs = Vec::new();
+    for arg in args.split(',').map(str::trim) {
+        let r = match arg.strip_prefix("params.") {
+            Some(name) if is_word(name) => RouteRef::Param { name: name.to_string() },
+            None if is_word(arg) => RouteRef::Node { node: arg.to_string() },
+            _ => {
+                return Err(CompileError::invalid(format!(
+                    "node {id} routing.provider names {arg:?}, which is neither a node id nor params.<name>"
+                )));
+            }
+        };
+        refs.push(r);
+    }
+    Ok(refs)
+}
+
+fn is_word(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Result<Node, CompileError> {
-    let launch =
-        Launch { pinned_agent: None, performer: n.performer, skill: n.skill, routing: n.routing.unwrap_or_default() };
+    let routing = n.routing.unwrap_or_default();
+    let different_from = match routing.get("provider") {
+        Some(provider) => different_from(id, provider)?,
+        None => Vec::new(),
+    };
+    let launch = Launch { pinned_agent: None, performer: n.performer, skill: n.skill, routing, different_from };
     let wait = match n.wait {
         Some(w) => {
             Some(Wait { heartbeat: seconds(&format!("node {id} wait.heartbeat"), &w.heartbeat)?, external: w.external })

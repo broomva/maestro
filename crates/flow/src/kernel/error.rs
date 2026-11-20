@@ -123,6 +123,9 @@ pub enum Refusal {
     /// A receipt the claim was bound to has changed, so the claim no longer holds the node.
     #[error("A receipt node {node} consumes has changed since it was claimed; claim it again.")]
     InputsChanged { node: String },
+    /// `routing.provider: different_from(...)` refuses this performer (BRO-3828).
+    #[error("Node {node} cannot be performed by this performer: {detail}")]
+    RoutingViolated { node: String, detail: String },
     #[error("Node {node} is held by a claim until {lease_until}.")]
     AlreadyClaimed { node: String, lease_until: String },
     #[error("The flow declares no node {node}.")]
@@ -244,6 +247,7 @@ impl Refusal {
             Refusal::LeaseExpired { .. } => "lease_expired",
             Refusal::NotCurrentIteration { .. } => "not_current_iteration",
             Refusal::InputsChanged { .. } => "inputs_changed",
+            Refusal::RoutingViolated { .. } => "routing_violated",
             Refusal::AlreadyClaimed { .. } => "already_claimed",
             Refusal::UnknownNode { .. } => "unknown_node",
             Refusal::NotClaimable { .. } => "not_claimable",

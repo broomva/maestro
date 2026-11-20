@@ -191,6 +191,7 @@ impl Fx {
             liveness: SessionLiveness::Live,
             harness: None,
             pending_permissions: vec![],
+            parent_id: None,
         });
         let t3 = T3Registry::new(match reg {
             Reg::Good => &self.t3,

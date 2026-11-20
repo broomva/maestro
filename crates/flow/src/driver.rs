@@ -31,7 +31,7 @@
 
 use crate::agents::{self, LaunchSpec};
 use crate::kernel::CompiledFlow;
-use crate::kernel::ir::{Class, Ir, Need, Node};
+use crate::kernel::ir::{Class, Ir, Need, Node, RouteRef};
 use crate::kernel::stop;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -208,6 +208,20 @@ fn node_section(out: &mut String, ir: &Ir, id: &str, node: &Node) {
     });
     if let Some(line) = performer {
         let _ = writeln!(out, "{line}");
+    }
+    if let Some(refs) = node.class.launch().map(|l| &l.different_from).filter(|r| !r.is_empty()) {
+        let names: Vec<String> = refs
+            .iter()
+            .map(|r| match r {
+                RouteRef::Node { node } => format!("the provider that performed {}", code(node)),
+                RouteRef::Param { name } => code(&format!("params.{name}")),
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "- Routed (BRO-3828): its performer's provider must differ from {}. Delegate the work to a child session of yours (a T3 thread you delegate to, or a direct session you launch) on another provider, and name it on `flow complete` with `--performer-session <its session>` (`performer_session`); naming it on `flow claim` too only checks it early. Completed without one, the performer is you, and the kernel refuses `routing_violated` when your provider is excluded; `performer_unverified` means the session is not your child on this host, or ran more than one provider.",
+            names.join(" and ")
+        );
     }
     let agent = node
         .class

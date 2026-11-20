@@ -62,6 +62,10 @@ pub struct T3Thread {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// Every provider the thread has run under, as the registry's provider-thread rows name them
+    /// (BRO-3828); `None` when the registry reports none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
     /// Pending permission records that did not decode, each with why (BRO-3863), and waiting
@@ -90,16 +94,42 @@ impl T3Thread {
     }
 
     pub fn harness(&self) -> Option<Harness> {
-        let raw = self.provider.as_deref()?;
-        Some(match raw {
-            "claudeAgent" | "claude-code" | "claude" => Harness::ClaudeCode,
-            "codex" => Harness::Codex,
-            "gemini-vertex" | "gemini" => Harness::Gemini,
-            "antigravity" | "agy" => Harness::Agy,
-            other => Harness::Other(other.to_string()),
-        })
+        self.provider.as_deref().map(harness_of)
     }
 
+    /// The harness the thread did its work under, attested (BRO-3828): every provider-thread row
+    /// it has, active or retired, names one provider. A thread that switched providers, or whose
+    /// rows the registry does not report, has none; its default provider is never taken for it.
+    /// The harness a verified session of this thread runs (BRO-3828): with provider rows reported,
+    /// the one provider they all name ([`Self::performed_harness`]), else none; a registry that
+    /// reports no rows (a JSON snapshot, a schema without the column) leaves the thread's default.
+    /// The thread's default provider is not what ran it once it has switched.
+    pub fn session_harness(&self) -> Option<Harness> {
+        match &self.providers {
+            Some(_) => self.performed_harness(),
+            None => self.harness(),
+        }
+    }
+
+    pub fn performed_harness(&self) -> Option<Harness> {
+        let rows = self.providers.as_ref()?;
+        let first = rows.first().filter(|p| !p.is_empty())?;
+        rows.iter().all(|p| p == first).then(|| harness_of(first))
+    }
+}
+
+/// A T3 provider name as the harness it runs.
+fn harness_of(raw: &str) -> Harness {
+    match raw {
+        "claudeAgent" | "claude-code" | "claude" => Harness::ClaudeCode,
+        "codex" => Harness::Codex,
+        "gemini-vertex" | "gemini" => Harness::Gemini,
+        "antigravity" | "agy" => Harness::Agy,
+        other => Harness::Other(other.to_string()),
+    }
+}
+
+impl T3Thread {
     pub fn incarnation(&self) -> Option<String> {
         let created = self.created_at.as_deref().filter(|s| !s.is_empty());
         let run = self.run_id.as_deref().filter(|s| !s.is_empty());
@@ -154,6 +184,9 @@ struct RawT3Thread {
     /// The thread's active provider-thread row (`active_provider_thread_id`).
     #[serde(default)]
     active_provider_thread_id: Option<String>,
+    /// Every provider its provider-thread rows name (BRO-3828).
+    #[serde(default)]
+    providers: Option<Vec<String>>,
     /// The thread's provider-thread rows, active or retired, each with its native id
     /// (`payload_json.$.nativeThreadRef.nativeId`), as `orchestration_v2_projection_provider_threads`
     /// holds them.
@@ -404,6 +437,12 @@ def main():
                     requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})
         return requests
 
+    # Whether provider-thread rows name their provider (BRO-3828). A schema without the column
+    # reports no providers, so no thread there attests a performer; identity reads go on.
+    provider_column = "orchestration_v2_projection_provider_threads" in tables and any(
+        c["name"] == "provider" for c in conn.execute("PRAGMA table_info(orchestration_v2_projection_provider_threads)")
+    )
+
     def pending_questions_of(thread_id):
         # A thread's waiting AskUserQuestion cards (BRO-3936): pending `user_input` requests, raw,
         # each with the payload of its `user_input_request` turn item (the questions) or None when
@@ -468,6 +507,15 @@ def main():
         if isinstance(lineage, dict):
             parent_id = lineage.get("parentThreadId") or lineage.get("threadId")
         created_at = row["created_at"] if "created_at" in row.keys() and row["created_at"] else payload.get("createdAt")
+        # Every provider the thread has run under, active row and retired ones (BRO-3828): a
+        # performer is attested only when they are one provider, never by the thread's default.
+        providers = None
+        if provider_column:
+            # A provider that is not text (NULL) names none: it reads, and confirms nobody.
+            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(
+                "SELECT provider FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
+                (row["thread_id"],),
+            )]
         run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")
         return {
             "id": row["thread_id"],
@@ -475,6 +523,7 @@ def main():
             "environment_id": env_id,
             "node": payload.get("node") if isinstance(payload.get("node"), str) else None,
             "provider": row["default_provider"],
+            "providers": providers,
             "created_at": created_at,
             "run_id": run_marker if isinstance(run_marker, str) and run_marker else None,
             "archived_at": row["archived_at"] or payload.get("archivedAt"),
@@ -796,6 +845,7 @@ impl T3Registry {
             settled_at: raw.settled_at,
             status: raw.status,
             parent_id: raw.parent_id,
+            providers: raw.providers,
             pending_permissions,
             unread_permissions,
             pending_questions,
@@ -1193,7 +1243,7 @@ impl T3Registry {
     /// across turns and provider switches, new when the thread is recreated. The environment lives
     /// in the SessionRef, not here. No `created_at`, no marker: writes are then `no_owner_marker`.
     fn verified(thread: T3Thread, incarnation: String) -> VerifiedSession {
-        let harness = thread.harness();
+        let harness = thread.session_harness();
         let owner_marker = thread
             .created_at
             .as_deref()
@@ -1211,6 +1261,54 @@ impl T3Registry {
             Some(marker) => verified.with_owner_marker(marker),
             None => verified,
         }
+    }
+
+    /// The thread `id` as the attested performer of a node `owner` drives (BRO-3828): a thread on
+    /// this host, not deleted or closed, whose parent is the owner's thread. A delegated child has
+    /// usually settled by the time its owner completes, so a settled or archived child still
+    /// attests; nothing about the child's own process is asked, only the registry's record of it.
+    pub fn performer(&self, owner: &VerifiedSession, id: &str) -> Result<VerifiedSession, IdentityRefusal> {
+        let unverified = |detail: String| IdentityRefusal::new(RefusalReason::PerformerUnverified, detail);
+        if owner.session().surface != Surface::T3 {
+            return Err(unverified("only a T3 owner names a T3 performer".into()));
+        }
+        if self.disconnected {
+            return Err(IdentityRefusal::new(RefusalReason::RegistryDisconnected, "T3 registry is disconnected."));
+        }
+        let Some(thread) = self.lookup_attributed(id)? else {
+            return Err(unverified(format!("no T3 thread on this host has the id {id}")));
+        };
+        // A child runs on this host's node: the owner's, else the registry's expected one. A child
+        // that names a node this host cannot confirm is foreign (P20 round 4, CodeRabbit round 6);
+        // one that names none claims no other host.
+        let here = owner.node().or(self.expected_node.as_ref());
+        let foreign = match (thread.node.as_ref(), here) {
+            (Some(child), Some(here)) => child != here,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if foreign || self.check_node(&thread, None).is_err() {
+            return Err(unverified(format!("thread {} is bound to another node", short_id(id))));
+        }
+        if thread.liveness() == SessionLiveness::Closed {
+            return Err(unverified(format!("thread {} is closed", short_id(id))));
+        }
+        if thread.parent_id.as_deref() != Some(owner.session().id.as_str()) {
+            return Err(unverified(format!("thread {} is not a child of the owner's thread", short_id(id))));
+        }
+        let Some(harness) = thread.performed_harness() else {
+            return Err(unverified(format!(
+                "thread {} has run under more than one provider, or the registry records none",
+                short_id(id)
+            )));
+        };
+        Ok(VerifiedSession::new(
+            SessionRef { surface: Surface::T3, environment: thread.environment_id, id: thread.id },
+            thread.cwd,
+            Some(harness),
+            thread.parent_id,
+            Vec::new(),
+        ))
     }
 
     /// Verify a caller claim against T3's thread registry.

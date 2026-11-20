@@ -149,6 +149,10 @@ pub struct FlowClaimArgs {
     pub instance: String,
     /// The flow node to claim, one `maestro_flow_next` lists as enabled.
     pub node_id: String,
+    /// The session that does the work, as `surface:environment/id` (BRO-3828): your child on this
+    /// host (a T3 thread you delegated to, or a direct session you launched). The registry attests
+    /// it; a node routed by `different_from` refuses a performer whose provider it excludes.
+    pub performer_session: Option<String>,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
     pub cwd: Option<String>,
     /// A Direct session's launch token.
@@ -187,6 +191,10 @@ pub struct FlowCompleteArgs {
     pub claim_token: String,
     /// The node's outputs, a JSON object; the kernel records them with the receipt.
     pub outputs: Option<Value>,
+    /// The session that does the work, as `surface:environment/id` (BRO-3828): your child on this
+    /// host (a T3 thread you delegated to, or a direct session you launched). The registry attests
+    /// it; a node routed by `different_from` refuses a performer whose provider it excludes.
+    pub performer_session: Option<String>,
     /// How long the node's command may run, in seconds (default 300, at most 3600).
     pub timeout_secs: Option<u64>,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
@@ -275,6 +283,17 @@ pub struct FlowProposeArgs {
 }
 
 /// A refusal as a result: the stable code, the reason, and whether the kernel recorded it.
+/// The performer a write names (BRO-3828), resolved by the registry as the caller's attested child;
+/// a session it cannot attest is the write's refusal, under the registry's code.
+fn performer(
+    hosts: &maestro_hosts::SurfaceRegistry,
+    me: &VerifiedSession,
+    named: Option<&SessionRef>,
+) -> Result<Option<VerifiedSession>, Value> {
+    let Some(named) = named else { return Ok(None) };
+    hosts.performer(me, named).map(Some).map_err(|e| refusal(e.reason.code(), &e.message, false))
+}
+
 fn refusal(code: &str, reason: impl std::fmt::Display, recorded: bool) -> Value {
     json!({ "ok": false, "code": code, "reason": reason.to_string(), "recorded": recorded })
 }
@@ -407,13 +426,18 @@ pub(crate) fn call(
         CLAIM => {
             let a: FlowClaimArgs = parse(args.clone())?;
             let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            let named = a.performer_session.as_deref().map(crate::session_of).transpose()?;
             Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
                 let node = match bounded("node_id", &a.node_id) {
                     Ok(node) => node,
                     Err(v) => return Ok(v),
                 };
+                let performer = match performer(hosts, &w.me, named.as_ref()) {
+                    Ok(p) => p,
+                    Err(v) => return Ok(v),
+                };
                 let instance = InstanceId::new(&a.instance)?;
-                let c = kernel::claim(&mut w.ledger()?, &w.me, &instance, node)?;
+                let c = kernel::claim_as(&mut w.ledger()?, &w.me, &instance, node, performer.as_ref())?;
                 Ok(json!({
                     "ok": true,
                     "claim_token": c.token,
@@ -438,27 +462,41 @@ pub(crate) fn call(
         COMPLETE => {
             let a: FlowCompleteArgs = parse(args.clone())?;
             let session = a.session.as_deref().map(crate::session_of).transpose()?;
+            let named = a.performer_session.as_deref().map(crate::session_of).transpose()?;
             Ok(write(workspace, (hosts, ambient), session.as_ref(), &args, false, |w| {
+                let performer = match performer(hosts, &w.me, named.as_ref()) {
+                    Ok(p) => p,
+                    Err(v) => return Ok(v),
+                };
                 let mut limits = Limits::default();
                 if let Some(secs) = a.timeout_secs {
                     limits.timeout = std::time::Duration::from_secs(secs);
                 }
                 let outputs = a.outputs.clone().unwrap_or(Value::Null);
-                Ok(match kernel::complete(&mut w.ledger()?, &w.me, &a.claim_token, outputs, &limits)? {
-                    Completion::Completed { appended, verify, stderr, verdicts } => json!({
-                        "ok": true,
-                        "seq": appended.event.seq,
-                        "verify": verify,
-                        "stderr": stderr,
-                        "verdicts": verdicts.iter().map(verdict).collect::<Vec<_>>(),
-                    }),
-                    Completion::Refused { appended, code, reason, stderr } => {
-                        let mut v = refusal(code, reason, true);
-                        v["seq"] = json!(appended.event.seq);
-                        v["stderr"] = json!(stderr);
-                        v
-                    }
-                })
+                Ok(
+                    match kernel::complete_as(
+                        &mut w.ledger()?,
+                        &w.me,
+                        &a.claim_token,
+                        outputs,
+                        &limits,
+                        performer.as_ref(),
+                    )? {
+                        Completion::Completed { appended, verify, stderr, verdicts } => json!({
+                            "ok": true,
+                            "seq": appended.event.seq,
+                            "verify": verify,
+                            "stderr": stderr,
+                            "verdicts": verdicts.iter().map(verdict).collect::<Vec<_>>(),
+                        }),
+                        Completion::Refused { appended, code, reason, stderr } => {
+                            let mut v = refusal(code, reason, true);
+                            v["seq"] = json!(appended.event.seq);
+                            v["stderr"] = json!(stderr);
+                            v
+                        }
+                    },
+                )
             }))
         }
         CHOOSE => {

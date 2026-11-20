@@ -269,6 +269,9 @@ enum FlowCommand {
         instance: String,
         #[arg(long)]
         node_id: String,
+        /// The child session that does the work, as `surface:environment/id` (BRO-3828).
+        #[arg(long)]
+        performer_session: Option<String>,
     },
     /// Finish a claim: the kernel runs the node's command and records the receipt if it passes.
     Complete {
@@ -282,6 +285,9 @@ enum FlowCommand {
         /// How long the node's command may run, in seconds.
         #[arg(long)]
         timeout_secs: Option<u64>,
+        /// The child session that did the work, as `surface:environment/id` (BRO-3828).
+        #[arg(long)]
+        performer_session: Option<String>,
     },
     /// Take a declared edge of a claimed choice node, if its guard holds.
     Choose {
@@ -812,12 +818,13 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
         FlowCommand::Next { instance } => (f::NEXT, json!({ "instance": instance })),
         FlowCommand::Status { instance } => (f::STATUS, json!({ "instance": instance })),
         FlowCommand::Spine { instance, against } => (f::SPINE, json!({ "instance": instance, "against": against })),
-        FlowCommand::Claim { session, instance, node_id } => {
-            (f::CLAIM, json!({ "session": session.session, "instance": instance, "node_id": node_id }))
+        FlowCommand::Claim { session, instance, node_id, performer_session } => {
+            let args = json!({ "session": session.session, "instance": instance, "node_id": node_id, "performer_session": performer_session });
+            (f::CLAIM, args)
         }
-        FlowCommand::Complete { session, claim_token, outputs, timeout_secs } => {
+        FlowCommand::Complete { session, claim_token, outputs, timeout_secs, performer_session } => {
             let outputs = json_arg("--outputs", outputs.as_deref())?;
-            let args = json!({ "session": session.session, "claim_token": claim_token, "outputs": outputs, "timeout_secs": timeout_secs });
+            let args = json!({ "session": session.session, "claim_token": claim_token, "outputs": outputs, "timeout_secs": timeout_secs, "performer_session": performer_session });
             (f::COMPLETE, args)
         }
         FlowCommand::Choose { session, claim_token, edge } => {

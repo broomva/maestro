@@ -91,9 +91,10 @@ use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
     Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat,
-    KernelEvent, Refused, Started, StopUnblockable, StopUnverified, Unblockable, digest, receipt_digest,
+    KernelEvent, Refused, Started, StopUnblockable, StopUnverified, Unblockable, digest, performer_receipt_digest,
+    receipt_digest,
 };
-use super::ir::{self, Class, Ir, Iteration, Launch, Need, Wait};
+use super::ir::{self, Class, Ir, Iteration, Launch, Need, RouteRef, Wait};
 use super::write;
 use crate::agents::{self, LaunchSpec};
 use crate::ids::InstanceId;
@@ -390,6 +391,16 @@ fn check_params(ir: &Ir, params: &Value) -> Result<(), KernelError> {
             }
         }
     }
+    // A route's param names a provider (BRO-3828): one that does not would refuse every claim of
+    // the routed node, and params never change, so such an instance is never started.
+    for route in ir.nodes.values().filter_map(|n| n.class.launch()).flat_map(|l| &l.different_from) {
+        let RouteRef::Param { name } = route else { continue };
+        let value = given.get(name).and_then(Value::as_str);
+        if !value.is_some_and(|v| super::write::PROVIDERS.contains(&v)) {
+            let allowed = super::write::PROVIDERS.join(", ");
+            return Err(refuse(format!("{name} is {value:?}, which a route reads as a provider: one of {allowed}")));
+        }
+    }
     Ok(())
 }
 
@@ -536,7 +547,12 @@ fn document(log: &Log, started: &Started, read: Vec<(&str, Rc<Core>)>) -> Result
         let index = usize::try_from(seq.saturating_sub(1)).unwrap_or(usize::MAX);
         let e = log.events.get(index).filter(|e| e.seq == seq).ok_or_else(|| malformed(log, seq, "no such event"))?;
         let outputs = e.body.get("outputs").cloned().unwrap_or(Value::Null);
-        nodes.insert(id.to_string(), serde_json::json!({ "outputs": outputs, "value": core.value }));
+        let mut entry = serde_json::json!({ "outputs": outputs, "value": core.value });
+        // IR version 9 (BRO-3828): the performer the receipt records, attested by the kernel.
+        if started.ir.ir_version >= 9 {
+            entry["performer"] = e.body.get("performer").cloned().unwrap_or(Value::Null);
+        }
+        nodes.insert(id.to_string(), entry);
     }
     Ok(serde_json::json!({ "params": started.params, "nodes": nodes }))
 }
@@ -906,7 +922,16 @@ impl<'a> Fold<'a> {
                     }
                     _ => at,
                 };
-                (Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs), c.attempt)
+                let mut receipt = Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs);
+                // At IR 9 a receipt binds the performer it records (BRO-3828), the very value
+                // `document` shows the guards and the verify, so what they see is what is bound.
+                if ir.ir_version >= 9
+                    && let Some(performer) = e.body.get("performer").filter(|p| !p.is_null())
+                {
+                    receipt.digest =
+                        Rc::from(performer_receipt_digest(&c.outputs, receipt.value.as_deref(), performer));
+                }
+                (receipt, c.attempt)
             }
             Chosen::KIND => {
                 let c: Chosen = body(log, e)?;

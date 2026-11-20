@@ -139,7 +139,7 @@ use super::events::{
 };
 use super::exec::{self, Feed, Limits, Ran, Search};
 use super::guard::{self, GUARD_TIMEOUT, Judged};
-use super::ir::{Class, Ir, Iteration, Node};
+use super::ir::{Class, Ir, Iteration, Node, RouteRef};
 use super::replay::{Awaiting, Next, Reason, State, awaiting, guard_input, next_of, pinned, secs};
 use super::snapshot;
 use crate::FlowError;
@@ -304,6 +304,64 @@ fn check_owner_only(
 pub(crate) fn same_owner(stored: &Owner, me: &Owner) -> bool {
     let host = me.session.environment.as_deref();
     stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)
+}
+
+/// The providers a `different_from` param may name (BRO-3828).
+pub const PROVIDERS: [&str; 4] = ["claude", "codex", "gemini", "grok"];
+
+/// The provider a verified harness runs: only a harness whose models are its own vendor's. `agy`
+/// and any other harness can run several vendors' models, which no session attests, so they have
+/// none and `different_from` refuses them.
+pub fn provider_of(harness: &str) -> Option<&'static str> {
+    match harness {
+        "claude-code" => Some("claude"),
+        "codex" => Some("codex"),
+        "gemini" => Some("gemini"),
+        "grok" => Some("grok"),
+        _ => None,
+    }
+}
+
+/// `routing.provider: different_from(...)` on `node` (BRO-3828), checked for `who`: every argument
+/// must name an attested provider (a param from [`PROVIDERS`], or the provider of the performer the
+/// consumed receipt of a node records), and `who`'s provider must be attested and differ from
+/// each. With no `who` (a claim that names no performer), only the arguments are checked.
+fn route(log: &Log, started: &Started, node: &str, who: Option<&Performer>) -> Result<(), String> {
+    let refs = started.ir.nodes.get(node).and_then(|n| n.class.launch()).map_or(&[][..], |l| &l.different_from[..]);
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let mut doc = None;
+    let mut excluded = Vec::new();
+    for r in refs {
+        match r {
+            RouteRef::Param { name } => {
+                // `start` refused any other value (`check_params`), and params never change.
+                let Some(p) = started.params.get(name).and_then(Value::as_str) else {
+                    return Err(format!("params.{name} names no provider"));
+                };
+                excluded.push((format!("params.{name}"), p.to_string()));
+            }
+            RouteRef::Node { node: m } => {
+                if doc.is_none() {
+                    doc = Some(guard_input(log, started, node).map_err(|e| e.to_string())?);
+                }
+                let harness = doc.as_ref().and_then(|d| d["nodes"][m.as_str()]["performer"]["harness"].as_str());
+                let Some(p) = harness.and_then(provider_of) else {
+                    return Err(format!("the receipt of {m} records no attested provider (harness {harness:?})"));
+                };
+                excluded.push((m.clone(), p.to_string()));
+            }
+        }
+    }
+    let Some(who) = who else { return Ok(()) };
+    let Some(mine) = provider_of(&who.harness) else {
+        return Err(format!("the performer's harness {} has no attested provider", who.harness));
+    };
+    if let Some((from, _)) = excluded.iter().find(|(_, p)| p == mine) {
+        return Err(format!("the performer's provider {mine} is the provider of {from}"));
+    }
+    Ok(())
 }
 
 fn performer(session: &VerifiedSession) -> Performer {
@@ -530,6 +588,21 @@ pub fn claim(
     instance: &InstanceId,
     node: &str,
 ) -> Result<Claim, KernelError> {
+    claim_as(ledger, session, instance, node, None)
+}
+
+/// [`claim`], naming the session that will do the work (BRO-3828): `performer`, which the caller
+/// has resolved as the owner's attested child (`SurfaceRegistry::performer`). The claim records it,
+/// and a node that routes by `different_from` refuses it here, `routing_violated`: an early check,
+/// not a binding, since the completion names its performer again. With none, the claim records
+/// the owner, and such a node checks only that its arguments resolve.
+pub fn claim_as(
+    ledger: &mut Ledger,
+    session: &VerifiedSession,
+    instance: &InstanceId,
+    node: &str,
+    performer_session: Option<&VerifiedSession>,
+) -> Result<Claim, KernelError> {
     // A verdict a crash left unwritten is written first, so what waits on it can be claimed.
     let verdicts = settle(ledger, session, instance)?;
     let mut guard = ledger.lock()?;
@@ -563,6 +636,10 @@ pub fn claim(
         let state = state_name(next.pending.get(node).map(|s| s.state));
         return Err(Refusal::NotEnabled { node: node.to_string(), state }.into());
     };
+    let who = performer_session.map(performer);
+    if let Err(detail) = route(&log, &started, node, who.as_ref()) {
+        return Err(Refusal::RoutingViolated { node: node.to_string(), detail }.into());
+    }
     let claims = Claims::fold(&log)?;
     let prior = claims.latest_of(&(node.to_string(), enabled.iteration.clone()));
     if let Some(p) = prior
@@ -584,7 +661,7 @@ pub fn claim(
         lease_until: lease_until.to_string(),
         token_sha256: line_hash(token.as_bytes()),
         inputs: enabled.inputs.clone(),
-        performer: Some(performer(session)),
+        performer: Some(who.unwrap_or_else(|| performer(session))),
         tool_use_id: None,
         cancel_at: cancel_at.map(|at| at.to_string()),
         audit: session.audit().cloned(),
@@ -612,6 +689,8 @@ struct Held {
     effect_started: bool,
     /// The writer's audit facts, for the events this write appends.
     audit: Option<Audit>,
+    /// Who did the work (BRO-3828): the performer `complete` names, else the claim's.
+    who: Performer,
 }
 
 impl Held {
@@ -661,7 +740,11 @@ fn hold(
         return Err(Refusal::InputsChanged { node: rec.node }.into());
     }
     let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));
-    Ok(Held { log, started, rec, next, effect_started, audit: session.audit().cloned() })
+    // The completing session, as it is now; `complete_as` replaces it with the performer it names.
+    // A performer named at claim is not carried over: its attestation was of that moment
+    // (BRO-3828, P20 round 3), so a completion names its performer again.
+    let who = performer(session);
+    Ok(Held { log, started, rec, next, effect_started, audit: session.audit().cloned(), who })
 }
 
 /// Extends the lease of the claim `token` names. See the module docs.
@@ -747,7 +830,15 @@ fn prepare(held: &Held, outputs: &Value) -> Result<Plan, Unfit> {
         let inputs =
             guard_input(&held.log, &held.started, &held.rec.node).map_err(|e| ("input_invalid", e.to_string()))?;
         let own = if judges { outputs.clone() } else { Value::Null };
-        Some(serde_json::to_vec(&serde_json::json!({ "outputs": own, "inputs": inputs })).unwrap_or_default())
+        let mut envelope = serde_json::json!({ "outputs": own, "inputs": inputs });
+        if ir.ir_version >= 9 {
+            // The completing performer's record as its receipt will record it, and its provider.
+            let who = &held.who;
+            let mut performer = serde_json::to_value(who).unwrap_or(Value::Null);
+            performer["provider"] = serde_json::json!(provider_of(&who.harness));
+            envelope["performer"] = performer;
+        }
+        Some(serde_json::to_vec(&envelope).unwrap_or_default())
     } else {
         judges.then(|| serde_json::to_vec(outputs).unwrap_or_default())
     };
@@ -854,7 +945,7 @@ fn receipt(held: &Held, session: &VerifiedSession, outputs: Value, verify: Verif
         inputs: held.rec.inputs.clone(),
         outputs,
         verify: Some(verify),
-        performer: Some(performer(session)),
+        performer: Some(held.who.clone()),
         tool_use_id: None,
         audit: session.audit().cloned(),
     }
@@ -911,13 +1002,40 @@ pub fn complete(
     outputs: Value,
     limits: &Limits,
 ) -> Result<Completion, KernelError> {
+    complete_as(ledger, session, token, outputs, limits, None)
+}
+
+/// [`complete`], naming the session that did the work (BRO-3828), resolved by the caller as the
+/// owner's attested child; with none, the completing session. A node that routes by
+/// `different_from` refuses the work, `routing_violated`, unless that performer's provider is
+/// attested and differs from each the route names. It is checked before the command runs; after
+/// it, `hold` refuses any change to the receipts the route read (`inputs_changed`), and the params
+/// and the performer cannot change, so the verdict stands.
+pub fn complete_as(
+    ledger: &mut Ledger,
+    session: &VerifiedSession,
+    token: &str,
+    outputs: Value,
+    limits: &Limits,
+    performer_session: Option<&VerifiedSession>,
+) -> Result<Completion, KernelError> {
+    let named = performer_session.map(performer);
+    let name = |mut held: Held| {
+        if let Some(who) = &named {
+            held.who = who.clone();
+        }
+        held
+    };
     limits.check().map_err(|detail| Refusal::InvalidLimits { detail })?;
     let (instance, sha) = parse_token(token)?;
     let mut guard = ledger.lock()?;
     let log = guard.log(&instance)?;
     let now = wall(&log)?;
-    let mut held = hold(log, session, &instance, &sha, now)?;
+    let mut held = name(hold(log, session, &instance, &sha, now)?);
     check_verb(&held, false)?;
+    if let Err(detail) = route(&held.log, &held.started, &held.rec.node, Some(&held.who)) {
+        return refuse(&mut guard, &held, ("routing_violated", detail), &[]);
+    }
     let plan = match prepare(&held, &outputs) {
         Ok(plan) => plan,
         Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
@@ -934,7 +1052,7 @@ pub fn complete(
         guard = ledger.lock()?;
         let log = guard.log(&instance)?;
         let judged_at = wall(&log)?;
-        held = hold(log, session, &instance, &sha, judged_at)?;
+        held = name(hold(log, session, &instance, &sha, judged_at)?);
         // Another completion of this claim started the effect meanwhile: it is never run twice.
         if held.effect_started {
             let reason = "another completion started this effect; complete again to reconcile it";
@@ -973,7 +1091,7 @@ pub fn complete(
     let mut guard = ledger.lock()?;
     let log = guard.log(&instance)?;
     let after = wall(&log)?;
-    let held = hold(log, session, &instance, &sha, after)?;
+    let held = name(hold(log, session, &instance, &sha, after)?);
     // The command and its input are bound to the pinned IR, params and claim inputs.
     if let Err(unfit) = prepare(&held, &outputs) {
         return refuse(&mut guard, &held, unfit, &[]);
