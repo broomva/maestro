@@ -65,6 +65,9 @@ struct Faults {
     no_flows: bool,
     /// One of the consumer's agent renders is gone.
     render_gone: bool,
+    /// The consumer's agents/ is gone, or a dangling link, while its renders remain.
+    agents_gone: bool,
+    agents_dangling: bool,
     /// This harness's Stop hook runs a program named maestro that is not the installed binary.
     impostor: Option<&'static str>,
     /// Claude Code's Stop hook runs the installed gate with this argument added.
@@ -197,11 +200,17 @@ impl Rig {
         };
         bin(&["agents", "render", "--root", consumer.to_str().unwrap()]);
         if !f.no_flows {
-            let flow = consumer.join("flows/c.yaml");
-            std::fs::write(&flow, "flow: c\nversion: 1\nnodes:\n  a: {class: pure, run: ['true']}\n").unwrap();
-            let skill = consumer.join("skills/flow-c-v1/SKILL.md");
-            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
-            bin(&["flow", "driver-skill", "--definition", flow.to_str().unwrap(), "--out", skill.to_str().unwrap()]);
+            // The file is orders.yaml and the definition c@2: its skill is flow-c-v2, as the binary
+            // names it, and a current copy where the file name would put it (flow-orders-v1) is a
+            // decoy no check may read instead.
+            let flow = consumer.join("flows/orders.yaml");
+            std::fs::write(&flow, "flow: c\nversion: 2\nnodes:\n  a: {class: pure, run: ['true']}\n").unwrap();
+            let skill = consumer.join("skills/flow-c-v2/SKILL.md");
+            let decoy = consumer.join("skills/flow-orders-v1/SKILL.md");
+            for out in [&skill, &decoy] {
+                std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+                bin(&["flow", "driver-skill", "--definition", flow.to_str().unwrap(), "--out", out.to_str().unwrap()]);
+            }
             if f.stale_skill {
                 let mut text = std::fs::read_to_string(&skill).unwrap();
                 text.push_str("\nedited by hand\n");
@@ -210,6 +219,13 @@ impl Rig {
         }
         if f.render_gone {
             std::fs::remove_file(consumer.join(".claude/agents/checker.md")).unwrap();
+        }
+        if f.agents_gone || f.agents_dangling {
+            std::fs::remove_dir_all(consumer.join("agents")).unwrap();
+        }
+        #[cfg(unix)]
+        if f.agents_dangling {
+            std::os::unix::fs::symlink(self.root.join("nowhere"), consumer.join("agents")).unwrap();
         }
     }
 
@@ -416,15 +432,19 @@ fn stop_gate_refuses_an_unwired_harness_and_a_codex_hook_codex_will_not_run() {
 }
 
 /// The check compiles the consumer's flows and compares its generated files itself, never through
-/// a Makefile that could check nothing: a stale skill, no flow at all, and a missing agent render
-/// are each refused for their own reason.
+/// a Makefile that could check nothing, and by the binary's conventions, not its own: the skill
+/// checked is the one the binary names from the definition (c@2 in orders.yaml), with a current
+/// decoy where the file name would point. A stale skill, no flow at all, a missing agent render,
+/// and an agents/ that is gone or a dangling link while renders remain are each refused.
 #[test]
 fn consumers_refuses_a_stale_skill_no_flow_and_a_drifted_render() {
     let r = rig();
     let faults = [
-        (Faults { stale_skill: true, ..Faults::default() }, "is stale"),
+        (Faults { stale_skill: true, ..Faults::default() }, "flow-c-v2/SKILL.md is stale or missing"),
         (Faults { no_flows: true, ..Faults::default() }, "has no flows/*.yaml"),
         (Faults { render_gone: true, ..Faults::default() }, "drift from agents/"),
+        (Faults { agents_gone: true, ..Faults::default() }, "drift from agents/"),
+        (Faults { agents_dangling: true, ..Faults::default() }, "drift from agents/"),
     ];
     for (fault, reason) in faults {
         let fi = r.start();

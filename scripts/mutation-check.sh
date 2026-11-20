@@ -2110,8 +2110,9 @@ mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s
 # Its checks (scripts/kernel-ready.py): the installed binary's build commit is the head; the MCP
 # server lists every flow verb with a twin (and only clap's help, driver-skill and stop-gate have
 # none); the gate is wired for both harnesses through the installed binary itself, and Codex lists
-# that hook enabled and trusted; the consumer has a flow, its flows compile with current skills, and
-# its agent renders match (checked directly, not through its Makefile).
+# that hook enabled and trusted; the consumer has a flow, its flows compile with current skills at
+# the names the binary gives them, and its agent renders match whenever agents/ or a render folder
+# exists (checked directly, not through its Makefile).
 kp=scripts/kernel-ready.py
 mutate $kp '    if commit != head:' '    if False:'
 mutate $kp '    missing = [n for n in expected if n not in names]' '    missing = []'
@@ -2121,6 +2122,8 @@ mutate $kp '    if not gates:' '    if False:'
 mutate $kp 'h.get("enabled") is not True or ' ''
 mutate $kp ' or h.get("trustStatus") != "trusted"' ''
 mutate $kp '        if not flows:' '        if False:'
+mutate $kp '            name = skill_name(maestro, flow.resolve())' '            name = f"flow-{flow.stem}-v1"'
+mutate $kp '        agents = os.path.lexists(Path(root, "agents")) or any(os.path.lexists(Path(root, d)) for d in RENDER_DIRS)' '        agents = Path(root, "agents").is_dir()'
 mutate $kp '            if out.returncode != 0:
                 tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
                 raise Unsound(f"{flow}' '            if False:

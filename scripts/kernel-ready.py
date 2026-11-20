@@ -220,15 +220,36 @@ def stop_gate() -> dict:
     return {"commands": commands, "codex_trusted": [h.get("key") for h in gates]}
 
 
+# Where a harness looks for agent renders (`maestro agents render`).
+RENDER_DIRS = (".claude/agents", ".gemini/agents", ".grok/agents")
+
+
+def skill_name(maestro: Path, flow: Path) -> str:
+    """The driver skill's name, as the installed binary derives it from the definition (its flow
+    name and version), never from the file name."""
+    out = run([maestro, "flow", "driver-skill", "--definition", flow, "--json"])
+    try:
+        text = json.loads(out.stdout)["skill"]
+    except (ValueError, KeyError, TypeError):
+        raise Unsound(f"{flow} does not compile (exit {out.returncode}): {(out.stderr or '').strip()[-200:]}")
+    names = [json.loads(line[len("name: "):]) for line in text.splitlines() if line.startswith("name: ")]
+    if out.returncode != 0 or len(names) != 1 or not re.fullmatch(r"flow-[a-z0-9-]+", names[0]):
+        raise Unsound(f"{flow}: the generated skill names no single skill (exit {out.returncode})")
+    return names[0]
+
+
 def consumers(roots: list) -> dict:
     """Each consumer's flows compile under the installed binary, and their generated driver skills
     and agent renders are current.
 
     The check runs this itself, not through the consumer's Makefile: a Makefile can make a target
     that checks nothing pass (an empty recipe, no rule, a file named like the target), so trusting
-    it checked only that make exited 0 (P20 rounds 1 and 3). A consumer is a repository with
-    `flows/*.yaml`, each with its skill at `skills/flow-<name>-v1/SKILL.md`, and, if it has
-    `agents/`, renders that match it. One with no flow is refused: there is nothing to check.
+    it checked only that make exited 0 (P20 rounds 1 and 3). The conventions are the installed
+    binary's, not this script's (P20 round 4): each `flows/*.yaml` must have its skill at
+    `skills/<name>/SKILL.md`, where the binary names it from the definition. A consumer with no
+    flow is refused: there is nothing to check. Its agents are checked with `agents render --check`
+    whenever `agents/` or any render folder exists, so an `agents/` that is gone, or not a folder,
+    while renders remain is refused rather than read as having no agents.
     """
     maestro = binary("maestro")
     if not roots:
@@ -238,19 +259,22 @@ def consumers(roots: list) -> dict:
         flows = sorted(Path(root, "flows").glob("*.yaml"))
         if not flows:
             raise Unsound(f"{root} has no flows/*.yaml to check")
+        skills = []
         for flow in flows:
-            skill = Path(root, "skills", f"flow-{flow.stem}-v1", "SKILL.md")
+            name = skill_name(maestro, flow.resolve())
+            skill = Path(root, "skills", name, "SKILL.md")
             out = run([maestro, "flow", "driver-skill", "--definition", flow.resolve(), "--out", skill, "--check"])
             if out.returncode != 0:
                 tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
-                raise Unsound(f"{flow} does not compile, or {skill} is stale (exit {out.returncode}): {tail}")
-        agents = Path(root, "agents").is_dir()
+                raise Unsound(f"{flow}'s skill {skill} is stale or missing (exit {out.returncode}): {tail}")
+            skills.append(name)
+        agents = os.path.lexists(Path(root, "agents")) or any(os.path.lexists(Path(root, d)) for d in RENDER_DIRS)
         if agents:
             out = run([maestro, "agents", "render", "--root", root, "--check"])
             if out.returncode != 0:
                 tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
                 raise Unsound(f"the agent renders in {root} drift from agents/ (exit {out.returncode}): {tail}")
-        checked[root] = {"flows": [f.name for f in flows], "agents": agents}
+        checked[root] = {"skills": skills, "agents": agents}
     return {"consumers": checked}
 
 
