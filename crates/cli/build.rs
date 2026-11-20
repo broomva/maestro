@@ -10,9 +10,13 @@
 //!
 //! The build reruns when HEAD, the branch it names, the packed refs, the index or anything inside
 //! a top-level entry of the commit changes, and the dirty state is read over exactly those
-//! entries, so what it reports is never older than what it watches (P20 round 2). A new untracked
-//! file beside them, at the top level, is outside both: the build can reach it only through a
-//! tracked file that names it, and changing that file is a tracked change.
+//! entries, so what it reports is never older than what it watches (P20 round 2).
+//!
+//! What it names is the sources, not the whole build. Configuration Cargo reads from outside the
+//! commit is not recorded: a `.cargo/config.toml` at the top level or above it or in `CARGO_HOME`,
+//! `RUSTFLAGS` and the like, and the toolchain (P20 round 3). Whoever can set those can also
+//! replace `~/.local/bin/maestro` itself, the user-level write the owner accepted as residual risk
+//! (BRO-3635), so the check claims the commit the binary's sources came from, and no more.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

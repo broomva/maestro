@@ -59,11 +59,12 @@ struct Faults {
     disabled: bool,
     /// Codex lists its Stop hook with a command other than the gate's.
     foreign: bool,
-    /// The consumer's `make maestro-check` fails.
-    consumer_fails: bool,
-    /// A file named `maestro-check` sits beside the consumer's Makefile, so a plain `make` deems
-    /// the target current and skips its recipe.
-    target_file: bool,
+    /// The consumer's committed driver skill is stale.
+    stale_skill: bool,
+    /// The consumer holds no flow definition.
+    no_flows: bool,
+    /// One of the consumer's agent renders is gone.
+    render_gone: bool,
     /// This harness's Stop hook runs a program named maestro that is not the installed binary.
     impostor: Option<&'static str>,
     /// Claude Code's Stop hook runs the installed gate with this argument added.
@@ -178,14 +179,37 @@ impl Rig {
                 "#!/bin/sh\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}' '{listing}'\nexec cat >/dev/null\n"
             ),
         );
-        let recipe = if f.consumer_fails { "\t@exit 3\n" } else { "\t@\"$(MAESTRO)\" flow --help >/dev/null\n" };
-        std::fs::create_dir_all(self.consumer()).unwrap();
-        std::fs::write(self.consumer().join("Makefile"), format!("maestro-check:\n{recipe}")).unwrap();
-        let target = self.consumer().join("maestro-check");
-        if f.target_file {
-            std::fs::write(&target, "").unwrap();
-        } else if target.exists() {
-            std::fs::remove_file(&target).unwrap();
+        // A consumer: one flow with its generated skill, and one agent with its renders.
+        let consumer = self.consumer();
+        if consumer.exists() {
+            std::fs::remove_dir_all(&consumer).unwrap();
+        }
+        std::fs::create_dir_all(consumer.join("flows")).unwrap();
+        std::fs::create_dir_all(consumer.join("agents")).unwrap();
+        let verifier =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../agents/verifier.agent.yaml"))
+                .unwrap()
+                .replace("name: verifier", "name: checker");
+        std::fs::write(consumer.join("agents/checker.agent.yaml"), verifier).unwrap();
+        let bin = |args: &[&str]| {
+            let out = Command::new(env!("CARGO_BIN_EXE_maestro")).args(args).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        bin(&["agents", "render", "--root", consumer.to_str().unwrap()]);
+        if !f.no_flows {
+            let flow = consumer.join("flows/c.yaml");
+            std::fs::write(&flow, "flow: c\nversion: 1\nnodes:\n  a: {class: pure, run: ['true']}\n").unwrap();
+            let skill = consumer.join("skills/flow-c-v1/SKILL.md");
+            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+            bin(&["flow", "driver-skill", "--definition", flow.to_str().unwrap(), "--out", skill.to_str().unwrap()]);
+            if f.stale_skill {
+                let mut text = std::fs::read_to_string(&skill).unwrap();
+                text.push_str("\nedited by hand\n");
+                std::fs::write(&skill, text).unwrap();
+            }
+        }
+        if f.render_gone {
+            std::fs::remove_file(consumer.join(".claude/agents/checker.md")).unwrap();
         }
     }
 
@@ -391,21 +415,25 @@ fn stop_gate_refuses_an_unwired_harness_and_a_codex_hook_codex_will_not_run() {
     }
 }
 
+/// The check compiles the consumer's flows and compares its generated files itself, never through
+/// a Makefile that could check nothing: a stale skill, no flow at all, and a missing agent render
+/// are each refused for their own reason.
 #[test]
-fn consumers_refuses_a_failing_consumer_check() {
+fn consumers_refuses_a_stale_skill_no_flow_and_a_drifted_render() {
     let r = rig();
-    let fi = r.start();
-    r.up_to(&fi, "consumers");
-    r.install(Faults { consumer_fails: true, ..Faults::default() });
-    let v = r.refused(&fi, "consumers", "exit_unmapped");
-    assert!(v["stderr"].as_str().unwrap().contains("make maestro-check in"), "{v}");
-    // A file named like the target does not let make skip the failing recipe.
-    r.install(Faults::default());
-    let fi = r.start();
-    r.up_to(&fi, "consumers");
-    r.install(Faults { consumer_fails: true, target_file: true, ..Faults::default() });
-    let v = r.refused(&fi, "consumers", "exit_unmapped");
-    assert!(v["stderr"].as_str().unwrap().contains("make maestro-check in"), "{v}");
+    let faults = [
+        (Faults { stale_skill: true, ..Faults::default() }, "is stale"),
+        (Faults { no_flows: true, ..Faults::default() }, "has no flows/*.yaml"),
+        (Faults { render_gone: true, ..Faults::default() }, "drift from agents/"),
+    ];
+    for (fault, reason) in faults {
+        let fi = r.start();
+        r.up_to(&fi, "consumers");
+        r.install(fault);
+        let v = r.refused(&fi, "consumers", "exit_unmapped");
+        assert!(v["stderr"].as_str().unwrap().contains(reason), "{reason}: {v}");
+        r.install(Faults::default());
+    }
 }
 
 #[test]

@@ -43,7 +43,9 @@ nodes:
     needs: [pin]
     snapshot: "{{params.head}}"
     run: [sh, -c, "{{params.suite}}"]
-  # ~/.local/bin/maestro, the binary the harnesses launch, was built from that head, clean.
+  # ~/.local/bin/maestro, the binary the harnesses launch, was built from that head's committed
+  # sources (`maestro --version`, `crates/cli/build.rs`); build configuration outside the tree
+  # (Cargo config, RUSTFLAGS, the toolchain) is not recorded.
   installed:
     class: observe
     needs: [suite]
@@ -64,7 +66,8 @@ nodes:
     run: [sh, -c, 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" stop-gate', stop_gate, "{{params.head}}"]
     inputs: [mcp_tools]
     exit_map: {0: pass}
-  # A consumer's definitions compile, and its generated skills match, under the installed binary.
+  # A consumer's definitions compile, and its generated skills and agent renders match, under the
+  # installed binary, checked by the script itself, never through the consumer's Makefile.
   consumers:
     class: observe
     needs: [stop_gate]

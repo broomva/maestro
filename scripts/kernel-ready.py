@@ -20,7 +20,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
@@ -222,22 +221,37 @@ def stop_gate() -> dict:
 
 
 def consumers(roots: list) -> dict:
-    """Each consumer's `make maestro-check` passes against the installed binary."""
+    """Each consumer's flows compile under the installed binary, and their generated driver skills
+    and agent renders are current.
+
+    The check runs this itself, not through the consumer's Makefile: a Makefile can make a target
+    that checks nothing pass (an empty recipe, no rule, a file named like the target), so trusting
+    it checked only that make exited 0 (P20 rounds 1 and 3). A consumer is a repository with
+    `flows/*.yaml`, each with its skill at `skills/flow-<name>-v1/SKILL.md`, and, if it has
+    `agents/`, renders that match it. One with no flow is refused: there is nothing to check.
+    """
     maestro = binary("maestro")
-    make = shutil.which("make")
-    if not make:
-        raise Unsound("make is not on the kernel's PATH")
     if not roots:
         raise Unsound("no consumer named")
+    checked = {}
     for root in roots:
-        if not Path(root, "Makefile").is_file():
-            raise Unsound(f"{root} has no Makefile")
-        # --always-make: a file named like the target must not let make skip the recipe.
-        out = run([make, "--always-make", "-C", root, "maestro-check", f"MAESTRO={maestro}"], timeout=600)
-        if out.returncode != 0:
-            tail = (out.stderr or out.stdout).strip().splitlines()[-3:]
-            raise Unsound(f"make maestro-check in {root} exited {out.returncode}: {tail}")
-    return {"consumers": roots}
+        flows = sorted(Path(root, "flows").glob("*.yaml"))
+        if not flows:
+            raise Unsound(f"{root} has no flows/*.yaml to check")
+        for flow in flows:
+            skill = Path(root, "skills", f"flow-{flow.stem}-v1", "SKILL.md")
+            out = run([maestro, "flow", "driver-skill", "--definition", flow.resolve(), "--out", skill, "--check"])
+            if out.returncode != 0:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"{flow} does not compile, or {skill} is stale (exit {out.returncode}): {tail}")
+        agents = Path(root, "agents").is_dir()
+        if agents:
+            out = run([maestro, "agents", "render", "--root", root, "--check"])
+            if out.returncode != 0:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"the agent renders in {root} drift from agents/ (exit {out.returncode}): {tail}")
+        checked[root] = {"flows": [f.name for f in flows], "agents": agents}
+    return {"consumers": checked}
 
 
 def main(argv: list) -> int:

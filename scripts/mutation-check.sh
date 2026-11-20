@@ -2110,7 +2110,8 @@ mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s
 # Its checks (scripts/kernel-ready.py): the installed binary's build commit is the head; the MCP
 # server lists every flow verb with a twin (and only clap's help, driver-skill and stop-gate have
 # none); the gate is wired for both harnesses through the installed binary itself, and Codex lists
-# that hook enabled and trusted; the consumer's check runs (make cannot skip it) and passes.
+# that hook enabled and trusted; the consumer has a flow, its flows compile with current skills, and
+# its agent renders match (checked directly, not through its Makefile).
 kp=scripts/kernel-ready.py
 mutate $kp '    if commit != head:' '    if False:'
 mutate $kp '    missing = [n for n in expected if n not in names]' '    missing = []'
@@ -2119,10 +2120,17 @@ mutate $kp '        if out.returncode != 0 or report.get("wired") is not True:' 
 mutate $kp '    if not gates:' '    if False:'
 mutate $kp 'h.get("enabled") is not True or ' ''
 mutate $kp ' or h.get("trustStatus") != "trusted"' ''
-mutate $kp '        if out.returncode != 0:
-            tail' '        if False:
-            tail'
-mutate $kp '"--always-make", ' ''
+mutate $kp '        if not flows:' '        if False:'
+mutate $kp '            if out.returncode != 0:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"{flow}' '            if False:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"{flow}'
+mutate $kp '            if out.returncode != 0:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"the agent renders' '            if False:
+                tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
+                raise Unsound(f"the agent renders'
 mutate $kp '        foreign = [c for c in commands[harness] if not gate_command(c, maestro, harness)]' '        foreign = []'
 mutate $kp '        and words[1:] == ["flow", "stop-gate", "--harness", harness]' '        and words[1:5] == ["flow", "stop-gate", "--harness", harness]'
 # The build commit in `maestro --version` (crates/cli/build.rs): `-dirty` exactly when the checkout

@@ -190,11 +190,14 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   flow kernel checking its own readiness, one node per check, in one chain: `pin` (the repository
   is at `params.head` with no tracked change), `suite` (`params.suite` exits 0 in a snapshot of the
   head, which proves that command and no more, so the owner's ask names it),
-  `installed` (`~/.local/bin/maestro --version` names the head as its build commit, clean),
+  `installed` (`~/.local/bin/maestro --version` names the head as the commit its sources came from,
+  clean; build configuration outside the tree, such as Cargo config or `RUSTFLAGS`, is not
+  recorded, the floor accepted in BRO-3635),
   `mcp_tools` (that binary's MCP server lists every `maestro flow` verb with an MCP twin),
   `stop_gate` (the gate is wired as Claude Code's and Codex's Stop hook through that binary itself,
-  and Codex lists that hook enabled and trusted), `consumers` (`make --always-make maestro-check`
-  passes in `params.consumer`), `exercise`
+  and Codex lists that hook enabled and trusted), `consumers` (the flows in `params.consumer`
+  compile, with current driver skills and agent renders, checked directly rather than through its
+  Makefile, which could check nothing), `exercise`
   (the `verifier` agent, routed to a provider other than `params.writer_provider`, returns a
   dogfood receipt for the head) and `ready` (the owner's answer, the ask naming the head). The
   machine checks are `scripts/kernel-ready.py`, which each check node runs as committed at
