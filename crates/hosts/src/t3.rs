@@ -114,7 +114,7 @@ impl T3Thread {
     pub fn performed_harness(&self) -> Option<Harness> {
         let rows = self.providers.as_ref()?;
         let first = harness_of(rows.first().filter(|p| !p.is_empty())?);
-        rows.iter().all(|p| !p.is_empty() && harness_of(p) == first).then_some(first)
+        rows.iter().all(|p| harness_of(p) == first).then_some(first)
     }
 }
 
