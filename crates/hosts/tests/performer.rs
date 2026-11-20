@@ -159,12 +159,18 @@ def thread(tid, active):
     conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tid, "p", "t", "codex", "full", "default", active, "2026-11-19T00:00:00Z", "2026-11-19T00:00:00Z",
          None, None, json.dumps(payload), "codex"))
-def provider(ptid, tid, name, status):
+def provider(ptid, tid, name, status, driver=None):
     conn.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}", name, name))
+        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}", driver or name, name))
 thread("moved", "pt-m"); provider("pt-m", "moved", "claudeAgent", "active")
 thread("nullrow", "pt-n"); provider("pt-n", "nullrow", None, "active")
 thread("switched", "pt-s2"); provider("pt-s1", "switched", "codex", "retired"); provider("pt-s2", "switched", "claudeAgent", "active")
+thread("team", "pt-t"); provider("pt-t", "team", "codex_team", "active", "codex")
+thread("gemini", "pt-g"); provider("pt-g", "gemini", "gemini-vertex", "active", "acpRegistry")
+thread("unknown", "pt-u"); provider("pt-u", "unknown", "mystery", "active", "acpRegistry")
+thread("bad-driver", "pt-b"); provider("pt-b", "bad-driver", "codex_team", "active", "unknown")
+thread("grok", "pt-grok"); provider("pt-grok", "grok", "renamed", "active", "grok")
+thread("same", "pt-same"); provider("pt-same1", "same", "codex", "retired"); provider("pt-same", "same", "codex_team", "active", "codex")
 conn.commit()
 "#;
     let db = userdata.join("statev2.sqlite");
@@ -174,6 +180,20 @@ conn.commit()
     let me = owner_t3();
     let moved = reg.performer(&me, &named("t3:env-mac/moved")).unwrap();
     assert_eq!(moved.harness(), Some(&Harness::ClaudeCode));
+    for (id, harness) in [
+        ("team", Harness::Codex),
+        ("same", Harness::Codex),
+        ("gemini", Harness::Gemini),
+        ("grok", Harness::Other("grok".into())),
+    ] {
+        assert_eq!(reg.performer(&me, &named(&format!("t3:env-mac/{id}"))).unwrap().harness(), Some(&harness));
+    }
+    for id in ["unknown", "bad-driver"] {
+        assert_eq!(
+            refused(reg.performer(&me, &named(&format!("t3:env-mac/{id}")))),
+            RefusalReason::PerformerUnverified
+        );
+    }
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/switched"))), RefusalReason::PerformerUnverified);
     // P20 round 2: a NULL provider reads (the registry is not unavailable) and confirms nobody.
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/nullrow"))), RefusalReason::PerformerUnverified);

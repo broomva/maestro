@@ -105,8 +105,8 @@ fn an_older_pinned_ir_with_different_from_text_still_validates() {
 fn a_performer_whose_provider_is_the_writers_is_refused_and_another_is_not() {
     let (mut f, fi) = routed("claude");
     let token = take(&mut f, &fi, "review_a");
-    assert_eq!(finish(&mut f, &token, Some(&child("w", Harness::ClaudeCode))), "routing_violated");
-    assert_eq!(finish(&mut f, &token, Some(&child("x", Harness::Codex))), "completed");
+    assert_eq!(finish(&mut f, &token, Some(&child("claudeAgent", Harness::ClaudeCode))), "routing_violated");
+    assert_eq!(finish(&mut f, &token, Some(&child("codex_team", Harness::Codex))), "completed");
 }
 
 #[test]

@@ -62,7 +62,7 @@ pub struct T3Thread {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    /// Every provider the thread has run under, as the registry's provider-thread rows name them
+    /// Every harness the thread has run under, resolved from the registry's provider-thread rows
     /// (BRO-3828); `None` when the registry reports none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<Vec<String>>,
@@ -98,7 +98,7 @@ impl T3Thread {
     }
 
     /// The harness the thread did its work under, attested (BRO-3828): every provider-thread row
-    /// it has, active or retired, names one provider. A thread that switched providers, or whose
+    /// it has, active or retired, resolves to one harness. A thread that switched harnesses, or whose
     /// rows the registry does not report, has none; its default provider is never taken for it.
     /// The harness a verified session of this thread runs (BRO-3828): with provider rows reported,
     /// the one provider they all name ([`Self::performed_harness`]), else none; a registry that
@@ -113,8 +113,8 @@ impl T3Thread {
 
     pub fn performed_harness(&self) -> Option<Harness> {
         let rows = self.providers.as_ref()?;
-        let first = rows.first().filter(|p| !p.is_empty())?;
-        rows.iter().all(|p| p == first).then(|| harness_of(first))
+        let first = harness_of(rows.first().filter(|p| !p.is_empty())?);
+        rows.iter().all(|p| !p.is_empty() && harness_of(p) == first).then_some(first)
     }
 }
 
@@ -437,11 +437,10 @@ def main():
                     requests.append({"id": req["runtime_request_id"], "kind": req["kind"], "payload_json": req["payload_json"]})
         return requests
 
-    # Whether provider-thread rows name their provider (BRO-3828). A schema without the column
+    # Whether provider-thread rows identify their driver and instance. A schema without the columns
     # reports no providers, so no thread there attests a performer; identity reads go on.
-    provider_column = "orchestration_v2_projection_provider_threads" in tables and any(
-        c["name"] == "provider" for c in conn.execute("PRAGMA table_info(orchestration_v2_projection_provider_threads)")
-    )
+    provider_columns = {c["name"] for c in conn.execute("PRAGMA table_info(orchestration_v2_projection_provider_threads)")} if "orchestration_v2_projection_provider_threads" in tables else set()
+    provider_column = {"provider", "driver", "provider_instance_id"} <= provider_columns
 
     def pending_questions_of(thread_id):
         # A thread's waiting AskUserQuestion cards (BRO-3936): pending `user_input` requests, raw,
@@ -511,9 +510,11 @@ def main():
         # performer is attested only when they are one provider, never by the thread's default.
         providers = None
         if provider_column:
-            # A provider that is not text (NULL) names none: it reads, and confirms nobody.
-            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(
-                "SELECT provider FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
+            # Concrete drivers name their harness; only the generic driver uses the instance mapping.
+            # Unknown or missing values confirm nobody.
+            providers = [(p["driver"] if p["driver"] in ("codex", "claudeAgent", "grok", "antigravity") else
+                          p["provider_instance_id"] if p["driver"] == "acpRegistry" and p["provider_instance_id"] in ("claudeAgent", "claude-code", "claude", "codex", "gemini-vertex", "gemini", "antigravity", "agy", "grok") else "") for p in conn.execute(
+                "SELECT driver, provider_instance_id FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
                 (row["thread_id"],),
             )]
         run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")
