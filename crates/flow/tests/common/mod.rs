@@ -168,10 +168,14 @@ pub struct ProjectionDump {
     pub kind_counts: Vec<(String, String, i64)>,
 }
 
-/// Reads the projection tables at `<root>/projection.sqlite` for test assertions.
+/// Reads the projection tables at `<root>/projection.sqlite` for test assertions. The root's links
+/// are resolved first, as the projection's own `db_path` does: `SQLITE_OPEN_NOFOLLOW` refuses a
+/// link anywhere in the path, and on macOS the temporary folder sits under `/var`, a link to
+/// `/private/var` (BRO-4017, found by the kernel-ready@1 dogfood).
 pub fn projection_dump(root: &Path) -> ProjectionDump {
     use rusqlite::{Connection, OpenFlags};
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let root = std::fs::canonicalize(root).unwrap();
     let conn = Connection::open_with_flags(root.join("projection.sqlite"), flags).unwrap();
     let mut meta = Vec::new();
     let mut stmt = conn.prepare("SELECT key, value FROM meta ORDER BY key").unwrap();
