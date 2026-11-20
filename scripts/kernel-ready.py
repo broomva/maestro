@@ -10,13 +10,16 @@ its subject included, exits 1, so the node's `exit_map` ({0: pass}) refuses it: 
 sound. The kernel runs it with only PATH (the system folders), HOME, LANG, LC_ALL and TMPDIR, so
 it names every program by absolute path or finds it on that PATH.
 
-Runs on the system's python3 (3.9 on macOS), so it uses nothing newer.
+Runs on the system's python3 (3.9 on macOS), so it uses nothing newer. `~/.local/bin/codex` must
+be a native executable (Codex's standalone install): a Node shim finds no `node` on the kernel's
+PATH, so the check refuses it rather than pass unread.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -161,6 +164,19 @@ def mcp_tools() -> dict:
     return {"expected": expected, "tools": len(names)}
 
 
+def runs(command: str, program: Path) -> bool:
+    """Whether a hook command's program (after any `env` and NAME=value words) is `program`."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    while words and (words[0] == "env" or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])):
+        words = words[1:]
+    if not words or not os.path.isabs(words[0]):
+        return False
+    return os.path.realpath(words[0]) == os.path.realpath(program)
+
+
 def stop_gate() -> dict:
     """The Stop gate is wired for Claude Code and Codex, and Codex trusts its hook."""
     maestro = binary("maestro")
@@ -176,6 +192,10 @@ def stop_gate() -> dict:
         commands[harness] = [c for c in report.get("commands") or [] if isinstance(c, str)]
         if not commands[harness]:
             raise Unsound(f"stop-gate --check-install for {harness} names no hook command")
+        # --check-install accepts any program named maestro; the hook must run this binary.
+        foreign = [c for c in commands[harness] if not runs(c, maestro)]
+        if foreign:
+            raise Unsound(f"the {harness} Stop hook runs another program than {maestro}: {foreign}")
     # Codex runs a hook only once it trusts it, which --check-install does not read.
     codex = binary("codex")
     reply = rpc([codex, "app-server"], [
@@ -207,7 +227,8 @@ def consumers(roots: list) -> dict:
     for root in roots:
         if not Path(root, "Makefile").is_file():
             raise Unsound(f"{root} has no Makefile")
-        out = run([make, "-C", root, "maestro-check", f"MAESTRO={maestro}"], timeout=600)
+        # --always-make: a file named like the target must not let make skip the recipe.
+        out = run([make, "--always-make", "-C", root, "maestro-check", f"MAESTRO={maestro}"], timeout=600)
         if out.returncode != 0:
             tail = (out.stderr or out.stdout).strip().splitlines()[-3:]
             raise Unsound(f"make maestro-check in {root} exited {out.returncode}: {tail}")

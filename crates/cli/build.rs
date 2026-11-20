@@ -1,18 +1,17 @@
 //! The commit this binary was built from, for `maestro --version` (BRO-3842). kernel-ready@1's
 //! `installed` node reads it to tell whether the installed binary is the head under check.
 //!
-//! It is `git rev-parse HEAD` of the checkout being built. `-dirty` is added when a tracked file
-//! under `crates/`, or the root `Cargo.toml` or `Cargo.lock`, differs from that commit: the
-//! sources a build reads. It is `unknown` when there is no git or no repository (a build from a
-//! source archive). An `unknown` or `-dirty` build never matches a head, so the check fails
-//! closed. The build reruns when HEAD, the branch it names, the packed refs, the index or any of
-//! those sources change, so neither a new commit nor a new edit is reported under the old value.
+//! It is `git rev-parse HEAD` of the checkout being built. `-dirty` is added when the checkout is
+//! not exactly that commit: any tracked file changed, or any untracked file git does not ignore.
+//! A build reads more than `crates/` (`agents/` is compiled in, P20 round 1), so the whole
+//! checkout counts, and an edit anywhere is reported rather than guessed harmless. It is `unknown`
+//! when there is no git or no repository (a build from a source archive). An `unknown` or
+//! `-dirty` build never matches a head, so the check fails closed. The build reruns when HEAD, the
+//! branch it names, the packed refs, the index or any top-level entry of the commit changes, so
+//! neither a new commit nor a new edit is reported under the old value.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// The sources a build reads, relative to the repository root.
-const SOURCES: &[&str] = &["crates", "Cargo.toml", "Cargo.lock"];
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
@@ -36,13 +35,12 @@ fn main() {
             {
                 println!("cargo:rerun-if-changed={p}");
             }
-            for source in SOURCES {
-                println!("cargo:rerun-if-changed={}", top.join(source).display());
+            // Every top-level entry of the commit (a folder is watched whole), never the untracked
+            // build output beside them, which would rerun this on every build.
+            for entry in git(&top, &["ls-tree", "--name-only", "HEAD"]).unwrap_or_default().lines() {
+                println!("cargo:rerun-if-changed={}", top.join(entry).display());
             }
-            let mut status =
-                vec!["-C", top.to_str().unwrap_or("."), "status", "--porcelain", "--untracked-files=no", "--"];
-            status.extend(SOURCES);
-            match Command::new("git").args(&status).output() {
+            match Command::new("git").arg("-C").arg(&top).args(["status", "--porcelain"]).output() {
                 Ok(out) if out.status.success() && out.stdout.is_empty() => head,
                 _ => format!("{head}-dirty"),
             }

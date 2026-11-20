@@ -61,6 +61,11 @@ struct Faults {
     foreign: bool,
     /// The consumer's `make maestro-check` fails.
     consumer_fails: bool,
+    /// A file named `maestro-check` sits beside the consumer's Makefile, so a plain `make` deems
+    /// the target current and skips its recipe.
+    target_file: bool,
+    /// This harness's Stop hook runs a program named maestro that is not the installed binary.
+    impostor: Option<&'static str>,
 }
 
 struct Rig {
@@ -140,7 +145,12 @@ impl Rig {
                 env!("CARGO_BIN_EXE_maestro")
             ),
         );
-        let gate = |harness: &str| format!("{} flow stop-gate --harness {harness}", maestro.display());
+        let impostor = self.root.join("elsewhere/maestro");
+        executable(&impostor, "#!/bin/sh\nexit 0\n");
+        let gate = |harness: &str| {
+            let program = if f.impostor == Some(harness) { &impostor } else { &maestro };
+            format!("{} flow stop-gate --harness {harness}", program.display())
+        };
         for (harness, settings) in [("claude", ".claude/settings.json"), ("codex", ".codex/hooks.json")] {
             let path = home.join(settings);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -168,6 +178,12 @@ impl Rig {
         let recipe = if f.consumer_fails { "\t@exit 3\n" } else { "\t@\"$(MAESTRO)\" flow --help >/dev/null\n" };
         std::fs::create_dir_all(self.consumer()).unwrap();
         std::fs::write(self.consumer().join("Makefile"), format!("maestro-check:\n{recipe}")).unwrap();
+        let target = self.consumer().join("maestro-check");
+        if f.target_file {
+            std::fs::write(&target, "").unwrap();
+        } else if target.exists() {
+            std::fs::remove_file(&target).unwrap();
+        }
     }
 
     /// The binary as the verified Direct session `d1`, its home the scratch one.
@@ -298,6 +314,19 @@ fn pin_refuses_another_head_and_a_tracked_change() {
     r.refused(&fi, "pin", "exit_unmapped");
 }
 
+/// The checks run the script as committed at the head: one replaced in the working tree after
+/// `pin` passed changes nothing, and a broken subject is still refused.
+#[test]
+fn a_check_script_changed_after_pin_is_not_the_one_that_runs() {
+    let r = rig();
+    let fi = r.start();
+    r.up_to(&fi, "installed");
+    std::fs::write(r.repo.join("scripts/kernel-ready.py"), "import sys; sys.exit(0)\n").unwrap();
+    r.install(Faults { commit: Some(r.first.clone().leak()), ..Faults::default() });
+    let v = r.refused(&fi, "installed", "exit_unmapped");
+    assert!(v["stderr"].as_str().unwrap().contains("was built from"), "{v}");
+}
+
 #[test]
 fn suite_refuses_a_failing_suite() {
     let r = rig();
@@ -339,6 +368,8 @@ fn stop_gate_refuses_an_unwired_harness_and_a_codex_hook_codex_will_not_run() {
         (Faults { untrusted: true, ..Faults::default() }, "disabled or untrusted"),
         (Faults { disabled: true, ..Faults::default() }, "disabled or untrusted"),
         (Faults { foreign: true, ..Faults::default() }, "lists no Stop hook running the gate"),
+        (Faults { impostor: Some("claude"), ..Faults::default() }, "the claude Stop hook runs another program"),
+        (Faults { impostor: Some("codex"), ..Faults::default() }, "the codex Stop hook runs another program"),
     ];
     for (fault, reason) in faults {
         let fi = r.start();
@@ -358,6 +389,13 @@ fn consumers_refuses_a_failing_consumer_check() {
     r.install(Faults { consumer_fails: true, ..Faults::default() });
     let v = r.refused(&fi, "consumers", "exit_unmapped");
     assert!(v["stderr"].as_str().unwrap().contains("make maestro-check in"), "{v}");
+    // A file named like the target does not let make skip the failing recipe.
+    r.install(Faults::default());
+    let fi = r.start();
+    r.up_to(&fi, "consumers");
+    r.install(Faults { consumer_fails: true, target_file: true, ..Faults::default() });
+    let v = r.refused(&fi, "consumers", "exit_unmapped");
+    assert!(v["stderr"].as_str().unwrap().contains("make maestro-check in"), "{v}");
 }
 
 #[test]
@@ -374,7 +412,8 @@ fn exercise_refuses_the_writers_provider_and_another_heads_receipt() {
 }
 
 /// `maestro --version` names the commit it was built from (`build.rs`), with `-dirty` exactly when
-/// a tracked build source differs from it, which is what `installed` compares with the head.
+/// the checkout differs from it (a tracked change, or an untracked file git does not ignore),
+/// which is what `installed` compares with the head.
 #[test]
 fn the_version_names_the_build_commit() {
     let out = Command::new(env!("CARGO_BIN_EXE_maestro")).arg("--version").output().unwrap();
@@ -382,10 +421,7 @@ fn the_version_names_the_build_commit() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let head = git(dir, &["rev-parse", "HEAD"]);
     let top = git(dir, &["rev-parse", "--show-toplevel"]);
-    let changed = git(
-        Path::new(&top),
-        &["status", "--porcelain", "--untracked-files=no", "--", "crates", "Cargo.toml", "Cargo.lock"],
-    );
+    let changed = git(Path::new(&top), &["status", "--porcelain"]);
     let commit = if changed.is_empty() { head } else { format!("{head}-dirty") };
     assert_eq!(text.trim(), format!("maestro {} ({commit})", env!("CARGO_PKG_VERSION")));
 }

@@ -188,20 +188,24 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   workdir is refused when a definition compiles.
 - **kernel-ready@1, the meta dogfood (BRO-3842).** `crates/flow/flows/kernel-ready.yaml` is the
   flow kernel checking its own readiness, one node per check, in one chain: `pin` (the repository
-  is at `params.head` with no tracked change), `suite` (`params.suite` in a snapshot of the head),
+  is at `params.head` with no tracked change), `suite` (`params.suite` exits 0 in a snapshot of the
+  head, which proves that command and no more, so the owner's ask names it),
   `installed` (`~/.local/bin/maestro --version` names the head as its build commit, clean),
   `mcp_tools` (that binary's MCP server lists every `maestro flow` verb with an MCP twin),
-  `stop_gate` (the gate is wired as Claude Code's and Codex's Stop hook, and Codex lists that hook
-  enabled and trusted), `consumers` (`make maestro-check` passes in `params.consumer`), `exercise`
+  `stop_gate` (the gate is wired as Claude Code's and Codex's Stop hook through that binary itself,
+  and Codex lists that hook enabled and trusted), `consumers` (`make --always-make maestro-check`
+  passes in `params.consumer`), `exercise`
   (the `verifier` agent, routed to a provider other than `params.writer_provider`, returns a
   dogfood receipt for the head) and `ready` (the owner's answer, the ask naming the head). The
-  machine checks are `scripts/kernel-ready.py`, at the pinned head. Every check node fails closed:
+  machine checks are `scripts/kernel-ready.py`, which each check node runs as committed at
+  `params.head` (`git show`), never the working tree's copy. Every check node fails closed:
   an observe node maps only exit 0 to `pass`, so a broken subject, or one the check cannot read,
   is refused (`exit_unmapped`), and the owner is never asked about a head that failed a check.
   `crates/cli/tests/kernel_ready.rs` seeds a fault into each node's subject and shows the kernel
   refuses it. `maestro --version` prints the build commit (`crates/cli/build.rs`), with `-dirty`
-  when a tracked build source differs from it and `unknown` outside a git checkout; neither
-  matches a head. The definition follows the owner's rule that structure is fixed and treatment is
+  when the checkout differs from it (any tracked change, or an untracked file git does not ignore)
+  and `unknown` outside a git checkout; neither matches a head. `~/.local/bin/codex` must be
+  Codex's native executable: a Node shim finds no `node` on the kernel's `PATH`, and is refused. The definition follows the owner's rule that structure is fixed and treatment is
   per instance (D6, BRO-3980): the definition fixes what must hold and in what order, and the
   params say how one instance meets it (which suite this host runs, which consumers this
   installation serves, who wrote the head, what the verifier exercises). Two instances, driven from
