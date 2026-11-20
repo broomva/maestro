@@ -66,6 +66,8 @@ struct Faults {
     target_file: bool,
     /// This harness's Stop hook runs a program named maestro that is not the installed binary.
     impostor: Option<&'static str>,
+    /// Claude Code's Stop hook runs the installed gate with this argument added.
+    extra: Option<&'static str>,
 }
 
 struct Rig {
@@ -149,7 +151,8 @@ impl Rig {
         executable(&impostor, "#!/bin/sh\nexit 0\n");
         let gate = |harness: &str| {
             let program = if f.impostor == Some(harness) { &impostor } else { &maestro };
-            format!("{} flow stop-gate --harness {harness}", program.display())
+            let extra = f.extra.filter(|_| harness == "claude").map_or(String::new(), |a| format!(" {a}"));
+            format!("{} flow stop-gate --harness {harness}{extra}", program.display())
         };
         for (harness, settings) in [("claude", ".claude/settings.json"), ("codex", ".codex/hooks.json")] {
             let path = home.join(settings);
@@ -373,8 +376,10 @@ fn stop_gate_refuses_an_unwired_harness_and_a_codex_hook_codex_will_not_run() {
         (Faults { untrusted: true, ..Faults::default() }, "disabled or untrusted"),
         (Faults { disabled: true, ..Faults::default() }, "disabled or untrusted"),
         (Faults { foreign: true, ..Faults::default() }, "lists no Stop hook running the gate"),
-        (Faults { impostor: Some("claude"), ..Faults::default() }, "the claude Stop hook runs another program"),
-        (Faults { impostor: Some("codex"), ..Faults::default() }, "the codex Stop hook runs another program"),
+        (Faults { impostor: Some("claude"), ..Faults::default() }, "the claude Stop hook is not exactly"),
+        (Faults { impostor: Some("codex"), ..Faults::default() }, "the codex Stop hook is not exactly"),
+        (Faults { extra: Some("--help"), ..Faults::default() }, "the claude Stop hook is not exactly"),
+        (Faults { extra: Some("--cannot-block"), ..Faults::default() }, "the claude Stop hook is not exactly"),
     ];
     for (fault, reason) in faults {
         let fi = r.start();
@@ -417,8 +422,9 @@ fn exercise_refuses_the_writers_provider_and_another_heads_receipt() {
 }
 
 /// `maestro --version` names the commit it was built from (`build.rs`), with `-dirty` exactly when
-/// the checkout differs from it (a tracked change, or an untracked file git does not ignore),
-/// which is what `installed` compares with the head.
+/// the build could have read what the commit does not hold (a tracked change, or an untracked file
+/// git does not ignore inside one of the commit's top-level entries), which is what `installed`
+/// compares with the head.
 #[test]
 fn the_version_names_the_build_commit() {
     let out = Command::new(env!("CARGO_BIN_EXE_maestro")).arg("--version").output().unwrap();
@@ -426,7 +432,10 @@ fn the_version_names_the_build_commit() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let head = git(dir, &["rev-parse", "HEAD"]);
     let top = git(dir, &["rev-parse", "--show-toplevel"]);
-    let changed = git(Path::new(&top), &["status", "--porcelain"]);
+    let entries = git(Path::new(&top), &["ls-tree", "--name-only", "HEAD"]);
+    let mut args = vec!["--literal-pathspecs", "status", "--porcelain", "--"];
+    args.extend(entries.lines());
+    let changed = git(Path::new(&top), &args);
     let commit = if changed.is_empty() { head } else { format!("{head}-dirty") };
     assert_eq!(text.trim(), format!("maestro {} ({commit})", env!("CARGO_PKG_VERSION")));
 }

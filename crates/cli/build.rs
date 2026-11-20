@@ -1,14 +1,18 @@
 //! The commit this binary was built from, for `maestro --version` (BRO-3842). kernel-ready@1's
 //! `installed` node reads it to tell whether the installed binary is the head under check.
 //!
-//! It is `git rev-parse HEAD` of the checkout being built. `-dirty` is added when the checkout is
-//! not exactly that commit: any tracked file changed, or any untracked file git does not ignore.
-//! A build reads more than `crates/` (`agents/` is compiled in, P20 round 1), so the whole
-//! checkout counts, and an edit anywhere is reported rather than guessed harmless. It is `unknown`
-//! when there is no git or no repository (a build from a source archive). An `unknown` or
-//! `-dirty` build never matches a head, so the check fails closed. The build reruns when HEAD, the
-//! branch it names, the packed refs, the index or any top-level entry of the commit changes, so
-//! neither a new commit nor a new edit is reported under the old value.
+//! It is `git rev-parse HEAD` of the checkout being built. `-dirty` is added when the build could
+//! have read something that commit does not hold: a tracked file changed anywhere, or an untracked
+//! file (one git does not ignore) inside any top-level entry of the commit. A build reads more than
+//! `crates/` (`agents/` is compiled in, P20 round 1), so every entry counts. It is `unknown` when
+//! there is no git or no repository (a build from a source archive). An `unknown` or `-dirty`
+//! build never matches a head, so the check fails closed.
+//!
+//! The build reruns when HEAD, the branch it names, the packed refs, the index or anything inside
+//! a top-level entry of the commit changes, and the dirty state is read over exactly those
+//! entries, so what it reports is never older than what it watches (P20 round 2). A new untracked
+//! file beside them, at the top level, is outside both: the build can reach it only through a
+//! tracked file that names it, and changing that file is a tracked change.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,11 +41,15 @@ fn main() {
             }
             // Every top-level entry of the commit (a folder is watched whole), never the untracked
             // build output beside them, which would rerun this on every build.
-            for entry in git(&top, &["ls-tree", "--name-only", "HEAD"]).unwrap_or_default().lines() {
+            let listed = git(&top, &["ls-tree", "--name-only", "HEAD"]);
+            let entries: Vec<&str> = listed.as_deref().map_or_else(Vec::new, |l| l.lines().collect());
+            for entry in &entries {
                 println!("cargo:rerun-if-changed={}", top.join(entry).display());
             }
-            match Command::new("git").arg("-C").arg(&top).args(["status", "--porcelain"]).output() {
-                Ok(out) if out.status.success() && out.stdout.is_empty() => head,
+            let mut status = Command::new("git");
+            status.arg("-C").arg(&top).args(["--literal-pathspecs", "status", "--porcelain", "--"]).args(&entries);
+            match (listed.is_some() && !entries.is_empty()).then(|| status.output()) {
+                Some(Ok(out)) if out.status.success() && out.stdout.is_empty() => head,
                 _ => format!("{head}-dirty"),
             }
         }

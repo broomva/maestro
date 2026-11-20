@@ -85,4 +85,4 @@ nodes:
   ready:
     class: human
     needs: [exercise]
-    ask: "Is the Maestro flow kernel at {{params.head}} ready? Every check of kernel-ready@1 passed for this head: its suite (`{{params.suite}}`), the installed binary, the MCP tools, the Stop gate for Claude Code and Codex, the consumers, and an exercise by a provider other than the writer's."
+    ask: "Is the Maestro flow kernel at {{params.head}} ready? Every check of kernel-ready@1 passed for this head: its suite (`{{params.suite}}`, which exited 0 in a snapshot of the head; that is all it proves), the installed binary, the MCP tools, the Stop gate for Claude Code and Codex, the consumers, and an exercise by a provider other than the writer's."

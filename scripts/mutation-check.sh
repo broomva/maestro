@@ -2123,12 +2123,15 @@ mutate $kp '        if out.returncode != 0:
             tail' '        if False:
             tail'
 mutate $kp '"--always-make", ' ''
-mutate $kp '        foreign = [c for c in commands[harness] if not runs(c, maestro)]' '        foreign = []'
+mutate $kp '        foreign = [c for c in commands[harness] if not gate_command(c, maestro, harness)]' '        foreign = []'
+mutate $kp '        and words[1:] == ["flow", "stop-gate", "--harness", harness]' '        and words[1:5] == ["flow", "stop-gate", "--harness", harness]'
+mutate $kp '        len(words) == 5
+        and ' ''
 # The build commit in `maestro --version` (crates/cli/build.rs): `-dirty` exactly when the checkout
 # differs from HEAD. A mutant here is itself such a difference, so the version test expects
 # `-dirty` and a build that drops it fails.
 br=crates/cli/build.rs
-mutate $br '                Ok(out) if out.status.success() && out.stdout.is_empty() => head,' '                _ => head,'
+mutate $br '                Some(Ok(out)) if out.status.success() && out.stdout.is_empty() => head,' '                _ => head,'
 mutate $br '                _ => format!("{head}-dirty"),' '                _ => head,'
 # The accepting spine: receipts replay accepted only; one record per (node, iteration), at its
 # first place with its latest result; choices and answers on it. Two runs are compared only as

@@ -285,8 +285,11 @@ fn redone_while_judged(yaml: &str, again: Harness) -> String {
         }
         std::fs::write(dir.join("done"), "").unwrap();
     });
+    // b's command runs until the rerun thread is done, which first waits for source to go stale
+    // (up to its 4 s freshness): the default 5 s timeout would race that (P20 round 2).
+    let patient = maestro_flow::kernel::Limits { timeout: std::time::Duration::from_secs(60), ..quick() };
     let outcome_b =
-        code(complete_as(&mut f.ledger, &f.me, &b, Value::Null, &quick(), Some(&child("c2", Harness::Codex))));
+        code(complete_as(&mut f.ledger, &f.me, &b, Value::Null, &patient, Some(&child("c2", Harness::Codex))));
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     rerun.join().unwrap();
     outcome_b

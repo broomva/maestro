@@ -164,17 +164,23 @@ def mcp_tools() -> dict:
     return {"expected": expected, "tools": len(names)}
 
 
-def runs(command: str, program: Path) -> bool:
-    """Whether a hook command's program (after any `env` and NAME=value words) is `program`."""
+def gate_command(command: str, program: Path, harness: str) -> bool:
+    """Whether a hook command is exactly `<program> flow stop-gate --harness <harness>`.
+
+    --check-install accepts any program named maestro and further arguments, some of which stop
+    the gate gating (`--help`, `--cannot-block`). Only the one form the gate is installed as runs
+    the gate as installed, so nothing else passes: an allowlist of one, not a list of bad flags.
+    """
     try:
         words = shlex.split(command)
     except ValueError:
         return False
-    while words and (words[0] == "env" or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])):
-        words = words[1:]
-    if not words or not os.path.isabs(words[0]):
-        return False
-    return os.path.realpath(words[0]) == os.path.realpath(program)
+    return (
+        len(words) == 5
+        and os.path.isabs(words[0])
+        and os.path.realpath(words[0]) == os.path.realpath(program)
+        and words[1:] == ["flow", "stop-gate", "--harness", harness]
+    )
 
 
 def stop_gate() -> dict:
@@ -192,10 +198,9 @@ def stop_gate() -> dict:
         commands[harness] = [c for c in report.get("commands") or [] if isinstance(c, str)]
         if not commands[harness]:
             raise Unsound(f"stop-gate --check-install for {harness} names no hook command")
-        # --check-install accepts any program named maestro; the hook must run this binary.
-        foreign = [c for c in commands[harness] if not runs(c, maestro)]
+        foreign = [c for c in commands[harness] if not gate_command(c, maestro, harness)]
         if foreign:
-            raise Unsound(f"the {harness} Stop hook runs another program than {maestro}: {foreign}")
+            raise Unsound(f"the {harness} Stop hook is not exactly {maestro} flow stop-gate --harness {harness}: {foreign}")
     # Codex runs a hook only once it trusts it, which --check-install does not read.
     codex = binary("codex")
     reply = rpc([codex, "app-server"], [
