@@ -176,7 +176,7 @@ def gate_command(command: str, program: Path, harness: str) -> bool:
     except ValueError:
         return False
     return (
-        len(words) == 5
+        len(words) > 0
         and os.path.isabs(words[0])
         and os.path.realpath(words[0]) == os.path.realpath(program)
         and words[1:] == ["flow", "stop-gate", "--harness", harness]
