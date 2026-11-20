@@ -365,17 +365,30 @@ fn pin_refuses_another_head_and_a_tracked_change() {
     r.refused(&fi, "pin", "exit_unmapped");
 }
 
-/// The checks run the script as committed at the head: one replaced in the working tree after
-/// `pin` passed changes nothing, and a broken subject is still refused.
+/// Every check node runs the script as committed at the head: one replaced in the working tree
+/// after `pin` passed changes nothing, and each node still refuses its broken subject.
 #[test]
 fn a_check_script_changed_after_pin_is_not_the_one_that_runs() {
     let r = rig();
-    let fi = r.start();
-    r.up_to(&fi, "installed");
-    std::fs::write(r.repo.join("scripts/kernel-ready.py"), "import sys; sys.exit(0)\n").unwrap();
-    r.install(Faults { commit: Some(r.first.clone().leak()), ..Faults::default() });
-    let v = r.refused(&fi, "installed", "exit_unmapped");
-    assert!(v["stderr"].as_str().unwrap().contains("was built from"), "{v}");
+    let script = r.repo.join("scripts/kernel-ready.py");
+    let committed = std::fs::read_to_string(&script).unwrap();
+    let cases = [
+        ("installed", Faults { commit: Some(r.first.clone().leak()), ..Faults::default() }, "was built from"),
+        ("mcp_tools", Faults { mcp_missing: true, ..Faults::default() }, "maestro_flow_spine"),
+        ("stop_gate", Faults { untrusted: true, ..Faults::default() }, "disabled or untrusted"),
+        ("consumers", Faults { stale_skill: true, ..Faults::default() }, "is stale or missing"),
+    ];
+    for (node, fault, reason) in cases {
+        std::fs::write(&script, &committed).unwrap();
+        let fi = r.start();
+        r.up_to(&fi, node);
+        std::fs::write(&script, "import sys; sys.exit(0)\n").unwrap();
+        r.install(fault);
+        let v = r.refused(&fi, node, "exit_unmapped");
+        assert!(v["stderr"].as_str().unwrap().contains(reason), "{node}: {v}");
+        r.install(Faults::default());
+    }
+    std::fs::write(&script, &committed).unwrap();
 }
 
 #[test]
@@ -494,9 +507,9 @@ fn the_version_names_the_build_commit() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let head = git(dir, &["rev-parse", "HEAD"]);
     let top = git(dir, &["rev-parse", "--show-toplevel"]);
-    let entries = git(Path::new(&top), &["ls-tree", "--name-only", "HEAD"]);
-    let mut args = vec!["--literal-pathspecs", "status", "--porcelain", "--"];
-    args.extend(entries.lines());
+    let entries = git(Path::new(&top), &["ls-tree", "-z", "--name-only", "HEAD"]);
+    let mut args = vec!["--literal-pathspecs", "status", "--porcelain", "--untracked-files=normal", "--"];
+    args.extend(entries.split('\0').filter(|e| !e.is_empty()));
     let changed = git(Path::new(&top), &args);
     let commit = if changed.is_empty() { head } else { format!("{head}-dirty") };
     assert_eq!(text.trim(), format!("maestro {} ({commit})", env!("CARGO_PKG_VERSION")));

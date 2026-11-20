@@ -2107,6 +2107,9 @@ mutate $ky '    routing: {provider: "different_from(params.writer_provider)"}
 ' ''
 mutate $ky '"--head={{params.head}}"' '"--head={{params.repo}}"'
 mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" installed' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" installed'
+mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" mcp-tools' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" mcp-tools'
+mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" stop-gate' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" stop-gate'
+mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" consumers' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" consumers'
 # Its checks (scripts/kernel-ready.py): the installed binary's build commit is the head; the MCP
 # server lists every flow verb with a twin (and only clap's help, driver-skill and stop-gate have
 # none); the gate is wired for both harnesses through the installed binary itself, and Codex lists

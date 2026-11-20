@@ -206,8 +206,9 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   is refused (`exit_unmapped`), and the owner is never asked about a head that failed a check.
   `crates/cli/tests/kernel_ready.rs` seeds a fault into each node's subject and shows the kernel
   refuses it. `maestro --version` prints the build commit (`crates/cli/build.rs`), with `-dirty`
-  when the checkout differs from it (any tracked change, or an untracked file git does not ignore)
-  and `unknown` outside a git checkout; neither matches a head. `~/.local/bin/codex` must run with
+  when the build could have read what the commit does not hold (any tracked change, or an
+  untracked file git does not ignore inside one of the commit's top-level entries, the paths the
+  build watches) and `unknown` outside a git checkout; neither matches a head. `~/.local/bin/codex` must run with
   the kernel's `PATH` (the system folders, `/usr/local/bin` and `/opt/homebrew/bin`): Codex's native
   install does, and a Node shim does only when `node` is in one of those folders; otherwise it is
   refused, never passed unread. The definition follows the owner's rule that structure is fixed and treatment is

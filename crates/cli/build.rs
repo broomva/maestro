@@ -45,13 +45,20 @@ fn main() {
             }
             // Every top-level entry of the commit (a folder is watched whole), never the untracked
             // build output beside them, which would rerun this on every build.
-            let listed = git(&top, &["ls-tree", "--name-only", "HEAD"]);
-            let entries: Vec<&str> = listed.as_deref().map_or_else(Vec::new, |l| l.lines().collect());
+            // NUL-separated, so a name git would quote (non-ASCII, say) stays exact.
+            let listed = git(&top, &["ls-tree", "-z", "--name-only", "HEAD"]);
+            let entries: Vec<&str> =
+                listed.as_deref().map_or_else(Vec::new, |l| l.split('\0').filter(|e| !e.is_empty()).collect());
             for entry in &entries {
                 println!("cargo:rerun-if-changed={}", top.join(entry).display());
             }
             let mut status = Command::new("git");
-            status.arg("-C").arg(&top).args(["--literal-pathspecs", "status", "--porcelain", "--"]).args(&entries);
+            // Untracked files are listed whatever the user's status.showUntrackedFiles says.
+            status
+                .arg("-C")
+                .arg(&top)
+                .args(["--literal-pathspecs", "status", "--porcelain", "--untracked-files=normal", "--"])
+                .args(&entries);
             match (listed.is_some() && !entries.is_empty()).then(|| status.output()) {
                 Some(Ok(out)) if out.status.success() && out.stdout.is_empty() => head,
                 _ => format!("{head}-dirty"),
