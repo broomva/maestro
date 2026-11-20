@@ -472,6 +472,17 @@ fn exercise_refuses_the_writers_provider_and_another_heads_receipt() {
     assert_ne!(r.states(&fi)["exercise"], "done");
 }
 
+/// The script keeps its own copy of the folders `maestro agents render` writes, since it runs on the
+/// system's python and imports nothing of Maestro's: the copy must be Maestro's list exactly, or the
+/// consumer check would skip a render folder (P20 round 5).
+#[test]
+fn the_scripts_render_folders_are_maestros() {
+    let script = std::fs::read_to_string(SCRIPT).unwrap();
+    let line = script.lines().find(|l| l.starts_with("RENDER_DIRS = (")).expect("RENDER_DIRS in the script");
+    let listed: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+    assert_eq!(listed, maestro_flow::agents::RENDER_DIRS, "{line}");
+}
+
 /// `maestro --version` names the commit it was built from (`build.rs`), with `-dirty` exactly when
 /// the build could have read what the commit does not hold (a tracked change, or an untracked file
 /// git does not ignore inside one of the commit's top-level entries), which is what `installed`

@@ -11,8 +11,9 @@ sound. The kernel runs it with only PATH (the system folders), HOME, LANG, LC_AL
 it names every program by absolute path or finds it on that PATH.
 
 Runs on the system's python3 (3.9 on macOS), so it uses nothing newer. `~/.local/bin/codex` must
-be a native executable (Codex's standalone install): a Node shim finds no `node` on the kernel's
-PATH, so the check refuses it rather than pass unread.
+run with the kernel's PATH (the system folders, /usr/local/bin and /opt/homebrew/bin): Codex's
+native standalone install does; a Node shim does only when `node` is in one of those folders (not,
+say, under ~/.nvm), and is otherwise refused rather than passed unread.
 """
 from __future__ import annotations
 
@@ -220,7 +221,8 @@ def stop_gate() -> dict:
     return {"commands": commands, "codex_trusted": [h.get("key") for h in gates]}
 
 
-# Where a harness looks for agent renders (`maestro agents render`).
+# The folders `maestro agents render` writes (`maestro_flow::agents::RENDER_DIRS`; Codex takes its
+# brief inline, so it has none). crates/cli/tests/kernel_ready.rs fails if the two differ.
 RENDER_DIRS = (".claude/agents", ".gemini/agents", ".grok/agents")
 
 

@@ -2125,6 +2125,7 @@ mutate $kp '        if not flows:' '        if False:'
 mutate $kp '            name = skill_name(maestro, flow.resolve())' '            name = f"flow-{flow.stem}-v1"'
 mutate $kp 'for line in lines[1:end] if line.startswith("name: ")' 'for line in lines if line.startswith("name: ")'
 mutate $kp '        agents = os.path.lexists(Path(root, "agents")) or any(os.path.lexists(Path(root, d)) for d in RENDER_DIRS)' '        agents = Path(root, "agents").is_dir()'
+mutate $kp 'RENDER_DIRS = (".claude/agents", ".gemini/agents", ".grok/agents")' 'RENDER_DIRS = (".claude/agents", ".gemini/agents")'
 mutate $kp '            if out.returncode != 0:
                 tail = (out.stderr or out.stdout).strip().splitlines()[-2:]
                 raise Unsound(f"{flow}' '            if False:
