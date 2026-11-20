@@ -15,9 +15,18 @@ use std::io::Read as _;
 use std::path::PathBuf;
 
 mod port;
+// The build commit's parsing, which build.rs includes; compiled here only for its tests.
+#[cfg(test)]
+mod build_commit;
 
 #[derive(Parser)]
-#[command(name = "maestro", version, about = "Governance and orchestration metalayer for agent fleets")]
+#[command(
+    name = "maestro",
+    // The version and the commit the binary was built from (`build.rs`), which kernel-ready@1's
+    // `installed` node compares with the head under check.
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MAESTRO_BUILD_COMMIT"), ")"),
+    about = "Governance and orchestration metalayer for agent fleets"
+)]
 struct Cli {
     /// Workspace checkout holding .broomva/ (legacy .control/). Default: the path registry's
     /// workspace root (BROOMVA_WORKSPACE, then MAESTRO_WORKSPACE, then BSTACK_WORKSPACE, then ~/broomva).

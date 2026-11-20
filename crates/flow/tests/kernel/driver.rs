@@ -7,6 +7,8 @@ use maestro_flow::kernel::compile;
 
 const VERIFY: &str = include_str!("../../flows/verify.yaml");
 const SKILL: &str = include_str!("../../../../skills/flow-verify-v1/SKILL.md");
+const KERNEL_READY: &str = include_str!("../../flows/kernel-ready.yaml");
+const KERNEL_READY_SKILL: &str = include_str!("../../../../skills/flow-kernel-ready-v1/SKILL.md");
 
 #[test]
 fn the_committed_driver_skill_is_what_the_ir_generates() {
@@ -19,6 +21,23 @@ fn the_committed_driver_skill_is_what_the_ir_generates() {
         SKILL.contains("\nname: \"flow-verify-v1\"\ndescription: \"Drives an instance of the Maestro flow verify@1")
     );
     assert!(SKILL.contains(flow.hash()));
+}
+
+/// kernel-ready@1 (BRO-3842): its committed driver skill is current, and its checks are one chain,
+/// so every run accepts them in one order and two runs' spines compare.
+#[test]
+fn kernel_ready_is_one_chain_and_its_skill_is_current() {
+    let flow = compile(KERNEL_READY).unwrap();
+    assert_eq!(skill_name(&flow).unwrap(), "flow-kernel-ready-v1");
+    let generated = driver::generate(&flow).unwrap();
+    assert_eq!(
+        generated, KERNEL_READY_SKILL,
+        "skills/flow-kernel-ready-v1/SKILL.md is stale: run maestro flow driver-skill --out"
+    );
+    let chain = ["pin", "suite", "installed", "mcp_tools", "stop_gate", "consumers", "exercise", "ready"];
+    assert_eq!(steps(&flow), chain.map(|n| vec![n]));
+    assert!(generated.contains("- Performer: `agent:verifier`, with the skill `dogfood`."));
+    assert!(generated.contains("its performer's provider must differ from `params.writer_provider`"));
 }
 
 #[test]
