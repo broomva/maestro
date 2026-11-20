@@ -1,0 +1,85 @@
+# kernel-ready@1: the flow kernel checks its own readiness (BRO-3842, the meta dogfood).
+#
+# pin -> suite -> installed -> mcp_tools -> stop_gate -> consumers -> exercise -> ready
+#
+# Each node is one readiness check, and each fails closed: a pure or work node whose command
+# fails is refused, and an observe node maps only exit 0 to `pass`, so any other exit is refused
+# (`exit_unmapped`) and the chain stops there. A broken subject never reaches the owner.
+#
+# Structure is fixed, treatment is per instance (owner directive D6, BRO-3980). The definition
+# fixes what must hold and in what order; the params carry how this instance meets it: which
+# suite runs on this host, which consumers this installation serves, which provider wrote the
+# head (so the exercise goes to another one), and what the verifier exercises. Two instances
+# with different params run the same checks, so their accepting spines compare.
+#
+# The nodes form one chain, so every run accepts them in the same order and `flow spine
+# --against` can compare a Claude-driven run with a Codex-driven one.
+#
+# The machine checks live in `scripts/kernel-ready.py` at the pinned head: `pin` refuses a tree
+# that is not exactly that commit (HEAD and every tracked file), so the script that runs is the
+# reviewed one. Placeholders are data here: the kernel fills them when it runs a command.
+flow: kernel-ready
+version: 1
+# `agent:verifier` is Maestro's own agents/verifier.agent.yaml, compiled into the binary as a
+# builtin (`maestro_flow::agents::BUILTIN`), so the flow declares no `agents:` root: a root holding
+# the same name would be refused as a conflict with the builtin (BRO-3826).
+params: [repo, head, suite, consumer, writer_provider, surface]
+workdir: "{{params.repo}}"
+nodes:
+  # The repository is at params.head, with no tracked change.
+  pin:
+    class: observe
+    run: [sh, -c, 'test "$(git -C "$1" rev-parse HEAD)" = "$2" && test -z "$(git -C "$1" status --porcelain --untracked-files=no)"', pin, "{{params.repo}}", "{{params.head}}"]
+    fresh_for: 2h
+    inputs: [params.head]
+    exit_map: {0: pass}
+  # The project's own tests at that head, run by the kernel in a snapshot of it. The command is
+  # the instance's (`scripts/ci.sh`, or the flow crate's tests on a loaded host).
+  suite:
+    class: pure
+    needs: [pin]
+    snapshot: "{{params.head}}"
+    run: [sh, -c, "{{params.suite}}"]
+  # ~/.local/bin/maestro, the binary the harnesses launch, was built from that head, clean.
+  installed:
+    class: observe
+    needs: [suite]
+    run: [python3, -I, scripts/kernel-ready.py, installed, "{{params.head}}"]
+    inputs: [params.head]
+    exit_map: {0: pass}
+  # Its MCP server lists every flow verb that has an MCP twin.
+  mcp_tools:
+    class: observe
+    needs: [installed]
+    run: [python3, -I, scripts/kernel-ready.py, mcp-tools]
+    inputs: [installed]
+    exit_map: {0: pass}
+  # Claude Code and Codex run the Stop gate as their Stop hook, and Codex trusts it.
+  stop_gate:
+    class: observe
+    needs: [mcp_tools]
+    run: [python3, -I, scripts/kernel-ready.py, stop-gate]
+    inputs: [mcp_tools]
+    exit_map: {0: pass}
+  # A consumer's definitions compile, and its generated skills match, under the installed binary.
+  consumers:
+    class: observe
+    needs: [stop_gate]
+    run: [python3, -I, scripts/kernel-ready.py, consumers, "{{params.consumer}}"]
+    inputs: [params.consumer, stop_gate]
+    exit_map: {0: pass}
+  # Used as a user would, by a provider other than the head's writer (BRO-3828): the kernel
+  # refuses a performer whose attested provider is the writer's. The performer completes with a
+  # dogfood-receipt@1 for this head and surface, which the kernel checks.
+  exercise:
+    class: work
+    needs: [consumers]
+    performer: agent:verifier
+    skill: dogfood
+    routing: {provider: "different_from(params.writer_provider)"}
+    verify: [maestro, dogfood, verify-receipt, "--head={{params.head}}", "--surface={{params.surface}}"]
+  # The owner's call, on the evidence above, for this head.
+  ready:
+    class: human
+    needs: [exercise]
+    ask: "Is the Maestro flow kernel at {{params.head}} ready? Every check of kernel-ready@1 passed for this head: its suite, the installed binary, the MCP tools, the Stop gate for Claude Code and Codex, the consumers, and an exercise by a provider other than the writer's."

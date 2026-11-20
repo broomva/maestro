@@ -2092,6 +2092,40 @@ mutate $vy '    switch: {on: surface, case: declared}
 ' ''
 mutate $vy '    run: [test, -n, "{{params.surface}}"]' '    run: [test, -z, "{{params.surface}}"]'
 mutate $vy '"--head={{params.head}}"' '"--head={{params.repo}}"'
+# kernel-ready@1 (BRO-3842), crates/cli/tests/kernel_ready.rs: every check node refuses its
+# subject broken. pin refuses another head and a tracked change; the chain is one order (the
+# driver test's steps); exercise is routed away from the writer's provider and its receipt is bound
+# to the head. The observe nodes' exit_map and a refused pure command are the kernel guards proven
+# above for verify@1.
+ky=crates/flow/flows/kernel-ready.yaml
+mutate $ky 'test "$(git -C "$1" rev-parse HEAD)" = "$2" && ' ''
+mutate $ky ' && test -z "$(git -C "$1" status --porcelain --untracked-files=no)"' ''
+mutate $ky '    needs: [suite]
+' ''
+mutate $ky '    routing: {provider: "different_from(params.writer_provider)"}
+' ''
+mutate $ky '"--head={{params.head}}"' '"--head={{params.repo}}"'
+# Its checks (scripts/kernel-ready.py): the installed binary's build commit is the head; the MCP
+# server lists every flow verb with a twin (and only clap's help, driver-skill and stop-gate have
+# none); the gate is wired for both harnesses, and Codex lists that hook enabled and trusted; the
+# consumer's check passes.
+kp=scripts/kernel-ready.py
+mutate $kp '    if commit != head:' '    if False:'
+mutate $kp '    missing = [n for n in expected if n not in names]' '    missing = []'
+mutate $kp 'NO_MCP_TWIN = {"help", "driver-skill", "stop-gate"}' 'NO_MCP_TWIN = {"help", "driver-skill", "stop-gate", "spine"}'
+mutate $kp '        if out.returncode != 0 or report.get("wired") is not True:' '        if False:'
+mutate $kp '    if not gates:' '    if False:'
+mutate $kp 'h.get("enabled") is not True or ' ''
+mutate $kp ' or h.get("trustStatus") != "trusted"' ''
+mutate $kp '        if out.returncode != 0:
+            tail' '        if False:
+            tail'
+# The build commit in `maestro --version` (crates/cli/build.rs): `-dirty` exactly when a tracked
+# build source differs from HEAD. A mutant here is itself such a difference, so the version test
+# expects `-dirty` and a build that drops it fails.
+br=crates/cli/build.rs
+mutate $br '                Ok(out) if out.status.success() && out.stdout.is_empty() => head,' '                _ => head,'
+mutate $br '                _ => format!("{head}-dirty"),' '                _ => head,'
 # The accepting spine: receipts replay accepted only; one record per (node, iteration), at its
 # first place with its latest result; choices and answers on it. Two runs are compared only as
 # runs of one definition (name and IR hash), a precondition reported on its own; then a record
