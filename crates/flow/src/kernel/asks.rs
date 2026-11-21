@@ -79,8 +79,8 @@
 //! # Amending (BRO-4036)
 //!
 //! `amend` replaces the node's current linked ask with a corrected body and a reason: a new
-//! `AskPinned` with `amends`, `supersedes` (the old id) and `reason` (`amended: <text>`, at most
-//! [`MAX_AMEND_REASON`] bytes). It is refused unless the old ask is the replayed current one and,
+//! `AskPinned` with `amends`, `supersedes` (the old id) and `reason` (`amended: <text>`, the
+//! text at most [`MAX_AMEND_REASON`] bytes). It is refused unless the old ask is the replayed current one and,
 //! on one verified read of main (`amendable`), not answered or closed there and not waiting to
 //! land: answered is `ask_amend_answered`, archived `ask_amend_closed`, two rows `ask_ambiguous`,
 //! unread `ask_amend_unread`. An ask not on main yet (its ledger change unmerged) may be amended:
@@ -869,23 +869,21 @@ fn amendable(paths: &Paths, rec: &AskRec) -> Result<(), KernelError> {
     Ok(())
 }
 
-/// [`waiting_to_land`] as a guard, failing closed: a ref that is absent holds no answer, but one
-/// that is there and does not resolve or read, or holds the ask twice, is `ask_amend_unread`
-/// rather than "no answer" (unread is not unanswered).
+/// [`waiting_to_land`] as a guard, held to the standard of the main read: each answers ref is
+/// resolved and its ledger read object by object, every git call bounded by [`READ_TIMEOUT`]
+/// (`tree::local_commit`, `ask_ledger_verified`). A ref that is absent holds no answer; one that
+/// is there and broken, names no commit, does not read in time or holds the ask twice is
+/// `ask_amend_unread`, never "no answer".
 fn answered_on_answers_refs(paths: &Paths, rec: &AskRec) -> Result<bool, KernelError> {
     let unread = || KernelError::from(Refusal::AskAmendUnread { ask_id: rec.ask_id.clone() });
     let workspace = Store::new(paths.clone(), TreeSource::WorkingTree);
     for (rev, _) in maestro_store::views::ANSWERS_REFS {
-        match workspace.tree.has_ref(rev) {
-            Ok(false) => continue,
-            Ok(true) => {}
+        let sha = match maestro_store::tree::local_commit(&paths.workspace, rev, READ_TIMEOUT) {
+            Ok(None) => continue,
+            Ok(Some(sha)) => sha,
             Err(_) => return Err(unread()),
-        }
-        let at = Store::new(paths.clone(), TreeSource::GitRev(rev.to_string()));
-        if at.tree.unresolved.is_some() {
-            return Err(unread());
-        }
-        match find(&at, &rec.ledger, &rec.ask_id) {
+        };
+        match workspace.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
             Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(true),
             Ok(Found::Row(_) | Found::None) => {}
             Ok(Found::Ambiguous) | Err(_) => return Err(unread()),

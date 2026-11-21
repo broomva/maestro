@@ -1723,14 +1723,12 @@ mutate $asks '    if answered_on_answers_refs(paths, rec)? {
         return Err(Refusal::AskAmendAnswered' '    if false {
         return Err(Refusal::AskAmendAnswered'
 mutate $asks '            Ok(Found::Ambiguous) | Err(_) => return Err(unread()),' '            Ok(Found::Ambiguous) | Err(_) => {}'
-mutate $asks '        if at.tree.unresolved.is_some() {
-            return Err(unread());' '        if at.tree.unresolved.is_some() {
-            continue;'
-mutate $asks '            Err(_) => return Err(unread()),
-        }
-        let at' '            Err(_) => continue,
-        }
-        let at'
+mutate $asks '            Ok(Some(sha)) => sha,
+            Err(_) => return Err(unread()),' '            Ok(Some(sha)) => sha,
+            Err(_) => continue,'
+mutate $tree '        Some(2) => return Ok(None),
+        _ => return Err(format!("`{refname}` does not read: {}", String::from_utf8_lossy(&err).trim())),' '        _ => return Ok(None),'
+mutate $tree '    if !status.success() || !hex || !(id.len() == 40 || id.len() == 64) {' '    if false {'
 mutate $asks '            let at = format!("main@{sha}:{}", rec.ledger);
             return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());' '            let _ = format!("main@{sha}:{}", rec.ledger);'
 mutate $asks '        Err(_) => return Err(unread().into()),' '        Err(_) => {}'
