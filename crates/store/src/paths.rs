@@ -21,6 +21,8 @@ pub struct Paths {
     pub broomva_home: PathBuf,
     /// fleet-reconcile state, one directory per scope (`MAESTRO_FLEET_STATE`).
     pub fleet_state: PathBuf,
+    /// Machine-local fleet telemetry (`MAESTRO_FLEET_META`).
+    pub fleet_meta: PathBuf,
     /// The ask ledgers' §5.5 lock root, shared with the Paseo plugin ([`crate::locks::ask_lock_root`]).
     pub ask_locks: PathBuf,
     /// A file holding `provider_manager.py --json usage` (`MAESTRO_USAGE`). Nothing writes one
@@ -86,6 +88,8 @@ impl Paths {
             work_root,
             broomva_home,
             fleet_state,
+            fleet_meta: env_path("MAESTRO_FLEET_META")
+                .unwrap_or_else(|| home().unwrap_or_else(|| PathBuf::from(".")).join(".config/broomva/fleet/meta")),
             ask_locks: crate::locks::ask_lock_root(),
             usage: env_path("MAESTRO_USAGE"),
         })
@@ -99,6 +103,7 @@ impl Paths {
             work_root: root.join("work"),
             broomva_home: root.join("broomva-home"),
             fleet_state: root.join("fleet-reconcile"),
+            fleet_meta: root.join("fleet-meta"),
             ask_locks: root.join("control-asks/locks"),
             usage: None,
         }

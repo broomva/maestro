@@ -99,6 +99,7 @@ pub const WEB_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-sr
 /// The web pages' styles (BRO-3783): the shell, the three-column decision and the phone layout.
 /// Only on the web pages, so the App's stylesheet holds only what the App places.
 const WEB_CSS: &str = include_str!("../assets/web.css");
+const HEALTH_CSS: &str = include_str!("../assets/health.css");
 
 /// One place in the web pages' navigation: its path and its label.
 pub const WEB_NAV: [(&str, &str); 3] = [("/decisions", "Decisions"), ("/today", "Today"), ("/health", "Health")];
@@ -195,6 +196,7 @@ pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String 
                 meta name="theme-color" content="#0b1622" media="(prefers-color-scheme: dark)";
                 link rel="manifest" href="/manifest.webmanifest";
                 style { (PreEscaped(WEB_CSS)) }
+                style { (PreEscaped(HEALTH_CSS)) }
             }
             body class="mv-web" {
                 header class="mv-web-head" {
