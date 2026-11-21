@@ -736,6 +736,13 @@ pub(crate) fn ask_of(
         .cloned())
 }
 
+/// The replayed current ask, without falling back to historical inputs.
+pub(crate) fn current_ask(log: &Log, started: &Started, node: &str) -> Result<Option<AskRec>, KernelError> {
+    let fold = Fold::replay(log, started)?;
+    let Some(i) = fold.current(node) else { return Ok(None) };
+    Ok(fold.asks.get(&(node, i)).cloned())
+}
+
 /// The earlier ask at `node`'s current iteration that a new ask over `inputs` supersedes.
 pub(crate) fn prior_ask_of(
     log: &Log,

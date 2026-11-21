@@ -99,7 +99,7 @@ use super::adoption;
 use super::error::{KernelError, Refusal};
 use super::events::{Answered, AskLinked, AskPinned, AskWithdrawn, KernelEvent, Started};
 use super::ir::{Class, Iteration};
-use super::replay::{AskRec, State, amended_predecessors, ask_of, next_of, pinned, prior_ask_of};
+use super::replay::{AskRec, State, amended_predecessors, ask_of, current_ask, next_of, pinned, prior_ask_of};
 use super::write::{MAX_OUTPUTS, check_owner, check_writable, wall};
 use crate::clock;
 use crate::ids::InstanceId;
@@ -260,7 +260,11 @@ pub fn amend(
     reason: &str,
 ) -> Result<Asked, KernelError> {
     let seen = look(ledger, session, instance, node)?;
-    let old = seen.rec.as_ref().filter(|r| r.linked).ok_or_else(|| invalid("amend needs a linked ask"))?;
+    let old = seen
+        .rec
+        .as_ref()
+        .filter(|r| r.linked && seen.prior.is_none())
+        .ok_or_else(|| invalid("amend needs the current linked ask"))?;
     if reason.trim().is_empty() {
         return Err(invalid("amend needs a reason"));
     }
@@ -483,6 +487,9 @@ fn pin(
     // stranger's proposal cannot make the owner's ask fail.
     let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };
     super::write::append_writable(&mut guard, instance, at, pin.to_event()?)?;
+    if pin.amends && !current_ask(&guard.log(instance)?, &started, node)?.is_some_and(|r| r.ask_id == pin.ask_id) {
+        return Err(Refusal::AskChanged { node: node.to_string() }.into());
+    }
     Ok(AskRec {
         ask_id: pin.ask_id,
         ledger: pin.ledger,

@@ -1747,3 +1747,34 @@ fn amend_refuses_when_answers_unread_without_appending() {
     assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_unread");
     assert_eq!(f.kinds(&fi), before);
 }
+
+#[test]
+fn amend_refuses_prior_ask_when_inputs_return() {
+    let clock = TestClock::install();
+    let mut f = fx(None, "");
+    f.flow = compile("flow: gate\nversion: 1\nworkdir: \"/tmp\"\nnodes:\n  probe: {class: observe, run: ['true'], fresh_for: 10s, exit_map: {0: ok}}\n  owner: {class: human, ask: 'Ship it?', needs: [probe]}\n").unwrap();
+    let fi = f.begin();
+    let observe = |f: &mut Fx, value| {
+        let c = crate::kernel::claim(&mut f.ledger, &f.me, &fi, "probe").unwrap();
+        crate::kernel::complete(
+            &mut f.ledger,
+            &f.me,
+            &c.token,
+            serde_json::json!({"v": value}),
+            &crate::kernel::Limits::default(),
+        )
+        .unwrap();
+    };
+    observe(&mut f, 1);
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, 2);
+    let current = waiting(&f.ask(&fi, None).unwrap()).0.to_string();
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, 1);
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_body_invalid");
+    assert_eq!(f.kinds(&fi), before);
+    assert!(f.row(&old).unwrap().row.get("archived_at").is_none());
+    assert!(f.row(&current).is_some());
+}
