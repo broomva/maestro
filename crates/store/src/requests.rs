@@ -215,7 +215,8 @@ fn write_ask(
         .spawn()
         // A writer that did not start wrote nothing in this call, but another call for the same
         // pin may be writing: a supersede that cannot start stays unconfirmed (the next call
-        // looks for both rows before filing again), never withdrawn, which could orphan a
+        // looks for the replacement row before filing again, and confirms both rows if it is
+        // there), never withdrawn, which could orphan a
         // replacement a concurrent call writes (P20 delta review, maestro#62).
         .map_err(|e| {
             let message = format!("the writer of record did not run: {e}");
