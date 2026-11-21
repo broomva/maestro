@@ -4,11 +4,17 @@ These receipts close BRO-3842, the meta dogfood of the flow kernel. They were ma
 
 There are two versions:
 - **kernel-ready@1** ended in an owner `ready` node.
-- **kernel-ready@2** (BRO-4044, #63) removes that node. The owner directed on 2026-11-20 that readiness is for agents to verify, not a question for the owner. An @2 instance reaching terminal means the head is ready.
+- **kernel-ready@2** (BRO-4044, #63) removes that node. #63's description and BRO-4044 record why: the owner's direction of 2026-11-20 that readiness is for agents to verify, not a question for the owner.
+
+**What a terminal @2 instance certifies.** Every readiness check was accepted for its head at the time the instance ran. It does not certify that the head is still ready later, because staleness and a newer head need a new run.
 
 ## kernel-ready@2 at `59cb97b` (the result)
 
-**Setup:** `~/.local/bin/maestro` was built from a clean checkout of `59cb97b` (#63's merge), and `maestro --version` reported `0.1.0 (59cb97b3f7c65c2bf247570fe7a3a8225200037c)`. Both instances used the same params:
+**Setup:** the installed binary and the subject were checked by the flow itself:
+- `installed`, accepted in both runs, checked that `~/.local/bin/maestro --version` names the head as a build with no `-dirty` mark, which is what a build from a clean checkout of that commit reports.
+- `pin`, accepted in both runs, checked that the repo is at the head with no tracked change.
+
+Both instances used the same params, as their Started events record:
 - repo: `/tmp/kr-v2`, a clean clone at that commit
 - head: `59cb97b`
 - suite: `cargo test --locked -p maestro-flow -p maestro`
@@ -32,11 +38,13 @@ There are two versions:
 |---|---|---|---|
 | First live run (Claude) | `fi_c938b824d3efbeae25f143e19d39bea3` | `4d6ede5` | Every check accepted. `suite` failed closed once on a macOS test-helper bug (BRO-4017, fixed in #60), and the Codex attempt found custom-named Codex instances unattested (BRO-4018, fixed in #61). Owner answer: **not ready**. Terminal. |
 | Final, Claude | `fi_bb2686ac150f7d1417616e4ba6695679` | `fd9edf9` | Every check accepted, `exercise` by Gemini. Owner answer: **ready** (workspace#1379). Terminal. |
-| Final, Codex | `fi_2d50569d20b5f89a565858d96049b885` | `fd9edf9` | Every check accepted, `exercise` by Codex. Never took the owner's answer: while it waited at `ready`, `pin` went stale past its 2 h `fresh_for`. Every node went stale with it and `ready` became `blocked`, and the Codex session that owned it had ended (BRO-4025). |
+| Final, Codex | `fi_2d50569d20b5f89a565858d96049b885` | `fd9edf9` | Every check accepted, `exercise` by Codex. Never took the owner's answer: while it waited at `ready`, `pin` went stale past its 2 h `fresh_for`. Its seven check nodes are `stale` and `ready` is `blocked` ([status](2026-11-21-kernel-ready/v1/fi_2d50569d-status.json)). Its owner is the delegated Codex thread its Started event names, and its [events log](2026-11-21-kernel-ready/v1/fi_2d50569d-events.jsonl) ends at the ask (`AskPinned`, `AskLinked`, seq 17–18), with nothing after it (BRO-4025). |
 
 The two final @1 runs are identical on every check node. `spine --against` exits 1 at `ready` alone: "the instance accepted ready at step 7; the other never did". See the [comparison](2026-11-21-kernel-ready/v1/against-claude-codex.json) and the [error text](2026-11-21-kernel-ready/v1/against-claude-codex.stderr.txt).
 
 ## What the dogfood found
+
+These are the tickets and PRs filed during the runs. Each finding is as its ticket states it, and each state is as of 2026-11-21. The tickets are the source for these rows; the files here are not.
 
 | Ticket | Finding | State |
 |---|---|---|
@@ -50,8 +58,8 @@ The two final @1 runs are identical on every check node. `spine --against` exits
 
 ## Limits
 
-- **Redaction.** The Gemini verifier's evidence log held three `claim_token` lease tokens from its own `verify@1` run. The committed copy is [claude-exercise-evidence.redacted.log](2026-11-21-kernel-ready/v2/claude-exercise-evidence.redacted.log), with those tokens replaced. Because of that, its digest is not the one the receipt names. The receipt binds the unredacted original (`sha256:6686594a…`), which the kernel checked with `maestro dogfood verify-receipt` when `exercise` completed. No committed event log holds a claim token.
+- **Redaction.** The Gemini verifier's evidence log held three distinct lease tokens from its own `verify@1` run. Each appeared twice, once in a `claim_token` JSON field and once on a `--claim-token` command line. The committed copy is [claude-exercise-evidence.redacted.log](2026-11-21-kernel-ready/v2/claude-exercise-evidence.redacted.log), with all six occurrences replaced and nothing else changed. Because of that, its digest is not the one the receipt names. The receipt binds the unredacted original (`sha256:6686594a…`), which the kernel checked with `maestro dogfood verify-receipt` when `exercise` completed. No committed event log holds a claim token.
 - **The Codex run's receipt** lives in that run's own temporary folder and is not committed. Its acceptance is recorded in the Codex events log (`Completed exercise`, `harness: codex`).
-- **Terminal after staleness.** At 05:33Z, more than 2 hours after their last `pin` observation (about 03:28Z), both of the Claude session's @1 instances read `terminal: true` with every node `stale`, and `flow open` listed no instance for that session. The BRO-3870 fix holds.
+- **Terminal after staleness.** In [staleness-snapshot.txt](2026-11-21-kernel-ready/v1/staleness-snapshot.txt), recorded at 05:37:01Z (the time is in its first line), both of the Claude session's @1 instances read `terminal: true` with every node `stale`, and `flow open` lists no instance for that session. That is more than 2 hours after their last `pin` completion at 03:28:36Z, per their events logs. The BRO-3870 fix holds.
 - **Attribution, not authentication.** The performers are what T3 records the child threads ran (the BRO-3635 floor). See [2026-11-18-attributed-identity.md](2026-11-18-attributed-identity.md).
 - **Subject state.** The flow state lives in the workspace's `.broomva/flows/`, which is not committed. The files here are copies taken after each instance finished.
