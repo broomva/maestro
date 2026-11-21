@@ -7,6 +7,7 @@
 #[cfg(not(unix))]
 compile_error!("maestro-store reads the Broomva path registry, whose reader is Unix only (BRO-3266)");
 
+pub mod answer;
 pub mod broomva_paths;
 pub mod doctor;
 pub mod locks;
@@ -451,7 +452,7 @@ impl Store {
 /// lies in the last `3 * limit + 3` bytes and only those are read, except when no line break
 /// follows the cut: then the tail is the whole file, as `indexOf` giving -1 makes it there.
 /// One ledger's text read as [`Store::asks`] reads each; an entry that does not read is an error.
-fn ask_ledger_of(rel: &str, text: &str) -> Result<AskLedger, String> {
+pub(crate) fn ask_ledger_of(rel: &str, text: &str) -> Result<AskLedger, String> {
     let doc = yaml::parse(text).map_err(|e| format!("{rel}: {e}"))?.value;
     let (ledger, bad) = AskLedger::from_value(doc).map_err(|e| format!("{rel}: {e}"))?;
     if let Some((i, reason)) = bad.first() {

@@ -84,6 +84,22 @@ function theme(ctx: ReturnType<App["getHostContext"]>) {
 }
 
 const app = new App({ name: "maestro-view", version: "1" }, {});
+
+// A link Rust marks with data-open-link (the answer page) is opened by the host: the frame is
+// sandboxed and cannot navigate. Only http(s) URLs are handed over.
+root.addEventListener("click", (e) => {
+  const a = (e.target as Element | null)?.closest?.("a[data-open-link]") as HTMLAnchorElement | null;
+  if (!a) return;
+  e.preventDefault();
+  let url: URL;
+  try {
+    url = new URL(a.href);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return;
+  app.openLink({ url: url.href }).catch(() => {});
+});
 app.ontoolresult = (result) => {
   take(result as { structuredContent?: Rendered });
   schedule();

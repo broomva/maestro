@@ -92,9 +92,28 @@ pub fn app() -> String {
     .into_string()
 }
 
-/// The web pages' policy (BRO-3588): the snapshot's, and no form may post, no page may frame
-/// them, and only the same origin's manifest may load.
-pub const WEB_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; manifest-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+/// The owner script (BRO-4042): the one script the web pages run, named in their policy by hash.
+pub const OWNER_JS: &str = include_str!("../assets/owner.js");
+
+/// The web pages' policy (BRO-3588, BRO-4042): no form may post, no page may frame them, only
+/// the same origin's manifest may load, and the one script that runs is the owner script,
+/// named by its hash, talking only to its own origin.
+/// The CSP source for an inline script: base64 of its SHA-256.
+pub fn script_hash(text: &str) -> String {
+    base64(&Sha256::digest(text.as_bytes()))
+}
+
+static WEB_CSP: LazyLock<String> = LazyLock::new(|| {
+    let hash = script_hash(OWNER_JS);
+    format!(
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; manifest-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; script-src 'sha256-{hash}'; connect-src 'self'"
+    )
+});
+
+/// The policy the web pages declare.
+pub fn web_csp() -> &'static str {
+    &WEB_CSP
+}
 
 /// The web pages' styles (BRO-3783): the shell, the three-column decision and the phone layout.
 /// Only on the web pages, so the App's stylesheet holds only what the App places.
@@ -183,14 +202,14 @@ impl Shell {
     }
 }
 
-/// One render as a web page for a browser (BRO-3588): no script, the shell with `current`
-/// marked, and the manifest a phone installs it from. Read-only: answering is not offered here.
+/// One render as a web page for a browser (BRO-3588): the shell with `current` marked, the
+/// manifest a phone installs it from, and the owner script (BRO-4042), the page's only script.
 pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String {
     html! {
         (DOCTYPE)
         html lang="en" {
             head {
-                (head(&format!("{title} · Maestro"), WEB_CSP))
+                (head(&format!("{title} · Maestro"), web_csp()))
                 meta name="theme-color" content="#f7f6f1" media="(prefers-color-scheme: light)";
                 meta name="theme-color" content="#0b1622" media="(prefers-color-scheme: dark)";
                 link rel="manifest" href="/manifest.webmanifest";
@@ -218,10 +237,60 @@ pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String 
                     }
                 }
                 main id="maestro-root" data-web="true" { (PreEscaped(fragment)) }
+                script { (PreEscaped(OWNER_JS)) }
             }
         }
     }
     .into_string()
+}
+
+/// The owner page (BRO-4042): set up the owner's passkey on this device, once.
+pub fn owner(state: &OwnerPage, shell: &Shell) -> String {
+    let body = html! {
+        section class="mv-owner" {
+            p class="mv-kicker" { "Your passkey" }
+            @match state {
+                OwnerPage::Off(why) => {
+                    h1 class="mv-owner-title" { "Answering is not set up here" }
+                    p class="mv-owner-sub" { (why) }
+                },
+                OwnerPage::Enroll => {
+                    h1 class="mv-owner-title" { "Set up your passkey" }
+                    p class="mv-owner-sub" {
+                        "Maestro writes an answer only when you sign it with Touch ID or Face ID. "
+                        "Set it up once on this device with the setup code Maestro printed when it started."
+                    }
+                    label class="mv-owner-code" {
+                        span { "Setup code" }
+                        input type="text" name="code" autocomplete="one-time-code" inputmode="text" spellcheck="false";
+                    }
+                    button class="mv-go" type="button" data-enroll="true" { "Set up with Touch ID or Face ID" }
+                    p class="mv-answer-status" data-enroll-status="true" role="status" aria-live="polite" {}
+                },
+                OwnerPage::Enrolled(when) => {
+                    h1 class="mv-owner-title" { "Your passkey is set up" }
+                    p class="mv-owner-sub" {
+                        "Decisions take your answer in place; each answer asks for Touch ID or Face ID. "
+                        "If a passkey below was not set up by you, tell Maestro's maintainer before answering."
+                    }
+                    ul class="mv-owner-keys" {
+                        @for at in when { li class="bv-code" { "Set up " (at) } }
+                    }
+                    a class="mv-go" href="/decisions" { "Go to decisions" }
+                },
+            }
+        }
+    };
+    web(&body.into_string(), "Your passkey", "", shell)
+}
+
+/// What the owner page shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerPage {
+    Off(String),
+    Enroll,
+    /// When each enrolled passkey was set up, so one the owner did not add is visible.
+    Enrolled(Vec<String>),
 }
 
 /// The web app manifest: a name and the start page, no icons a browser would fetch.
