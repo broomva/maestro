@@ -40,6 +40,8 @@ pub enum Owner {
     Enroll,
     /// A passkey is enrolled: an open decision takes its answer in place.
     Ready,
+    /// The page was opened at another address than the secure one that takes answers: it links there.
+    Elsewhere(String),
 }
 
 pub(crate) struct Ctx<'a> {

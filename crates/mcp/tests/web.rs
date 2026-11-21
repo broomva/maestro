@@ -231,6 +231,11 @@ async fn an_open_decision_takes_its_answer_in_place_once_a_passkey_is_set_up() {
     // Never preselected, and no T3 hand-off.
     assert!(!r.body.contains(" checked"), "preselected");
     assert!(!r.body.contains("t3code://") && !r.body.contains("data-handoff"));
+    // At another address than the secure one, the page links there instead.
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &addr.to_string(), &[]).await;
+    assert_page(&r, "elsewhere", "/decisions");
+    assert!(r.body.contains(r#"href="http://localhost:7181/decisions/demo-arc.yaml/merge-now""#), "no link to the secure page");
+    assert!(!r.body.contains("mv-opt-input"));
     // An answered ask and an idea that is answered take no answer.
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/old-one", "localhost:7181", &[]).await;
     assert_page(&r, "answered", "/decisions");

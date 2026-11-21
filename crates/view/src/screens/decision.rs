@@ -284,7 +284,7 @@ fn answerable<'c>(cx: &'c Ctx, a: &Ask, state: AskState, landing: Landing, ambig
 
 /// The answer bar of the web page: a note, the answer button that names the chosen option, and
 /// what happens when it is pressed. The page's script signs and sends it; nothing posts without it.
-fn answer_bar(a: &Ask, owner: &Owner) -> Markup {
+fn answer_bar(lf: &LedgerFile, a: &Ask, owner: &Owner) -> Markup {
     html! {
         @match owner {
             Owner::Ready => div class="mv-control mv-answerbar mv-answer" data-answer-bar="true" {
@@ -307,6 +307,13 @@ fn answer_bar(a: &Ask, owner: &Owner) -> Markup {
             Owner::Enroll => div class="mv-control mv-answerbar mv-answer" {
                 p class="mv-answer-cta" { "Answering here needs your passkey. " a href="/owner" { "Set up your passkey" } " once, on this device." }
             },
+            Owner::Elsewhere(origin) => div class="mv-control mv-answerbar mv-answer" {
+                p class="mv-answer-cta" {
+                    "Answers are signed with your passkey at Maestro's secure address. "
+                    a href=(format!("{origin}/decisions/{}/{}", super::web::segment(&lf.file), super::web::segment(a.handle()))) { "Answer it there" }
+                    "."
+                }
+            },
             Owner::Off(why) => div class="mv-control mv-answerbar mv-answer" {
                 p class="mv-answer-cta" { "Answering is not available on this page: " (why) }
                 p class="mv-answer-why bv-meta" { "Find it as " span class="bv-code" { bdi { (a.handle()) } } "." }
@@ -317,7 +324,7 @@ fn answer_bar(a: &Ask, owner: &Owner) -> Markup {
 
 fn outcome(cx: &Ctx, lf: &LedgerFile, a: &Ask, state: AskState, landing: Landing) -> Markup {
     if let Some(owner) = answerable(cx, a, state, landing, false) {
-        return answer_bar(a, owner);
+        return answer_bar(lf, a, owner);
     }
     let given =
         a.answer_option.as_deref().and_then(|id| a.options.iter().find(|o| o.id == id)).map(|o| o.label.as_str());

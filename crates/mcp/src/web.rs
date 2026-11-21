@@ -125,6 +125,11 @@ fn admitted(uri: &Uri, headers: &HeaderMap, hosts: &[String]) -> bool {
     }
 }
 
+/// The host name a request names, as [`admitted`] reads it.
+fn request_host(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::HOST)?.to_str().ok().and_then(host_of)
+}
+
 fn refused() -> Response {
     (StatusCode::FORBIDDEN, "refused: this page is served only to its own host and origin\n").into_response()
 }
@@ -168,6 +173,10 @@ async fn page_of(
     };
     let server = web.server.clone();
     let owner = match &web.owner {
+        // Opened at another address than the secure one, the page links there to answer.
+        Ok(o) if request_host(headers).is_some_and(|h| !h.eq_ignore_ascii_case(&o.party.id)) => {
+            maestro_view::render::Owner::Elsewhere(o.party.origin.clone())
+        }
         Ok(o) => o.state(),
         Err(e) => maestro_view::render::Owner::Off(e.clone()),
     };

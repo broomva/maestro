@@ -103,7 +103,7 @@ fn selected_at(rows: &[&Entry], selected: Option<(&str, &str)>) -> Option<usize>
 
 /// A path segment: every byte but the unreserved ones percent-encoded, so a ledger value can
 /// add no segment, query or fragment to the link.
-fn segment(s: &str) -> String {
+pub(crate) fn segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {

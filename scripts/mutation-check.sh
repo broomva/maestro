@@ -250,6 +250,7 @@ ans=crates/mcp/src/answers.rs
 sans=crates/store/src/answer.rs
 mutate $web '    let origin_ok = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) == Some(owner.party.origin.as_str());' '    let origin_ok = true;'
 mutate $web '    let json_ok = !json_body' '    let json_ok = true || !json_body'
+mutate $web '        Ok(o) if request_host(headers).is_some_and(|h| !h.eq_ignore_ascii_case(&o.party.id)) => {' '        Ok(o) if false => {'
 mutate $web '    if !admitted(uri, headers, &web.hosts) {
         return Err(refused());' '    if false {
         return Err(refused());'

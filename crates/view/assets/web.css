@@ -267,3 +267,17 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-sign .bv-code { font-size: 12px; line-height: 1.6; color: var(--mv-ink3); overflow-wrap: anywhere; }
 .mv-sign [data-sign] { color: var(--mv-tide); }
 .mv-qrow-handle { font-size: 11px; color: var(--mv-tide); overflow-wrap: anywhere; }
+
+/* An option's words span the card; its badges sit on the label's row (BRO-4042, the Decide frame). */
+.mv-decide-main .mv-dopt { grid-template-columns: minmax(0, 1fr) auto; }
+.mv-decide-main .mv-dopt > .mv-dopt-text { grid-column: 1 / -1; }
+.mv-decide-main .mv-dopt > .mv-chips { white-space: nowrap; }
+/* The header names the tree read; the card need not repeat it in its footer. */
+.mv-decide-main > .mv-card[data-state="ok"] > .mv-source { display: none; }
+.mv-screen:has(.mv-decide) > .mv-foot { display: none; }
+@media (max-width: 760px) {
+  .mv-decide-main .mv-decision .mv-answer { bottom: var(--bv-space-2); padding: var(--bv-space-2); gap: var(--bv-space-2); }
+  .mv-note-input { min-height: 40px; padding: var(--bv-space-2) var(--bv-space-3); font-size: 14px; }
+  .mv-go { min-height: 44px; font-size: 15px; }
+  .mv-answer-how { flex-basis: 100%; font-size: 12px; }
+}
