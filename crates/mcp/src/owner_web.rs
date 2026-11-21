@@ -479,6 +479,9 @@ mod tests {
         }
         assert!(!d.path().join("escape.undo").exists() && !d.path().join("owner/escape.undo").exists());
         assert!(answers::valid_id("Ab-_0123456789xy"));
+        // The marker writer refuses such an id itself, before any path is built from it.
+        assert!(answers::mark_undone(&o.dir, "../../escape").is_err());
+        assert!(!d.path().join("escape.undo").exists(), "a marker was written outside the owner folder");
     }
 
     #[test]

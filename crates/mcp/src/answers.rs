@@ -718,6 +718,8 @@ mod tests {
         apply(&w, &book, "r1AAAAAAAAAAAAAA", &assertion(), "n1", "owner", None);
         std::fs::write(w.checkout.join(".control/asks/evil.yaml"), "arc: e\nasks: []\n").unwrap();
         git(&w.checkout, &["add", "."]).unwrap();
+        // And leaves a file never staged: a module beside the validator would be imported by it.
+        std::fs::write(w.checkout.join("scripts/yaml.py"), "raise SystemExit(0)\n").unwrap();
         let mut r2 = receipt(Intent::answer("t.yaml", "b", &hash_of("b"), "go", None), 0);
         r2.id = "r2AAAAAAAAAAAAAA".into();
         book.put(r2);
@@ -731,6 +733,7 @@ mod tests {
         let files = git(&w.checkout, &["diff", "--name-only", "HEAD~1", "HEAD"]).unwrap();
         assert_eq!(files, ".control/asks/t.yaml");
         assert!(!w.checkout.join(".control/asks/evil.yaml").exists());
+        assert!(!w.checkout.join("scripts/yaml.py").exists(), "an untracked file survived the reset");
     }
 
     #[test]
