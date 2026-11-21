@@ -362,7 +362,7 @@ enum FlowCommand {
         #[arg(long, requires_all = ["reason", "ask"])]
         amend: bool,
         /// Why the ask is being amended.
-        #[arg(long, requires = "amend")]
+        #[arg(long, requires = "amend", value_parser = parse_amend_reason)]
         reason: Option<String>,
     },
     /// Propose to the owner that this session adopt an instance it does not own: file the ask
@@ -1461,4 +1461,11 @@ fn validate(store: &Store, file: &PathBuf) -> Result<()> {
         .status()
         .with_context(|| format!("running {}", script.display()))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+fn parse_amend_reason(value: &str) -> Result<String, String> {
+    if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {
+        return Err("amend reason exceeds 2048 bytes".into());
+    }
+    Ok(value.to_string())
 }

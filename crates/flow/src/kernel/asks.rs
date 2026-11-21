@@ -120,6 +120,8 @@ use std::time::Duration;
 
 /// The most bytes of ask body an agent gives, as JSON.
 pub const MAX_ASK_BODY: usize = 64 << 10;
+/// Maximum UTF-8 byte length of an amendment reason.
+pub const MAX_AMEND_REASON: usize = 2048;
 
 /// How long the kernel keeps retrying a filing the ask ledger's lock refuses, from its first try.
 /// Each try may itself wait 30 s on the lock (`requests::FILE_WAIT`).
@@ -259,6 +261,9 @@ pub fn amend(
     body: &Map<String, Value>,
     reason: &str,
 ) -> Result<Asked, KernelError> {
+    if reason.len() > MAX_AMEND_REASON {
+        return Err(invalid("amend reason exceeds 2048 bytes"));
+    }
     let seen = look(ledger, session, instance, node)?;
     let old = seen
         .rec
@@ -460,6 +465,9 @@ fn pin(
     if let Some(prev) = &supersedes {
         body.insert("supersedes".into(), Value::String(prev.clone()));
         body.insert("reason".into(), Value::String(reason.clone().unwrap_or_default()));
+    }
+    if serde_json::to_vec(&body).map_or(usize::MAX, |b| b.len()) > MAX_ASK_BODY {
+        return Err(invalid("the composed ask exceeds MAX_ASK_BODY"));
     }
     let body = requests::compose_ask(&body).map_err(|e| invalid(e.to_string()))?;
     let body_hash = comparable_hash(&JsValue::from(Value::Object(body.clone())));

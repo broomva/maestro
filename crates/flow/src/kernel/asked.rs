@@ -1778,3 +1778,16 @@ fn amend_refuses_prior_ask_when_inputs_return() {
     assert!(f.row(&old).unwrap().row.get("archived_at").is_none());
     assert!(f.row(&current).is_some());
 }
+
+#[test]
+fn amend_rejects_oversized_reason_before_pin() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    let before = f.kinds(&fi);
+    assert_eq!(
+        code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), &"é".repeat(1025))),
+        "ask_body_invalid"
+    );
+    assert_eq!(f.kinds(&fi), before);
+}

@@ -550,6 +550,12 @@ pub(crate) fn call(
                         .reason
                         .as_deref()
                         .ok_or_else(|| kernel::Refusal::AskBodyInvalid { detail: "amend needs a reason".into() })?;
+                    if reason.len() > kernel::MAX_AMEND_REASON {
+                        return Err(kernel::Refusal::AskBodyInvalid {
+                            detail: "amend reason exceeds 2048 bytes".into(),
+                        }
+                        .into());
+                    }
                     kernel::amend(&mut w.ledger()?, paths, &w.me, &instance, node, body, reason)?
                 } else {
                     kernel::ask(&mut w.ledger()?, paths, &w.me, &instance, node, filing.as_ref())?
