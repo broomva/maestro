@@ -551,8 +551,20 @@ Maestro decides every value on it:
   hash, so markup in a forged tool result runs nothing (the e2e checks it). There is no WebAssembly:
   T3's CSP blocks it.
 - The web pages (`maestro serve --http`: `/decisions`, `/decisions/<ledger>/<id>`, `/today`,
-  `/health`) are the same blocks rendered on the server, read-only, with no script, laid out as the
-  approved design (maestro#20, BRO-3783). `view.css` holds the Liquid Dawn and Maestro Midnight tokens
+  `/health`) are the same blocks rendered on the server, laid out as the approved design
+  (maestro#20, BRO-3783). They run one script, `crates/view/assets/owner.js`, named in the policy by
+  its hash. An open decision takes the owner's answer in place (BRO-4042): choose an option, add a
+  note, press Answer, confirm with Touch ID or Face ID. Maestro holds it 8 seconds for undo, writes
+  it to `maestro/answers` in its own checkout (`MAESTRO_ANSWERS_CHECKOUT`, else
+  `~/.local/state/maestro/answers-checkout`) with the passkey's proof in the commit's
+  `Maestro-Owner-Proof` trailer, tells the asking T3 thread (`origin.session`), and opens a
+  landing PR into main set to merge when its checks pass. The answer takes effect when signed.
+  Answering needs a secure origin, `MAESTRO_WEB_ORIGIN` (for example
+  `https://<mac>.<tailnet>.ts.net` behind `tailscale serve`, or `http://localhost:<port>`), and a
+  passkey set up once at `/owner` with the code Maestro prints at start. Passkeys live in
+  `MAESTRO_OWNER_DIR` (else `~/.local/state/maestro/owner`), with `receipts.jsonl` beside them.
+  `MAESTRO_T3_BIN` names the T3 CLI (else `~/.t3/bin/t3`); `MAESTRO_ANSWERS_LOCAL=1` writes without
+  pushing or landing. `view.css` holds the Liquid Dawn and Maestro Midnight tokens
   the App shares; `crates/view/assets/web.css` adds the shell (counts from the same read as the page),
   the queue beside the decision, and the phone pager. "Nothing needs you" shows only on a whole read.
 - `today` is the Today screen (design page 10): a headline composed from one snapshot that names the

@@ -72,7 +72,7 @@ fn worktree(root: &Path) -> Store {
 fn web(store: &Store, block: Value) -> (Rendered, Shell) {
     let v = validate(&spec(block)).unwrap();
     assert!(v.drops.is_empty(), "{:?}", v.drops);
-    render_web(store, &v, at(), None)
+    render_web(store, &v, at(), maestro_view::render::Owner::Off("test".into()))
 }
 
 /// The rows of the queue column, in order: (href, whether it is the current one).

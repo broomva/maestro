@@ -412,6 +412,22 @@ mod tests {
     }
 
     #[test]
+    fn the_read_back_refuses_an_edit_that_touches_another_ask() {
+        let before = crate::ask_ledger_of("t.yaml", LEDGER).unwrap();
+        // The right ask answered, and another ask changed too.
+        let h = hash_of(LEDGER, "a");
+        let good = answered(LEDGER, "t.yaml", &Select { handle: "a" }, &h, &answer("no", None)).unwrap();
+        let bad = good.replace("ask: \"Second?\"", "ask: \"Second, changed?\"");
+        assert!(verify(&good, "t.yaml", &before, &Select { handle: "a" }, "no", None).is_ok());
+        assert!(matches!(
+            verify(&bad, "t.yaml", &before, &Select { handle: "a" }, "no", None),
+            Err(Refusal::Unverified(_))
+        ));
+        // Answered with another option than meant.
+        assert!(verify(&good, "t.yaml", &before, &Select { handle: "a" }, "yes", None).is_err());
+    }
+
+    #[test]
     fn crlf_ledgers_stay_crlf() {
         let crlf = LEDGER.replace('\n', "\r\n");
         let h = hash_of(&crlf, "b");

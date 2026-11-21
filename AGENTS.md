@@ -14,6 +14,12 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
   the ADR allows beside it), a new family with no prior
   writer. `crates/flow` is its only writer, and nothing else writes there
   (`docs/adrs/2026-11-06-flow-ledger.md`).
+  The second exception is the owner's answer (BRO-4042, owner decision 2026-11-20): the web
+  pages take an answer only with a passkey assertion over the ask's ledger, handle, entry hash,
+  option and note (`crates/mcp/src/passkey.rs`), and `crates/mcp/src/answers.rs` writes it, in
+  Maestro's own checkout of the workspace, to `maestro/answers` only, never to the owner's
+  checkout or to main. Its edit is `maestro_store::answer`, which inserts the answer keys and
+  refuses unless every other ask reads back unchanged. Nothing else in Maestro writes an answer.
 - **No owner verb on a model-visible surface** until an authenticated owner path exists.
   `crates/mcp/tests/dispatch.rs` enforces this, so keep it green and do not weaken it.
 - **Unread is not empty.** Every reader returns a `Section` with its source and errors. Never collapse
@@ -23,7 +29,9 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
 - **Vocabulary.** Work-state labels are exact: `Queued`, `Running`, `Stuck`, `Needs you`, `Done`,
   `Standing`. `Needs you` is used only for a concrete hold on the owner.
 - **The fleet skill acts, Maestro reads.** Do not send agent mail or spawn sessions from here. That
-  stays in the fleet skill until a host adapter phase lands.
+  stays in the fleet skill until a host adapter phase lands. The one exception: once the owner's
+  signed answer is written, Maestro tells the session the ask names in `origin.session` (a T3
+  thread), with `t3 thread send`, as that thread's next turn (BRO-4042).
 
 ## Gates
 

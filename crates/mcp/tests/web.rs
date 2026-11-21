@@ -1,6 +1,7 @@
 //! The web pages (BRO-3588) over a real loopback listener, as `maestro serve --http` runs
-//! them: each page renders its block from the ledgers with no script and no form, and the
-//! daemon refuses a foreign `Host`, a cross-site browser request and any write method.
+//! them: each page renders its block from the ledgers with one script, the owner script pinned
+//! by hash, and no form; the daemon refuses a foreign `Host`, a cross-site browser request and
+//! any write method but the owner's passkey-signed answer (BRO-4042).
 
 use maestro_mcp::http::{self, Bind};
 use maestro_store::{Paths, Store, TreeSource};
@@ -42,10 +43,13 @@ async fn send(addr: SocketAddr, method: &str, path: &str, host: &str, extra: &[(
     for (n, v) in extra {
         req.push_str(&format!("{n}: {v}\r\n"));
     }
+    let body = extra.iter().find(|(n, _)| *n == "x-body").map_or("", |(_, v)| *v);
     if method != "GET" {
-        req.push_str("Content-Length: 0\r\n");
+        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
+    req = req.replace(&format!("x-body: {body}\r\n"), "");
     req.push_str("\r\n");
+    req.push_str(body);
     stream.write_all(req.as_bytes()).await.unwrap();
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).await.unwrap();
@@ -63,7 +67,7 @@ async fn send(addr: SocketAddr, method: &str, path: &str, host: &str, extra: &[(
 fn assert_page(r: &Reply, what: &str, current: &str) {
     assert_eq!(r.status, 200, "{what}: {}", r.body);
     assert_eq!(r.header("content-type"), Some("text/html; charset=utf-8"), "{what}");
-    assert_eq!(r.header("content-security-policy"), Some(page::WEB_CSP), "{what}");
+    assert_eq!(r.header("content-security-policy"), Some(page::web_csp()), "{what}");
     assert_eq!(r.header("x-frame-options"), Some("DENY"), "{what}");
     assert_eq!(r.header("cache-control"), Some("no-store"), "{what}");
     assert!(r.body.contains(r#"<main id="maestro-root" data-web="true">"#), "{what}: no root");
@@ -72,8 +76,10 @@ fn assert_page(r: &Reply, what: &str, current: &str) {
         r.body.contains(&format!(r#"href="{current}" aria-current="page""#)),
         "{what}: nav does not mark {current}"
     );
-    // Read-only and script-free: no script, no form, nothing that posts.
-    for banned in ["<script", "<form", "formaction", "onclick"] {
+    // One script, the owner script the policy names by hash; no form, no handler.
+    assert_eq!(r.body.matches("<script").count(), 1, "{what}: one script");
+    assert!(r.body.contains(&format!("<script>{}</script>", page::OWNER_JS)), "{what}: the pinned script");
+    for banned in ["<form", "formaction", "onclick"] {
         assert!(!r.body.contains(banned), "{what}: carries {banned}");
     }
 }
@@ -182,62 +188,129 @@ async fn a_missing_ask_is_not_found_but_an_unread_ledger_still_renders() {
     cancel.cancel();
 }
 
-/// A server whose decisions draft answers in `thread`, as `MAESTRO_ANSWER_THREAD` would set it.
-async fn start_with_thread(thread: &str) -> (SocketAddr, CancellationToken) {
+/// A server whose decisions take the owner's answer at `origin`, with passkeys in `dir`.
+async fn start_owner(dir: &Path, origin: &str, enrolled: bool) -> (SocketAddr, CancellationToken, maestro_mcp::owner_web::Owner) {
     let cancel = CancellationToken::new();
     let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let thread = maestro_view::handoff::AnswerThread::parse(thread).unwrap();
-    let router = maestro_mcp::web::router_with(maestro_mcp::MaestroServer::new(fixture()), addr, Some(thread));
+    let owner_dir = dir.join("owner");
+    if enrolled {
+        std::fs::create_dir_all(&owner_dir).unwrap();
+        std::fs::write(
+            owner_dir.join("passkeys.json"),
+            r#"{"credentials":[{"id":"Y3JlZA","public_key":"x","enrolled_at":"t","rp_id":"localhost"}]}"#,
+        )
+        .unwrap();
+    }
+    let writer = maestro_mcp::answers::Writer {
+        workspace: dir.join("ws"),
+        asks: ".control/asks".into(),
+        checkout: dir.join("co"),
+        owner_dir: owner_dir.clone(),
+        t3: None,
+        remote: false,
+    };
+    let party = maestro_mcp::passkey::Party::parse(origin).unwrap();
+    let owner = maestro_mcp::owner_web::Owner::new(party, owner_dir, writer);
+    let router = maestro_mcp::web::router_with(maestro_mcp::MaestroServer::new(fixture()), addr, Ok(owner.clone()));
     let stop = cancel.clone();
     tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(stop.cancelled_owned()).await });
-    (addr, cancel)
+    (addr, cancel, owner)
 }
 
 #[tokio::test]
-async fn an_open_decision_drafts_each_answer_in_the_t3_thread() {
-    let (addr, cancel) = start_with_thread("env-1/mcp:abc").await;
-    let host = addr.to_string();
-    let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &host, &[]).await;
-    assert_page(&r, "handoff", "/decisions");
-    assert!(r.body.contains(r#"data-handoff="t3""#), "no handoff");
+async fn an_open_decision_takes_its_answer_in_place_once_a_passkey_is_set_up() {
+    let d = tempfile::tempdir().unwrap();
+    let (addr, cancel, _) = start_owner(d.path(), "http://localhost:7181", true).await;
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", "localhost:7181", &[]).await;
+    assert_page(&r, "answering", "/decisions");
+    assert!(r.body.contains(r#"data-answer-bar="true""#), "no answer bar");
     for option in ["merge", "hold"] {
-        assert!(r.body.contains(&format!(r#"data-option="{option}""#)), "{option}");
-        // The exact answer, as the owner reads it before sending.
-        assert!(r.body.contains(&format!("answer_option: &quot;{option}&quot;")), "{option}: exact answer");
+        assert!(r.body.contains(&format!(r#"name="mv-answer-option" value="{option}""#)), "{option}: a choice");
     }
-    assert!(
-        r.body.contains(r#"href="t3code://threads/env-1/mcp:abc?prompt=Owner%20answer%20for%20one%20Maestro%20ask"#)
-    );
-    // The ledger Maestro read, and the ask as that ledger addresses it.
-    assert!(r.body.contains("path: &quot;.control/asks/demo-arc.yaml&quot;"), "ledger path");
-    assert!(
-        r.body.contains(
-            r#"maestro_ask_get: {&quot;id&quot;:&quot;merge-now&quot;,&quot;ledger&quot;:&quot;demo-arc.yaml&quot;}"#
-        ),
-        "re-read args"
-    );
-    assert!(r.body.contains(r#"select: {&quot;id&quot;:&quot;merge-now&quot;,&quot;uid&quot;:null}"#), "selector");
-    assert!(r.body.contains(r#"href="https://app.t3.codes/env-1/mcp:abc?prompt=Owner%20answer"#));
-    // Answered and idea asks get no handoff; nothing on the page writes.
-    for done in ["/decisions/demo-arc.yaml/old-one", "/decisions/demo-arc.yaml/pick-name"] {
-        let r = send(addr, "GET", done, &host, &[]).await;
-        assert_page(&r, done, "/decisions");
-        assert!(!r.body.contains("data-handoff"), "{done}");
-    }
+    // Never preselected, and no T3 hand-off.
+    assert!(!r.body.contains(" checked"), "preselected");
+    assert!(!r.body.contains("t3code://") && !r.body.contains("data-handoff"));
+    // An answered ask and an idea that is answered take no answer.
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/old-one", "localhost:7181", &[]).await;
+    assert_page(&r, "answered", "/decisions");
+    assert!(!r.body.contains("mv-opt-input") && !r.body.contains("data-answer-bar"));
     cancel.cancel();
 }
 
 #[tokio::test]
-async fn without_an_answer_thread_the_decision_stays_read_only() {
-    let cancel = CancellationToken::new();
-    let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let router = maestro_mcp::web::router_with(maestro_mcp::MaestroServer::new(fixture()), addr, None);
-    let stop = cancel.clone();
-    tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(stop.cancelled_owned()).await });
+async fn before_a_passkey_is_set_up_the_decision_links_to_setup() {
+    let d = tempfile::tempdir().unwrap();
+    let (addr, cancel, owner) = start_owner(d.path(), "http://localhost:7181", false).await;
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", "localhost:7181", &[]).await;
+    assert_page(&r, "enroll", "/decisions");
+    assert!(r.body.contains(r#"href="/owner""#) && !r.body.contains("mv-opt-input"));
+    let r = send(addr, "GET", "/owner", "localhost:7181", &[]).await;
+    assert_eq!(r.status, 200);
+    assert!(r.body.contains(r#"data-enroll="true""#));
+    // Setup needs the printed code.
+    let post = |body: String| async move {
+        send(
+            addr,
+            "POST",
+            "/owner/enroll/begin",
+            "localhost:7181",
+            &[("Origin", "http://localhost:7181"), ("Content-Type", "application/json"), ("x-body", &body)],
+        )
+        .await
+    };
+    assert_eq!(post(r#"{"code":"NOTTHIS1"}"#.into()).await.status, 403);
+    let ok = post(format!(r#"{{"code":"{}"}}"#, owner.setup_code().unwrap())).await;
+    assert_eq!(ok.status, 200, "{}", ok.body);
+    assert!(ok.body.contains(r#""rp_id":"localhost""#));
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn the_owner_routes_take_only_json_from_the_page_itself() {
+    let d = tempfile::tempdir().unwrap();
+    let (addr, cancel, _) = start_owner(d.path(), "http://localhost:7181", true).await;
+    let body = r#"{"ledger":"demo-arc.yaml","handle":"merge-now","hash":"stale","option":"merge","note":""}"#;
+    let json = ("Content-Type", "application/json");
+    let mine = ("Origin", "http://localhost:7181");
+    let begin = |h: Vec<(&'static str, &'static str)>| async move {
+        let mut h = h;
+        h.push(("x-body", body));
+        send(addr, "POST", "/owner/answer/begin", "localhost:7181", &h).await
+    };
+    // Another origin, no origin, or not JSON: refused before anything is read.
+    assert_eq!(begin(vec![("Origin", "https://evil.example"), json]).await.status, 403);
+    assert_eq!(begin(vec![json]).await.status, 403);
+    assert_eq!(begin(vec![mine, ("Content-Type", "text/plain")]).await.status, 403);
+    assert_eq!(begin(vec![mine, json, ("Sec-Fetch-Site", "cross-site")]).await.status, 403);
+    // From the page: a stale hash is refused as changed.
+    let r = begin(vec![mine, json]).await;
+    assert_eq!(r.status, 409, "{}", r.body);
+    assert!(r.body.contains("changed since you opened it"), "{}", r.body);
+    // A finish with no request behind it is refused; an unknown receipt is not found.
+    let fin = r#"{"nonce":"never","assertion":{"credential":"Y3JlZA","client_data":"e30","authenticator_data":"AA","signature":"AA"}}"#;
+    let r = send(addr, "POST", "/owner/answer/finish", "localhost:7181", &[mine, json, ("x-body", fin)]).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    let r = send(addr, "GET", "/owner/answer/nothing", "localhost:7181", &[]).await;
+    assert_eq!(r.status, 404);
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn without_a_secure_origin_the_decision_says_why_it_takes_no_answer() {
+    let (addr, cancel) = start(fixture()).await;
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &addr.to_string(), &[]).await;
-    assert_page(&r, "no thread", "/decisions");
-    assert!(!r.body.contains("data-handoff") && !r.body.contains("t3code://"));
+    assert_page(&r, "no origin", "/decisions");
+    assert!(r.body.contains("Answering is not available on this page"));
+    assert!(!r.body.contains("mv-opt-input") && !r.body.contains("t3code://"));
+    let r = send(
+        addr,
+        "POST",
+        "/owner/answer/begin",
+        &addr.to_string(),
+        &[("Origin", "http://localhost"), ("Content-Type", "application/json"), ("x-body", "{}")],
+    )
+    .await;
+    assert_eq!(r.status, 503);
     cancel.cancel();
 }

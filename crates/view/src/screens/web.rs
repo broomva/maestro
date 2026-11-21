@@ -159,6 +159,7 @@ fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, current: Opti
     let section = joined(cx, None);
     let partial =
         !section.errors.is_empty() || ledgers.iter().flat_map(|(_, v)| v).any(|e| e.landing == Landing::Unknown);
+    let twin = |e: &Entry| ledgers.iter().flat_map(|(_, v)| v).filter(|o| o.ask.title() == e.ask.title()).count() > 1;
     html! {
         aside class="mv-queue" aria-label="Waiting on you" data-state=(if section.data.is_none() { "unavailable" } else if partial { "partial" } else { "ok" }) {
             header class="mv-queue-head" {
@@ -175,9 +176,9 @@ fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, current: Opti
                             li class="mv-qrow" data-blocking=(e.ask.blocking) data-landing=(match e.landing { Landing::Waiting => "waiting", Landing::NotSeen => "open", Landing::Unknown => "unknown" }) {
                                 @if e.keyed {
                                     // `true`, not `page`: the nav's Decisions tab already marks the page.
-                                    a href=(href(e)) aria-current=[current.is_some_and(|c| std::ptr::eq(c, *e)).then_some("true")] { (qrow(cx, e)) }
+                                    a href=(href(e)) aria-current=[current.is_some_and(|c| std::ptr::eq(c, *e)).then_some("true")] { (qrow(cx, e, twin(e))) }
                                 } @else {
-                                    div { (qrow(cx, e)) }
+                                    div { (qrow(cx, e, twin(e))) }
                                 }
                             }
                         }
@@ -201,7 +202,7 @@ fn read_state(cx: &Ctx, section: &maestro_core::Section<()>) -> Markup {
                 @if cx.store.tree.source != maestro_store::TreeSource::WorkingTree {
                     @match c.unlanded {
                         Some(0) => {},
-                        Some(n) => p data-tone="success" { (n) " answered, not yet on " span class="bv-code" { (cx.snap.tree) } "." },
+                        Some(n) => p data-tone="success" { (n) " answered and in effect, waiting to land on main." },
                         None => p data-tone="warning" { "Answers not yet landed could not all be read. This is not the same as none." },
                     }
                 }
@@ -212,9 +213,11 @@ fn read_state(cx: &Ctx, section: &maestro_core::Section<()>) -> Markup {
     }
 }
 
-fn qrow(cx: &Ctx, e: &Entry) -> Markup {
+fn qrow(cx: &Ctx, e: &Entry, twin: bool) -> Markup {
     html! {
         span class="mv-qrow-title" { (e.ask.title()) }
+        // Two asks with one title are told apart by their handles.
+        @if twin { span class="mv-qrow-handle bv-code" { bdi { (e.ask.handle()) } } }
         span class="mv-qrow-meta bv-code" {
             bdi { (e.project()) } " · " (kind(e.ask))
             @if let Some(a) = e.asked().and_then(|t| age(t, cx.at)) { " · " (a) }

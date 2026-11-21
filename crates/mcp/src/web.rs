@@ -4,10 +4,10 @@
 //! `maestro serve --http` already runs. A phone or browser on the tailnet reads them with no
 //! Paseo and no MCP host.
 //!
-//! Read-only. Every route is GET, the pages run no script and post no form, and no route
-//! writes a ledger: answering waits for the authenticated owner path (BRO-3273, BRO-3279).
-//! A request must name the bound address (or a loopback name) in `Host`, as on `/mcp`, and a
-//! browser request from another site is refused.
+//! The pages read, and one path writes: the owner's answer, signed with a passkey
+//! ([`crate::owner_web`], BRO-4042). The pages run one script, the owner script, pinned by hash,
+//! and post no form. A request must name the bound address, a loopback name, or the configured
+//! secure origin's host in `Host`, as on `/mcp`, and a browser request from another site is refused.
 
 use crate::MaestroServer;
 use axum::Router;
@@ -15,7 +15,7 @@ use axum::extract::{Path, State};
 use axum::http::uri::Authority;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use maestro_view::handoff::AnswerThread;
 use maestro_view::page;
 use serde_json::{Value, json};
@@ -26,7 +26,8 @@ use std::sync::Arc;
 struct Web {
     server: MaestroServer,
     hosts: Arc<Vec<String>>,
-    answer_thread: Option<Arc<AnswerThread>>,
+    /// The owner's answering, or why the pages offer none.
+    owner: Result<crate::owner_web::Owner, String>,
 }
 
 /// The environment variable naming the T3 thread answers are drafted in (BRO-3590).
@@ -45,17 +46,34 @@ pub fn answer_thread_from(value: Option<&str>) -> Option<AnswerThread> {
         .ok()
 }
 
-/// The web routes for a listener bound at `local`, answering through the thread the environment names.
+/// The web routes for a listener bound at `local`, answering as the environment configures.
 pub fn router(server: MaestroServer, local: SocketAddr) -> Router {
-    router_with(server, local, answer_thread_from_env())
+    let store = server.store();
+    let owner = store
+        .rel(maestro_store::ASKS)
+        .and_then(|asks| crate::owner_web::Owner::from_env(store.paths.workspace.clone(), asks));
+    if let Err(e) = &owner {
+        eprintln!("maestro: the web pages take no answers: {e}");
+    }
+    router_with(server, local, owner)
 }
 
-/// The web routes, with open decisions offering the T3 handoff to `answer_thread` when one is given.
-pub fn router_with(server: MaestroServer, local: SocketAddr, answer_thread: Option<AnswerThread>) -> Router {
-    let hosts = vec!["localhost".to_string(), "127.0.0.1".to_string(), "[::1]".to_string(), host_name(local)];
-    let web = Web { server, hosts: Arc::new(hosts), answer_thread: answer_thread.map(Arc::new) };
+/// The web routes, answering with `owner` when it is configured.
+pub fn router_with(server: MaestroServer, local: SocketAddr, owner: Result<crate::owner_web::Owner, String>) -> Router {
+    let mut hosts = vec!["localhost".to_string(), "127.0.0.1".to_string(), "[::1]".to_string(), host_name(local)];
+    if let Ok(o) = &owner {
+        hosts.push(o.party.id.clone());
+    }
+    let web = Web { server, hosts: Arc::new(hosts), owner };
     Router::new()
         .route("/", get(root))
+        .route("/owner", get(owner_page))
+        .route("/owner/enroll/begin", post(enroll_begin))
+        .route("/owner/enroll/finish", post(enroll_finish))
+        .route("/owner/answer/begin", post(answer_begin))
+        .route("/owner/answer/finish", post(answer_finish))
+        .route("/owner/answer/undo", post(answer_undo))
+        .route("/owner/answer/{id}", get(answer_receipt))
         .route("/decisions", get(decisions))
         .route("/decisions/{ledger}/{id}", get(decision))
         .route("/today", get(today))
@@ -114,7 +132,7 @@ fn refused() -> Response {
 fn with_headers(mut res: Response, content_type: &'static str) -> Response {
     let h = res.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::WEB_CSP));
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::web_csp()));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
@@ -149,7 +167,10 @@ async fn page_of(
         Err(e) => return (StatusCode::NOT_FOUND, format!("no such page: {e}\n")).into_response(),
     };
     let server = web.server.clone();
-    let thread = web.answer_thread.clone();
+    let owner = match &web.owner {
+        Ok(o) => o.state(),
+        Err(e) => maestro_view::render::Owner::Off(e.clone()),
+    };
     let rendered = tokio::task::spawn_blocking(move || {
         let store = server.store();
         // A readable ledger with no such ask is no page; an unread one still renders as unavailable.
@@ -159,7 +180,7 @@ async fn page_of(
             return None;
         }
         let at = maestro_store::views::now();
-        Some(maestro_view::render::render_web(&store, &validated, at, thread.as_deref()))
+        Some(maestro_view::render::render_web(&store, &validated, at, owner))
     })
     .await;
     match rendered {
@@ -205,6 +226,173 @@ async fn manifest(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Respo
         return refused();
     }
     with_headers(page::web_manifest().into_response(), "application/manifest+json")
+}
+
+/// A JSON reply.
+fn json_reply(status: StatusCode, v: Value) -> Response {
+    let mut res = (status, v.to_string()).into_response();
+    res.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
+}
+
+fn refusal(status: StatusCode, why: impl std::fmt::Display) -> Response {
+    json_reply(status, json!({ "error": why.to_string() }))
+}
+
+/// The owner's routes admit a request only from the page itself: admitted as every page is,
+/// JSON, and from the configured secure origin.
+fn owner_admitted<'w>(web: &'w Web, uri: &Uri, headers: &HeaderMap, json_body: bool) -> Result<&'w crate::owner_web::Owner, Response> {
+    if !admitted(uri, headers, &web.hosts) {
+        return Err(refused());
+    }
+    let owner = web.owner.as_ref().map_err(|e| refusal(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let origin_ok = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) == Some(owner.party.origin.as_str());
+    let json_ok = !json_body
+        || headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.split(';').next().is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json")));
+    if json_body && !(origin_ok && json_ok) {
+        return Err(refusal(StatusCode::FORBIDDEN, "refused: only Maestro's own page at its secure address may send this"));
+    }
+    Ok(owner)
+}
+
+fn body_of<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
+    serde_json::from_slice(body).map_err(|e| refusal(StatusCode::BAD_REQUEST, format!("the request does not read: {e}")))
+}
+
+async fn owner_page(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    if !admitted(&uri, &headers, &web.hosts) {
+        return refused();
+    }
+    let state = match &web.owner {
+        Err(e) => page::OwnerPage::Off(e.clone()),
+        Ok(o) => match crate::passkey::Keyring::load(&o.dir) {
+            Ok(k) if k.credentials.is_empty() => page::OwnerPage::Enroll,
+            Ok(k) => page::OwnerPage::Enrolled(k.credentials.len()),
+            Err(e) => page::OwnerPage::Off(e),
+        },
+    };
+    with_headers(page::owner(&state, &page::Shell::default()).into_response(), "text/html; charset=utf-8")
+}
+
+async fn enroll_begin(State(web): State<Web>, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let owner = match owner_admitted(&web, &uri, &headers, true) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    #[derive(serde::Deserialize)]
+    struct Req {
+        #[serde(default)]
+        code: String,
+    }
+    let req: Req = match body_of(&body) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match owner.enroll_begin(&req.code) {
+        Ok(v) => json_reply(StatusCode::OK, v),
+        Err(e) => refusal(StatusCode::FORBIDDEN, e),
+    }
+}
+
+async fn enroll_finish(State(web): State<Web>, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let owner = match owner_admitted(&web, &uri, &headers, true) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    #[derive(serde::Deserialize)]
+    struct Req {
+        nonce: String,
+        registration: crate::passkey::Registration,
+    }
+    let req: Req = match body_of(&body) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let at = jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string();
+    match owner.enroll_finish(&req.nonce, &req.registration, &at) {
+        Ok(()) => json_reply(StatusCode::OK, json!({ "enrolled": true })),
+        Err(e) => refusal(StatusCode::FORBIDDEN, e),
+    }
+}
+
+async fn answer_begin(State(web): State<Web>, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let owner = match owner_admitted(&web, &uri, &headers, true) {
+        Ok(o) => o.clone(),
+        Err(r) => return r,
+    };
+    let req: crate::owner_web::AnswerBegin = match body_of(&body) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let server = web.server.clone();
+    let done = tokio::task::spawn_blocking(move || owner.answer_begin(&server.store(), &req)).await;
+    match done {
+        Ok(Ok(v)) => json_reply(StatusCode::OK, v),
+        Ok(Err(e)) => refusal(StatusCode::CONFLICT, e),
+        Err(_) => refusal(StatusCode::INTERNAL_SERVER_ERROR, "the check did not finish"),
+    }
+}
+
+async fn answer_finish(State(web): State<Web>, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let owner = match owner_admitted(&web, &uri, &headers, true) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    #[derive(serde::Deserialize)]
+    struct Req {
+        nonce: String,
+        assertion: crate::passkey::Assertion,
+    }
+    let req: Req = match body_of(&body) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    let now = jiff::Timestamp::now();
+    match owner.answer_finish(&req.nonce, &req.assertion, now) {
+        Ok(r) => {
+            let mut v = serde_json::to_value(&r).unwrap_or_default();
+            v["now_ms"] = json!(now.as_millisecond());
+            json_reply(StatusCode::OK, v)
+        }
+        Err(e) => refusal(StatusCode::FORBIDDEN, e),
+    }
+}
+
+async fn answer_undo(State(web): State<Web>, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let owner = match owner_admitted(&web, &uri, &headers, true) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    #[derive(serde::Deserialize)]
+    struct Req {
+        id: String,
+    }
+    let req: Req = match body_of(&body) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match owner.book.undo(&req.id, jiff::Timestamp::now().as_millisecond()) {
+        Ok(r) => {
+            crate::answers::log(&owner.dir, &r);
+            json_reply(StatusCode::OK, serde_json::to_value(&r).unwrap_or_default())
+        }
+        Err(e) => refusal(StatusCode::CONFLICT, e),
+    }
+}
+
+async fn answer_receipt(State(web): State<Web>, uri: Uri, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    let owner = match owner_admitted(&web, &uri, &headers, false) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    match owner.book.get(&id) {
+        Some(r) => json_reply(StatusCode::OK, serde_json::to_value(&r).unwrap_or_default()),
+        None => refusal(StatusCode::NOT_FOUND, "no such answer"),
+    }
 }
 
 #[cfg(test)]

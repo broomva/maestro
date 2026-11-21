@@ -221,7 +221,7 @@ mutate $web '    if uri.scheme().is_some() || uri.authority().is_some() {' '    
 mutate $web '    let (Some(host), None) = (values.next(), values.next()) else { return false };' '    let Some(host) = values.next() else { return false };'
 mutate $web '    section.data.is_some() && matches.is_empty() && unread.is_empty()' '    section.data.is_some() && matches.is_empty()'
 mutate $web '            && absent(&store, ledger, id)' '            && false'
-mutate $web '    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::WEB_CSP));' '    let _ = page::WEB_CSP;'
+mutate $web '    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(page::web_csp()));' '    let _ = page::web_csp();'
 mutate $web '    if !admitted(uri, headers, &web.hosts) {
         return refused();
     }
@@ -241,7 +241,36 @@ mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_em
 mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| a.class != Some(AskClass::Idea))'
 mutate $decision '        @if landing == Landing::Unknown {' '        @if false {'
 mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
-mutate $web 'render_web(&store, &validated, at, thread.as_deref())' 'render_web(&store, &validated, at, None)'
+mutate $web 'render_web(&store, &validated, at, owner)' 'render_web(&store, &validated, at, maestro_view::render::Owner::Off(String::new()))'
+# The owner's answer (BRO-4042): only the page itself, only a passkey over the very intent, only
+# the hash the owner saw, an undo that holds only inside its window, an edit that reads back.
+pk=crates/mcp/src/passkey.rs
+ow=crates/mcp/src/owner_web.rs
+ans=crates/mcp/src/answers.rs
+sans=crates/store/src/answer.rs
+mutate $web '    let origin_ok = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) == Some(owner.party.origin.as_str());' '    let origin_ok = true;'
+mutate $web '    let json_ok = !json_body' '    let json_ok = true || !json_body'
+mutate $web '    if !admitted(uri, headers, &web.hosts) {
+        return Err(refused());' '    if false {
+        return Err(refused());'
+mutate $pk '    if cd.kind != kind {' '    if false {'
+mutate $pk "    if cd.challenge.trim_end_matches('=') != challenge {" '    if false {'
+mutate $pk '    if cd.origin != party.origin || cd.cross_origin {' '    if false {'
+mutate $pk '    if auth[..32] != Sha256::digest(party.id.as_bytes())[..] {' '    if false {'
+mutate $pk '    if flags & 0x01 == 0 {' '    if false {'
+mutate $pk '    if flags & 0x04 == 0 {' '    if false {'
+mutate $pk '    key.verify(&signed, &sig).map_err(|_| "the signature does not verify".to_string())?;' '    let _ = key.verify(&signed, &sig);'
+mutate $pk '    if r.algorithm != ES256 {' '    if false {'
+mutate $ow '        if !constant_eq(code.trim().to_ascii_uppercase().as_bytes(), expected.as_bytes()) {' '        if false {'
+mutate $ow '        if ask.hash() != req.hash {' '        if false {'
+mutate $ow '        m.remove(nonce).filter(|p| p.at().elapsed() < CHALLENGE_TTL)' '        m.get(nonce).cloned()'
+mutate $ans '        if now_ms >= r.applies_at_ms {' '        if false {'
+mutate $ans '        if r.stage != Stage::Signed {' '        if false {'
+mutate $ans '        m.get(id).filter(|r| r.stage == Stage::Signed).cloned()' '        m.get(id).cloned()'
+mutate $sans '    if ask.hash() != hash {' '    if false {'
+mutate $sans '    if ask.state() != AskState::Open {' '    if false {'
+mutate $sans '        } else if a.hash() != b.hash() {' '        } else if false {'
+mutate $sans '                && a.answer_option.as_deref() == Some(option)' '                && true'
 mutate $page 'aria-current=[(path == current).then_some("page")]' 'aria-current=[(path != current).then_some("page")]'
 # The web decision layout (BRO-3783): calm only when nothing waits by a whole read (owner holds on
 # work included), the shell's lower bounds, unread as "?", encoded links, shared handles never opened.
