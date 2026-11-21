@@ -988,12 +988,22 @@ fn take_answer(
                 }
                 .into());
             }
-            old_answer = Some((row, format!("{source}:{}", old.ask_id)));
+            old_answer = Some((Some(row), format!("{source}:{}", old.ask_id)));
+            break;
+        }
+        if let Answer::Landing { at } = answer {
+            // An answer to an older ask waits to land: wait for it, as both landed would take it
+            // first. Taking the replacement's answer now would make the receipt depend on which
+            // landed first (P20 verification, maestro#62).
+            old_answer = Some((None, format!("{at}:{}", old.ask_id)));
             break;
         }
     }
-    let answer =
-        if let Some((row, source)) = old_answer { Answer::Landed { row, source } } else { landed(paths, &rec)? };
+    let answer = match old_answer {
+        Some((Some(row), source)) => Answer::Landed { row, source },
+        Some((None, at)) => Answer::Landing { at },
+        None => landed(paths, &rec)?,
+    };
     let (row, source) = match answer {
         Answer::Landed { row, source } => (row, source),
         Answer::Landing { at } => {

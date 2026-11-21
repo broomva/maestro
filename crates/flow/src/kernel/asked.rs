@@ -1815,6 +1815,43 @@ fn amend_refuses_an_ask_main_holds_twice() {
 }
 
 #[test]
+fn an_older_answer_waiting_to_land_holds_the_node_against_the_replacements_answer() {
+    // A is amended to B; the owner's answer to A waits on the answers branch while an answer to
+    // B lands on main. The node waits for A's (as it would take A's if both had landed).
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let a = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let b = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap()).0.to_string();
+    let amended = f.ledger_text();
+    // The answers branch holds A answered and open, as the owner's answer writer saw it.
+    let unsuperseded: String = {
+        let mut out = Vec::new();
+        let mut in_a = false;
+        for line in amended.lines() {
+            if line.starts_with("  - id: ") {
+                in_a = line.contains(&a);
+            }
+            let writer_key = ["archived_at:", "archived_reason:", "superseded_by:", "status:"]
+                .iter()
+                .any(|k| line.trim_start().starts_with(k));
+            if !(in_a && writer_key) {
+                out.push(line);
+            }
+        }
+        out.join("\n") + "\n"
+    };
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), &unsuperseded).unwrap();
+    f.answer_in_worktree(&a);
+    f.put_on_answers_branch();
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), &amended).unwrap();
+    f.answer_in_worktree(&b);
+    f.land_on_main();
+    let result = f.ask(&fi, None).unwrap();
+    assert!(matches!(&result, Asked::Waiting { ask_id, landing: Some(_), .. } if ask_id == &b), "{result:?}");
+    assert_ne!(f.status(&fi).nodes["owner"].state, State::Done);
+}
+
+#[test]
 fn amend_refuses_an_ask_closed_on_main() {
     let mut f = fx(None, "");
     let fi = f.begin();

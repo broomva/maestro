@@ -1733,6 +1733,7 @@ mutate $asks '            AskState::Archived => return Err(Refusal::AskAmendClos
 mutate $ask '    if !text(row.get("superseded_by")).is_some_and(|t| successor.contains(&t.as_str())) {' '    if false {'
 mutate $ask '    if text(before.get("status")).is_some_and(|s| s.eq_ignore_ascii_case("archived")) {' '    if false {'
 mutate $asks 'let successor = if i == 0 { &rec } else { &predecessors[i - 1] };' 'let successor = old;'
+mutate $asks '        if let Answer::Landing { at } = answer {' '        if let (false, Answer::Landing { at }) = (true, answer) {'
 # The minted id collides with no id or uid in the ledger.
 mutate $asks '.flat_map(|a| [Some(a.id), a.uid])' '.flat_map(|a| [Some(a.id), None])'
 mutate $asks 'if !taken.contains(&id) {' 'if true {'
