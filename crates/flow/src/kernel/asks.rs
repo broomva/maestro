@@ -435,6 +435,7 @@ fn pin(
         body_hash,
         inputs: None,
         supersedes,
+        amends: false,
         reason,
         audit: audit.cloned(),
     };
@@ -456,6 +457,7 @@ fn pin(
         body_hash: pin.body_hash,
         inputs,
         supersedes: pin.supersedes,
+        amends: pin.amends,
         reason: pin.reason,
         linked: false,
     })

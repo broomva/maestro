@@ -43,6 +43,7 @@ pub const FILER_REFUSED: &[&str] = &[
     "status",
     "archived_at",
     "archived_reason",
+    "superseded_by",
     "origin",
 ];
 

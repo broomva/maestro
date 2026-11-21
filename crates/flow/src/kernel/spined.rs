@@ -281,6 +281,7 @@ fn a_human_nodes_answer_is_on_the_spine_with_no_edge_or_exit() {
         body_hash: "h".into(),
         inputs: None,
         supersedes: None,
+        amends: false,
         reason: None,
         audit: None,
     };

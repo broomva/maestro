@@ -257,6 +257,7 @@ fn asked_at_is_pinned_before_hashing_and_the_comparable_body_excludes_origin() {
     let map = answered.as_object_mut().unwrap();
     map.insert("answer".into(), JsValue::Str("yes".into()));
     map.remove("origin");
+    map.insert("superseded_by".into(), JsValue::Str("new-id".into()));
     assert_eq!(comparable_hash(&answered), comparable_hash(&row.row));
     answered.as_object_mut().unwrap().insert("headline".into(), JsValue::Str("edited".into()));
     assert_ne!(comparable_hash(&answered), comparable_hash(&row.row));
@@ -784,6 +785,38 @@ fn replay_keeps_the_first_pin_links_only_its_hash_and_never_withdraws_a_link() {
     assert!(matches!(owner(&f, &fi), crate::kernel::Reason::Unfiled { .. }));
     append(&mut f, &fi, "AskLinked", link("flow-owner-x", "sha256:pinned"));
     assert!(matches!(owner(&f, &fi), crate::kernel::Reason::Owner { .. }));
+}
+
+#[test]
+fn replay_amend_replaces_only_the_named_link_and_withdrawal_restores_it() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let append = |f: &mut Fx, kind: &str, body: Value| {
+        let mut guard = f.ledger.lock().unwrap();
+        let seq = guard.log(&fi).unwrap().seq();
+        guard.append(&fi, seq, crate::NewEvent::new(kind, body)).unwrap();
+    };
+    let pin = |predecessor: &str| {
+        serde_json::json!({
+            "node": "owner", "iteration": {}, "ask_id": "flow-owner-amend", "ledger": "ledger.yaml",
+            "body": {}, "body_hash": "h", "supersedes": predecessor, "amends": true, "reason": "amended: clarify"
+        })
+    };
+    append(&mut f, "AskPinned", pin("wrong"));
+    assert!(f.status(&fi).rejected.iter().any(|r| r.reason == "invalid_amend"));
+    append(&mut f, "AskPinned", pin(&old));
+    assert!(matches!(f.status(&fi).nodes["owner"].unmet[0], crate::kernel::Reason::Unfiled { .. }));
+    append(
+        &mut f,
+        "AskWithdrawn",
+        serde_json::json!({
+            "node": "owner", "iteration": {}, "ask_id": "flow-owner-amend", "code": "ask_not_filed", "reason": "refused"
+        }),
+    );
+    assert!(
+        matches!(&f.status(&fi).nodes["owner"].unmet[0], crate::kernel::Reason::Owner { ask_id, .. } if ask_id == &old)
+    );
 }
 
 /// The working tree's ledger with the answer added to row `id`, the working tree put back.

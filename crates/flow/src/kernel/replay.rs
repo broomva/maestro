@@ -712,6 +712,7 @@ pub(crate) struct AskRec {
     pub body_hash: String,
     pub inputs: BTreeMap<String, String>,
     pub supersedes: Option<String>,
+    pub amends: bool,
     pub reason: Option<String>,
     pub linked: bool,
 }
@@ -998,8 +999,23 @@ impl<'a> Fold<'a> {
                     Some(inputs) => inputs,
                     None => Eval::new(self, at).node(id, i).inputs(),
                 };
-                // A pin stands until it is withdrawn; a linked one is replaced only when inputs changed.
-                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {
+                // Only a linked current ask can be amended, and it must be the named predecessor.
+                let predecessor = self.asks.get(&(id, i));
+                if p.amends && self.answers.get(&(id, i)).is_some_and(|a| a.contains_key(&inputs)) {
+                    return Ok(Err("invalid_amend"));
+                }
+                if p.amends
+                    && !predecessor.is_some_and(|r| {
+                        r.linked
+                            && r.inputs == inputs
+                            && r.ledger == p.ledger
+                            && p.supersedes.as_deref() == Some(r.ask_id.as_str())
+                    })
+                {
+                    return Ok(Err("invalid_amend"));
+                }
+                // Other pins stand until withdrawn or their inputs change.
+                if !p.amends && predecessor.is_some_and(|r| r.inputs == inputs) {
                     return Ok(Err("already_pinned"));
                 }
                 let rec = AskRec {
@@ -1009,6 +1025,7 @@ impl<'a> Fold<'a> {
                     body_hash: p.body_hash,
                     inputs,
                     supersedes: p.supersedes,
+                    amends: p.amends,
                     reason: p.reason,
                     linked: false,
                 };

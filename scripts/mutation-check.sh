@@ -1886,6 +1886,7 @@ mutate $asks '    if let Some(prev) = &supersedes {
         body.insert("supersedes".into(), Value::String(prev.clone()));
         body.insert("reason".into(), Value::String("inputs_changed".into()));
     }' ''
+mutate $replay '                            && p.supersedes.as_deref() == Some(r.ask_id.as_str())' '                            && true'
 mutate $asks '    let pin = AskPinned { iteration, inputs: Some(inputs.clone()), ..pin };' '    let pin = AskPinned { iteration, inputs: Some(BTreeMap::new()), ..pin };'
 mutate $asks 'let mut out: String = text.chars().take(MAX_ECHO).collect();' 'let mut out: String = text.chars().collect();'
 mutate $asks ' || !filing.ledger.bytes().all(|b| b.is_ascii_graphic())' ''
