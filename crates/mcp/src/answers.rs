@@ -323,6 +323,15 @@ fn exclusive(w: &Writer) -> Result<std::fs::File, String> {
 pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &str) -> Result<String, String> {
     let _lock = exclusive(w)?;
     let tip = prepare(w)?;
+    // Written already (a restart after the push, before the pending record was settled): the
+    // commit that carries this answer's id is the outcome, and nothing is written twice.
+    let done = git(
+        &w.checkout,
+        &["log", "-1", "--format=%H", "--fixed-strings", &format!("--grep=Maestro-Answer: {}", r.id)],
+    )?;
+    if !done.is_empty() {
+        return Ok(done);
+    }
     let rel = format!("{}/{}", w.asks, r.intent.ledger);
     let path = w.checkout.join(&rel);
     let source = std::fs::read_to_string(&path).map_err(|e| format!("{rel}: {e}"))?;
@@ -625,6 +634,24 @@ mod tests {
         let files = git(&w.checkout, &["diff", "--name-only", "HEAD~1", "HEAD"]).unwrap();
         assert_eq!(files, ".control/asks/t.yaml");
         assert!(!w.checkout.join(".control/asks/evil.yaml").exists());
+    }
+
+    #[test]
+    fn a_resumed_answer_already_written_is_not_written_twice() {
+        let (_ws, _state, w) = workspace(Some(true));
+        let book = Book::default();
+        book.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", None), 0));
+        apply(&w, &book, "r1", &assertion(), "n1", "owner", None);
+        let first = book.get("r1").unwrap().commit.unwrap();
+        // The daemon restarts before settling: the same signed receipt is applied again.
+        let again = Book::default();
+        again.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", None), 0));
+        // Locally the base is the workspace HEAD, which lacks the first commit; build on it instead.
+        git(&w.workspace, &["fetch", "-q", &w.checkout.to_string_lossy(), &first]).unwrap();
+        git(&w.workspace, &["merge", "-q", "--ff-only", &first]).unwrap();
+        apply(&w, &again, "r1", &assertion(), "n1", "owner", None);
+        let r = again.get("r1").unwrap();
+        assert_eq!((r.stage, r.commit.as_deref()), (Stage::Written, Some(first.as_str())), "{:?}", r.error);
     }
 
     #[test]

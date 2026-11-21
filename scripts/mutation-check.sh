@@ -271,6 +271,9 @@ mutate $ans '        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?
 mutate $ans '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
 mutate $ans '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''
 mutate $ans '    if !ok && !new.is_empty() {' '    if false {'
+mutate $ans '    if !done.is_empty() {
+        return Ok(done);' '    if false {
+        return Ok(done);'
 mutate $ans '        if o.status.code().is_none_or(|c| c > 1) {' '        if false {'
 mutate $sans '    if ask.hash() != hash {' '    if false {'
 mutate $sans '    if ask.state() != AskState::Open {' '    if false {'
