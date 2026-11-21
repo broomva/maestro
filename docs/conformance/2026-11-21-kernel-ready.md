@@ -11,11 +11,11 @@ There are two versions:
 ## kernel-ready@2 at `59cb97b` (the result)
 
 **Setup:** the installed binary and the subject were checked by the flow itself:
-- `installed`, accepted in both runs, checked that `~/.local/bin/maestro --version` names the head as a build with no `-dirty` mark, which is what a build from a clean checkout of that commit reports.
+- `installed`, accepted in both runs, checked that `~/.local/bin/maestro --version` names the head with no `-dirty` mark. Per [`crates/cli/build.rs`](../../crates/cli/build.rs), that means the build saw no tracked change and no untracked, non-ignored file inside the commit's top-level entries. Configuration outside the tree is not recorded.
 - `pin`, accepted in both runs, checked that the repo is at the head with no tracked change.
 
 Both instances used the same params, as their Started events record:
-- repo: `/tmp/kr-v2`, a clean clone at that commit
+- repo: `/tmp/kr-v2` (`pin` checked only that it was at the head with no tracked change)
 - head: `59cb97b`
 - suite: `cargo test --locked -p maestro-flow -p maestro`
 - consumer: content-flow
