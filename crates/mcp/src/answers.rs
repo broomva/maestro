@@ -350,11 +350,9 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
     }
     let tip = prepare(w)?;
     // Written already (a restart after the push, before the pending record was settled): the
-    // commit that carries this answer's id is the outcome, and nothing is written twice.
-    let done = git(
-        &w.checkout,
-        &["log", "-1", "--format=%H", "--fixed-strings", &format!("--grep=Maestro-Answer: {}", r.id)],
-    )?;
+    // commit whose trailer line is exactly this answer's id is the outcome, and nothing is
+    // written twice. Ids are base64url, so they carry no regular-expression character.
+    let done = git(&w.checkout, &["log", "-1", "--format=%H", &format!("--grep=^Maestro-Answer: {}$", r.id)])?;
     if !done.is_empty() {
         return Ok(done);
     }
