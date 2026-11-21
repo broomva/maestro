@@ -241,12 +241,40 @@ pub fn ask(
     let seen = look(ledger, session, instance, node)?;
     let rec = match seen.rec.clone() {
         Some(rec) => rec,
-        None => pin(ledger, paths, instance, node, &seen, filing, session.audit())?,
+        None => pin(ledger, paths, instance, node, &seen, filing, session.audit(), None)?,
     };
     if !rec.linked {
         return file_and_link(ledger, paths, session, instance, node, rec);
     }
     take_answer(ledger, paths, session, instance, node, rec)
+}
+
+/// Amend a linked, unanswered ask. The replacement is pinned before invoking the writer.
+pub fn amend(
+    ledger: &mut Ledger,
+    paths: &Paths,
+    session: &VerifiedSession,
+    instance: &InstanceId,
+    node: &str,
+    body: &Map<String, Value>,
+    reason: &str,
+) -> Result<Asked, KernelError> {
+    let seen = look(ledger, session, instance, node)?;
+    let old = seen.rec.as_ref().filter(|r| r.linked).ok_or_else(|| invalid("amend needs a linked ask"))?;
+    if reason.trim().is_empty() {
+        return Err(invalid("amend needs a reason"));
+    }
+    match landed(paths, old) {
+        Ok(Answer::Open) => {}
+        Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: old.ask_id.clone() }.into()),
+        Err(KernelError::Refused(Refusal::AnswersUnread { .. })) => {
+            return Err(Refusal::AskAmendUnread { ask_id: old.ask_id.clone() }.into());
+        }
+        Err(e) => return Err(e),
+    }
+    let filing = Filing { ledger: old.ledger.clone(), body: body.clone() };
+    let rec = pin(ledger, paths, instance, node, &seen, Some(&filing), session.audit(), Some((old, reason)))?;
+    file_and_link(ledger, paths, session, instance, node, rec)
 }
 
 /// The node as the log has it, read under the flows lock, which is released on return.
@@ -386,6 +414,7 @@ fn pin(
     seen: &Seen,
     filing: Option<&Filing>,
     audit: Option<&Audit>,
+    amend: Option<(&AskRec, &str)>,
 ) -> Result<AskRec, KernelError> {
     let owned;
     let filing = match (filing, &seen.prior) {
@@ -410,9 +439,13 @@ fn pin(
     if let Some(meanwhile) = seams::BEFORE_PIN.with(|c| c.borrow_mut().take()) {
         meanwhile();
     }
-    let (supersedes, reason) = match &seen.prior {
-        Some(prior) => (Some(prior.ask_id.clone()), Some("inputs_changed".to_string())),
-        None => (None, None),
+    let (supersedes, reason) = if let Some((old, why)) = amend {
+        (Some(old.ask_id.clone()), Some(format!("amended: {}", why.trim())))
+    } else {
+        match &seen.prior {
+            Some(prior) => (Some(prior.ask_id.clone()), Some("inputs_changed".to_string())),
+            None => (None, None),
+        }
     };
     let mut body = Map::new();
     body.insert("id".into(), Value::String(ask_id.clone()));
@@ -422,7 +455,7 @@ fn pin(
     body.extend(filing.body.clone());
     if let Some(prev) = &supersedes {
         body.insert("supersedes".into(), Value::String(prev.clone()));
-        body.insert("reason".into(), Value::String("inputs_changed".into()));
+        body.insert("reason".into(), Value::String(reason.clone().unwrap_or_default()));
     }
     let body = requests::compose_ask(&body).map_err(|e| invalid(e.to_string()))?;
     let body_hash = comparable_hash(&JsValue::from(Value::Object(body.clone())));
@@ -435,7 +468,7 @@ fn pin(
         body_hash,
         inputs: None,
         supersedes,
-        amends: false,
+        amends: amend.is_some(),
         reason,
         audit: audit.cloned(),
     };
@@ -575,6 +608,10 @@ pub(super) fn file_and_confirm<T>(
     let Some(body) = rec.body.as_object() else {
         return Err(unconfirmed("the pinned body is not an object".into()).into());
     };
+    // Until the supersede writer is wired, never file an amendment as an ordinary ask.
+    if rec.amends {
+        return Err(unconfirmed("the supersede writer is not yet available".into()).into());
+    }
     // No flows guard is alive here: the callers drop theirs before they file.
     let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?;
     #[cfg(test)]

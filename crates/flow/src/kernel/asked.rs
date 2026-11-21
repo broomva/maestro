@@ -1642,3 +1642,21 @@ fn legacy_asks_and_answers_without_inputs_bind_to_consumed_digests_at_their_log_
         Err(KernelError::Refused(Refusal::NotEnabled { ref node, ref state })) if node == "owner" && state == "done"
     ));
 }
+
+#[test]
+fn amend_refuses_an_answer_on_main_or_waiting_to_land() {
+    for landed in [false, true] {
+        let mut f = fx(None, "");
+        let fi = f.begin();
+        let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+        f.answer_in_worktree(&id);
+        if landed {
+            f.land_on_main();
+        } else {
+            f.put_on_answers_branch();
+        }
+        let before = f.kinds(&fi);
+        assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_answered");
+        assert_eq!(f.kinds(&fi), before);
+    }
+}
