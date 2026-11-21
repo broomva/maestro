@@ -125,9 +125,11 @@ fn a_local_ref_is_absent_a_commit_or_an_error() {
 
 #[test]
 fn a_fifo_where_git_looks_cannot_hang_the_ref_resolution() {
-    // A FIFO at the head commit's own loose object: `rev-parse <ref>^{commit}` must open it to
-    // learn the object's type, on every platform (a FIFO at the alternates file is not opened by
-    // every git here, which let a mutant lengthening the deadline survive on CI: maestro#62).
+    // A FIFO at the head commit's own loose object, its only copy in this fresh repo (no pack, no
+    // commit-graph): `rev-parse <ref>^{commit}` opens it to peel the ref (checked on the Mac's git
+    // and Linux git 2.43). A FIFO at the alternates file is not opened by every git, which let a
+    // mutant lengthening the deadline survive on CI (maestro#62). The assertion names the
+    // rev-parse step, so a git that does not open the object fails this test, never passes it.
     let (_tmp, root, head) = repo("x");
     let loose = root.join(".git/objects").join(&head[..2]).join(&head[2..]);
     std::fs::remove_file(&loose).unwrap();
