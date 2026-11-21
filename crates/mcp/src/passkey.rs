@@ -312,7 +312,12 @@ pub(crate) mod tests {
 
     /// What Touch ID returns for `challenge`, with these flags and this origin.
     pub(crate) fn sign_with(challenge: &str, flags: u8, origin: &str, rp: &Party) -> Assertion {
-        let cd = client("webauthn.get", challenge, origin);
+        sign_kind("webauthn.get", challenge, flags, origin, rp)
+    }
+
+    /// A validly signed assertion whose client data names ceremony `kind`.
+    fn sign_kind(kind: &str, challenge: &str, flags: u8, origin: &str, rp: &Party) -> Assertion {
+        let cd = client(kind, challenge, origin);
         let auth = auth_data(rp, flags);
         let mut signed = auth.clone();
         signed.extend_from_slice(&Sha256::digest(URL_SAFE_NO_PAD.decode(&cd).unwrap()));
@@ -365,6 +370,8 @@ pub(crate) mod tests {
         let sig: p256::ecdsa::Signature = stranger.sign(&signed);
         a.signature = URL_SAFE_NO_PAD.encode(sig.to_der().as_bytes());
         assert!(verify(&p, &k, &c, &a).is_err(), "stranger");
+        // A registration's client data, validly signed, is not an assertion.
+        assert!(verify(&p, &k, &c, &sign_kind("webauthn.create", &c, 0x05, &p.origin, &p)).is_err(), "signed create");
         // A get assertion is not a registration, and the other way round.
         let mut a = sign(&c);
         a.client_data = client("webauthn.create", &c, &p.origin);
