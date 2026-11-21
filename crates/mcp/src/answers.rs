@@ -167,7 +167,20 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 fn landing_pr(dir: &Path) -> Result<Option<String>, String> {
     let out = Command::new("gh")
         .current_dir(dir)
-        .args(["pr", "list", "--head", BRANCH, "--base", "main", "--state", "open", "--json", "number", "--jq", ".[0].number // empty"])
+        .args([
+            "pr",
+            "list",
+            "--head",
+            BRANCH,
+            "--base",
+            "main",
+            "--state",
+            "open",
+            "--json",
+            "number",
+            "--jq",
+            ".[0].number // empty",
+        ])
         .output()
         .map_err(|e| format!("gh: {e}"))?;
     if !out.status.success() {
@@ -190,7 +203,10 @@ fn prepare(w: &Writer) -> Result<Option<String>, String> {
         git(&w.checkout, &["fetch", "-q", "origin", "main"])?;
         let has = !git(&w.checkout, &["ls-remote", "--heads", "origin", BRANCH])?.is_empty();
         if has {
-            git(&w.checkout, &["fetch", "-q", "origin", &format!("+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")])?;
+            git(
+                &w.checkout,
+                &["fetch", "-q", "origin", &format!("+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")],
+            )?;
             Some(git(&w.checkout, &["rev-parse", &format!("refs/remotes/origin/{BRANCH}")])?)
         } else {
             None
@@ -222,9 +238,15 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
     let rel = format!("{}/{}", w.asks, r.intent.ledger);
     let path = w.checkout.join(&rel);
     let source = std::fs::read_to_string(&path).map_err(|e| format!("{rel}: {e}"))?;
-    let answer = maestro_store::answer::Answer { option: &r.intent.option, note: r.intent.note.as_deref(), by, at: &r.signed_at };
+    let answer = maestro_store::answer::Answer {
+        option: &r.intent.option,
+        note: r.intent.note.as_deref(),
+        by,
+        at: &r.signed_at,
+    };
     let select = maestro_store::answer::Select { handle: &r.intent.handle };
-    let edited = maestro_store::answer::answered(&source, &rel, &select, &r.intent.hash, &answer).map_err(|e| e.to_string())?;
+    let edited =
+        maestro_store::answer::answered(&source, &rel, &select, &r.intent.hash, &answer).map_err(|e| e.to_string())?;
     std::fs::write(&path, edited).map_err(|e| format!("{rel}: {e}"))?;
     // The validator of record has the last word on the ledger.
     let validator = w.checkout.join("scripts/ask_ledger.py");
@@ -234,7 +256,10 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
             Ok(o) if o.status.success() => {}
             Ok(o) => {
                 let _ = git(&w.checkout, &["checkout", "--", &rel]);
-                return Err(format!("the ledger validator refused the answer: {}", String::from_utf8_lossy(&o.stdout).trim()));
+                return Err(format!(
+                    "the ledger validator refused the answer: {}",
+                    String::from_utf8_lossy(&o.stdout).trim()
+                ));
             }
             Err(e) => {
                 let _ = git(&w.checkout, &["checkout", "--", &rel]);
@@ -253,7 +278,10 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
         serde_json::to_string(&proof).unwrap_or_default()
     );
     git(&w.checkout, &["add", "--", &rel])?;
-    git(&w.checkout, &["-c", "user.name=Maestro", "-c", "user.email=maestro@broomva.local", "commit", "-q", "-m", &message])?;
+    git(
+        &w.checkout,
+        &["-c", "user.name=Maestro", "-c", "user.email=maestro@broomva.local", "commit", "-q", "-m", &message],
+    )?;
     let commit = git(&w.checkout, &["rev-parse", "HEAD"])?;
     if w.remote {
         let lease = format!("--force-with-lease=refs/heads/{BRANCH}:{}", lease.as_deref().unwrap_or(""));
@@ -309,7 +337,9 @@ pub fn land(w: &Writer) -> String {
                 ])
                 .output();
             match out {
-                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().rsplit('/').next().unwrap_or("").to_string(),
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().rsplit('/').next().unwrap_or("").to_string()
+                }
                 Ok(o) => return format!("no landing PR: {}", String::from_utf8_lossy(&o.stderr).trim()),
                 Err(e) => return format!("no landing PR: {e}"),
             }
@@ -372,7 +402,10 @@ mod tests {
     #[test]
     fn the_intent_is_canonical_and_a_blank_note_is_none() {
         let i = Intent::answer("l.yaml", "a", "h", "no", Some("  "));
-        assert_eq!(i.canonical(), r#"{"verb":"ask.answer","ledger":"l.yaml","handle":"a","hash":"h","option":"no","note":null}"#);
+        assert_eq!(
+            i.canonical(),
+            r#"{"verb":"ask.answer","ledger":"l.yaml","handle":"a","hash":"h","option":"no","note":null}"#
+        );
     }
 
     #[test]
@@ -392,7 +425,11 @@ mod tests {
         std::fs::create_dir_all(&asks).unwrap();
         let ledger = "arc: t\nasks:\n  - id: a\n    ask: \"First?\"\n    options:\n      - id: yes\n        label: \"Yes\"\n      - id: no\n        label: \"No\"\n    origin:\n      session: \"t3:env/thread-1\"\n";
         std::fs::write(asks.join("t.yaml"), ledger).unwrap();
-        for args in [&["init", "-q", "-b", "main"][..], &["add", "."], &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]] {
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["add", "."],
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"],
+        ] {
             git(ws.path(), args).unwrap();
         }
         let hash = {
@@ -413,7 +450,12 @@ mod tests {
         };
         let book = Book::default();
         book.put(receipt(Intent::answer("t.yaml", "a", &hash, "no", Some("after the soak")), 0));
-        let a = Assertion { credential: "c".into(), client_data: "d".into(), authenticator_data: "e".into(), signature: "f".into() };
+        let a = Assertion {
+            credential: "c".into(),
+            client_data: "d".into(),
+            authenticator_data: "e".into(),
+            signature: "f".into(),
+        };
         apply(&w, &book, "r1", &a, "n1", "owner (passkey)", Some("t3:env/thread-1"));
         let r = book.get("r1").unwrap();
         assert_eq!(r.stage, Stage::Written, "{:?}", r.error);
@@ -421,7 +463,10 @@ mod tests {
         let written = std::fs::read_to_string(w.checkout.join(".control/asks/t.yaml")).unwrap();
         assert!(written.contains("answer_option: \"no\""));
         let msg = git(&w.checkout, &["log", "-1", "--format=%B"]).unwrap();
-        assert!(msg.contains("Maestro-Owner-Proof: {") && msg.contains(r#""intent":"{\"verb\":\"ask.answer\""#), "{msg}");
+        assert!(
+            msg.contains("Maestro-Owner-Proof: {") && msg.contains(r#""intent":"{\"verb\":\"ask.answer\""#),
+            "{msg}"
+        );
         // The owner's own checkout is untouched.
         assert_eq!(std::fs::read_to_string(asks.join("t.yaml")).unwrap(), ledger);
         // A second answer to the same ask is refused: it is no longer open at the checkout's base,

@@ -48,9 +48,11 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Merge now</bdi>
 </span>
 </summary>
-<article class="mv-decision" data-ask="demo-arc.yaml#merge-now" data-hash="5b70dab7a7f0afa6" data-kind="decision">
-<p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> <bdi>demo-arc.yaml</bdi> by <bdi>demo-arc</bdi>
+<article class="mv-decision" data-ask="demo-arc.yaml#merge-now" data-hash="5b70dab7a7f0afa6" data-kind="decision" data-ledger="demo-arc.yaml" data-handle="merge-now">
+<p class="mv-dchips">
+<span class="mv-dchip" data-kind="decision">decision</span>
+<span class="mv-dchip" data-tone="success">Reversible</span>
+<span class="mv-dchip" data-tone="attention">Blocking</span>
 </p>
 <p class="mv-dtitle">Merge the demo PR now, or hold for review?</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
@@ -78,15 +80,21 @@ expression: "portable(&r.html, m.path())"
 </li>
 </ol>
 <section class="mv-fold mv-tried">
-<h3 class="mv-fold-title">What the agent tried first</h3>
+<h3 class="mv-fold-title">What the agent tried</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: <bdi>the review ledger records a pass</bdi>
+<span class="bv-code">read</span> <bdi>the review ledger records a pass</bdi>
 </li>
 <li>
-<span class="bv-code">default</span>: <bdi>holding is the reversible default</bdi>
+<span class="bv-code">default</span> <bdi>holding is the reversible default</bdi>
 </li>
 </ul>
+<p class="mv-origin bv-code">from <bdi>demo-arc</bdi>
+<br>
+<bdi>demo-arc.yaml</bdi>
+<br>
+<bdi>merge-now</bdi>
+</p>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
@@ -108,9 +116,10 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-irow-title">Held under the corpus's other spelling?</span>
 <span class="mv-irow-rec" data-tone="warning">Not offered here: whether it is answered, or answerable, is not known</span>
 </summary>
-<article class="mv-decision" data-ask="alt-key.yaml#alt-blocking" data-hash="7e423ddd550cb6e8" data-kind="decision">
-<p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> <bdi>alt-key.yaml</bdi> by <bdi>alt-key</bdi>
+<article class="mv-decision" data-ask="alt-key.yaml#alt-blocking" data-hash="7e423ddd550cb6e8" data-kind="decision" data-ledger="alt-key.yaml" data-handle="alt-blocking">
+<p class="mv-dchips">
+<span class="mv-dchip" data-kind="decision">decision</span>
+<span class="mv-dchip" data-tone="attention">Blocking</span>
 </p>
 <p class="mv-dtitle">Held under the corpus's other spelling?</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
@@ -118,15 +127,21 @@ expression: "portable(&r.html, m.path())"
 </span>
 </p>
 <section class="mv-fold mv-tried">
-<h3 class="mv-fold-title">What the agent tried first</h3>
+<h3 class="mv-fold-title">What the agent tried</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: <bdi>x</bdi>
+<span class="bv-code">read</span> <bdi>x</bdi>
 </li>
 <li>
-<span class="bv-code">default</span>: <bdi>y</bdi>
+<span class="bv-code">default</span> <bdi>y</bdi>
 </li>
 </ul>
+<p class="mv-origin bv-code">from <bdi>alt-key</bdi>
+<br>
+<bdi>alt-key.yaml</bdi>
+<br>
+<bdi>alt-blocking</bdi>
+</p>
 </section>
 <p class="mv-callout" data-tone="warning">Maestro cannot tell for sure whether this ask is answered, or whether Paseo would take an answer to it. Paseo · Maestro · Decisions shows it.</p>
 </article>
@@ -140,21 +155,28 @@ expression: "portable(&r.html, m.path())"
 </span>
 <span class="mv-irow-title">Which name?</span>
 </summary>
-<article class="mv-decision" data-ask="demo-arc.yaml#pick-name" data-hash="70b46ca380a91c51" data-kind="idea">
-<p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> <bdi>demo-arc.yaml</bdi> by <bdi>demo-arc</bdi>
+<article class="mv-decision" data-ask="demo-arc.yaml#pick-name" data-hash="70b46ca380a91c51" data-kind="idea" data-ledger="demo-arc.yaml" data-handle="pick-name">
+<p class="mv-dchips">
+<span class="mv-dchip" data-kind="idea">idea</span>
+<span class="mv-dchip" data-tone="warning">Not blocking</span>
 </p>
 <p class="mv-dtitle">Which name?</p>
 <section class="mv-fold mv-tried">
-<h3 class="mv-fold-title">What the agent tried first</h3>
+<h3 class="mv-fold-title">What the agent tried</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: <bdi>none found</bdi>
+<span class="bv-code">read</span> <bdi>none found</bdi>
 </li>
 <li>
-<span class="bv-code">loop</span>: <bdi>asked the coordinator</bdi>
+<span class="bv-code">loop</span> <bdi>asked the coordinator</bdi>
 </li>
 </ul>
+<p class="mv-origin bv-code">from <bdi>demo-arc</bdi>
+<br>
+<bdi>demo-arc.yaml</bdi>
+<br>
+<bdi>pick-name</bdi>
+</p>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
@@ -189,9 +211,11 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Paste it now</bdi>
 </span>
 </summary>
-<article class="mv-decision" data-ask="decisions.yaml#new-key" data-hash="b7d37ffe8758bf00" data-kind="credential">
-<p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="credential">credential</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-22T08:00:00Z</bdi> by <bdi>fleet-closeout</bdi>
+<article class="mv-decision" data-ask="decisions.yaml#new-key" data-hash="b7d37ffe8758bf00" data-kind="credential" data-ledger="decisions.yaml" data-handle="new-key">
+<p class="mv-dchips">
+<span class="mv-dchip" data-kind="credential">credential</span>
+<span class="mv-dchip" data-tone="success">Reversible</span>
+<span class="mv-dchip" data-tone="attention">Blocking</span>
 </p>
 <p class="mv-dtitle">Paste the &lt;b&gt;deploy&lt;/b&gt; key</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
@@ -215,12 +239,19 @@ expression: "portable(&r.html, m.path())"
 </li>
 </ol>
 <section class="mv-fold mv-tried">
-<h3 class="mv-fold-title">What the agent tried first</h3>
+<h3 class="mv-fold-title">What the agent tried</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: <bdi>keychain has none</bdi>
+<span class="bv-code">read</span> <bdi>keychain has none</bdi>
 </li>
 </ul>
+<p class="mv-origin bv-code">from <bdi>fleet-closeout</bdi>
+<br>
+<bdi>decisions.yaml</bdi>
+<br>
+<bdi>new-key</bdi>
+<br>asked <bdi>2026-10-22T08:00:00Z</bdi>
+</p>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
@@ -243,9 +274,10 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-irow-rec" data-tone="info">Recommended: <bdi>A person merges them</bdi>
 </span>
 </summary>
-<article class="mv-decision" data-ask="decisions.yaml#merge-policy" data-hash="ae8d1d0cd57f5f87" data-kind="authority">
-<p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="authority">authority</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-12</bdi> by <bdi>fleet-closeout</bdi>
+<article class="mv-decision" data-ask="decisions.yaml#merge-policy" data-hash="ae8d1d0cd57f5f87" data-kind="authority" data-ledger="decisions.yaml" data-handle="merge-policy">
+<p class="mv-dchips">
+<span class="mv-dchip" data-kind="authority">authority</span>
+<span class="mv-dchip" data-tone="warning">Not blocking</span>
 </p>
 <p class="mv-dtitle">May Maestro's answers-only PRs merge on their own once their gates pass?</p>
 <div class="mv-pair">
@@ -273,15 +305,22 @@ expression: "portable(&r.html, m.path())"
 </ol>
 <p class="mv-callout" data-tone="warning">No default: irreversible. It waits for you.</p>
 <section class="mv-fold mv-tried">
-<h3 class="mv-fold-title">What the agent tried first</h3>
+<h3 class="mv-fold-title">What the agent tried</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: <bdi>the merge policy</bdi>
+<span class="bv-code">read</span> <bdi>the merge policy</bdi>
 </li>
 <li>
-<span class="bv-code">preauth</span>: <bdi>no grant covers merges</bdi>
+<span class="bv-code">preauth</span> <bdi>no grant covers merges</bdi>
 </li>
 </ul>
+<p class="mv-origin bv-code">from <bdi>fleet-closeout</bdi>
+<br>
+<bdi>decisions.yaml</bdi>
+<br>
+<bdi>merge-policy</bdi>
+<br>asked <bdi>2026-10-12</bdi>
+</p>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
@@ -315,9 +354,11 @@ expression: "portable(&r.html, m.path())"
 <span class="mv-irow-rec" data-tone="info">Recommended: <bdi>Rotate long orchestrators by handoff</bdi>
 </span>
 </summary>
-<article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
-<p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
+<article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision" data-ledger="decisions.yaml" data-handle="fleet-cost-1">
+<p class="mv-dchips">
+<span class="mv-dchip" data-kind="decision">decision</span>
+<span class="mv-dchip" data-tone="success">Reversible</span>
+<span class="mv-dchip" data-tone="attention">Blocking</span>
 </p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
@@ -414,15 +455,22 @@ expression: "portable(&r.html, m.path())"
 </li>
 </ul>
 <section class="mv-fold mv-tried">
-<h3 class="mv-fold-title">What the agent tried first</h3>
+<h3 class="mv-fold-title">What the agent tried</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: <bdi>ws#983 and the fleet-cost memory</bdi>
+<span class="bv-code">read</span> <bdi>ws#983 and the fleet-cost memory</bdi>
 </li>
 <li>
-<span class="bv-code">reroute</span>: <bdi>no standing grant covers it</bdi>
+<span class="bv-code">reroute</span> <bdi>no standing grant covers it</bdi>
 </li>
 </ul>
+<p class="mv-origin bv-code">from <bdi>claude:coordinator</bdi>
+<br>
+<bdi>decisions.yaml</bdi>
+<br>
+<bdi>fleet-cost-1</bdi>
+<br>asked <bdi>2026-10-17T12:00:00Z</bdi>
+</p>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">
@@ -454,9 +502,11 @@ expression: "portable(&r.html, m.path())"
 </span>
 <span class="mv-irow-title">Run the Jev-vs-/kg retrieval experiment?</span>
 </summary>
-<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="4e0b3b5d6873501f" data-kind="idea">
-<p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="idea">idea</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-20T00:00:00Z</bdi> by <bdi>9f3c2a1b</bdi>
+<article class="mv-decision" data-ask="decisions.yaml#jev-idea" data-hash="4e0b3b5d6873501f" data-kind="idea" data-ledger="decisions.yaml" data-handle="jev-idea">
+<p class="mv-dchips">
+<span class="mv-dchip" data-kind="idea">idea</span>
+<span class="mv-dchip" data-tone="success">Reversible</span>
+<span class="mv-dchip" data-tone="warning">Not blocking</span>
 </p>
 <p class="mv-dtitle">Run the Jev-vs-/kg retrieval experiment?</p>
 <h3 class="mv-label bv-meta">Choose one</h3>
@@ -476,12 +526,19 @@ expression: "portable(&r.html, m.path())"
 </li>
 </ol>
 <section class="mv-fold mv-tried">
-<h3 class="mv-fold-title">What the agent tried first</h3>
+<h3 class="mv-fold-title">What the agent tried</h3>
 <ul>
 <li>
-<span class="bv-code">loop</span>: <bdi>filed by the idea triage</bdi>
+<span class="bv-code">loop</span> <bdi>filed by the idea triage</bdi>
 </li>
 </ul>
+<p class="mv-origin bv-code">from <bdi>9f3c2a1b</bdi>
+<br>
+<bdi>decisions.yaml</bdi>
+<br>
+<bdi>jev-idea</bdi>
+<br>asked <bdi>2026-10-20T00:00:00Z</bdi>
+</p>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">

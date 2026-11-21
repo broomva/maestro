@@ -435,10 +435,11 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
     assert!(doc.contains(r#"<a class="mv-tab" href="/today" aria-current="page">Today</a>"#), "{doc}");
     assert!(doc.contains(r#"<span class="mv-nav-count">3</span>"#), "{doc}");
     assert!(doc.contains("main 0123456</span> · committed 2 h ago"), "{doc}");
-    assert!(
-        !doc.contains("<script") && !doc.to_ascii_lowercase().contains("url("),
-        "the web page runs and fetches nothing"
-    );
+    // One script, the owner script its policy names by hash (BRO-4042), and no fetched asset.
+    assert_eq!(doc.matches("<script").count(), 1, "one script");
+    assert!(doc.contains(&format!("<script>{}</script>", page::OWNER_JS)), "the pinned owner script");
+    assert!(page::web_csp().contains("script-src 'sha256-"), "the script is named by hash");
+    assert!(!doc.to_ascii_lowercase().contains("url("), "the web page fetches no asset");
 }
 
 #[test]

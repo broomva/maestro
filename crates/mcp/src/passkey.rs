@@ -167,7 +167,8 @@ struct ClientData {
 /// The checks client data and authenticator data share: the ceremony, the challenge, the
 /// origin, the relying party, and the owner present and verified.
 fn check(party: &Party, kind: &str, challenge: &str, client_data: &[u8], auth: &[u8]) -> Result<(), String> {
-    let cd: ClientData = serde_json::from_slice(client_data).map_err(|_| "the client data does not read".to_string())?;
+    let cd: ClientData =
+        serde_json::from_slice(client_data).map_err(|_| "the client data does not read".to_string())?;
     if cd.kind != kind {
         return Err(format!("not a {kind} ceremony"));
     }
@@ -198,15 +199,31 @@ pub fn register(party: &Party, challenge: &str, r: &Registration, at: &str) -> R
     if r.algorithm != ES256 {
         return Err("only ES256 passkeys are enrolled".into());
     }
-    check(party, "webauthn.create", challenge, &b64url("client data", &r.client_data)?, &b64url("authenticator data", &r.authenticator_data)?)?;
+    check(
+        party,
+        "webauthn.create",
+        challenge,
+        &b64url("client data", &r.client_data)?,
+        &b64url("authenticator data", &r.authenticator_data)?,
+    )?;
     let spki = b64url("public key", &r.public_key)?;
     VerifyingKey::from_public_key_der(&spki).map_err(|_| "the public key is not a P-256 key".to_string())?;
     b64url("credential", &r.credential)?;
-    Ok(Credential { id: r.credential.clone(), public_key: STANDARD.encode(spki), enrolled_at: at.to_string(), rp_id: party.id.clone() })
+    Ok(Credential {
+        id: r.credential.clone(),
+        public_key: STANDARD.encode(spki),
+        enrolled_at: at.to_string(),
+        rp_id: party.id.clone(),
+    })
 }
 
 /// An assertion checked against the keyring, for `challenge`. Returns the credential that signed.
-pub fn verify<'k>(party: &Party, keyring: &'k Keyring, challenge: &str, a: &Assertion) -> Result<&'k Credential, String> {
+pub fn verify<'k>(
+    party: &Party,
+    keyring: &'k Keyring,
+    challenge: &str,
+    a: &Assertion,
+) -> Result<&'k Credential, String> {
     let cred = keyring.find(&a.credential).ok_or("that passkey is not enrolled")?;
     if cred.rp_id != party.id {
         return Err("that passkey was enrolled for another host".into());
@@ -216,7 +233,8 @@ pub fn verify<'k>(party: &Party, keyring: &'k Keyring, challenge: &str, a: &Asse
     check(party, "webauthn.get", challenge, &client_data, &auth)?;
     let spki = STANDARD.decode(&cred.public_key).map_err(|_| "the enrolled key does not read".to_string())?;
     let key = VerifyingKey::from_public_key_der(&spki).map_err(|_| "the enrolled key does not read".to_string())?;
-    let sig = DerSignature::from_bytes(&b64url("signature", &a.signature)?).map_err(|_| "the signature does not read".to_string())?;
+    let sig = DerSignature::from_bytes(&b64url("signature", &a.signature)?)
+        .map_err(|_| "the signature does not read".to_string())?;
     let mut signed = auth.clone();
     signed.extend_from_slice(&Sha256::digest(&client_data));
     key.verify(&signed, &sig).map_err(|_| "the signature does not verify".to_string())?;
@@ -255,7 +273,8 @@ pub(crate) mod tests {
     }
 
     fn client(kind: &str, challenge: &str, origin: &str) -> String {
-        URL_SAFE_NO_PAD.encode(format!(r#"{{"type":"{kind}","challenge":"{challenge}","origin":"{origin}","crossOrigin":false}}"#))
+        URL_SAFE_NO_PAD
+            .encode(format!(r#"{{"type":"{kind}","challenge":"{challenge}","origin":"{origin}","crossOrigin":false}}"#))
     }
 
     pub(crate) fn keyring() -> Keyring {
@@ -346,7 +365,15 @@ pub(crate) mod tests {
         assert_eq!(cred.rp_id, p.id);
         assert!(register(&p, &c, &Registration { algorithm: -257, ..r.clone() }, "t").is_err());
         assert!(register(&p, &challenge("other", "n"), &r, "t").is_err());
-        assert!(register(&p, &c, &Registration { authenticator_data: URL_SAFE_NO_PAD.encode(auth_data(&p, 0x41)), ..r }, "t").is_err());
+        assert!(
+            register(
+                &p,
+                &c,
+                &Registration { authenticator_data: URL_SAFE_NO_PAD.encode(auth_data(&p, 0x41)), ..r },
+                "t"
+            )
+            .is_err()
+        );
     }
 
     #[test]

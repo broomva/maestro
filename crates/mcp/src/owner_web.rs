@@ -66,14 +66,8 @@ impl Owner {
     }
 
     pub fn new(party: Party, dir: PathBuf, writer: Writer) -> Self {
-        let owner = Owner {
-            party,
-            dir,
-            writer,
-            book: Book::default(),
-            pending: Arc::default(),
-            enroll_code: Arc::default(),
-        };
+        let owner =
+            Owner { party, dir, writer, book: Book::default(), pending: Arc::default(), enroll_code: Arc::default() };
         if Keyring::load(&owner.dir).is_ok_and(|k| k.credentials.is_empty()) {
             let code = passkey::nonce()[..8].to_ascii_uppercase();
             eprintln!("maestro: set up the owner's passkey at {}/owner with the code {code}", owner.party.origin);
@@ -123,7 +117,9 @@ impl Owner {
         let nonce = passkey::nonce();
         let challenge = passkey::challenge("{\"verb\":\"owner.enroll\"}", &nonce);
         self.keep(&nonce, Pending::Enroll { challenge: challenge.clone(), at: Instant::now() });
-        Ok(serde_json::json!({ "nonce": nonce, "challenge": challenge, "rp_id": self.party.id, "user_id": passkey::nonce() }))
+        Ok(
+            serde_json::json!({ "nonce": nonce, "challenge": challenge, "rp_id": self.party.id, "user_id": passkey::nonce() }),
+        )
     }
 
     pub fn enroll_finish(&self, nonce: &str, r: &Registration, at: &str) -> Result<(), String> {
@@ -169,7 +165,13 @@ impl Owner {
         let session = ask.origin.as_ref().and_then(|o| o.session.clone());
         self.keep(
             &nonce,
-            Pending::Answer { intent, label: option.label.clone(), session, challenge: challenge.clone(), at: Instant::now() },
+            Pending::Answer {
+                intent,
+                label: option.label.clone(),
+                session,
+                challenge: challenge.clone(),
+                at: Instant::now(),
+            },
         );
         let ids: Vec<&str> =
             keyring.credentials.iter().filter(|c| c.rp_id == self.party.id).map(|c| c.id.as_str()).collect();
@@ -264,7 +266,16 @@ mod tests {
         let nonce = passkey::nonce();
         let challenge = passkey::challenge(&intent.canonical(), &nonce);
         let keep = |n: &str, c: &str| {
-            o.keep(n, Pending::Answer { intent: intent.clone(), label: "No".into(), session: None, challenge: c.into(), at: Instant::now() })
+            o.keep(
+                n,
+                Pending::Answer {
+                    intent: intent.clone(),
+                    label: "No".into(),
+                    session: None,
+                    challenge: c.into(),
+                    at: Instant::now(),
+                },
+            )
         };
         // A signature over another challenge is refused, and the request is spent.
         keep(&nonce, &challenge);

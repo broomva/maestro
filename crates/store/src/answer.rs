@@ -61,8 +61,11 @@ pub enum Refusal {
 /// The one ask `select` names, as the store reads it: a uid, else an id among asks without one.
 pub fn find<'l>(ledger: &'l AskLedger, select: &Select) -> Result<&'l Ask, Refusal> {
     let by_uid: Vec<&Ask> = ledger.asks.iter().filter(|a| a.uid.as_deref() == Some(select.handle)).collect();
-    let found =
-        if by_uid.is_empty() { ledger.asks.iter().filter(|a| a.uid.is_none() && a.id == select.handle).collect() } else { by_uid };
+    let found = if by_uid.is_empty() {
+        ledger.asks.iter().filter(|a| a.uid.is_none() && a.id == select.handle).collect()
+    } else {
+        by_uid
+    };
     match found.as_slice() {
         [a] => Ok(a),
         [] => Err(Refusal::NoSuchAsk(select.handle.to_string())),
@@ -147,13 +150,17 @@ fn edit(source: &str, item: &Item, keys: &[(&str, &str)], eol: &str) -> Result<S
             }
         }
         // The item's own keys sit at its indentation; the first line also carries the `- `.
-        let body = if i == 0 { &source[item.start..at + line.len()] } else { line.strip_prefix(pad.as_str()).unwrap_or("") };
+        let body =
+            if i == 0 { &source[item.start..at + line.len()] } else { line.strip_prefix(pad.as_str()).unwrap_or("") };
         let own = i == 0 || (line.starts_with(pad.as_str()) && !body.starts_with(' '));
-        let hit = own.then(|| keys.iter().find(|(k, _)| body.strip_prefix(k).is_some_and(|r| r.starts_with(':')))).flatten();
+        let hit =
+            own.then(|| keys.iter().find(|(k, _)| body.strip_prefix(k).is_some_and(|r| r.starts_with(':')))).flatten();
         match hit {
             Some((k, v)) => {
                 let value = body[k.len() + 1..].trim();
-                let nested = lines.get(i + 1).is_some_and(|n| n.starts_with(&format!("{pad} ")) || n.starts_with(&format!("{pad}-")));
+                let nested = lines
+                    .get(i + 1)
+                    .is_some_and(|n| n.starts_with(&format!("{pad} ")) || n.starts_with(&format!("{pad}-")));
                 if !matches!(value, "" | "null" | "~" | "\"\"" | "''") || (value.is_empty() && nested) {
                     return Err(Refusal::Unsupported(format!("the ask already holds `{k}`")));
                 }
@@ -347,7 +354,8 @@ mod tests {
     #[test]
     fn writes_only_the_answer_keys_into_the_one_ask() {
         let h = hash_of(LEDGER, "a");
-        let out = answered(LEDGER, "t.yaml", &Select { handle: "a" }, &h, &answer("no", Some("after the soak"))).unwrap();
+        let out =
+            answered(LEDGER, "t.yaml", &Select { handle: "a" }, &h, &answer("no", Some("after the soak"))).unwrap();
         let l = crate::ask_ledger_of("t.yaml", &out).unwrap();
         let a = find(&l, &Select { handle: "a" }).unwrap();
         assert_eq!(a.state(), AskState::Answered);
@@ -379,7 +387,10 @@ mod tests {
         let h = hash_of(LEDGER, "a");
         let s = Select { handle: "a" };
         assert_eq!(answered(LEDGER, "t.yaml", &s, "stale", &answer("no", None)), Err(Refusal::Changed));
-        assert_eq!(answered(LEDGER, "t.yaml", &s, &h, &answer("maybe", None)), Err(Refusal::NoSuchOption("maybe".into())));
+        assert_eq!(
+            answered(LEDGER, "t.yaml", &s, &h, &answer("maybe", None)),
+            Err(Refusal::NoSuchOption("maybe".into()))
+        );
         let once = answered(LEDGER, "t.yaml", &s, &h, &answer("no", None)).unwrap();
         let h2 = hash_of(&once, "a");
         assert_eq!(answered(&once, "t.yaml", &s, &h2, &answer("yes", None)), Err(Refusal::NotOpen));
@@ -400,11 +411,14 @@ mod tests {
 
     #[test]
     fn an_empty_answer_key_is_filled_in_place_and_a_set_one_refuses() {
-        let with_null = LEDGER.replace("    class: decision\n", "    class: decision\n    answered_at: null\n    answer_note: ~\n");
+        let with_null =
+            LEDGER.replace("    class: decision\n", "    class: decision\n    answered_at: null\n    answer_note: ~\n");
         let h = hash_of(&with_null, "a");
         let out = answered(&with_null, "t.yaml", &Select { handle: "a" }, &h, &answer("yes", Some("n"))).unwrap();
         assert_eq!(out.matches("answered_at:").count(), 1, "{out}");
-        assert!(out.contains("    class: decision\n    answered_at: \"2026-11-20T23:00:00Z\"\n    answer_note: \"n\"\n"));
+        assert!(
+            out.contains("    class: decision\n    answered_at: \"2026-11-20T23:00:00Z\"\n    answer_note: \"n\"\n")
+        );
         let with_by = LEDGER.replace("    class: decision\n", "    class: decision\n    answered_by: someone\n");
         let h = hash_of(&with_by, "a");
         let r = answered(&with_by, "t.yaml", &Select { handle: "a" }, &h, &answer("yes", None));
@@ -445,14 +459,39 @@ mod real_ledgers {
         let (mut ok, mut refused) = (0, Vec::new());
         for e in std::fs::read_dir(dir).unwrap() {
             let p = e.unwrap().path();
-            if !p.extension().is_some_and(|x| x == "yaml" || x == "yml") { continue }
+            if !p.extension().is_some_and(|x| x == "yaml" || x == "yml") {
+                continue;
+            }
             let text = std::fs::read_to_string(&p).unwrap();
-            let l = match crate::ask_ledger_of("x", &text) { Ok(l) => l, Err(e) => { eprintln!("unread {}: {e}", p.display()); continue } };
-            eprintln!("{} open {}", p.display(), l.asks.iter().filter(|a| a.state() == maestro_core::ask::AskState::Open).count());
+            let l = match crate::ask_ledger_of("x", &text) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("unread {}: {e}", p.display());
+                    continue;
+                }
+            };
+            eprintln!(
+                "{} open {}",
+                p.display(),
+                l.asks.iter().filter(|a| a.state() == maestro_core::ask::AskState::Open).count()
+            );
             for a in l.asks.iter().filter(|a| a.state() == maestro_core::ask::AskState::Open && !a.options.is_empty()) {
-                let r = super::answered(&text, "x", &super::Select { handle: a.handle() }, &a.hash(),
-                    &super::Answer { option: &a.options[0].id, note: Some("n"), by: "owner", at: "2026-11-21T00:00:00Z" });
-                match r { Ok(_) => ok += 1, Err(e) => refused.push(format!("{}#{}: {e}", p.display(), a.handle())) }
+                let r = super::answered(
+                    &text,
+                    "x",
+                    &super::Select { handle: a.handle() },
+                    &a.hash(),
+                    &super::Answer {
+                        option: &a.options[0].id,
+                        note: Some("n"),
+                        by: "owner",
+                        at: "2026-11-21T00:00:00Z",
+                    },
+                );
+                match r {
+                    Ok(_) => ok += 1,
+                    Err(e) => refused.push(format!("{}#{}: {e}", p.display(), a.handle())),
+                }
             }
         }
         eprintln!("answered {ok}; refused {}:\n{}", refused.len(), refused.join("\n"));

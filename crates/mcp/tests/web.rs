@@ -189,7 +189,11 @@ async fn a_missing_ask_is_not_found_but_an_unread_ledger_still_renders() {
 }
 
 /// A server whose decisions take the owner's answer at `origin`, with passkeys in `dir`.
-async fn start_owner(dir: &Path, origin: &str, enrolled: bool) -> (SocketAddr, CancellationToken, maestro_mcp::owner_web::Owner) {
+async fn start_owner(
+    dir: &Path,
+    origin: &str,
+    enrolled: bool,
+) -> (SocketAddr, CancellationToken, maestro_mcp::owner_web::Owner) {
     let cancel = CancellationToken::new();
     let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -229,17 +233,21 @@ async fn an_open_decision_takes_its_answer_in_place_once_a_passkey_is_set_up() {
         assert!(r.body.contains(&format!(r#"name="mv-answer-option" value="{option}""#)), "{option}: a choice");
     }
     // Never preselected, and no T3 hand-off.
-    assert!(!r.body.contains(" checked"), "preselected");
+    let inputs: Vec<&str> = r.body.split("<input").skip(1).map(|t| t.split('>').next().unwrap_or("")).collect();
+    assert!(!inputs.is_empty() && inputs.iter().all(|t| !t.contains("checked")), "preselected");
     assert!(!r.body.contains("t3code://") && !r.body.contains("data-handoff"));
     // At another address than the secure one, the page links there instead.
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &addr.to_string(), &[]).await;
     assert_page(&r, "elsewhere", "/decisions");
-    assert!(r.body.contains(r#"href="http://localhost:7181/decisions/demo-arc.yaml/merge-now""#), "no link to the secure page");
-    assert!(!r.body.contains("mv-opt-input"));
+    assert!(
+        r.body.contains(r#"href="http://localhost:7181/decisions/demo-arc.yaml/merge-now""#),
+        "no link to the secure page"
+    );
+    assert!(!r.body.contains(r#"name="mv-answer-option""#));
     // An answered ask and an idea that is answered take no answer.
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/old-one", "localhost:7181", &[]).await;
     assert_page(&r, "answered", "/decisions");
-    assert!(!r.body.contains("mv-opt-input") && !r.body.contains("data-answer-bar"));
+    assert!(!r.body.contains(r#"name="mv-answer-option""#) && !r.body.contains(r#"data-answer-bar="true""#));
     cancel.cancel();
 }
 
@@ -249,7 +257,7 @@ async fn before_a_passkey_is_set_up_the_decision_links_to_setup() {
     let (addr, cancel, owner) = start_owner(d.path(), "http://localhost:7181", false).await;
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", "localhost:7181", &[]).await;
     assert_page(&r, "enroll", "/decisions");
-    assert!(r.body.contains(r#"href="/owner""#) && !r.body.contains("mv-opt-input"));
+    assert!(r.body.contains(r#"href="/owner""#) && !r.body.contains(r#"name="mv-answer-option""#));
     let r = send(addr, "GET", "/owner", "localhost:7181", &[]).await;
     assert_eq!(r.status, 200);
     assert!(r.body.contains(r#"data-enroll="true""#));
@@ -307,7 +315,7 @@ async fn without_a_secure_origin_the_decision_says_why_it_takes_no_answer() {
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &addr.to_string(), &[]).await;
     assert_page(&r, "no origin", "/decisions");
     assert!(r.body.contains("Answering is not available on this page"));
-    assert!(!r.body.contains("mv-opt-input") && !r.body.contains("t3code://"));
+    assert!(!r.body.contains(r#"name="mv-answer-option""#) && !r.body.contains("t3code://"));
     let r = send(
         addr,
         "POST",

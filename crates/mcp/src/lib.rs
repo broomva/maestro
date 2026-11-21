@@ -31,12 +31,12 @@ use serde_json::{Value, json};
 use std::future::Future;
 use std::sync::Arc;
 
+pub mod answers;
 pub mod flow;
 pub mod http;
-pub mod stop;
-pub mod answers;
 pub mod owner_web;
 pub mod passkey;
+pub mod stop;
 pub mod web;
 
 /// One tool: its name, what it may do, and its argument type.

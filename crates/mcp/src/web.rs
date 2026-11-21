@@ -52,9 +52,7 @@ pub fn router(server: MaestroServer, local: SocketAddr) -> Router {
     let owner = store
         .rel(maestro_store::ASKS)
         .and_then(|asks| crate::owner_web::Owner::from_env(store.paths.workspace.clone(), asks));
-    if let Err(e) = &owner {
-        eprintln!("maestro: the web pages take no answers: {e}");
-    }
+    // Unconfigured, the pages say why they take no answer; the log's first line stays the listener's.
     router_with(server, local, owner)
 }
 
@@ -251,7 +249,13 @@ fn refusal(status: StatusCode, why: impl std::fmt::Display) -> Response {
 
 /// The owner's routes admit a request only from the page itself: admitted as every page is,
 /// JSON, and from the configured secure origin.
-fn owner_admitted<'w>(web: &'w Web, uri: &Uri, headers: &HeaderMap, json_body: bool) -> Result<&'w crate::owner_web::Owner, Response> {
+#[allow(clippy::result_large_err)] // the refusal is the reply itself, sent at once
+fn owner_admitted<'w>(
+    web: &'w Web,
+    uri: &Uri,
+    headers: &HeaderMap,
+    json_body: bool,
+) -> Result<&'w crate::owner_web::Owner, Response> {
     if !admitted(uri, headers, &web.hosts) {
         return Err(refused());
     }
@@ -263,13 +267,18 @@ fn owner_admitted<'w>(web: &'w Web, uri: &Uri, headers: &HeaderMap, json_body: b
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.split(';').next().is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json")));
     if json_body && !(origin_ok && json_ok) {
-        return Err(refusal(StatusCode::FORBIDDEN, "refused: only Maestro's own page at its secure address may send this"));
+        return Err(refusal(
+            StatusCode::FORBIDDEN,
+            "refused: only Maestro's own page at its secure address may send this",
+        ));
     }
     Ok(owner)
 }
 
+#[allow(clippy::result_large_err)] // the refusal is the reply itself, sent at once
 fn body_of<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
-    serde_json::from_slice(body).map_err(|e| refusal(StatusCode::BAD_REQUEST, format!("the request does not read: {e}")))
+    serde_json::from_slice(body)
+        .map_err(|e| refusal(StatusCode::BAD_REQUEST, format!("the request does not read: {e}")))
 }
 
 async fn owner_page(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
