@@ -141,6 +141,32 @@ pub fn file_ask(
     session: &SessionRef,
     caller: &Principal,
 ) -> Result<Filed, FileError> {
+    write_ask(paths, asks_dir, ledger, ask, session, caller, None)
+}
+
+/// Atomically replace an unanswered ask using the writer of record.
+pub fn supersede_ask(
+    paths: &Paths,
+    asks_dir: &Path,
+    ledger: &str,
+    ask: &Map<String, Value>,
+    session: &SessionRef,
+    caller: &Principal,
+    old: &str,
+    reason: &str,
+) -> Result<Filed, FileError> {
+    write_ask(paths, asks_dir, ledger, ask, session, caller, Some((old, reason)))
+}
+
+fn write_ask(
+    paths: &Paths,
+    asks_dir: &Path,
+    ledger: &str,
+    ask: &Map<String, Value>,
+    session: &SessionRef,
+    caller: &Principal,
+    supersede: Option<(&str, &str)>,
+) -> Result<Filed, FileError> {
     let _ = caller; // every filing's origin is unverified until host-identity (see compose_ask)
     let entry = compose_ask(ask)?;
     if !ledger_name_ok(ledger) {
@@ -173,21 +199,27 @@ pub fn file_ask(
     let id = entry["id"].as_str().unwrap_or_default().to_string();
     let body = serde_json::to_string(&entry).map_err(|e| refused(e.to_string()))?;
     // -P: neither the workspace (the cwd) nor the script's folder shadows a module it imports.
-    let mut child = Command::new("python3")
-        .arg("-P")
-        .arg(&script)
-        .arg("file")
-        .arg(&path)
-        // One `--opt=value` word: a session starting with `-` is a value, never an option.
-        .args(["--json", "-", &format!("--maestro-session={session}"), "--wait"])
-        .arg(FILE_WAIT.as_secs().to_string())
+    let mut command = Command::new("python3");
+    command.arg("-P").arg(&script);
+    if let Some((old, reason)) = supersede {
+        command.arg("supersede").arg(&path).args(["--old", old, "--reason", reason, "--json", "-"]);
+    } else {
+        command.arg("file").arg(&path).args([
+            "--json",
+            "-",
+            &format!("--maestro-session={session}"),
+            "--wait",
+            &FILE_WAIT.as_secs().to_string(),
+        ]);
+    }
+    let mut child = command
         .env("MAESTRO_PASEO_ASK_LOCKS", &paths.ask_locks)
         .current_dir(&paths.workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| refused(format!("the writer of record did not run: {e}")))?;
+        .map_err(|e| std::io::Error::other(format!("the writer of record did not run: {e}")))?;
     {
         use std::io::Write as _;
         let mut stdin = child.stdin.take().expect("stdin is piped");
@@ -203,10 +235,11 @@ pub fn file_ask(
         Some(0) => Ok(Filed { ledger: path, id, validator: said(&out.stdout) }),
         Some(EX_TEMPFAIL) => Err(FileError::Lock(LockError::Busy { holder: said(&out.stderr), what: ledger.into() })),
         Some(2) => Err(refused(said(&out.stderr))),
-        code => Err(refused(format!(
-            "ask_ledger.py file failed (exit {code:?}); nothing is known to be written: {}",
+        code => Err(std::io::Error::other(format!(
+            "ask_ledger.py failed (exit {code:?}); nothing is known to be written: {}",
             said(&out.stderr).lines().last().unwrap_or_default()
-        ))),
+        ))
+        .into()),
     }
 }
 

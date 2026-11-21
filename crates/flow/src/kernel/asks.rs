@@ -565,7 +565,14 @@ fn file_pinned(
     let caller = Principal::Agent { session: session.session().clone() };
     let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;
     loop {
-        match requests::file_ask(paths, dir, &rec.ledger, body, session.session(), &caller) {
+        let outcome = if rec.amends {
+            let old = rec.supersedes.as_deref().ok_or_else(|| invalid("amend has no predecessor"))?;
+            let reason = rec.reason.as_deref().ok_or_else(|| invalid("amend has no reason"))?;
+            requests::supersede_ask(paths, dir, &rec.ledger, body, session.session(), &caller, old, reason)
+        } else {
+            requests::file_ask(paths, dir, &rec.ledger, body, session.session(), &caller)
+        };
+        match outcome {
             Err(FileError::Lock(LockError::Busy { holder, .. })) => {
                 if clock::now() >= deadline {
                     return Err(Refusal::AskRefusedBusy { ledger: rec.ledger.clone(), holder: clip(&holder) }.into());
@@ -608,9 +615,10 @@ pub(super) fn file_and_confirm<T>(
     let Some(body) = rec.body.as_object() else {
         return Err(unconfirmed("the pinned body is not an object".into()).into());
     };
-    // Until the supersede writer is wired, never file an amendment as an ordinary ask.
-    if rec.amends {
-        return Err(unconfirmed("the supersede writer is not yet available".into()).into());
+    // A completed supersede must be recovered before invoking the writer again.
+    if rec.amends && !matches!(find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)?, Found::None) {
+        confirm_amend(&here, &rec)?;
+        return then(ledger, Confirmed::Row);
     }
     // No flows guard is alive here: the callers drop theirs before they file.
     let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?;
@@ -638,6 +646,10 @@ pub(super) fn file_and_confirm<T>(
             Err(e) => return Err(unconfirmed(e.to_string()).into()),
         },
     };
+    if rec.amends {
+        confirm_amend(&here, &rec)?;
+        return then(ledger, Confirmed::Row);
+    }
     let found = comparable_hash(&row.row);
     if found != rec.body_hash {
         return Err(Refusal::AskRefused {
@@ -649,6 +661,31 @@ pub(super) fn file_and_confirm<T>(
         .into());
     }
     then(ledger, Confirmed::Row)
+}
+
+fn confirm_amend(here: &Store, rec: &AskRec) -> Result<(), KernelError> {
+    let fail = || Refusal::AskUnconfirmed {
+        ledger: rec.ledger.clone(),
+        ask_id: rec.ask_id.clone(),
+        detail: "amend rows do not confirm the replacement".into(),
+    };
+    let old_id = rec.supersedes.as_deref().ok_or_else(fail)?;
+    let new = match find(here, &rec.ledger, &rec.ask_id).map_err(|_| fail())? {
+        Found::Row(row) => row,
+        _ => return Err(fail().into()),
+    };
+    let old = match find(here, &rec.ledger, old_id).map_err(|_| fail())? {
+        Found::Row(row) => row,
+        _ => return Err(fail().into()),
+    };
+    let target = text(old.row.get("superseded_by"));
+    if comparable_hash(&new.row) != rec.body_hash
+        || !(target.as_deref() == Some(new.id.as_str())
+            || new.uid.as_deref().is_some_and(|uid| target.as_deref() == Some(uid)))
+    {
+        return Err(fail().into());
+    }
+    Ok(())
 }
 
 /// Files the pinned ask (flows lock released), confirms it in the working tree, and links it.

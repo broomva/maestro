@@ -1660,3 +1660,51 @@ fn amend_refuses_an_answer_on_main_or_waiting_to_land() {
         assert_eq!(f.kinds(&fi), before);
     }
 }
+
+#[test]
+fn amend_recovers_after_supersede_before_link() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
+    let replacement = f.events(&fi).into_iter().filter(|e| e["kind"] == "AskPinned").last().unwrap()["body"]["ask_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(f.row(&replacement).is_some());
+    assert_eq!(text(f.row(&old).unwrap().row.get("superseded_by")).as_deref(), Some(replacement.as_str()));
+    assert_eq!(waiting(&f.ask(&fi, None).unwrap()).0, replacement);
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn amend_writer_refusal_restores_old_ask() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&old);
+    let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap();
+    assert!(matches!(result, Asked::Withdrawn { code: ASK_NOT_FILED, .. }));
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == old));
+}
+
+#[test]
+fn amend_requires_old_row_to_point_to_replacement() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
+    let replacement = f.events(&fi).into_iter().filter(|e| e["kind"] == "AskPinned").last().unwrap()["body"]["ask_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = f.ws.join(".control/asks/ledger.yaml");
+    let contents = f.ledger_text().replace(&format!("    superseded_by: \"{replacement}\"\n"), "");
+    std::fs::write(path, contents).unwrap();
+    assert!(f.row(&old).is_some());
+    assert_eq!(code(f.ask(&fi, None)), "ask_unconfirmed");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned"]);
+}
