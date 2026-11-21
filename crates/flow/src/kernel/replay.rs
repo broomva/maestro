@@ -749,6 +749,31 @@ pub(crate) fn prior_ask_of(
     Ok(fold.asks.get(&(id.as_str(), i)).filter(|r| &r.inputs != inputs).cloned())
 }
 
+/// Linked predecessors of the current amendment, newest first.
+pub(crate) fn amended_predecessors(
+    log: &Log,
+    started: &Started,
+    node: &str,
+    current: &AskRec,
+) -> Result<Vec<AskRec>, KernelError> {
+    let fold = Fold::replay(log, started)?;
+    let Some(i) = fold.current(node) else { return Ok(Vec::new()) };
+    let Some((id, _)) = started.ir.nodes.get_key_value(node) else { return Ok(Vec::new()) };
+    let Some(prior) = fold.prior_asks.get(&(id.as_str(), i)) else { return Ok(Vec::new()) };
+    let mut result = Vec::new();
+    let mut cursor = current;
+    while cursor.amends {
+        let Some(old) = prior.iter().rev().find(|r| {
+            r.linked && r.inputs == current.inputs && Some(r.ask_id.as_str()) == cursor.supersedes.as_deref()
+        }) else {
+            break;
+        };
+        result.push(old.clone());
+        cursor = old;
+    }
+    Ok(result)
+}
+
 /// A claim, for the retry projection: it ends at its lease's end (which is never past its cancel
 /// deadline), when the inputs it was bound to are no longer the node's, or when a later claim
 /// takes the node, unless a receipt spent it.

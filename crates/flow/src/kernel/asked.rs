@@ -1708,3 +1708,17 @@ fn amend_requires_old_row_to_point_to_replacement() {
     assert_eq!(code(f.ask(&fi, None)), "ask_unconfirmed");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned"]);
 }
+
+#[test]
+fn answer_to_superseded_ask_is_taken_as_receipt() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap();
+    let new = waiting(&result).0.to_string();
+    f.answer_in_worktree(&old);
+    f.land_on_main();
+    let result = f.ask(&fi, None).unwrap();
+    assert!(matches!(result, Asked::Answered { ask_id, source, .. } if ask_id == new && source.contains(&old)));
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
+}

@@ -99,7 +99,7 @@ use super::adoption;
 use super::error::{KernelError, Refusal};
 use super::events::{Answered, AskLinked, AskPinned, AskWithdrawn, KernelEvent, Started};
 use super::ir::{Class, Iteration};
-use super::replay::{AskRec, State, ask_of, next_of, pinned, prior_ask_of};
+use super::replay::{AskRec, State, amended_predecessors, ask_of, next_of, pinned, prior_ask_of};
 use super::write::{MAX_OUTPUTS, check_owner, check_writable, wall};
 use crate::clock;
 use crate::ids::InstanceId;
@@ -894,7 +894,24 @@ fn take_answer(
     node: &str,
     rec: AskRec,
 ) -> Result<Asked, KernelError> {
-    let (row, source) = match landed(paths, &rec)? {
+    let predecessors = if rec.amends {
+        let guard = ledger.lock()?;
+        let log = guard.log(instance)?;
+        let started = pinned(&log)?;
+        amended_predecessors(&log, &started, node, &rec)?
+    } else {
+        Vec::new()
+    };
+    let mut old_answer = None;
+    for old in &predecessors {
+        if let Answer::Landed { row, source } = landed(paths, old)? {
+            old_answer = Some((row, format!("{source}:{}", old.ask_id)));
+            break;
+        }
+    }
+    let answer =
+        if let Some((row, source)) = old_answer { Answer::Landed { row, source } } else { landed(paths, &rec)? };
+    let (row, source) = match answer {
         Answer::Landed { row, source } => (row, source),
         Answer::Landing { at } => {
             return Ok(Asked::Waiting {
