@@ -1827,8 +1827,10 @@ fn amend_refuses_when_an_answers_ref_is_there_but_broken() {
             let in_fixture = |args: &[&str], input: Option<&[u8]>| {
                 let mut cmd = std::process::Command::new("git");
                 cmd.args(["-C", f.ws.to_str().unwrap()]).args(args);
-                for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"] {
-                    cmd.env_remove(var);
+                for (var, _) in std::env::vars_os() {
+                    if var.to_string_lossy().starts_with("GIT_") {
+                        cmd.env_remove(var);
+                    }
                 }
                 let mut child =
                     cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();

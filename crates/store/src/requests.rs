@@ -213,9 +213,14 @@ fn write_ask(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        // A writer that did not start wrote nothing, in either mode: refused, so the caller
-        // withdraws the pin it finds no row for (an amendment restores the old ask).
-        .map_err(|e| refused(format!("the writer of record did not run: {e}")))?;
+        // A writer that did not start wrote nothing in this call, but another call for the same
+        // pin may be writing: a supersede that cannot start stays unconfirmed (the next call
+        // looks for both rows before filing again), never withdrawn, which could orphan a
+        // replacement a concurrent call writes (P20 delta review, maestro#62).
+        .map_err(|e| {
+            let message = format!("the writer of record did not run: {e}");
+            if supersede.is_some() { FileError::Io(std::io::Error::other(message)) } else { refused(message) }
+        })?;
     {
         use std::io::Write as _;
         let mut stdin = child.stdin.take().expect("stdin is piped");
