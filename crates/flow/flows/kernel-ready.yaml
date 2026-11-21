@@ -42,8 +42,8 @@ nodes:
     inputs: [params.head]
     exit_map: {0: pass}
   # The instance's suite command at that head, run by the kernel in a snapshot of it: this proves
-  # that command exits 0, no more, so the owner's ask names it (`scripts/ci.sh`, or the workspace
-  # tests on a loaded host).
+  # that command exits 0, no more, so the params name the command (`scripts/ci.sh`, or the
+  # workspace tests on a loaded host).
   suite:
     class: pure
     needs: [pin]
