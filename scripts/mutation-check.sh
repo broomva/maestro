@@ -1723,7 +1723,8 @@ mutate $asks '        Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: ol
 mutate $asks '        || !(target.as_deref() == Some(new.id.as_str())' '        || !(true || target.as_deref() == Some(new.id.as_str())'
 # An amendment refuses an ask closed on main; a predecessor's outcome counts only when it names its successor.
 mutate $asks '        Ok((Answer::Open, true)) => return Err(Refusal::AskAmendClosed { ask_id: old.ask_id.clone() }.into()),' '        Ok((Answer::Open, true)) => {}'
-mutate $asks 'maestro_core::ask::has_outcome(&row.row) && names(&row.row, s)' 'maestro_core::ask::has_outcome(&row.row)'
+mutate $ask '    if !text(row.get("superseded_by")).is_some_and(|t| successor.contains(&t.as_str())) {' '    if false {'
+mutate $ask '    if text(before.get("status")).is_some_and(|s| s.eq_ignore_ascii_case("archived")) {' '    if false {'
 mutate $asks 'let successor = if i == 0 { &rec } else { &predecessors[i - 1] };' 'let successor = old;'
 # The minted id collides with no id or uid in the ledger.
 mutate $asks '.flat_map(|a| [Some(a.id), a.uid])' '.flat_map(|a| [Some(a.id), None])'

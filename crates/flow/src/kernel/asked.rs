@@ -1753,6 +1753,43 @@ fn owner_archive_of_a_predecessor_that_names_no_successor_is_not_a_receipt() {
 }
 
 #[test]
+fn status_only_answer_on_a_superseded_predecessor_is_taken() {
+    // The owner's answer was a status the writer kept (it sets `status: archived` only when absent).
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let new = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap()).0.to_string();
+    let text = f.ledger_text();
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("status:") && l.contains("archived"))
+        .expect("archived status");
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), text.replace(line, "    status: \"resolved\"")).unwrap();
+    f.land_on_main();
+    let result = f.ask(&fi, None).unwrap();
+    assert!(matches!(&result, Asked::Answered { ask_id, source, outputs, .. }
+        if ask_id == &new && source.contains(&old) && outputs["status"] == "resolved"));
+}
+
+#[test]
+fn an_answer_two_amendments_back_is_checked_against_its_own_successor() {
+    // A -> B -> C: A's superseded_by names B, not C.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let a = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let b = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "first").unwrap()).0.to_string();
+    let c = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "second").unwrap()).0.to_string();
+    assert!(a != b && b != c);
+    f.answer_in_worktree(&a);
+    f.land_on_main();
+    let result = f.ask(&fi, None).unwrap();
+    assert!(
+        matches!(&result, Asked::Answered { ask_id, source, .. } if ask_id == &c && source.contains(&a)),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn amend_refuses_an_ask_closed_on_main() {
     let mut f = fx(None, "");
     let fi = f.begin();

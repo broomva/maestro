@@ -802,9 +802,9 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
 
 /// The linked ask's answer, as main has it at the commit the remote names; failing that, whether
 /// one waits to land on Maestro's answers branch.
-/// `successor`: for an amended predecessor, the ask that replaced it. Its outcome counts even
-/// though the row is archived, but only when the row's `superseded_by` names that successor: an
-/// owner's own archive or withdrawal of the old ask is not an answer (P20 round 2, maestro#62).
+/// `successor`: for an amended predecessor, the ask that replaced it. The row is judged as it
+/// stood before the writer's supersede (`ask::state_before_supersede`), by the rules every ask is
+/// judged by; a row the supersede did not name that successor on keeps its own state.
 fn read_answer(paths: &Paths, rec: &AskRec, successor: Option<&AskRec>) -> Result<Answer, KernelError> {
     let sha = landed_main(paths)?;
     // The asks folder as the registry names it here; the ledger is read at `sha`, every object on
@@ -820,7 +820,9 @@ fn read_answer(paths: &Paths, rec: &AskRec, successor: Option<&AskRec>) -> Resul
         }
         Ok(Found::Row(row))
             if row.state() == AskState::Answered
-                || successor.is_some_and(|s| maestro_core::ask::has_outcome(&row.row) && names(&row.row, s)) =>
+                || successor.is_some_and(|s| {
+                    maestro_core::ask::state_before_supersede(&row.row, &handles(s)) == AskState::Answered
+                }) =>
         {
             return Ok(Answer::Landed { row, source });
         }
@@ -840,14 +842,19 @@ fn closed_on_main(paths: &Paths, rec: &AskRec) -> Result<bool, KernelError> {
     match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
         Err(e) => Err(Refusal::AnswersUnread { at: format!("main@{sha}"), detail: clip(&e) }.into()),
         Ok(Found::Row(row)) => Ok(row.state() != AskState::Open),
-        Ok(_) => Ok(false),
+        Ok(Found::Ambiguous) => {
+            let at = format!("main@{sha}:{}", rec.ledger);
+            Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into())
+        }
+        Ok(Found::None) => Ok(false),
     }
 }
 
-/// Whether `row`'s `superseded_by` names `successor` by its id, or by the uid its body carries.
-fn names(row: &JsValue, successor: &AskRec) -> bool {
-    let Some(target) = text(row.get("superseded_by")) else { return false };
-    target == successor.ask_id || successor.body.get("uid").and_then(Value::as_str) == Some(target.as_str())
+/// The names the writer may record a replacement by in `superseded_by`: its id, and its uid.
+fn handles(successor: &AskRec) -> Vec<&str> {
+    let mut names = vec![successor.ask_id.as_str()];
+    names.extend(successor.body.get("uid").and_then(Value::as_str));
+    names
 }
 
 /// The first of Maestro's answers refs (`views::ANSWERS_REFS`) where the ask `ask_id` of `ledger`
