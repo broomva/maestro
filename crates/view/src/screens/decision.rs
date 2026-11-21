@@ -3,7 +3,7 @@
 
 use super::rich::{self, Tradeoff};
 use super::{Landing, asker, joined, kind, landing};
-use crate::render::{Ctx, card, label, scope_errors};
+use crate::render::{Ctx, Owner, card, label, scope_errors};
 use maestro_core::ask::{Ask, AskClass, AskState, Rung};
 use maestro_store::LedgerFile;
 use maud::{Markup, html};
@@ -98,16 +98,22 @@ fn tried(entry: &Value) -> (Option<Rung>, String) {
 /// `ambiguous`: its handle names more than one ask in its ledger, which the owner path refuses.
 pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguous: bool) -> Markup {
     let state = a.state();
+    // The web page takes the answer in place (BRO-4042): the options become choices.
+    let answering = answerable(cx, a, state, landing, ambiguous) == Some(&Owner::Ready);
     let rich = rich::of(a);
     let free: Vec<_> = rich.tradeoffs.iter().filter(|r| r.option.is_none()).collect();
     let question = a.ask.as_deref().or(a.question.as_deref()).filter(|q| *q != a.title());
     html! {
-        article class="mv-decision" data-ask=(format!("{}#{}", lf.file, a.handle())) data-hash=(a.hash()) data-kind=(kind(a)) {
-            p class="mv-dmeta bv-meta" {
-                span class="mv-chip" data-kind=(kind(a)) { (kind(a)) }
-                " " bdi { (lf.file) }
-                @if let Some(at) = &a.asked_at { " · asked " bdi { (at) } }
-                " by " bdi { (asker(lf, a)) }
+        article class="mv-decision" data-ask=(format!("{}#{}", lf.file, a.handle())) data-hash=(a.hash()) data-kind=(kind(a))
+            data-ledger=(lf.file) data-handle=(a.handle()) {
+            // The kind, whether it blocks, and whether every way out can be undone (the design's chips).
+            p class="mv-dchips" {
+                span class="mv-dchip" data-kind=(kind(a)) { (kind(a)) }
+                @if !a.options.is_empty() && a.options.iter().all(|o| o.reversible == Some(true)) {
+                    span class="mv-dchip" data-tone="success" { "Reversible" }
+                }
+                @if a.blocking { span class="mv-dchip" data-tone="attention" { "Blocking" } }
+                @else { span class="mv-dchip" data-tone="warning" { "Not blocking" } }
             }
             p class="mv-dtitle" { (a.title()) }
             @if a.blocking && !a.gates.is_empty() {
@@ -134,7 +140,12 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                 ol class="mv-dopts" {
                     @for o in &a.options {
                         li class="mv-dopt" data-option=(o.id) data-recommended=(o.recommended)
-                            data-chosen=(a.answer_option.as_deref() == Some(o.id.as_str())) {
+                            data-chosen=(a.answer_option.as_deref() == Some(o.id.as_str())) data-answerable=[answering.then_some("true")] {
+                            @if answering {
+                                // The whole card is the control: a radio, never preselected.
+                                input class="mv-opt-input" type="radio" name="mv-answer-option" value=(o.id)
+                                    data-label=(o.label) aria-label=(o.label);
+                            }
                             p class="mv-dopt-label" { (o.label) }
                             @if let Some(c) = &o.consequence { p class="mv-dopt-text" { (c) } }
                             @if o.recommended || o.reversible.is_some() || o.status_quo {
@@ -184,14 +195,30 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                     }
                 }
             }
-            @if !a.exhausted.is_empty() {
-                section class="mv-fold mv-tried" {
-                    h3 class="mv-fold-title" { "What the agent tried first" }
+            // Beside the decision on a wide screen: what the agent tried, where the ask came from,
+            // and, where the page takes the answer, exactly what the passkey signs.
+            section class="mv-fold mv-tried" {
+                h3 class="mv-fold-title" { "What the agent tried" }
+                @if a.exhausted.is_empty() {
+                    p class="mv-tried-none" { "The ask names nothing it tried first." }
+                } @else {
                     ul {
                         @for e in &a.exhausted {
                             @let (rung, what) = tried(e);
-                            li { @if let Some(r) = rung { span class="bv-code" { (r.as_str()) } ": " } bdi { (what) } }
+                            li { @if let Some(r) = rung { span class="bv-code" { (r.as_str()) } " " } bdi { (what) } }
                         }
+                    }
+                }
+                p class="mv-origin bv-code" {
+                    "from " bdi { (asker(lf, a)) } br;
+                    bdi { (lf.file) } br;
+                    bdi { (a.handle()) }
+                    @if let Some(at) = &a.asked_at { br; "asked " bdi { (at) } }
+                }
+                @if answering {
+                    div class="mv-sign" {
+                        p class="mv-sign-title" { "What you will sign" }
+                        p class="bv-code" { "answer " span data-sign="option" { "the option you choose" } br; "ask " (a.hash()) br; "checked again when it is written" }
                     }
                 }
             }
@@ -248,7 +275,74 @@ fn place(a: &Ask) -> &'static str {
     if a.class == Some(AskClass::Idea) { "Paseo · Maestro · Initiatives" } else { "Paseo · Maestro · Decisions" }
 }
 
+/// Whether this decision takes the owner's answer on this page: `None` where it does not (the
+/// App, an ask that is not open, waiting to land, unknown or ambiguous, or one with no options).
+fn answerable<'c>(cx: &'c Ctx, a: &Ask, state: AskState, landing: Landing, ambiguous: bool) -> Option<&'c Owner> {
+    let owner = cx.web.as_ref()?;
+    (state == AskState::Open && landing == Landing::NotSeen && !ambiguous && !a.options.is_empty()).then_some(owner)
+}
+
+/// The answer bar of the web page: a note, the answer button that names the chosen option, and
+/// what happens when it is pressed. The page's script signs and sends it; nothing posts without it.
+fn answer_bar(lf: &LedgerFile, a: &Ask, owner: &Owner) -> Markup {
+    html! {
+        @match owner {
+            Owner::Ready => div class="mv-control mv-answerbar mv-answer" data-answer-bar="true" {
+                label class="mv-note" {
+                    span class="mv-sr" { "Note, sent to the agent with your answer" }
+                    textarea class="mv-note-input" name="note" rows="2" maxlength="2000"
+                        placeholder="Add a note for the agent (optional)" {}
+                }
+                div class="mv-answer-row" {
+                    button class="mv-go" type="button" disabled data-answer="go" {
+                        span class="mv-go-icon" aria-hidden="true" {}
+                        span class="mv-go-text" { "Choose an option" }
+                    }
+                    p class="mv-answer-how" {
+                        "Signed with your passkey and written by Maestro now. You can undo for 8 seconds."
+                    }
+                }
+                p class="mv-answer-status" role="status" aria-live="polite" {}
+            },
+            Owner::Enroll => div class="mv-control mv-answerbar mv-answer" {
+                p class="mv-answer-cta" { "Answering here needs your passkey. " a href="/owner" { "Set up your passkey" } " once, on this device." }
+            },
+            Owner::Elsewhere(origin) => div class="mv-control mv-answerbar mv-answer" {
+                p class="mv-answer-cta" {
+                    "Answers are signed with your passkey at Maestro's secure address. "
+                    a href=(format!("{origin}/decisions/{}/{}", super::web::segment(&lf.file), super::web::segment(a.handle()))) { "Answer it there" }
+                    "."
+                }
+            },
+            Owner::Off(why) => div class="mv-control mv-answerbar mv-answer" {
+                p class="mv-answer-cta" { "Answering is not available on this page: " (why) }
+                p class="mv-answer-why bv-meta" { "Find it as " span class="bv-code" { bdi { (a.handle()) } } "." }
+            },
+        }
+    }
+}
+
 fn outcome(cx: &Ctx, lf: &LedgerFile, a: &Ask, state: AskState, landing: Landing) -> Markup {
+    if let Some(owner) = answerable(cx, a, state, landing, false) {
+        return answer_bar(lf, a, owner);
+    }
+    // Outside the web pages, an open decision opens on the secure page to be answered there.
+    if let Some(origin) = cx
+        .answer_origin
+        .as_deref()
+        .filter(|_| cx.web.is_none() && state == AskState::Open && landing == Landing::NotSeen && !a.options.is_empty())
+    {
+        let url = format!("{origin}/decisions/{}/{}", super::web::segment(&lf.file), super::web::segment(a.handle()));
+        return html! {
+            div class="mv-control mv-answerbar mv-answer mv-answer-away" {
+                a class="mv-go" href=(url) target="_blank" rel="noopener noreferrer" data-open-link="true" {
+                    span class="mv-go-icon" aria-hidden="true" {}
+                    span class="mv-go-text" { "Answer with your passkey" }
+                }
+                p class="mv-answer-how" { "Opens this decision on Maestro's page, where you choose, add a note and confirm with Touch ID or Face ID." }
+            }
+        };
+    }
     let given =
         a.answer_option.as_deref().and_then(|id| a.options.iter().find(|o| o.id == id)).map(|o| o.label.as_str());
     html! {
@@ -261,7 +355,7 @@ fn outcome(cx: &Ctx, lf: &LedgerFile, a: &Ask, state: AskState, landing: Landing
             }
         } @else if state == AskState::Open && landing == Landing::Waiting {
             p class="mv-callout" data-tone="success" {
-                "Answered in this checkout or on " (maestro_store::views::ANSWERS_READ) "; not yet on " span class="bv-code" { (cx.snap.tree) } "."
+                "Answered. The answer is in effect; it reaches main with the next landing PR."
             }
         } @else if state == AskState::Answered {
             p class="mv-callout" data-tone="success" {

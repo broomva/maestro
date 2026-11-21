@@ -176,3 +176,109 @@ body.mv-web { padding: 0; min-height: 100vh; }
 @media (prefers-reduced-transparency: reduce) {
   .mv-queue, .mv-web-nav.mv-tabs, .mv-stats { background: var(--mv-surface); backdrop-filter: none; -webkit-backdrop-filter: none; border-color: var(--mv-line2); }
 }
+
+/* Answering in place (BRO-4042). An option that takes the answer is a radio card: the whole
+   card is the control, it shows a pointer and a hover, and only the chosen card fills its mark.
+   The recommended one keeps its tide label and rim but never looks chosen. */
+.mv-dopt[data-answerable="true"] { cursor: pointer; transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease; }
+.mv-dopt[data-answerable="true"]:hover { border-color: var(--mv-tide-line); background: color-mix(in srgb, var(--mv-tide) 7%, var(--mv-surface)); }
+.mv-dopt[data-answerable="true"][data-recommended="true"]::before { border: 1.5px solid var(--mv-tide-line); background: var(--mv-surface); }
+.mv-opt-input {
+  position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; margin: 0;
+  opacity: 0; cursor: pointer; border-radius: inherit;
+}
+.mv-opt-input:disabled { cursor: default; }
+.mv-dopt:has(.mv-opt-input:checked) {
+  border: 1.5px solid var(--mv-tide);
+  background: linear-gradient(var(--mv-tide-soft), var(--mv-tide-soft)), color-mix(in srgb, var(--mv-surface) 86%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mv-tide) 18%, transparent), 0 14px 30px -22px var(--mv-shadow);
+}
+.mv-dopt:has(.mv-opt-input:checked)::before { border: 6px solid var(--mv-tide); background: var(--mv-surface); }
+.mv-dopt:has(.mv-opt-input:focus-visible) { outline: 2px solid var(--mv-tide); outline-offset: 2px; }
+.mv-dopt:has(.mv-opt-input:disabled):not(:has(.mv-opt-input:checked)) { opacity: 0.55; }
+
+/* The answer bar: a note on glass, then the answer button that names the choice. */
+.mv-decide-main .mv-decision .mv-answer { position: sticky; bottom: var(--bv-space-3); z-index: 2; display: flex; flex-direction: column; gap: var(--bv-space-3); padding: var(--bv-space-3); margin-top: var(--bv-space-2); }
+.mv-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.mv-note { display: block; }
+.mv-note-input {
+  width: 100%; resize: vertical; min-height: 52px; font: inherit; font-size: 15px; line-height: 1.45;
+  padding: var(--bv-space-3) var(--bv-space-4); border-radius: 16px; color: var(--mv-ink);
+  border: 1px solid var(--mv-line2); background: color-mix(in srgb, var(--mv-surface) 72%, transparent);
+}
+.mv-note-input::placeholder { color: var(--mv-ink3); }
+.mv-note-input:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 1px; border-color: transparent; }
+.mv-answer-row { display: flex; align-items: center; gap: var(--bv-space-4); flex-wrap: wrap; }
+.mv-go {
+  display: inline-flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 22px;
+  border: 1px solid transparent; border-radius: 999px; cursor: pointer; text-decoration: none;
+  font: inherit; font-size: 16px; font-weight: 500; color: var(--mv-cta-ink);
+  background: linear-gradient(var(--mv-cta), var(--mv-cta)) padding-box, var(--mv-rim) border-box;
+  box-shadow: 0 10px 26px -14px var(--mv-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+.mv-go:hover:not(:disabled) { filter: brightness(1.04); }
+.mv-go:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 3px; }
+.mv-go:disabled { cursor: not-allowed; opacity: 0.5; box-shadow: none; }
+.mv-go-icon { width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid currentColor; position: relative; flex: none; opacity: 0.85; }
+.mv-go-icon::before, .mv-go-icon::after { content: ""; position: absolute; top: 5px; width: 2px; height: 3px; border-radius: 1px; background: currentColor; }
+.mv-go-icon::before { left: 4px; } .mv-go-icon::after { right: 4px; }
+.mv-answer-how { margin: 0; flex: 1 1 16rem; font-size: 13px; line-height: 1.45; color: var(--mv-ink3); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mv-answer-status { margin: 0; font-size: 14px; line-height: 1.45; color: var(--mv-ink2); }
+.mv-answer-status:empty { display: none; }
+.mv-answer-status[data-tone="success"] { color: var(--mv-ok); }
+.mv-answer-status[data-tone="danger"] { color: var(--mv-fail); }
+.mv-answer-status[data-tone="info"] { color: var(--mv-tide); }
+.mv-undo-count {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
+  border: 2px solid var(--mv-tide); font-family: var(--bv-font-mono); font-size: 13px; color: var(--mv-ink);
+}
+.mv-undo, .mv-next {
+  padding: 6px 16px; border-radius: 999px; border: 1px solid var(--mv-line2); cursor: pointer;
+  font: inherit; font-size: 14px; font-weight: 500; color: var(--mv-tide); background: color-mix(in srgb, var(--mv-surface) 80%, transparent); text-decoration: none;
+}
+.mv-undo:focus-visible, .mv-next:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 2px; }
+.mv-answer .mv-answer-cta { margin: 0; padding: var(--bv-space-3) var(--bv-space-4); }
+.mv-answer .mv-answer-cta a { color: var(--mv-tide); }
+
+/* The passkey page. */
+.mv-owner { max-width: 34rem; margin: 8vh auto; display: flex; flex-direction: column; gap: var(--bv-space-4); align-items: flex-start; }
+.mv-owner-title { margin: 0; font-family: var(--mv-font-display); font-size: 40px; font-weight: 300; letter-spacing: -0.03em; color: var(--mv-ink); }
+.mv-owner-sub { margin: 0; font-size: 16px; line-height: 1.55; color: var(--mv-ink2); }
+.mv-owner-code { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--mv-ink3); }
+.mv-owner-code input {
+  font-family: var(--bv-font-mono); font-size: 18px; letter-spacing: 0.2em; text-transform: uppercase;
+  padding: 10px 14px; border-radius: 12px; border: 1px solid var(--mv-line2); color: var(--mv-ink);
+  background: color-mix(in srgb, var(--mv-surface) 72%, transparent); width: 14rem;
+}
+.mv-owner-code input:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 1px; }
+
+/* The decision's chips, its side column, and twin rows in the queue (BRO-4042). */
+.mv-dchips { margin: 0; display: flex; gap: var(--bv-space-4); flex-wrap: wrap; }
+.mv-dchip { display: inline-flex; align-items: center; gap: 7px; font-family: var(--bv-font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mv-ink3); }
+.mv-dchip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mv-tide); }
+.mv-dchip[data-tone="success"]::before { background: var(--mv-ok); }
+.mv-dchip[data-tone="warning"]::before { background: var(--mv-warn); }
+.mv-dchip[data-tone="attention"]::before { background: var(--mv-fail); }
+.mv-tried-none { margin: 0; font-size: 13px; color: var(--mv-ink3); }
+.mv-origin { margin: var(--bv-space-3) 0 0; padding-top: var(--bv-space-3); border-top: 1px solid var(--mv-line); font-size: 12px; line-height: 1.6; color: var(--mv-ink3); overflow-wrap: anywhere; }
+.mv-sign { margin-top: var(--bv-space-4); padding: var(--bv-space-3) var(--bv-space-4); border-radius: 16px; border: 1px solid var(--mv-line2); background: color-mix(in srgb, var(--mv-surface) 55%, transparent); }
+.mv-sign p { margin: 0; }
+.mv-sign-title { font-size: 13px; font-weight: 500; color: var(--mv-ink); margin-bottom: 4px !important; }
+.mv-sign .bv-code { font-size: 12px; line-height: 1.6; color: var(--mv-ink3); overflow-wrap: anywhere; }
+.mv-sign [data-sign] { color: var(--mv-tide); }
+.mv-qrow-handle { font-size: 11px; color: var(--mv-tide); overflow-wrap: anywhere; }
+
+/* An option's words span the card; its badges sit on the label's row (BRO-4042, the Decide frame). */
+.mv-decide-main .mv-dopt { grid-template-columns: minmax(0, 1fr) auto; }
+.mv-decide-main .mv-dopt > .mv-dopt-text { grid-column: 1 / -1; }
+.mv-decide-main .mv-dopt > .mv-chips { white-space: nowrap; }
+/* The header names the tree read; the card need not repeat it in its footer. */
+.mv-decide-main > .mv-card[data-state="ok"] > .mv-source { display: none; }
+.mv-screen:has(.mv-decide) > .mv-foot { display: none; }
+@media (max-width: 760px) {
+  .mv-decide-main .mv-decision .mv-answer { bottom: var(--bv-space-2); padding: var(--bv-space-2); gap: var(--bv-space-2); }
+  .mv-note-input { min-height: 40px; padding: var(--bv-space-2) var(--bv-space-3); font-size: 14px; }
+  .mv-go { min-height: 44px; font-size: 15px; }
+  .mv-answer-how { flex-basis: 100%; font-size: 12px; }
+}
+.mv-owner-keys { margin: 0; padding: 0; list-style: none; font-size: 13px; color: var(--mv-ink3); }

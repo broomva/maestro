@@ -7,9 +7,11 @@ expression: "portable(&r.html, m.path())"
 <header class="mv-head">
 <h2 class="mv-title">Decision</h2>
 </header>
-<article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision">
-<p class="mv-dmeta bv-meta">
-<span class="mv-chip" data-kind="decision">decision</span> <bdi>decisions.yaml</bdi> · asked <bdi>2026-10-17T12:00:00Z</bdi> by <bdi>claude:coordinator</bdi>
+<article class="mv-decision" data-ask="decisions.yaml#fleet-cost-1" data-hash="587902cda8d8c68e" data-kind="decision" data-ledger="decisions.yaml" data-handle="fleet-cost-1">
+<p class="mv-dchips">
+<span class="mv-dchip" data-kind="decision">decision</span>
+<span class="mv-dchip" data-tone="success">Reversible</span>
+<span class="mv-dchip" data-tone="attention">Blocking</span>
 </p>
 <p class="mv-dtitle">Context-cost policy: compact at 300K, rotate orchestrators, both, or wait?</p>
 <p class="mv-gates bv-meta">Blocks <span class="bv-code">
@@ -106,15 +108,22 @@ expression: "portable(&r.html, m.path())"
 </li>
 </ul>
 <section class="mv-fold mv-tried">
-<h3 class="mv-fold-title">What the agent tried first</h3>
+<h3 class="mv-fold-title">What the agent tried</h3>
 <ul>
 <li>
-<span class="bv-code">read</span>: <bdi>ws#983 and the fleet-cost memory</bdi>
+<span class="bv-code">read</span> <bdi>ws#983 and the fleet-cost memory</bdi>
 </li>
 <li>
-<span class="bv-code">reroute</span>: <bdi>no standing grant covers it</bdi>
+<span class="bv-code">reroute</span> <bdi>no standing grant covers it</bdi>
 </li>
 </ul>
+<p class="mv-origin bv-code">from <bdi>claude:coordinator</bdi>
+<br>
+<bdi>decisions.yaml</bdi>
+<br>
+<bdi>fleet-cost-1</bdi>
+<br>asked <bdi>2026-10-17T12:00:00Z</bdi>
+</p>
 </section>
 <div class="mv-control mv-answerbar">
 <textarea class="mv-note-field" rows="1" disabled placeholder="Add a note (optional)" aria-label="Note (answering is not available here yet)">

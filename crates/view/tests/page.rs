@@ -36,7 +36,7 @@ fn the_app_page_holds_one_script_and_no_remote_fetch() {
 
 /// The same digest as `BRIDGE_SHA256`, base64 as CSP writes it
 /// (`openssl dgst -sha256 -binary assets/bridge.js | base64`). Update both together.
-const BRIDGE_CSP_HASH: &str = "ZKbieos1yCzyS+MCBiLtX1/0BXQDI3untm7P5GRhhPQ=";
+const BRIDGE_CSP_HASH: &str = "hL52gtvq/txXP41VPwSbclYVusAawsg3zVdE4NOqsEo=";
 
 #[test]
 fn the_app_page_runs_only_the_pinned_bridge_and_fetches_nothing() {

@@ -187,8 +187,8 @@ fn the_decision_shows_every_field_it_names() {
         r#"<a href="https://github.com/broomva/workspace/pull/983" target="_blank" rel="noopener noreferrer">Cost-levers study #983</a>"#,
         r#"<a href="https://linear.app/broomva/issue/BRO-3001""#,
         r#"<span class="bv-code">session 2fb204ca</span>"#,
-        "What the agent tried first",
-        r#"<span class="bv-code">reroute</span>: <bdi>no standing grant covers it"#,
+        "What the agent tried",
+        r#"<span class="bv-code">reroute</span> <bdi>no standing grant covers it"#,
     ] {
         assert!(html.contains(shown), "missing {shown}\n{html}");
     }
@@ -277,12 +277,7 @@ fn an_answer_in_the_working_tree_waits_to_land() {
     );
     assert!(html.contains(r#"<span class="mv-irow-rec" data-tone="success">Waiting to land</span>"#), "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
-    assert!(
-        d.contains(
-            "Answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched); not yet on"
-        ),
-        "{d}"
-    );
+    assert!(d.contains("Answered. The answer is in effect; it reaches main with the next landing PR."), "{d}");
     // Answered, if not landed: what silence would do no longer applies.
     assert!(!d.contains("If you don't answer"), "{d}");
     assert!(!d.contains("mv-answerbar"), "{d}");
@@ -388,7 +383,7 @@ fn a_uuid_agent_is_named_by_its_first_8() {
     let m = machine();
     let html = render(&worktree(m.path()), &detail("decisions.yaml", "jev-idea")).html;
     // Ledger text sits in its own bdi, so a bidi override in it cannot reorder Maestro's words.
-    assert!(html.contains(" by <bdi>9f3c2a1b</bdi>"), "{html}");
+    assert!(html.contains("from <bdi>9f3c2a1b</bdi>"), "{html}");
     let inbox_html = render(&worktree(m.path()), &inbox()).html;
     assert!(inbox_html.contains("<bdi>claude:coordinator</bdi> · <bdi>cost</bdi>"), "{inbox_html}");
     assert!(!html.contains("9f3c2a1b-"), "{html}");
@@ -609,9 +604,9 @@ fn an_answer_waiting_in_another_ledger_is_not_this_ones() {
     std::fs::write(asks.join("twin.yaml"), twin.replace("    headline", "    answer: \"done\"\n    headline")).unwrap();
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let d = render(&store, &detail("demo-arc.yaml", "merge-now")).html;
-    assert!(!d.contains("not yet on") && d.contains("mv-answerbar"), "{d}");
+    assert!(!d.contains("it reaches main with the next landing PR") && d.contains("mv-answerbar"), "{d}");
     let t = render(&store, &detail("twin.yaml", "merge-now")).html;
-    assert!(t.contains("not yet on"), "{t}");
+    assert!(t.contains("it reaches main with the next landing PR"), "{t}");
 }
 
 #[test]
@@ -637,7 +632,7 @@ fn an_answer_on_the_answers_branch_waits_to_land() {
     git(&ws, &["checkout", "-q", "main"]);
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
-    assert!(d.contains("not yet on") && !d.contains("mv-answerbar"), "{d}");
+    assert!(d.contains("it reaches main with the next landing PR") && !d.contains("mv-answerbar"), "{d}");
     let html = render(&store, &inbox()).html;
     assert!(html.contains("or on maestro/answers"), "{html}");
 }
@@ -983,4 +978,24 @@ fn the_t3_handoff_shows_only_on_an_open_ask_whose_landing_is_known() {
         let html = with_handoff(&store, "kinds.yaml", id);
         assert!(html.contains("mv-answerbar") && !html.contains("data-handoff"), "{id}: {html}");
     }
+}
+
+/// The MCP App and the snapshot (BRO-4042): an open decision links to the secure page that takes
+/// the passkey-signed answer, for the bridge to open through the host; nothing is read-only.
+#[test]
+fn outside_the_web_pages_an_open_decision_links_to_the_answer_page() {
+    let m = machine();
+    let store = worktree(m.path());
+    let v = validate(&detail("demo-arc.yaml", "merge-now")).unwrap();
+    let html = maestro_view::render_app(&store, &v, at(), Some("https://mac.example.ts.net:7443")).html;
+    assert!(
+        html.contains(r#"href="https://mac.example.ts.net:7443/decisions/demo-arc.yaml/merge-now" target="_blank" rel="noopener noreferrer" data-open-link="true""#),
+        "{html}"
+    );
+    assert!(html.contains("Answer with your passkey"), "{html}");
+    assert!(!html.contains("disabled") && !html.contains("t3code://"), "{html}");
+    // An answered decision links nowhere.
+    let v = validate(&detail("demo-arc.yaml", "old-one")).unwrap();
+    let html = maestro_view::render_app(&store, &v, at(), Some("https://mac.example.ts.net:7443")).html;
+    assert!(!html.contains("data-open-link"), "{html}");
 }

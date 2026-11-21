@@ -31,6 +31,19 @@ pub struct Rendered {
     pub spec: serde_json::Value,
 }
 
+/// Whether the web pages can take the owner's answer (BRO-4042).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Owner {
+    /// Answering is not offered here, and why.
+    Off(String),
+    /// No passkey is enrolled yet: the page links to enrollment.
+    Enroll,
+    /// A passkey is enrolled: an open decision takes its answer in place.
+    Ready,
+    /// The page was opened at another address than the secure one that takes answers: it links there.
+    Elsewhere(String),
+}
+
 pub(crate) struct Ctx<'a> {
     pub(crate) store: &'a Store,
     pub(crate) reads: Reads,
@@ -39,6 +52,12 @@ pub(crate) struct Ctx<'a> {
     pub(crate) at: jiff::Timestamp,
     /// Where an open decision's answers are drafted (BRO-3590); `None` keeps the read-only bar.
     pub(crate) answer_thread: Option<crate::handoff::AnswerThread>,
+    /// A web page (BRO-4042): an open decision takes its answer there, signed with the owner's
+    /// passkey; the App never offers it. `None` in the App.
+    pub(crate) web: Option<Owner>,
+    /// Where the owner answers (BRO-4042): the secure web page's origin. Outside the web pages
+    /// (the MCP App, the snapshot), an open decision links there to be signed with the passkey.
+    pub(crate) answer_origin: Option<String>,
     /// Asks answered in the working tree or on maestro/answers but open at the read tree, read once per render
     /// and only by a block that shows them.
     unlanded: std::cell::OnceCell<Section<Vec<views::Waiting>>>,
@@ -97,20 +116,22 @@ pub fn render_with(
     at: jiff::Timestamp,
     answer_thread: Option<&crate::handoff::AnswerThread>,
 ) -> Rendered {
-    let cx = Ctx::new(store, at, answer_thread);
+    let cx = Ctx::new(store, at, answer_thread, None, None);
+    finish(&cx, v, node(&cx, &v.root))
+}
+
+/// Render for the MCP App and the snapshot (BRO-4042): every open decision links to the secure web
+/// page at `answer_origin`, where it is answered with the owner's passkey.
+pub fn render_app(store: &Store, v: &Validated, at: jiff::Timestamp, answer_origin: Option<&str>) -> Rendered {
+    let cx = Ctx::new(store, at, None, None, answer_origin.map(str::to_string));
     finish(&cx, v, node(&cx, &v.root))
 }
 
 /// Render for the web pages (BRO-3783): the decision screens laid out as the approved design,
 /// with the header's [`Shell`](crate::page::Shell) read in the same render, so the header and
 /// the page never disagree. Every other block renders as [`render_with`] renders it.
-pub fn render_web(
-    store: &Store,
-    v: &Validated,
-    at: jiff::Timestamp,
-    answer_thread: Option<&crate::handoff::AnswerThread>,
-) -> (Rendered, crate::page::Shell) {
-    let cx = Ctx::new(store, at, answer_thread);
+pub fn render_web(store: &Store, v: &Validated, at: jiff::Timestamp, owner: Owner) -> (Rendered, crate::page::Shell) {
+    let cx = Ctx::new(store, at, None, Some(owner), None);
     let screen = match &v.root.block {
         Block::Today(_) => crate::screens::web_today::today(&cx, &v.root.id),
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
@@ -122,7 +143,13 @@ pub fn render_web(
 }
 
 impl<'a> Ctx<'a> {
-    fn new(store: &'a Store, at: jiff::Timestamp, answer_thread: Option<&crate::handoff::AnswerThread>) -> Self {
+    fn new(
+        store: &'a Store,
+        at: jiff::Timestamp,
+        answer_thread: Option<&crate::handoff::AnswerThread>,
+        web: Option<Owner>,
+        answer_origin: Option<String>,
+    ) -> Self {
         let reads = Reads::of(store);
         let snap = views::snapshot_of(store, &reads, at);
         Ctx {
@@ -131,6 +158,8 @@ impl<'a> Ctx<'a> {
             snap,
             at,
             answer_thread: answer_thread.cloned(),
+            web,
+            answer_origin,
             unlanded: std::cell::OnceCell::new(),
             ids: std::cell::Cell::new(0),
             plans: std::cell::OnceCell::new(),
