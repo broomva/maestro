@@ -273,15 +273,7 @@ pub fn amend(
     if reason.trim().is_empty() {
         return Err(invalid("amend needs a reason"));
     }
-    match landed(paths, old).and_then(|a| closed_on_main(paths, old).map(|closed| (a, closed))) {
-        Ok((Answer::Open, true)) => return Err(Refusal::AskAmendClosed { ask_id: old.ask_id.clone() }.into()),
-        Ok((Answer::Open, false)) => {}
-        Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: old.ask_id.clone() }.into()),
-        Err(KernelError::Refused(Refusal::AnswersUnread { .. })) => {
-            return Err(Refusal::AskAmendUnread { ask_id: old.ask_id.clone() }.into());
-        }
-        Err(e) => return Err(e),
-    }
+    amendable(paths, old)?;
     let filing = Filing { ledger: old.ledger.clone(), body: body.clone() };
     let rec = pin(ledger, paths, instance, node, &seen, Some(&filing), (session.audit(), Some((old, reason))))?;
     file_and_link(ledger, paths, session, instance, node, rec)
@@ -834,20 +826,35 @@ fn read_answer(paths: &Paths, rec: &AskRec, successor: Option<&AskRec>) -> Resul
     })
 }
 
-/// Whether main holds the ask `rec` closed without an answer (archived), which `landed` reads as
-/// open. Unread is refused as `read_answer` refuses it.
-fn closed_on_main(paths: &Paths, rec: &AskRec) -> Result<bool, KernelError> {
-    let sha = landed_main(paths)?;
+/// Whether the linked ask `rec` may be amended, decided on one read of main at the commit the
+/// answers remote names (as `read_answer` reads it), then the answers branches: open there and
+/// not waiting to land. Answered is `ask_amend_answered`, closed without an answer (archived) is
+/// `ask_amend_closed`, two rows by its id is `ask_ambiguous`, and unread is `ask_amend_unread`.
+fn amendable(paths: &Paths, rec: &AskRec) -> Result<(), KernelError> {
+    let unread = || Refusal::AskAmendUnread { ask_id: rec.ask_id.clone() };
+    let sha = match landed_main(paths) {
+        Err(KernelError::Refused(Refusal::AnswersUnread { .. })) => return Err(unread().into()),
+        other => other?,
+    };
     let local = Store::new(paths.clone(), TreeSource::WorkingTree);
-    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
-        Err(e) => Err(Refusal::AnswersUnread { at: format!("main@{sha}"), detail: clip(&e) }.into()),
-        Ok(Found::Row(row)) => Ok(row.state() != AskState::Open),
+    let on_main = local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id));
+    match on_main {
+        Err(_) => return Err(unread().into()),
         Ok(Found::Ambiguous) => {
             let at = format!("main@{sha}:{}", rec.ledger);
-            Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into())
+            return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
         }
-        Ok(Found::None) => Ok(false),
+        Ok(Found::Row(row)) => match row.state() {
+            AskState::Open => {}
+            AskState::Answered => return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into()),
+            AskState::Archived => return Err(Refusal::AskAmendClosed { ask_id: rec.ask_id.clone() }.into()),
+        },
+        Ok(Found::None) => {}
     }
+    if waiting_to_land(paths, &rec.ledger, &rec.ask_id).is_some() {
+        return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into());
+    }
+    Ok(())
 }
 
 /// The names the writer may record a replacement by in `superseded_by`: its id, and its uid.

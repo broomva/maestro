@@ -1705,7 +1705,7 @@ mutate $asks 'if reason.len() > MAX_AMEND_REASON {' 'if false {'
 mutate $asks 'if serde_json::to_vec(&body).map_or(usize::MAX, |b| b.len()) > MAX_ASK_BODY {' 'if false {'
 mutate $asks 'pin.amends && !current_ask' 'pin.amends && false && !current_ask'
 mutate $asks '.filter(|r| r.linked && seen.prior.is_none())' '.filter(|r| r.linked)'
-mutate $asks 'predecessor && maestro_core::ask::has_outcome(&row.row)' 'false'
+mutate $asks '                    maestro_core::ask::state_before_supersede(&row.row, &handles(s)) == AskState::Answered' '                    false'
 mutate $replay 'supersedes.is_some() && !current.is_some_and(|r| r.amends)' 'supersedes.is_some()'
 mutate $mf 'if reason.len() > kernel::MAX_AMEND_REASON {' 'if false {'
 mutate $cli 'if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {' 'if false {'
@@ -1719,10 +1719,17 @@ mutate $asks '            Found::Ambiguous => {
             Found::None => {}' '            Found::Ambiguous => return Err(unconfirmed("ambiguous".into()).into()),
             Found::None => {}'
 # An amendment refuses an answered predecessor and confirms the old row names the replacement.
-mutate $asks '        Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: old.ask_id.clone() }.into()),' '        Ok(_) => {},'
+mutate $asks '            AskState::Answered => return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into()),' '            AskState::Answered => {}'
+mutate $asks '    if waiting_to_land(paths, &rec.ledger, &rec.ask_id).is_some() {
+        return Err(Refusal::AskAmendAnswered' '    if false {
+        return Err(Refusal::AskAmendAnswered'
+mutate $asks '            let at = format!("main@{sha}:{}", rec.ledger);
+            return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());' '            let _ = format!("main@{sha}:{}", rec.ledger);'
+mutate $asks '        Err(_) => return Err(unread().into()),' '        Err(_) => {}'
+mutate $asks '    let on_main = local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id));' '    let on_main = find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id);'
 mutate $asks '        || !(target.as_deref() == Some(new.id.as_str())' '        || !(true || target.as_deref() == Some(new.id.as_str())'
 # An amendment refuses an ask closed on main; a predecessor's outcome counts only when it names its successor.
-mutate $asks '        Ok((Answer::Open, true)) => return Err(Refusal::AskAmendClosed { ask_id: old.ask_id.clone() }.into()),' '        Ok((Answer::Open, true)) => {}'
+mutate $asks '            AskState::Archived => return Err(Refusal::AskAmendClosed { ask_id: rec.ask_id.clone() }.into()),' '            AskState::Archived => {}'
 mutate $ask '    if !text(row.get("superseded_by")).is_some_and(|t| successor.contains(&t.as_str())) {' '    if false {'
 mutate $ask '    if text(before.get("status")).is_some_and(|s| s.eq_ignore_ascii_case("archived")) {' '    if false {'
 mutate $asks 'let successor = if i == 0 { &rec } else { &predecessors[i - 1] };' 'let successor = old;'
@@ -1751,7 +1758,9 @@ mutate $asks 'let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?
 # Only the owner path answers (owner decision 2026-11-09, "Landed main, remote-checked"): main at
 # the commit the remote names, present here; an answered row; the linked ask. A local
 # maestro/answers or refs/remotes/origin/main never answers, and unread is not unanswered.
-mutate $asks 'if row.state() == AskState::Answered || (predecessor && maestro_core::ask::has_outcome(&row.row)) =>' 'if true =>'
+mutate $asks '            if row.state() == AskState::Answered
+                || successor.is_some_and(|s| {' '            if true
+                || successor.is_some_and(|s| {'
 mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit)'
 mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)

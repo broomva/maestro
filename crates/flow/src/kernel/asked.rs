@@ -1790,6 +1790,31 @@ fn an_answer_two_amendments_back_is_checked_against_its_own_successor() {
 }
 
 #[test]
+fn amend_refuses_when_main_is_read_but_its_ledger_is_not() {
+    // The answers remote answers, but the ledger at that commit does not read: unread, not open.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    waiting(&f.ask(&fi, Some(&filing())).unwrap());
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), "asks: [unterminated\n").unwrap();
+    f.land_on_main();
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_unread");
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
+fn amend_refuses_an_ask_main_holds_twice() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.add_entry(&format!("\n  - id: \"{id}\"\n    ask: \"a second row by the same id\"\n"));
+    f.land_on_main();
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_ambiguous");
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
 fn amend_refuses_an_ask_closed_on_main() {
     let mut f = fx(None, "");
     let fi = f.begin();
