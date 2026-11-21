@@ -213,7 +213,10 @@ fn write_ask(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| std::io::Error::other(format!("the writer of record did not run: {e}")))?;
+        .map_err(|e| {
+            let message = format!("the writer of record did not run: {e}");
+            if supersede.is_some() { FileError::Io(std::io::Error::other(message)) } else { refused(message) }
+        })?;
     {
         use std::io::Write as _;
         let mut stdin = child.stdin.take().expect("stdin is piped");
@@ -229,11 +232,13 @@ fn write_ask(
         Some(0) => Ok(Filed { ledger: path, id, validator: said(&out.stdout) }),
         Some(EX_TEMPFAIL) => Err(FileError::Lock(LockError::Busy { holder: said(&out.stderr), what: ledger.into() })),
         Some(2) => Err(refused(said(&out.stderr))),
-        code => Err(std::io::Error::other(format!(
-            "ask_ledger.py failed (exit {code:?}); nothing is known to be written: {}",
-            said(&out.stderr).lines().last().unwrap_or_default()
-        ))
-        .into()),
+        code => {
+            let message = format!(
+                "ask_ledger.py failed (exit {code:?}); nothing is known to be written: {}",
+                said(&out.stderr).lines().last().unwrap_or_default()
+            );
+            if supersede.is_some() { Err(std::io::Error::other(message).into()) } else { Err(refused(message)) }
+        }
     }
 }
 
