@@ -1,0 +1,293 @@
+# recorded_at 2026-11-21T05:37:01Z by the Claude session t3:030f399c-549a-4f0e-8f56-4c18c8b48e51/493baa7d-3bee-423f-946a-3c07bac908cf
+## maestro flow status --instance fi_bb2686ac150f7d1417616e4ba6695679 --json
+{
+  "ok": true,
+  "relay": [],
+  "status": {
+    "flow": "kernel-ready@1",
+    "instance": "fi_bb2686ac150f7d1417616e4ba6695679",
+    "ir_hash": "sha256:46b413dcc790be3db694ece37550722b4b2e8894c2fb784c1040d94d7047cbdb",
+    "nodes": {
+      "consumers": {
+        "class": "observe",
+        "inputs": {
+          "stop_gate": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "consumers": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "installed": {
+        "class": "observe",
+        "inputs": {
+          "suite": "sha256:c7168e1b301c3f24609fc92e1942cba243136e2b4284b586887ac8c68aa3b935"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "mcp_tools": {
+        "class": "observe",
+        "inputs": {
+          "installed": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "pin": {
+        "class": "observe",
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "age_secs": 7705,
+            "fresh_for_secs": 7200,
+            "reason": "expired"
+          }
+        ]
+      },
+      "ready": {
+        "class": "human",
+        "inputs": {
+          "exercise": "sha256:84057a07b66d6cf3dd50a205d7665ae76295637e595d20337c1c159d9d908c5b"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "stop_gate": {
+        "class": "observe",
+        "inputs": {
+          "mcp_tools": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "suite": {
+        "class": "pure",
+        "inputs": {
+          "pin": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      }
+    },
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "493baa7d-3bee-423f-946a-3c07bac908cf",
+      "surface": "t3"
+    },
+    "rejected": [],
+    "repeats": {},
+    "seq": 21,
+    "stop_unblockable": [
+      {
+        "harness": "claude",
+        "reason": "no_progress",
+        "seq": 14,
+        "session": "t3:030f399c-549a-4f0e-8f56-4c18c8b48e51/493baa7d-3bee-423f-946a-3c07bac908cf"
+      }
+    ],
+    "terminal": true
+  },
+  "waiting": [],
+  "work": []
+}
+## maestro flow status --instance fi_c938b824d3efbeae25f143e19d39bea3 --json
+{
+  "ok": true,
+  "relay": [],
+  "status": {
+    "flow": "kernel-ready@1",
+    "instance": "fi_c938b824d3efbeae25f143e19d39bea3",
+    "ir_hash": "sha256:46b413dcc790be3db694ece37550722b4b2e8894c2fb784c1040d94d7047cbdb",
+    "nodes": {
+      "consumers": {
+        "class": "observe",
+        "inputs": {
+          "stop_gate": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "consumers": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "installed": {
+        "class": "observe",
+        "inputs": {
+          "suite": "sha256:c7168e1b301c3f24609fc92e1942cba243136e2b4284b586887ac8c68aa3b935"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "mcp_tools": {
+        "class": "observe",
+        "inputs": {
+          "installed": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "pin": {
+        "class": "observe",
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "age_secs": 7705,
+            "fresh_for_secs": 7200,
+            "reason": "expired"
+          }
+        ]
+      },
+      "ready": {
+        "class": "human",
+        "inputs": {
+          "exercise": "sha256:aa3de281e8d3c0f8c251c007f01726314427b110b74b9a6b63413a0c8372f649"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "stop_gate": {
+        "class": "observe",
+        "inputs": {
+          "mcp_tools": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "suite": {
+        "class": "pure",
+        "inputs": {
+          "pin": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      }
+    },
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "493baa7d-3bee-423f-946a-3c07bac908cf",
+      "surface": "t3"
+    },
+    "rejected": [],
+    "repeats": {},
+    "seq": 30,
+    "stop_unblockable": [
+      {
+        "harness": "claude",
+        "reason": "no_progress",
+        "seq": 17,
+        "session": "t3:030f399c-549a-4f0e-8f56-4c18c8b48e51/493baa7d-3bee-423f-946a-3c07bac908cf"
+      }
+    ],
+    "terminal": true
+  },
+  "waiting": [],
+  "work": []
+}
+## maestro flow open --json
+{
+  "ok": true,
+  "open": {
+    "instances": [],
+    "session": "t3:030f399c-549a-4f0e-8f56-4c18c8b48e51/493baa7d-3bee-423f-946a-3c07bac908cf",
+    "unread": []
+  },
+  "refuses_stop": false
+}

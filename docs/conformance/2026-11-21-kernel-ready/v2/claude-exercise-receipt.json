@@ -1,0 +1,13 @@
+{
+  "schema": "dogfood-receipt@1",
+  "head": "59cb97b3f7c65c2bf247570fe7a3a8225200037c",
+  "surface": "maestro flow verify@1 at this head, driven from the CLI",
+  "entry": "maestro flow start --definition crates/flow/flows/verify.yaml --params <json> --json",
+  "driver": "~/.local/bin/maestro flow CLI (start, next, claim, complete, status)",
+  "evidence": {
+    "path": "/private/tmp/kr-verify-receipt.iivek0/evidence.log",
+    "sha256": "sha256:6686594acd422c1aefd45b70198bde146737cad1a578922f168256e375276a13"
+  },
+  "result": "pass",
+  "at": "2026-11-21T05:22:54Z"
+}

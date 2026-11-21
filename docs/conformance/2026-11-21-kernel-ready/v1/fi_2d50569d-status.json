@@ -1,0 +1,140 @@
+{
+  "ok": true,
+  "relay": [],
+  "status": {
+    "flow": "kernel-ready@1",
+    "instance": "fi_2d50569d20b5f89a565858d96049b885",
+    "ir_hash": "sha256:46b413dcc790be3db694ece37550722b4b2e8894c2fb784c1040d94d7047cbdb",
+    "nodes": {
+      "consumers": {
+        "class": "observe",
+        "inputs": {
+          "stop_gate": "sha256:e7c9c23bd76a0962d8f6a9d7e28c8eab6bd4c60410212352d064be4d197de050"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "consumers": "sha256:e7c9c23bd76a0962d8f6a9d7e28c8eab6bd4c60410212352d064be4d197de050"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "installed": {
+        "class": "observe",
+        "inputs": {
+          "suite": "sha256:c1a8c4e0c10f2e7c9fdc9451ea0cf897f18828160291d326938574a26ba9344a"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "mcp_tools": {
+        "class": "observe",
+        "inputs": {
+          "installed": "sha256:e7c9c23bd76a0962d8f6a9d7e28c8eab6bd4c60410212352d064be4d197de050"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "pin": {
+        "class": "observe",
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "age_secs": 16812,
+            "fresh_for_secs": 7200,
+            "reason": "expired"
+          }
+        ]
+      },
+      "ready": {
+        "class": "human",
+        "inputs": {
+          "exercise": "sha256:2e7042e0bb472a84c7777ba64bee874838ee4bf864fe5515172b29daa7594a94"
+        },
+        "iteration": {},
+        "state": "blocked",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "stop_gate": {
+        "class": "observe",
+        "inputs": {
+          "mcp_tools": "sha256:e7c9c23bd76a0962d8f6a9d7e28c8eab6bd4c60410212352d064be4d197de050"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      },
+      "suite": {
+        "class": "pure",
+        "inputs": {
+          "pin": "sha256:e7c9c23bd76a0962d8f6a9d7e28c8eab6bd4c60410212352d064be4d197de050"
+        },
+        "iteration": {},
+        "state": "stale",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "stale"
+          }
+        ]
+      }
+    },
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "thread:delegated-task:command%3Amcp%3Aff8efbf6-9baa-4156-a6e2-c9cd6038dfa1%3Adelegate-task%3Abab16e93-4f87-4f1a-bf1b-76fbd6290193",
+      "surface": "t3"
+    },
+    "rejected": [],
+    "repeats": {},
+    "seq": 18,
+    "terminal": false
+  },
+  "waiting": [],
+  "work": [
+    {
+      "class": "observe",
+      "held": false,
+      "iteration": {},
+      "kind": "node",
+      "node": "pin"
+    }
+  ]
+}

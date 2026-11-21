@@ -1,0 +1,363 @@
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree start --definition crates/flow/flows/verify.yaml --params '{"repo": "/tmp/kr-verify-checkout.yqurXy", "head": "59cb97b3f7c65c2bf247570fe7a3a8225200037c", "check": "git rev-parse HEAD && test -f crates/flow/flows/verify.yaml"}' --json
+{
+  "flow": "verify@1",
+  "instance": "fi_60660bc99db51768468837fde212808a",
+  "ir_hash": "sha256:be4ca47f0f76ee3ce75f6796d8fa65ce58b3038545be7d47e1b02ae9c730b7d7",
+  "ok": true,
+  "seq": 1
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree next --instance fi_60660bc99db51768468837fde212808a --json
+{
+  "next": {
+    "enabled": [
+      {
+        "class": "observe",
+        "inputs": {},
+        "iteration": {},
+        "launch": {
+          "performer": null,
+          "routing": {},
+          "skill": null
+        },
+        "node": "pin",
+        "wait": null
+      },
+      {
+        "class": "observe",
+        "inputs": {},
+        "iteration": {},
+        "launch": {
+          "performer": null,
+          "routing": {},
+          "skill": null
+        },
+        "node": "surface",
+        "wait": null
+      }
+    ],
+    "flow": "verify@1",
+    "instance": "fi_60660bc99db51768468837fde212808a",
+    "ir_hash": "sha256:be4ca47f0f76ee3ce75f6796d8fa65ce58b3038545be7d47e1b02ae9c730b7d7",
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "thread:delegated-task:command%3Amcp%3A4294ffa1-a461-460f-8fa1-aab365951f0c%3Adelegate-task%3Akr2-claude-exercise-gemini-59cb97b",
+      "surface": "t3"
+    },
+    "pending": {
+      "check": {
+        "class": "pure",
+        "iteration": {},
+        "state": "blocked",
+        "unmet": [
+          {
+            "node": "pin",
+            "reason": "needs"
+          }
+        ]
+      },
+      "exercise": {
+        "class": "work",
+        "iteration": {},
+        "state": "blocked",
+        "unmet": [
+          {
+            "node": "check",
+            "reason": "needs"
+          },
+          {
+            "node": "surface",
+            "reason": "needs"
+          }
+        ]
+      }
+    },
+    "seq": 1,
+    "terminal": false
+  },
+  "ok": true,
+  "relay": [],
+  "waiting": [],
+  "work": [
+    {
+      "class": "observe",
+      "held": false,
+      "iteration": {},
+      "kind": "node",
+      "node": "pin"
+    },
+    {
+      "class": "observe",
+      "held": false,
+      "iteration": {},
+      "kind": "node",
+      "node": "surface"
+    }
+  ]
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree claim --instance fi_60660bc99db51768468837fde212808a --node-id pin --json
+{
+  "attempt": 1,
+  "claim_token": "<redacted>",
+  "inputs": {},
+  "instance": "fi_60660bc99db51768468837fde212808a",
+  "iteration": {},
+  "lease_until": "2026-11-21T05:32:53.202683Z",
+  "node_id": "pin",
+  "ok": true,
+  "seq": 2
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree complete --claim-token <redacted> --json
+{
+  "ok": true,
+  "seq": 3,
+  "stderr": "",
+  "verdicts": [],
+  "verify": {
+    "argv": [
+      "sh",
+      "-c",
+      "test \"$(git -C \"$1\" rev-parse HEAD)\" = \"$2\"",
+      "pin",
+      "/tmp/kr-verify-checkout.yqurXy",
+      "59cb97b3f7c65c2bf247570fe7a3a8225200037c"
+    ],
+    "exit": 0,
+    "ran_at": "2026-11-21T05:22:53.303502Z",
+    "stdout_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree claim --instance fi_60660bc99db51768468837fde212808a --node-id surface --json
+{
+  "attempt": 1,
+  "claim_token": "<redacted>",
+  "inputs": {},
+  "instance": "fi_60660bc99db51768468837fde212808a",
+  "iteration": {},
+  "lease_until": "2026-11-21T05:32:53.420124Z",
+  "node_id": "surface",
+  "ok": true,
+  "seq": 4
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree complete --claim-token <redacted> --json
+{
+  "ok": true,
+  "seq": 5,
+  "stderr": "",
+  "verdicts": [],
+  "verify": {
+    "argv": [
+      "test",
+      "-n",
+      ""
+    ],
+    "exit": 1,
+    "ran_at": "2026-11-21T05:22:53.527642Z",
+    "stdout_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree next --instance fi_60660bc99db51768468837fde212808a --json
+{
+  "next": {
+    "enabled": [
+      {
+        "class": "pure",
+        "inputs": {
+          "pin": "sha256:3f7b4b3716c3ae5361a990d3027de667cd54866a4fcb4ba084e0dd4f3e4681c2"
+        },
+        "iteration": {},
+        "launch": {
+          "performer": null,
+          "routing": {},
+          "skill": null
+        },
+        "node": "check",
+        "wait": null
+      }
+    ],
+    "flow": "verify@1",
+    "instance": "fi_60660bc99db51768468837fde212808a",
+    "ir_hash": "sha256:be4ca47f0f76ee3ce75f6796d8fa65ce58b3038545be7d47e1b02ae9c730b7d7",
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "thread:delegated-task:command%3Amcp%3A4294ffa1-a461-460f-8fa1-aab365951f0c%3Adelegate-task%3Akr2-claude-exercise-gemini-59cb97b",
+      "surface": "t3"
+    },
+    "pending": {
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "surface": "sha256:434f28a9ce0ad05de3cb459fb80e9e0274038c27596b3381a1e0c4533e1c45c4"
+        },
+        "iteration": {},
+        "state": "blocked",
+        "unmet": [
+          {
+            "node": "check",
+            "reason": "needs"
+          },
+          {
+            "case": "declared",
+            "on": "surface",
+            "reason": "switch",
+            "took": "none"
+          }
+        ]
+      }
+    },
+    "seq": 5,
+    "terminal": false
+  },
+  "ok": true,
+  "relay": [],
+  "waiting": [],
+  "work": [
+    {
+      "class": "pure",
+      "held": false,
+      "iteration": {},
+      "kind": "node",
+      "node": "check"
+    }
+  ]
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree claim --instance fi_60660bc99db51768468837fde212808a --node-id check --json
+{
+  "attempt": 1,
+  "claim_token": "<redacted>",
+  "inputs": {
+    "pin": "sha256:3f7b4b3716c3ae5361a990d3027de667cd54866a4fcb4ba084e0dd4f3e4681c2"
+  },
+  "instance": "fi_60660bc99db51768468837fde212808a",
+  "iteration": {},
+  "lease_until": "2026-11-21T05:32:53.635926Z",
+  "node_id": "check",
+  "ok": true,
+  "seq": 6
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree complete --claim-token <redacted> --json
+{
+  "ok": true,
+  "seq": 7,
+  "stderr": "",
+  "verdicts": [],
+  "verify": {
+    "argv": [
+      "sh",
+      "-c",
+      "git rev-parse HEAD && test -f crates/flow/flows/verify.yaml"
+    ],
+    "exit": 0,
+    "ran_at": "2026-11-21T05:22:53.740167Z",
+    "stdout_sha256": "sha256:05221cf4de721a2288cba15f8ae3db1082e835fed45a6b29d06f7c4de0e7a48f"
+  }
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree next --instance fi_60660bc99db51768468837fde212808a --json
+{
+  "next": {
+    "enabled": [],
+    "flow": "verify@1",
+    "instance": "fi_60660bc99db51768468837fde212808a",
+    "ir_hash": "sha256:be4ca47f0f76ee3ce75f6796d8fa65ce58b3038545be7d47e1b02ae9c730b7d7",
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "thread:delegated-task:command%3Amcp%3A4294ffa1-a461-460f-8fa1-aab365951f0c%3Adelegate-task%3Akr2-claude-exercise-gemini-59cb97b",
+      "surface": "t3"
+    },
+    "pending": {
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "check": "sha256:23668a0ff1ecf9b5f07881700868817716c755dbb7670a268567dc8bf90f68b7",
+          "surface": "sha256:434f28a9ce0ad05de3cb459fb80e9e0274038c27596b3381a1e0c4533e1c45c4"
+        },
+        "iteration": {},
+        "state": "blocked",
+        "unmet": [
+          {
+            "case": "declared",
+            "on": "surface",
+            "reason": "switch",
+            "took": "none"
+          }
+        ]
+      }
+    },
+    "seq": 7,
+    "terminal": true
+  },
+  "ok": true,
+  "relay": [],
+  "waiting": [],
+  "work": []
+}
+
+$ maestro flow --workspace /private/tmp/kr-verify-ws --tree worktree status --instance fi_60660bc99db51768468837fde212808a --json
+{
+  "ok": true,
+  "relay": [],
+  "status": {
+    "flow": "verify@1",
+    "instance": "fi_60660bc99db51768468837fde212808a",
+    "ir_hash": "sha256:be4ca47f0f76ee3ce75f6796d8fa65ce58b3038545be7d47e1b02ae9c730b7d7",
+    "nodes": {
+      "check": {
+        "class": "pure",
+        "inputs": {
+          "pin": "sha256:3f7b4b3716c3ae5361a990d3027de667cd54866a4fcb4ba084e0dd4f3e4681c2"
+        },
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "check": "sha256:23668a0ff1ecf9b5f07881700868817716c755dbb7670a268567dc8bf90f68b7",
+          "surface": "sha256:434f28a9ce0ad05de3cb459fb80e9e0274038c27596b3381a1e0c4533e1c45c4"
+        },
+        "iteration": {},
+        "state": "blocked",
+        "unmet": [
+          {
+            "case": "declared",
+            "on": "surface",
+            "reason": "switch",
+            "took": "none"
+          }
+        ]
+      },
+      "pin": {
+        "class": "observe",
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "surface": {
+        "class": "observe",
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      }
+    },
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "thread:delegated-task:command%3Amcp%3A4294ffa1-a461-460f-8fa1-aab365951f0c%3Adelegate-task%3Akr2-claude-exercise-gemini-59cb97b",
+      "surface": "t3"
+    },
+    "rejected": [],
+    "repeats": {},
+    "seq": 7,
+    "terminal": true
+  },
+  "waiting": [],
+  "work": []
+}
