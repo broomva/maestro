@@ -637,9 +637,18 @@ pub(super) fn file_and_confirm<T>(
         return Err(unconfirmed("the pinned body is not an object".into()).into());
     };
     // A completed supersede must be recovered before invoking the writer again.
-    if rec.amends && !matches!(find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)?, Found::None) {
-        confirm_amend(&here, &rec)?;
-        return then(ledger, Confirmed::Row);
+    if rec.amends {
+        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {
+            Found::Row(_) => {
+                confirm_amend(&here, &rec)?;
+                return then(ledger, Confirmed::Row);
+            }
+            Found::Ambiguous => {
+                let at = format!("worktree:{}", rec.ledger);
+                return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
+            }
+            Found::None => {}
+        }
     }
     // No flows guard is alive here: the callers drop theirs before they file.
     let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?;

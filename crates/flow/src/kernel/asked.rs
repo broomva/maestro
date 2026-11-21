@@ -1674,7 +1674,14 @@ fn amend_recovers_after_supersede_before_link() {
         .to_string();
     assert!(f.row(&replacement).is_some());
     assert_eq!(text(f.row(&old).unwrap().row.get("superseded_by")).as_deref(), Some(replacement.as_str()));
+    let marker = f.ws.join("writer-invoked");
+    std::fs::write(
+        f.ws.join("scripts/ask_ledger.py"),
+        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(99)\n", marker.to_str().unwrap()),
+    )
+    .unwrap();
     assert_eq!(waiting(&f.ask(&fi, None).unwrap()).0, replacement);
+    assert!(!marker.exists());
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned", "AskLinked"]);
 }
 
@@ -1827,4 +1834,19 @@ fn rejected_amend_pin_is_never_filed() {
     assert_eq!(f.ledger_text(), before);
     assert!(!marker.exists(), "rejected pin reached the writer");
     assert!(f.row(&old).unwrap().row.get("archived_at").is_none());
+}
+
+#[test]
+fn ambiguous_recovered_amend_is_reported_as_ambiguous() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
+    let replacement = f.events(&fi).into_iter().rfind(|e| e["kind"] == "AskPinned").unwrap()["body"]["ask_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.add_entry(&format!("\n  - id: \"{replacement}\"\n    ask: duplicate\n"));
+    assert_eq!(code(f.ask(&fi, None)), "ask_ambiguous");
 }

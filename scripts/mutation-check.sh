@@ -1709,6 +1709,15 @@ mutate $asks 'predecessor && maestro_core::ask::has_outcome(&row.row)' 'false'
 mutate $replay 'supersedes.is_some() && !current.is_some_and(|r| r.amends)' 'supersedes.is_some()'
 mutate $mf 'if reason.len() > kernel::MAX_AMEND_REASON {' 'if false {'
 mutate $cli 'if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {' 'if false {'
+mutate $asks '    if rec.amends {
+        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {' '    if false {
+        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {'
+mutate $asks '            Found::Ambiguous => {
+                let at = format!("worktree:{}", rec.ledger);
+                return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
+            }
+            Found::None => {}' '            Found::Ambiguous => return Err(unconfirmed("ambiguous".into()).into()),
+            Found::None => {}'
 # An amendment refuses an answered predecessor and confirms the old row names the replacement.
 mutate $asks '        Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: old.ask_id.clone() }.into()),' '        Ok(_) => {},'
 mutate $asks '        || !(target.as_deref() == Some(new.id.as_str())' '        || !(true || target.as_deref() == Some(new.id.as_str())'
