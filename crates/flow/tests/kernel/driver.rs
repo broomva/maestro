@@ -8,7 +8,7 @@ use maestro_flow::kernel::compile;
 const VERIFY: &str = include_str!("../../flows/verify.yaml");
 const SKILL: &str = include_str!("../../../../skills/flow-verify-v1/SKILL.md");
 const KERNEL_READY: &str = include_str!("../../flows/kernel-ready.yaml");
-const KERNEL_READY_SKILL: &str = include_str!("../../../../skills/flow-kernel-ready-v1/SKILL.md");
+const KERNEL_READY_SKILL: &str = include_str!("../../../../skills/flow-kernel-ready-v2/SKILL.md");
 
 #[test]
 fn the_committed_driver_skill_is_what_the_ir_generates() {
@@ -23,21 +23,25 @@ fn the_committed_driver_skill_is_what_the_ir_generates() {
     assert!(SKILL.contains(flow.hash()));
 }
 
-/// kernel-ready@1 (BRO-3842): its committed driver skill is current, and its checks are one chain,
-/// so every run accepts them in one order and two runs' spines compare.
+/// kernel-ready@2 (BRO-3842, BRO-4044): its committed driver skill is current, its checks are one
+/// chain, so every run accepts them in one order and two runs' spines compare, and it has no human
+/// node: readiness is the agents' to verify, and reaching terminal is the head being ready (owner,
+/// 2026-11-20).
 #[test]
 fn kernel_ready_is_one_chain_and_its_skill_is_current() {
     let flow = compile(KERNEL_READY).unwrap();
-    assert_eq!(skill_name(&flow).unwrap(), "flow-kernel-ready-v1");
+    assert_eq!(skill_name(&flow).unwrap(), "flow-kernel-ready-v2");
     let generated = driver::generate(&flow).unwrap();
     assert_eq!(
         generated, KERNEL_READY_SKILL,
-        "skills/flow-kernel-ready-v1/SKILL.md is stale: run maestro flow driver-skill --out"
+        "skills/flow-kernel-ready-v2/SKILL.md is stale: run maestro flow driver-skill --out"
     );
-    let chain = ["pin", "suite", "installed", "mcp_tools", "stop_gate", "consumers", "exercise", "ready"];
+    let chain = ["pin", "suite", "installed", "mcp_tools", "stop_gate", "consumers", "exercise"];
     assert_eq!(steps(&flow), chain.map(|n| vec![n]));
     assert!(generated.contains("- Performer: `agent:verifier`, with the skill `dogfood`."));
     assert!(generated.contains("its performer's provider must differ from `params.writer_provider`"));
+    let human: Vec<&String> = flow.ir().nodes.iter().filter(|(_, n)| n.class.name() == "human").map(|(id, _)| id).collect();
+    assert!(human.is_empty(), "kernel-ready asks the owner nothing; these nodes are human: {human:?}");
 }
 
 #[test]
