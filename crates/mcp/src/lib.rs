@@ -34,6 +34,8 @@ use std::sync::Arc;
 pub mod flow;
 pub mod http;
 pub mod stop;
+pub mod answers;
+pub mod passkey;
 pub mod web;
 
 /// One tool: its name, what it may do, and its argument type.
