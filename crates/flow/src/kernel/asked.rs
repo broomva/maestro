@@ -1822,18 +1822,30 @@ fn amend_refuses_when_an_answers_ref_is_there_but_broken() {
         let fi = f.begin();
         let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
         let target = if broken == "blob" {
-            let out = std::process::Command::new("git")
-                .args(["-C", f.ws.to_str().unwrap(), "hash-object", "-w", "--stdin"])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .and_then(|mut c| {
+            // In the fixture's own repository, whatever GIT_* the test inherited (a hook's
+            // GIT_DIR would send the write elsewhere), and checked to be a blob there.
+            let in_fixture = |args: &[&str], input: Option<&[u8]>| {
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["-C", f.ws.to_str().unwrap()]).args(args);
+                for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"] {
+                    cmd.env_remove(var);
+                }
+                let mut child =
+                    cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+                {
                     use std::io::Write as _;
-                    c.stdin.take().unwrap().write_all(b"not a commit")?;
-                    c.wait_with_output()
-                })
-                .unwrap();
-            String::from_utf8(out.stdout).unwrap()
+                    let mut stdin = child.stdin.take().unwrap();
+                    if let Some(bytes) = input {
+                        stdin.write_all(bytes).unwrap();
+                    }
+                }
+                let out = child.wait_with_output().unwrap();
+                assert!(out.status.success(), "git {args:?}");
+                String::from_utf8(out.stdout).unwrap().trim().to_string()
+            };
+            let blob = in_fixture(&["hash-object", "-w", "--stdin"], Some(b"not a commit"));
+            assert_eq!(in_fixture(&["cat-file", "-t", &blob], None), "blob");
+            format!("{blob}\n")
         } else {
             "this is not an object id\n".to_string()
         };

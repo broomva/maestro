@@ -712,11 +712,13 @@ fn confirm_amend(here: &Store, rec: &AskRec) -> Result<(), KernelError> {
         detail: "amend rows do not confirm the replacement".into(),
     };
     let old_id = rec.supersedes.as_deref().ok_or_else(fail)?;
-    let new = match find(here, &rec.ledger, &rec.ask_id).map_err(|_| fail())? {
+    // One read of the ledger: both rows come from the same snapshot.
+    let snapshot = here.ask_ledger(&rec.ledger).map_err(|_| fail())?;
+    let new = match rows(snapshot.clone(), &rec.ask_id).map_err(|_| fail())? {
         Found::Row(row) => row,
         _ => return Err(fail().into()),
     };
-    let old = match find(here, &rec.ledger, old_id).map_err(|_| fail())? {
+    let old = match rows(snapshot, old_id).map_err(|_| fail())? {
         Found::Row(row) => row,
         _ => return Err(fail().into()),
     };

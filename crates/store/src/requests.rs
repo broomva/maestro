@@ -213,10 +213,9 @@ fn write_ask(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| {
-            let message = format!("the writer of record did not run: {e}");
-            if supersede.is_some() { FileError::Io(std::io::Error::other(message)) } else { refused(message) }
-        })?;
+        // A writer that did not start wrote nothing, in either mode: refused, so the caller
+        // withdraws the pin it finds no row for (an amendment restores the old ask).
+        .map_err(|e| refused(format!("the writer of record did not run: {e}")))?;
     {
         use std::io::Write as _;
         let mut stdin = child.stdin.take().expect("stdin is piped");
