@@ -76,6 +76,24 @@
 //! itself, not the `xcrun` launcher at `/usr/bin/git`), checked root-owned and not group- or
 //! other-writable up to `/` before each answer read, with `xcrun_nocache=1` and a fixed `PATH`.
 //!
+//! # Amending (BRO-4036)
+//!
+//! `amend` replaces the node's current linked ask with a corrected body and a reason: a new
+//! `AskPinned` with `amends`, `supersedes` (the old id) and `reason` (`amended: <text>`, at most
+//! [`MAX_AMEND_REASON`] bytes). It is refused unless the old ask is the replayed current one and,
+//! on one verified read of main (`amendable`), open there and not waiting to land: answered is
+//! `ask_amend_answered`, archived `ask_amend_closed`, two rows `ask_ambiguous`, unread
+//! `ask_amend_unread`. The pin is filed by the writer of record's `ask_ledger.py supersede`, which
+//! archives the old row (`superseded_by` names the replacement) and appends the new one in one
+//! locked write; it is confirmed and linked as a filing is, and a crash between the write and the
+//! link is recovered by finding both rows before filing again. A writer refusal with no row
+//! withdraws the pin, and the old linked ask is current again.
+//!
+//! Only the current ask's answer is ever a receipt. An answer to a replaced ask is refused where
+//! it would land: the workspace's ledger validation rejects a row both answered and superseded
+//! (BRO-4039), so the owner answers the replacement. Owner decision, 2026-11-21, verbatim:
+//! "Reject at gate (Recommended)".
+//!
 //! # The answer as outputs
 //!
 //! `Answered.outputs` holds the answered row's answer fields that are set, each as text:
@@ -99,7 +117,7 @@ use super::adoption;
 use super::error::{KernelError, Refusal};
 use super::events::{Answered, AskLinked, AskPinned, AskWithdrawn, KernelEvent, Started};
 use super::ir::{Class, Iteration};
-use super::replay::{AskRec, State, amended_predecessors, ask_of, current_ask, next_of, pinned, prior_ask_of};
+use super::replay::{AskRec, State, ask_of, current_ask, next_of, pinned, prior_ask_of};
 use super::write::{MAX_OUTPUTS, check_owner, check_writable, wall};
 use crate::clock;
 use crate::ids::InstanceId;
@@ -794,10 +812,7 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
 
 /// The linked ask's answer, as main has it at the commit the remote names; failing that, whether
 /// one waits to land on Maestro's answers branch.
-/// `successor`: for an amended predecessor, the ask that replaced it. The row is judged as it
-/// stood before the writer's supersede (`ask::state_before_supersede`), by the rules every ask is
-/// judged by; a row the supersede did not name that successor on keeps its own state.
-fn read_answer(paths: &Paths, rec: &AskRec, successor: Option<&AskRec>) -> Result<Answer, KernelError> {
+fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
     let sha = landed_main(paths)?;
     // The asks folder as the registry names it here; the ledger is read at `sha`, every object on
     // the way checked against its id, so nothing planted in the object store under the commit's,
@@ -810,14 +825,7 @@ fn read_answer(paths: &Paths, rec: &AskRec, successor: Option<&AskRec>) -> Resul
             let at = format!("{source}:{}", rec.ledger);
             return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
         }
-        Ok(Found::Row(row))
-            if row.state() == AskState::Answered
-                || successor.is_some_and(|s| {
-                    maestro_core::ask::state_before_supersede(&row.row, &handles(s)) == AskState::Answered
-                }) =>
-        {
-            return Ok(Answer::Landed { row, source });
-        }
+        Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed { row, source }),
         Ok(_) => {}
     }
     Ok(match waiting_to_land(paths, &rec.ledger, &rec.ask_id) {
@@ -855,13 +863,6 @@ fn amendable(paths: &Paths, rec: &AskRec) -> Result<(), KernelError> {
         return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into());
     }
     Ok(())
-}
-
-/// The names the writer may record a replacement by in `superseded_by`: its id, and its uid.
-fn handles(successor: &AskRec) -> Vec<&str> {
-    let mut names = vec![successor.ask_id.as_str()];
-    names.extend(successor.body.get("uid").and_then(Value::as_str));
-    names
 }
 
 /// The first of Maestro's answers refs (`views::ANSWERS_REFS`) where the ask `ask_id` of `ledger`
@@ -932,7 +933,7 @@ pub fn landing(paths: &Paths, unmet: &mut [super::Reason]) {
 /// The linked ask's answer as [`read_answer`] reads it, the one answer source; an answer landed
 /// on main counts only for the body that was linked (`answer_mismatch` otherwise).
 pub(super) fn landed(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
-    let answer = read_answer(paths, rec, None)?;
+    let answer = read_answer(paths, rec)?;
     let Answer::Landed { row, source } = &answer else { return Ok(answer) };
     let found = comparable_hash(&row.row);
     if found != rec.body_hash {
@@ -965,46 +966,11 @@ fn take_answer(
     node: &str,
     rec: AskRec,
 ) -> Result<Asked, KernelError> {
-    let predecessors = if rec.amends {
-        let guard = ledger.lock()?;
-        let log = guard.log(instance)?;
-        let started = pinned(&log)?;
-        amended_predecessors(&log, &started, node, &rec)?
-    } else {
-        Vec::new()
-    };
-    let mut old_answer = None;
-    for (i, old) in predecessors.iter().enumerate() {
-        let successor = if i == 0 { &rec } else { &predecessors[i - 1] };
-        let answer = read_answer(paths, old, Some(successor))?;
-        if let Answer::Landed { row, source } = answer {
-            let found = comparable_hash(&row.row);
-            if found != old.body_hash {
-                return Err(Refusal::AnswerMismatch {
-                    ask_id: old.ask_id.clone(),
-                    at: source,
-                    linked: old.body_hash.clone(),
-                    found,
-                }
-                .into());
-            }
-            old_answer = Some((Some(row), format!("{source}:{}", old.ask_id)));
-            break;
-        }
-        if let Answer::Landing { at } = answer {
-            // An answer to an older ask waits to land: wait for it, as both landed would take it
-            // first. Taking the replacement's answer now would make the receipt depend on which
-            // landed first (P20 verification, maestro#62).
-            old_answer = Some((None, format!("{at}:{}", old.ask_id)));
-            break;
-        }
-    }
-    let answer = match old_answer {
-        Some((Some(row), source)) => Answer::Landed { row, source },
-        Some((None, at)) => Answer::Landing { at },
-        None => landed(paths, &rec)?,
-    };
-    let (row, source) = match answer {
+    // Only the current ask's answer is ever a receipt. An answer to an ask an amendment replaced
+    // is refused where it would land (the workspace's ledger validation rejects a row that is
+    // both answered and superseded, BRO-4039), so the owner answers the replacement instead; the
+    // owner's choice, 2026-11-21: "Reject at gate (Recommended)".
+    let (row, source) = match landed(paths, &rec)? {
         Answer::Landed { row, source } => (row, source),
         Answer::Landing { at } => {
             return Ok(Asked::Waiting {
@@ -1027,11 +993,7 @@ fn take_answer(
             });
         }
     };
-    let mut outputs = outputs_of(&row);
-    if outputs.get("status").and_then(Value::as_str).is_some_and(|s| s.to_lowercase().starts_with("archived")) {
-        outputs.remove("status"); // the supersede's archive, not the owner's answer
-    }
-    let outputs = Value::Object(outputs);
+    let outputs = Value::Object(outputs_of(&row));
     let size = serde_json::to_vec(&outputs).map_or(usize::MAX, |b| b.len());
     if size > MAX_OUTPUTS {
         return Err(Refusal::AnswerTooLarge { ask_id: rec.ask_id.clone(), size, limit: MAX_OUTPUTS }.into());

@@ -1717,79 +1717,6 @@ fn amend_requires_old_row_to_point_to_replacement() {
 }
 
 #[test]
-fn answer_to_superseded_ask_is_taken_as_receipt() {
-    let mut f = fx(None, "");
-    let fi = f.begin();
-    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
-    let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap();
-    let new = waiting(&result).0.to_string();
-    f.answer_in_worktree(&old);
-    f.land_on_main();
-    let result = f.ask(&fi, None).unwrap();
-    assert!(matches!(&result, Asked::Answered { ask_id, source, .. } if ask_id == &new && source.contains(&old)));
-    // The supersede's `status: archived` is not reported as the owner's answer.
-    assert!(
-        matches!(&result, Asked::Answered { outputs, .. } if outputs.get("status").is_none() && outputs["answer_option"] == "ship")
-    );
-    assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
-}
-
-#[test]
-fn owner_archive_of_a_predecessor_that_names_no_successor_is_not_a_receipt() {
-    // The owner withdrew the old ask on main (an outcome, no `superseded_by` naming the
-    // replacement): that is not an answer to the node, so the node keeps waiting.
-    let mut f = fx(None, "");
-    let fi = f.begin();
-    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
-    let new = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap()).0.to_string();
-    let text = f.ledger_text();
-    let line =
-        text.lines().find(|l| l.trim_start().starts_with("superseded_by:")).expect("supersede wrote superseded_by");
-    assert!(line.contains(&new), "{line}");
-    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), text.replace(line, "    resolution: \"withdrawn\""))
-        .unwrap();
-    f.land_on_main();
-    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { ask_id, .. } if ask_id == new), "{old}");
-}
-
-#[test]
-fn status_only_answer_on_a_superseded_predecessor_is_taken() {
-    // The owner's answer was a status the writer kept (it sets `status: archived` only when absent).
-    let mut f = fx(None, "");
-    let fi = f.begin();
-    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
-    let new = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap()).0.to_string();
-    let text = f.ledger_text();
-    let line = text
-        .lines()
-        .find(|l| l.trim_start().starts_with("status:") && l.contains("archived"))
-        .expect("archived status");
-    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), text.replace(line, "    status: \"resolved\"")).unwrap();
-    f.land_on_main();
-    let result = f.ask(&fi, None).unwrap();
-    assert!(matches!(&result, Asked::Answered { ask_id, source, outputs, .. }
-        if ask_id == &new && source.contains(&old) && outputs["status"] == "resolved"));
-}
-
-#[test]
-fn an_answer_two_amendments_back_is_checked_against_its_own_successor() {
-    // A -> B -> C: A's superseded_by names B, not C.
-    let mut f = fx(None, "");
-    let fi = f.begin();
-    let a = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
-    let b = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "first").unwrap()).0.to_string();
-    let c = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "second").unwrap()).0.to_string();
-    assert!(a != b && b != c);
-    f.answer_in_worktree(&a);
-    f.land_on_main();
-    let result = f.ask(&fi, None).unwrap();
-    assert!(
-        matches!(&result, Asked::Answered { ask_id, source, .. } if ask_id == &c && source.contains(&a)),
-        "{result:?}"
-    );
-}
-
-#[test]
 fn amend_refuses_when_main_is_read_but_its_ledger_is_not() {
     // The answers remote answers, but the ledger at that commit does not read: unread, not open.
     let mut f = fx(None, "");
@@ -1815,40 +1742,24 @@ fn amend_refuses_an_ask_main_holds_twice() {
 }
 
 #[test]
-fn an_older_answer_waiting_to_land_holds_the_node_against_the_replacements_answer() {
-    // A is amended to B; the owner's answer to A waits on the answers branch while an answer to
-    // B lands on main. The node waits for A's (as it would take A's if both had landed).
+fn an_answer_to_a_replaced_ask_is_never_the_receipt() {
+    // Only the current ask's answer counts (owner, 2026-11-21: "Reject at gate"). An answer that
+    // reaches the replaced row on main (the workspace gate, BRO-4039, refuses it there) is not
+    // taken: the node waits on the replacement, and the replacement's answer completes it.
     let mut f = fx(None, "");
     let fi = f.begin();
     let a = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
     let b = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap()).0.to_string();
-    let amended = f.ledger_text();
-    // The answers branch holds A answered and open, as the owner's answer writer saw it.
-    let unsuperseded: String = {
-        let mut out = Vec::new();
-        let mut in_a = false;
-        for line in amended.lines() {
-            if line.starts_with("  - id: ") {
-                in_a = line.contains(&a);
-            }
-            let writer_key = ["archived_at:", "archived_reason:", "superseded_by:", "status:"]
-                .iter()
-                .any(|k| line.trim_start().starts_with(k));
-            if !(in_a && writer_key) {
-                out.push(line);
-            }
-        }
-        out.join("\n") + "\n"
-    };
-    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), &unsuperseded).unwrap();
     f.answer_in_worktree(&a);
-    f.put_on_answers_branch();
-    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), &amended).unwrap();
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { ask_id, .. } if ask_id == b));
+    assert_ne!(f.status(&fi).nodes["owner"].state, State::Done);
     f.answer_in_worktree(&b);
     f.land_on_main();
-    let result = f.ask(&fi, None).unwrap();
-    assert!(matches!(&result, Asked::Waiting { ask_id, landing: Some(_), .. } if ask_id == &b), "{result:?}");
-    assert_ne!(f.status(&fi).nodes["owner"].state, State::Done);
+    assert!(
+        matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, source, .. } if ask_id == b && !source.contains(&a))
+    );
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
 }
 
 #[test]

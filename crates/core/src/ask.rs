@@ -322,30 +322,6 @@ fn array_index(key: &str) -> Option<u32> {
     key.parse::<u32>().ok().filter(|&i| i != u32::MAX)
 }
 
-/// The fields the workspace writer's `ask_ledger.py supersede` adds to the ask it replaces
-/// (workspace#1377), besides the `status: archived` it sets only when the row had no status.
-pub const SUPERSEDE_KEYS: [&str; 3] = ["archived_at", "archived_reason", "superseded_by"];
-
-/// The state of `row` as it stood before the writer superseded it by `successor` (the
-/// replacement's id and, if it has one, its uid). The writer's own fields are removed, and so is
-/// `status` when it is the `archived` the writer sets; what remains is judged by [`state_of`], the
-/// same rules as every other ask. A row whose `superseded_by` names none of `successor` was not
-/// superseded by it and keeps its own state, so an owner's archive of it stays Archived.
-pub fn state_before_supersede(row: &JsValue, successor: &[&str]) -> AskState {
-    let JsValue::Obj(map) = row else { return state_of(row) };
-    if !text(row.get("superseded_by")).is_some_and(|t| successor.contains(&t.as_str())) {
-        return state_of(row);
-    }
-    let mut before = map.clone();
-    for key in SUPERSEDE_KEYS {
-        before.remove(key);
-    }
-    if text(before.get("status")).is_some_and(|s| s.eq_ignore_ascii_case("archived")) {
-        before.remove("status");
-    }
-    state_of(&JsValue::Obj(before))
-}
-
 /// An ask row's state, ported from the plugin's `stateOf`.
 pub fn state_of(row: &JsValue) -> AskState {
     let status = text(row.get("status")).unwrap_or_default().to_lowercase();
@@ -640,35 +616,6 @@ mod tests {
     /// A JavaScript value from JSON, for the tests.
     macro_rules! json {
         ($($t:tt)+) => { JsValue::from(serde_json::json!($($t)+)) };
-    }
-
-    #[test]
-    fn state_before_supersede_judges_the_row_without_the_writers_fields() {
-        let sup = |extra: JsValue| {
-            let JsValue::Obj(mut m) = json!({"id": "A", "archived_at": "2026-11-21T00:00:00Z",
-                "archived_reason": "amended: x", "superseded_by": "B"})
-            else {
-                unreachable!()
-            };
-            if let JsValue::Obj(e) = extra {
-                m.extend(e);
-            }
-            JsValue::Obj(m)
-        };
-        // The writer's archive alone: open before it.
-        assert_eq!(state_before_supersede(&sup(json!({"status": "archived"})), &["B"]), AskState::Open);
-        // An answer, or a status-only answer the writer kept, is an answer.
-        assert_eq!(
-            state_before_supersede(&sup(json!({"answer": "ship", "status": "archived"})), &["B"]),
-            AskState::Answered
-        );
-        assert_eq!(state_before_supersede(&sup(json!({"status": "resolved"})), &["B"]), AskState::Answered);
-        // By uid as well as id.
-        assert_eq!(state_before_supersede(&sup(json!({"answer": "ship"})), &["C", "B"]), AskState::Answered);
-        // Not superseded by this successor: the row keeps its own state, even with an answer.
-        assert_eq!(state_before_supersede(&sup(json!({"answer": "ship"})), &["Z"]), AskState::Archived);
-        let owner_archive = json!({"id": "A", "archived_at": "2026-11-21T00:00:00Z", "answer": "ship"});
-        assert_eq!(state_before_supersede(&owner_archive, &["B"]), AskState::Archived);
     }
 
     fn ask(v: JsValue) -> Ask {
