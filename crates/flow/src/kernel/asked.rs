@@ -1794,3 +1794,18 @@ fn amend_rejects_oversized_reason_before_pin() {
     );
     assert_eq!(f.kinds(&fi), before);
 }
+
+#[test]
+fn composed_ask_with_amend_reason_obeys_body_limit() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    let mut large = body();
+    large.insert("stakes".into(), Value::String("x".repeat(MAX_ASK_BODY - 1000)));
+    let before = f.kinds(&fi);
+    assert_eq!(
+        code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &large, &"r".repeat(2000))),
+        "ask_body_invalid"
+    );
+    assert_eq!(f.kinds(&fi), before);
+}

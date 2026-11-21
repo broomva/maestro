@@ -554,3 +554,16 @@ fn a_t3_thread_writes_through_the_cli_by_its_own_variable() {
         .args(["--params", &json!({ "dir": m.work }).to_string()]);
     assert_eq!(refused(&mut direct), "thread_mismatch");
 }
+
+#[test]
+fn amendment_reason_is_bounded_at_cli_parse() {
+    let m = machine();
+    let long = "é".repeat(1025);
+    let output = m
+        .bare()
+        .args(["flow", "ask", "--instance", "fi_x", "--node-id", "owner", "--amend", "--ask", "{}", "--reason", &long])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("amend reason exceeds 2048 bytes"));
+}

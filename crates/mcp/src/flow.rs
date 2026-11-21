@@ -552,7 +552,7 @@ pub(crate) fn call(
                         .ok_or_else(|| kernel::Refusal::AskBodyInvalid { detail: "amend needs a reason".into() })?;
                     if reason.len() > kernel::MAX_AMEND_REASON {
                         return Err(kernel::Refusal::AskBodyInvalid {
-                            detail: "amend reason exceeds 2048 bytes".into(),
+                            detail: "MCP amend reason exceeds 2048 bytes".into(),
                         }
                         .into());
                     }

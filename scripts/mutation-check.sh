@@ -1700,6 +1700,14 @@ mutate $cli '    if v["ok"] == json!(true) {
 # Human steps (BRO-3635; BRO-3624 items 1 and 7): a flow's ask, pinned, filed, linked, answered.
 asks=crates/flow/src/kernel/asks.rs
 replay=crates/flow/src/kernel/replay.rs
+# Amendment bounds and current predecessor, each exercised by a focused regression.
+mutate $asks 'if reason.len() > MAX_AMEND_REASON {' 'if false {'
+mutate $asks 'if serde_json::to_vec(&body).map_or(usize::MAX, |b| b.len()) > MAX_ASK_BODY {' 'if false {'
+mutate $asks '.filter(|r| r.linked && seen.prior.is_none())' '.filter(|r| r.linked)'
+mutate $asks 'predecessor && maestro_core::ask::has_outcome(&row.row)' 'false'
+mutate $replay 'supersedes.is_some() && !current.is_some_and(|r| r.amends)' 'supersedes.is_some()'
+mutate $mf 'if reason.len() > kernel::MAX_AMEND_REASON {' 'if false {'
+mutate $cli 'if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {' 'if false {'
 # An amendment refuses an answered predecessor and confirms the old row names the replacement.
 mutate $asks '        Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: old.ask_id.clone() }.into()),' '        Ok(_) => {},'
 mutate $asks '        || !(target.as_deref() == Some(new.id.as_str())' '        || !(true || target.as_deref() == Some(new.id.as_str())'
