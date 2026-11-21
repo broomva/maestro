@@ -1763,6 +1763,28 @@ fn an_answer_to_a_replaced_ask_is_never_the_receipt() {
 }
 
 #[test]
+fn recovery_does_not_link_while_the_old_row_is_open() {
+    // The supersede wrote both rows, then the old row's archive was undone before recovery: the
+    // replacement is not linked, which would leave two open asks.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
+    let text = f.ledger_text();
+    let reopened: String = text
+        .lines()
+        .filter(|l| !["archived_at:", "archived_reason:", "status:"].iter().any(|k| l.trim_start().starts_with(k)))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), reopened).unwrap();
+    assert_eq!(f.row(&old).unwrap().state(), maestro_core::ask::AskState::Open);
+    let before = f.kinds(&fi);
+    assert_eq!(code(f.ask(&fi, None)), "ask_unconfirmed");
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
 fn amend_refuses_an_ask_closed_on_main() {
     let mut f = fx(None, "");
     let fi = f.begin();

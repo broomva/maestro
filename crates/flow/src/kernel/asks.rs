@@ -81,9 +81,10 @@
 //! `amend` replaces the node's current linked ask with a corrected body and a reason: a new
 //! `AskPinned` with `amends`, `supersedes` (the old id) and `reason` (`amended: <text>`, at most
 //! [`MAX_AMEND_REASON`] bytes). It is refused unless the old ask is the replayed current one and,
-//! on one verified read of main (`amendable`), open there and not waiting to land: answered is
-//! `ask_amend_answered`, archived `ask_amend_closed`, two rows `ask_ambiguous`, unread
-//! `ask_amend_unread`. The pin is filed by the writer of record's `ask_ledger.py supersede`, which
+//! on one verified read of main (`amendable`), not answered or closed there and not waiting to
+//! land: answered is `ask_amend_answered`, archived `ask_amend_closed`, two rows `ask_ambiguous`,
+//! unread `ask_amend_unread`. An ask not on main yet (its ledger change unmerged) may be amended:
+//! the owner cannot have answered it on main, and an answer on the answers branches refuses. The pin is filed by the writer of record's `ask_ledger.py supersede`, which
 //! archives the old row (`superseded_by` names the replacement) and appends the new one in one
 //! locked write; it is confirmed and linked as a filing is, and a crash between the write and the
 //! link is recovered by finding both rows before filing again. A writer refusal with no row
@@ -720,7 +721,10 @@ fn confirm_amend(here: &Store, rec: &AskRec) -> Result<(), KernelError> {
         _ => return Err(fail().into()),
     };
     let target = text(old.row.get("superseded_by"));
-    if comparable_hash(&new.row) != rec.body_hash
+    // The writer archives the old row in the same write: an old row that is not archived was not
+    // superseded by it (or was reopened), and linking would leave two open asks.
+    if old.state() != AskState::Archived
+        || comparable_hash(&new.row) != rec.body_hash
         || !(target.as_deref() == Some(new.id.as_str())
             || new.uid.as_deref().is_some_and(|uid| target.as_deref() == Some(uid)))
     {
@@ -835,8 +839,8 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
 }
 
 /// Whether the linked ask `rec` may be amended, decided on one read of main at the commit the
-/// answers remote names (as `read_answer` reads it), then the answers branches: open there and
-/// not waiting to land. Answered is `ask_amend_answered`, closed without an answer (archived) is
+/// answers remote names (as `read_answer` reads it), then the answers branches: open or not yet
+/// on main, and not waiting to land. Answered is `ask_amend_answered`, closed without an answer (archived) is
 /// `ask_amend_closed`, two rows by its id is `ask_ambiguous`, and unread is `ask_amend_unread`.
 fn amendable(paths: &Paths, rec: &AskRec) -> Result<(), KernelError> {
     let unread = || Refusal::AskAmendUnread { ask_id: rec.ask_id.clone() };

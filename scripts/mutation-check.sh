@@ -1727,6 +1727,9 @@ mutate $asks '            let at = format!("main@{sha}:{}", rec.ledger);
 mutate $asks '        Err(_) => return Err(unread().into()),' '        Err(_) => {}'
 mutate $asks '    let on_main = local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id));' '    let on_main = find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id);'
 mutate $asks '        || !(target.as_deref() == Some(new.id.as_str())' '        || !(true || target.as_deref() == Some(new.id.as_str())'
+mutate $asks '    if old.state() != AskState::Archived
+        || comparable_hash(&new.row) != rec.body_hash' '    if false
+        || comparable_hash(&new.row) != rec.body_hash'
 # An amendment refuses an ask closed on main.
 mutate $asks '            AskState::Archived => return Err(Refusal::AskAmendClosed { ask_id: rec.ask_id.clone() }.into()),' '            AskState::Archived => {}'
 # The minted id collides with no id or uid in the ledger.
