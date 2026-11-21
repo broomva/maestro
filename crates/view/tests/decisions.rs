@@ -979,3 +979,23 @@ fn the_t3_handoff_shows_only_on_an_open_ask_whose_landing_is_known() {
         assert!(html.contains("mv-answerbar") && !html.contains("data-handoff"), "{id}: {html}");
     }
 }
+
+/// The MCP App and the snapshot (BRO-4042): an open decision links to the secure page that takes
+/// the passkey-signed answer, for the bridge to open through the host; nothing is read-only.
+#[test]
+fn outside_the_web_pages_an_open_decision_links_to_the_answer_page() {
+    let m = machine();
+    let store = worktree(m.path());
+    let v = validate(&detail("demo-arc.yaml", "merge-now")).unwrap();
+    let html = maestro_view::render_app(&store, &v, at(), Some("https://mac.example.ts.net:7443")).html;
+    assert!(
+        html.contains(r#"href="https://mac.example.ts.net:7443/decisions/demo-arc.yaml/merge-now" target="_blank" rel="noopener noreferrer" data-open-link="true""#),
+        "{html}"
+    );
+    assert!(html.contains("Answer with your passkey"), "{html}");
+    assert!(!html.contains("disabled") && !html.contains("t3code://"), "{html}");
+    // An answered decision links nowhere.
+    let v = validate(&detail("demo-arc.yaml", "old-one")).unwrap();
+    let html = maestro_view::render_app(&store, &v, at(), Some("https://mac.example.ts.net:7443")).html;
+    assert!(!html.contains("data-open-link"), "{html}");
+}

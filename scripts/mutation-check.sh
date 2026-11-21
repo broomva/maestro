@@ -285,6 +285,7 @@ mutate $ans '    if !done.is_empty() {
         return Ok(done);' '    if false {
         return Ok(done);'
 mutate $sans '    if ask.hash() != hash {' '    if false {'
+mutate $decision '        cx.web.is_none() && state == AskState::Open && landing == Landing::NotSeen && !a.options.is_empty()' '        true'
 mutate $sans '    if ask.state() != AskState::Open {' '    if false {'
 mutate $sans '        } else if a.hash() != b.hash() {' '        } else if false {'
 mutate $sans '                && a.answer_option.as_deref() == Some(option)' '                && true'

@@ -531,7 +531,7 @@ Maestro decides every value on it:
 
 - `maestro_ui_catalog` lists the block types (`stack`, `snapshot`, `needs`, `asks`, `ask`, `work`,
   `loops`, `initiatives`, `fleet`, and the Decisions screens `decisions` and `decision`) and their
-  props. The Decisions screens read only: Paseo's Maestro plugin still writes every answer. Props are handles and filters only (a ledger
+  props. An open decision on these screens links to the secure web page that takes the owner's passkey-signed answer (BRO-4042): the bridge opens it through the host (`ui/open-link`), since the App's frame cannot run a passkey. The origin is `MAESTRO_WEB_ORIGIN`, else the one `maestro-web` records in `<owner dir>/web-origin` at start. Props are handles and filters only (a ledger
   name, an ask id, a project, a state, a limit); no block carries text, numbers or markup.
 - `maestro_ui_render { root, blocks }` validates the spec, places what it can and reports every drop
   with its reason (an unknown type, a prop the type does not take, a cycle, a missing or unreachable

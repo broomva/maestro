@@ -15,6 +15,15 @@ use std::time::{Duration, Instant};
 /// How long a challenge stays good.
 const CHALLENGE_TTL: Duration = Duration::from_secs(180);
 
+/// The secure page's origin, for the App and the snapshot to link open decisions to:
+/// `MAESTRO_WEB_ORIGIN`, else the one the running web daemon recorded at start in
+/// `<owner dir>/web-origin`. `None` when neither is set or the recorded one does not parse.
+pub fn web_origin() -> Option<String> {
+    let set = std::env::var("MAESTRO_WEB_ORIGIN").ok().filter(|v| !v.is_empty());
+    let origin = set.or_else(|| std::fs::read_to_string(passkey::owner_dir().join("web-origin")).ok())?;
+    Party::parse(origin.trim()).ok().map(|p| p.origin)
+}
+
 /// What answering needs: the party, the passkeys' folder, the writer, and the live state.
 #[derive(Clone)]
 pub struct Owner {
@@ -65,7 +74,10 @@ impl Owner {
             .or_else(|| Some(home.join(".t3/bin/t3")).filter(|p| p.exists()));
         let remote = std::env::var("MAESTRO_ANSWERS_LOCAL").ok().as_deref() != Some("1");
         let writer = Writer { workspace, asks, checkout, owner_dir: dir.clone(), t3, remote };
-        Self::claim(party, dir, writer)
+        let owner = Self::claim(party, dir, writer)?;
+        // Recorded for the MCP servers on this machine, which link open decisions here.
+        let _ = std::fs::write(owner.dir.join("web-origin"), format!("{}\n", owner.party.origin));
+        Ok(owner)
     }
 
     pub fn new(party: Party, dir: PathBuf, writer: Writer) -> Self {

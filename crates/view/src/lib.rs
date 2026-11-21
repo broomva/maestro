@@ -12,4 +12,4 @@ pub mod render;
 mod screens;
 
 pub use catalog::{Drop, Validated, catalog, validate};
-pub use render::{Rendered, render, render_at, render_web, render_with};
+pub use render::{Rendered, render, render_app, render_at, render_web, render_with};

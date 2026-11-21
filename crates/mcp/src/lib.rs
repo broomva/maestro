@@ -743,7 +743,8 @@ fn dispatch(
             };
             let spec = json!({ "root": a.root, "blocks": a.blocks });
             let v = maestro_view::validate(&spec).map_err(|e| McpError::invalid_params(e, None))?;
-            let r = maestro_view::render(store, &v);
+            let origin = owner_web::web_origin();
+            let r = maestro_view::render_app(store, &v, maestro_store::views::now(), origin.as_deref());
             let mut out = json!(r);
             out["text"] = if snapshot {
                 Value::String(maestro_view::page::snapshot(&r.html, theme))
@@ -755,7 +756,8 @@ fn dispatch(
         "maestro_ui_poll" => {
             let a: UiPollArgs = parse(args)?;
             let v = maestro_view::validate(&a.spec).map_err(|e| McpError::invalid_params(e, None))?;
-            let r = maestro_view::render(store, &v);
+            let origin = owner_web::web_origin();
+            let r = maestro_view::render_app(store, &v, maestro_store::views::now(), origin.as_deref());
             if a.revision.as_deref() == Some(r.revision.as_str()) {
                 Ok(json!({ "revision": r.revision, "changed": false, "tree": r.tree }))
             } else {

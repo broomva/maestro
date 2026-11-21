@@ -326,6 +326,23 @@ fn outcome(cx: &Ctx, lf: &LedgerFile, a: &Ask, state: AskState, landing: Landing
     if let Some(owner) = answerable(cx, a, state, landing, false) {
         return answer_bar(lf, a, owner);
     }
+    // Outside the web pages, an open decision opens on the secure page to be answered there.
+    if let Some(origin) = cx
+        .answer_origin
+        .as_deref()
+        .filter(|_| cx.web.is_none() && state == AskState::Open && landing == Landing::NotSeen && !a.options.is_empty())
+    {
+        let url = format!("{origin}/decisions/{}/{}", super::web::segment(&lf.file), super::web::segment(a.handle()));
+        return html! {
+            div class="mv-control mv-answerbar mv-answer mv-answer-away" {
+                a class="mv-go" href=(url) target="_blank" rel="noopener noreferrer" data-open-link="true" {
+                    span class="mv-go-icon" aria-hidden="true" {}
+                    span class="mv-go-text" { "Answer with your passkey" }
+                }
+                p class="mv-answer-how" { "Opens this decision on Maestro's page, where you choose, add a note and confirm with Touch ID or Face ID." }
+            }
+        };
+    }
     let given =
         a.answer_option.as_deref().and_then(|id| a.options.iter().find(|o| o.id == id)).map(|o| o.label.as_str());
     html! {
