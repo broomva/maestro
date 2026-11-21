@@ -18,6 +18,9 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(180);
 /// What answering needs: the party, the passkeys' folder, the writer, and the live state.
 #[derive(Clone)]
 pub struct Owner {
+    /// The owner-role lock, held while any clone lives.
+    #[allow(dead_code)]
+    daemon: Arc<std::fs::File>,
     pub party: Party,
     pub dir: PathBuf,
     pub writer: Writer,
@@ -62,12 +65,33 @@ impl Owner {
             .or_else(|| Some(home.join(".t3/bin/t3")).filter(|p| p.exists()));
         let remote = std::env::var("MAESTRO_ANSWERS_LOCAL").ok().as_deref() != Some("1");
         let writer = Writer { workspace, asks, checkout, owner_dir: dir.clone(), t3, remote };
-        Ok(Self::new(party, dir, writer))
+        Self::claim(party, dir, writer)
     }
 
     pub fn new(party: Party, dir: PathBuf, writer: Writer) -> Self {
-        let owner =
-            Owner { party, dir, writer, book: Book::default(), pending: Arc::default(), enroll_code: Arc::default() };
+        Self::claim(party, dir, writer).expect("a fresh owner directory")
+    }
+
+    /// The owner role, held by one daemon at a time: an exclusive lock on `<dir>/daemon.lock`,
+    /// kept for the daemon's life. A second daemon on the same directory takes no answers.
+    pub fn claim(party: Party, dir: PathBuf, writer: Writer) -> Result<Self, String> {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("daemon.lock"))
+            .map_err(|e| format!("owner lock: {e}"))?;
+        lock.try_lock().map_err(|_| "another Maestro daemon already takes the owner's answers here".to_string())?;
+        let owner = Owner {
+            daemon: Arc::new(lock),
+            party,
+            dir,
+            writer,
+            book: Book::default(),
+            pending: Arc::default(),
+            enroll_code: Arc::default(),
+        };
         owner.recover();
         if Keyring::load(&owner.dir).is_ok_and(|k| k.credentials.is_empty()) {
             let code = passkey::nonce()[..8].to_ascii_uppercase();
@@ -76,7 +100,7 @@ impl Owner {
             let _ = std::fs::write(owner.dir.join("setup-code"), format!("{code}\n"));
             *owner.enroll_code.lock().expect("fresh") = Some(code);
         }
-        owner
+        Ok(owner)
     }
 
     /// Pending answers left by a stopped daemon: each is written once its window has closed, or
@@ -84,6 +108,13 @@ impl Owner {
     fn recover(&self) {
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         for p in answers::pending(&self.dir) {
+            if answers::undone(&self.dir, &p.receipt.id) {
+                let mut r = p.receipt.clone();
+                r.stage = Stage::Undone;
+                let _ = answers::log(&self.dir, &r);
+                answers::settle(&self.dir, &r.id);
+                continue;
+            }
             self.book.put(p.receipt.clone());
             let wait = (p.receipt.applies_at_ms - jiff::Timestamp::now().as_millisecond()).max(0) as u64;
             let owner = self.clone();
@@ -112,10 +143,19 @@ impl Owner {
 
     /// Undo inside the window; the pending record is settled so a restart does not write it.
     pub fn undo(&self, id: &str, now_ms: i64) -> Result<Receipt, String> {
-        let r = self.book.undo(id, now_ms)?;
-        answers::settle(&self.dir, id);
-        let _ = answers::log(&self.dir, &r);
-        Ok(r)
+        // Durable first: the write checks this marker under its lock, here and after a restart.
+        answers::mark_undone(&self.dir, id)?;
+        match self.book.undo(id, now_ms) {
+            Ok(r) => {
+                let _ = answers::log(&self.dir, &r);
+                Ok(r)
+            }
+            Err(e) => {
+                // The write began first: the marker is withdrawn and the answer stands.
+                answers::unmark_undone(&self.dir, id);
+                Err(e)
+            }
+        }
     }
 
     /// The setup code, for tests.
@@ -285,6 +325,17 @@ mod tests {
     use super::*;
     use crate::passkey::tests::{keyring, party, sign};
 
+    fn owner_writer(dir: &std::path::Path) -> Writer {
+        Writer {
+            workspace: dir.join("ws"),
+            asks: ".control/asks".into(),
+            checkout: dir.join("co"),
+            owner_dir: dir.join("owner"),
+            t3: None,
+            remote: false,
+        }
+    }
+
     fn owner(dir: &std::path::Path) -> Owner {
         let writer = Writer {
             workspace: dir.join("ws"),
@@ -336,6 +387,53 @@ mod tests {
         assert!(o.answer_finish(&nonce, &sign(&challenge), now).is_err(), "a spent request");
         // A nonce never issued is refused.
         assert!(o.answer_finish("never", &sign(&challenge), now).is_err());
+    }
+
+    #[test]
+    fn one_daemon_holds_the_owner_role() {
+        let d = tempfile::tempdir().unwrap();
+        let first = owner(d.path());
+        let second = Owner::claim(party(), d.path().join("owner"), first.writer.clone());
+        assert!(second.is_err(), "a second daemon on the same owner directory");
+        drop(first);
+        // Free once the first is gone. A child another test forks may hold the descriptor for an
+        // instant before its exec closes it, so the claim is tried for up to a second.
+        let third = (0..20).find_map(|_| {
+            Owner::claim(party(), d.path().join("owner"), owner_writer(d.path()))
+                .map_err(|_| std::thread::sleep(std::time::Duration::from_millis(50)))
+                .ok()
+        });
+        assert!(third.is_some(), "free once the first is gone");
+    }
+
+    #[test]
+    fn an_undo_is_on_disk_before_it_is_acknowledged_and_a_restart_honours_it() {
+        let d = tempfile::tempdir().unwrap();
+        let o = owner(d.path());
+        let receipt = Receipt {
+            id: "r1".into(),
+            intent: Intent::answer("t.yaml", "a", "h", "no", None),
+            label: "No".into(),
+            stage: Stage::Signed,
+            signed_at: "t".into(),
+            applies_at_ms: i64::MAX,
+            commit: None,
+            woke: None,
+            landing: None,
+            error: None,
+        };
+        o.book.put(receipt.clone());
+        let a = crate::passkey::tests::sign("c");
+        answers::persist(
+            &o.dir,
+            &answers::Pending { receipt, assertion: a, nonce: "n".into(), by: "o".into(), session: None },
+        )
+        .unwrap();
+        o.undo("r1", 0).unwrap();
+        assert!(answers::undone(&o.dir, "r1"));
+        // The write, here or after a restart, finds the marker and writes nothing.
+        let r = answers::write(&o.writer, &o.book.get("r1").unwrap(), &crate::passkey::tests::sign("c"), "n", "o");
+        assert_eq!(r, Err(answers::UNDONE.to_string()));
     }
 
     #[test]

@@ -265,16 +265,21 @@ mutate $pk '    if r.algorithm != ES256 {' '    if false {'
 mutate $ow '        if !constant_eq(code.trim().to_ascii_uppercase().as_bytes(), expected.as_bytes()) {' '        if false {'
 mutate $ow '        if ask.hash() != req.hash {' '        if false {'
 mutate $ow '        m.remove(nonce).filter(|p| p.at().elapsed() < CHALLENGE_TTL)' '        m.get(nonce).cloned()'
+mutate $ow '        lock.try_lock().map_err(|_| "another Maestro daemon already takes the owner'"'"'s answers here".to_string())?;' '        let _ = lock.try_lock();'
+mutate $ow '        answers::mark_undone(&self.dir, id)?;' ''
 mutate $ans '        if now_ms >= r.applies_at_ms {' '        if false {'
 mutate $ans '        if r.stage != Stage::Signed {' '        if false {'
 mutate $ans '        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?;' '        let r = m.get_mut(id)?;'
 mutate $ans '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
 mutate $ans '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''
-mutate $ans '    if !ok && !new.is_empty() {' '    if false {'
+mutate $ans '    if !new.is_empty() {
+        let _ = std::fs::write(&path, &source);' '    if false {
+        let _ = std::fs::write(&path, &source);'
+mutate $ans '        (Some(1), Some(n)) if n > 0 && n == errors.len() => Ok(errors),' '        (Some(1), _) => Ok(errors),'
+mutate $ans '    if undone(&w.owner_dir, &r.id) {' '    if false {'
 mutate $ans '    if !done.is_empty() {
         return Ok(done);' '    if false {
         return Ok(done);'
-mutate $ans '        if o.status.code().is_none_or(|c| c > 1) {' '        if false {'
 mutate $sans '    if ask.hash() != hash {' '    if false {'
 mutate $sans '    if ask.state() != AskState::Open {' '    if false {'
 mutate $sans '        } else if a.hash() != b.hash() {' '        } else if false {'

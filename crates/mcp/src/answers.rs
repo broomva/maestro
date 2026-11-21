@@ -193,6 +193,28 @@ pub fn persist(owner_dir: &Path, p: &Pending) -> Result<(), String> {
 /// Settle a pending answer: written, failed or undone, it no longer waits.
 pub fn settle(owner_dir: &Path, id: &str) {
     let _ = std::fs::remove_file(pending_dir(owner_dir).join(format!("{id}.json")));
+    let _ = std::fs::remove_file(pending_dir(owner_dir).join(format!("{id}.undo")));
+}
+
+/// What a write that found its answer undone reports.
+pub const UNDONE: &str = "undone before it was written";
+
+/// Record an undo on disk, durably, before it is acknowledged.
+pub fn mark_undone(owner_dir: &Path, id: &str) -> Result<(), String> {
+    let dir = pending_dir(owner_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("undo: {e}"))?;
+    let f = std::fs::File::create(dir.join(format!("{id}.undo"))).map_err(|e| format!("undo: {e}"))?;
+    f.sync_all().map_err(|e| format!("undo: {e}"))
+}
+
+/// Withdraw an undo marker the write already overtook.
+pub fn unmark_undone(owner_dir: &Path, id: &str) {
+    let _ = std::fs::remove_file(pending_dir(owner_dir).join(format!("{id}.undo")));
+}
+
+/// Whether an undo is recorded on disk for `id`.
+pub fn undone(owner_dir: &Path, id: &str) -> bool {
+    pending_dir(owner_dir).join(format!("{id}.undo")).exists()
 }
 
 /// Every pending answer on disk, for recovery at start.
@@ -322,6 +344,10 @@ fn exclusive(w: &Writer) -> Result<std::fs::File, String> {
 /// Write one signed answer: the ledger edit, a commit carrying the proof and nothing else, the push.
 pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &str) -> Result<String, String> {
     let _lock = exclusive(w)?;
+    // An undo recorded on disk, by this daemon or before a restart, wins over the write.
+    if undone(&w.owner_dir, &r.id) {
+        return Err(UNDONE.into());
+    }
     let tip = prepare(w)?;
     // Written already (a restart after the push, before the pending record was settled): the
     // commit that carries this answer's id is the outcome, and nothing is written twice.
@@ -346,7 +372,7 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
         maestro_store::answer::answered(&source, &rel, &select, &r.intent.hash, &answer).map_err(|e| e.to_string())?;
     // The validator of record has the last word, and without it nothing is written. As Maestro's
     // ask writer does, the answer is refused for any error the ledger did not already have.
-    let validate = |text: &str| -> Result<(bool, Vec<String>), String> {
+    let validate = |text: &str| -> Result<Vec<String>, String> {
         std::fs::write(&path, text).map_err(|e| format!("{rel}: {e}"))?;
         let o = Command::new("python3")
             .arg(w.checkout.join("scripts/ask_ledger.py"))
@@ -355,17 +381,12 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
             .current_dir(&w.checkout)
             .output()
             .map_err(|e| format!("the ledger validator did not run: {e}"))?;
-        // Exit 2 or above is the validator failing to run (a missing file, a crash), not a verdict.
-        if o.status.code().is_none_or(|c| c > 1) {
-            return Err(format!("the ledger validator did not run: {}", String::from_utf8_lossy(&o.stderr).trim()));
-        }
-        let lines = String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect();
-        Ok((o.status.success(), lines))
+        verdict(o.status.code(), &String::from_utf8_lossy(&o.stdout))
     };
-    let (_, before) = validate(&source)?;
-    let (ok, after) = validate(&edited)?;
-    let new: Vec<&String> = after.iter().filter(|l| !before.contains(l)).collect();
-    if !ok && !new.is_empty() {
+    let before = validate(&source)?;
+    let after = validate(&edited)?;
+    let new: Vec<&String> = after.iter().filter(|e| !before.contains(e)).collect();
+    if !new.is_empty() {
         let _ = std::fs::write(&path, &source);
         return Err(format!(
             "the ledger validator refused the answer: {}",
@@ -411,6 +432,23 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
         git(&w.checkout, &["push", "-q", "origin", &format!("HEAD:refs/heads/{BRANCH}")])?;
     }
     Ok(commit)
+}
+
+/// The validator's verdict, read strictly: its `ERROR` records, which must be exactly the count
+/// its summary line states, with exit 0 for none and 1 for some. Anything else (a traceback, a
+/// usage error, a missing summary) is the validator failing to run, and nothing is written.
+fn verdict(code: Option<i32>, stdout: &str) -> Result<Vec<String>, String> {
+    let errors: Vec<String> = stdout.lines().filter_map(|l| l.strip_prefix("  ERROR ")).map(str::to_string).collect();
+    let stated = stdout.lines().rev().find_map(|l| {
+        let rest = l.strip_prefix("ask-ledger: ")?;
+        let n = rest.rsplit_once(", ")?.1.strip_suffix(" error(s)")?;
+        n.parse::<usize>().ok()
+    });
+    match (code, stated) {
+        (Some(0), Some(0)) if errors.is_empty() => Ok(errors),
+        (Some(1), Some(n)) if n > 0 && n == errors.len() => Ok(errors),
+        _ => Err(format!("the ledger validator gave no verdict (exit {code:?}): {}", stdout.trim())),
+    }
 }
 
 /// The message the asking session gets.
@@ -487,7 +525,6 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
             r.commit = Some(commit.clone());
             book.put(r.clone());
             let _ = log(&w.owner_dir, &r);
-            settle(&w.owner_dir, id);
             r.woke = Some(wake(w.t3.as_deref(), session, &wake_message(&r, &commit)));
             book.put(r.clone());
             if w.remote {
@@ -495,6 +532,15 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
                 book.put(r.clone());
             }
             let _ = log(&w.owner_dir, &r);
+            // Settled last: a crash before this resumes the answer, which is found written by its
+            // id, and the wake and the landing are tried again.
+            settle(&w.owner_dir, id);
+        }
+        Err(e) if e == UNDONE => {
+            r.stage = Stage::Undone;
+            book.put(r.clone());
+            let _ = log(&w.owner_dir, &r);
+            settle(&w.owner_dir, id);
         }
         Err(e) => {
             r.stage = Stage::Failed;
@@ -555,10 +601,13 @@ mod tests {
         if let Some(ok) = validator {
             std::fs::create_dir_all(ws.path().join("scripts")).unwrap();
             // The refusing one, like the real one, reports an error only once an answer is in the file.
+            let ok_line = "print('ask-ledger: 2 ask(s), 0 decision(s), 0 error(s)')";
             let body = if ok {
-                "import sys\nsys.exit(0)\n".to_string()
+                format!("import sys\n{ok_line}\nsys.exit(0)\n")
             } else {
-                "import sys\nif 'answer_option' in open(sys.argv[2]).read():\n    print('t.yaml#a: bad answer')\n    sys.exit(1)\nsys.exit(0)\n".to_string()
+                format!(
+                    "import sys\nif 'answer_option' in open(sys.argv[2]).read():\n    print('  ERROR ask a: bad answer')\n    print('ask-ledger: 2 ask(s), 0 decision(s), 1 error(s)')\n    sys.exit(1)\n{ok_line}\nsys.exit(0)\n"
+                )
             };
             std::fs::write(ws.path().join("scripts/ask_ledger.py"), body).unwrap();
         }
@@ -664,6 +713,26 @@ mod tests {
             let r = book.get("r1").unwrap();
             assert_eq!(r.stage, Stage::Failed, "{validator:?}");
             assert!(git(&w.checkout, &["log", "-1", "--format=%s"]).unwrap() == "init", "{validator:?}: committed");
+        }
+    }
+
+    #[test]
+    fn only_a_complete_verdict_counts() {
+        let ok = "ask-ledger: 2 ask(s), 0 decision(s), 0 error(s)\n";
+        assert_eq!(verdict(Some(0), ok), Ok(vec![]));
+        let errs = "  ERROR ask a: x\nask-ledger: 2 ask(s), 0 decision(s), 1 error(s)\n";
+        assert_eq!(verdict(Some(1), errs), Ok(vec!["ask a: x".to_string()]));
+        // A crash (exit 1, no summary), a count that disagrees, a usage error, a missing summary.
+        for (code, out) in [
+            (Some(1), ""),
+            (Some(1), "Traceback (most recent call last):\n"),
+            (Some(1), "  ERROR a\nask-ledger: 2 ask(s), 0 decision(s), 2 error(s)\n"),
+            (Some(0), "  ERROR a\nask-ledger: 2 ask(s), 0 decision(s), 0 error(s)\n"),
+            (Some(2), "error: no ledger\n"),
+            (Some(0), ""),
+            (None, ok),
+        ] {
+            assert!(verdict(code, out).is_err(), "{code:?} {out:?}");
         }
     }
 
