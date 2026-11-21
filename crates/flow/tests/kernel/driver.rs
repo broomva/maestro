@@ -30,6 +30,11 @@ fn the_committed_driver_skill_is_what_the_ir_generates() {
 #[test]
 fn kernel_ready_is_one_chain_and_its_skill_is_current() {
     let flow = compile(KERNEL_READY).unwrap();
+    // First, so an owner node added back fails here, not on the skill or the chain (the mutant
+    // in scripts/mutation-check.sh is killed by this assertion).
+    let human: Vec<&String> =
+        flow.ir().nodes.iter().filter(|(_, n)| n.class.name() == "human").map(|(id, _)| id).collect();
+    assert!(human.is_empty(), "kernel-ready asks the owner nothing; these nodes are human: {human:?}");
     assert_eq!(skill_name(&flow).unwrap(), "flow-kernel-ready-v2");
     let generated = driver::generate(&flow).unwrap();
     assert_eq!(
@@ -40,8 +45,6 @@ fn kernel_ready_is_one_chain_and_its_skill_is_current() {
     assert_eq!(steps(&flow), chain.map(|n| vec![n]));
     assert!(generated.contains("- Performer: `agent:verifier`, with the skill `dogfood`."));
     assert!(generated.contains("its performer's provider must differ from `params.writer_provider`"));
-    let human: Vec<&String> = flow.ir().nodes.iter().filter(|(_, n)| n.class.name() == "human").map(|(id, _)| id).collect();
-    assert!(human.is_empty(), "kernel-ready asks the owner nothing; these nodes are human: {human:?}");
 }
 
 #[test]
