@@ -1,0 +1,52 @@
+{
+  "ok": true,
+  "spine": {
+    "flow": "kernel-ready@2",
+    "instance": "fi_780ae2adaf5b6044da23ede0882601e5",
+    "ir_hash": "sha256:e18579f99ef50baff8d055f6b212bb655f9ae63628fe6ce6efbd7893e896f054",
+    "records": [
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "pin"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "suite"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "installed"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "mcp_tools"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "stop_gate"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "consumers"
+      },
+      {
+        "edge": null,
+        "exit": 0,
+        "iteration": {},
+        "node": "exercise"
+      }
+    ]
+  }
+}
