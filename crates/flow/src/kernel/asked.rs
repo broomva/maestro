@@ -519,7 +519,11 @@ fn an_ask_body_the_kernel_does_not_file_is_ask_body_invalid() {
     assert_eq!(code(f.ask(&fi, Some(&bad_name))), "ask_body_invalid", "not a ledger name");
     let mut big = filing();
     big.body.insert("stakes".into(), Value::String("x".repeat(MAX_ASK_BODY)));
-    assert_eq!(code(f.ask(&fi, Some(&big))), "ask_body_invalid", "over MAX_ASK_BODY");
+    // The agent's own body is refused by its own bound, before the composed ask is checked
+    // (the composed bound refuses it too, with another message: maestro#62 mutation shard 15).
+    let refused = f.ask(&fi, Some(&big)).unwrap_err();
+    assert_eq!(refused.code(), "ask_body_invalid", "over MAX_ASK_BODY");
+    assert!(refused.to_string().contains("the body is"), "{refused}");
     let mut deep = Value::String("x".into());
     for _ in 0..MAX_NESTING {
         deep = Value::Array(vec![deep]);
