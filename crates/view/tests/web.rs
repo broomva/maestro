@@ -440,3 +440,19 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
         "the web page runs and fetches nothing"
     );
 }
+
+#[test]
+fn health_web_distinguishes_unread_and_measured_sources() {
+    let m = machine();
+    let mut paths = Paths::under(m.path());
+    paths.fleet_meta = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/health");
+    let store = Store::new(paths, TreeSource::WorkingTree);
+    let (r, _) = web(&store, json!({ "type": "health" }));
+    assert!(r.html.contains("2 of 4 sessions"));
+    assert!(r.html.contains("25% used"));
+    assert!(r.html.contains("not measured"));
+    assert!(r.html.contains("Needs a look"));
+    let (unread, _) = web(&worktree(m.path()), json!({ "type": "health" }));
+    assert!(unread.html.contains("Host information is unavailable"));
+    assert!(unread.html.contains("Token capacity is unavailable"));
+}

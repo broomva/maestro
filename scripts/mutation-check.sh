@@ -662,6 +662,7 @@ mutate $scr/decision.rs '            @if state == AskState::Open && landing == L
 mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 
 # Today and the health rail (BRO-3270).
+mutate crates/store/src/health.rs '                Err(e) => errors.push(SourceError { at: format!("{}:{}", source, index + 1), reason: e.to_string() }),' '                Err(_) => { let _ = index; },'
 td=crates/view/src/screens/today.rs
 hl=crates/view/src/screens/health.rs
 mutate $td 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, Some(WorkState::Running)).len())' 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, None).len())'
