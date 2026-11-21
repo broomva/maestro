@@ -548,7 +548,7 @@ mutate $locks '    hash.update(b"/");' '    hash.update(b"");'
 mutate $locks 'Ok(hash.finalize().iter().take(8)' 'Ok(hash.finalize().iter().take(9)'
 mutate $requests '    maestro_core::ask::OUTCOME_KEYS.contains(&key) || FILER_REFUSED.contains(&key)' '    FILER_REFUSED.contains(&key)'
 mutate $requests $'    "answered_by",\n    "answer_option",' '    "answer_option",'
-mutate $requests '.args(["--json", "-", &format!("--maestro-session={session}"), "--wait"])' '.args(["--json", "-", "--maestro-session=x", "--wait"])'
+mutate $requests 'command.args([&format!("--maestro-session={session}"), "--wait", &FILE_WAIT.as_secs().to_string()])' 'command.args(["--maestro-session=x", "--wait", &FILE_WAIT.as_secs().to_string()])'
 mutate $requests '        Ok(m) if m.is_file() => {}' '        Ok(_) => {}'
 mutate $requests '    if id.is_empty() {' '    if false {'
 mutate $request '            (Self::AskFile, _) => Disposition::Applied,' '            (Self::AskFile, _) => Disposition::Held,'
@@ -1728,7 +1728,7 @@ mutate $asks 'let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?
 # Only the owner path answers (owner decision 2026-11-09, "Landed main, remote-checked"): main at
 # the commit the remote names, present here; an answered row; the linked ask. A local
 # maestro/answers or refs/remotes/origin/main never answers, and unread is not unanswered.
-mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed' 'Ok(Found::Row(row)) => return Ok(Answer::Landed'
+mutate $asks 'if row.state() == AskState::Answered || (predecessor && maestro_core::ask::has_outcome(&row.row)) =>' 'if true =>'
 mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)' '    let sha = Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit)'
 mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
@@ -1855,8 +1855,8 @@ mutate $asks '    let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map
         let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;'
 mutate $asks '        Some(s) if s.state == State::Waiting => Ok((s.iteration.clone(), s.inputs.clone())),' '        Some(s) => Ok((s.iteration.clone(), s.inputs.clone())),'
 mutate $asks 'let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };' 'let at = log.seq();'
-mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {' '                if false {'
-mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {' '                if self.asks.contains_key(&(id, i)) {'
+mutate $replay '                if !p.amends && predecessor.is_some_and(|r| r.inputs == inputs) {' '                if false {'
+mutate $replay '                if !p.amends && predecessor.is_some_and(|r| r.inputs == inputs) {' '                if !p.amends && predecessor.is_some() {'
 mutate $replay 'Some(r) if !r.linked && r.ask_id == l.ask_id && r.body_hash == l.body_hash => {' 'Some(r) if !r.linked && r.ask_id == l.ask_id => {'
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| !r.linked && r.ask_id == w.ask_id) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.ask_id == w.ask_id) {'
 mutate $replay 'Some(r) if r.linked => {' 'Some(r) if true => {'
@@ -1887,7 +1887,7 @@ mutate $replay '        .filter(|r| &r.inputs == inputs)' '        .filter(|_| t
 mutate $replay '    Ok(fold.asks.get(&(id.as_str(), i)).filter(|r| &r.inputs != inputs).cloned())' '    Ok(None)'
 mutate $asks '    if let Some(prev) = &supersedes {
         body.insert("supersedes".into(), Value::String(prev.clone()));
-        body.insert("reason".into(), Value::String("inputs_changed".into()));
+        body.insert("reason".into(), Value::String(reason.clone().unwrap_or_default()));
     }' ''
 mutate $replay '                            && p.supersedes.as_deref() == Some(r.ask_id.as_str())' '                            && true'
 mutate $asks '    let pin = AskPinned { iteration, inputs: Some(inputs.clone()), ..pin };' '    let pin = AskPinned { iteration, inputs: Some(BTreeMap::new()), ..pin };'
