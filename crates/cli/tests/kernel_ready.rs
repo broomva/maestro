@@ -1,12 +1,12 @@
-//! kernel-ready@1 end to end through the built binary (BRO-3842): the flow's own definition
+//! kernel-ready@2 end to end through the built binary (BRO-3842): the flow's own definition
 //! (`crates/flow/flows/kernel-ready.yaml`) and check script (`scripts/kernel-ready.py`) on a
 //! scratch repository and a scratch home, driven `flow start`, `claim` and `complete`, with the
 //! kernel running every command.
 //!
 //! The contract's first clause: every check node fails closed when its subject is broken. Each
 //! test below seeds one fault into one node's subject and shows the kernel refuses that node,
-//! after a sound installation has carried the chain up to it. The sound run reaches the owner's
-//! `ready` node and nothing past it.
+//! after a sound installation has carried the chain up to it. The sound run reaches terminal with
+//! no node waiting on the owner: readiness is the agents' to verify (BRO-4044).
 //!
 //! The scratch home stands in for the owner's: `~/.local/bin/maestro` is a shim that reports a
 //! build commit and runs the built binary for everything else, `~/.local/bin/codex` answers
@@ -333,7 +333,7 @@ impl Rig {
 }
 
 #[test]
-fn a_sound_installation_reaches_the_owner_and_nothing_else() {
+fn a_sound_installation_reaches_terminal_without_asking_the_owner() {
     let r = rig();
     let fi = r.start();
     r.up_to(&fi, "exercise");
@@ -343,7 +343,9 @@ fn a_sound_installation_reaches_the_owner_and_nothing_else() {
     for n in CHAIN.iter().chain(["exercise"].iter()) {
         assert_eq!(states[*n], "done", "{n}: {states}");
     }
-    assert_eq!(states["ready"], "waiting", "the owner's node waits for the owner: {states}");
+    assert_eq!(states.as_object().unwrap().len(), CHAIN.len() + 1, "no node past exercise: {states}");
+    let status = r.ok(&["flow", "status", "--instance", &fi])["status"].clone();
+    assert_eq!(status["terminal"], true, "the verified chain is the head being ready: {status}");
     let spine = r.ok(&["flow", "spine", "--instance", &fi]);
     let nodes: Vec<&str> =
         spine["spine"]["records"].as_array().unwrap().iter().map(|x| x["node"].as_str().unwrap()).collect();

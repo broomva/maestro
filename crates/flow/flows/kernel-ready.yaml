@@ -1,10 +1,16 @@
-# kernel-ready@1: the flow kernel checks its own readiness (BRO-3842, the meta dogfood).
+# kernel-ready@2: the flow kernel checks its own readiness (BRO-3842, the meta dogfood).
 #
-# pin -> suite -> installed -> mcp_tools -> stop_gate -> consumers -> exercise -> ready
+# pin -> suite -> installed -> mcp_tools -> stop_gate -> consumers -> exercise
 #
 # Each node is one readiness check, and each fails closed: a pure or work node whose command
 # fails is refused, and an observe node maps only exit 0 to `pass`, so any other exit is refused
-# (`exit_unmapped`) and the chain stops there. A broken subject never reaches the owner.
+# (`exit_unmapped`) and the chain stops there.
+#
+# Readiness is the agents' to verify, not the owner's (owner, 2026-11-20, BRO-4044): the instance
+# reaching terminal, every check accepted and the exercise attested to a provider other than the
+# writer's, is the head being ready. @1 ended in an owner `ready` node after every check, which
+# only ever showed the owner passing evidence to confirm; @2 has no human node, so nothing waits
+# on the owner.
 #
 # Structure is fixed, treatment is per instance (owner directive D6, BRO-3980). The definition
 # fixes what must hold and in what order; the params carry how this instance meets it: which
@@ -20,7 +26,7 @@
 # copy, which could change after `pin` (P20 round 1). Placeholders are data here: the kernel fills
 # them when it runs a command.
 flow: kernel-ready
-version: 1
+version: 2
 # `agent:verifier` is Maestro's own agents/verifier.agent.yaml, compiled into the binary as a
 # builtin (`maestro_flow::agents::BUILTIN`), so the flow declares no `agents:` root: a root holding
 # the same name would be refused as a conflict with the builtin (BRO-3826).
@@ -36,8 +42,8 @@ nodes:
     inputs: [params.head]
     exit_map: {0: pass}
   # The instance's suite command at that head, run by the kernel in a snapshot of it: this proves
-  # that command exits 0, no more, so the owner's ask names it (`scripts/ci.sh`, or the workspace
-  # tests on a loaded host).
+  # that command exits 0, no more, so the params name the command (`scripts/ci.sh`, or the
+  # workspace tests on a loaded host).
   suite:
     class: pure
     needs: [pin]
@@ -84,8 +90,3 @@ nodes:
     skill: dogfood
     routing: {provider: "different_from(params.writer_provider)"}
     verify: [maestro, dogfood, verify-receipt, "--head={{params.head}}", "--surface={{params.surface}}"]
-  # The owner's call, on the evidence above, for this head.
-  ready:
-    class: human
-    needs: [exercise]
-    ask: "Is the Maestro flow kernel at {{params.head}} ready? Every check of kernel-ready@1 passed for this head: its suite (`{{params.suite}}`, which exited 0 in a snapshot of the head; that is all it proves), the installed binary, the MCP tools, the Stop gate for Claude Code and Codex, the consumers, and an exercise by a provider other than the writer's."

@@ -1,4 +1,4 @@
-//! The commit this binary was built from, for `maestro --version` (BRO-3842). kernel-ready@1's
+//! The commit this binary was built from, for `maestro --version` (BRO-3842). kernel-ready's
 //! `installed` node reads it to tell whether the installed binary is the head under check.
 //!
 //! It is `git rev-parse HEAD` of the checkout being built. `-dirty` is added when the build could

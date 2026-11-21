@@ -186,10 +186,10 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   unreadable, 10 evidence mismatch, 11 outputs invalid, 12 receipt changed, 13 receipt not a
   regular file, 14 evidence not a regular file. `{{outputs.<name>}}` in any command or the
   workdir is refused when a definition compiles.
-- **kernel-ready@1, the meta dogfood (BRO-3842).** `crates/flow/flows/kernel-ready.yaml` is the
+- **kernel-ready@2, the meta dogfood (BRO-3842).** `crates/flow/flows/kernel-ready.yaml` is the
   flow kernel checking its own readiness, one node per check, in one chain: `pin` (the repository
   is at `params.head` with no tracked change), `suite` (`params.suite` exits 0 in a snapshot of the
-  head, which proves that command and no more, so the owner's ask names it),
+  head, which proves that command and no more),
   `installed` (`~/.local/bin/maestro --version` names the head as the commit its sources came from,
   clean; build configuration outside the tree, such as Cargo config or `RUSTFLAGS`, is not
   recorded, the floor accepted in BRO-3635),
@@ -199,11 +199,14 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   compile, with current driver skills and agent renders, checked directly rather than through its
   Makefile, which could check nothing), `exercise`
   (the `verifier` agent, routed to a provider other than `params.writer_provider`, returns a
-  dogfood receipt for the head) and `ready` (the owner's answer, the ask naming the head). The
+  dogfood receipt for the head). The instance reaching terminal is the head being ready: no node
+  waits on the owner, because readiness is the agents' to verify, not a question for the owner
+  (owner, 2026-11-20, BRO-4044; @1 ended in an owner `ready` node that only ever showed the owner
+  passing evidence to confirm). The
   machine checks are `scripts/kernel-ready.py`, which each check node runs as committed at
   `params.head` (`git show`), never the working tree's copy. Every check node fails closed:
   an observe node maps only exit 0 to `pass`, so a broken subject, or one the check cannot read,
-  is refused (`exit_unmapped`), and the owner is never asked about a head that failed a check.
+  is refused (`exit_unmapped`), and the chain stops there.
   `crates/cli/tests/kernel_ready.rs` seeds a fault into each node's subject and shows the kernel
   refuses it. `maestro --version` prints the build commit (`crates/cli/build.rs`), with `-dirty`
   when the build could have read what the commit does not hold (any tracked change, or an
