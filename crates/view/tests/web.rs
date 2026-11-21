@@ -440,3 +440,21 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
         "the web page runs and fetches nothing"
     );
 }
+
+#[test]
+fn today_shows_answer_progress_and_unavailable_sources() {
+    let m = all_answered(false);
+    let ledger = m.path().join("workspace/.control/asks/done.yaml");
+    let text = std::fs::read_to_string(&ledger).unwrap().replace("2026-10-02T00:00:00Z", "2026-10-23T10:00:00Z");
+    std::fs::write(ledger, text).unwrap();
+    let (r, _) = web(&worktree(m.path()), json!({ "type": "today" }));
+    assert!(r.html.contains("Ship it?"), "{}", r.html);
+    assert!(r.html.contains("You chose yes"), "{}", r.html);
+    assert!(r.html.contains("On main · not yet known"), "{}", r.html);
+    assert!(r.html.contains("Acted · not yet known"), "{}", r.html);
+    assert!(r.html.contains("href=\"/decisions\""), "{}", r.html);
+    let empty = tempfile::tempdir().unwrap();
+    let (r, _) = web(&worktree(empty.path()), json!({ "type": "today" }));
+    assert!(r.html.contains("Answers are unavailable"), "{}", r.html);
+    assert!(!r.html.contains("No answers found today"), "{}", r.html);
+}

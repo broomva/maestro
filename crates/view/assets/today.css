@@ -1,0 +1,41 @@
+/* Today: the owner's answers and the work that followed. */
+.today-page { display:grid; grid-template-columns:minmax(0,1fr) 330px; gap:24px; align-items:start; }
+.today-heading h1 { margin: 8px 0; font: 300 34px/1.2 var(--mv-font-display); letter-spacing:-.035em; }
+.today-heading p { margin:0 0 18px; color:var(--mv-ink2); }
+.today-answers, .today-waiting { border:1px solid transparent; border-radius:26px; background:linear-gradient(var(--mv-glass-heavy),var(--mv-glass-heavy)) padding-box,var(--mv-rim) border-box; box-shadow:0 22px 48px -30px var(--mv-shadow); padding:8px 24px; }
+.today-answer { display:grid; grid-template-columns:44px minmax(0,1fr) auto; gap:12px; padding:18px 0; align-items:center; border-bottom:1px solid var(--mv-line); }
+.today-answer:last-child { border:0; }
+.today-answer time,.today-event time { font:12px var(--bv-font-mono); color:var(--mv-ink3); }
+.today-answer strong { font-size:15px; font-weight:500; }
+.today-answer p { margin:2px 0 0; color:var(--mv-ink2); font-size:14px; }
+.today-stages { display:flex; gap:12px; }
+.today-stage { display:flex; flex-direction:column; text-align:center; font:10px var(--bv-font-mono); color:var(--mv-ink3); max-width:65px; }
+.today-stage span { color:var(--mv-ok); font-size:12px; }
+.today-stage[data-known="false"] span { color:var(--mv-ink3); opacity:.4; }
+.today-overnight { margin-top:24px; }
+.today-overnight h2 { margin:0; padding:0 4px 10px; font:11px var(--bv-font-mono); letter-spacing:.12em; text-transform:uppercase; color:var(--mv-ink3); }
+.today-event { display:grid; grid-template-columns:58px minmax(0,1fr) auto; gap:12px; border-top:1px solid var(--mv-line); padding:10px 4px; font-size:14px; }
+.today-event a { color:var(--mv-tide); }
+.today-event .today-done { font-size:12px; color:var(--mv-ink3); }
+.today-side { padding-top:8px; }
+.today-waiting { padding:20px; }
+.today-waiting h2 { margin:0 0 16px; font:400 22px var(--mv-font-display); }
+.today-waiting-row { border-top:1px solid var(--mv-line); padding:12px 0; margin:0; font-size:14px; }
+.today-action { display:inline-block; margin-top:12px; padding:10px 22px; border-radius:999px; background:var(--mv-ink); color:var(--mv-surface); text-decoration:none; font-size:14px; }
+.today-action:focus-visible,.today-event a:focus-visible { outline:2px solid var(--mv-tide); outline-offset:3px; }
+.today-stats { display:grid; grid-template-columns:1fr 1fr; gap:20px; padding:24px 6px; }
+.today-stats div { display:flex; flex-direction:column; gap:4px; }
+.today-stats strong { font:300 30px var(--mv-font-display); }
+.today-stats span,.today-notice { font-size:12px; color:var(--mv-ink3); }
+@media(max-width:760px) {
+ .today-page { display:flex; flex-direction:column; gap:12px; }
+ .today-primary,.today-side { width:100%; }
+ .today-heading h1 { font-size:28px; }
+ .today-answers { padding:0; border:0; border-radius:0; background:none; box-shadow:none; }
+ .today-answer { grid-template-columns:36px minmax(0,1fr); gap:8px 12px; }
+ .today-stages { grid-column:2; flex-wrap:wrap; gap:8px; }
+ .today-stage { max-width:none; flex-direction:row; gap:3px; }
+ .today-waiting { padding:16px; }
+}
+
+.mv-screen:has(.today-page) > .mv-foot { display:none; }

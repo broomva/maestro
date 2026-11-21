@@ -112,6 +112,7 @@ pub fn render_web(
 ) -> (Rendered, crate::page::Shell) {
     let cx = Ctx::new(store, at, answer_thread);
     let screen = match &v.root.block {
+        Block::Today(_) => crate::screens::web_today::today(&cx, &v.root.id),
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
         Block::Decision(p) => crate::screens::web::decide(&cx, &v.root.id, &p.ledger, &p.id),
         _ => node(&cx, &v.root),

@@ -197,7 +197,7 @@ fn top_decision(cx: &Ctx) -> Markup {
                 p class="mv-row-meta bv-meta" {
                     @if let Some(a) = e.asked().and_then(|t| age(t, cx.at)) { "asked " (a) @if a != "today" { " ago" } " by " (asker(e.lf, e.ask)) } @else { "asked by " (asker(e.lf, e.ask)) }
                 }
-                p class="mv-note bv-meta" { "Answer it in Paseo's Maestro plugin. Maestro answers nothing in this phase." }
+                p class="mv-note bv-meta" { "Open Decisions to see the ask." }
             }
         },
     };
