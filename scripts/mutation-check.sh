@@ -1703,6 +1703,7 @@ replay=crates/flow/src/kernel/replay.rs
 # Amendment bounds and current predecessor, each exercised by a focused regression.
 mutate $asks 'if reason.len() > MAX_AMEND_REASON {' 'if false {'
 mutate $asks 'if serde_json::to_vec(&body).map_or(usize::MAX, |b| b.len()) > MAX_ASK_BODY {' 'if false {'
+mutate $asks 'pin.amends && !current_ask' 'pin.amends && false && !current_ask'
 mutate $asks '.filter(|r| r.linked && seen.prior.is_none())' '.filter(|r| r.linked)'
 mutate $asks 'predecessor && maestro_core::ask::has_outcome(&row.row)' 'false'
 mutate $replay 'supersedes.is_some() && !current.is_some_and(|r| r.amends)' 'supersedes.is_some()'

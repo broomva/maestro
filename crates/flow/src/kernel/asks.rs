@@ -490,6 +490,12 @@ fn pin(
     check_writable(&log, &started)?;
     let (iteration, inputs) = waiting(&log, &started, node)?;
     let pin = AskPinned { iteration, inputs: Some(inputs.clone()), ..pin };
+    #[cfg(test)]
+    let pin = if seams::REJECT_AMEND_PIN.with(|c| c.replace(false)) {
+        AskPinned { supersedes: Some("not-the-current-ask".into()), ..pin }
+    } else {
+        pin
+    };
     // Nothing appended since `look`, or the pin is not appended (`stale_seq`): the only concurrency
     // rule. Another session's proposal bookkeeping changes nothing the pin depends on, so a
     // stranger's proposal cannot make the owner's ask fail.
@@ -998,6 +1004,7 @@ pub(crate) mod seams {
     thread_local! {
         pub(crate) static SUFFIXES: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
         pub(crate) static CRASH_AFTER_FILE: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static REJECT_AMEND_PIN: Cell<bool> = const { Cell::new(false) };
         /// The git binary a test has checked instead of the platform's (`trusted_git`).
         pub(crate) static GIT_CHECKED: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
         /// The answers remote a test reads instead of the compiled one: a local bare repository.
