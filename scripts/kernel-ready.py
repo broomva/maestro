@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kernel-ready@1's machine checks (BRO-3842): one subcommand per observe node of
+"""kernel-ready's machine checks (BRO-3842): one subcommand per observe node of
 crates/flow/flows/kernel-ready.yaml.
 
 Each check reads the installation the owner's harnesses actually launch: the binary at

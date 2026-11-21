@@ -22,7 +22,7 @@ mod build_commit;
 #[derive(Parser)]
 #[command(
     name = "maestro",
-    // The version and the commit the binary was built from (`build.rs`), which kernel-ready@1's
+    // The version and the commit the binary was built from (`build.rs`), which kernel-ready's
     // `installed` node compares with the head under check.
     version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MAESTRO_BUILD_COMMIT"), ")"),
     about = "Governance and orchestration metalayer for agent fleets"

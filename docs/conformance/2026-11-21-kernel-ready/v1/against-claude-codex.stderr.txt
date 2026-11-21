@@ -1,0 +1,2 @@
+maestro: spine_differs: the instance accepted ready at step 7; the other never did
+exit 1

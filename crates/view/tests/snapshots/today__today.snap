@@ -33,7 +33,7 @@ expression: "portable(&r.html, m.path())"
 </p>
 <p class="mv-ask-title">Merge the demo PR now, or hold for review?</p>
 <p class="mv-row-meta bv-meta">asked 22 d ago by demo-arc</p>
-<p class="mv-note bv-meta">Answer it in Paseo's Maestro plugin. Maestro answers nothing in this phase.</p>
+<p class="mv-note bv-meta">Open Decisions to see the ask.</p>
 </div>
 <details class="mv-errors">
 <summary data-tone="warning">Partial: 2 sources could not be read</summary>

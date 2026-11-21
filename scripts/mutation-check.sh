@@ -662,6 +662,8 @@ mutate $scr/decision.rs '            @if state == AskState::Open && landing == L
 mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 
 # Today and the health rail (BRO-3270).
+mutate crates/view/src/screens/web_today.rs 'asks.data.is_none() { p { "Answers are unavailable." } }' 'false { p { "Answers are unavailable." } }'
+mutate crates/view/src/screens/web_today.rs '("Acted", false)' '("Acted", true)'
 td=crates/view/src/screens/today.rs
 hl=crates/view/src/screens/health.rs
 mutate $td 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, Some(WorkState::Running)).len())' 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, None).len())'
@@ -2135,10 +2137,11 @@ mutate $vy '    switch: {on: surface, case: declared}
 ' ''
 mutate $vy '    run: [test, -n, "{{params.surface}}"]' '    run: [test, -z, "{{params.surface}}"]'
 mutate $vy '"--head={{params.head}}"' '"--head={{params.repo}}"'
-# kernel-ready@1 (BRO-3842), crates/cli/tests/kernel_ready.rs: every check node refuses its
+# kernel-ready@2 (BRO-3842, BRO-4044), crates/cli/tests/kernel_ready.rs: every check node refuses its
 # subject broken. pin refuses another head and a tracked change; the checks run the script
 # committed at the head, not the working tree's; the chain is one order (the driver test's steps);
-# exercise is routed away from the writer's provider and its receipt is bound to the head. The observe nodes' exit_map and a refused pure command are the kernel guards proven
+# exercise is routed away from the writer's provider and its receipt is bound to the head; and no
+# node waits on the owner (an owner node added back is caught by the driver test). The observe nodes' exit_map and a refused pure command are the kernel guards proven
 # above for verify@1.
 ky=crates/flow/flows/kernel-ready.yaml
 mutate $ky 'test "$(git -C "$1" rev-parse HEAD)" = "$2" && ' ''
@@ -2149,6 +2152,10 @@ mutate $ky '    needs: [suite]
 mutate $ky '    routing: {provider: "different_from(params.writer_provider)"}
 ' ''
 mutate $ky '"--head={{params.head}}"' '"--head={{params.repo}}"'
+mutate $ky '"--surface={{params.surface}}"]
+' '"--surface={{params.surface}}"]
+  ready: {class: human, needs: [exercise], ask: "Is it ready?"}
+'
 mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" installed' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" installed'
 mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" mcp-tools' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" mcp-tools'
 mutate $ky 's=$(git show "$1:scripts/kernel-ready.py") && exec python3 -I -c "$s" stop-gate' 's=$(cat scripts/kernel-ready.py) && exec python3 -I -c "$s" stop-gate'

@@ -1,0 +1,82 @@
+{
+  "ok": true,
+  "relay": [],
+  "status": {
+    "flow": "kernel-ready@2",
+    "instance": "fi_a0033ad0207dbb7528edac98439e8f42",
+    "ir_hash": "sha256:e18579f99ef50baff8d055f6b212bb655f9ae63628fe6ce6efbd7893e896f054",
+    "nodes": {
+      "consumers": {
+        "class": "observe",
+        "inputs": {
+          "stop_gate": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "exercise": {
+        "class": "work",
+        "inputs": {
+          "consumers": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "installed": {
+        "class": "observe",
+        "inputs": {
+          "suite": "sha256:c7168e1b301c3f24609fc92e1942cba243136e2b4284b586887ac8c68aa3b935"
+        },
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "mcp_tools": {
+        "class": "observe",
+        "inputs": {
+          "installed": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "pin": {
+        "class": "observe",
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "stop_gate": {
+        "class": "observe",
+        "inputs": {
+          "mcp_tools": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      },
+      "suite": {
+        "class": "pure",
+        "inputs": {
+          "pin": "sha256:d71a52babf40440d3ffc42743c1c58497c4f668e5c0195f69b1352283a7544e1"
+        },
+        "iteration": {},
+        "state": "done",
+        "unmet": []
+      }
+    },
+    "owner": {
+      "environment": "030f399c-549a-4f0e-8f56-4c18c8b48e51",
+      "id": "493baa7d-3bee-423f-946a-3c07bac908cf",
+      "surface": "t3"
+    },
+    "rejected": [],
+    "repeats": {},
+    "seq": 20,
+    "terminal": true
+  },
+  "waiting": [],
+  "work": []
+}
