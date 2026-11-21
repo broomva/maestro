@@ -1785,6 +1785,69 @@ fn recovery_does_not_link_while_the_old_row_is_open() {
 }
 
 #[test]
+fn amend_refuses_when_an_answers_branch_does_not_read_or_holds_the_ask_twice() {
+    for broken in ["asks: [unterminated\n", "twice"] {
+        let mut f = fx(None, "");
+        let fi = f.begin();
+        let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+        let good = f.ledger_text();
+        if broken == "twice" {
+            f.add_entry(&format!("\n  - id: \"{id}\"\n    ask: \"a second row by the same id\"\n"));
+        } else {
+            std::fs::write(f.ws.join(".control/asks/ledger.yaml"), broken).unwrap();
+        }
+        f.put_on_answers_branch();
+        std::fs::write(f.ws.join(".control/asks/ledger.yaml"), &good).unwrap();
+        let before = f.kinds(&fi);
+        assert_eq!(
+            code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")),
+            "ask_amend_unread",
+            "{broken}"
+        );
+        assert_eq!(f.kinds(&fi), before);
+        assert!(f.row(&id).unwrap().row.get("superseded_by").is_none());
+    }
+}
+
+#[test]
+fn amend_refuses_when_an_answers_ref_is_there_but_broken() {
+    // A ref that exists but names no commit (a blob), or whose file is not a ref at all, is
+    // unread, never "no answer".
+    for broken in ["blob", "garbage"] {
+        let mut f = fx(None, "");
+        let fi = f.begin();
+        let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+        let target = if broken == "blob" {
+            let out = std::process::Command::new("git")
+                .args(["-C", f.ws.to_str().unwrap(), "hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut c| {
+                    use std::io::Write as _;
+                    c.stdin.take().unwrap().write_all(b"not a commit")?;
+                    c.wait_with_output()
+                })
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        } else {
+            "this is not an object id\n".to_string()
+        };
+        let refs = f.ws.join(".git/refs/heads/maestro");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("answers"), target).unwrap();
+        let before = f.kinds(&fi);
+        assert_eq!(
+            code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")),
+            "ask_amend_unread",
+            "{broken}"
+        );
+        assert_eq!(f.kinds(&fi), before);
+        assert!(f.row(&id).unwrap().row.get("superseded_by").is_none());
+    }
+}
+
+#[test]
 fn amend_refuses_an_ask_closed_on_main() {
     let mut f = fx(None, "");
     let fi = f.begin();

@@ -1719,9 +1719,18 @@ mutate $asks '            Found::Ambiguous => {
             Found::None => {}'
 # An amendment refuses an answered predecessor and confirms the old row names the replacement.
 mutate $asks '            AskState::Answered => return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into()),' '            AskState::Answered => {}'
-mutate $asks '    if waiting_to_land(paths, &rec.ledger, &rec.ask_id).is_some() {
+mutate $asks '    if answered_on_answers_refs(paths, rec)? {
         return Err(Refusal::AskAmendAnswered' '    if false {
         return Err(Refusal::AskAmendAnswered'
+mutate $asks '            Ok(Found::Ambiguous) | Err(_) => return Err(unread()),' '            Ok(Found::Ambiguous) | Err(_) => {}'
+mutate $asks '        if at.tree.unresolved.is_some() {
+            return Err(unread());' '        if at.tree.unresolved.is_some() {
+            continue;'
+mutate $asks '            Err(_) => return Err(unread()),
+        }
+        let at' '            Err(_) => continue,
+        }
+        let at'
 mutate $asks '            let at = format!("main@{sha}:{}", rec.ledger);
             return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());' '            let _ = format!("main@{sha}:{}", rec.ledger);'
 mutate $asks '        Err(_) => return Err(unread().into()),' '        Err(_) => {}'

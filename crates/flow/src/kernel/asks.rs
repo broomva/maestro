@@ -863,10 +863,35 @@ fn amendable(paths: &Paths, rec: &AskRec) -> Result<(), KernelError> {
         },
         Ok(Found::None) => {}
     }
-    if waiting_to_land(paths, &rec.ledger, &rec.ask_id).is_some() {
+    if answered_on_answers_refs(paths, rec)? {
         return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into());
     }
     Ok(())
+}
+
+/// [`waiting_to_land`] as a guard, failing closed: a ref that is absent holds no answer, but one
+/// that is there and does not resolve or read, or holds the ask twice, is `ask_amend_unread`
+/// rather than "no answer" (unread is not unanswered).
+fn answered_on_answers_refs(paths: &Paths, rec: &AskRec) -> Result<bool, KernelError> {
+    let unread = || KernelError::from(Refusal::AskAmendUnread { ask_id: rec.ask_id.clone() });
+    let workspace = Store::new(paths.clone(), TreeSource::WorkingTree);
+    for (rev, _) in maestro_store::views::ANSWERS_REFS {
+        match workspace.tree.has_ref(rev) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(_) => return Err(unread()),
+        }
+        let at = Store::new(paths.clone(), TreeSource::GitRev(rev.to_string()));
+        if at.tree.unresolved.is_some() {
+            return Err(unread());
+        }
+        match find(&at, &rec.ledger, &rec.ask_id) {
+            Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(true),
+            Ok(Found::Row(_) | Found::None) => {}
+            Ok(Found::Ambiguous) | Err(_) => return Err(unread()),
+        }
+    }
+    Ok(false)
 }
 
 /// The first of Maestro's answers refs (`views::ANSWERS_REFS`) where the ask `ask_id` of `ledger`
