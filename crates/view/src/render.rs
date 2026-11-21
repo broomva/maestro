@@ -39,6 +39,9 @@ pub(crate) struct Ctx<'a> {
     pub(crate) at: jiff::Timestamp,
     /// Where an open decision's answers are drafted (BRO-3590); `None` keeps the read-only bar.
     pub(crate) answer_thread: Option<crate::handoff::AnswerThread>,
+    /// A web page (BRO-4042): an open decision takes its answer in a form there, which the App,
+    /// whose policy no form may use, never shows.
+    pub(crate) web: bool,
     /// Asks answered in the working tree or on maestro/answers but open at the read tree, read once per render
     /// and only by a block that shows them.
     unlanded: std::cell::OnceCell<Section<Vec<views::Waiting>>>,
@@ -97,7 +100,7 @@ pub fn render_with(
     at: jiff::Timestamp,
     answer_thread: Option<&crate::handoff::AnswerThread>,
 ) -> Rendered {
-    let cx = Ctx::new(store, at, answer_thread);
+    let cx = Ctx::new(store, at, answer_thread, false);
     finish(&cx, v, node(&cx, &v.root))
 }
 
@@ -110,7 +113,7 @@ pub fn render_web(
     at: jiff::Timestamp,
     answer_thread: Option<&crate::handoff::AnswerThread>,
 ) -> (Rendered, crate::page::Shell) {
-    let cx = Ctx::new(store, at, answer_thread);
+    let cx = Ctx::new(store, at, answer_thread, true);
     let screen = match &v.root.block {
         Block::Today(_) => crate::screens::web_today::today(&cx, &v.root.id),
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
@@ -122,7 +125,12 @@ pub fn render_web(
 }
 
 impl<'a> Ctx<'a> {
-    fn new(store: &'a Store, at: jiff::Timestamp, answer_thread: Option<&crate::handoff::AnswerThread>) -> Self {
+    fn new(
+        store: &'a Store,
+        at: jiff::Timestamp,
+        answer_thread: Option<&crate::handoff::AnswerThread>,
+        web: bool,
+    ) -> Self {
         let reads = Reads::of(store);
         let snap = views::snapshot_of(store, &reads, at);
         Ctx {
@@ -131,6 +139,7 @@ impl<'a> Ctx<'a> {
             snap,
             at,
             answer_thread: answer_thread.cloned(),
+            web,
             unlanded: std::cell::OnceCell::new(),
             ids: std::cell::Cell::new(0),
             plans: std::cell::OnceCell::new(),
