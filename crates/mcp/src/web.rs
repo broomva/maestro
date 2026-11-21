@@ -123,9 +123,13 @@ fn admitted(uri: &Uri, headers: &HeaderMap, hosts: &[String]) -> bool {
     }
 }
 
-/// The host name a request names, as [`admitted`] reads it.
-fn request_host(headers: &HeaderMap) -> Option<&str> {
-    headers.get(header::HOST)?.to_str().ok().and_then(host_of)
+/// The host and port a request names in `Host`, comparable with the configured origin's: a page
+/// opened at another host or port links to the secure page instead of offering controls its
+/// answer would be refused from.
+fn request_authority(headers: &HeaderMap, party: &crate::passkey::Party) -> Option<String> {
+    let value = headers.get(header::HOST)?.to_str().ok()?;
+    host_of(value)?;
+    Some(crate::passkey::authority_of(value, party.origin.starts_with("https://")))
 }
 
 fn refused() -> Response {
@@ -172,7 +176,7 @@ async fn page_of(
     let server = web.server.clone();
     let owner = match &web.owner {
         // Opened at another address than the secure one, the page links there to answer.
-        Ok(o) if request_host(headers).is_some_and(|h| !h.eq_ignore_ascii_case(&o.party.id)) => {
+        Ok(o) if request_authority(headers, &o.party).is_some_and(|a| a != o.party.authority) => {
             maestro_view::render::Owner::Elsewhere(o.party.origin.clone())
         }
         Ok(o) => o.state(),

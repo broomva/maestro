@@ -236,6 +236,9 @@ async fn an_open_decision_takes_its_answer_in_place_once_a_passkey_is_set_up() {
     let inputs: Vec<&str> = r.body.split("<input").skip(1).map(|t| t.split('>').next().unwrap_or("")).collect();
     assert!(!inputs.is_empty() && inputs.iter().all(|t| !t.contains("checked")), "preselected");
     assert!(!r.body.contains("t3code://") && !r.body.contains("data-handoff"));
+    // The right host on another port is another address too.
+    let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", "localhost:8181", &[]).await;
+    assert!(!r.body.contains(r#"name="mv-answer-option""#), "controls offered on another port");
     // At another address than the secure one, the page links there instead.
     let r = send(addr, "GET", "/decisions/demo-arc.yaml/merge-now", &addr.to_string(), &[]).await;
     assert_page(&r, "elsewhere", "/decisions");

@@ -35,6 +35,8 @@ pub fn owner_dir() -> PathBuf {
 pub struct Party {
     pub origin: String,
     pub id: String,
+    /// The host and port a request to the origin names in `Host`: lowercase, with no default port.
+    pub authority: String,
 }
 
 impl Party {
@@ -53,7 +55,26 @@ impl Party {
             "http" if host == "localhost" => {}
             _ => return Err(format!("{origin:?}: a passkey needs https, or http on localhost")),
         }
-        Ok(Self { origin: origin.to_string(), id: host.to_ascii_lowercase() })
+        let authority = authority_of(rest, scheme == "https");
+        Ok(Self { origin: origin.to_string(), id: host.to_ascii_lowercase(), authority })
+    }
+}
+
+/// A `Host` value as a comparable authority: lowercase, one trailing dot of the name dropped, and
+/// the scheme's default port (443 for https, else 80) dropped, as a browser omits it.
+pub fn authority_of(value: &str, https: bool) -> String {
+    let v = value.to_ascii_lowercase();
+    let (host, port) = match v.rsplit_once(':') {
+        Some((h, p)) if !h.ends_with(']') || h.starts_with('[') && !p.contains(']') => {
+            (h.to_string(), Some(p.to_string()))
+        }
+        _ => (v.clone(), None),
+    };
+    let host = host.strip_suffix('.').unwrap_or(&host).to_string();
+    match port.as_deref() {
+        Some(p) if p == if https { "443" } else { "80" } => host,
+        Some(p) => format!("{host}:{p}"),
+        None => host,
     }
 }
 
@@ -374,6 +395,15 @@ pub(crate) mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn the_authority_keeps_the_port_but_not_the_default_one() {
+        assert_eq!(Party::parse("https://Mac.example.ts.net:7443").unwrap().authority, "mac.example.ts.net:7443");
+        assert_eq!(Party::parse("https://mac.example.ts.net").unwrap().authority, "mac.example.ts.net");
+        assert_eq!(authority_of("MAC.example.ts.net.:443", true), "mac.example.ts.net");
+        assert_eq!(authority_of("localhost:8181", false), "localhost:8181");
+        assert_ne!(authority_of("localhost:8181", false), Party::parse("http://localhost:7171").unwrap().authority);
     }
 
     #[test]
