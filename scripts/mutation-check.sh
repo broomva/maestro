@@ -1729,6 +1729,7 @@ mutate $asks '            Ok(Some(sha)) => sha,
 mutate $tree '        Some(2) => return Ok(None),
         _ => return Err(format!("`{refname}` does not read: {}", String::from_utf8_lossy(&err).trim())),' '        _ => return Ok(None),'
 mutate $tree '    if !status.success() || !hex || !(id.len() == 40 || id.len() == 64) {' '    if false {'
+mutate $tree '    let (status, out, _) = run_bounded(cmd, "git rev-parse", 256, timeout)?;' '    let (status, out, _) = run_bounded(cmd, "git rev-parse", 256, Duration::from_secs(30))?;'
 mutate $asks '            let at = format!("main@{sha}:{}", rec.ledger);
             return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());' '            let _ = format!("main@{sha}:{}", rec.ledger);'
 mutate $asks '        Err(_) => return Err(unread().into()),' '        Err(_) => {}'

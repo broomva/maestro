@@ -576,7 +576,9 @@ pub fn has_object(root: &Path, id: &str, timeout: Duration) -> Result<bool, Stri
 /// The commit the local ref `refname` names, both git calls bounded by `timeout` ([`run_bounded`]:
 /// a FIFO planted where git looks cannot hang them). `Ok(None)` only when the ref is absent
 /// (`show-ref --exists` says 2); a ref that is there and broken, or names no commit, is an error,
-/// never "absent". Present, not trusted: read what it names with [`read_verified`].
+/// never "absent". Present, not trusted: read what it names with [`read_verified`]. Needs git >=
+/// 2.43 for `show-ref --exists`, as [`Tree::has_ref`] does; an older git is an error here, so a
+/// guard built on it refuses rather than reading every ref as absent.
 pub fn local_commit(root: &Path, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
     if refname.starts_with('-') {
         return Err(format!("`{refname}` is not a ref name"));
