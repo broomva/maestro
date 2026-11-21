@@ -272,7 +272,7 @@ mutate $ow '        lock.try_lock().map_err(|_| "another Maestro daemon already 
 mutate $ow '        let r = self.book.undo(id, now_ms, || answers::mark_undone(&self.dir, id))?;' '        let r = self.book.undo(id, now_ms, || Ok(()))?;'
 mutate $ans '            Stage::Undone => return Ok(r.clone()),' '            Stage::Undone => return Err("again".into()),'
 mutate $ans '        if now_ms >= r.applies_at_ms {' '        if false {'
-mutate $ans '        if r.stage != Stage::Signed {' '        if false {'
+mutate $ans '            _ => return Err("it was already written".into()),' '            _ => {}'
 mutate $ans '        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?;' '        let r = m.get_mut(id)?;'
 mutate $ans '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
 mutate $ans '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''
@@ -285,7 +285,7 @@ mutate $ans '    if !done.is_empty() {
         return Ok(done);' '    if false {
         return Ok(done);'
 mutate $sans '    if ask.hash() != hash {' '    if false {'
-mutate $decision '        cx.web.is_none() && state == AskState::Open && landing == Landing::NotSeen && !a.options.is_empty()' '        true'
+mutate $decision '.filter(|_| cx.web.is_none() && state == AskState::Open && landing == Landing::NotSeen && !a.options.is_empty())' '.filter(|_| true)'
 mutate $sans '    if ask.state() != AskState::Open {' '    if false {'
 mutate $sans '        } else if a.hash() != b.hash() {' '        } else if false {'
 mutate $sans '                && a.answer_option.as_deref() == Some(option)' '                && true'
