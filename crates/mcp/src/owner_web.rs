@@ -68,6 +68,7 @@ impl Owner {
     pub fn new(party: Party, dir: PathBuf, writer: Writer) -> Self {
         let owner =
             Owner { party, dir, writer, book: Book::default(), pending: Arc::default(), enroll_code: Arc::default() };
+        owner.recover();
         if Keyring::load(&owner.dir).is_ok_and(|k| k.credentials.is_empty()) {
             let code = passkey::nonce()[..8].to_ascii_uppercase();
             eprintln!("maestro: set up the owner's passkey at {}/owner with the code {code}", owner.party.origin);
@@ -76,6 +77,45 @@ impl Owner {
             *owner.enroll_code.lock().expect("fresh") = Some(code);
         }
         owner
+    }
+
+    /// Pending answers left by a stopped daemon: each is written once its window has closed, or
+    /// at once if it already has. Needs a running Tokio runtime; without one (a unit test) none is resumed.
+    fn recover(&self) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        for p in answers::pending(&self.dir) {
+            self.book.put(p.receipt.clone());
+            let wait = (p.receipt.applies_at_ms - jiff::Timestamp::now().as_millisecond()).max(0) as u64;
+            let owner = self.clone();
+            rt.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    answers::apply(
+                        &owner.writer,
+                        &owner.book,
+                        &p.receipt.id,
+                        &p.assertion,
+                        &p.nonce,
+                        &p.by,
+                        p.session.as_deref(),
+                    )
+                })
+                .await;
+            });
+        }
+    }
+
+    /// A receipt by id: the running daemon's, else the last one logged.
+    pub fn receipt(&self, id: &str) -> Option<Receipt> {
+        self.book.get(id).or_else(|| answers::logged(&self.dir, id))
+    }
+
+    /// Undo inside the window; the pending record is settled so a restart does not write it.
+    pub fn undo(&self, id: &str, now_ms: i64) -> Result<Receipt, String> {
+        let r = self.book.undo(id, now_ms)?;
+        answers::settle(&self.dir, id);
+        let _ = answers::log(&self.dir, &r);
+        Ok(r)
     }
 
     /// The setup code, for tests.
@@ -198,10 +238,22 @@ impl Owner {
             landing: None,
             error: None,
         };
-        self.book.put(receipt.clone());
-        answers::log(&self.dir, &receipt);
-        let (owner, id, assertion, nonce) = (self.clone(), receipt.id.clone(), a.clone(), nonce.to_string());
         let by = format!("owner (passkey {})", &cred.id[..cred.id.len().min(8)]);
+        // Durable before acknowledged: a restart inside or after the window resumes it.
+        let pending = answers::Pending {
+            receipt: receipt.clone(),
+            assertion: a.clone(),
+            nonce: nonce.to_string(),
+            by: by.clone(),
+            session: session.clone(),
+        };
+        answers::persist(&self.dir, &pending)?;
+        if let Err(e) = answers::log(&self.dir, &receipt) {
+            answers::settle(&self.dir, &receipt.id);
+            return Err(e);
+        }
+        self.book.put(receipt.clone());
+        let (owner, id, assertion, nonce) = (self.clone(), receipt.id.clone(), a.clone(), nonce.to_string());
         tokio::spawn(async move {
             tokio::time::sleep(answers::UNDO).await;
             let _ = tokio::task::spawn_blocking(move || {

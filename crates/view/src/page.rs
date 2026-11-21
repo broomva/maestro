@@ -262,11 +262,14 @@ pub fn owner(state: &OwnerPage, shell: &Shell) -> String {
                     button class="mv-go" type="button" data-enroll="true" { "Set up with Touch ID or Face ID" }
                     p class="mv-answer-status" data-enroll-status="true" role="status" aria-live="polite" {}
                 },
-                OwnerPage::Enrolled(n) => {
+                OwnerPage::Enrolled(when) => {
                     h1 class="mv-owner-title" { "Your passkey is set up" }
                     p class="mv-owner-sub" {
-                        (n) @if *n == 1 { " passkey is" } @else { " passkeys are" } " enrolled. "
-                        "Decisions take your answer in place; each answer asks for Touch ID or Face ID."
+                        "Decisions take your answer in place; each answer asks for Touch ID or Face ID. "
+                        "If a passkey below was not set up by you, tell Maestro's maintainer before answering."
+                    }
+                    ul class="mv-owner-keys" {
+                        @for at in when { li class="bv-code" { "Set up " (at) } }
                     }
                     a class="mv-go" href="/decisions" { "Go to decisions" }
                 },
@@ -281,7 +284,8 @@ pub fn owner(state: &OwnerPage, shell: &Shell) -> String {
 pub enum OwnerPage {
     Off(String),
     Enroll,
-    Enrolled(usize),
+    /// When each enrolled passkey was set up, so one the owner did not add is visible.
+    Enrolled(Vec<String>),
 }
 
 /// The web app manifest: a name and the start page, no icons a browser would fetch.

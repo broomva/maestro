@@ -281,3 +281,4 @@ body.mv-web { padding: 0; min-height: 100vh; }
   .mv-go { min-height: 44px; font-size: 15px; }
   .mv-answer-how { flex-basis: 100%; font-size: 12px; }
 }
+.mv-owner-keys { margin: 0; padding: 0; list-style: none; font-size: 13px; color: var(--mv-ink3); }

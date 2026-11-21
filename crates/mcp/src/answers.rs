@@ -57,6 +57,8 @@ impl Intent {
 pub enum Stage {
     /// Signed and held for the undo window.
     Signed,
+    /// The window closed and the write began: it can no longer be undone.
+    Applying,
     /// Undone inside the window: nothing was written.
     Undone,
     /// Written to `maestro/answers`: in effect.
@@ -132,20 +134,75 @@ impl Book {
         Ok(r.clone())
     }
 
-    /// Take a signed receipt to write once its window has closed: `None` if it was undone.
+    /// Take a signed receipt to write once its window has closed, turning it `Applying` under
+    /// the lock undo takes, so an undo either lands before this or is refused: `None` if undone.
     fn take_due(&self, id: &str) -> Option<Receipt> {
-        let m = self.inner.lock().ok()?;
-        m.get(id).filter(|r| r.stage == Stage::Signed).cloned()
+        let mut m = self.inner.lock().ok()?;
+        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?;
+        r.stage = Stage::Applying;
+        Some(r.clone())
     }
 }
 
-/// Append a receipt to the log.
-pub fn log(owner_dir: &Path, r: &Receipt) {
+/// Append a receipt to the log, synced to disk.
+pub fn log(owner_dir: &Path, r: &Receipt) -> Result<(), String> {
     use std::io::Write;
-    let _ = std::fs::create_dir_all(owner_dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(owner_dir.join("receipts.jsonl")) {
-        let _ = writeln!(f, "{}", serde_json::to_string(r).unwrap_or_default());
-    }
+    std::fs::create_dir_all(owner_dir).map_err(|e| format!("receipts: {e}"))?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(owner_dir.join("receipts.jsonl"))
+        .map_err(|e| format!("receipts: {e}"))?;
+    writeln!(f, "{}", serde_json::to_string(r).map_err(|e| e.to_string())?).map_err(|e| format!("receipts: {e}"))?;
+    f.sync_data().map_err(|e| format!("receipts: {e}"))
+}
+
+/// The last logged state of receipt `id`, for a receipt the running daemon does not hold.
+pub fn logged(owner_dir: &Path, id: &str) -> Option<Receipt> {
+    let text = std::fs::read_to_string(owner_dir.join("receipts.jsonl")).ok()?;
+    text.lines().rev().filter_map(|l| serde_json::from_str::<Receipt>(l).ok()).find(|r| r.id == id)
+}
+
+/// A signed answer not yet settled: everything needed to write it after a restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    pub receipt: Receipt,
+    pub assertion: Assertion,
+    pub nonce: String,
+    pub by: String,
+    pub session: Option<String>,
+}
+
+fn pending_dir(owner_dir: &Path) -> PathBuf {
+    owner_dir.join("pending")
+}
+
+/// Persist a pending answer before it is acknowledged: written whole, synced, then renamed.
+pub fn persist(owner_dir: &Path, p: &Pending) -> Result<(), String> {
+    use std::io::Write;
+    let dir = pending_dir(owner_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("pending: {e}"))?;
+    let tmp = dir.join(format!(".{}.tmp", p.receipt.id));
+    let mut f = std::fs::File::create(&tmp).map_err(|e| format!("pending: {e}"))?;
+    f.write_all(serde_json::to_string(p).map_err(|e| e.to_string())?.as_bytes())
+        .map_err(|e| format!("pending: {e}"))?;
+    f.sync_all().map_err(|e| format!("pending: {e}"))?;
+    std::fs::rename(&tmp, dir.join(format!("{}.json", p.receipt.id))).map_err(|e| format!("pending: {e}"))
+}
+
+/// Settle a pending answer: written, failed or undone, it no longer waits.
+pub fn settle(owner_dir: &Path, id: &str) {
+    let _ = std::fs::remove_file(pending_dir(owner_dir).join(format!("{id}.json")));
+}
+
+/// Every pending answer on disk, for recovery at start.
+pub fn pending(owner_dir: &Path) -> Vec<Pending> {
+    let Ok(dir) = std::fs::read_dir(pending_dir(owner_dir)) else { return Vec::new() };
+    dir.filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .filter_map(|e| std::fs::read(e.path()).ok())
+        .filter_map(|b| serde_json::from_slice(&b).ok())
+        .collect()
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -190,8 +247,10 @@ fn landing_pr(dir: &Path) -> Result<Option<String>, String> {
     Ok((!n.is_empty()).then_some(n))
 }
 
-/// Maestro's checkout, made if missing, at the base the answer goes on: `maestro/answers` while
-/// a landing PR holds answers main lacks, else main itself. Returns the lease for the push.
+/// Maestro's checkout, made if missing, reset to a clean tree (nothing staged, nothing untracked)
+/// at the base the answer goes on: `maestro/answers` with main merged in when the branch exists,
+/// so an answer it holds that main lacks is kept, never pushed over; else main itself. Returns
+/// the branch's tip when it exists.
 fn prepare(w: &Writer) -> Result<Option<String>, String> {
     if !w.checkout.join(".git").exists() {
         if let Some(parent) = w.checkout.parent() {
@@ -199,42 +258,71 @@ fn prepare(w: &Writer) -> Result<Option<String>, String> {
         }
         git(&w.workspace, &["worktree", "add", "--detach", &w.checkout.to_string_lossy(), "HEAD"])?;
     }
-    let remote_answers = if w.remote {
+    // Whatever another process left here, staged or not, is dropped before anything is written.
+    let _ = git(&w.checkout, &["merge", "--abort"]);
+    git(&w.checkout, &["reset", "-q", "--hard"])?;
+    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;
+    let tip = if w.remote {
         git(&w.checkout, &["fetch", "-q", "origin", "main"])?;
-        let has = !git(&w.checkout, &["ls-remote", "--heads", "origin", BRANCH])?.is_empty();
-        if has {
+        if git(&w.checkout, &["ls-remote", "--heads", "origin", BRANCH])?.is_empty() {
+            None
+        } else {
             git(
                 &w.checkout,
                 &["fetch", "-q", "origin", &format!("+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")],
             )?;
             Some(git(&w.checkout, &["rev-parse", &format!("refs/remotes/origin/{BRANCH}")])?)
-        } else {
-            None
         }
     } else {
         None
     };
     let main = if w.remote { "refs/remotes/origin/main" } else { "HEAD" };
-    let pending = match &remote_answers {
-        Some(_) if w.remote => landing_pr(&w.checkout)?.is_some(),
-        _ => false,
-    };
-    if let (Some(tip), true) = (&remote_answers, pending) {
-        git(&w.checkout, &["checkout", "-q", "--detach", tip])?;
-        if let Err(e) = git(&w.checkout, &["merge", "-q", "--no-edit", main]) {
-            let _ = git(&w.checkout, &["merge", "--abort"]);
-            return Err(format!("main does not merge into {BRANCH}: {e}"));
+    match &tip {
+        Some(tip) => {
+            git(&w.checkout, &["checkout", "-q", "--detach", tip])?;
+            let merged = git(
+                &w.checkout,
+                &[
+                    "-c",
+                    "user.name=Maestro",
+                    "-c",
+                    "user.email=maestro@broomva.local",
+                    "merge",
+                    "-q",
+                    "--no-edit",
+                    main,
+                ],
+            );
+            if let Err(e) = merged {
+                let _ = git(&w.checkout, &["merge", "--abort"]);
+                return Err(format!("main does not merge into {BRANCH}: {e}"));
+            }
         }
-    } else {
-        let at = git(&w.checkout, &["rev-parse", main])?;
-        git(&w.checkout, &["checkout", "-q", "--detach", &at])?;
+        None => {
+            let at = git(&w.checkout, &["rev-parse", main])?;
+            git(&w.checkout, &["checkout", "-q", "--detach", &at])?;
+        }
     }
-    Ok(remote_answers)
+    Ok(tip)
 }
 
-/// Write one signed answer: the ledger edit, a commit carrying the proof, the push.
+/// One write at a time across every Maestro process: an exclusive lock on a file beside the checkout.
+fn exclusive(w: &Writer) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(&w.owner_dir).map_err(|e| e.to_string())?;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(w.owner_dir.join("write.lock"))
+        .map_err(|e| format!("write lock: {e}"))?;
+    f.lock().map_err(|e| format!("write lock: {e}"))?;
+    Ok(f)
+}
+
+/// Write one signed answer: the ledger edit, a commit carrying the proof and nothing else, the push.
 pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &str) -> Result<String, String> {
-    let lease = prepare(w)?;
+    let _lock = exclusive(w)?;
+    let tip = prepare(w)?;
     let rel = format!("{}/{}", w.asks, r.intent.ledger);
     let path = w.checkout.join(&rel);
     let source = std::fs::read_to_string(&path).map_err(|e| format!("{rel}: {e}"))?;
@@ -247,27 +335,34 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
     let select = maestro_store::answer::Select { handle: &r.intent.handle };
     let edited =
         maestro_store::answer::answered(&source, &rel, &select, &r.intent.hash, &answer).map_err(|e| e.to_string())?;
-    std::fs::write(&path, edited).map_err(|e| format!("{rel}: {e}"))?;
-    // The validator of record has the last word on the ledger.
-    let validator = w.checkout.join("scripts/ask_ledger.py");
-    if validator.exists() {
-        let out = Command::new("python3").arg(&validator).arg("validate").arg(&path).current_dir(&w.checkout).output();
-        match out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                let _ = git(&w.checkout, &["checkout", "--", &rel]);
-                return Err(format!(
-                    "the ledger validator refused the answer: {}",
-                    String::from_utf8_lossy(&o.stdout).trim()
-                ));
-            }
-            Err(e) => {
-                let _ = git(&w.checkout, &["checkout", "--", &rel]);
-                return Err(format!("the ledger validator did not run: {e}"));
-            }
+    // The validator of record has the last word, and without it nothing is written. As Maestro's
+    // ask writer does, the answer is refused for any error the ledger did not already have.
+    let validate = |text: &str| -> Result<(bool, Vec<String>), String> {
+        std::fs::write(&path, text).map_err(|e| format!("{rel}: {e}"))?;
+        let o = Command::new("python3")
+            .arg(w.checkout.join("scripts/ask_ledger.py"))
+            .arg("validate")
+            .arg(&path)
+            .current_dir(&w.checkout)
+            .output()
+            .map_err(|e| format!("the ledger validator did not run: {e}"))?;
+        // Exit 2 or above is the validator failing to run (a missing file, a crash), not a verdict.
+        if o.status.code().is_none_or(|c| c > 1) {
+            return Err(format!("the ledger validator did not run: {}", String::from_utf8_lossy(&o.stderr).trim()));
         }
+        let lines = String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect();
+        Ok((o.status.success(), lines))
+    };
+    let (_, before) = validate(&source)?;
+    let (ok, after) = validate(&edited)?;
+    let new: Vec<&String> = after.iter().filter(|l| !before.contains(l)).collect();
+    if !ok && !new.is_empty() {
+        let _ = std::fs::write(&path, &source);
+        return Err(format!(
+            "the ledger validator refused the answer: {}",
+            new.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("; ")
+        ));
     }
-    // The intent exactly as signed (its canonical text), so the proof re-checks byte for byte.
     let proof = serde_json::json!({ "intent": r.intent.canonical(), "nonce": nonce, "assertion": assertion });
     let message = format!(
         "answers: {}#{} -> {}\n\nThe owner answered with a passkey; Maestro wrote it (BRO-4042).\n\nMaestro-Answer: {}\nMaestro-Owner-Proof: {}\n",
@@ -278,14 +373,33 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
         serde_json::to_string(&proof).unwrap_or_default()
     );
     git(&w.checkout, &["add", "--", &rel])?;
+    // A pathspec commit takes this one file whatever else is staged.
     git(
         &w.checkout,
-        &["-c", "user.name=Maestro", "-c", "user.email=maestro@broomva.local", "commit", "-q", "-m", &message],
+        &[
+            "-c",
+            "user.name=Maestro",
+            "-c",
+            "user.email=maestro@broomva.local",
+            "commit",
+            "-q",
+            "-m",
+            &message,
+            "--",
+            &rel,
+        ],
     )?;
+    // The commit holds exactly the signed edit: one file, these bytes.
+    let changed = git(&w.checkout, &["diff", "--name-only", "HEAD~1", "HEAD"])?;
+    let committed = git(&w.checkout, &["show", &format!("HEAD:{rel}")])?;
+    if changed != rel || committed != edited.trim() {
+        return Err(format!("the commit is not exactly the signed answer ({changed}); nothing was pushed"));
+    }
     let commit = git(&w.checkout, &["rev-parse", "HEAD"])?;
     if w.remote {
-        let lease = format!("--force-with-lease=refs/heads/{BRANCH}:{}", lease.as_deref().unwrap_or(""));
-        git(&w.checkout, &["push", "-q", &lease, "origin", &format!("HEAD:refs/heads/{BRANCH}")])?;
+        // A fast-forward only: the base holds the branch's tip, so nothing on it is pushed over.
+        let _ = tip;
+        git(&w.checkout, &["push", "-q", "origin", &format!("HEAD:refs/heads/{BRANCH}")])?;
     }
     Ok(commit)
 }
@@ -354,7 +468,8 @@ pub fn land(w: &Writer) -> String {
     }
 }
 
-/// After the window: write, wake, land, logging each stage. Runs on a blocking thread.
+/// After the window: write, wake, land, logging each stage. Runs on a blocking thread. The pending
+/// record is settled only once the outcome is logged, so a crash before that is retried at start.
 pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &str, by: &str, session: Option<&str>) {
     let Some(mut r) = book.take_due(id) else { return };
     match write(w, &r, assertion, nonce, by) {
@@ -362,20 +477,22 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
             r.stage = Stage::Written;
             r.commit = Some(commit.clone());
             book.put(r.clone());
-            log(&w.owner_dir, &r);
+            let _ = log(&w.owner_dir, &r);
+            settle(&w.owner_dir, id);
             r.woke = Some(wake(w.t3.as_deref(), session, &wake_message(&r, &commit)));
             book.put(r.clone());
             if w.remote {
                 r.landing = Some(land(w));
                 book.put(r.clone());
             }
-            log(&w.owner_dir, &r);
+            let _ = log(&w.owner_dir, &r);
         }
         Err(e) => {
             r.stage = Stage::Failed;
             r.error = Some(e);
             book.put(r.clone());
-            log(&w.owner_dir, &r);
+            let _ = log(&w.owner_dir, &r);
+            settle(&w.owner_dir, id);
         }
     }
 }
@@ -418,13 +535,24 @@ mod tests {
         assert!(book.take_due("r1").is_none(), "an undone answer is never written");
     }
 
-    #[test]
-    fn writes_the_answer_in_its_own_checkout_with_the_proof() {
+    const LEDGER: &str = "arc: t\nasks:\n  - id: a\n    ask: \"First?\"\n    options:\n      - id: yes\n        label: \"Yes\"\n      - id: no\n        label: \"No\"\n    origin:\n      session: \"t3:env/thread-1\"\n  - id: b\n    ask: \"Second?\"\n    options:\n      - id: go\n        label: \"Go\"\n";
+
+    /// A workspace repo with the ledger, and a validator that passes (`ok`) or refuses.
+    fn workspace(validator: Option<bool>) -> (tempfile::TempDir, tempfile::TempDir, Writer) {
         let ws = tempfile::tempdir().unwrap();
         let asks = ws.path().join(".control/asks");
         std::fs::create_dir_all(&asks).unwrap();
-        let ledger = "arc: t\nasks:\n  - id: a\n    ask: \"First?\"\n    options:\n      - id: yes\n        label: \"Yes\"\n      - id: no\n        label: \"No\"\n    origin:\n      session: \"t3:env/thread-1\"\n";
-        std::fs::write(asks.join("t.yaml"), ledger).unwrap();
+        std::fs::write(asks.join("t.yaml"), LEDGER).unwrap();
+        if let Some(ok) = validator {
+            std::fs::create_dir_all(ws.path().join("scripts")).unwrap();
+            // The refusing one, like the real one, reports an error only once an answer is in the file.
+            let body = if ok {
+                "import sys\nsys.exit(0)\n".to_string()
+            } else {
+                "import sys\nif 'answer_option' in open(sys.argv[2]).read():\n    print('t.yaml#a: bad answer')\n    sys.exit(1)\nsys.exit(0)\n".to_string()
+            };
+            std::fs::write(ws.path().join("scripts/ask_ledger.py"), body).unwrap();
+        }
         for args in [
             &["init", "-q", "-b", "main"][..],
             &["add", "."],
@@ -432,13 +560,6 @@ mod tests {
         ] {
             git(ws.path(), args).unwrap();
         }
-        let hash = {
-            let l = maestro_store::answer::find;
-            let text = std::fs::read_to_string(asks.join("t.yaml")).unwrap();
-            let parsed: maestro_core::ask::AskLedger =
-                maestro_core::ask::AskLedger::from_value(maestro_store::yaml::parse(&text).unwrap().value).unwrap().0;
-            l(&parsed, &maestro_store::answer::Select { handle: "a" }).unwrap().hash()
-        };
         let state = tempfile::tempdir().unwrap();
         let w = Writer {
             workspace: ws.path().into(),
@@ -448,15 +569,30 @@ mod tests {
             t3: None,
             remote: false,
         };
-        let book = Book::default();
-        book.put(receipt(Intent::answer("t.yaml", "a", &hash, "no", Some("after the soak")), 0));
-        let a = Assertion {
+        (ws, state, w)
+    }
+
+    fn hash_of(handle: &str) -> String {
+        let parsed =
+            maestro_core::ask::AskLedger::from_value(maestro_store::yaml::parse(LEDGER).unwrap().value).unwrap().0;
+        maestro_store::answer::find(&parsed, &maestro_store::answer::Select { handle }).unwrap().hash()
+    }
+
+    fn assertion() -> Assertion {
+        Assertion {
             credential: "c".into(),
             client_data: "d".into(),
             authenticator_data: "e".into(),
             signature: "f".into(),
-        };
-        apply(&w, &book, "r1", &a, "n1", "owner (passkey)", Some("t3:env/thread-1"));
+        }
+    }
+
+    #[test]
+    fn writes_the_answer_in_its_own_checkout_with_the_proof() {
+        let (ws, _state, w) = workspace(Some(true));
+        let book = Book::default();
+        book.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", Some("after the soak")), 0));
+        apply(&w, &book, "r1", &assertion(), "n1", "owner (passkey)", Some("t3:env/thread-1"));
         let r = book.get("r1").unwrap();
         assert_eq!(r.stage, Stage::Written, "{:?}", r.error);
         assert_eq!(r.woke.as_deref(), Some("no T3 CLI is configured"));
@@ -467,12 +603,67 @@ mod tests {
             msg.contains("Maestro-Owner-Proof: {") && msg.contains(r#""intent":"{\"verb\":\"ask.answer\""#),
             "{msg}"
         );
-        // The owner's own checkout is untouched.
-        assert_eq!(std::fs::read_to_string(asks.join("t.yaml")).unwrap(), ledger);
-        // A second answer to the same ask is refused: it is no longer open at the checkout's base,
-        // which in this test is the workspace HEAD, so it reads open again; the hash still binds it.
-        let log = std::fs::read_to_string(w.owner_dir.join("receipts.jsonl")).unwrap();
-        assert_eq!(log.lines().count(), 2);
+        // The owner's own checkout is untouched; the log has the signed line's outcome.
+        assert_eq!(std::fs::read_to_string(ws.path().join(".control/asks/t.yaml")).unwrap(), LEDGER);
+        assert_eq!(logged(&w.owner_dir, "r1").unwrap().stage, Stage::Written);
+    }
+
+    #[test]
+    fn a_change_staged_in_the_checkout_never_rides_along() {
+        let (_ws, _state, w) = workspace(Some(true));
+        // A first answer makes the checkout; then another process stages an unsigned change there.
+        let book = Book::default();
+        book.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", None), 0));
+        apply(&w, &book, "r1", &assertion(), "n1", "owner", None);
+        std::fs::write(w.checkout.join(".control/asks/evil.yaml"), "arc: e\nasks: []\n").unwrap();
+        git(&w.checkout, &["add", "."]).unwrap();
+        let mut r2 = receipt(Intent::answer("t.yaml", "b", &hash_of("b"), "go", None), 0);
+        r2.id = "r2".into();
+        book.put(r2);
+        apply(&w, &book, "r2", &assertion(), "n2", "owner", None);
+        assert_eq!(book.get("r2").unwrap().stage, Stage::Written, "{:?}", book.get("r2").unwrap().error);
+        let files = git(&w.checkout, &["diff", "--name-only", "HEAD~1", "HEAD"]).unwrap();
+        assert_eq!(files, ".control/asks/t.yaml");
+        assert!(!w.checkout.join(".control/asks/evil.yaml").exists());
+    }
+
+    #[test]
+    fn without_the_validator_or_against_it_nothing_is_written() {
+        for validator in [None, Some(false)] {
+            let (_ws, _state, w) = workspace(validator);
+            let book = Book::default();
+            book.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", None), 0));
+            apply(&w, &book, "r1", &assertion(), "n1", "owner", None);
+            let r = book.get("r1").unwrap();
+            assert_eq!(r.stage, Stage::Failed, "{validator:?}");
+            assert!(git(&w.checkout, &["log", "-1", "--format=%s"]).unwrap() == "init", "{validator:?}: committed");
+        }
+    }
+
+    #[test]
+    fn once_the_write_begins_undo_is_refused() {
+        let book = Book::default();
+        book.put(receipt(Intent::answer("l", "a", "h", "no", None), 1_000));
+        assert!(book.take_due("r1").is_some());
+        // Even with a wall clock moved back inside the window.
+        assert!(book.undo("r1", 0).is_err());
+        assert!(book.take_due("r1").is_none(), "taken once");
+    }
+
+    #[test]
+    fn a_pending_answer_survives_on_disk_until_settled() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Pending {
+            receipt: receipt(Intent::answer("l", "a", "h", "no", None), 0),
+            assertion: assertion(),
+            nonce: "n".into(),
+            by: "owner".into(),
+            session: Some("t3:e/t".into()),
+        };
+        persist(d.path(), &p).unwrap();
+        assert_eq!(pending(d.path()), vec![p]);
+        settle(d.path(), "r1");
+        assert!(pending(d.path()).is_empty());
     }
 
     #[test]

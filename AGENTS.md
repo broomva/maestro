@@ -20,6 +20,9 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
   Maestro's own checkout of the workspace, to `maestro/answers` only, never to the owner's
   checkout or to main. Its edit is `maestro_store::answer`, which inserts the answer keys and
   refuses unless every other ask reads back unchanged. Nothing else in Maestro writes an answer.
+  Known limit, accepted by the owner on 2026-11-21 until Maestro runs under its own macOS user: a
+  passkey stops a forged click and an answer by curl, but not an agent running as the owner's OS
+  user that deliberately attacks Maestro's own files or first passkey setup.
 - **No owner verb on a model-visible surface** until an authenticated owner path exists.
   `crates/mcp/tests/dispatch.rs` enforces this, so keep it green and do not weaken it.
 - **Unread is not empty.** Every reader returns a `Section` with its source and errors. Never collapse

@@ -289,7 +289,7 @@ async fn owner_page(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Res
         Err(e) => page::OwnerPage::Off(e.clone()),
         Ok(o) => match crate::passkey::Keyring::load(&o.dir) {
             Ok(k) if k.credentials.is_empty() => page::OwnerPage::Enroll,
-            Ok(k) => page::OwnerPage::Enrolled(k.credentials.len()),
+            Ok(k) => page::OwnerPage::Enrolled(k.credentials.iter().map(|c| c.enrolled_at.clone()).collect()),
             Err(e) => page::OwnerPage::Off(e),
         },
     };
@@ -393,11 +393,8 @@ async fn answer_undo(State(web): State<Web>, uri: Uri, headers: HeaderMap, body:
         Ok(r) => r,
         Err(r) => return r,
     };
-    match owner.book.undo(&req.id, jiff::Timestamp::now().as_millisecond()) {
-        Ok(r) => {
-            crate::answers::log(&owner.dir, &r);
-            json_reply(StatusCode::OK, serde_json::to_value(&r).unwrap_or_default())
-        }
+    match owner.undo(&req.id, jiff::Timestamp::now().as_millisecond()) {
+        Ok(r) => json_reply(StatusCode::OK, serde_json::to_value(&r).unwrap_or_default()),
         Err(e) => refusal(StatusCode::CONFLICT, e),
     }
 }
@@ -407,7 +404,7 @@ async fn answer_receipt(State(web): State<Web>, uri: Uri, headers: HeaderMap, Pa
         Ok(o) => o,
         Err(r) => return r,
     };
-    match owner.book.get(&id) {
+    match owner.receipt(&id) {
         Some(r) => json_reply(StatusCode::OK, serde_json::to_value(&r).unwrap_or_default()),
         None => refusal(StatusCode::NOT_FOUND, "no such answer"),
     }
