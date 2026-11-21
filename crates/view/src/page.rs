@@ -98,8 +98,13 @@ pub const OWNER_JS: &str = include_str!("../assets/owner.js");
 /// The web pages' policy (BRO-3588, BRO-4042): no form may post, no page may frame them, only
 /// the same origin's manifest may load, and the one script that runs is the owner script,
 /// named by its hash, talking only to its own origin.
+/// The CSP source for an inline script: base64 of its SHA-256.
+pub fn script_hash(text: &str) -> String {
+    base64(&Sha256::digest(text.as_bytes()))
+}
+
 static WEB_CSP: LazyLock<String> = LazyLock::new(|| {
-    let hash = base64(&Sha256::digest(OWNER_JS.as_bytes()));
+    let hash = script_hash(OWNER_JS);
     format!(
         "default-src 'none'; style-src 'unsafe-inline'; img-src data:; manifest-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; script-src 'sha256-{hash}'; connect-src 'self'"
     )

@@ -438,7 +438,12 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
     // One script, the owner script its policy names by hash (BRO-4042), and no fetched asset.
     assert_eq!(doc.matches("<script").count(), 1, "one script");
     assert!(doc.contains(&format!("<script>{}</script>", page::OWNER_JS)), "the pinned owner script");
-    assert!(page::web_csp().contains("script-src 'sha256-"), "the script is named by hash");
+    // The policy names exactly the script the page emits.
+    let emitted = doc.split("<script>").nth(1).and_then(|t| t.split("</script>").next()).expect("a script");
+    assert!(
+        page::web_csp().contains(&format!("script-src 'sha256-{}'", page::script_hash(emitted))),
+        "the hash of the emitted script"
+    );
     assert!(!doc.to_ascii_lowercase().contains("url("), "the web page fetches no asset");
 }
 

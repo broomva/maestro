@@ -120,16 +120,22 @@ impl Book {
         }
     }
 
-    /// Undo inside the window: only a receipt still signed turns undone.
-    pub fn undo(&self, id: &str, now_ms: i64) -> Result<Receipt, String> {
+    /// Undo inside the window: only a receipt still signed turns undone, and only once `durable`
+    /// (recording the undo on disk) has succeeded, all under the lock `take_due` takes. So an undo
+    /// is either recorded and honoured, or refused with nothing recorded. Undoing an answer
+    /// already undone is a no-op that succeeds.
+    pub fn undo(&self, id: &str, now_ms: i64, durable: impl FnOnce() -> Result<(), String>) -> Result<Receipt, String> {
         let mut m = self.inner.lock().map_err(|_| "busy".to_string())?;
         let r = m.get_mut(id).ok_or("no such answer")?;
-        if r.stage != Stage::Signed {
-            return Err("it was already written".into());
+        match r.stage {
+            Stage::Undone => return Ok(r.clone()),
+            Stage::Signed => {}
+            _ => return Err("it was already written".into()),
         }
         if now_ms >= r.applies_at_ms {
             return Err("the undo window has closed".into());
         }
+        durable()?;
         r.stage = Stage::Undone;
         Ok(r.clone())
     }
@@ -180,6 +186,9 @@ fn pending_dir(owner_dir: &Path) -> PathBuf {
 /// Persist a pending answer before it is acknowledged: written whole, synced, then renamed.
 pub fn persist(owner_dir: &Path, p: &Pending) -> Result<(), String> {
     use std::io::Write;
+    if !valid_id(&p.receipt.id) {
+        return Err("not an answer id".into());
+    }
     let dir = pending_dir(owner_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("pending: {e}"))?;
     let tmp = dir.join(format!(".{}.tmp", p.receipt.id));
@@ -187,34 +196,51 @@ pub fn persist(owner_dir: &Path, p: &Pending) -> Result<(), String> {
     f.write_all(serde_json::to_string(p).map_err(|e| e.to_string())?.as_bytes())
         .map_err(|e| format!("pending: {e}"))?;
     f.sync_all().map_err(|e| format!("pending: {e}"))?;
-    std::fs::rename(&tmp, dir.join(format!("{}.json", p.receipt.id))).map_err(|e| format!("pending: {e}"))
+    std::fs::rename(&tmp, dir.join(format!("{}.json", p.receipt.id))).map_err(|e| format!("pending: {e}"))?;
+    sync_dir(&dir).map_err(|e| format!("pending: {e}"))
 }
 
 /// Settle a pending answer: written, failed or undone, it no longer waits.
 pub fn settle(owner_dir: &Path, id: &str) {
-    let _ = std::fs::remove_file(pending_dir(owner_dir).join(format!("{id}.json")));
-    let _ = std::fs::remove_file(pending_dir(owner_dir).join(format!("{id}.undo")));
+    if !valid_id(id) {
+        return;
+    }
+    let dir = pending_dir(owner_dir);
+    // The answer first: a crash between the two leaves only a marker, which writes nothing.
+    let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+    let _ = std::fs::remove_file(dir.join(format!("{id}.undo")));
+    let _ = sync_dir(&dir);
+}
+
+/// Whether `id` is a receipt id as Maestro makes them: 16 base64url characters. Only such an
+/// id is ever part of a path; anything else is refused before the file system is touched.
+pub fn valid_id(id: &str) -> bool {
+    id.len() == 16 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// What a write that found its answer undone reports.
 pub const UNDONE: &str = "undone before it was written";
 
-/// Record an undo on disk, durably, before it is acknowledged.
+/// Record an undo on disk, durably (the file and its folder entry), before it is acknowledged.
 pub fn mark_undone(owner_dir: &Path, id: &str) -> Result<(), String> {
+    if !valid_id(id) {
+        return Err("not an answer id".into());
+    }
     let dir = pending_dir(owner_dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("undo: {e}"))?;
     let f = std::fs::File::create(dir.join(format!("{id}.undo"))).map_err(|e| format!("undo: {e}"))?;
-    f.sync_all().map_err(|e| format!("undo: {e}"))
+    f.sync_all().map_err(|e| format!("undo: {e}"))?;
+    sync_dir(&dir).map_err(|e| format!("undo: {e}"))
 }
 
-/// Withdraw an undo marker the write already overtook.
-pub fn unmark_undone(owner_dir: &Path, id: &str) {
-    let _ = std::fs::remove_file(pending_dir(owner_dir).join(format!("{id}.undo")));
+/// Sync a folder, so an entry created, renamed or removed in it survives a crash.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// Whether an undo is recorded on disk for `id`.
 pub fn undone(owner_dir: &Path, id: &str) -> bool {
-    pending_dir(owner_dir).join(format!("{id}.undo")).exists()
+    valid_id(id) && pending_dir(owner_dir).join(format!("{id}.undo")).exists()
 }
 
 /// Every pending answer on disk, for recovery at start.
@@ -419,15 +445,28 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
     )?;
     // The commit holds exactly the signed edit: one file, these bytes.
     let changed = git(&w.checkout, &["diff", "--name-only", "HEAD~1", "HEAD"])?;
-    let committed = git(&w.checkout, &["show", &format!("HEAD:{rel}")])?;
-    if changed != rel || committed != edited.trim() {
+    let committed = Command::new("git")
+        .arg("-C")
+        .arg(&w.checkout)
+        .args(["cat-file", "blob", &format!("HEAD:{rel}")])
+        .output()
+        .map_err(|e| format!("git cat-file: {e}"))?
+        .stdout;
+    if changed != rel || committed != edited.as_bytes() {
         return Err(format!("the commit is not exactly the signed answer ({changed}); nothing was pushed"));
     }
     let commit = git(&w.checkout, &["rev-parse", "HEAD"])?;
     if w.remote {
         // A fast-forward only: the base holds the branch's tip, so nothing on it is pushed over.
         let _ = tip;
-        git(&w.checkout, &["push", "-q", "origin", &format!("HEAD:refs/heads/{BRANCH}")])?;
+        if let Err(e) = git(&w.checkout, &["push", "-q", "origin", &format!("HEAD:refs/heads/{BRANCH}")]) {
+            // The remote may have taken it before the reply was lost: its tip decides.
+            let remote =
+                git(&w.checkout, &["ls-remote", "origin", &format!("refs/heads/{BRANCH}")]).unwrap_or_default();
+            if remote.split_whitespace().next() != Some(commit.as_str()) {
+                return Err(e);
+            }
+        }
     }
     Ok(commit)
 }
@@ -455,8 +494,9 @@ pub fn wake_message(r: &Receipt, commit: &str) -> String {
     format!(
         "[maestro] The owner answered your ask {}#{}: {} (option `{}`).{note}\n\
          They signed it with their passkey and Maestro wrote it to `{BRANCH}` at {commit}, so it is in effect now. \
-         A landing PR brings it to main; do not wait for it. Resume the work this ask held, acting on the answer.",
-        r.intent.ledger, r.intent.handle, r.label, r.intent.option
+         A landing PR brings it to main; do not wait for it. Resume the work this ask held, acting on the answer.\n\
+         Answer id {}: if you already acted on this id, this is a repeat after a restart; ignore it.",
+        r.intent.ledger, r.intent.handle, r.label, r.intent.option, r.id
     )
 }
 
@@ -529,10 +569,11 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
                 r.landing = Some(land(w));
                 book.put(r.clone());
             }
-            let _ = log(&w.owner_dir, &r);
-            // Settled last: a crash before this resumes the answer, which is found written by its
-            // id, and the wake and the landing are tried again.
-            settle(&w.owner_dir, id);
+            // Settled last, and only once the final receipt is on disk: a crash before this resumes
+            // the answer, which is found written by its id, and the wake and the landing are tried again.
+            if log(&w.owner_dir, &r).is_ok() {
+                settle(&w.owner_dir, id);
+            }
         }
         Err(e) if e == UNDONE => {
             r.stage = Stage::Undone;
@@ -556,7 +597,7 @@ mod tests {
 
     fn receipt(intent: Intent, now_ms: i64) -> Receipt {
         Receipt {
-            id: "r1".into(),
+            id: "r1AAAAAAAAAAAAAA".into(),
             intent,
             label: "No".into(),
             stage: Stage::Signed,
@@ -582,10 +623,14 @@ mod tests {
     fn undo_works_only_inside_the_window_and_only_once() {
         let book = Book::default();
         book.put(receipt(Intent::answer("l", "a", "h", "no", None), 1_000));
-        assert!(book.undo("r1", 9_001).is_err(), "after the window");
-        assert_eq!(book.undo("r1", 2_000).unwrap().stage, Stage::Undone);
-        assert!(book.undo("r1", 2_000).is_err(), "twice");
-        assert!(book.take_due("r1").is_none(), "an undone answer is never written");
+        assert!(book.undo("r1AAAAAAAAAAAAAA", 9_001, || Ok(())).is_err(), "after the window");
+        assert_eq!(book.undo("r1AAAAAAAAAAAAAA", 2_000, || Ok(())).unwrap().stage, Stage::Undone);
+        assert_eq!(
+            book.undo("r1AAAAAAAAAAAAAA", 2_000, || Err("never called".into())).unwrap().stage,
+            Stage::Undone,
+            "twice is a no-op"
+        );
+        assert!(book.take_due("r1AAAAAAAAAAAAAA").is_none(), "an undone answer is never written");
     }
 
     const LEDGER: &str = "arc: t\nasks:\n  - id: a\n    ask: \"First?\"\n    options:\n      - id: yes\n        label: \"Yes\"\n      - id: no\n        label: \"No\"\n    origin:\n      session: \"t3:env/thread-1\"\n  - id: b\n    ask: \"Second?\"\n    options:\n      - id: go\n        label: \"Go\"\n";
@@ -648,8 +693,8 @@ mod tests {
         let (ws, _state, w) = workspace(Some(true));
         let book = Book::default();
         book.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", Some("after the soak")), 0));
-        apply(&w, &book, "r1", &assertion(), "n1", "owner (passkey)", Some("t3:env/thread-1"));
-        let r = book.get("r1").unwrap();
+        apply(&w, &book, "r1AAAAAAAAAAAAAA", &assertion(), "n1", "owner (passkey)", Some("t3:env/thread-1"));
+        let r = book.get("r1AAAAAAAAAAAAAA").unwrap();
         assert_eq!(r.stage, Stage::Written, "{:?}", r.error);
         assert_eq!(r.woke.as_deref(), Some("no T3 CLI is configured"));
         let written = std::fs::read_to_string(w.checkout.join(".control/asks/t.yaml")).unwrap();
@@ -661,7 +706,7 @@ mod tests {
         );
         // The owner's own checkout is untouched; the log has the signed line's outcome.
         assert_eq!(std::fs::read_to_string(ws.path().join(".control/asks/t.yaml")).unwrap(), LEDGER);
-        assert_eq!(logged(&w.owner_dir, "r1").unwrap().stage, Stage::Written);
+        assert_eq!(logged(&w.owner_dir, "r1AAAAAAAAAAAAAA").unwrap().stage, Stage::Written);
     }
 
     #[test]
@@ -670,14 +715,19 @@ mod tests {
         // A first answer makes the checkout; then another process stages an unsigned change there.
         let book = Book::default();
         book.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", None), 0));
-        apply(&w, &book, "r1", &assertion(), "n1", "owner", None);
+        apply(&w, &book, "r1AAAAAAAAAAAAAA", &assertion(), "n1", "owner", None);
         std::fs::write(w.checkout.join(".control/asks/evil.yaml"), "arc: e\nasks: []\n").unwrap();
         git(&w.checkout, &["add", "."]).unwrap();
         let mut r2 = receipt(Intent::answer("t.yaml", "b", &hash_of("b"), "go", None), 0);
-        r2.id = "r2".into();
+        r2.id = "r2AAAAAAAAAAAAAA".into();
         book.put(r2);
-        apply(&w, &book, "r2", &assertion(), "n2", "owner", None);
-        assert_eq!(book.get("r2").unwrap().stage, Stage::Written, "{:?}", book.get("r2").unwrap().error);
+        apply(&w, &book, "r2AAAAAAAAAAAAAA", &assertion(), "n2", "owner", None);
+        assert_eq!(
+            book.get("r2AAAAAAAAAAAAAA").unwrap().stage,
+            Stage::Written,
+            "{:?}",
+            book.get("r2AAAAAAAAAAAAAA").unwrap().error
+        );
         let files = git(&w.checkout, &["diff", "--name-only", "HEAD~1", "HEAD"]).unwrap();
         assert_eq!(files, ".control/asks/t.yaml");
         assert!(!w.checkout.join(".control/asks/evil.yaml").exists());
@@ -688,16 +738,16 @@ mod tests {
         let (_ws, _state, w) = workspace(Some(true));
         let book = Book::default();
         book.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", None), 0));
-        apply(&w, &book, "r1", &assertion(), "n1", "owner", None);
-        let first = book.get("r1").unwrap().commit.unwrap();
+        apply(&w, &book, "r1AAAAAAAAAAAAAA", &assertion(), "n1", "owner", None);
+        let first = book.get("r1AAAAAAAAAAAAAA").unwrap().commit.unwrap();
         // The daemon restarts before settling: the same signed receipt is applied again.
         let again = Book::default();
         again.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", None), 0));
         // Locally the base is the workspace HEAD, which lacks the first commit; build on it instead.
         git(&w.workspace, &["fetch", "-q", &w.checkout.to_string_lossy(), &first]).unwrap();
         git(&w.workspace, &["merge", "-q", "--ff-only", &first]).unwrap();
-        apply(&w, &again, "r1", &assertion(), "n1", "owner", None);
-        let r = again.get("r1").unwrap();
+        apply(&w, &again, "r1AAAAAAAAAAAAAA", &assertion(), "n1", "owner", None);
+        let r = again.get("r1AAAAAAAAAAAAAA").unwrap();
         assert_eq!((r.stage, r.commit.as_deref()), (Stage::Written, Some(first.as_str())), "{:?}", r.error);
     }
 
@@ -707,8 +757,8 @@ mod tests {
             let (_ws, _state, w) = workspace(validator);
             let book = Book::default();
             book.put(receipt(Intent::answer("t.yaml", "a", &hash_of("a"), "no", None), 0));
-            apply(&w, &book, "r1", &assertion(), "n1", "owner", None);
-            let r = book.get("r1").unwrap();
+            apply(&w, &book, "r1AAAAAAAAAAAAAA", &assertion(), "n1", "owner", None);
+            let r = book.get("r1AAAAAAAAAAAAAA").unwrap();
             assert_eq!(r.stage, Stage::Failed, "{validator:?}");
             assert!(git(&w.checkout, &["log", "-1", "--format=%s"]).unwrap() == "init", "{validator:?}: committed");
         }
@@ -738,10 +788,10 @@ mod tests {
     fn once_the_write_begins_undo_is_refused() {
         let book = Book::default();
         book.put(receipt(Intent::answer("l", "a", "h", "no", None), 1_000));
-        assert!(book.take_due("r1").is_some());
+        assert!(book.take_due("r1AAAAAAAAAAAAAA").is_some());
         // Even with a wall clock moved back inside the window.
-        assert!(book.undo("r1", 0).is_err());
-        assert!(book.take_due("r1").is_none(), "taken once");
+        assert!(book.undo("r1AAAAAAAAAAAAAA", 0, || panic!("an undo refused records nothing")).is_err());
+        assert!(book.take_due("r1AAAAAAAAAAAAAA").is_none(), "taken once");
     }
 
     #[test]
@@ -756,7 +806,7 @@ mod tests {
         };
         persist(d.path(), &p).unwrap();
         assert_eq!(pending(d.path()), vec![p]);
-        settle(d.path(), "r1");
+        settle(d.path(), "r1AAAAAAAAAAAAAA");
         assert!(pending(d.path()).is_empty());
     }
 

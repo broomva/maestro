@@ -141,21 +141,16 @@ impl Owner {
         self.book.get(id).or_else(|| answers::logged(&self.dir, id))
     }
 
-    /// Undo inside the window; the pending record is settled so a restart does not write it.
+    /// Undo inside the window, recorded on disk so neither the write nor a restart applies it.
     pub fn undo(&self, id: &str, now_ms: i64) -> Result<Receipt, String> {
-        // Durable first: the write checks this marker under its lock, here and after a restart.
-        answers::mark_undone(&self.dir, id)?;
-        match self.book.undo(id, now_ms) {
-            Ok(r) => {
-                let _ = answers::log(&self.dir, &r);
-                Ok(r)
-            }
-            Err(e) => {
-                // The write began first: the marker is withdrawn and the answer stands.
-                answers::unmark_undone(&self.dir, id);
-                Err(e)
-            }
+        if !answers::valid_id(id) {
+            return Err("not an answer id".into());
         }
+        // The marker is written inside the state change, under the lock the write's claim takes:
+        // recorded and honoured (here, by the write, and after a restart), or refused with nothing recorded.
+        let r = self.book.undo(id, now_ms, || answers::mark_undone(&self.dir, id))?;
+        let _ = answers::log(&self.dir, &r);
+        Ok(r)
     }
 
     /// The setup code, for tests.
@@ -166,7 +161,8 @@ impl Owner {
     /// How the decision pages offer answering.
     pub fn state(&self) -> maestro_view::render::Owner {
         match Keyring::load(&self.dir) {
-            Ok(k) if k.credentials.is_empty() => maestro_view::render::Owner::Enroll,
+            // Ready only with a passkey for this address: one enrolled for another host cannot sign here.
+            Ok(k) if !k.credentials.iter().any(|c| c.rp_id == self.party.id) => maestro_view::render::Owner::Enroll,
             Ok(_) => maestro_view::render::Owner::Ready,
             Err(e) => maestro_view::render::Owner::Off(format!("the enrolled passkeys could not be read ({e})")),
         }
@@ -411,7 +407,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let o = owner(d.path());
         let receipt = Receipt {
-            id: "r1".into(),
+            id: "r1AAAAAAAAAAAAAA".into(),
             intent: Intent::answer("t.yaml", "a", "h", "no", None),
             label: "No".into(),
             stage: Stage::Signed,
@@ -429,11 +425,58 @@ mod tests {
             &answers::Pending { receipt, assertion: a, nonce: "n".into(), by: "o".into(), session: None },
         )
         .unwrap();
-        o.undo("r1", 0).unwrap();
-        assert!(answers::undone(&o.dir, "r1"));
+        o.undo("r1AAAAAAAAAAAAAA", 0).unwrap();
+        assert!(answers::undone(&o.dir, "r1AAAAAAAAAAAAAA"));
+        // A repeated undo keeps the first one's record.
+        o.undo("r1AAAAAAAAAAAAAA", 0).unwrap();
+        assert!(answers::undone(&o.dir, "r1AAAAAAAAAAAAAA"), "a second undo withdrew the first");
         // The write, here or after a restart, finds the marker and writes nothing.
-        let r = answers::write(&o.writer, &o.book.get("r1").unwrap(), &crate::passkey::tests::sign("c"), "n", "o");
+        let r = answers::write(
+            &o.writer,
+            &o.book.get("r1AAAAAAAAAAAAAA").unwrap(),
+            &crate::passkey::tests::sign("c"),
+            "n",
+            "o",
+        );
         assert_eq!(r, Err(answers::UNDONE.to_string()));
+    }
+
+    #[test]
+    fn an_expired_request_is_refused_even_unused() {
+        let d = tempfile::tempdir().unwrap();
+        let o = owner(d.path());
+        keyring().save(&o.dir).unwrap();
+        let intent = Intent::answer("t.yaml", "a", "h", "no", None);
+        let challenge = passkey::challenge(&intent.canonical(), "old");
+        let at = Instant::now().checked_sub(CHALLENGE_TTL + Duration::from_secs(1)).expect("a clock past the TTL");
+        // Inserted directly, so no newer request prunes it first.
+        o.pending.lock().unwrap().insert(
+            "old".into(),
+            Pending::Answer { intent, label: "No".into(), session: None, challenge: challenge.clone(), at },
+        );
+        let now = jiff::Timestamp::from_second(1_800_000_000).unwrap();
+        assert!(o.answer_finish("old", &sign(&challenge), now).is_err());
+    }
+
+    #[test]
+    fn a_receipt_id_that_is_not_one_touches_no_file() {
+        let d = tempfile::tempdir().unwrap();
+        let o = owner(d.path());
+        for bad in ["../../escape", "a/b", "", "AAAAAAAAAAAAAAA/", "AAAAAAAAAAAAAAAAA"] {
+            assert!(o.undo(bad, 0).is_err(), "{bad:?}");
+        }
+        assert!(!d.path().join("escape.undo").exists() && !d.path().join("owner/escape.undo").exists());
+        assert!(answers::valid_id("Ab-_0123456789xy"));
+    }
+
+    #[test]
+    fn a_passkey_for_another_address_does_not_make_answering_ready() {
+        let d = tempfile::tempdir().unwrap();
+        let o = owner(d.path());
+        let mut k = keyring();
+        k.credentials[0].rp_id = "old.example".into();
+        k.save(&o.dir).unwrap();
+        assert_eq!(o.state(), maestro_view::render::Owner::Enroll);
     }
 
     #[test]

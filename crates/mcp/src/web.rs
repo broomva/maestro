@@ -293,7 +293,19 @@ async fn owner_page(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Res
             Err(e) => page::OwnerPage::Off(e),
         },
     };
-    with_headers(page::owner(&state, &page::Shell::default()).into_response(), "text/html; charset=utf-8")
+    // The header from a real read, as on every page, so it never claims a read that was not tried.
+    let server = web.server.clone();
+    let shell = tokio::task::spawn_blocking(move || {
+        let spec = json!({ "root": "page", "blocks": { "page": { "type": "decisions" } } });
+        let v = maestro_view::catalog::validate(&spec).ok()?;
+        let off = maestro_view::render::Owner::Off(String::new());
+        Some(maestro_view::render::render_web(&server.store(), &v, maestro_store::views::now(), off).1)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    with_headers(page::owner(&state, &shell).into_response(), "text/html; charset=utf-8")
 }
 
 async fn enroll_begin(State(web): State<Web>, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
@@ -370,7 +382,11 @@ async fn answer_finish(State(web): State<Web>, uri: Uri, headers: HeaderMap, bod
         Err(r) => return r,
     };
     let now = jiff::Timestamp::now();
-    match owner.answer_finish(&req.nonce, &req.assertion, now) {
+    // Disk writes and syncs: on the blocking pool, as the begin is.
+    let owner = owner.clone();
+    let done = tokio::task::spawn_blocking(move || owner.answer_finish(&req.nonce, &req.assertion, now)).await;
+    let Ok(done) = done else { return refusal(StatusCode::INTERNAL_SERVER_ERROR, "the answer did not finish") };
+    match done {
         Ok(r) => {
             let mut v = serde_json::to_value(&r).unwrap_or_default();
             v["now_ms"] = json!(now.as_millisecond());
@@ -404,6 +420,9 @@ async fn answer_receipt(State(web): State<Web>, uri: Uri, headers: HeaderMap, Pa
         Ok(o) => o,
         Err(r) => return r,
     };
+    if !crate::answers::valid_id(&id) {
+        return refusal(StatusCode::NOT_FOUND, "no such answer");
+    }
     match owner.receipt(&id) {
         Some(r) => json_reply(StatusCode::OK, serde_json::to_value(&r).unwrap_or_default()),
         None => refusal(StatusCode::NOT_FOUND, "no such answer"),
