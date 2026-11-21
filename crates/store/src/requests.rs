@@ -152,10 +152,9 @@ pub fn supersede_ask(
     ask: &Map<String, Value>,
     session: &SessionRef,
     caller: &Principal,
-    old: &str,
-    reason: &str,
+    replacement: (&str, &str),
 ) -> Result<Filed, FileError> {
-    write_ask(paths, asks_dir, ledger, ask, session, caller, Some((old, reason)))
+    write_ask(paths, asks_dir, ledger, ask, session, caller, Some(replacement))
 }
 
 fn write_ask(

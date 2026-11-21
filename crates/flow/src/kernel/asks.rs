@@ -241,7 +241,7 @@ pub fn ask(
     let seen = look(ledger, session, instance, node)?;
     let rec = match seen.rec.clone() {
         Some(rec) => rec,
-        None => pin(ledger, paths, instance, node, &seen, filing, session.audit(), None)?,
+        None => pin(ledger, paths, instance, node, &seen, filing, (session.audit(), None))?,
     };
     if !rec.linked {
         return file_and_link(ledger, paths, session, instance, node, rec);
@@ -273,7 +273,7 @@ pub fn amend(
         Err(e) => return Err(e),
     }
     let filing = Filing { ledger: old.ledger.clone(), body: body.clone() };
-    let rec = pin(ledger, paths, instance, node, &seen, Some(&filing), session.audit(), Some((old, reason)))?;
+    let rec = pin(ledger, paths, instance, node, &seen, Some(&filing), (session.audit(), Some((old, reason))))?;
     file_and_link(ledger, paths, session, instance, node, rec)
 }
 
@@ -413,9 +413,9 @@ fn pin(
     node: &str,
     seen: &Seen,
     filing: Option<&Filing>,
-    audit: Option<&Audit>,
-    amend: Option<(&AskRec, &str)>,
+    options: (Option<&Audit>, Option<(&AskRec, &str)>),
 ) -> Result<AskRec, KernelError> {
+    let (audit, amend) = options;
     let owned;
     let filing = match (filing, &seen.prior) {
         (Some(filing), _) => filing,
@@ -568,7 +568,7 @@ fn file_pinned(
         let outcome = if rec.amends {
             let old = rec.supersedes.as_deref().ok_or_else(|| invalid("amend has no predecessor"))?;
             let reason = rec.reason.as_deref().ok_or_else(|| invalid("amend has no reason"))?;
-            requests::supersede_ask(paths, dir, &rec.ledger, body, session.session(), &caller, old, reason)
+            requests::supersede_ask(paths, dir, &rec.ledger, body, session.session(), &caller, (old, reason))
         } else {
             requests::file_ask(paths, dir, &rec.ledger, body, session.session(), &caller)
         };

@@ -1700,6 +1700,9 @@ mutate $cli '    if v["ok"] == json!(true) {
 # Human steps (BRO-3635; BRO-3624 items 1 and 7): a flow's ask, pinned, filed, linked, answered.
 asks=crates/flow/src/kernel/asks.rs
 replay=crates/flow/src/kernel/replay.rs
+# An amendment refuses an answered predecessor and confirms the old row names the replacement.
+mutate $asks '        Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: old.ask_id.clone() }.into()),' '        Ok(_) => {},'
+mutate $asks '        || !(target.as_deref() == Some(new.id.as_str())' '        || !(true || target.as_deref() == Some(new.id.as_str())'
 # The minted id collides with no id or uid in the ledger.
 mutate $asks '.flat_map(|a| [Some(a.id), a.uid])' '.flat_map(|a| [Some(a.id), None])'
 mutate $asks 'if !taken.contains(&id) {' 'if true {'

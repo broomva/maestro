@@ -1668,7 +1668,7 @@ fn amend_recovers_after_supersede_before_link() {
     let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
     seams::CRASH_AFTER_FILE.with(|c| c.set(true));
     assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
-    let replacement = f.events(&fi).into_iter().filter(|e| e["kind"] == "AskPinned").last().unwrap()["body"]["ask_id"]
+    let replacement = f.events(&fi).into_iter().rfind(|e| e["kind"] == "AskPinned").unwrap()["body"]["ask_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1697,7 +1697,7 @@ fn amend_requires_old_row_to_point_to_replacement() {
     let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
     seams::CRASH_AFTER_FILE.with(|c| c.set(true));
     assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
-    let replacement = f.events(&fi).into_iter().filter(|e| e["kind"] == "AskPinned").last().unwrap()["body"]["ask_id"]
+    let replacement = f.events(&fi).into_iter().rfind(|e| e["kind"] == "AskPinned").unwrap()["body"]["ask_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1721,4 +1721,28 @@ fn answer_to_superseded_ask_is_taken_as_receipt() {
     let result = f.ask(&fi, None).unwrap();
     assert!(matches!(result, Asked::Answered { ask_id, source, .. } if ask_id == new && source.contains(&old)));
     assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
+}
+
+#[test]
+fn amend_then_answer_replacement() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap();
+    let new = waiting(&result).0.to_string();
+    assert_ne!(old, new);
+    f.answer_in_worktree(&new);
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == new));
+}
+
+#[test]
+fn amend_refuses_when_answers_unread_without_appending() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    seams::REMOTE.with(|r| *r.borrow_mut() = Some(f.tmp.path().join("missing").display().to_string()));
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_unread");
+    assert_eq!(f.kinds(&fi), before);
 }

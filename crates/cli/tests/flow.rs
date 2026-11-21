@@ -417,6 +417,26 @@ fn an_ask_is_filed_through_the_cli() {
         "class": "decision", "gates": ["fixture"], "blocking": false, "default": "hold", "preanswerable": false,
         "exhausted": ["read: a fixture", "default: a fixture"],
     });
+    // Both amendment flags and its body reach the kernel; an unlinked node cannot be amended.
+    assert_eq!(
+        refused(
+            cli()
+                .args([
+                    "flow",
+                    "ask",
+                    "--instance",
+                    &fi,
+                    "--node-id",
+                    "owner",
+                    "--amend",
+                    "--reason",
+                    "clarify",
+                    "--ask"
+                ])
+                .arg(body.to_string())
+        ),
+        "ask_body_invalid"
+    );
     let ask = ["flow", "ask", "--instance", &fi, "--node-id", "owner", "--ledger", "ledger.yaml", "--ask"];
     let v = ok(cli().args(ask).arg(body.to_string()));
     assert_eq!(v["state"], "waiting", "{v}");
