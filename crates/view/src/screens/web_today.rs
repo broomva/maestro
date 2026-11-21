@@ -53,7 +53,7 @@ pub(crate) fn today(cx: &Ctx, id: &str) -> Markup {
     let answered_all = all.iter().filter(|a| a.state() == AskState::Answered).count();
     let groups = super::queue(cx, None);
     let waiting: Vec<_> =
-        groups.iter().flat_map(|g| &g.rows).filter(|e| e.landing != super::Landing::Waiting).collect();
+        groups.iter().flat_map(|g| &g.rows).filter(|e| e.landing == super::Landing::NotSeen).collect();
     let joined = super::joined(cx, None);
     let on_main = matches!(&cx.store.tree.source, TreeSource::GitRev(r) if r == "main" || r == "origin/main")
         && cx.store.tree.commit.is_some();
@@ -99,14 +99,12 @@ pub(crate) fn today(cx: &Ctx, id: &str) -> Markup {
             h2 { "Last 24 hours" }
             @if asks.data.is_none() { p { "New asks are unavailable." } }
             @for (ask, at) in recent_asks.iter().rev().take(5) {
-              div class="today-event" { time { (at.to_zoned(zone.clone()).strftime("%H:%M")) } span { (ask.title()) } a href="/decisions" { "Decide" } }
-            }
-            @if cx.reads.ticks.data.is_none() { p { "Loop activity is unavailable." } }
-            @if let Some(tail) = &cx.reads.ticks.data {
-              @for tick in tail.ticks.iter().rev().filter(|t| super::instant(&t.started_at).is_some_and(|t| (since..=cx.at.as_second()).contains(&t.as_second()))).take(3) {
-                div class="today-event" { time { @if let Some(at) = super::instant(&tick.started_at) { (at.to_zoned(zone.clone()).strftime("%H:%M")) } } span { "A loop ran" } a href="/health" { "Health" } }
+              div class="today-event" {
+                time { (at.to_zoned(zone.clone()).strftime("%H:%M")) }
+                span { "Filed: " (ask.title()) }
+                // Only an ask still open is one to decide; it links to that ask itself.
+                @if ask.state() == AskState::Open { a href="/decisions" { "Decide" } } @else { span class="today-done" { "Answered" } }
               }
-              @if !tail.whole() || !cx.reads.ticks.errors.is_empty() { p class="today-notice" { "Loop activity is partially available." } }
             }
           }
         }
