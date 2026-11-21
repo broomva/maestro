@@ -15,6 +15,7 @@ characters.
 arguments, refusals, §5.5 lock (the plugin's key, pid grammar, token and stale reclaim) and exit
 codes (0 filed, 2 refused, 75 lock busy). Its emitter is a simple one: the real writer's
 line-shape checks are the real writer's to prove, in the workspace suite."""
+import datetime
 import hashlib
 import json
 import os
@@ -278,7 +279,10 @@ def file(ledger: Path, ask: dict, session, wait: float, old=None, reason=None) -
             line = f'  - id: "{matches[0]["id"]}"\n'
             if text.count(line) != 1:
                 raise Refused("cannot locate old ask")
-            text = text.replace(line, line + f'    superseded_by: "{entry["id"]}"\n', 1)
+            fields = {"archived_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "archived_reason": reason, "superseded_by": entry.get("uid", entry["id"])}
+            if "status" not in matches[0]:
+                fields["status"] = "archived"
+            text = text.replace(line, line + "".join(_render(fields, 4)), 1)
         lines = text.splitlines(keepends=True)
         at = next(i for i, line in enumerate(lines) if line.startswith("asks:"))
         end = next((i for i in range(at + 1, len(lines)) if lines[i][:1] not in ("", " ", "\n", "#", "-")), len(lines))
@@ -290,7 +294,7 @@ def file(ledger: Path, ask: dict, session, wait: float, old=None, reason=None) -
         if len(new.encode()) > LIMIT:
             raise Refused(f"the ledger would be over {LIMIT} bytes; nothing was written")
         after = yaml.safe_load(new)
-        expected = [dict(a, superseded_by=entry["id"]) if old is not None and a is matches[0] else a for a in was]
+        expected = [dict(a, **fields) if old is not None and a is matches[0] else a for a in was]
         if asks_of(after) != [*expected, entry]:
             raise Refused("the appended ledger does not read as the old one plus this ask")
         old_errs, new_errs = validate(before, path=ledger), validate(after, path=ledger)

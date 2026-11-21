@@ -322,6 +322,11 @@ fn array_index(key: &str) -> Option<u32> {
     key.parse::<u32>().ok().filter(|&i| i != u32::MAX)
 }
 
+/// Whether an ask has an outcome, including when the row was later archived.
+pub fn has_outcome(row: &JsValue) -> bool {
+    OUTCOME_KEYS.iter().any(|k| text(row.get(k)).is_some())
+}
+
 /// An ask row's state, ported from the plugin's `stateOf`.
 pub fn state_of(row: &JsValue) -> AskState {
     let status = text(row.get("status")).unwrap_or_default().to_lowercase();

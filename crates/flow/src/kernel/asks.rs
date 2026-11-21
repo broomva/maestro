@@ -771,7 +771,7 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
 
 /// The linked ask's answer, as main has it at the commit the remote names; failing that, whether
 /// one waits to land on Maestro's answers branch.
-fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
+fn read_answer(paths: &Paths, rec: &AskRec, predecessor: bool) -> Result<Answer, KernelError> {
     let sha = landed_main(paths)?;
     // The asks folder as the registry names it here; the ledger is read at `sha`, every object on
     // the way checked against its id, so nothing planted in the object store under the commit's,
@@ -784,7 +784,11 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
             let at = format!("{source}:{}", rec.ledger);
             return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
         }
-        Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed { row, source }),
+        Ok(Found::Row(row))
+            if row.state() == AskState::Answered || (predecessor && maestro_core::ask::has_outcome(&row.row)) =>
+        {
+            return Ok(Answer::Landed { row, source });
+        }
         Ok(_) => {}
     }
     Ok(match waiting_to_land(paths, &rec.ledger, &rec.ask_id) {
@@ -861,7 +865,7 @@ pub fn landing(paths: &Paths, unmet: &mut [super::Reason]) {
 /// The linked ask's answer as [`read_answer`] reads it, the one answer source; an answer landed
 /// on main counts only for the body that was linked (`answer_mismatch` otherwise).
 pub(super) fn landed(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
-    let answer = read_answer(paths, rec)?;
+    let answer = read_answer(paths, rec, false)?;
     let Answer::Landed { row, source } = &answer else { return Ok(answer) };
     let found = comparable_hash(&row.row);
     if found != rec.body_hash {
@@ -904,7 +908,18 @@ fn take_answer(
     };
     let mut old_answer = None;
     for old in &predecessors {
-        if let Answer::Landed { row, source } = landed(paths, old)? {
+        let answer = read_answer(paths, old, true)?;
+        if let Answer::Landed { row, source } = answer {
+            let found = comparable_hash(&row.row);
+            if found != old.body_hash {
+                return Err(Refusal::AnswerMismatch {
+                    ask_id: old.ask_id.clone(),
+                    at: source,
+                    linked: old.body_hash.clone(),
+                    found,
+                }
+                .into());
+            }
             old_answer = Some((row, format!("{source}:{}", old.ask_id)));
             break;
         }
