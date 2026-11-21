@@ -2,7 +2,7 @@
 //! it is read in full, and every git call it makes is given a deadline, so neither an oversized
 //! object nor a FIFO planted at an object's path holds the answer read.
 
-use maestro_store::tree::{MAX_OBJECT, has_object, read_verified};
+use maestro_store::tree::{MAX_OBJECT, has_object, local_commit, read_verified};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -105,5 +105,43 @@ fn a_fifo_where_git_looks_cannot_hang_the_presence_check() {
     let got = rx.recv_timeout(Duration::from_secs(15)).expect("the presence check never gave up");
     let e = got.unwrap_err();
     assert!(e.contains("did not answer within 1s"), "{e}");
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+}
+
+#[test]
+fn a_local_ref_is_absent_a_commit_or_an_error() {
+    let (_tmp, root, head) = repo("x");
+    assert_eq!(local_commit(&root, "refs/heads/main", T), Ok(Some(head.clone())));
+    assert_eq!(local_commit(&root, "refs/heads/maestro/answers", T), Ok(None));
+    // There but naming a blob: an error, never absent.
+    let blob = git(&root, &["rev-parse", "HEAD:f"]);
+    std::fs::create_dir_all(root.join(".git/refs/heads/maestro")).unwrap();
+    std::fs::write(root.join(".git/refs/heads/maestro/answers"), format!("{blob}\n")).unwrap();
+    assert!(local_commit(&root, "refs/heads/maestro/answers", T).is_err());
+    // There and not a ref at all: an error.
+    std::fs::write(root.join(".git/refs/heads/maestro/answers"), "not an id\n").unwrap();
+    assert!(local_commit(&root, "refs/heads/maestro/answers", T).is_err());
+}
+
+#[test]
+fn a_fifo_where_git_looks_cannot_hang_the_ref_resolution() {
+    // A FIFO at the head commit's own loose object, its only copy in this fresh repo (no pack, no
+    // commit-graph): `rev-parse <ref>^{commit}` opens it to peel the ref (checked on the Mac's git
+    // and Linux git 2.43). A FIFO at the alternates file is not opened by every git, which let a
+    // mutant lengthening the deadline survive on CI (maestro#62). The assertion names the
+    // rev-parse step, so a git that does not open the object fails this test, never passes it.
+    let (_tmp, root, head) = repo("x");
+    let loose = root.join(".git/objects").join(&head[..2]).join(&head[2..]);
+    std::fs::remove_file(&loose).unwrap();
+    let made = Command::new("mkfifo").arg(&loose).status().unwrap();
+    assert!(made.success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let _ = tx.send(local_commit(&root, "refs/heads/main", Duration::from_secs(1)));
+    });
+    let got = rx.recv_timeout(Duration::from_secs(15)).expect("the ref resolution never gave up");
+    let e = got.unwrap_err();
+    assert!(e.contains("git rev-parse did not answer within 1s"), "{e}");
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
 }

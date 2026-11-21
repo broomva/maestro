@@ -15,6 +15,7 @@ characters.
 arguments, refusals, §5.5 lock (the plugin's key, pid grammar, token and stale reclaim) and exit
 codes (0 filed, 2 refused, 75 lock busy). Its emitter is a simple one: the real writer's
 line-shape checks are the real writer's to prove, in the workspace suite."""
+import datetime
 import hashlib
 import json
 import os
@@ -229,7 +230,7 @@ def _render(v, indent: int) -> list:
     return out
 
 
-def file(ledger: Path, ask: dict, session, wait: float) -> str:
+def file(ledger: Path, ask: dict, session, wait: float, old=None, reason=None) -> str:
     if not isinstance(ask, dict) or not isinstance(ask.get("id"), str):
         raise Refused("the ask must be an object with a string id")
     for name in ("id", "uid"):
@@ -269,6 +270,19 @@ def file(ledger: Path, ask: dict, session, wait: float) -> str:
         for name in (entry["id"], entry.get("uid")):
             if name is not None and name in taken:
                 raise Refused(f"the ledger already has an ask {name!r}; nothing was written")
+        if old is not None:
+            matches = [a for a in was if old in (a.get("id"), a.get("uid"))]
+            if len(matches) != 1 or _closed(matches[0]) or matches[0].get("superseded_by"):
+                raise Refused("the old ask is not uniquely open")
+            if entry.get("supersedes") != old or entry.get("reason") != reason:
+                raise Refused("replacement does not name the old ask and reason")
+            line = f'  - id: "{matches[0]["id"]}"\n'
+            if text.count(line) != 1:
+                raise Refused("cannot locate old ask")
+            fields = {"archived_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "archived_reason": reason, "superseded_by": entry.get("uid", entry["id"])}
+            if "status" not in matches[0]:
+                fields["status"] = "archived"
+            text = text.replace(line, line + "".join(_render(fields, 4)), 1)
         lines = text.splitlines(keepends=True)
         at = next(i for i, line in enumerate(lines) if line.startswith("asks:"))
         end = next((i for i in range(at + 1, len(lines)) if lines[i][:1] not in ("", " ", "\n", "#", "-")), len(lines))
@@ -280,7 +294,8 @@ def file(ledger: Path, ask: dict, session, wait: float) -> str:
         if len(new.encode()) > LIMIT:
             raise Refused(f"the ledger would be over {LIMIT} bytes; nothing was written")
         after = yaml.safe_load(new)
-        if asks_of(after) != [*was, entry]:
+        expected = [dict(a, **fields) if old is not None and a is matches[0] else a for a in was]
+        if asks_of(after) != [*expected, entry]:
             raise Refused("the appended ledger does not read as the old one plus this ask")
         old_errs, new_errs = validate(before, path=ledger), validate(after, path=ledger)
         fresh = [e for e in new_errs if e not in old_errs]
@@ -303,7 +318,7 @@ def file(ledger: Path, ask: dict, session, wait: float) -> str:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "file":
+    if len(sys.argv) >= 3 and sys.argv[1] in ("file", "supersede"):
         args = sys.argv[3:]
         def opt(name, default=None):  # `--name value` or `--name=value`, as argparse reads them
             for i, a in enumerate(args):
@@ -315,7 +330,8 @@ if __name__ == "__main__":
 
         try:
             raw = sys.stdin.read() if opt("--json") == "-" else Path(opt("--json")).read_text()
-            filed = file(Path(sys.argv[2]), json.loads(raw), opt("--maestro-session"), float(opt("--wait", "30")))
+            filed = file(Path(sys.argv[2]), json.loads(raw), opt("--maestro-session"), float(opt("--wait", "30")),
+                         opt("--old") if sys.argv[1] == "supersede" else None, opt("--reason"))
         except Busy as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(75)

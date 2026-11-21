@@ -417,6 +417,26 @@ fn an_ask_is_filed_through_the_cli() {
         "class": "decision", "gates": ["fixture"], "blocking": false, "default": "hold", "preanswerable": false,
         "exhausted": ["read: a fixture", "default: a fixture"],
     });
+    // Both amendment flags and its body reach the kernel; an unlinked node cannot be amended.
+    assert_eq!(
+        refused(
+            cli()
+                .args([
+                    "flow",
+                    "ask",
+                    "--instance",
+                    &fi,
+                    "--node-id",
+                    "owner",
+                    "--amend",
+                    "--reason",
+                    "clarify",
+                    "--ask"
+                ])
+                .arg(body.to_string())
+        ),
+        "ask_body_invalid"
+    );
     let ask = ["flow", "ask", "--instance", &fi, "--node-id", "owner", "--ledger", "ledger.yaml", "--ask"];
     let v = ok(cli().args(ask).arg(body.to_string()));
     assert_eq!(v["state"], "waiting", "{v}");
@@ -533,4 +553,17 @@ fn a_t3_thread_writes_through_the_cli_by_its_own_variable() {
         .arg(m.root.join("decide.yaml"))
         .args(["--params", &json!({ "dir": m.work }).to_string()]);
     assert_eq!(refused(&mut direct), "thread_mismatch");
+}
+
+#[test]
+fn amendment_reason_is_bounded_at_cli_parse() {
+    let m = machine();
+    let long = "é".repeat(1025);
+    let output = m
+        .bare()
+        .args(["flow", "ask", "--instance", "fi_x", "--node-id", "owner", "--amend", "--ask", "{}", "--reason", &long])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("amend reason exceeds 2048 bytes"));
 }

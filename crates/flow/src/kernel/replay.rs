@@ -712,6 +712,7 @@ pub(crate) struct AskRec {
     pub body_hash: String,
     pub inputs: BTreeMap<String, String>,
     pub supersedes: Option<String>,
+    pub amends: bool,
     pub reason: Option<String>,
     pub linked: bool,
 }
@@ -733,6 +734,13 @@ pub(crate) fn ask_of(
         .filter(|r| &r.inputs == inputs)
         .or_else(|| fold.prior_asks.get(&key)?.iter().rev().find(|r| &r.inputs == inputs))
         .cloned())
+}
+
+/// The replayed current ask, without falling back to historical inputs.
+pub(crate) fn current_ask(log: &Log, started: &Started, node: &str) -> Result<Option<AskRec>, KernelError> {
+    let fold = Fold::replay(log, started)?;
+    let Some(i) = fold.current(node) else { return Ok(None) };
+    Ok(fold.asks.get(&(node, i)).cloned())
 }
 
 /// The earlier ask at `node`'s current iteration that a new ask over `inputs` supersedes.
@@ -998,8 +1006,23 @@ impl<'a> Fold<'a> {
                     Some(inputs) => inputs,
                     None => Eval::new(self, at).node(id, i).inputs(),
                 };
-                // A pin stands until it is withdrawn; a linked one is replaced only when inputs changed.
-                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {
+                // Only a linked current ask can be amended, and it must be the named predecessor.
+                let predecessor = self.asks.get(&(id, i));
+                if p.amends && self.answers.get(&(id, i)).is_some_and(|a| a.contains_key(&inputs)) {
+                    return Ok(Err("invalid_amend"));
+                }
+                if p.amends
+                    && !predecessor.is_some_and(|r| {
+                        r.linked
+                            && r.inputs == inputs
+                            && r.ledger == p.ledger
+                            && p.supersedes.as_deref() == Some(r.ask_id.as_str())
+                    })
+                {
+                    return Ok(Err("invalid_amend"));
+                }
+                // Other pins stand until withdrawn or their inputs change.
+                if !p.amends && predecessor.is_some_and(|r| r.inputs == inputs) {
                     return Ok(Err("already_pinned"));
                 }
                 let rec = AskRec {
@@ -1009,6 +1032,7 @@ impl<'a> Fold<'a> {
                     body_hash: p.body_hash,
                     inputs,
                     supersedes: p.supersedes,
+                    amends: p.amends,
                     reason: p.reason,
                     linked: false,
                 };
@@ -1515,7 +1539,9 @@ impl<'f, 'a> Eval<'f, 'a> {
                         Some(r) => r.supersedes.clone(),
                         None => latest.map(|r| r.ask_id.clone()),
                     };
-                    if supersedes.is_some() || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. })) {
+                    if (supersedes.is_some() && !current.is_some_and(|r| r.amends))
+                        || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. }))
+                    {
                         human.push(Reason::InputsChanged { supersedes });
                     }
                     human.extend(reasons);

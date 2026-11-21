@@ -268,6 +268,7 @@ impl Owners {
                     body_hash: p.body_hash,
                     inputs: Default::default(),
                     supersedes: None,
+                    amends: false,
                     reason: None,
                     linked: false,
                 };
@@ -642,6 +643,7 @@ fn pin(
         body_hash: pin.body_hash,
         inputs: Default::default(),
         supersedes: None,
+        amends: false,
         reason: None,
         linked: false,
     };

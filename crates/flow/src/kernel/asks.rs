@@ -76,6 +76,25 @@
 //! itself, not the `xcrun` launcher at `/usr/bin/git`), checked root-owned and not group- or
 //! other-writable up to `/` before each answer read, with `xcrun_nocache=1` and a fixed `PATH`.
 //!
+//! # Amending (BRO-4036)
+//!
+//! `amend` replaces the node's current linked ask with a corrected body and a reason: a new
+//! `AskPinned` with `amends`, `supersedes` (the old id) and `reason` (`amended: <text>`, the
+//! text at most [`MAX_AMEND_REASON`] bytes). It is refused unless the old ask is the replayed current one and,
+//! on one verified read of main (`amendable`), not answered or closed there and not waiting to
+//! land: answered is `ask_amend_answered`, archived `ask_amend_closed`, two rows `ask_ambiguous`,
+//! unread `ask_amend_unread`. An ask not on main yet (its ledger change unmerged) may be amended:
+//! the owner cannot have answered it on main, and an answer on the answers branches refuses. The pin is filed by the writer of record's `ask_ledger.py supersede`, which
+//! archives the old row (`superseded_by` names the replacement) and appends the new one in one
+//! locked write; it is confirmed and linked as a filing is, and a crash between the write and the
+//! link is recovered by finding both rows before filing again. A writer refusal with no row
+//! withdraws the pin, and the old linked ask is current again.
+//!
+//! Only the current ask's answer is ever a receipt. An answer to a replaced ask is refused where
+//! it would land: the workspace's ledger validation rejects a row both answered and superseded
+//! (BRO-4039), so the owner answers the replacement. Owner decision, 2026-11-21, verbatim:
+//! "Reject at gate (Recommended)".
+//!
 //! # The answer as outputs
 //!
 //! `Answered.outputs` holds the answered row's answer fields that are set, each as text:
@@ -99,7 +118,7 @@ use super::adoption;
 use super::error::{KernelError, Refusal};
 use super::events::{Answered, AskLinked, AskPinned, AskWithdrawn, KernelEvent, Started};
 use super::ir::{Class, Iteration};
-use super::replay::{AskRec, State, ask_of, next_of, pinned, prior_ask_of};
+use super::replay::{AskRec, State, ask_of, current_ask, next_of, pinned, prior_ask_of};
 use super::write::{MAX_OUTPUTS, check_owner, check_writable, wall};
 use crate::clock;
 use crate::ids::InstanceId;
@@ -120,6 +139,8 @@ use std::time::Duration;
 
 /// The most bytes of ask body an agent gives, as JSON.
 pub const MAX_ASK_BODY: usize = 64 << 10;
+/// Maximum UTF-8 byte length of an amendment reason.
+pub const MAX_AMEND_REASON: usize = 2048;
 
 /// How long the kernel keeps retrying a filing the ask ledger's lock refuses, from its first try.
 /// Each try may itself wait 30 s on the lock (`requests::FILE_WAIT`).
@@ -241,12 +262,40 @@ pub fn ask(
     let seen = look(ledger, session, instance, node)?;
     let rec = match seen.rec.clone() {
         Some(rec) => rec,
-        None => pin(ledger, paths, instance, node, &seen, filing, session.audit())?,
+        None => pin(ledger, paths, instance, node, &seen, filing, (session.audit(), None))?,
     };
     if !rec.linked {
         return file_and_link(ledger, paths, session, instance, node, rec);
     }
     take_answer(ledger, paths, session, instance, node, rec)
+}
+
+/// Amend a linked, unanswered ask. The replacement is pinned before invoking the writer.
+pub fn amend(
+    ledger: &mut Ledger,
+    paths: &Paths,
+    session: &VerifiedSession,
+    instance: &InstanceId,
+    node: &str,
+    body: &Map<String, Value>,
+    reason: &str,
+) -> Result<Asked, KernelError> {
+    if reason.len() > MAX_AMEND_REASON {
+        return Err(invalid("amend reason exceeds 2048 bytes"));
+    }
+    let seen = look(ledger, session, instance, node)?;
+    let old = seen
+        .rec
+        .as_ref()
+        .filter(|r| r.linked && seen.prior.is_none())
+        .ok_or_else(|| invalid("amend needs the current linked ask"))?;
+    if reason.trim().is_empty() {
+        return Err(invalid("amend needs a reason"));
+    }
+    amendable(paths, old)?;
+    let filing = Filing { ledger: old.ledger.clone(), body: body.clone() };
+    let rec = pin(ledger, paths, instance, node, &seen, Some(&filing), (session.audit(), Some((old, reason))))?;
+    file_and_link(ledger, paths, session, instance, node, rec)
 }
 
 /// The node as the log has it, read under the flows lock, which is released on return.
@@ -385,8 +434,9 @@ fn pin(
     node: &str,
     seen: &Seen,
     filing: Option<&Filing>,
-    audit: Option<&Audit>,
+    options: (Option<&Audit>, Option<(&AskRec, &str)>),
 ) -> Result<AskRec, KernelError> {
+    let (audit, amend) = options;
     let owned;
     let filing = match (filing, &seen.prior) {
         (Some(filing), _) => filing,
@@ -410,9 +460,13 @@ fn pin(
     if let Some(meanwhile) = seams::BEFORE_PIN.with(|c| c.borrow_mut().take()) {
         meanwhile();
     }
-    let (supersedes, reason) = match &seen.prior {
-        Some(prior) => (Some(prior.ask_id.clone()), Some("inputs_changed".to_string())),
-        None => (None, None),
+    let (supersedes, reason) = if let Some((old, why)) = amend {
+        (Some(old.ask_id.clone()), Some(format!("amended: {}", why.trim())))
+    } else {
+        match &seen.prior {
+            Some(prior) => (Some(prior.ask_id.clone()), Some("inputs_changed".to_string())),
+            None => (None, None),
+        }
     };
     let mut body = Map::new();
     body.insert("id".into(), Value::String(ask_id.clone()));
@@ -422,7 +476,10 @@ fn pin(
     body.extend(filing.body.clone());
     if let Some(prev) = &supersedes {
         body.insert("supersedes".into(), Value::String(prev.clone()));
-        body.insert("reason".into(), Value::String("inputs_changed".into()));
+        body.insert("reason".into(), Value::String(reason.clone().unwrap_or_default()));
+    }
+    if serde_json::to_vec(&body).map_or(usize::MAX, |b| b.len()) > MAX_ASK_BODY {
+        return Err(invalid("the composed ask exceeds MAX_ASK_BODY"));
     }
     let body = requests::compose_ask(&body).map_err(|e| invalid(e.to_string()))?;
     let body_hash = comparable_hash(&JsValue::from(Value::Object(body.clone())));
@@ -435,6 +492,7 @@ fn pin(
         body_hash,
         inputs: None,
         supersedes,
+        amends: amend.is_some(),
         reason,
         audit: audit.cloned(),
     };
@@ -444,11 +502,20 @@ fn pin(
     check_writable(&log, &started)?;
     let (iteration, inputs) = waiting(&log, &started, node)?;
     let pin = AskPinned { iteration, inputs: Some(inputs.clone()), ..pin };
+    #[cfg(test)]
+    let pin = if seams::REJECT_AMEND_PIN.with(|c| c.replace(false)) {
+        AskPinned { supersedes: Some("not-the-current-ask".into()), ..pin }
+    } else {
+        pin
+    };
     // Nothing appended since `look`, or the pin is not appended (`stale_seq`): the only concurrency
     // rule. Another session's proposal bookkeeping changes nothing the pin depends on, so a
     // stranger's proposal cannot make the owner's ask fail.
     let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };
     super::write::append_writable(&mut guard, instance, at, pin.to_event()?)?;
+    if pin.amends && !current_ask(&guard.log(instance)?, &started, node)?.is_some_and(|r| r.ask_id == pin.ask_id) {
+        return Err(Refusal::AskChanged { node: node.to_string() }.into());
+    }
     Ok(AskRec {
         ask_id: pin.ask_id,
         ledger: pin.ledger,
@@ -456,6 +523,7 @@ fn pin(
         body_hash: pin.body_hash,
         inputs,
         supersedes: pin.supersedes,
+        amends: pin.amends,
         reason: pin.reason,
         linked: false,
     })
@@ -530,7 +598,14 @@ fn file_pinned(
     let caller = Principal::Agent { session: session.session().clone() };
     let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;
     loop {
-        match requests::file_ask(paths, dir, &rec.ledger, body, session.session(), &caller) {
+        let outcome = if rec.amends {
+            let old = rec.supersedes.as_deref().ok_or_else(|| invalid("amend has no predecessor"))?;
+            let reason = rec.reason.as_deref().ok_or_else(|| invalid("amend has no reason"))?;
+            requests::supersede_ask(paths, dir, &rec.ledger, body, session.session(), &caller, (old, reason))
+        } else {
+            requests::file_ask(paths, dir, &rec.ledger, body, session.session(), &caller)
+        };
+        match outcome {
             Err(FileError::Lock(LockError::Busy { holder, .. })) => {
                 if clock::now() >= deadline {
                     return Err(Refusal::AskRefusedBusy { ledger: rec.ledger.clone(), holder: clip(&holder) }.into());
@@ -573,6 +648,20 @@ pub(super) fn file_and_confirm<T>(
     let Some(body) = rec.body.as_object() else {
         return Err(unconfirmed("the pinned body is not an object".into()).into());
     };
+    // A completed supersede must be recovered before invoking the writer again.
+    if rec.amends {
+        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {
+            Found::Row(_) => {
+                confirm_amend(&here, &rec)?;
+                return then(ledger, Confirmed::Row);
+            }
+            Found::Ambiguous => {
+                let at = format!("worktree:{}", rec.ledger);
+                return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
+            }
+            Found::None => {}
+        }
+    }
     // No flows guard is alive here: the callers drop theirs before they file.
     let outcome = file_pinned(&here.paths, &dir, &rec, body, session)?;
     #[cfg(test)]
@@ -599,6 +688,10 @@ pub(super) fn file_and_confirm<T>(
             Err(e) => return Err(unconfirmed(e.to_string()).into()),
         },
     };
+    if rec.amends {
+        confirm_amend(&here, &rec)?;
+        return then(ledger, Confirmed::Row);
+    }
     let found = comparable_hash(&row.row);
     if found != rec.body_hash {
         return Err(Refusal::AskRefused {
@@ -610,6 +703,34 @@ pub(super) fn file_and_confirm<T>(
         .into());
     }
     then(ledger, Confirmed::Row)
+}
+
+fn confirm_amend(here: &Store, rec: &AskRec) -> Result<(), KernelError> {
+    let fail = || Refusal::AskUnconfirmed {
+        ledger: rec.ledger.clone(),
+        ask_id: rec.ask_id.clone(),
+        detail: "amend rows do not confirm the replacement".into(),
+    };
+    let old_id = rec.supersedes.as_deref().ok_or_else(fail)?;
+    let new = match find(here, &rec.ledger, &rec.ask_id).map_err(|_| fail())? {
+        Found::Row(row) => row,
+        _ => return Err(fail().into()),
+    };
+    let old = match find(here, &rec.ledger, old_id).map_err(|_| fail())? {
+        Found::Row(row) => row,
+        _ => return Err(fail().into()),
+    };
+    let target = text(old.row.get("superseded_by"));
+    // The writer archives the old row in the same write: an old row that is not archived was not
+    // superseded by it (or was reopened), and linking would leave two open asks.
+    if old.state() != AskState::Archived
+        || comparable_hash(&new.row) != rec.body_hash
+        || !(target.as_deref() == Some(new.id.as_str())
+            || new.uid.as_deref().is_some_and(|uid| target.as_deref() == Some(uid)))
+    {
+        return Err(fail().into());
+    }
+    Ok(())
 }
 
 /// Files the pinned ask (flows lock released), confirms it in the working tree, and links it.
@@ -717,6 +838,60 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
     })
 }
 
+/// Whether the linked ask `rec` may be amended, decided on one read of main at the commit the
+/// answers remote names (as `read_answer` reads it), then the answers branches: open or not yet
+/// on main, and not waiting to land. Answered is `ask_amend_answered`, closed without an answer (archived) is
+/// `ask_amend_closed`, two rows by its id is `ask_ambiguous`, and unread is `ask_amend_unread`.
+fn amendable(paths: &Paths, rec: &AskRec) -> Result<(), KernelError> {
+    let unread = || Refusal::AskAmendUnread { ask_id: rec.ask_id.clone() };
+    let sha = match landed_main(paths) {
+        Err(KernelError::Refused(Refusal::AnswersUnread { .. })) => return Err(unread().into()),
+        other => other?,
+    };
+    let local = Store::new(paths.clone(), TreeSource::WorkingTree);
+    let on_main = local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id));
+    match on_main {
+        Err(_) => return Err(unread().into()),
+        Ok(Found::Ambiguous) => {
+            let at = format!("main@{sha}:{}", rec.ledger);
+            return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
+        }
+        Ok(Found::Row(row)) => match row.state() {
+            AskState::Open => {}
+            AskState::Answered => return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into()),
+            AskState::Archived => return Err(Refusal::AskAmendClosed { ask_id: rec.ask_id.clone() }.into()),
+        },
+        Ok(Found::None) => {}
+    }
+    if answered_on_answers_refs(paths, rec)? {
+        return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into());
+    }
+    Ok(())
+}
+
+/// [`waiting_to_land`] as a guard, held to the standard of the main read: each answers ref is
+/// resolved and its ledger read object by object, every git call bounded by [`READ_TIMEOUT`]
+/// (`tree::local_commit`, `ask_ledger_verified`). A ref that is absent holds no answer; one that
+/// is there and broken, names no commit, does not read in time or holds the ask twice is
+/// `ask_amend_unread`, never "no answer".
+fn answered_on_answers_refs(paths: &Paths, rec: &AskRec) -> Result<bool, KernelError> {
+    let unread = || KernelError::from(Refusal::AskAmendUnread { ask_id: rec.ask_id.clone() });
+    let workspace = Store::new(paths.clone(), TreeSource::WorkingTree);
+    for (rev, _) in maestro_store::views::ANSWERS_REFS {
+        let sha = match maestro_store::tree::local_commit(&paths.workspace, rev, READ_TIMEOUT) {
+            Ok(None) => continue,
+            Ok(Some(sha)) => sha,
+            Err(_) => return Err(unread()),
+        };
+        match workspace.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
+            Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(true),
+            Ok(Found::Row(_) | Found::None) => {}
+            Ok(Found::Ambiguous) | Err(_) => return Err(unread()),
+        }
+    }
+    Ok(false)
+}
+
 /// The first of Maestro's answers refs (`views::ANSWERS_REFS`) where the ask `ask_id` of `ledger`
 /// is answered: an answer waiting to land on main. Read bounded, for what the reads and `ask`
 /// report only, never as a receipt; a ref that is not there or does not read holds none.
@@ -818,6 +993,10 @@ fn take_answer(
     node: &str,
     rec: AskRec,
 ) -> Result<Asked, KernelError> {
+    // Only the current ask's answer is ever a receipt. An answer to an ask an amendment replaced
+    // is refused where it would land (the workspace's ledger validation rejects a row that is
+    // both answered and superseded, BRO-4039), so the owner answers the replacement instead; the
+    // owner's choice, 2026-11-21: "Reject at gate (Recommended)".
     let (row, source) = match landed(paths, &rec)? {
         Answer::Landed { row, source } => (row, source),
         Answer::Landing { at } => {
@@ -875,6 +1054,7 @@ pub(crate) mod seams {
     thread_local! {
         pub(crate) static SUFFIXES: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
         pub(crate) static CRASH_AFTER_FILE: Cell<bool> = const { Cell::new(false) };
+        pub(crate) static REJECT_AMEND_PIN: Cell<bool> = const { Cell::new(false) };
         /// The git binary a test has checked instead of the platform's (`trusted_git`).
         pub(crate) static GIT_CHECKED: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
         /// The answers remote a test reads instead of the compiled one: a local bare repository.

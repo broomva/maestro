@@ -243,6 +243,11 @@ pub struct FlowAskArgs {
     /// ledger's validator requires (`class`, `gates`, `exhausted`, `blocking`, ...). Needed on the
     /// first call only.
     pub ask: Option<serde_json::Map<String, Value>>,
+    /// Replace the current linked unanswered ask.
+    #[serde(default)]
+    pub amend: bool,
+    /// The reason for amending.
+    pub reason: Option<String>,
     /// Your session's folder, an absolute path: with `token` or `credential`, your claim.
     pub cwd: Option<String>,
     /// A Direct session's launch token.
@@ -536,7 +541,26 @@ pub(crate) fn call(
                     (Some(ledger), Some(body)) => Some(kernel::Filing { ledger: ledger.clone(), body: body.clone() }),
                     _ => None,
                 };
-                Ok(match kernel::ask(&mut w.ledger()?, paths, &w.me, &instance, node, filing.as_ref())? {
+                let result = if a.amend {
+                    let body = a
+                        .ask
+                        .as_ref()
+                        .ok_or_else(|| kernel::Refusal::AskBodyInvalid { detail: "amend needs an ask body".into() })?;
+                    let reason = a
+                        .reason
+                        .as_deref()
+                        .ok_or_else(|| kernel::Refusal::AskBodyInvalid { detail: "amend needs a reason".into() })?;
+                    if reason.len() > kernel::MAX_AMEND_REASON {
+                        return Err(kernel::Refusal::AskBodyInvalid {
+                            detail: "MCP amend reason exceeds 2048 bytes".into(),
+                        }
+                        .into());
+                    }
+                    kernel::amend(&mut w.ledger()?, paths, &w.me, &instance, node, body, reason)?
+                } else {
+                    kernel::ask(&mut w.ledger()?, paths, &w.me, &instance, node, filing.as_ref())?
+                };
+                Ok(match result {
                     Asked::Waiting { ask_id, ledger, appended, landing, supersedes, reason } => {
                         let mut v = json!({
                             "ok": true,

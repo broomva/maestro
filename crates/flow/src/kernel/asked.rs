@@ -257,6 +257,7 @@ fn asked_at_is_pinned_before_hashing_and_the_comparable_body_excludes_origin() {
     let map = answered.as_object_mut().unwrap();
     map.insert("answer".into(), JsValue::Str("yes".into()));
     map.remove("origin");
+    map.insert("superseded_by".into(), JsValue::Str("new-id".into()));
     assert_eq!(comparable_hash(&answered), comparable_hash(&row.row));
     answered.as_object_mut().unwrap().insert("headline".into(), JsValue::Str("edited".into()));
     assert_ne!(comparable_hash(&answered), comparable_hash(&row.row));
@@ -518,7 +519,11 @@ fn an_ask_body_the_kernel_does_not_file_is_ask_body_invalid() {
     assert_eq!(code(f.ask(&fi, Some(&bad_name))), "ask_body_invalid", "not a ledger name");
     let mut big = filing();
     big.body.insert("stakes".into(), Value::String("x".repeat(MAX_ASK_BODY)));
-    assert_eq!(code(f.ask(&fi, Some(&big))), "ask_body_invalid", "over MAX_ASK_BODY");
+    // The agent's own body is refused by its own bound, before the composed ask is checked
+    // (the composed bound refuses it too, with another message: maestro#62 mutation shard 15).
+    let refused = f.ask(&fi, Some(&big)).unwrap_err();
+    assert_eq!(refused.code(), "ask_body_invalid", "over MAX_ASK_BODY");
+    assert!(refused.to_string().contains("the body is"), "{refused}");
     let mut deep = Value::String("x".into());
     for _ in 0..MAX_NESTING {
         deep = Value::Array(vec![deep]);
@@ -784,6 +789,38 @@ fn replay_keeps_the_first_pin_links_only_its_hash_and_never_withdraws_a_link() {
     assert!(matches!(owner(&f, &fi), crate::kernel::Reason::Unfiled { .. }));
     append(&mut f, &fi, "AskLinked", link("flow-owner-x", "sha256:pinned"));
     assert!(matches!(owner(&f, &fi), crate::kernel::Reason::Owner { .. }));
+}
+
+#[test]
+fn replay_amend_replaces_only_the_named_link_and_withdrawal_restores_it() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let append = |f: &mut Fx, kind: &str, body: Value| {
+        let mut guard = f.ledger.lock().unwrap();
+        let seq = guard.log(&fi).unwrap().seq();
+        guard.append(&fi, seq, crate::NewEvent::new(kind, body)).unwrap();
+    };
+    let pin = |predecessor: &str| {
+        serde_json::json!({
+            "node": "owner", "iteration": {}, "ask_id": "flow-owner-amend", "ledger": "ledger.yaml",
+            "body": {}, "body_hash": "h", "supersedes": predecessor, "amends": true, "reason": "amended: clarify"
+        })
+    };
+    append(&mut f, "AskPinned", pin("wrong"));
+    assert!(f.status(&fi).rejected.iter().any(|r| r.reason == "invalid_amend"));
+    append(&mut f, "AskPinned", pin(&old));
+    assert!(matches!(f.status(&fi).nodes["owner"].unmet[0], crate::kernel::Reason::Unfiled { .. }));
+    append(
+        &mut f,
+        "AskWithdrawn",
+        serde_json::json!({
+            "node": "owner", "iteration": {}, "ask_id": "flow-owner-amend", "code": "ask_not_filed", "reason": "refused"
+        }),
+    );
+    assert!(
+        matches!(&f.status(&fi).nodes["owner"].unmet[0], crate::kernel::Reason::Owner { ask_id, .. } if ask_id == &old)
+    );
 }
 
 /// The working tree's ledger with the answer added to row `id`, the working tree put back.
@@ -1608,4 +1645,355 @@ fn legacy_asks_and_answers_without_inputs_bind_to_consumed_digests_at_their_log_
         f.ask(&fi, None),
         Err(KernelError::Refused(Refusal::NotEnabled { ref node, ref state })) if node == "owner" && state == "done"
     ));
+}
+
+#[test]
+fn amend_refuses_an_answer_on_main_or_waiting_to_land() {
+    for landed in [false, true] {
+        let mut f = fx(None, "");
+        let fi = f.begin();
+        let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+        f.answer_in_worktree(&id);
+        if landed {
+            f.land_on_main();
+        } else {
+            f.put_on_answers_branch();
+        }
+        let before = f.kinds(&fi);
+        assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_answered");
+        assert_eq!(f.kinds(&fi), before);
+    }
+}
+
+#[test]
+fn amend_recovers_after_supersede_before_link() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
+    let replacement = f.events(&fi).into_iter().rfind(|e| e["kind"] == "AskPinned").unwrap()["body"]["ask_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(f.row(&replacement).is_some());
+    assert_eq!(text(f.row(&old).unwrap().row.get("superseded_by")).as_deref(), Some(replacement.as_str()));
+    let marker = f.ws.join("writer-invoked");
+    std::fs::write(
+        f.ws.join("scripts/ask_ledger.py"),
+        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(99)\n", marker.to_str().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(waiting(&f.ask(&fi, None).unwrap()).0, replacement);
+    assert!(!marker.exists());
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned", "AskLinked"]);
+}
+
+#[test]
+fn amend_writer_refusal_restores_old_ask() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.answer_in_worktree(&old);
+    let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap();
+    assert!(matches!(result, Asked::Withdrawn { code: ASK_NOT_FILED, .. }));
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == old));
+}
+
+#[test]
+fn amend_requires_old_row_to_point_to_replacement() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
+    let replacement = f.events(&fi).into_iter().rfind(|e| e["kind"] == "AskPinned").unwrap()["body"]["ask_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = f.ws.join(".control/asks/ledger.yaml");
+    let contents = f.ledger_text().replace(&format!("    superseded_by: \"{replacement}\"\n"), "");
+    std::fs::write(path, contents).unwrap();
+    assert!(f.row(&old).is_some());
+    assert_eq!(code(f.ask(&fi, None)), "ask_unconfirmed");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned"]);
+}
+
+#[test]
+fn amend_refuses_when_main_is_read_but_its_ledger_is_not() {
+    // The answers remote answers, but the ledger at that commit does not read: unread, not open.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    waiting(&f.ask(&fi, Some(&filing())).unwrap());
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), "asks: [unterminated\n").unwrap();
+    f.land_on_main();
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_unread");
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
+fn amend_refuses_an_ask_main_holds_twice() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.add_entry(&format!("\n  - id: \"{id}\"\n    ask: \"a second row by the same id\"\n"));
+    f.land_on_main();
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_ambiguous");
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
+fn an_answer_to_a_replaced_ask_is_never_the_receipt() {
+    // Only the current ask's answer counts (owner, 2026-11-21: "Reject at gate"). An answer that
+    // reaches the replaced row on main (the workspace gate, BRO-4039, refuses it there) is not
+    // taken: the node waits on the replacement, and the replacement's answer completes it.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let a = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let b = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap()).0.to_string();
+    f.answer_in_worktree(&a);
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { ask_id, .. } if ask_id == b));
+    assert_ne!(f.status(&fi).nodes["owner"].state, State::Done);
+    f.answer_in_worktree(&b);
+    f.land_on_main();
+    assert!(
+        matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, source, .. } if ask_id == b && !source.contains(&a))
+    );
+    assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
+}
+
+#[test]
+fn recovery_does_not_link_while_the_old_row_is_open() {
+    // The supersede wrote both rows, then the old row's archive was undone before recovery: the
+    // replacement is not linked, which would leave two open asks.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
+    let text = f.ledger_text();
+    let reopened: String = text
+        .lines()
+        .filter(|l| !["archived_at:", "archived_reason:", "status:"].iter().any(|k| l.trim_start().starts_with(k)))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), reopened).unwrap();
+    assert_eq!(f.row(&old).unwrap().state(), maestro_core::ask::AskState::Open);
+    let before = f.kinds(&fi);
+    assert_eq!(code(f.ask(&fi, None)), "ask_unconfirmed");
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
+fn amend_refuses_when_an_answers_branch_does_not_read_or_holds_the_ask_twice() {
+    for broken in ["asks: [unterminated\n", "twice"] {
+        let mut f = fx(None, "");
+        let fi = f.begin();
+        let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+        let good = f.ledger_text();
+        if broken == "twice" {
+            f.add_entry(&format!("\n  - id: \"{id}\"\n    ask: \"a second row by the same id\"\n"));
+        } else {
+            std::fs::write(f.ws.join(".control/asks/ledger.yaml"), broken).unwrap();
+        }
+        f.put_on_answers_branch();
+        std::fs::write(f.ws.join(".control/asks/ledger.yaml"), &good).unwrap();
+        let before = f.kinds(&fi);
+        assert_eq!(
+            code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")),
+            "ask_amend_unread",
+            "{broken}"
+        );
+        assert_eq!(f.kinds(&fi), before);
+        assert!(f.row(&id).unwrap().row.get("superseded_by").is_none());
+    }
+}
+
+#[test]
+fn amend_refuses_when_an_answers_ref_is_there_but_broken() {
+    // A ref that exists but names no commit (a blob), or whose file is not a ref at all, is
+    // unread, never "no answer".
+    for broken in ["blob", "garbage"] {
+        let mut f = fx(None, "");
+        let fi = f.begin();
+        let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+        let target = if broken == "blob" {
+            // In the fixture's own repository, whatever GIT_* the test inherited (a hook's
+            // GIT_DIR would send the write elsewhere), and checked to be a blob there.
+            let in_fixture = |args: &[&str], input: Option<&[u8]>| {
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(["-C", f.ws.to_str().unwrap()]).args(args);
+                for (var, _) in std::env::vars_os() {
+                    if var.to_string_lossy().starts_with("GIT_") {
+                        cmd.env_remove(var);
+                    }
+                }
+                let mut child =
+                    cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+                {
+                    use std::io::Write as _;
+                    let mut stdin = child.stdin.take().unwrap();
+                    if let Some(bytes) = input {
+                        stdin.write_all(bytes).unwrap();
+                    }
+                }
+                let out = child.wait_with_output().unwrap();
+                assert!(out.status.success(), "git {args:?}");
+                String::from_utf8(out.stdout).unwrap().trim().to_string()
+            };
+            let blob = in_fixture(&["hash-object", "-w", "--stdin"], Some(b"not a commit"));
+            assert_eq!(in_fixture(&["cat-file", "-t", &blob], None), "blob");
+            format!("{blob}\n")
+        } else {
+            "this is not an object id\n".to_string()
+        };
+        let refs = f.ws.join(".git/refs/heads/maestro");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("answers"), target).unwrap();
+        let before = f.kinds(&fi);
+        assert_eq!(
+            code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")),
+            "ask_amend_unread",
+            "{broken}"
+        );
+        assert_eq!(f.kinds(&fi), before);
+        assert!(f.row(&id).unwrap().row.get("superseded_by").is_none());
+    }
+}
+
+#[test]
+fn amend_refuses_an_ask_closed_on_main() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.add_to_row(&id, "    archived_at: \"2026-11-20T00:00:00Z\"\n    resolution: \"withdrawn\"\n");
+    f.land_on_main();
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_closed");
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
+fn amend_then_answer_replacement() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap();
+    let new = waiting(&result).0.to_string();
+    assert_ne!(old, new);
+    assert!(f.row(&new).unwrap().origin.is_some(), "replacement retains Maestro origin");
+    assert!(
+        !f.status(&fi).nodes["owner"].unmet.iter().any(|r| matches!(r, crate::kernel::Reason::InputsChanged { .. }))
+    );
+    f.answer_in_worktree(&new);
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == new));
+}
+
+#[test]
+fn amend_refuses_when_answers_unread_without_appending() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    seams::REMOTE.with(|r| *r.borrow_mut() = Some(f.tmp.path().join("missing").display().to_string()));
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_unread");
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
+fn amend_refuses_prior_ask_when_inputs_return() {
+    let clock = TestClock::install();
+    let mut f = fx(None, "");
+    f.flow = compile("flow: gate\nversion: 1\nworkdir: \"/tmp\"\nnodes:\n  probe: {class: observe, run: ['true'], fresh_for: 10s, exit_map: {0: ok}}\n  owner: {class: human, ask: 'Ship it?', needs: [probe]}\n").unwrap();
+    let fi = f.begin();
+    let observe = |f: &mut Fx, value| {
+        let c = crate::kernel::claim(&mut f.ledger, &f.me, &fi, "probe").unwrap();
+        crate::kernel::complete(
+            &mut f.ledger,
+            &f.me,
+            &c.token,
+            serde_json::json!({"v": value}),
+            &crate::kernel::Limits::default(),
+        )
+        .unwrap();
+    };
+    observe(&mut f, 1);
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, 2);
+    let current = waiting(&f.ask(&fi, None).unwrap()).0.to_string();
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, 1);
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_body_invalid");
+    assert_eq!(f.kinds(&fi), before);
+    assert!(f.row(&old).unwrap().row.get("archived_at").is_none());
+    assert!(f.row(&current).is_some());
+}
+
+#[test]
+fn amend_rejects_oversized_reason_before_pin() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    let before = f.kinds(&fi);
+    assert_eq!(
+        code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), &"é".repeat(1025))),
+        "ask_body_invalid"
+    );
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
+fn composed_ask_with_amend_reason_obeys_body_limit() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    let mut large = body();
+    large.insert("stakes".into(), Value::String("x".repeat(MAX_ASK_BODY - 1000)));
+    let before = f.kinds(&fi);
+    assert_eq!(
+        code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &large, &"r".repeat(2000))),
+        "ask_body_invalid"
+    );
+    assert_eq!(f.kinds(&fi), before);
+}
+
+#[test]
+fn rejected_amend_pin_is_never_filed() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let before = f.ledger_text();
+    let marker = f.ws.join("writer-invoked");
+    std::fs::write(
+        f.ws.join("scripts/ask_ledger.py"),
+        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(2)\n", marker.to_str().unwrap()),
+    )
+    .unwrap();
+    seams::REJECT_AMEND_PIN.with(|c| c.set(true));
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_changed");
+    assert_eq!(f.ledger_text(), before);
+    assert!(!marker.exists(), "rejected pin reached the writer");
+    assert!(f.row(&old).unwrap().row.get("archived_at").is_none());
+}
+
+#[test]
+fn ambiguous_recovered_amend_is_reported_as_ambiguous() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    seams::CRASH_AFTER_FILE.with(|c| c.set(true));
+    assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
+    let replacement = f.events(&fi).into_iter().rfind(|e| e["kind"] == "AskPinned").unwrap()["body"]["ask_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    f.add_entry(&format!("\n  - id: \"{replacement}\"\n    ask: duplicate\n"));
+    assert_eq!(code(f.ask(&fi, None)), "ask_ambiguous");
 }

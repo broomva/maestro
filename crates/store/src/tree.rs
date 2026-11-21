@@ -573,6 +573,35 @@ pub fn has_object(root: &Path, id: &str, timeout: Duration) -> Result<bool, Stri
     Ok(status.success())
 }
 
+/// The commit the local ref `refname` names, both git calls bounded by `timeout` ([`run_bounded`]:
+/// a FIFO planted where git looks cannot hang them). `Ok(None)` only when the ref is absent
+/// (`show-ref --exists` says 2); a ref that is there and broken, or names no commit, is an error,
+/// never "absent". Present, not trusted: read what it names with [`read_verified`]. Needs git >=
+/// 2.43 for `show-ref --exists`, as [`Tree::has_ref`] does; an older git is an error here, so a
+/// guard built on it refuses rather than reading every ref as absent.
+pub fn local_commit(root: &Path, refname: &str, timeout: Duration) -> Result<Option<String>, String> {
+    if refname.starts_with('-') {
+        return Err(format!("`{refname}` is not a ref name"));
+    }
+    let mut cmd = git_command(root);
+    cmd.args(["show-ref", "--exists", refname]);
+    let (status, _, err) = run_bounded(cmd, "git show-ref --exists", 4096, timeout)?;
+    match status.code() {
+        Some(0) => {}
+        Some(2) => return Ok(None),
+        _ => return Err(format!("`{refname}` does not read: {}", String::from_utf8_lossy(&err).trim())),
+    }
+    let mut cmd = git_command(root);
+    cmd.args(["rev-parse", "--verify", "--quiet", &format!("{refname}^{{commit}}")]);
+    let (status, out, _) = run_bounded(cmd, "git rev-parse", 256, timeout)?;
+    let id = String::from_utf8_lossy(&out).trim().to_string();
+    let hex = id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !status.success() || !hex || !(id.len() == 40 || id.len() == 64) {
+        return Err(format!("`{refname}` names no commit"));
+    }
+    Ok(Some(id))
+}
+
 /// Refuses `body` unless it hashes, as git names objects, to `id`.
 fn check(format: &str, kind: &str, id: &str, body: &[u8]) -> Result<(), String> {
     use sha2::Digest as _;

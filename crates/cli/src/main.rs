@@ -358,6 +358,12 @@ enum FlowCommand {
         /// The ask's fields besides id, ask and asked_at, as a JSON object (first call only).
         #[arg(long)]
         ask: Option<String>,
+        /// Replace the current unanswered ask.
+        #[arg(long, requires_all = ["reason", "ask"])]
+        amend: bool,
+        /// Why the ask is being amended.
+        #[arg(long, requires = "amend", value_parser = parse_amend_reason)]
+        reason: Option<String>,
     },
     /// Propose to the owner that this session adopt an instance it does not own: file the ask
     /// (first call), then carry out the owner's answer once it has landed on main. Call it again
@@ -842,9 +848,9 @@ fn flow(store: &Store, command: &FlowCommand) -> Result<()> {
         FlowCommand::Heartbeat { session, claim_token } => {
             (f::HEARTBEAT, json!({ "session": session.session, "claim_token": claim_token }))
         }
-        FlowCommand::Ask { session, instance, node_id, ledger, ask } => {
+        FlowCommand::Ask { session, instance, node_id, ledger, ask, amend, reason } => {
             let ask = json_arg("--ask", ask.as_deref())?;
-            let args = json!({ "session": session.session, "instance": instance, "node_id": node_id, "ledger": ledger, "ask": ask });
+            let args = json!({ "session": session.session, "instance": instance, "node_id": node_id, "ledger": ledger, "ask": ask, "amend": amend, "reason": reason });
             (f::ASK, args)
         }
         FlowCommand::ProposeAdoption { session, instance, ledger, ask, again }
@@ -1455,4 +1461,11 @@ fn validate(store: &Store, file: &PathBuf) -> Result<()> {
         .status()
         .with_context(|| format!("running {}", script.display()))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+fn parse_amend_reason(value: &str) -> Result<String, String> {
+    if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {
+        return Err("amend reason exceeds 2048 bytes".into());
+    }
+    Ok(value.to_string())
 }

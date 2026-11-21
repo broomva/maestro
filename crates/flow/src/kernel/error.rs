@@ -193,6 +193,15 @@ pub enum Refusal {
     /// An answers source that exists could not be read, and none that was read holds the answer.
     #[error("The answers ledger could not be read at {at} ({detail}), so the ask's answer is unknown.")]
     AnswersUnread { at: String, detail: String },
+    /// An answer already exists or is waiting to land.
+    #[error("The ask {ask_id} has an answer and cannot be amended.")]
+    AskAmendAnswered { ask_id: String },
+    /// The answer source could not be read.
+    #[error("The answer to {ask_id} could not be read; it cannot be amended.")]
+    AskAmendUnread { ask_id: String },
+    /// The ask is closed on main without an answer (archived or withdrawn by the owner).
+    #[error("The ask {ask_id} is closed on main and cannot be amended.")]
+    AskAmendClosed { ask_id: String },
     /// The answers ledger holds the ask answered with a body that is not the one linked.
     #[error(
         "The answer to {ask_id} at {at} is to a body that is not the one linked (hash {found}, not {linked}); it is not taken."
@@ -267,6 +276,9 @@ impl Refusal {
             Refusal::AskUnconfirmed { .. } => "ask_unconfirmed",
             Refusal::AskAmbiguous { .. } => "ask_ambiguous",
             Refusal::AnswersUnread { .. } => "answers_unread",
+            Refusal::AskAmendAnswered { .. } => "ask_amend_answered",
+            Refusal::AskAmendUnread { .. } => "ask_amend_unread",
+            Refusal::AskAmendClosed { .. } => "ask_amend_closed",
             Refusal::AnswerMismatch { .. } => "answer_mismatch",
             Refusal::AnswerTooLarge { .. } => "answer_too_large",
             Refusal::AskChanged { .. } => "ask_changed",

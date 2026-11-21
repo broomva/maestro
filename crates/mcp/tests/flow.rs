@@ -634,3 +634,13 @@ fn a_named_performer_is_attested_and_routed_through_the_tools() {
     let kid = f.d1(COMPLETE, json!({ "claim_token": token, "performer_session": "direct:-/kid" }));
     assert_eq!(kid["ok"], true, "{kid}");
 }
+
+#[test]
+fn mcp_amend_rejects_oversized_reason_before_kernel() {
+    let f = fx();
+    let fi = f.begin();
+    let v =
+        f.d1(ASK, json!({"instance": fi, "node_id": "review", "amend": true, "ask": {}, "reason": "é".repeat(1025)}));
+    assert_eq!(code(&v), "ask_body_invalid", "{v}");
+    assert!(v.to_string().contains("MCP amend reason exceeds 2048 bytes"), "{v}");
+}

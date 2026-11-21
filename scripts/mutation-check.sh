@@ -548,7 +548,7 @@ mutate $locks '    hash.update(b"/");' '    hash.update(b"");'
 mutate $locks 'Ok(hash.finalize().iter().take(8)' 'Ok(hash.finalize().iter().take(9)'
 mutate $requests '    maestro_core::ask::OUTCOME_KEYS.contains(&key) || FILER_REFUSED.contains(&key)' '    FILER_REFUSED.contains(&key)'
 mutate $requests $'    "answered_by",\n    "answer_option",' '    "answer_option",'
-mutate $requests '.args(["--json", "-", &format!("--maestro-session={session}"), "--wait"])' '.args(["--json", "-", "--maestro-session=x", "--wait"])'
+mutate $requests 'command.args([&format!("--maestro-session={session}"), "--wait", &FILE_WAIT.as_secs().to_string()])' 'command.args(["--maestro-session=x", "--wait", &FILE_WAIT.as_secs().to_string()])'
 mutate $requests '        Ok(m) if m.is_file() => {}' '        Ok(_) => {}'
 mutate $requests '    if id.is_empty() {' '    if false {'
 mutate $request '            (Self::AskFile, _) => Disposition::Applied,' '            (Self::AskFile, _) => Disposition::Held,'
@@ -1702,6 +1702,46 @@ mutate $cli '    if v["ok"] == json!(true) {
 # Human steps (BRO-3635; BRO-3624 items 1 and 7): a flow's ask, pinned, filed, linked, answered.
 asks=crates/flow/src/kernel/asks.rs
 replay=crates/flow/src/kernel/replay.rs
+# Amendment bounds and current predecessor, each exercised by a focused regression.
+mutate $asks 'if reason.len() > MAX_AMEND_REASON {' 'if false {'
+mutate $asks 'if serde_json::to_vec(&body).map_or(usize::MAX, |b| b.len()) > MAX_ASK_BODY {' 'if false {'
+mutate $asks 'pin.amends && !current_ask' 'pin.amends && false && !current_ask'
+mutate $asks '.filter(|r| r.linked && seen.prior.is_none())' '.filter(|r| r.linked)'
+mutate $replay 'supersedes.is_some() && !current.is_some_and(|r| r.amends)' 'supersedes.is_some()'
+mutate $mf 'if reason.len() > kernel::MAX_AMEND_REASON {' 'if false {'
+mutate $cli 'if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {' 'if false {'
+mutate $asks '    if rec.amends {
+        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {' '    if false {
+        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {'
+mutate $asks '            Found::Ambiguous => {
+                let at = format!("worktree:{}", rec.ledger);
+                return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
+            }
+            Found::None => {}' '            Found::Ambiguous => return Err(unconfirmed("ambiguous".into()).into()),
+            Found::None => {}'
+# An amendment refuses an answered predecessor and confirms the old row names the replacement.
+mutate $asks '            AskState::Answered => return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into()),' '            AskState::Answered => {}'
+mutate $asks '    if answered_on_answers_refs(paths, rec)? {
+        return Err(Refusal::AskAmendAnswered' '    if false {
+        return Err(Refusal::AskAmendAnswered'
+mutate $asks '            Ok(Found::Ambiguous) | Err(_) => return Err(unread()),' '            Ok(Found::Ambiguous) | Err(_) => {}'
+mutate $asks '            Ok(Some(sha)) => sha,
+            Err(_) => return Err(unread()),' '            Ok(Some(sha)) => sha,
+            Err(_) => continue,'
+mutate $tree '        Some(2) => return Ok(None),
+        _ => return Err(format!("`{refname}` does not read: {}", String::from_utf8_lossy(&err).trim())),' '        _ => return Ok(None),'
+mutate $tree '    if !status.success() || !hex || !(id.len() == 40 || id.len() == 64) {' '    if false {'
+mutate $tree '    let (status, out, _) = run_bounded(cmd, "git rev-parse", 256, timeout)?;' '    let (status, out, _) = run_bounded(cmd, "git rev-parse", 256, Duration::from_secs(30))?;'
+mutate $asks '            let at = format!("main@{sha}:{}", rec.ledger);
+            return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());' '            let _ = format!("main@{sha}:{}", rec.ledger);'
+mutate $asks '        Err(_) => return Err(unread().into()),' '        Err(_) => {}'
+mutate $asks '    let on_main = local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id));' '    let on_main = find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id);'
+mutate $asks '        || !(target.as_deref() == Some(new.id.as_str())' '        || !(true || target.as_deref() == Some(new.id.as_str())'
+mutate $asks '    if old.state() != AskState::Archived
+        || comparable_hash(&new.row) != rec.body_hash' '    if false
+        || comparable_hash(&new.row) != rec.body_hash'
+# An amendment refuses an ask closed on main.
+mutate $asks '            AskState::Archived => return Err(Refusal::AskAmendClosed { ask_id: rec.ask_id.clone() }.into()),' '            AskState::Archived => {}'
 # The minted id collides with no id or uid in the ledger.
 mutate $asks '.flat_map(|a| [Some(a.id), a.uid])' '.flat_map(|a| [Some(a.id), None])'
 mutate $asks 'if !taken.contains(&id) {' 'if true {'
@@ -1854,8 +1894,8 @@ mutate $asks '    let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map
         let deadline = clock::now().checked_add(ASK_BUSY_DEADLINE).map_err(|_| Refusal::ClockOutOfRange)?;'
 mutate $asks '        Some(s) if s.state == State::Waiting => Ok((s.iteration.clone(), s.inputs.clone())),' '        Some(s) => Ok((s.iteration.clone(), s.inputs.clone())),'
 mutate $asks 'let at = if adoption::only_proposals_since(&log, seen.seq) { log.seq() } else { seen.seq };' 'let at = log.seq();'
-mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {' '                if false {'
-mutate $replay '                if self.asks.get(&(id, i)).is_some_and(|r| r.inputs == inputs) {' '                if self.asks.contains_key(&(id, i)) {'
+mutate $replay '                if !p.amends && predecessor.is_some_and(|r| r.inputs == inputs) {' '                if false {'
+mutate $replay '                if !p.amends && predecessor.is_some_and(|r| r.inputs == inputs) {' '                if !p.amends && predecessor.is_some() {'
 mutate $replay 'Some(r) if !r.linked && r.ask_id == l.ask_id && r.body_hash == l.body_hash => {' 'Some(r) if !r.linked && r.ask_id == l.ask_id => {'
 mutate $replay 'if !self.asks.get(&(id, i)).is_some_and(|r| !r.linked && r.ask_id == w.ask_id) {' 'if !self.asks.get(&(id, i)).is_some_and(|r| r.ask_id == w.ask_id) {'
 mutate $replay 'Some(r) if r.linked => {' 'Some(r) if true => {'
@@ -1879,15 +1919,18 @@ mutate $replay '        if matches!(n.class, Class::Human { .. }) && !out.reason
             out.form = Form::Open;
             return out;
         }' ''
-mutate $replay '                    if supersedes.is_some() || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. })) {
+mutate $replay '                    if (supersedes.is_some() && !current.is_some_and(|r| r.amends))
+                        || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. }))
+                    {
                         human.push(Reason::InputsChanged { supersedes });
                     }' ''
 mutate $replay '        .filter(|r| &r.inputs == inputs)' '        .filter(|_| true)'
 mutate $replay '    Ok(fold.asks.get(&(id.as_str(), i)).filter(|r| &r.inputs != inputs).cloned())' '    Ok(None)'
 mutate $asks '    if let Some(prev) = &supersedes {
         body.insert("supersedes".into(), Value::String(prev.clone()));
-        body.insert("reason".into(), Value::String("inputs_changed".into()));
+        body.insert("reason".into(), Value::String(reason.clone().unwrap_or_default()));
     }' ''
+mutate $replay '                            && p.supersedes.as_deref() == Some(r.ask_id.as_str())' '                            && true'
 mutate $asks '    let pin = AskPinned { iteration, inputs: Some(inputs.clone()), ..pin };' '    let pin = AskPinned { iteration, inputs: Some(BTreeMap::new()), ..pin };'
 mutate $asks 'let mut out: String = text.chars().take(MAX_ECHO).collect();' 'let mut out: String = text.chars().collect();'
 mutate $asks ' || !filing.ledger.bytes().all(|b| b.is_ascii_graphic())' ''

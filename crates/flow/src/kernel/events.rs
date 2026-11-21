@@ -230,6 +230,9 @@ pub struct AskPinned {
     /// The earlier ask id at this node and iteration that this ask replaces when inputs changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
+    /// Whether this pin amends the current linked ask. Missing in older logs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub amends: bool,
     /// Why this ask supersedes the earlier one (`inputs_changed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
