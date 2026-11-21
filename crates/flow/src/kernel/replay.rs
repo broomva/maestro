@@ -1564,7 +1564,9 @@ impl<'f, 'a> Eval<'f, 'a> {
                         Some(r) => r.supersedes.clone(),
                         None => latest.map(|r| r.ask_id.clone()),
                     };
-                    if supersedes.is_some() || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. })) {
+                    if (supersedes.is_some() && !current.is_some_and(|r| r.amends))
+                        || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. }))
+                    {
                         human.push(Reason::InputsChanged { supersedes });
                     }
                     human.extend(reasons);

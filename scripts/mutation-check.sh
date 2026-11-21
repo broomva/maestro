@@ -1880,7 +1880,9 @@ mutate $replay '        if matches!(n.class, Class::Human { .. }) && !out.reason
             out.form = Form::Open;
             return out;
         }' ''
-mutate $replay '                    if supersedes.is_some() || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. })) {
+mutate $replay '                    if (supersedes.is_some() && !current.is_some_and(|r| r.amends))
+                        || reasons.iter().any(|r| matches!(r, Reason::InputChanged { .. }))
+                    {
                         human.push(Reason::InputsChanged { supersedes });
                     }' ''
 mutate $replay '        .filter(|r| &r.inputs == inputs)' '        .filter(|_| true)'

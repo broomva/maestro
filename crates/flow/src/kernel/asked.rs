@@ -1732,6 +1732,9 @@ fn amend_then_answer_replacement() {
     let new = waiting(&result).0.to_string();
     assert_ne!(old, new);
     assert!(f.row(&new).unwrap().origin.is_some(), "replacement retains Maestro origin");
+    assert!(
+        !f.status(&fi).nodes["owner"].unmet.iter().any(|r| matches!(r, crate::kernel::Reason::InputsChanged { .. }))
+    );
     f.answer_in_worktree(&new);
     f.land_on_main();
     assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == new));
