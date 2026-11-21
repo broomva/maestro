@@ -98,7 +98,7 @@ pub const WEB_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-sr
 
 /// The web pages' styles (BRO-3783): the shell, the three-column decision and the phone layout.
 /// Only on the web pages, so the App's stylesheet holds only what the App places.
-const WEB_CSS: &str = include_str!("../assets/web.css");
+const WEB_CSS: &str = concat!(include_str!("../assets/web.css"), include_str!("../assets/today.css"));
 
 /// One place in the web pages' navigation: its path and its label.
 pub const WEB_NAV: [(&str, &str); 3] = [("/decisions", "Decisions"), ("/today", "Today"), ("/health", "Health")];
