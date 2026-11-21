@@ -125,8 +125,13 @@ fn a_local_ref_is_absent_a_commit_or_an_error() {
 
 #[test]
 fn a_fifo_where_git_looks_cannot_hang_the_ref_resolution() {
-    let (_tmp, root, _head) = repo("x");
-    let made = Command::new("mkfifo").arg(root.join(".git/objects/info/alternates")).status().unwrap();
+    // A FIFO at the head commit's own loose object: `rev-parse <ref>^{commit}` must open it to
+    // learn the object's type, on every platform (a FIFO at the alternates file is not opened by
+    // every git here, which let a mutant lengthening the deadline survive on CI: maestro#62).
+    let (_tmp, root, head) = repo("x");
+    let loose = root.join(".git/objects").join(&head[..2]).join(&head[2..]);
+    std::fs::remove_file(&loose).unwrap();
+    let made = Command::new("mkfifo").arg(&loose).status().unwrap();
     assert!(made.success());
     let (tx, rx) = std::sync::mpsc::channel();
     let started = Instant::now();
@@ -134,6 +139,7 @@ fn a_fifo_where_git_looks_cannot_hang_the_ref_resolution() {
         let _ = tx.send(local_commit(&root, "refs/heads/main", Duration::from_secs(1)));
     });
     let got = rx.recv_timeout(Duration::from_secs(15)).expect("the ref resolution never gave up");
-    assert!(got.is_err(), "{got:?}");
+    let e = got.unwrap_err();
+    assert!(e.contains("git rev-parse did not answer within 1s"), "{e}");
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
 }
