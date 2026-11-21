@@ -159,12 +159,19 @@ def thread(tid, active):
     conn.execute("INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (tid, "p", "t", "codex", "full", "default", active, "2026-11-19T00:00:00Z", "2026-11-19T00:00:00Z",
          None, None, json.dumps(payload), "codex"))
-def provider(ptid, tid, name, status):
+def provider(ptid, tid, name, status, driver=None):
     conn.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}", name, name))
+        (ptid, tid, None, name, None, status, 1, 1, "2026-11-19T00:00:00Z", "{}",
+         None if driver == "NULL" else (driver or name), name))
 thread("moved", "pt-m"); provider("pt-m", "moved", "claudeAgent", "active")
 thread("nullrow", "pt-n"); provider("pt-n", "nullrow", None, "active")
 thread("switched", "pt-s2"); provider("pt-s1", "switched", "codex", "retired"); provider("pt-s2", "switched", "claudeAgent", "active")
+# BRO-4018: instances the owner named, each with the driver its row recorded.
+thread("team", "pt-t"); provider("pt-t", "team", "codex_team", "active", "codex")
+thread("vertex", "pt-v"); provider("pt-v", "vertex", "gemini-vertex", "active", "acpRegistry")
+thread("holon", "pt-h"); provider("pt-h", "holon", "holon", "active", "acpRegistry")
+thread("redriven", "pt-r2"); provider("pt-r1", "redriven", "codex_team", "retired", "claudeAgent"); provider("pt-r2", "redriven", "codex_team", "active", "codex")
+thread("undriven", "pt-u"); provider("pt-u", "undriven", "codex", "active", "NULL")
 conn.commit()
 "#;
     let db = userdata.join("statev2.sqlite");
@@ -177,6 +184,16 @@ conn.commit()
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/switched"))), RefusalReason::PerformerUnverified);
     // P20 round 2: a NULL provider reads (the registry is not unavailable) and confirms nobody.
     assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/nullrow"))), RefusalReason::PerformerUnverified);
+    // BRO-4018: the driver each row recorded decides, whatever the owner named the instance.
+    let harness = |id: &str| reg.performer(&me, &named(&format!("t3:env-mac/{id}"))).unwrap().harness().cloned();
+    assert_eq!(harness("team"), Some(Harness::Codex));
+    assert_eq!(harness("vertex"), Some(Harness::Gemini));
+    assert_eq!(harness("holon"), Some(Harness::Other("acpRegistry:holon".into())), "an acp agent not named");
+    // One instance whose rows recorded two drivers ran two providers: none is attested.
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/redriven"))), RefusalReason::PerformerUnverified);
+    // A row whose driver is NULL, though it names a provider, attests nothing: the column exists,
+    // so the name alone is not taken (Codex, P20 round 2).
+    assert_eq!(refused(reg.performer(&me, &named("t3:env-mac/undriven"))), RefusalReason::PerformerUnverified);
 }
 
 #[test]
@@ -251,4 +268,41 @@ fn with_no_node_known_for_this_host_a_child_that_names_one_is_not_attested() {
         t3(json!([row("named", Some("owner"), json!({"node": "nuc-1"})), row("plain", Some("owner"), json!({}))]));
     assert_eq!(refused(reg.performer(&owner_t3(), &named("t3:env-mac/named"))), RefusalReason::PerformerUnverified);
     assert!(reg.performer(&owner_t3(), &named("t3:env-mac/plain")).is_ok());
+}
+
+/// BRO-4018 (found by the kernel-ready@1 dogfood): a provider-thread row names the instance the
+/// owner chose (`codex_team`) and records the driver it ran; that driver decides the harness. An
+/// `acpRegistry` instance is attested only by name; an unknown driver attests none; rows that
+/// disagree, or a row with no driver, attest none; a registry that records no drivers keeps the
+/// instance id alone.
+#[test]
+fn a_t3_instance_runs_the_harness_its_recorded_driver_names() {
+    let thread = |providers: serde_json::Value, drivers: serde_json::Value| -> maestro_hosts::T3Thread {
+        serde_json::from_value(
+            json!({"id": "t", "cwd": "/tmp", "provider": "x", "providers": providers, "provider_drivers": drivers}),
+        )
+        .unwrap()
+    };
+    let one = |instance: &str, driver: &str| thread(json!([instance]), json!([driver])).performed_harness();
+    assert_eq!(one("codex_team", "codex"), Some(Harness::Codex));
+    assert_eq!(one("codex_carlos_personal_20261029", "codex"), Some(Harness::Codex));
+    assert_eq!(one("claudeAgent", "claudeAgent"), Some(Harness::ClaudeCode));
+    assert_eq!(one("antigravity-personal", "antigravity"), Some(Harness::Agy));
+    assert_eq!(one("grok", "grok"), Some(Harness::Other("grok".into())));
+    assert_eq!(one("gemini-vertex", "acpRegistry"), Some(Harness::Gemini));
+    assert_eq!(one("holon", "acpRegistry"), Some(Harness::Other("acpRegistry:holon".into())));
+    assert_eq!(one("muse", "muse"), Some(Harness::Other("muse:muse".into())));
+    // The driver wins over the name.
+    assert_eq!(one("codex", "acpRegistry"), Some(Harness::Other("acpRegistry:codex".into())));
+    assert_eq!(one("gemini-vertex", "codex"), Some(Harness::Codex));
+    // A row with no driver, rows that disagree, or a driver list that does not match the rows.
+    assert_eq!(one("codex_team", ""), None);
+    assert_eq!(thread(json!(["codex_team", "codex_team"]), json!(["codex", "claudeAgent"])).performed_harness(), None);
+    assert_eq!(thread(json!(["codex_team", "codex_team"]), json!(["codex"])).performed_harness(), None);
+    // No drivers recorded: the instance id alone, so a custom name attests nothing.
+    assert_eq!(
+        thread(json!(["codex_team"]), json!(null)).performed_harness(),
+        Some(Harness::Other("codex_team".into()))
+    );
+    assert_eq!(thread(json!(["codex"]), json!(null)).performed_harness(), Some(Harness::Codex));
 }

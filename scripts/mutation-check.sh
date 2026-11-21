@@ -2151,6 +2151,20 @@ mutate $bc '    if entries.is_empty() || entries.iter().any(|e| e.chars().any(ch
 mutate $bc '    if entries.is_empty() || entries.iter().any(|e| e.chars().any(char::is_control)) {' '    if entries.iter().any(|e| e.chars().any(char::is_control)) {'
 mutate $br '                Some(Ok(out)) if out.status.success() && out.stdout.is_empty() => head,' '                _ => head,'
 mutate $br '                _ => format!("{head}-dirty"),' '                _ => head,'
+# BRO-4018 (crates/hosts/tests/performer.rs): a T3 provider-thread row's recorded driver decides the
+# harness; an acpRegistry instance is attested only by name; an unknown driver attests none; every
+# row must record the same driver; the SQLite reader reports the drivers.
+t3h=crates/hosts/src/t3.rs
+mutate $t3h '        "codex" => Harness::Codex,
+        "claudeAgent" => Harness::ClaudeCode,' '        "codex" => Harness::Other("codex".into()),
+        "claudeAgent" => Harness::ClaudeCode,'
+mutate $t3h '        "acpRegistry" => acp_harness(instance),' '        "acpRegistry" => harness_of(instance),'
+mutate $t3h '        other => Harness::Other(format!("{other}:{instance}")),' '        _ => harness_of(instance),'
+mutate $t3h '        "gemini-vertex" => Harness::Gemini,
+        other => Harness::Other(format!("acpRegistry:{other}")),' '        other => harness_of(other),'
+mutate $t3h '(drivers.len() == rows.len() && drivers.iter().all(|d| d == driver))' '(drivers.iter().all(|d| d == driver))'
+mutate $t3h '(drivers.len() == rows.len() && drivers.iter().all(|d| d == driver))' '(drivers.len() == rows.len())'
+mutate $t3h '            "provider_drivers": provider_drivers,' '            "provider_drivers": None,'
 # The accepting spine: receipts replay accepted only; one record per (node, iteration), at its
 # first place with its latest result; choices and answers on it. Two runs are compared only as
 # runs of one definition (name and IR hash), a precondition reported on its own; then a record
@@ -2691,13 +2705,13 @@ mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if start
 # routed node's driver skill says how to name its performer.
 mutate $fk/replay.rs '                if ir.ir_version >= 9' '                if ir.ir_version >= 10'
 mutate crates/flow/src/kernel/events.rs '    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer }))' '    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer["harness"] }))'
-mutate $ht '        rows.iter().all(|p| p == first).then(|| harness_of(first))' '        Some(harness_of(first))'
+mutate $ht '        if !rows.iter().all(|p| p == first) {' '        if false {'
 mutate $ht '        if provider_column:' '        if False:'
 mutate $ht '        let first = rows.first().filter(|p| !p.is_empty())?;' '        let first = rows.first()?;'
 mutate $ht '            Some(_) => self.performed_harness(),' '            Some(_) => self.harness(),'
 mutate $ht '            (Some(child), Some(here)) => child != here,' '            (Some(child), Some(here)) => false,'
 mutate $ht '            (Some(_), None) => true,' '            (Some(_), None) => false,'
-mutate $ht $'            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(' $'            providers = [p["provider"] for p in conn.execute('
+mutate $ht $'            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in rows]' $'            providers = [p["provider"] for p in rows]'
 mutate crates/flow/src/driver.rs '    if let Some(refs) = node.class.launch().map(|l| &l.different_from).filter(|r| !r.is_empty()) {' '    if let Some(refs) = None::<&Vec<RouteRef>> {'
 # The registry attests a performer only as the owner's child, on this host, not closed.
 mutate $ht '        if thread.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'

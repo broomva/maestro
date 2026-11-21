@@ -66,6 +66,10 @@ pub struct T3Thread {
     /// (BRO-3828); `None` when the registry reports none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<Vec<String>>,
+    /// The driver each provider-thread row records it ran, in the order of `providers`
+    /// (BRO-4018); `None` when the registry records none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_drivers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
     /// Pending permission records that did not decode, each with why (BRO-3863), and waiting
@@ -114,7 +118,50 @@ impl T3Thread {
     pub fn performed_harness(&self) -> Option<Harness> {
         let rows = self.providers.as_ref()?;
         let first = rows.first().filter(|p| !p.is_empty())?;
-        rows.iter().all(|p| p == first).then(|| harness_of(first))
+        if !rows.iter().all(|p| p == first) {
+            return None;
+        }
+        // The driver each row recorded, when the registry records it (BRO-4018): every row must
+        // name the same one, and a row that names none attests nothing.
+        match &self.provider_drivers {
+            None => Some(harness_of(first)),
+            Some(drivers) => {
+                let driver = drivers.first().filter(|d| !d.is_empty())?;
+                (drivers.len() == rows.len() && drivers.iter().all(|d| d == driver))
+                    .then(|| harness_of_driver(first, driver))
+            }
+        }
+    }
+}
+
+/// The harness a T3 provider instance ran, from the driver its provider-thread row recorded
+/// (BRO-4018). The instance id is the owner's name for it (`codex_team`); the driver is what ran.
+/// An `acpRegistry` instance names no agent in its driver, and one may run any model (`holon`
+/// runs Claude), so only the instances [`acp_harness`] names are attested; any other driver
+/// attests none.
+///
+/// What this attests is what T3 records the thread ran: the instance and its driver. Which agent
+/// an ACP instance runs, and what an instance named like a provider runs when no driver is
+/// recorded, are the owner's T3 configuration, as is the instance's name. That configuration is a
+/// user-level write, the same that can replace Maestro's binary: the floor the owner accepted as
+/// residual risk (BRO-3635). Attestation stops an agent misreporting its provider; it does not
+/// defend against the owner mislabelling an instance (P20 round 2 on maestro#61).
+fn harness_of_driver(instance: &str, driver: &str) -> Harness {
+    match driver {
+        "codex" => Harness::Codex,
+        "claudeAgent" => Harness::ClaudeCode,
+        "antigravity" => Harness::Agy,
+        "grok" => Harness::Other("grok".to_string()),
+        "acpRegistry" => acp_harness(instance),
+        other => Harness::Other(format!("{other}:{instance}")),
+    }
+}
+
+/// The `acpRegistry` instances whose agent is known: `gemini-vertex` runs the Gemini CLI.
+fn acp_harness(instance: &str) -> Harness {
+    match instance {
+        "gemini-vertex" => Harness::Gemini,
+        other => Harness::Other(format!("acpRegistry:{other}")),
     }
 }
 
@@ -187,6 +234,9 @@ struct RawT3Thread {
     /// Every provider its provider-thread rows name (BRO-3828).
     #[serde(default)]
     providers: Option<Vec<String>>,
+    /// The driver each of those rows ran, in the same order (BRO-4018).
+    #[serde(default)]
+    provider_drivers: Option<Vec<String>>,
     /// The thread's provider-thread rows, active or retired, each with its native id
     /// (`payload_json.$.nativeThreadRef.nativeId`), as `orchestration_v2_projection_provider_threads`
     /// holds them.
@@ -442,6 +492,11 @@ def main():
     provider_column = "orchestration_v2_projection_provider_threads" in tables and any(
         c["name"] == "provider" for c in conn.execute("PRAGMA table_info(orchestration_v2_projection_provider_threads)")
     )
+    # Whether those rows also record the driver each ran (BRO-4018): the provider names an
+    # instance the owner chose (`codex_team`), and the driver is what that instance ran then.
+    driver_column = provider_column and any(
+        c["name"] == "driver" for c in conn.execute("PRAGMA table_info(orchestration_v2_projection_provider_threads)")
+    )
 
     def pending_questions_of(thread_id):
         # A thread's waiting AskUserQuestion cards (BRO-3936): pending `user_input` requests, raw,
@@ -510,12 +565,18 @@ def main():
         # Every provider the thread has run under, active row and retired ones (BRO-3828): a
         # performer is attested only when they are one provider, never by the thread's default.
         providers = None
+        provider_drivers = None
         if provider_column:
             # A provider that is not text (NULL) names none: it reads, and confirms nobody.
-            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in conn.execute(
-                "SELECT provider FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
+            rows = conn.execute(
+                "SELECT provider" + (", driver" if driver_column else "")
+                + " FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?",
                 (row["thread_id"],),
-            )]
+            ).fetchall()
+            providers = [p["provider"] if isinstance(p["provider"], str) else "" for p in rows]
+            if driver_column:
+                # Each row's driver, in the same order; one that is not text names none.
+                provider_drivers = [p["driver"] if isinstance(p["driver"], str) else "" for p in rows]
         run_marker = latest_run_id or payload.get("runId") or payload.get("sessionId")
         return {
             "id": row["thread_id"],
@@ -524,6 +585,7 @@ def main():
             "node": payload.get("node") if isinstance(payload.get("node"), str) else None,
             "provider": row["default_provider"],
             "providers": providers,
+            "provider_drivers": provider_drivers,
             "created_at": created_at,
             "run_id": run_marker if isinstance(run_marker, str) and run_marker else None,
             "archived_at": row["archived_at"] or payload.get("archivedAt"),
@@ -846,6 +908,7 @@ impl T3Registry {
             status: raw.status,
             parent_id: raw.parent_id,
             providers: raw.providers,
+            provider_drivers: raw.provider_drivers,
             pending_permissions,
             unread_permissions,
             pending_questions,
