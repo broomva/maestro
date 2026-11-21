@@ -1726,8 +1726,42 @@ fn answer_to_superseded_ask_is_taken_as_receipt() {
     f.answer_in_worktree(&old);
     f.land_on_main();
     let result = f.ask(&fi, None).unwrap();
-    assert!(matches!(result, Asked::Answered { ask_id, source, .. } if ask_id == new && source.contains(&old)));
+    assert!(matches!(&result, Asked::Answered { ask_id, source, .. } if ask_id == &new && source.contains(&old)));
+    // The supersede's `status: archived` is not reported as the owner's answer.
+    assert!(
+        matches!(&result, Asked::Answered { outputs, .. } if outputs.get("status").is_none() && outputs["answer_option"] == "ship")
+    );
     assert_eq!(f.status(&fi).nodes["owner"].state, State::Done);
+}
+
+#[test]
+fn owner_archive_of_a_predecessor_that_names_no_successor_is_not_a_receipt() {
+    // The owner withdrew the old ask on main (an outcome, no `superseded_by` naming the
+    // replacement): that is not an answer to the node, so the node keeps waiting.
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let new = waiting(&amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap()).0.to_string();
+    let text = f.ledger_text();
+    let line =
+        text.lines().find(|l| l.trim_start().starts_with("superseded_by:")).expect("supersede wrote superseded_by");
+    assert!(line.contains(&new), "{line}");
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), text.replace(line, "    resolution: \"withdrawn\""))
+        .unwrap();
+    f.land_on_main();
+    assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Waiting { ask_id, .. } if ask_id == new), "{old}");
+}
+
+#[test]
+fn amend_refuses_an_ask_closed_on_main() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    f.add_to_row(&id, "    archived_at: \"2026-11-20T00:00:00Z\"\n    resolution: \"withdrawn\"\n");
+    f.land_on_main();
+    let before = f.kinds(&fi);
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_amend_closed");
+    assert_eq!(f.kinds(&fi), before);
 }
 
 #[test]

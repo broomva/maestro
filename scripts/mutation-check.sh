@@ -1721,6 +1721,10 @@ mutate $asks '            Found::Ambiguous => {
 # An amendment refuses an answered predecessor and confirms the old row names the replacement.
 mutate $asks '        Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: old.ask_id.clone() }.into()),' '        Ok(_) => {},'
 mutate $asks '        || !(target.as_deref() == Some(new.id.as_str())' '        || !(true || target.as_deref() == Some(new.id.as_str())'
+# An amendment refuses an ask closed on main; a predecessor's outcome counts only when it names its successor.
+mutate $asks '        Ok((Answer::Open, true)) => return Err(Refusal::AskAmendClosed { ask_id: old.ask_id.clone() }.into()),' '        Ok((Answer::Open, true)) => {}'
+mutate $asks 'maestro_core::ask::has_outcome(&row.row) && names(&row.row, s)' 'maestro_core::ask::has_outcome(&row.row)'
+mutate $asks 'let successor = if i == 0 { &rec } else { &predecessors[i - 1] };' 'let successor = old;'
 # The minted id collides with no id or uid in the ledger.
 mutate $asks '.flat_map(|a| [Some(a.id), a.uid])' '.flat_map(|a| [Some(a.id), None])'
 mutate $asks 'if !taken.contains(&id) {' 'if true {'

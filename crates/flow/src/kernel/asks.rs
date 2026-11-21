@@ -273,8 +273,9 @@ pub fn amend(
     if reason.trim().is_empty() {
         return Err(invalid("amend needs a reason"));
     }
-    match landed(paths, old) {
-        Ok(Answer::Open) => {}
+    match landed(paths, old).and_then(|a| closed_on_main(paths, old).map(|closed| (a, closed))) {
+        Ok((Answer::Open, true)) => return Err(Refusal::AskAmendClosed { ask_id: old.ask_id.clone() }.into()),
+        Ok((Answer::Open, false)) => {}
         Ok(_) => return Err(Refusal::AskAmendAnswered { ask_id: old.ask_id.clone() }.into()),
         Err(KernelError::Refused(Refusal::AnswersUnread { .. })) => {
             return Err(Refusal::AskAmendUnread { ask_id: old.ask_id.clone() }.into());
@@ -801,7 +802,10 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
 
 /// The linked ask's answer, as main has it at the commit the remote names; failing that, whether
 /// one waits to land on Maestro's answers branch.
-fn read_answer(paths: &Paths, rec: &AskRec, predecessor: bool) -> Result<Answer, KernelError> {
+/// `successor`: for an amended predecessor, the ask that replaced it. Its outcome counts even
+/// though the row is archived, but only when the row's `superseded_by` names that successor: an
+/// owner's own archive or withdrawal of the old ask is not an answer (P20 round 2, maestro#62).
+fn read_answer(paths: &Paths, rec: &AskRec, successor: Option<&AskRec>) -> Result<Answer, KernelError> {
     let sha = landed_main(paths)?;
     // The asks folder as the registry names it here; the ledger is read at `sha`, every object on
     // the way checked against its id, so nothing planted in the object store under the commit's,
@@ -815,7 +819,8 @@ fn read_answer(paths: &Paths, rec: &AskRec, predecessor: bool) -> Result<Answer,
             return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
         }
         Ok(Found::Row(row))
-            if row.state() == AskState::Answered || (predecessor && maestro_core::ask::has_outcome(&row.row)) =>
+            if row.state() == AskState::Answered
+                || successor.is_some_and(|s| maestro_core::ask::has_outcome(&row.row) && names(&row.row, s)) =>
         {
             return Ok(Answer::Landed { row, source });
         }
@@ -825,6 +830,24 @@ fn read_answer(paths: &Paths, rec: &AskRec, predecessor: bool) -> Result<Answer,
         Some(at) => Answer::Landing { at },
         None => Answer::Open,
     })
+}
+
+/// Whether main holds the ask `rec` closed without an answer (archived), which `landed` reads as
+/// open. Unread is refused as `read_answer` refuses it.
+fn closed_on_main(paths: &Paths, rec: &AskRec) -> Result<bool, KernelError> {
+    let sha = landed_main(paths)?;
+    let local = Store::new(paths.clone(), TreeSource::WorkingTree);
+    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
+        Err(e) => Err(Refusal::AnswersUnread { at: format!("main@{sha}"), detail: clip(&e) }.into()),
+        Ok(Found::Row(row)) => Ok(row.state() != AskState::Open),
+        Ok(_) => Ok(false),
+    }
+}
+
+/// Whether `row`'s `superseded_by` names `successor` by its id, or by the uid its body carries.
+fn names(row: &JsValue, successor: &AskRec) -> bool {
+    let Some(target) = text(row.get("superseded_by")) else { return false };
+    target == successor.ask_id || successor.body.get("uid").and_then(Value::as_str) == Some(target.as_str())
 }
 
 /// The first of Maestro's answers refs (`views::ANSWERS_REFS`) where the ask `ask_id` of `ledger`
@@ -895,7 +918,7 @@ pub fn landing(paths: &Paths, unmet: &mut [super::Reason]) {
 /// The linked ask's answer as [`read_answer`] reads it, the one answer source; an answer landed
 /// on main counts only for the body that was linked (`answer_mismatch` otherwise).
 pub(super) fn landed(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
-    let answer = read_answer(paths, rec, false)?;
+    let answer = read_answer(paths, rec, None)?;
     let Answer::Landed { row, source } = &answer else { return Ok(answer) };
     let found = comparable_hash(&row.row);
     if found != rec.body_hash {
@@ -937,8 +960,9 @@ fn take_answer(
         Vec::new()
     };
     let mut old_answer = None;
-    for old in &predecessors {
-        let answer = read_answer(paths, old, true)?;
+    for (i, old) in predecessors.iter().enumerate() {
+        let successor = if i == 0 { &rec } else { &predecessors[i - 1] };
+        let answer = read_answer(paths, old, Some(successor))?;
         if let Answer::Landed { row, source } = answer {
             let found = comparable_hash(&row.row);
             if found != old.body_hash {
@@ -979,7 +1003,11 @@ fn take_answer(
             });
         }
     };
-    let outputs = Value::Object(outputs_of(&row));
+    let mut outputs = outputs_of(&row);
+    if outputs.get("status").and_then(Value::as_str).is_some_and(|s| s.to_lowercase().starts_with("archived")) {
+        outputs.remove("status"); // the supersede's archive, not the owner's answer
+    }
+    let outputs = Value::Object(outputs);
     let size = serde_json::to_vec(&outputs).map_or(usize::MAX, |b| b.len());
     if size > MAX_OUTPUTS {
         return Err(Refusal::AnswerTooLarge { ask_id: rec.ask_id.clone(), size, limit: MAX_OUTPUTS }.into());

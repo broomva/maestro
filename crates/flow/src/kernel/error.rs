@@ -199,6 +199,9 @@ pub enum Refusal {
     /// The answer source could not be read.
     #[error("The answer to {ask_id} could not be read; it cannot be amended.")]
     AskAmendUnread { ask_id: String },
+    /// The ask is closed on main without an answer (archived or withdrawn by the owner).
+    #[error("The ask {ask_id} is closed on main and cannot be amended.")]
+    AskAmendClosed { ask_id: String },
     /// The answers ledger holds the ask answered with a body that is not the one linked.
     #[error(
         "The answer to {ask_id} at {at} is to a body that is not the one linked (hash {found}, not {linked}); it is not taken."
@@ -275,6 +278,7 @@ impl Refusal {
             Refusal::AnswersUnread { .. } => "answers_unread",
             Refusal::AskAmendAnswered { .. } => "ask_amend_answered",
             Refusal::AskAmendUnread { .. } => "ask_amend_unread",
+            Refusal::AskAmendClosed { .. } => "ask_amend_closed",
             Refusal::AnswerMismatch { .. } => "answer_mismatch",
             Refusal::AnswerTooLarge { .. } => "answer_too_large",
             Refusal::AskChanged { .. } => "ask_changed",
