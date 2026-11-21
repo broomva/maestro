@@ -203,14 +203,9 @@ fn write_ask(
     if let Some((old, reason)) = supersede {
         command.arg("supersede").arg(&path).args(["--old", old, "--reason", reason, "--json", "-"]);
     } else {
-        command.arg("file").arg(&path).args([
-            "--json",
-            "-",
-            &format!("--maestro-session={session}"),
-            "--wait",
-            &FILE_WAIT.as_secs().to_string(),
-        ]);
+        command.arg("file").arg(&path).args(["--json", "-"]);
     }
+    command.args([&format!("--maestro-session={session}"), "--wait", &FILE_WAIT.as_secs().to_string()]);
     let mut child = command
         .env("MAESTRO_PASEO_ASK_LOCKS", &paths.ask_locks)
         .current_dir(&paths.workspace)

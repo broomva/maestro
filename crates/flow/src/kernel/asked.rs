@@ -1731,6 +1731,7 @@ fn amend_then_answer_replacement() {
     let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap();
     let new = waiting(&result).0.to_string();
     assert_ne!(old, new);
+    assert!(f.row(&new).unwrap().origin.is_some(), "replacement retains Maestro origin");
     f.answer_in_worktree(&new);
     f.land_on_main();
     assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == new));
