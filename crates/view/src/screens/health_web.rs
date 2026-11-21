@@ -32,6 +32,36 @@ fn available<T>(s: &Section<T>) -> &'static str {
     if s.is_degraded() { "unavailable" } else { "read" }
 }
 
+fn account_label(account: &str) -> &str {
+    if account.starts_with("devteam@") {
+        "devteam"
+    } else if account.starts_with("team@") {
+        "team"
+    } else if account.contains('@') {
+        "personal"
+    } else {
+        account
+    }
+}
+
+fn reset_time(lane: &Value) -> Option<&str> {
+    let resets = lane.get("resets")?;
+    resets
+        .as_array()
+        .and_then(|r| r.iter().find_map(Value::as_str))
+        .or_else(|| resets.get("weekly").and_then(Value::as_str))
+}
+
+fn dispatch(e: &Value) -> Markup {
+    let counts = number(e, "decisions_24h").zip(number(e, "denials_24h")).zip(number(e, "followed"));
+    html! { div class="mh-dispatch" { h3 { "Dispatch gate · 24 hours" }
+        @if let Some(((total, denied), followed)) = counts.filter(|((total, denied), followed)|
+            *total >= *denied && *denied >= *followed && *followed >= 0.0) {
+            p { (format!("✓ {:.0} allowed · ↪ {:.0} sent elsewhere · ! {:.0} denied", total-denied, followed, denied-followed)) }
+        } @else { p { "— Not measured" } }
+    } }
+}
+
 pub(crate) fn health(cx: &Ctx, id: &str) -> Markup {
     let census = cx.store.health_census();
     let capacity = cx.store.health_capacity();
@@ -99,15 +129,19 @@ pub(crate) fn health(cx: &Ctx, id: &str) -> Markup {
                 section { h2 { "Token capacity" } p class="mh-note" { "Usage against the 80% throttle · last 24 hours" }
                     @if let Some(c) = &capacity.data { @for lane in &c.lanes {
                         @let provider = word(lane,"provider"); @let account = word(lane,"account"); @let used = number(lane,"used");
+                        @let routing = c.routing.iter().find(|r| word(r,"provider") == provider && word(r,"account") == account);
                         @let samples: Vec<_> = history.data.as_ref().into_iter().flatten().filter(|s| s.lane == format!("{provider}/{account}")).collect();
-                        article class="mh-token" { div { strong { (provider) } small { (account) } } div class="mh-token-detail" {
+                        article class="mh-token" { div { strong { (provider) } small { (account_label(&account)) } } div class="mh-token-detail" {
                             @if let Some(n) = used { div class="mh-track" { span style=(format!("width:{:.1}%", n.clamp(0.0,100.0))) {} } strong { (format!("{n:.0}% used")) } } @else { div class="mh-track mh-empty" {} span { "— not measured" } }
+                            p { @if let Some(r) = routing { @if let Some((live, max)) = number(r,"live").zip(number(r,"max_concurrent")) { (format!("{live:.0} of {max:.0} slots")) } @else { "Slots not measured" } } @else { "Slots not measured" } " · " @if let Some(reset) = reset_time(lane) { "Resets " (reset) } @else { "Reset not measured" } }
                             p { @if history.is_degraded() { "History unavailable" } @else if samples.is_empty() { "History not measured" } @else { (samples.len()) " history samples" } " · " @if let Some(n) = number(lane,"hours_to_dry") { (format!("Estimated {n:.1} hours to empty")) } @else { "Projection not measured" } }
                         } }
                     } } @else { p class="mh-unavailable" { "Token capacity is unavailable." } }
                 }
                 section { h2 { "Loops" }
-                    @if let Some(l) = &loops.data { @if let Some(map) = l.loops.as_object() { div class="mh-loops" { @for (name, value) in map { article { (chip(&word(value,"status"))) strong { (name.replace('_', " ")) } small { (word(value,"why")) } } } } } }
+                    @if let Some(l) = &loops.data { @if let Some(map) = l.loops.as_object() { div class="mh-loops" { @for (name, value) in map { article { (chip(&word(value,"status"))) strong { (name.replace('_', " ")) } small { (word(value,"why")) } } } } }
+                        @if let Some(e) = l.loops.get("dispatch_gate").and_then(|v| v.get("evidence")) { (dispatch(e)) }
+                    }
                     @else { p class="mh-unavailable" { "Loop information is unavailable." } }
                 }
             }
@@ -117,5 +151,30 @@ pub(crate) fn health(cx: &Ctx, id: &str) -> Markup {
                 div class="mh-hatched" aria-label="Incident intervals not measured" {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn dispatch_counts_require_consistent_evidence() {
+        let good = dispatch(&json!({"decisions_24h": 10, "denials_24h": 3, "followed": 2})).into_string();
+        assert!(good.contains("7 allowed"));
+        assert!(good.contains("2 sent elsewhere"));
+        assert!(good.contains("1 denied"));
+        let bad = dispatch(&json!({"decisions_24h": 2, "denials_24h": 3, "followed": 1})).into_string();
+        assert!(bad.contains("Not measured"));
+    }
+
+    #[test]
+    fn account_names_and_reset_shapes() {
+        assert_eq!(account_label("team@example.com"), "team");
+        assert_eq!(account_label("person@example.com"), "personal");
+        assert_eq!(reset_time(&json!({"resets": {"weekly": "tomorrow"}})), Some("tomorrow"));
+        assert_eq!(reset_time(&json!({"resets": ["later"]})), Some("later"));
+        assert_eq!(reset_time(&json!({})), None);
     }
 }

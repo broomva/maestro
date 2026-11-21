@@ -2719,6 +2719,8 @@ mutate $ht '        if thread.parent_id.as_deref() != Some(owner.session().id.as
 mutate $ht '        if thread.liveness() == SessionLiveness::Closed {' '        if false {'
 mutate $hlb '        if session.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'
 mutate $hlb '        if performer.canonical(host) != resolved.session().canonical(host) {' '        if false {'
+# BRO-4042: inconsistent dispatch evidence is not presented as measured counts.
+mutate crates/view/src/screens/health_web.rs '            *total >= *denied && *denied >= *followed && *followed >= 0.0) {' '            true) {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
