@@ -1340,3 +1340,24 @@ mod tests {
         assert_eq!(check_outputs(&over).unwrap_err().0, "outputs_invalid");
     }
 }
+
+/// End an instance on an authenticated owner action. No agent session may take this verb.
+pub fn abandon(
+    ledger: &mut Ledger,
+    principal: &maestro_core::authority::Principal,
+    instance: &InstanceId,
+    reason: &str,
+) -> Result<Appended, KernelError> {
+    if !principal.permits(maestro_core::authority::Authority::OwnerAction) {
+        return Err(Refusal::OwnerActionRequired.into());
+    }
+    let via = match principal {
+        maestro_core::authority::Principal::Owner { via } => via.clone(),
+        _ => String::new(),
+    };
+    let mut guard = ledger.lock()?;
+    let log = guard.log(instance)?;
+    check_writable(&log, &pinned(&log)?)?;
+    let event = super::events::Abandoned { reason: reason.to_string(), by: via };
+    append_writable(&mut guard, instance, log.seq(), event.to_event()?)
+}

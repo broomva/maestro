@@ -45,6 +45,17 @@ impl Intent {
         }
     }
 
+    pub fn abandon(instance: &str, reason: &str) -> Self {
+        Intent {
+            verb: "flow.abandon".into(),
+            ledger: String::new(),
+            handle: instance.into(),
+            hash: String::new(),
+            option: String::new(),
+            note: Some(reason.into()),
+        }
+    }
+
     /// The canonical JSON the challenge commits to.
     pub fn canonical(&self) -> String {
         serde_json::to_string(self).expect("an intent serialises")
@@ -557,6 +568,21 @@ pub fn land(w: &Writer) -> String {
 /// record is settled only once the outcome is logged, so a crash before that is retried at start.
 pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &str, by: &str, session: Option<&str>) {
     let Some(mut r) = book.take_due(id) else { return };
+    if r.intent.verb == "flow.abandon" {
+        let result = abandon_flow(w, &r, by);
+        match result {
+            Ok(()) => r.stage = Stage::Written,
+            Err(e) => {
+                r.stage = Stage::Failed;
+                r.error = Some(e);
+            }
+        }
+        book.put(r.clone());
+        if log(&w.owner_dir, &r).is_ok() {
+            settle(&w.owner_dir, id);
+        }
+        return;
+    }
     match write(w, &r, assertion, nonce, by) {
         Ok(commit) => {
             r.stage = Stage::Written;
@@ -589,6 +615,21 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
             settle(&w.owner_dir, id);
         }
     }
+}
+
+fn abandon_flow(w: &Writer, r: &Receipt, by: &str) -> Result<(), String> {
+    let root = crate::flow::flows_root(&w.workspace).map_err(|e| e.to_string())?;
+    if !root.exists() {
+        return Err("no flow ledger".into());
+    }
+    let host = crate::flow::host_id().map_err(|e| e.to_string())?;
+    let instance = maestro_flow::InstanceId::new(&r.intent.handle).map_err(|e| e.to_string())?;
+    let mut ledger =
+        maestro_flow::Ledger::open(&root, &host, maestro_flow::Options::default()).map_err(|e| e.to_string())?;
+    let owner = maestro_core::authority::Principal::Owner { via: by.to_owned() };
+    maestro_flow::kernel::abandon(&mut ledger, &owner, &instance, r.intent.note.as_deref().unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]
