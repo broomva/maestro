@@ -160,6 +160,30 @@ fn copy(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
+fn git(root: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn init_origin(root: &std::path::Path) {
+    let ws = root.join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-qm", "seed"]);
+    let origin = root.join("origin.git");
+    git(root, &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
+    git(&ws, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&ws, &["push", "-q", "origin", "main"]);
+    git(&ws, &["fetch", "-q", "origin"]);
+}
+
 /// What a read does, not what it declares: every tool declared a read leaves a whole machine
 /// (ledgers, work, home, fleet state) byte for byte as it was.
 #[test]
@@ -353,6 +377,7 @@ fn the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record() {
     copy(&fixtures.join("machine"), &root);
     std::fs::create_dir_all(root.join("workspace/scripts")).unwrap();
     std::fs::copy(fixtures.join("requests/ask_ledger_stub.py"), root.join("workspace/scripts/ask_ledger.py")).unwrap();
+    init_origin(&root);
     let mut paths = Paths::under(&root);
     paths.ask_locks = root.join("locks");
     let store = Store::new(paths, TreeSource::WorkingTree);
@@ -409,14 +434,23 @@ fn the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record() {
         .collect();
     let ledger = Path::new("workspace/.broomva/flows");
     let asks = Path::new("workspace/.control/asks/demo-arc.yaml");
-    assert!(changed.iter().any(|p| p == asks), "{changed:?}");
+    assert!(!changed.iter().any(|p| p == asks), "the owner's working tree changed: {changed:?}");
     for p in &changed {
         let flows = p.starts_with(ledger.join("instances").join(&fi))
             || (p.parent() == Some(ledger)
                 && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("projection.sqlite")));
-        assert!(flows || p == asks || p.starts_with("locks"), "ask changed {p:?}");
+        assert!(
+            flows
+                || p.starts_with("locks")
+                || p.starts_with("workspace/.git")
+                || p.starts_with("origin.git")
+                || p.starts_with("maestro-checkout")
+                || p.starts_with("maestro-owner"),
+            "ask changed {p:?}"
+        );
     }
-    let text = std::fs::read_to_string(root.join(asks)).unwrap();
+    let text =
+        git(&root.join("workspace"), &["show", "refs/remotes/origin/maestro/ledger:.control/asks/demo-arc.yaml"]);
     assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "one ask filed");
     assert!(!root.join("broomva-home/ledger/requests/requests.jsonl").exists(), "nothing journalled");
     // A read relays the waiting question with its ask, and writes nothing.
@@ -445,6 +479,7 @@ fn a_flow_proposal_writes_its_instance_and_one_ask_and_takes_no_answer() {
     copy(&fixtures.join("machine"), &root);
     std::fs::create_dir_all(root.join("workspace/scripts")).unwrap();
     std::fs::copy(fixtures.join("requests/ask_ledger_stub.py"), root.join("workspace/scripts/ask_ledger.py")).unwrap();
+    init_origin(&root);
     let mut paths = Paths::under(&root);
     paths.ask_locks = root.join("locks");
     let store = Store::new(paths, TreeSource::WorkingTree);
@@ -503,14 +538,23 @@ fn a_flow_proposal_writes_its_instance_and_one_ask_and_takes_no_answer() {
             .map(|(p, _)| p.clone())
             .chain(before.keys().filter(|p| !after.contains_key(*p)).cloned())
             .collect();
-        assert!(changed.iter().any(|p| p == asks), "{tool}: {changed:?}");
+        assert!(!changed.iter().any(|p| p == asks), "{tool}: owner workspace changed: {changed:?}");
         for p in &changed {
             let flows = p.starts_with(ledger.join("instances").join(&fi))
                 || (p.parent() == Some(ledger)
                     && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("projection.sqlite")));
-            assert!(flows || p == asks || p.starts_with("locks"), "{tool} changed {p:?}");
+            assert!(
+                flows
+                    || p.starts_with("locks")
+                    || p.starts_with("workspace/.git")
+                    || p.starts_with("origin.git")
+                    || p.starts_with("maestro-checkout")
+                    || p.starts_with("maestro-owner"),
+                "{tool} changed {p:?}"
+            );
         }
-        let text = std::fs::read_to_string(root.join(asks)).unwrap();
+        let text =
+            git(&root.join("workspace"), &["show", "refs/remotes/origin/maestro/ledger:.control/asks/demo-arc.yaml"]);
         assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "{tool}: one ask filed");
     }
     assert!(!root.join("broomva-home/ledger/requests/requests.jsonl").exists(), "nothing journalled");
@@ -578,6 +622,7 @@ fn a_filed_ask_with_a_busy_journal_lock_has_no_busy_flag() {
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/requests");
     std::fs::copy(fixtures.join("ledger.yaml"), asks.join("ledger.yaml")).unwrap();
     std::fs::copy(fixtures.join("ask_ledger_stub.py"), workspace.join("scripts/ask_ledger.py")).unwrap();
+    init_origin(tmp.path());
     let mut paths = Paths::under(tmp.path());
     paths.ask_locks = tmp.path().join("ask-locks");
     let store = Store::new(paths.clone(), TreeSource::WorkingTree);
@@ -595,6 +640,8 @@ fn a_filed_ask_with_a_busy_journal_lock_has_no_busy_flag() {
         )
         .unwrap(),
     ));
+    // A shadow folder in the owner's working tree must not change the committed asks path.
+    std::fs::create_dir_all(workspace.join(".broomva/asks")).unwrap();
     let mut ask: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fixtures.join("ask.json")).unwrap()).unwrap();
     ask["id"] = json!("mcp-busy-journal-1");
@@ -609,6 +656,20 @@ fn a_filed_ask_with_a_busy_journal_lock_has_no_busy_flag() {
     let data = error.data.expect("the filed ask is named in the error data");
     assert_eq!(data["filed"]["id"], "mcp-busy-journal-1");
     assert_ne!(data.get("busy"), Some(&json!(true)), "{data}");
-    assert!(std::fs::read_to_string(asks.join("ledger.yaml")).unwrap().contains("id: \"mcp-busy-journal-1\""));
+    assert!(!std::fs::read_to_string(asks.join("ledger.yaml")).unwrap().contains("id: \"mcp-busy-journal-1\""));
+    let main = Store::new(paths.clone(), TreeSource::GitRev("origin/main".into()));
+    let section = main.asks();
+    assert!(section.data.unwrap().iter().flat_map(|l| &l.ledger.asks).any(|a| a.id == "mcp-busy-journal-1"));
     assert!(!journal.exists(), "the journal line must be absent");
+    drop(_lock);
+    let mut ask: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixtures.join("ask.json")).unwrap()).unwrap();
+    ask["id"] = json!("mcp-filed");
+    let result =
+        call(&store, "maestro_ask_file", json!({ "session": "t3:local/test", "ledger": "ledger.yaml", "ask": ask }))
+            .unwrap();
+    assert_eq!(result["request"]["result"]["id"], "mcp-filed");
+    let section = store.asks();
+    assert!(section.data.unwrap().iter().flat_map(|l| &l.ledger.asks).any(|a| a.id == "mcp-filed"));
+    assert!(!std::fs::read_to_string(asks.join("ledger.yaml")).unwrap().contains("id: \"mcp-filed\""));
 }

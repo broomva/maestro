@@ -1,6 +1,6 @@
 //! Agent requests on disk: an ask filed into its ledger, and the requests journal (BRO-3267).
 //!
-//! Until phase 2 Maestro is not the asks writer of record: it files *through* the workspace's
+//! Maestro files asks on its ledger branch through the workspace's
 //! `scripts/ask_ledger.py file` (BRO-3406), which appends the entry in the line shape its own
 //! `stamp` and `archive` edit, under the ledger's §5.5 lock (the lock the Paseo plugin answers
 //! under) and its flock, and writes nothing unless the ledger reads back as its asks plus exactly
@@ -90,6 +90,10 @@ pub struct Filed {
     pub id: String,
     /// What the validator of record said of the written ledger.
     pub validator: String,
+    /// The commit pushed to Maestro's ledger branch.
+    pub commit: String,
+    /// Landing PR status, or no attempt in isolated fixtures.
+    pub landing: Option<String>,
 }
 
 fn now_rfc3339() -> String {
@@ -127,12 +131,8 @@ pub fn compose_ask(ask: &Map<String, Value>) -> Result<Map<String, Value>, FileE
 /// How `ask_ledger.py file` ended: 0 filed, 2 refused, 75 the lock was busy or taken over.
 const EX_TEMPFAIL: i32 = 75;
 
-/// Files `ask` into `<asks dir>/<ledger>` with the writer of record, `ask_ledger.py file`
-/// (BRO-3406). It takes the ledger's §5.5 lock (the lock root is passed on, so it is Maestro's)
-/// and the flock, appends the ask in the line shape `stamp` and `archive` edit, records Maestro's
-/// unverified origin from `--maestro-session`, and writes nothing unless the result reads as the
-/// ledger's asks plus exactly this one with no new validator error. Maestro holds no lock of its
-/// own around it: the §5.5 lock is not reentrant.
+/// File through `ask_ledger.py` in Maestro's checkout under the shared write lock, then commit
+/// and push the one ledger file. The workspace working tree is not modified.
 pub fn file_ask(
     paths: &Paths,
     asks_dir: &Path,
@@ -141,7 +141,7 @@ pub fn file_ask(
     session: &SessionRef,
     caller: &Principal,
 ) -> Result<Filed, FileError> {
-    write_ask(paths, asks_dir, ledger, ask, session, caller, None)
+    file_on_ledger(paths, asks_dir, ledger, ask, session, caller, None)
 }
 
 /// Atomically replace an unanswered ask using the writer of record.
@@ -154,7 +154,55 @@ pub fn supersede_ask(
     caller: &Principal,
     replacement: (&str, &str),
 ) -> Result<Filed, FileError> {
-    write_ask(paths, asks_dir, ledger, ask, session, caller, Some(replacement))
+    file_on_ledger(paths, asks_dir, ledger, ask, session, caller, Some(replacement))
+}
+
+fn file_on_ledger(
+    paths: &Paths,
+    asks_dir: &Path,
+    ledger: &str,
+    ask: &Map<String, Value>,
+    session: &SessionRef,
+    caller: &Principal,
+    supersede: Option<(&str, &str)>,
+) -> Result<Filed, FileError> {
+    compose_ask(ask)?;
+    if !ledger_name_ok(ledger) {
+        return Err(refused(format!("`{ledger}` is not a ledger name")));
+    }
+    if ledger.contains(['\n', '\r']) {
+        return Err(refused("the ledger name cannot be written in a commit trailer"));
+    }
+    let relative =
+        asks_dir.strip_prefix(&paths.workspace).map_err(|_| refused("the asks folder is outside the workspace"))?;
+    if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        return Err(refused("the asks folder is not a workspace-relative path"));
+    }
+    let writer = crate::ledger::Writer {
+        workspace: paths.workspace.clone(),
+        checkout: paths.ledger_checkout.clone(),
+        owner_dir: paths.owner_dir.clone(),
+        remote: true,
+    };
+    let failure = |e: String| FileError::Io(std::io::Error::other(e));
+    let guard = crate::ledger::exclusive(&writer).map_err(failure)?;
+    crate::ledger::prepare(&writer).map_err(failure)?;
+    let mut checkout_paths = paths.clone();
+    checkout_paths.workspace = writer.checkout.clone();
+    let dir = writer.checkout.join(relative);
+    let mut filed = write_ask(&checkout_paths, &dir, ledger, ask, session, caller, supersede)?;
+    if filed.id.contains(['\n', '\r']) {
+        return Err(refused("the ask id cannot be written in a commit trailer"));
+    }
+    let rel = relative.join(ledger).to_str().ok_or_else(|| refused("the ledger path is not UTF-8"))?.to_string();
+    let bytes = std::fs::read(&filed.ledger)?;
+    let message = format!("asks: file {}#{}\n\nMaestro-Ask: {}#{}\n", ledger, filed.id, ledger, filed.id);
+    filed.commit = crate::ledger::commit_and_push(&writer, &rel, &message, &bytes).map_err(failure)?;
+    drop(guard);
+    if paths.ledger_landing {
+        filed.landing = Some(crate::ledger::land(&writer));
+    }
+    Ok(filed)
 }
 
 fn write_ask(
@@ -234,7 +282,7 @@ fn write_ask(
         text.strip_prefix("error: ").unwrap_or(text).to_string()
     };
     match out.status.code() {
-        Some(0) => Ok(Filed { ledger: path, id, validator: said(&out.stdout) }),
+        Some(0) => Ok(Filed { ledger: path, id, validator: said(&out.stdout), commit: String::new(), landing: None }),
         Some(EX_TEMPFAIL) => Err(FileError::Lock(LockError::Busy { holder: said(&out.stderr), what: ledger.into() })),
         Some(2) => Err(refused(said(&out.stderr))),
         code => {

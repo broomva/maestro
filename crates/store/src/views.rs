@@ -191,9 +191,8 @@ pub struct AskCounts {
     pub unlanded: Option<usize>,
 }
 
-/// The branch Paseo's Maestro plugin lands owner answers on before their batch PR merges
-/// (spec row R2). An answer there is waiting to land as much as one in the working tree.
-pub const ANSWERS_BRANCH: &str = "maestro/answers";
+/// Maestro's ledger branch; the legacy answers branch remains a reader source.
+pub const ANSWERS_BRANCH: &str = "maestro/ledger";
 
 /// Answered asks by ledger and the plugin's key: `u:<uid>`, else `i:<id>` for an ask without a
 /// uid (`answers-landing.ts`), so a uid and a uid-less id that share their text never match.
@@ -270,15 +269,18 @@ fn closed_in(asks: &[LedgerFile], closed: impl Fn(AskState) -> bool) -> Answered
         .collect()
 }
 
-/// Where [`ANSWERS_BRANCH`] is read: this clone's own branch, and origin's as this clone last
-/// fetched it (the plugin merges origin's batch in before landing, `answers-landing.ts`). Origin
-/// itself is never asked: an answer pushed there since the last fetch is not seen.
+/// The current and legacy ledger refs in this clone and as last fetched from origin.
+/// Origin itself is not asked here, so a push since the last fetch is not seen.
 /// Each is `(ref, label)`; a read error there is labelled `<label>:`.
-pub const ANSWERS_REFS: [(&str, &str); 2] =
-    [("refs/heads/maestro/answers", ANSWERS_BRANCH), ("refs/remotes/origin/maestro/answers", "origin/maestro/answers")];
+pub const ANSWERS_REFS: [(&str, &str); 4] = [
+    ("refs/heads/maestro/ledger", ANSWERS_BRANCH),
+    ("refs/remotes/origin/maestro/ledger", "origin/maestro/ledger"),
+    ("refs/heads/maestro/answers", "maestro/answers"),
+    ("refs/remotes/origin/maestro/answers", "origin/maestro/answers"),
+];
 
 /// How screens and the CLI name what [`ANSWERS_REFS`] read.
-pub const ANSWERS_READ: &str = "maestro/answers (this clone's, or origin's as last fetched)";
+pub const ANSWERS_READ: &str = "maestro/ledger and maestro/answers (this clone or origin as last fetched)";
 
 /// Answers on [`ANSWERS_BRANCH`]: the union over [`ANSWERS_REFS`]. A ref that is not there holds
 /// none; one that exists but does not read at all makes the whole `None` with its errors: its
@@ -336,10 +338,15 @@ fn answered_at_ref(store: &Store, name: &str, label: &str) -> (Option<Answered>,
 /// [`ANSWERS_BRANCH`]. Empty when the store already reads the working tree. The section's
 /// errors are those two reads' failures: an unreadable ledger there may hide answers waiting to
 /// land, so the rows are then the ones seen, and `data` is `None` when either read failed whole.
-pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
+pub fn unlanded(store: &Store, _at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
     if store.reads_worktree() {
         return Section::ok("worktree", Vec::new());
     }
+    // Compare the branch with the underlying tree, before its overlay is applied.
+    let base = store.asks_at_tree();
+    let Some(at_rev) = base.data.as_deref() else {
+        return Section { source: base.source, data: None, errors: base.errors };
+    };
     // `None` once a read failed whole: what waits to land is then unknown, never none.
     let (mut answered, mut errors) = answered_on_branch(store);
     // The plugin's `unlandedAnswers`: an answer waits when the first ask at the read tree with its
@@ -372,7 +379,7 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
             if std::fs::symlink_metadata(&local_dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
                 (format!("worktree:{rel}"), Some(Answered::new()))
             } else {
-                let read = local.asks();
+                let read = local.asks_at_tree();
                 errors.extend(read.errors.iter().map(|e| SourceError {
                     at: if e.at.starts_with("worktree:") { e.at.clone() } else { format!("worktree:{}", e.at) },
                     reason: e.reason.clone(),
@@ -699,6 +706,54 @@ pub fn work_by_state(work: &[WorkItem], state: Option<WorkState>) -> Vec<&WorkIt
 mod tests {
     use super::*;
     use maestro_core::loops::LoopSpec;
+
+    fn branch_with_asks(whole_directory_broken: bool) -> (tempfile::TempDir, Store) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        let asks = ws.join(".control/asks");
+        std::fs::create_dir_all(&asks).unwrap();
+        std::fs::write(asks.join("a.yaml"), "asks: []\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new(crate::tree::git())
+                .current_dir(&ws)
+                .args(["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "main"]);
+        git(&["checkout", "-qb", "maestro/answers"]);
+        if whole_directory_broken {
+            std::fs::remove_dir_all(&asks).unwrap();
+            std::fs::write(&asks, "not a directory").unwrap();
+        } else {
+            std::fs::write(asks.join("a.yaml"), "asks: [broken\n").unwrap();
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "broken"]);
+        git(&["checkout", "-q", "main"]);
+        let store = Store::new(crate::Paths::under(tmp.path().to_path_buf()), crate::TreeSource::GitRev("main".into()));
+        (tmp, store)
+    }
+
+    #[test]
+    fn unread_branch_directory_has_no_answer_set() {
+        let (_tmp, store) = branch_with_asks(true);
+        let (answers, errors) = answered_at_ref(&store, "refs/heads/maestro/answers", "maestro/answers");
+        assert!(answers.is_none());
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn branch_ledger_errors_name_the_branch() {
+        let (_tmp, store) = branch_with_asks(false);
+        let (answers, errors) = answered_at_ref(&store, "refs/heads/maestro/answers", "maestro/answers");
+        assert!(answers.is_some());
+        assert!(errors.iter().any(|e| e.at.starts_with("maestro/answers:.control/asks/a.yaml")), "{errors:?}");
+    }
 
     fn tick(started_at: &str) -> Tick {
         Tick {

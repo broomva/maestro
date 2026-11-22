@@ -515,6 +515,30 @@ pub fn parse_ls_remote(out: &[u8], refname: &str) -> Result<Option<String>, Stri
 /// The most bytes [`read_verified`] reads of a commit or a tree object.
 pub const MAX_OBJECT: usize = 1024 * 1024;
 
+/// Whether a directory exists at a verified commit, without trusting git's object lookup.
+pub fn directory_verified(root: &Path, commit: &str, rel: &str, timeout: Duration) -> Result<bool, String> {
+    let format = git_bytes(root, &["rev-parse", "--show-object-format"], 64, timeout)?;
+    let format = String::from_utf8_lossy(&format).trim().to_string();
+    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;
+    check(&format, "commit", commit, &body)?;
+    let mut id = String::from_utf8_lossy(&body)
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("tree "))
+        .ok_or_else(|| format!("commit {commit} names no tree"))?
+        .to_string();
+    for part in rel.split('/') {
+        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;
+        check(&format, "tree", &id, &body)?;
+        match tree_entry(&body, part, &format)? {
+            Some((mode, next)) if mode == "40000" => id = next,
+            Some(_) => return Err(format!("{rel} is not a directory")),
+            None => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 /// `rel` at `commit`, read object by object and each object checked against its id before it is
 /// trusted. Git does not check an object's hash when it reads it, so content planted in the
 /// object store under a genuine id (an overwritten loose object, a pack naming that id with other
@@ -557,6 +581,37 @@ pub fn read_verified(
     let blob = git_bytes(root, &["cat-file", "blob", &id], limit, timeout)?;
     check(&format, "blob", &id, &blob)?;
     String::from_utf8(blob).map(Some).map_err(|_| format!("{rel} is not valid UTF-8"))
+}
+
+/// A commit whose complete object hashes to its id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCommit {
+    pub parents: Vec<String>,
+    pub message: String,
+}
+
+/// Read a commit's parent ids and message only after verifying its object hash.
+pub fn verified_commit(root: &Path, commit: &str, timeout: Duration) -> Result<VerifiedCommit, String> {
+    let format = git_bytes(root, &["rev-parse", "--show-object-format"], 64, timeout)?;
+    let format = String::from_utf8(format).map_err(|_| "the object format is not UTF-8")?;
+    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;
+    check(format.trim(), "commit", commit, &body)?;
+    let body = String::from_utf8(body).map_err(|_| "the commit is not UTF-8")?;
+    let (headers, message) = body.split_once("\n\n").ok_or("the commit has no message separator")?;
+    let parents: Vec<String> =
+        headers.lines().filter_map(|line| line.strip_prefix("parent ")).map(str::to_string).collect();
+    let width = match format.trim() {
+        "sha1" => 40,
+        "sha256" => 64,
+        _ => return Err("the object format is not supported".into()),
+    };
+    if parents
+        .iter()
+        .any(|id| id.len() != width || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    {
+        return Err("the commit has an invalid parent id".into());
+    }
+    Ok(VerifiedCommit { parents, message: message.to_string() })
 }
 
 /// Whether the object store of the repository at `root` holds an object under `id`

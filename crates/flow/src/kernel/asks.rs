@@ -1,6 +1,6 @@
 //! Human steps as Maestro asks (BRO-3635): [`ask`] files a human node's question through the asks
-//! ledger's writer of record, links the row it filed, and takes the owner's answer, once it
-//! has landed on origin's main, as the node's receipt.
+//! ledger's writer of record, links the row it filed, and takes the owner's answer from main
+//! or the remotely verified ledger branch as the node's receipt.
 //!
 //! # The verb
 //!
@@ -9,7 +9,7 @@
 //! `answered`; each call does the next step and says where the ask stands:
 //!
 //! 1. **Pin.** The first call mints an ask id (`flow-<node>-<12 hex>`), checked against every `id`
-//!    and `uid` in the ledger's working tree and minted again on a collision, and builds the body:
+//!    and `uid` in the overlaid ledger and minted again on a collision, and builds the body:
 //!    the agent's fields (whatever the validator of record requires: `class`, `gates`,
 //!    `exhausted`, `blocking`, and so on), plus `id`, `ask` (the definition's question) and
 //!    `asked_at`, read from the kernel's clock. It appends `AskPinned` with that exact body and
@@ -21,8 +21,8 @@
 //!    answer. A busy ask-ledger lock (`FileError::Lock`) is retried by the kernel until its own
 //!    deadline ([`ASK_BUSY_DEADLINE`], read from its clock), then refused `ask_refused_busy`: the
 //!    ask stays pinned and the node stays `waiting` for the agent, not for the owner.
-//! 3. **Confirm and link.** Whatever the writer said, the kernel reads the ledger's working tree
-//!    (where the writer writes, never `origin/main`) for the row addressed by the pinned id. That
+//! 3. **Confirm and link.** The kernel reads the committed ledger branch tip for the row
+//!    addressed by the pinned id, verifying its objects. That
 //!    id with that hash is linked (`AskLinked`): after a filing, and after a duplicate, which is a
 //!    filing a crash left unlinked. That id with another hash is `ask_refused`, and nothing is
 //!    linked. No row after a refusal by the writer means nothing was filed: the pin is withdrawn
@@ -32,42 +32,15 @@
 //!    Only the latest pin for the current inputs is selected. Returning to earlier inputs does
 //!    not revive a historical pin; the kernel files a new ask. A recorded answer receipt can
 //!    still revalidate when its inputs return, and a withdrawal restores its predecessor.
-//! 4. **Answer.** A linked ask's answer counts only once it has landed on main, read where the
-//!    answers remote says main is. Two owner decisions (AskUserQuestion, 2026-11-09), verbatim:
-//!    "Landed main, remote-checked (Recommended)" and "Compiled into maestro (Recommended)". The
-//!    remote is compiled into Maestro, [`ANSWERS_REMOTE`]; changing it changes Maestro's code, so
-//!    it goes through a pull request and the merge gates. No setting, variable or local remote
-//!    names it (a test build alone swaps in a local fixture, `cfg(test)`). The kernel asks that URL
-//!    for `refs/heads/main` (`maestro_store::tree::remote_ref`: `git ls-remote` run outside any
-//!    repository, with no system, global or local configuration and none of the caller's
-//!    environment but `PATH` and `HOME`, bounded in time and output, its process group killed at
-//!    [`REMOTE_TIMEOUT`]). The remote is private, so the call names one credential helper,
-//!    GitHub's own ([`ANSWERS_GIT_CONFIG`]); it only supplies credentials, the URL stays compiled
-//!    in and TLS authenticates github.com, and a missing or wrong token is `answers_unread`. Every
-//!    git call on this path is the platform's git by absolute path (`maestro_store::tree::git`,
-//!    checked root-owned first, see the floor below) on a fixed `PATH` (`tree::git_path`: git's
-//!    folder, the system folders, then the two where `gh` is installed, so `gh` is found there; it
-//!    only supplies credentials, and fails closed). Then
-//!    it requires that commit to be in this clone, and reads the asks ledger at that exact commit
-//!    object by object, each checked against its id in-process (`tree::read_verified`): the commit
-//!    against the remote's id, each tree on the path against its parent's entry, the ledger against
-//!    its tree's entry. Git does not check an object's hash when it reads it, so this is what keeps
-//!    content planted in the object store (an overwritten loose object, a pack naming a genuine id,
-//!    a commit planted under an id not fetched yet) from reading as the answer. Replace objects are
-//!    off too (`--no-replace-objects`), and none of the caller's `GIT_*` environment applies. No local ref counts: not `maestro/answers`,
-//!    not `refs/remotes/origin/main`, not `origin`'s URL, which any process here can move. A remote
-//!    that does not answer or has no main, or a commit this clone does not have (fetch), is
-//!    `answers_unread`: unread is not unanswered (fail closed). The working tree is never read for
-//!    answers, and the verb takes no answer. The row is found by the pinned id, never by searching
-//!    or listing the asks, and must hash as the linked body. Unanswered, the node stays `waiting`.
-//!    Answered, the kernel appends `Answered`, the node's receipt, so it is done and its successors
-//!    become ready. The flow resumes when the answer lands on main, not before, and each call of a
-//!    linked ask may take up to [`REMOTE_TIMEOUT`].
-//!
-//! An answer on Maestro's answers branch (this clone's or origin's as last fetched,
-//! `maestro_store::views::ANSWERS_REFS`) and not on main is waiting to land, as `views::unlanded`
-//! reads it: [`landing`] reports it as `answer_waiting_to_land` for `next` and `status`, and `ask`
-//! says so, but it is never a receipt.
+//! 4. **Answer.** The owner's 2026-11-22 decision replaces the 2026-11-09 rule that only
+//!    main counts. Main remains a source, and the remote's `maestro/ledger` and legacy
+//!    `maestro/answers` branches also count when the commit that last changed the answered row
+//!    carries a verifying owner passkey proof. The compiled [`ANSWERS_REMOTE`] is queried with
+//!    `ls-remote`; no local ref counts as answer evidence. Every commit, tree and ledger object
+//!    read on this path is checked against its object id. The owner keyring and relying party
+//!    come from the owner directory; an unreadable source is `answers_unread` and a missing or
+//!    invalid proof is `answer_unproven`. A valid answer must still match the linked ask body.
+//!    A local answer waiting to land is informational and cannot become a receipt on its own.
 //!
 //! **The floor (owner decision 2026-11-09, verbatim: "Set the floor, fix, re-check
 //! (Recommended)").** The kernel defends against anything short of the user-level write that can
@@ -528,11 +501,11 @@ fn pin(
     })
 }
 
-/// Every `id` and `uid` in the ledger's working tree, trimmed as the plugin addresses them.
+/// Every `id` and `uid` in the overlaid ledger, trimmed as the plugin addresses them.
 pub(super) fn taken(paths: &Paths, ledger: &str) -> Result<BTreeSet<String>, KernelError> {
     let unread = |detail: String| Refusal::AskLedgerUnread { ledger: ledger.to_string(), detail: clip(&detail) };
-    let tree = Store::new(paths.clone(), TreeSource::WorkingTree);
-    let Some(l) = tree.ask_ledger(ledger).map_err(unread)? else {
+    let tree = Store::new(paths.clone(), TreeSource::GitRev("origin/main".into()));
+    let Some(l) = tree.ask_ledger_overlay(ledger).map_err(unread)? else {
         return Err(unread("there is no such ledger in the asks folder".into()).into());
     };
     Ok(l.asks.into_iter().flat_map(|a| [Some(a.id), a.uid]).flatten().collect())
@@ -616,18 +589,16 @@ fn file_pinned(
     }
 }
 
-/// What filing a pinned ask came to, as the working tree confirms it.
+/// What filing a pinned ask came to, as the committed branch confirms it.
 pub(super) enum Confirmed {
-    /// The working tree holds a row with the pinned id and hash: link it.
+    /// The committed branch holds a row with the pinned id and hash: link it.
     Row,
     /// The writer of record refused it and the working tree has no row of its id: nothing was
     /// filed, so withdraw the pin, with the writer's words.
     NotFiled { reason: String },
 }
 
-/// Files the pinned ask (flows lock released) and confirms it in the working tree, then hands
-/// what it found to `then`, with the ledger, to record it. A hash miss, an ambiguous id or an
-/// outcome the working tree cannot confirm is refused here, and `then` is not called.
+/// Files the pinned ask (flows lock released) and confirms the committed branch row before linking.
 pub(super) fn file_and_confirm<T>(
     ledger: &mut Ledger,
     paths: &Paths,
@@ -640,25 +611,41 @@ pub(super) fn file_and_confirm<T>(
         ask_id: rec.ask_id.clone(),
         detail: clip(&detail),
     };
-    // The working tree: where the writer of record writes, and where a filing is confirmed.
-    let here = Store::new(paths.clone(), TreeSource::WorkingTree);
+    // Resolve the asks folder; the writer and confirmation use Maestro's branch.
+    let here = Store::new(paths.clone(), TreeSource::GitRev("origin/main".into()));
     let dir = here.rel(ASKS).map_err(|e| unconfirmed(format!("no asks folder: {e}")))?;
     let dir = here.paths.workspace.join(dir);
     let Some(body) = rec.body.as_object() else {
         return Err(unconfirmed("the pinned body is not an object".into()).into());
     };
-    // A completed supersede must be recovered before invoking the writer again.
+    // A crash may leave an already-pushed amendment unlinked. Recover it from the remote tip
+    // before invoking the writer again, so a completed supersede is never repeated.
     if rec.amends {
-        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {
-            Found::Row(_) => {
-                confirm_amend(&here, &rec)?;
-                return then(ledger, Confirmed::Row);
+        trusted_git().map_err(|e| unconfirmed(format!("git is not trusted: {e}")))?;
+        let remote = answers_remote();
+        let branch = "refs/heads/maestro/ledger";
+        let cmd = maestro_store::tree::ls_remote_command(&remote, branch, ANSWERS_GIT_CONFIG);
+        if let Some(tip) = maestro_store::tree::remote_ref(cmd, branch, REMOTE_TIMEOUT).map_err(unconfirmed)? {
+            let committed = Store::new(paths.clone(), TreeSource::GitRev(tip.clone()));
+            match committed
+                .ask_ledger_verified(&rec.ledger, &tip, READ_TIMEOUT)
+                .and_then(|ledger| rows(ledger, &rec.ask_id))
+                .map_err(unconfirmed)?
+            {
+                Found::Row(_) => {
+                    confirm_amend(&committed, &rec)?;
+                    return then(ledger, Confirmed::Row);
+                }
+                Found::Ambiguous => {
+                    return Err(Refusal::AskAmbiguous {
+                        ledger: rec.ledger.clone(),
+                        ask_id: rec.ask_id.clone(),
+                        at: tip,
+                    }
+                    .into());
+                }
+                Found::None => {}
             }
-            Found::Ambiguous => {
-                let at = format!("worktree:{}", rec.ledger);
-                return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
-            }
-            Found::None => {}
         }
     }
     // No flows guard is alive here: the callers drop theirs before they file.
@@ -667,28 +654,41 @@ pub(super) fn file_and_confirm<T>(
     if seams::CRASH_AFTER_FILE.with(|c| c.replace(false)) {
         return Err(KernelError::Encode("a crash after filing (test)".into()));
     }
-    // Confirm whatever the writer said: a filing, a duplicate (a filing a crash left unlinked), or
-    // a failure. Only the working tree's row, by the pinned id and hash, links.
-    let row = match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {
+    // A successful filing names the commit pushed by the writer. A refusal is checked against
+    // the branch tip fetched under the writer lock, or main when the branch does not yet exist.
+    let (revision, refused) = match outcome {
+        Ok(filed) => (filed.commit, None),
+        Err(FileError::Refused(reason)) => {
+            let branch = "refs/heads/maestro/ledger";
+            trusted_git().map_err(|e| unconfirmed(format!("git is not trusted: {e}")))?;
+            let remote = answers_remote();
+            let cmd = maestro_store::tree::ls_remote_command(&remote, branch, ANSWERS_GIT_CONFIG);
+            let revision = match maestro_store::tree::remote_ref(cmd, branch, REMOTE_TIMEOUT).map_err(unconfirmed)? {
+                Some(revision) => revision,
+                None => landed_main(paths)?,
+            };
+            (revision, Some(reason))
+        }
+        Err(e) => return Err(unconfirmed(e.to_string()).into()),
+    };
+    let committed = Store::new(paths.clone(), TreeSource::GitRev(revision.clone()));
+    let row = match committed
+        .ask_ledger_verified(&rec.ledger, &revision, READ_TIMEOUT)
+        .and_then(|ledger| rows(ledger, &rec.ask_id))
+        .map_err(unconfirmed)?
+    {
         Found::Row(row) => row,
         Found::Ambiguous => {
-            let at = format!("worktree:{}", rec.ledger);
+            let at = format!("{revision}:{}", rec.ledger);
             return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
         }
-        Found::None => match outcome {
-            // Refused, and no row: nothing was filed. The pin is withdrawn.
-            Err(FileError::Refused(reason)) => {
-                let reason = clip(&reason);
-                return then(ledger, Confirmed::NotFiled { reason });
-            }
-            Ok(_) => {
-                return Err(unconfirmed("the writer filed it, and the working tree has no row of its id".into()).into());
-            }
-            Err(e) => return Err(unconfirmed(e.to_string()).into()),
+        Found::None => match refused {
+            Some(reason) => return then(ledger, Confirmed::NotFiled { reason: clip(&reason) }),
+            None => return Err(unconfirmed("the pushed ledger has no row of its id".into()).into()),
         },
     };
     if rec.amends {
-        confirm_amend(&here, &rec)?;
+        confirm_amend(&committed, &rec)?;
         return then(ledger, Confirmed::Row);
     }
     let found = comparable_hash(&row.row);
@@ -711,11 +711,13 @@ fn confirm_amend(here: &Store, rec: &AskRec) -> Result<(), KernelError> {
         detail: "amend rows do not confirm the replacement".into(),
     };
     let old_id = rec.supersedes.as_deref().ok_or_else(fail)?;
-    let new = match find(here, &rec.ledger, &rec.ask_id).map_err(|_| fail())? {
+    let revision = here.tree.commit.as_deref().ok_or_else(fail)?;
+    let read = |id: &str| here.ask_ledger_verified(&rec.ledger, revision, READ_TIMEOUT).and_then(|l| rows(l, id));
+    let new = match read(&rec.ask_id).map_err(|_| fail())? {
         Found::Row(row) => row,
         _ => return Err(fail().into()),
     };
-    let old = match find(here, &rec.ledger, old_id).map_err(|_| fail())? {
+    let old = match read(old_id).map_err(|_| fail())? {
         Found::Row(row) => row,
         _ => return Err(fail().into()),
     };
@@ -820,7 +822,7 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
     // The asks folder as the registry names it here; the ledger is read at `sha`, every object on
     // the way checked against its id, so nothing planted in the object store under the commit's,
     // a tree's or the ledger's id reads as genuine.
-    let local = Store::new(paths.clone(), TreeSource::WorkingTree);
+    let local = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
     let source = format!("main@{sha}");
     match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
         Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),
@@ -831,10 +833,71 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
         Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed { row, source }),
         Ok(_) => {}
     }
+    for branch in ["refs/heads/maestro/ledger", "refs/heads/maestro/answers"] {
+        let remote = answers_remote();
+        let unread =
+            |detail: String| Refusal::AnswersUnread { at: format!("{remote} {branch}"), detail: clip(&detail) };
+        let cmd = maestro_store::tree::ls_remote_command(&remote, branch, ANSWERS_GIT_CONFIG);
+        let Some(tip) = maestro_store::tree::remote_ref(cmd, branch, REMOTE_TIMEOUT).map_err(unread)? else { continue };
+        let source = format!("{branch}@{tip}");
+        let row = match local.ask_ledger_verified(&rec.ledger, &tip, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
+            Err(e) => return Err(unread(e).into()),
+            Ok(Found::Ambiguous) => {
+                return Err(Refusal::AskAmbiguous {
+                    ledger: rec.ledger.clone(),
+                    ask_id: rec.ask_id.clone(),
+                    at: source,
+                }
+                .into());
+            }
+            Ok(Found::Row(row)) if row.state() == AskState::Answered => row,
+            Ok(_) => continue,
+        };
+        let owner = proof_owner_dir();
+        let (keys, party) = maestro_store::passkey::load_answer_verifier(&owner).map_err(unread)?;
+        let message = answer_change_message(&local, rec, &tip, &row).map_err(unread)?;
+        maestro_store::passkey::verify_answer_proof(&message, &rec.ledger, &row, &keys, &party).map_err(|e| {
+            Refusal::AnswerUnproven { ask_id: rec.ask_id.clone(), at: source.clone(), detail: clip(&e) }
+        })?;
+        return Ok(Answer::Landed { row, source });
+    }
     Ok(match waiting_to_land(paths, &rec.ledger, &rec.ask_id) {
         Some(at) => Answer::Landing { at },
         None => Answer::Open,
     })
+}
+
+/// Read verified parent objects until reaching the commit that changed this exact row.
+fn answer_change_message(store: &Store, rec: &AskRec, tip: &str, row: &Ask) -> Result<String, String> {
+    let mut at = tip.to_string();
+    for _ in 0..10_000 {
+        let commit = maestro_store::tree::verified_commit(&store.paths.workspace, &at, READ_TIMEOUT)?;
+        let mut same = None;
+        for parent in &commit.parents {
+            let parent_row = rows(store.ask_ledger_verified(&rec.ledger, parent, READ_TIMEOUT)?, &rec.ask_id)?;
+            match parent_row {
+                Found::Ambiguous => return Err("an ancestor has an ambiguous ask".into()),
+                Found::Row(previous) if previous.row == row.row => {
+                    same = Some(parent.clone());
+                    break;
+                }
+                _ => {}
+            }
+        }
+        match same {
+            Some(parent) => at = parent,
+            None => return Ok(commit.message),
+        }
+    }
+    Err("the answer history is too long".into())
+}
+
+fn proof_owner_dir() -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = seams::OWNER_DIR.with(|d| d.borrow().clone()) {
+        return dir;
+    }
+    maestro_store::passkey::owner_dir()
 }
 
 /// Whether the linked ask `rec` may be amended, decided on one read of main at the commit the
@@ -847,7 +910,7 @@ fn amendable(paths: &Paths, rec: &AskRec) -> Result<(), KernelError> {
         Err(KernelError::Refused(Refusal::AnswersUnread { .. })) => return Err(unread().into()),
         other => other?,
     };
-    let local = Store::new(paths.clone(), TreeSource::WorkingTree);
+    let local = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
     let on_main = local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id));
     match on_main {
         Err(_) => return Err(unread().into()),
@@ -875,13 +938,13 @@ fn amendable(paths: &Paths, rec: &AskRec) -> Result<(), KernelError> {
 /// `ask_amend_unread`, never "no answer".
 fn answered_on_answers_refs(paths: &Paths, rec: &AskRec) -> Result<bool, KernelError> {
     let unread = || KernelError::from(Refusal::AskAmendUnread { ask_id: rec.ask_id.clone() });
-    let workspace = Store::new(paths.clone(), TreeSource::WorkingTree);
     for (rev, _) in maestro_store::views::ANSWERS_REFS {
         let sha = match maestro_store::tree::local_commit(&paths.workspace, rev, READ_TIMEOUT) {
             Ok(None) => continue,
             Ok(Some(sha)) => sha,
             Err(_) => return Err(unread()),
         };
+        let workspace = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
         match workspace.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
             Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(true),
             Ok(Found::Row(_) | Found::None) => {}
@@ -1058,6 +1121,7 @@ pub(crate) mod seams {
         pub(crate) static GIT_CHECKED: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
         /// The answers remote a test reads instead of the compiled one: a local bare repository.
         pub(crate) static REMOTE: RefCell<Option<String>> = const { RefCell::new(None) };
+        pub(crate) static OWNER_DIR: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
         /// Runs once, after a mint and before its pin is appended: another write meanwhile.
         pub(crate) static BEFORE_PIN: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     }

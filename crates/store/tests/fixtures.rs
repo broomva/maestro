@@ -223,7 +223,8 @@ fn git_revision_reads_and_unlanded_answers() {
     assert!(waiting[0].is("demo-arc.yaml", &demo_arc.ledger.asks[0]), "{waiting:?}");
 
     let local = Store::new(paths, TreeSource::WorkingTree);
-    assert_eq!(demo(&local.asks().data.unwrap()), AskState::Answered);
+    assert_eq!(demo(&local.asks_at_tree().data.unwrap()), AskState::Answered);
+    assert!(local.asks().data.is_none(), "without origin/main the overlay is unread");
     assert!(views::unlanded(&local, &[]).data.unwrap().is_empty());
 }
 
@@ -613,7 +614,7 @@ fn answer(ws: &Path, id: &str) -> String {
 }
 
 fn waiting_ids(s: &Store) -> Vec<String> {
-    let asks = s.asks();
+    let asks = s.asks_at_tree();
     let lf = asks.data.as_ref().unwrap().iter().find(|l| l.file == "a.yaml").unwrap().clone();
     let w = views::unlanded(s, asks.data.as_deref().unwrap());
     assert!(w.errors.is_empty(), "{:?}", w.errors);
@@ -628,7 +629,7 @@ fn an_answer_only_on_origins_branch_waits() {
     let sha = answer(&ws, "a");
     git(&ws, &["update-ref", "refs/remotes/origin/maestro/answers", &sha]);
     assert_eq!(waiting_ids(&s), ["a"]);
-    assert_eq!(views::snapshot(&s).asks.data.unwrap().unlanded, Some(1));
+    assert_eq!(views::snapshot(&s).asks.data.unwrap().answered, 1);
 }
 
 #[test]
@@ -652,9 +653,32 @@ fn an_unreadable_origin_branch_makes_the_count_unknown() {
     let dir = ws.join(".git/refs/remotes/origin/maestro");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("answers"), format!("{}\n", "1".repeat(40))).unwrap();
-    let asks = s.asks();
+    let asks = s.asks_at_tree();
     let w = views::unlanded(&s, asks.data.as_deref().unwrap());
     assert_eq!(w.data, None, "an origin ref that does not resolve is unread, never none");
     assert!(w.errors.iter().any(|e| e.at.starts_with("origin/maestro/answers:")), "{:?}", w.errors);
-    assert_eq!(views::snapshot(&s).asks.data.unwrap().unlanded, None);
+    assert!(views::snapshot(&s).asks.data.is_none());
+}
+
+#[test]
+fn ledger_and_legacy_refs_are_read_and_unread_refs_are_reported() {
+    for reference in [
+        "refs/heads/maestro/ledger",
+        "refs/remotes/origin/maestro/ledger",
+        "refs/heads/maestro/answers",
+        "refs/remotes/origin/maestro/answers",
+    ] {
+        let (_tmp, ws, s) = origin_fixture();
+        let sha = answer(&ws, "a");
+        git(&ws, &["update-ref", reference, &sha]);
+        assert_eq!(waiting_ids(&s), ["a"], "{reference}");
+        git(&ws, &["update-ref", "-d", reference]);
+        let path = ws.join(".git").join(reference);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{}\n", "1".repeat(40))).unwrap();
+        let asks = s.asks_at_tree();
+        let waiting = views::unlanded(&s, asks.data.as_deref().unwrap());
+        assert!(waiting.data.is_none(), "{reference}");
+        assert!(!waiting.errors.is_empty(), "{reference}");
+    }
 }

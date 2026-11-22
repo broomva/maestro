@@ -61,6 +61,7 @@ pub(crate) struct Ctx<'a> {
     /// Asks answered in the working tree or on maestro/answers but open at the read tree, read once per render
     /// and only by a block that shows them.
     unlanded: std::cell::OnceCell<Section<Vec<views::Waiting>>>,
+    main_asks: std::cell::OnceCell<Section<Vec<maestro_store::LedgerFile>>>,
     /// Blocks that need document-unique ids (the inbox's radio groups) take the next number.
     ids: std::cell::Cell<usize>,
     /// The plan graphs, the economy and the read commit's date, read once per render and only
@@ -71,6 +72,26 @@ pub(crate) struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Whether the open row exists only on the ledger branch.
+    pub(crate) fn filed(&self, lf: &maestro_store::LedgerFile, ask: &maestro_core::ask::Ask) -> bool {
+        let main = self.main_asks.get_or_init(|| {
+            if self.store.reads_worktree() && self.store.has_git_checkout() {
+                Store::new(self.store.paths.clone(), maestro_store::TreeSource::GitRev("origin/main".into()))
+                    .asks_at_tree()
+            } else {
+                self.store.asks_at_tree()
+            }
+        });
+        main.data.as_ref().is_some_and(|ledgers| {
+            !main.errors.iter().any(|e| views::may_hide(&e.at, &lf.file))
+                && !ledgers
+                    .iter()
+                    .filter(|l| l.file == lf.file)
+                    .flat_map(|l| &l.ledger.asks)
+                    .any(|a| a.id == ask.id && a.uid == ask.uid)
+        })
+    }
+
     /// A number no other block of this render has taken.
     pub(crate) fn next_id(&self) -> usize {
         let n = self.ids.get();
@@ -161,6 +182,7 @@ impl<'a> Ctx<'a> {
             web,
             answer_origin,
             unlanded: std::cell::OnceCell::new(),
+            main_asks: std::cell::OnceCell::new(),
             ids: std::cell::Cell::new(0),
             plans: std::cell::OnceCell::new(),
             economy: std::cell::OnceCell::new(),

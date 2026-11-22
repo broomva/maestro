@@ -1133,7 +1133,7 @@ pub(crate) fn agent_request_in(
 }
 
 /// Files `ask` into `ledger` for `session` as `caller`, through the writer of record, and journals
-/// the request. Writes go to the working tree, never to a git revision.
+/// the request. The ask is committed to Maestro's ledger branch in its own checkout.
 pub(crate) fn file_ask_as(
     store: &Store,
     session: maestro_core::session::SessionRef,
@@ -1142,7 +1142,7 @@ pub(crate) fn file_ask_as(
     ask: &serde_json::Map<String, Value>,
 ) -> Result<Value, McpError> {
     requests::compose_ask(ask).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-    let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);
+    let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::GitRev("origin/main".into()));
     let rel = disk.rel(maestro_store::ASKS).map_err(|e| McpError::invalid_params(e, None))?;
     let dir = disk.paths.workspace.join(rel);
     let filed = requests::file_ask(&disk.paths, &dir, ledger, ask, &session, caller).map_err(file_error)?;
@@ -1153,7 +1153,7 @@ pub(crate) fn file_ask_as(
     if let Err(e) = requests::record(&disk.paths, &record) {
         return Err(unjournalled(&filed.ledger, &filed.id, &e));
     }
-    Ok(json!({ "request": record, "validator": filed.validator }))
+    Ok(json!({ "request": record, "validator": filed.validator, "commit": filed.commit, "landing": filed.landing }))
 }
 
 pub fn unjournalled(ledger: &std::path::Path, id: &str, e: &requests::FileError) -> McpError {

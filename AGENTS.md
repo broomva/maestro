@@ -14,12 +14,13 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
   the ADR allows beside it), a new family with no prior
   writer. `crates/flow` is its only writer, and nothing else writes there
   (`docs/adrs/2026-11-06-flow-ledger.md`).
-  The second exception is the owner's answer (BRO-4042, owner decision 2026-11-20): the web
-  pages take an answer only with a passkey assertion over the ask's ledger, handle, entry hash,
-  option and note (`crates/mcp/src/passkey.rs`), and `crates/mcp/src/answers.rs` writes it, in
-  Maestro's own checkout of the workspace, to `maestro/answers` only, never to the owner's
-  checkout or to main. Its edit is `maestro_store::answer`, which inserts the answer keys and
-  refuses unless every other ask reads back unchanged. Nothing else in Maestro writes an answer.
+  The second exception is the ledger fast lane (BRO-4042 and BRO-4093, owner decisions
+  2026-11-20 and 2026-11-22): Maestro files asks through `ask_ledger.py` and writes them only
+  in its own checkout on `maestro/ledger`. The web pages take an answer only with a passkey
+  assertion over the ask's ledger, handle, entry hash, option and note (`crates/store/src/passkey.rs`),
+  and `crates/mcp/src/answers.rs` writes it to that branch, never to the owner's checkout or main.
+  Its edit is `maestro_store::answer`, which inserts the answer keys and refuses unless every other
+  ask reads back unchanged. Nothing else in Maestro writes an answer.
   Known limit, accepted by the owner on 2026-11-21 until Maestro runs under its own macOS user: a
   passkey stops a forged click and an answer by curl, but not an agent running as the owner's OS
   user that deliberately attacks Maestro's own files or first passkey setup.
@@ -40,7 +41,7 @@ Typed governance metalayer: the `maestro` CLI and MCP server over the workspace 
 
 ```bash
 bash scripts/ci.sh   # fmt, clippy, tests, mutation check, plugin parity; CI runs it as the `ci` check,
-                     # after forty `mutants` jobs split the mutation check (MUTANT_SHARD=i/N)
+                     # after fifty-six `mutants` jobs split the mutation check (MUTANT_SHARD=i/N)
 ```
 
 A behaviour change ships with a test. A guard, such as an authority check, a drift rule or a

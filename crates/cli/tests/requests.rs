@@ -11,6 +11,24 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/requests")
 }
 
+fn git(dir: &Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn commit_main(root: &Path) {
+    let ws = root.join("ws");
+    for args in [&["add", "-A"][..], &["commit", "-qm", "fixture change"][..], &["push", "-q", "origin", "main"][..]] {
+        let out = git(&ws, args);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
 /// A scratch machine: a workspace with the seeded ledger and the stub at scripts/ask_ledger.py.
 fn machine() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
@@ -19,6 +37,18 @@ fn machine() -> tempfile::TempDir {
     std::fs::create_dir_all(ws.join("scripts")).unwrap();
     std::fs::copy(fixtures().join("ledger.yaml"), ws.join(".control/asks/ledger.yaml")).unwrap();
     std::fs::copy(fixtures().join("ask_ledger_stub.py"), ws.join("scripts/ask_ledger.py")).unwrap();
+    assert!(git(&ws, &["init", "-q", "-b", "main"]).status.success());
+    assert!(git(&ws, &["add", "."]).status.success());
+    assert!(git(&ws, &["commit", "-qm", "seed"]).status.success());
+    let origin = tmp.path().join("origin.git");
+    assert!(git(tmp.path(), &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]).status.success());
+    assert!(git(&ws, &["remote", "add", "origin", origin.to_str().unwrap()]).status.success());
+    assert!(git(&ws, &["push", "-q", "origin", "main"]).status.success());
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("gh"), "#!/bin/sh\nexit 1\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     tmp
 }
 
@@ -32,14 +62,16 @@ fn python_user_base() -> String {
 fn maestro(root: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_maestro"));
     cmd.env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PATH", format!("{}:{}", root.join("bin").display(), std::env::var("PATH").unwrap_or_default()))
         .env("PYTHONUSERBASE", python_user_base())
         .env("HOME", root.join("home"))
         .env("BROOMVA_WORKSPACE", root.join("ws"))
         .env("BROOMVA_HOME", root.join("broomva-home"))
         .env("MAESTRO_PASEO_ASK_LOCKS", root.join("locks"))
         .env("MAESTRO_FLEET_STATE", root.join("fleet"))
-        .env("MAESTRO_TREE", "worktree");
+        .env("MAESTRO_ANSWERS_CHECKOUT", root.join("checkout"))
+        .env("MAESTRO_OWNER_DIR", root.join("owner"))
+        .env("MAESTRO_TREE", "origin/main");
     cmd
 }
 
@@ -84,7 +116,13 @@ fn hold_journal_lock(root: &Path) -> HeldJournalLock {
 }
 
 fn ledger(root: &Path) -> String {
-    std::fs::read_to_string(root.join("ws/.control/asks/ledger.yaml")).unwrap()
+    let ws = root.join("ws");
+    let out = git(&ws, &["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
+    if out.status.success() {
+        String::from_utf8(out.stdout).unwrap()
+    } else {
+        std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap()
+    }
 }
 
 fn listed(root: &Path) -> Vec<String> {
@@ -172,6 +210,7 @@ fn an_error_the_ledger_already_had_does_not_refuse_a_new_ask() {
     let m = machine();
     let path = m.path().join("ws/.control/asks/ledger.yaml");
     std::fs::write(&path, ledger(m.path()).replace("ask: \"Seeded ask 2", "ask: \"STUB-INVALID Seeded ask 2")).unwrap();
+    commit_main(m.path());
     let out = file(m.path(), "after-legacy");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(ledger(m.path()).contains("id: \"after-legacy\""));
@@ -186,6 +225,7 @@ fn a_symlinked_ledger_is_refused() {
     let asks = m.path().join("ws/.control/asks");
     std::fs::rename(asks.join("ledger.yaml"), m.path().join("real.yaml")).unwrap();
     std::os::unix::fs::symlink(m.path().join("real.yaml"), asks.join("ledger.yaml")).unwrap();
+    commit_main(m.path());
     let out = file(m.path(), "through-link");
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("not a regular file"),
@@ -201,6 +241,7 @@ fn an_open_asks_ledger_is_refused() {
     let m = machine();
     let path = m.path().join("ws/.control/asks/ledger.yaml");
     std::fs::write(&path, ledger(m.path()).replace("\nasks:\n", "\nopen_asks:\n")).unwrap();
+    commit_main(m.path());
     let before = ledger(m.path());
     let out = file(m.path(), "hidden");
     assert!(!out.status.success());
@@ -214,6 +255,7 @@ fn the_validator_judges_the_ledgers_own_name() {
     let m = machine();
     let asks = m.path().join("ws/.control/asks");
     std::fs::rename(asks.join("ledger.yaml"), asks.join("ideas-foo.yaml")).unwrap();
+    commit_main(m.path());
     let file_into = |body: String| {
         maestro(m.path())
             .args(["ask", "file", "--session", "t3:-/x", "--ledger", "ideas-foo.yaml", "--ask", &body])
@@ -259,6 +301,7 @@ fn no_spelling_of_a_taken_uid_is_filed() {
     let path = m.path().join("ws/.control/asks/ledger.yaml");
     std::fs::write(&path, ledger(m.path()).replacen("  - id: seed-1\n", "  - id: seed-1\n    uid: \"7\"\n", 1))
         .unwrap();
+    commit_main(m.path());
     let before = ledger(m.path());
     for uid in [json!("7"), json!(" 7 "), json!(7), json!("seed-2")] {
         let mut v: Value = serde_json::from_str(&ask("n1")).unwrap();

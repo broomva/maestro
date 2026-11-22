@@ -145,3 +145,70 @@ fn a_fifo_where_git_looks_cannot_hang_the_ref_resolution() {
     assert!(e.contains("git rev-parse did not answer within 1s"), "{e}");
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
 }
+
+#[test]
+fn verified_commit_reads_the_exact_message_and_parent() {
+    let (_tmp, root, parent) = repo("x");
+    std::fs::write(root.join("f"), "y").unwrap();
+    git(&root, &["commit", "-qam", "answer\n\nMaestro-Owner-Proof: {}"]);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let commit = maestro_store::tree::verified_commit(&root, &head, T).unwrap();
+    assert_eq!(commit.parents, [parent]);
+    assert!(commit.message.contains("Maestro-Owner-Proof: {}"));
+    let forged = "1".repeat(40);
+    let objects = root.join(".git/objects");
+    let from = objects.join(&head[..2]).join(&head[2..]);
+    let to = objects.join(&forged[..2]).join(&forged[2..]);
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    std::fs::copy(from, to).unwrap();
+    let error = maestro_store::tree::verified_commit(&root, &forged, T).unwrap_err();
+    assert!(error.contains("does not hash to its id"), "{error}");
+    let malformed = root.join("bad-commit");
+    let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+    std::fs::write(&malformed, format!("tree {tree}\nparent --bad\n\nmessage\n")).unwrap();
+    let bad = git(&root, &["hash-object", "--literally", "-t", "commit", "-w", malformed.to_str().unwrap()]);
+    assert!(maestro_store::tree::verified_commit(&root, &bad, T).unwrap_err().contains("invalid parent"));
+}
+
+#[test]
+fn verified_ask_directory_refuses_shadowed_and_forged_trees() {
+    let (tmp, root, _) = repo("x");
+    std::fs::create_dir_all(root.join(".broomva/asks")).unwrap();
+    std::fs::write(root.join(".broomva/asks/ledger.yaml"), "asks: []\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "current"]);
+    let current = git(&root, &["rev-parse", "HEAD"]);
+    let mut paths = maestro_store::Paths::under(tmp.path().to_path_buf());
+    paths.workspace = root.clone();
+    let store = maestro_store::Store::new(paths.clone(), maestro_store::TreeSource::GitRev(current.clone()));
+    assert!(store.ask_ledger_verified("ledger.yaml", &current, T).unwrap().is_some());
+
+    std::fs::create_dir_all(root.join(".control/asks")).unwrap();
+    std::fs::write(root.join(".control/asks/ledger.yaml"), "asks: []\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "shadowed"]);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let store = maestro_store::Store::new(paths, maestro_store::TreeSource::GitRev(head.clone()));
+    assert!(store.ask_ledger_verified("ledger.yaml", &head, T).unwrap_err().contains("both"));
+    assert!(maestro_store::tree::directory_verified(&root, &head, "f", T).unwrap_err().contains("not a directory"));
+
+    let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+    let other = git(&root, &["rev-parse", "HEAD:.control"]);
+    let parent = git(&root, &["rev-parse", "HEAD^1"]);
+    let loose = |id: &str| root.join(".git/objects").join(&id[..2]).join(&id[2..]);
+    let original = std::fs::read(loose(&head)).unwrap();
+    std::fs::set_permissions(loose(&head), std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    std::fs::copy(loose(&parent), loose(&head)).unwrap();
+    let error = maestro_store::tree::directory_verified(&root, &head, ".broomva/asks", T).unwrap_err();
+    assert!(error.contains("does not hash to its id"), "{error}");
+    let error = read_verified(&root, &head, "f", 100, T).unwrap_err();
+    assert!(error.contains("does not hash to its id"), "{error}");
+    std::fs::set_permissions(loose(&head), std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    std::fs::write(loose(&head), original).unwrap();
+    std::fs::set_permissions(loose(&tree), std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    std::fs::copy(loose(&other), loose(&tree)).unwrap();
+    let error = maestro_store::tree::directory_verified(&root, &head, ".broomva/asks", T).unwrap_err();
+    assert!(error.contains("does not hash to its id"), "{error}");
+    let error = read_verified(&root, &head, ".broomva/asks/ledger.yaml", 100, T).unwrap_err();
+    assert!(error.contains("does not hash to its id"), "{error}");
+}

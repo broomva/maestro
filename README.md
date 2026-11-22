@@ -65,7 +65,9 @@ maestro escalate --reason R
   `~/.local/state/control-asks/locks`, which Maestro passes on) and the flock, appends the ask in the
   line shape its own `stamp` and `archive` edit, records the origin `{via: maestro, session, verified:
   false}`, and replaces the ledger only when it reads back as the ledger's asks plus exactly that ask with
-  no new validator error. It writes to the working tree. It refuses an answer, a status or an origin in
+  no new validator error. Maestro holds its shared checkout lock, files in its own checkout, commits
+  the one ledger file with a `Maestro-Ask` trailer, and pushes `maestro/ledger`. The owner checkout
+  is unchanged. The ask appears before the landing PR merges. It refuses an answer, a status or an origin in
   the ask, an id or uid outside `^[A-Za-z0-9][A-Za-z0-9._-]*$` or one any existing ask is addressed by,
   values Maestro's reader would read back otherwise (integers beyond ±(2^53 − 1), `-0.0`), a result over
   the readers' 1 MiB limit, and a ledger that does not exist or is a symlink. A lock busy for the
@@ -111,22 +113,15 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   from the definition (filling `{{params.name}}` from the pinned params) and `asked_at` from its own clock. An ask containing `{{` is treated as a template and uses IR version 6; use that syntax only for parameter placeholders. A human node can declare `required_body_fields: [evidence]` to require those fields in `--ask`; the kernel refuses a missing or null field before pinning. It adds your `--ask` fields (what the
   ledger's validator requires), pins that body in the flow's log, and files it through the
   writer of record (`ask_ledger.py file`, as `ask file` does) with the flow ledger's lock
-  released. It links the row it finds in the working tree by that id and hash. Call it again until
-  it says `answered`: the answer counts only once it has landed on main of the answers remote,
-  `https://github.com/broomva/workspace.git`, compiled into Maestro (owner decisions 2026-11-09,
-  "Landed main, remote-checked" and "Compiled into maestro"; changing it is a code change). The
-  kernel asks that URL for `refs/heads/main` with nothing local applying (git by absolute path,
-  the Command Line Tools' on macOS and `/usr/bin/git` on Linux, checked root-owned and not group-
-  or other-writable; a fixed `PATH`; outside the repository; no git configuration; none of your
-  `GIT_*` environment; the one credential helper is `gh`'s, which only supplies credentials), and
-  reads the ledger at that commit object by object, each checked against its id, so nothing planted
-  in the object store reads as the answer. The floor (owner decision 2026-11-09, "Set the floor,
-  fix, re-check"): the residual risk is anything needing the user-level write that can replace
-  Maestro's own binary (`~/.local/bin/maestro`, the macOS `xcrun` cache, Homebrew's `gh`), a
-  root-level change, or merging a pull request carrying an answer into that main. No local ref or remote counts: an answer on `maestro/answers` (this clone's
-  or origin's) is reported as `answer_waiting_to_land`, and the flow resumes when it lands. A
-  remote that cannot be asked (20 s per call), has no main, or names a commit this clone has not
-  fetched is `answers_unread`. The answer is
+  released. It confirms the row at the committed ledger branch by id and hash. Call it again until
+  it says `answered`: the answer counts on main, or on `maestro/ledger` and the legacy
+  `maestro/answers` branch when the commit that last changed the row carries a valid owner passkey
+  proof (owner decision 2026-11-22). The kernel queries the compiled answers remote
+  `https://github.com/broomva/workspace.git` for the branch ref and verifies each commit, tree and
+  ledger object against its id. No local ref counts as answer evidence. The proof must match the
+  ledger, ask, option and note, and verify against the enrolled key and relying party. Missing
+  owner configuration or unreadable remote objects are `answers_unread`; a missing or invalid
+  proof is `answer_unproven`. The answer is
   never read from the working tree or from you; it is recorded as the node's receipt, with the
   answer's fields as its outputs (`answer_option`, `answer`, ...). A busy asks ledger is retried
   until the kernel's deadline, then `ask_refused_busy`; a row with that id and another body is
@@ -138,7 +133,7 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
   adopts or retires an instance: `flow propose-adoption` and `flow propose-retirement` (MCP
   `maestro_flow_propose_adoption`, `maestro_flow_propose_retirement`) put it to the owner as a
   Maestro ask, filed, linked and answered exactly as a human node's ask is, and the kernel
-  carries out only the owner's answer, read from main of the answers remote. The first call
+  carries out only the owner's answer, read from main or the verified ledger branch of the answers remote. The first call
   takes `--ledger` and `--ask` (the fields the validator requires; the kernel writes the
   question, the options and the default) and files an ask naming the instance, its owner, your
   session (each with its owner marker's digest, never the marker) and the progress so far.
@@ -373,10 +368,10 @@ Definitions declare params as a list (`params: [repo, head, surface?]`); `?` mak
 Every command takes `--json` (`delegation brief` prints its markdown block either way). Agents should use `--json`: it is the same data the MCP tools return,
 because the CLI and the MCP server share one dispatch.
 
-By default Maestro reads the workspace at `origin/main`, because main's copy wins under the home rule.
-`--tree worktree` reads the local checkout instead. An answer present locally but not on main is
-reported as waiting to land, not as open and not as answered. If the local checkout itself cannot be
-read, that count becomes a lower bound and the error is reported under `worktree:`.
+By default Maestro reads the workspace at `origin/main`. Ask ledgers overlay that tree with the
+fetched `maestro/ledger` and legacy `maestro/answers` refs, so filed asks appear as open and answers
+appear in effect before landing. A branch that cannot be read is reported as unread. `--tree worktree`
+reads other sections from the local checkout explicitly; asks still use the main and ledger overlay.
 
 - **Revisions.** A revision that does not resolve, or that starts with `-`, reads nothing. Every
   section is then unavailable, not empty. The MCP server resolves the revision again on each request,
@@ -555,10 +550,11 @@ Maestro decides every value on it:
   (maestro#20, BRO-3783). They run one script, `crates/view/assets/owner.js`, named in the policy by
   its hash. An open decision takes the owner's answer in place (BRO-4042): choose an option, add a
   note, press Answer, confirm with Touch ID or Face ID. Maestro holds it 8 seconds for undo, writes
-  it to `maestro/answers` in its own checkout (`MAESTRO_ANSWERS_CHECKOUT`, else
+  it to `maestro/ledger` in its own checkout (`MAESTRO_ANSWERS_CHECKOUT`, else
   `~/.local/state/maestro/answers-checkout`) with the passkey's proof in the commit's
   `Maestro-Owner-Proof` trailer, tells the asking T3 thread (`origin.session`), and opens a
-  landing PR into main set to merge when its checks pass. The answer takes effect when signed.
+  landing PR into main set to merge when its checks pass. The answer takes effect when written
+  to the branch after the undo window.
   Answering needs a secure origin, `MAESTRO_WEB_ORIGIN` (for example
   `https://<mac>.<tailnet>.ts.net` behind `tailscale serve`, or `http://localhost:<port>`), and a
   passkey set up once at `/owner` with the code Maestro prints at start. Passkeys live in

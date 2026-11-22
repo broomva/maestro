@@ -71,6 +71,25 @@ fn thread(id: &str, native: &str) -> Value {
     })
 }
 
+fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
 /// A scratch machine: a workspace with `.broomva/` and an asks ledger whose writer of record is the
 /// stub, a work folder, a T3 snapshot (and a broken one), a Paseo agent and a Direct session.
 struct Fx {
@@ -94,6 +113,15 @@ fn fx() -> Fx {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/requests");
     std::fs::copy(fixtures.join("ledger.yaml"), ws.join(".broomva/asks/ledger.yaml")).unwrap();
     std::fs::copy(fixtures.join("ask_ledger_stub.py"), ws.join("scripts/ask_ledger.py")).unwrap();
+    for args in [&["init", "-q", "-b", "main"][..], &["add", "."][..], &["commit", "-qm", "seed"][..]] {
+        let out = git(&ws, args);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let origin = root.join("origin.git");
+    assert!(git(&root, &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]).status.success());
+    assert!(git(&ws, &["remote", "add", "origin", origin.to_str().unwrap()]).status.success());
+    assert!(git(&ws, &["push", "-q", "origin", "main"]).status.success());
+    assert!(git(&ws, &["fetch", "-q", "origin"]).status.success());
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let w = work.to_string_lossy().into_owned();
@@ -254,7 +282,13 @@ impl Fx {
     }
 
     fn ledger(&self) -> String {
-        std::fs::read_to_string(self.root.join("workspace/.broomva/asks/ledger.yaml")).unwrap()
+        let ws = self.root.join("workspace");
+        let result = git(&ws, &["show", "refs/remotes/origin/maestro/ledger:.broomva/asks/ledger.yaml"]);
+        if result.status.success() {
+            String::from_utf8(result.stdout).unwrap()
+        } else {
+            std::fs::read_to_string(ws.join(".broomva/asks/ledger.yaml")).unwrap()
+        }
     }
 
     /// Starts an instance owned by `thread`, attributed from its own variable.
