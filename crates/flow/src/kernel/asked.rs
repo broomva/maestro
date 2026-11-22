@@ -1392,6 +1392,88 @@ fn a_human_nodes_events_carry_the_writers_audit_facts() {
 }
 
 #[test]
+fn returning_inputs_do_not_revive_an_answered_old_ask() {
+    let clock = TestClock::install();
+    let mut f = fx(None, "");
+    f.flow = compile("flow: gate\nversion: 1\nworkdir: \"/tmp\"\nnodes:\n  probe: {class: observe, run: ['true'], fresh_for: 10s, exit_map: {0: ok}}\n  owner: {class: human, ask: 'Ship?', needs: [probe]}\n  ship: {class: pure, run: ['true'], needs: [owner]}\n").unwrap();
+    let fi = f.begin();
+    let observe = |f: &mut Fx, value| {
+        let c = crate::kernel::claim(&mut f.ledger, &f.me, &fi, "probe").unwrap();
+        crate::kernel::complete(
+            &mut f.ledger,
+            &f.me,
+            &c.token,
+            serde_json::json!({"v": value}),
+            &crate::kernel::Limits::default(),
+        )
+        .unwrap();
+    };
+    observe(&mut f, 1);
+    let first = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, 2);
+    let second = waiting(&f.ask(&fi, None).unwrap()).0.to_string();
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, 1);
+    f.answer_in_worktree(&first);
+    f.land_on_main(); // The answer exists, but no Answered event was recorded.
+    let s = f.status(&fi);
+    assert_eq!(s.nodes["owner"].state, State::Waiting);
+    assert!(matches!(&s.nodes["owner"].unmet[0], crate::kernel::Reason::Unfiled { ask_id: None, .. }));
+    let third = waiting(&f.ask(&fi, None).unwrap()).0.to_string();
+    assert_ne!(third, first);
+    assert_ne!(third, second);
+    let s = f.status(&fi);
+    assert_eq!(s.nodes["owner"].state, State::Waiting);
+    assert!(matches!(&s.nodes["owner"].unmet[0], crate::kernel::Reason::Owner { ask_id, .. } if ask_id == &third));
+    assert!(s.rejected.is_empty(), "{:?}", s.rejected);
+}
+
+#[test]
+fn superseded_unlinked_pin_is_not_revived_after_delayed_refusal() {
+    let clock = TestClock::install();
+    let mut f = fx(None, "");
+    f.flow = compile("flow: gate\nversion: 1\nworkdir: \"/tmp\"\nnodes:\n  probe: {class: observe, run: ['true'], fresh_for: 10s, exit_map: {0: ok}}\n  owner: {class: human, ask: 'Ship?', needs: [probe]}\n").unwrap();
+    let fi = f.begin();
+    let observe = |f: &mut Fx, value| {
+        let c = crate::kernel::claim(&mut f.ledger, &f.me, &fi, "probe").unwrap();
+        crate::kernel::complete(
+            &mut f.ledger,
+            &f.me,
+            &c.token,
+            serde_json::json!({"v": value}),
+            &crate::kernel::Limits::default(),
+        )
+        .unwrap();
+    };
+    observe(&mut f, 1);
+    let b_inputs = f.status(&fi).nodes["owner"].inputs.clone();
+    let append = |f: &mut Fx, kind: &str, body: Value| {
+        let mut guard = f.ledger.lock().unwrap();
+        let seq = guard.log(&fi).unwrap().seq();
+        guard.append(&fi, seq, crate::NewEvent::new(kind, body)).unwrap();
+    };
+    let pin = |id: &str, inputs| serde_json::json!({"node":"owner", "iteration":{}, "ask_id":id, "ledger":"ledger.yaml", "body":{}, "body_hash":"h", "inputs":inputs});
+    append(&mut f, "AskPinned", pin("B", b_inputs));
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, 2);
+    let c_inputs = f.status(&fi).nodes["owner"].inputs.clone();
+    append(&mut f, "AskPinned", pin("C", c_inputs));
+    append(
+        &mut f,
+        "AskWithdrawn",
+        serde_json::json!({"node":"owner", "iteration":{}, "ask_id":"B", "code":"ask_not_filed", "reason":"refused"}),
+    );
+    clock.shift(jiff::SignedDuration::from_secs(11));
+    observe(&mut f, 1);
+    let s = f.status(&fi);
+    assert!(s.rejected.iter().any(|r| r.kind == "AskWithdrawn" && r.reason == "not_pinned"));
+    assert!(matches!(&s.nodes["owner"].unmet[0], crate::kernel::Reason::Unfiled { ask_id: None, .. }));
+    let result = f.ask(&fi, Some(&filing())).unwrap();
+    assert!(matches!(result, Asked::Waiting { ref ask_id, .. } if ask_id != "B" && ask_id != "C"), "{result:?}");
+}
+
+#[test]
 fn a_human_node_whose_inputs_changed_is_re_askable_and_revalidates() {
     let clock = TestClock::install();
     let mut f = fx(None, "");
