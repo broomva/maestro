@@ -641,6 +641,33 @@ fn open_shows_a_re_ask_with_inputs_changed() {
 }
 
 #[test]
+fn abandonment_replays_stably_and_old_logs_remain_unchanged() {
+    let (mut f, fi) = with(RELAY);
+    let before = {
+        let guard = f.ledger.lock().unwrap();
+        guard.log(&fi).unwrap()
+    };
+    let old_status = {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        let guard = reader.lock().unwrap();
+        status(&guard, &fi, clock::now()).unwrap()
+    };
+    let principal = maestro_core::authority::Principal::Owner { via: "owner (passkey fixture)".into() };
+    abandon(&mut f.ledger, &principal, &fi, "no longer needed", "stable-action").unwrap();
+    let guard = f.ledger.lock().unwrap();
+    let after = guard.log(&fi).unwrap();
+    assert_eq!(&after.events[..before.events.len()], &before.events);
+    let started = super::replay::pinned(&after).unwrap();
+    let at = clock::now();
+    assert_eq!(
+        super::replay::read_both(&after, &started, at).unwrap(),
+        super::replay::read_both(&after, &started, at).unwrap()
+    );
+    let old_started = super::replay::pinned(&before).unwrap();
+    assert_eq!(super::replay::read_both(&before, &old_started, at).unwrap().0, old_status);
+}
+
+#[test]
 fn agent_cannot_abandon_and_appends_nothing() {
     let (mut f, fi) = with(RELAY);
     let before = f.ledger.lock().unwrap().log(&fi).unwrap().seq();
