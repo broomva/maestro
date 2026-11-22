@@ -2425,12 +2425,19 @@ mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.coun
 mutate $stp '        counts.retain(|_, c| c.refusals > MAX_REFUSALS);' '        counts.clear();'
 mutate $stp '            && count.seq.checked_add(1) == Some(seq)' '            && true'
 mutate $stp '            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)' '            true'
-mutate $gt '                Err(e) if matches!(e, KernelError::Encode(_)) => match Refusals::quarantine(&guard, &me) {' '                Err(e) if false => match Refusals::quarantine(&guard, &me) {'
-mutate $gt '                },
-                Err(e) => return self.block_unread_counts(&session, &e.to_string()),
-            };' '                },
-                Err(e) => return self.fail_open(Some(&session), "refusals_unread", &e.to_string()),
-            };'
+mutate $gt '                Err(load_error) => match Refusals::quarantine(&guard, &me) {' '                Err(load_error) => match Err::<String, KernelError>(KernelError::Encode("disabled".into())) {'
+mutate $gt '                    Err(e) => {
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",' '                    Err(e) => {
+                        self.out.blocked = true;
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",'
 mutate $gt '                        r.prune(&open);' ''
 mutate $gt '            counts.prune(&open);' ''
 mutate $gt '            reason.push_str(&format!(" {recovered}"));' '            let _ = recovered;'

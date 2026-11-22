@@ -397,7 +397,7 @@ fn the_gate_fails_open() {
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
     let reason = refusal(&out);
     assert!(reason.contains("unreadable") && reason.contains("stop-gate"), "{reason}");
-    assert!(out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_unread:")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.contains("saved as")), "{out:?}");
 
     // Refusal counts that cannot be written: their folder takes no new file (the count and its lock
     // were made by a first stop, so they still open).
@@ -764,6 +764,55 @@ fn corrupt_and_truncated_counts_are_quarantined_and_bounded() {
         }
         allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
     }
+}
+
+#[test]
+fn unreadable_count_variants_are_quarantined_and_bounded() {
+    for kind in ["directory", "symlink", "too_large"] {
+        let f = fx();
+        f.begin("d1");
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+        let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+        let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        std::fs::remove_file(&file).unwrap();
+        match kind {
+            "directory" => std::fs::create_dir(&file).unwrap(),
+            "symlink" => std::os::unix::fs::symlink("missing", &file).unwrap(),
+            _ => std::fs::write(&file, vec![b'x'; (1 << 20) + 1]).unwrap(),
+        }
+        let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+        assert!(refusal(&out).contains("saved aside"), "{kind}: {out:?}");
+        assert_eq!(out.alerts.len(), 1, "{kind}");
+        for _ in 0..2 {
+            refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+        }
+        allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+}
+
+#[test]
+fn quarantine_failure_fails_open_and_alerts() {
+    use std::os::unix::fs::PermissionsExt;
+    if std::process::Command::new("id").arg("-u").output().unwrap().stdout == b"0\n" {
+        return;
+    }
+    let f = fx();
+    f.begin("d1");
+    refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(&file, "broken").unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    allowed(&out);
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.contains("quarantine failed") && n.contains(file.file_name().unwrap().to_str().unwrap())),
+        "{out:?}"
+    );
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
 }
 
 #[test]

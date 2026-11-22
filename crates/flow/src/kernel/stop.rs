@@ -46,7 +46,9 @@
 //! it was taken in, and counts of another epoch are no counts. They move with the root, so
 //! `operator::archive` takes them away and `create_fresh_ledger` starts with none. The file is
 //! replaced whole (written aside, then renamed), so a crash leaves the old counts or the new
-//! ones, and a stop with nothing to count writes nothing.
+//! ones, and a stop with nothing to count writes nothing. An unreadable count file is quarantined
+//! under that lock and recounted from zero; failure to quarantine or recount lets the stop through
+//! with an alert, so a broken count file cannot trap the session.
 //!
 //! # The record
 //!
@@ -549,7 +551,12 @@ impl Refusals {
         Ok(Refusals { name, was_empty: counts.is_empty(), counts })
     }
 
-    /// Quarantine a malformed count file under the write lock before recounting from zero.
+    /// The relative path of the session's count file, for diagnostics.
+    pub fn path(session: &VerifiedSession) -> Result<String, KernelError> {
+        Ok(format!("{STOP_GATE}/{}", file_name(session)?))
+    }
+
+    /// Quarantine an unreadable count file under the write lock before recounting from zero.
     pub fn quarantine(guard: &WriteGuard<'_>, session: &VerifiedSession) -> Result<String, KernelError> {
         let name = file_name(session)?;
         let dir =

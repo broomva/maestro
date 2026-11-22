@@ -31,8 +31,8 @@
 //!   whatever else the gate decides: beside an instance with work, the stop is still refused, and
 //!   the refusal names it; with no work beside it, the stop goes through. No session named, or no
 //!   flow ledger in the workspace, is no Maestro flow at all: the stop goes through with a note and
-//!   no alert. An unreadable refusal-count file blocks and names the file; malformed count files
-//!   are quarantined under the lock, alerted, and counted again from zero.
+//!   no alert. An unreadable refusal-count file is quarantined under the lock, alerted, and counted
+//!   again from zero. If quarantine or the recount fails, the stop goes through with an alert.
 //! - **The loop bound.** A session refused at one instance's log position
 //!   [`MAX_REFUSALS`](maestro_flow::kernel::stop::MAX_REFUSALS) times in a row is let through the
 //!   next time: the gate appends `StopUnblockable` with reason `no_progress` to each such instance
@@ -223,18 +223,6 @@ impl Run<'_> {
             }
             None => self.note("no session to file the alert as, so none was filed."),
         }
-    }
-
-    /// A count file that cannot be read or quarantined must not bypass the gate.
-    fn block_unread_counts(&mut self, session: &SessionRef, why: &str) {
-        let reason = format!(
-            "refusals_unread: the refusal count file is unreadable: {why}. Report and repair this file before stopping."
-        );
-        self.note(&reason);
-        self.out.stdout = self.gate.harness.block(&reason);
-        self.out.blocked = true;
-        let key = format!("refusals_unread\n{session}\n{why}");
-        self.alert(session, &key, UNCHECKED, &reason, &Principal::Unverified);
     }
 
     /// Notes and alerts the instances that did not read (see `judge`).
@@ -581,23 +569,39 @@ impl Run<'_> {
             };
             let mut counts = match Refusals::load(&guard, &me) {
                 Ok(c) => c,
-                Err(e) if matches!(e, KernelError::Encode(_)) => match Refusals::quarantine(&guard, &me) {
+                Err(load_error) => match Refusals::quarantine(&guard, &me) {
                     Ok(path) => {
-                        let why = format!("refusal count file was corrupt: {e}; {path}; counting again from zero");
+                        let why = format!(
+                            "refusal count file was corrupt or unreadable: {load_error}; {path}; counting again from zero"
+                        );
                         self.note(&why);
                         recovered_counts = Some(format!(
-                            "The refusal count file was unreadable and corrupt: {path}. It was saved aside and the count restarted; report this file."
+                            "The refusal count file was unreadable: {path}. It was saved aside and the count restarted; report this file."
                         ));
                         let key = format!("refusals_corrupt\n{session}\n{path}");
                         self.alert(&session, &key, UNCHECKED, &why, &Principal::Unverified);
                         match Refusals::load(&guard, &me) {
                             Ok(c) => c,
-                            Err(e) => return self.block_unread_counts(&session, &e.to_string()),
+                            Err(e) => {
+                                return self.fail_open(
+                                    Some(&session),
+                                    "refusals_unread",
+                                    &format!("{path}: recount failed: {e}"),
+                                );
+                            }
                         }
                     }
-                    Err(e) => return self.block_unread_counts(&session, &e.to_string()),
+                    Err(e) => {
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",
+                                Refusals::path(&me).unwrap_or_else(|_| "stop-gate/<unknown>".into())
+                            ),
+                        );
+                    }
                 },
-                Err(e) => return self.block_unread_counts(&session, &e.to_string()),
             };
             counts.prune(&open);
             let tally = counts.tally(&refusing);
