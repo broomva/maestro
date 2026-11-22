@@ -29,6 +29,9 @@
 //!    (`AskWithdrawn`, `ask_not_filed`) and the next call mints anew, with a body the agent can fix.
 //!    No row otherwise, or a ledger that cannot be read, is `ask_unconfirmed`, and the next call
 //!    files the same pin again.
+//!    Only the latest pin for the current inputs is selected. Returning to earlier inputs does
+//!    not revive a historical pin; the kernel files a new ask. A recorded answer receipt can
+//!    still revalidate when its inputs return, and a withdrawal restores its predecessor.
 //! 4. **Answer.** A linked ask's answer counts only once it has landed on main, read where the
 //!    answers remote says main is. Two owner decisions (AskUserQuestion, 2026-11-09), verbatim:
 //!    "Landed main, remote-checked (Recommended)" and "Compiled into maestro (Recommended)". The
@@ -284,11 +287,7 @@ pub fn amend(
         return Err(invalid("amend reason exceeds 2048 bytes"));
     }
     let seen = look(ledger, session, instance, node)?;
-    let old = seen
-        .rec
-        .as_ref()
-        .filter(|r| r.linked && seen.prior.is_none())
-        .ok_or_else(|| invalid("amend needs the current linked ask"))?;
+    let old = seen.rec.as_ref().filter(|r| r.linked).ok_or_else(|| invalid("amend needs the current linked ask"))?;
     if reason.trim().is_empty() {
         return Err(invalid("amend needs a reason"));
     }

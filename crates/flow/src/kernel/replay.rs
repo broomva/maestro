@@ -728,12 +728,7 @@ pub(crate) fn ask_of(
     let Some(i) = fold.current(node) else { return Ok(None) };
     let Some((id, _)) = started.ir.nodes.get_key_value(node) else { return Ok(None) };
     let key = (id.as_str(), i);
-    Ok(fold
-        .asks
-        .get(&key)
-        .filter(|r| &r.inputs == inputs)
-        .or_else(|| fold.prior_asks.get(&key)?.iter().rev().find(|r| &r.inputs == inputs))
-        .cloned())
+    Ok(fold.asks.get(&key).filter(|r| &r.inputs == inputs).cloned())
 }
 
 /// The replayed current ask, without falling back to historical inputs.
@@ -1113,10 +1108,7 @@ impl<'a> Fold<'a> {
     }
 
     fn ask_for(&self, key: Key<'a>, consumed: &BTreeMap<&'a str, Rc<str>>) -> Option<&AskRec> {
-        self.asks
-            .get(&key)
-            .filter(|r| same_inputs(&r.inputs, consumed))
-            .or_else(|| self.prior_asks.get(&key)?.iter().rev().find(|r| same_inputs(&r.inputs, consumed)))
+        self.asks.get(&key).filter(|r| same_inputs(&r.inputs, consumed))
     }
 
     /// The node's `retry.attempts`, when they have all ended without a receipt at `now`, in its
