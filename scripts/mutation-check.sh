@@ -2432,6 +2432,7 @@ mutate $gt '                },
                 Err(e) => return self.fail_open(Some(&session), "refusals_unread", &e.to_string()),
             };'
 mutate $gt '                        r.prune(&open);' ''
+mutate $gt '            counts.prune(&open);' ''
 mutate $gt '            reason.push_str(&format!(" {recovered}"));' '            let _ = recovered;'
 # The gate's own no-progress record carries the release into the next turn.
 mutate $gt '                    counts.recorded_release(instance, *seq);' '                    let _ = (instance, seq);'

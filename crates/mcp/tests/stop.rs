@@ -786,3 +786,26 @@ fn release_is_pruned_when_instance_finishes() {
     allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
     assert!(!std::fs::read_to_string(&file).unwrap().contains(&fi));
 }
+
+#[test]
+fn release_is_pruned_while_other_work_remains() {
+    let f = fx();
+    let fi = f.begin("d1");
+    for _ in 0..3 {
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(f.work.join("ok"), "").unwrap();
+    for node in ["one", "two"] {
+        let c = f.call(CLAIM, f.as_("d1", json!({ "instance": fi, "node_id": node })));
+        let done = f.call(COMPLETE, f.as_("d1", json!({ "claim_token": c["claim_token"] })));
+        assert_eq!(done["ok"], true, "{done}");
+    }
+    let other = f.begin("d1");
+    let reason = refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert!(reason.contains(&other));
+    let counts = std::fs::read_to_string(&file).unwrap();
+    assert!(!counts.contains(&fi) && counts.contains(&other), "{counts}");
+}
