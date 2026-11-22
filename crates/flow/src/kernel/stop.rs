@@ -635,7 +635,12 @@ impl Refusals {
             // Every event after the last progress event is non-progress (adoption::BOOKKEEPING or
             // the gate's own record), so a count taken at or after it is a count of this state.
             // `>=` also keeps the counts a gate before progress_seq saved at a raw seq.
-            let prior = self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq).map_or(0, |c| c.refusals);
+            let held = self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq);
+            let prior = held.map_or(0, |c| c.refusals);
+            // A count is never moved back: an assessment made before a concurrent stop saved a
+            // newer count (assess and tally take separate locks) must not rewind it, or the next
+            // stop finds it stale and re-arms.
+            let seq = held.map_or(a.progress_seq, |c| c.seq);
             let refusals = if prior >= MAX_REFUSALS {
                 tally.spent.push(a.instance.clone());
                 MAX_REFUSALS + 1
@@ -643,7 +648,7 @@ impl Refusals {
                 tally.refused.push(a.instance.clone());
                 prior + 1
             };
-            counts.insert(a.instance.clone(), Count { seq: a.progress_seq, refusals });
+            counts.insert(a.instance.clone(), Count { seq, refusals });
         }
         self.counts = counts;
         tally

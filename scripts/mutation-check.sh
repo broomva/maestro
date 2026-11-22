@@ -2431,6 +2431,8 @@ mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '           
 mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq)' 'self.counts.get(&a.instance).filter(|_| true)'
 # A count saved at a raw seq after the last progress (a gate before progress_seq) still holds.
 mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq)' 'self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq)'
+# A stale assessment does not rewind a newer count.
+mutate $stp '            let seq = held.map_or(a.progress_seq, |c| c.seq);' '            let seq = a.progress_seq;'
 # Bookkeeping after the gate's record does not make a second record.
 mutate $stp '    let last = log.events.iter().rev().find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()));' '    let last = log.events.last();'
 # BRO-4057: preserve an absent release; intervening events re-arm it.
