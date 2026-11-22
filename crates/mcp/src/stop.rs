@@ -31,11 +31,13 @@
 //!   whatever else the gate decides: beside an instance with work, the stop is still refused, and
 //!   the refusal names it; with no work beside it, the stop goes through. No session named, or no
 //!   flow ledger in the workspace, is no Maestro flow at all: the stop goes through with a note and
-//!   no alert.
+//!   no alert. An unreadable refusal-count file blocks and names the file; malformed count files
+//!   are quarantined under the lock, alerted, and counted again from zero.
 //! - **The loop bound.** A session refused at one instance's log position
 //!   [`MAX_REFUSALS`](maestro_flow::kernel::stop::MAX_REFUSALS) times in a row is let through the
 //!   next time: the gate appends `StopUnblockable` with reason `no_progress` to each such instance
-//!   and files the alert (`kernel::stop::Refusals`).
+//!   and files the alert (`kernel::stop::Refusals`). The release persists until a later event
+//!   moves that instance's log, including while it temporarily has no work.
 //! - **A harness that cannot block** (`--cannot-block`, for a turn-end program that cannot refuse):
 //!   the gate appends `StopUnblockable` with reason `harness_cannot_block` to each instance with
 //!   work and files the alert. Claude Code and Codex 0.164 both block (README, harness matrix).
