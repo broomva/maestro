@@ -509,6 +509,8 @@ pub fn performer_receipt_digest(outputs: &Value, value: Option<&str>, performer:
 pub struct Abandoned {
     pub reason: String,
     pub by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
 }
 
 impl KernelEvent for Abandoned {

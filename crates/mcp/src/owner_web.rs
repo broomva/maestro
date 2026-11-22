@@ -433,8 +433,14 @@ mod tests {
         let log = read().lock().unwrap().log(&second).unwrap();
         assert_eq!(log.events.len(), 2);
         assert_eq!(log.events[1].kind, "Abandoned");
-        assert!(log.events[1].body["by"].as_str().unwrap().starts_with("owner (passkey "));
+        let by = log.events[1].body["by"].as_str().unwrap();
+        assert!(by.starts_with("owner (passkey "));
         assert_eq!(o.receipt(&applied.id).unwrap().stage, Stage::Written);
+        // Recovery retries the same signed receipt if the daemon stopped after append.
+        o.book.put(applied.clone());
+        answers::apply(&o.writer, &o.book, &applied.id, &sign("unused"), "unused", by, None);
+        assert_eq!(o.receipt(&applied.id).unwrap().stage, Stage::Written);
+        assert_eq!(read().lock().unwrap().log(&second).unwrap().events.len(), 2);
     }
 
     #[test]

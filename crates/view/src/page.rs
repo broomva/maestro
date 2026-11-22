@@ -277,6 +277,15 @@ pub fn owner(state: &OwnerPage, shell: &Shell) -> String {
                         @for at in when { li class="bv-code" { "Set up " (at) } }
                     }
                     a class="mv-go" href="/decisions" { "Go to decisions" }
+                    section data-abandon-flow="true" {
+                        h2 { "Abandon a flow instance" }
+                        p { "Enter the instance ID and a reason. This stops its remaining work." }
+                        label { "Instance ID" input type="text" name="instance" required; }
+                        label { "Reason" textarea name="reason" maxlength="2000" required {} }
+                        button class="mv-go" type="button" data-abandon-go="true" { "Sign and abandon" }
+                        p class="mv-answer-status" data-abandon-status="true" role="status" aria-live="polite" {}
+                        div data-abandon-receipt="true" {}
+                    }
                 },
             }
         }

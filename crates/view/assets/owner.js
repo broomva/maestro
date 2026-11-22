@@ -165,6 +165,60 @@
     });
   }
 
+  // ---- Abandoning a flow ----
+  const abandon = document.querySelector("[data-abandon-flow]");
+  if (abandon) {
+    const go = abandon.querySelector("[data-abandon-go]");
+    const status = abandon.querySelector("[data-abandon-status]");
+    const receiptBox = abandon.querySelector("[data-abandon-receipt]");
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      receiptBox.replaceChildren();
+      try {
+        const begin = await post("/owner/flow/abandon/begin", {
+          instance: abandon.querySelector("[name=instance]").value.trim(),
+          reason: abandon.querySelector("[name=reason]").value.trim(),
+        });
+        status.textContent = "Confirm with your passkey.";
+        const cred = await navigator.credentials.get({ publicKey: {
+          challenge: unb64u(begin.challenge), rpId: begin.rp_id,
+          allowCredentials: begin.credentials.map((id) => ({ type: "public-key", id: unb64u(id) })),
+          userVerification: "required", timeout: 120000,
+        }});
+        if (!cred) throw new Error("no passkey was used");
+        const receipt = await post("/owner/flow/abandon/finish", { nonce: begin.nonce, assertion: {
+          credential: b64u(cred.rawId), client_data: b64u(cred.response.clientDataJSON),
+          authenticator_data: b64u(cred.response.authenticatorData), signature: b64u(cred.response.signature),
+        }});
+        const offset = receipt.now_ms - Date.now();
+        const undo = document.createElement("button");
+        undo.type = "button"; undo.textContent = "Undo";
+        receiptBox.append(undo);
+        let undone = false;
+        undo.addEventListener("click", async () => {
+          undo.disabled = true;
+          try { await post("/owner/answer/undo", { id: receipt.id }); undone = true; status.textContent = "Undone. Nothing was written."; }
+          catch (err) { status.textContent = `Could not undo: ${err.message}`; }
+        });
+        while (!undone && Date.now() + offset < receipt.applies_at_ms) {
+          status.textContent = `Signed. Abandoning in ${Math.ceil((receipt.applies_at_ms - Date.now() - offset) / 1000)} seconds.`;
+          await sleep(250);
+        }
+        undo.remove();
+        if (!undone) {
+          status.textContent = "Applying your action.";
+          for (let i = 0; i < 60; i++) {
+            const r = await fetch(`/owner/answer/${encodeURIComponent(receipt.id)}`, { credentials: "same-origin" }).then((x) => x.json());
+            if (r.stage === "written") { status.textContent = "Flow instance abandoned."; break; }
+            if (r.stage === "failed") { status.textContent = `Not abandoned: ${r.error}`; break; }
+            await sleep(1000);
+          }
+        }
+      } catch (err) { status.textContent = `Not abandoned: ${err.message}`; }
+      finally { go.disabled = false; }
+    });
+  }
+
   // ---- Enrolling the owner's passkey ----
   const enroll = document.querySelector("[data-enroll]");
   if (enroll) {

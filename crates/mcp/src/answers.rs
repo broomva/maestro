@@ -627,7 +627,7 @@ fn abandon_flow(w: &Writer, r: &Receipt, by: &str) -> Result<(), String> {
     let mut ledger =
         maestro_flow::Ledger::open(&root, &host, maestro_flow::Options::default()).map_err(|e| e.to_string())?;
     let owner = maestro_core::authority::Principal::Owner { via: by.to_owned() };
-    maestro_flow::kernel::abandon(&mut ledger, &owner, &instance, r.intent.note.as_deref().unwrap_or_default())
+    maestro_flow::kernel::abandon(&mut ledger, &owner, &instance, r.intent.note.as_deref().unwrap_or_default(), &r.id)
         .map_err(|e| e.to_string())?;
     Ok(())
 }

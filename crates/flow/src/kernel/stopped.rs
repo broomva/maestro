@@ -646,7 +646,7 @@ fn agent_cannot_abandon_and_appends_nothing() {
     let before = f.ledger.lock().unwrap().log(&fi).unwrap().seq();
     let principal = maestro_core::authority::Principal::Agent { session: "t3:-/agent".parse().unwrap() };
     assert_eq!(
-        abandon(&mut f.ledger, &principal, &fi, "no longer needed").unwrap_err().code(),
+        abandon(&mut f.ledger, &principal, &fi, "no longer needed", "agent-attempt").unwrap_err().code(),
         "owner_action_required"
     );
     assert_eq!(f.ledger.lock().unwrap().log(&fi).unwrap().seq(), before);
@@ -656,7 +656,8 @@ fn agent_cannot_abandon_and_appends_nothing() {
 fn abandonment_is_terminal_and_not_reported_by_stop_gate() {
     let (mut f, fi) = with(RELAY);
     let principal = maestro_core::authority::Principal::Owner { via: "owner (passkey fixture)".into() };
-    abandon(&mut f.ledger, &principal, &fi, "no longer needed").unwrap();
+    abandon(&mut f.ledger, &principal, &fi, "no longer needed", "signed-action").unwrap();
+    assert!(abandon(&mut f.ledger, &principal, &fi, "no longer needed", "signed-action").unwrap().is_none());
     let a = judge(&f, &fi);
     assert!(a.terminal && a.work.is_empty() && a.waiting.is_empty());
     assert!(open_for(&f, &f.me).instances.is_empty());
