@@ -202,6 +202,7 @@ fn an_approved_adoption_hands_the_instance_to_the_new_owner() {
     }
     let options: Vec<&str> = body["options"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert_eq!((options, &body["default"]), (vec!["adopt", "keep"], &json!("keep")));
+    assert_eq!(body["options"][1]["recommended"], true);
     let log = std::fs::read_to_string(f.flows.join("instances").join(fi.as_str()).join("events.jsonl")).unwrap();
     for marker in ["marker-1", "marker-9"] {
         assert!(!f.ledger_text().contains(marker) && !log.contains(marker), "a marker was written");
@@ -539,6 +540,35 @@ fn a_writer_refusal_withdraws_the_proposal_and_the_next_call_proposes_anew() {
     assert!(f.status(&fi).proposals.is_empty());
     linked(&adopt(&mut f, &other(), &fi, Some(&proposing())).unwrap());
     assert_eq!(f.kinds(&fi)[3..], ["ProposalPinned", "ProposalLinked"]);
+}
+
+#[test]
+fn refused_proposals_do_not_reset_stop_gate_counts() {
+    use crate::kernel::stop::{self, MAX_REFUSALS, Refusals};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let mut bad = proposing();
+    bad.body.insert("stakes".into(), json!("STUB-INVALID"));
+    for _ in 0..MAX_REFUSALS {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        let assessment = stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| {
+            super::asks::AnswerSeen::Open
+        })
+        .unwrap();
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        assert_eq!(counts.tally(&[&assessment]).refused, [fi.to_string()]);
+        counts.save(&guard, &me).unwrap();
+        drop(guard);
+        assert!(matches!(retire(&mut f, &me, &fi, Some(&bad)).unwrap(), Proposed::Withdrawn { .. }));
+    }
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let assessment =
+        stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| super::asks::AnswerSeen::Open)
+            .unwrap();
+    let guard = f.ledger.lock().unwrap();
+    let mut counts = Refusals::load(&guard, &me).unwrap();
+    assert_eq!(counts.tally(&[&assessment]).spent, [fi.to_string()]);
 }
 
 #[test]

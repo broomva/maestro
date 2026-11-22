@@ -333,6 +333,7 @@ fn at(instance: &str, seq: u64) -> Assessment {
         flow: "relay@1".into(),
         ir_hash: "sha256:x".into(),
         seq,
+        progress_seq: seq,
         terminal: false,
         work: vec![Work::Node {
             node: "one".into(),

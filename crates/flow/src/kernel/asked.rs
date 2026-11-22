@@ -96,7 +96,7 @@ pub(crate) fn body() -> Map<String, Value> {
         "headline": "Ship the release?",
         "stakes": "Nothing is blocked; a fixture.",
         "why_you": "Only the owner answers asks.",
-        "options": [{ "id": "ship", "label": "Ship" }, { "id": "hold", "label": "Hold" }],
+        "options": [{ "id": "ship", "label": "Ship" }, { "id": "hold", "label": "Hold", "recommended": true }],
         "blocking": false,
         "default": "hold",
         "preanswerable": false,

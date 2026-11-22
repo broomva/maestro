@@ -1985,6 +1985,10 @@ mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Val
 # Owner-approved adoption and retirement (BRO-3635; ADR decisions 6 and 7): an agent proposes, the
 # owner decides, the kernel applies only the owner's approve option, read from landed main.
 adopt=crates/flow/src/kernel/adoption.rs
+# BRO-4011: the default is recommended, and refused filings do not reset the stop bound.
+mutate $adopt '"status_quo": true, "recommended": true' '"status_quo": true'
+mutate $fk/stop.rs '.find(|e| e.kind != "ProposalPinned" && e.kind != "ProposalWithdrawn")' '.find(|_| true)'
+
 # Only the approve option exactly; anything else is declined and changes nothing.
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if false {'
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if answer_option.as_deref().map(str::to_lowercase).as_deref() != Some(proposal.approve_option()) {'
@@ -2420,7 +2424,7 @@ mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| 
 mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
 mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
-mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq)' 'self.counts.get(&a.instance).filter(|_| true)'
 mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
 mutate $replay '            self.unblockable.push(record);' ''
 mutate $asks '        return AnswerSeen::Landed;' '        return AnswerSeen::Open;'

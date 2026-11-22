@@ -111,6 +111,8 @@ def validate(ledger: dict, preauth=None, require_decisions=False, require_decisi
         if ideas and ask.get("class") != "idea":
             errs.append(f"ask {ask.get('id')}: {Path(path).name} holds ideas only")
         if isinstance(ask, dict):
+            if ask.get("class") == "decision" and sum(isinstance(o, dict) and o.get("recommended") is True for o in (ask.get("options") or [])) != 1:
+                errs.append(f"ask {ask.get('id')}: exactly one option must carry recommended: true")
             errs.extend(rich_errors(ask, ledger, f"ask {ask.get('id')}"))
     return errs
 

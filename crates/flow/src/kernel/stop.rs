@@ -33,8 +33,8 @@
 //!
 //! A gate that refuses forever traps a session. [`Refusals`] counts, per session, how many stops in
 //! a row the gate refused over each instance at one log position (its `seq`). The count starts
-//! again whenever the instance's `seq` moves, and an instance the gate no longer refuses over
-//! drops out. Once an instance has been refused [`MAX_REFUSALS`] times at one position, the next
+//! again whenever the instance advances beyond proposal pins and withdrawals. An instance the gate
+//! no longer refuses over drops out. Once an instance has been refused [`MAX_REFUSALS`] times at one position, the next
 //! stop over it goes through and the gate records `no_progress` ([`Refusals::tally`]).
 //!
 //! The counts are one JSON file per session under the ledger's own root, `stop-gate/<digest>.json`
@@ -147,6 +147,8 @@ pub struct Assessment {
     pub flow: String,
     pub ir_hash: String,
     pub seq: u64,
+    #[serde(skip)]
+    pub(crate) progress_seq: u64,
     pub terminal: bool,
     pub work: Vec<Work>,
     pub waiting: Vec<Waiting>,
@@ -285,6 +287,14 @@ pub(crate) fn assess(
         flow: status.flow,
         ir_hash: status.ir_hash,
         seq: status.seq,
+        // A pin must precede the external writer for recovery. A refused filing only adds a
+        // pin and withdrawal, neither of which is progress toward the owner's work.
+        progress_seq: log
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind != "ProposalPinned" && e.kind != "ProposalWithdrawn")
+            .map_or(0, |e| e.seq),
         terminal: status.terminal,
         work,
         waiting,
@@ -563,7 +573,7 @@ impl Refusals {
         let mut tally = Tally::default();
         let mut counts = BTreeMap::new();
         for a in refusing {
-            let prior = self.counts.get(&a.instance).filter(|c| c.seq == a.seq).map_or(0, |c| c.refusals);
+            let prior = self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq).map_or(0, |c| c.refusals);
             let refusals = if prior >= MAX_REFUSALS {
                 tally.spent.push(a.instance.clone());
                 prior
@@ -571,7 +581,7 @@ impl Refusals {
                 tally.refused.push(a.instance.clone());
                 prior + 1
             };
-            counts.insert(a.instance.clone(), Count { seq: a.seq, refusals });
+            counts.insert(a.instance.clone(), Count { seq: a.progress_seq, refusals });
         }
         self.counts = counts;
         tally

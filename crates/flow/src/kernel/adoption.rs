@@ -580,7 +580,7 @@ fn question(instance: &InstanceId, proposal: Proposal, me: &Owner, seen: &Seen, 
             }),
         ),
     };
-    let keep = json!({ "id": KEEP, "label": "Keep it as it is", "consequence": "Nothing changes.", "reversible": true, "status_quo": true });
+    let keep = json!({ "id": KEEP, "label": "Keep it as it is", "consequence": "Nothing changes.", "reversible": true, "status_quo": true, "recommended": true });
     let mut out = Map::new();
     out.insert("headline".into(), Value::String(headline));
     out.insert("ask".into(), Value::String(ask));
