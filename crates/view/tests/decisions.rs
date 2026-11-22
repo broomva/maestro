@@ -270,9 +270,7 @@ fn an_answer_in_the_working_tree_waits_to_land() {
     // in the sentence and in the banner alike.
     assert!(html.contains("at least 7 open · at least 1 answered, not yet landed"), "{html}");
     assert!(
-        html.contains(
-            r#"<p class="mv-banner-title">at least 1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"#
-        ),
+        html.contains(r#"<p class="mv-banner-title">at least 1 answered and in effect, waiting to land on main"#),
         "{html}"
     );
     assert!(html.contains(r#"<span class="mv-irow-rec" data-tone="success">Waiting to land</span>"#), "{html}");
@@ -561,10 +559,7 @@ fn a_waiting_answer_is_placed_by_the_plugins_key_not_its_text() {
     assert!(!html.contains(r#"mv-irow-title">By id</span><span class="mv-irow-rec" data-tone="success">"#), "{html}");
     // One project's open count stands alone; the checkout's count is the banner's, and it says so.
     assert!(html.contains(">2 open<"), "{html}");
-    assert!(
-        html.contains(r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"#),
-        "{html}"
-    );
+    assert!(html.contains(r#"<p class="mv-banner-title">1 answered and in effect, waiting to land on main"#), "{html}");
     assert!(html.contains("Counted for the whole checkout, not this project alone."), "{html}");
     // The uid-less ask is open and nothing answers it: the owner path is offered for it alone.
     assert_eq!(html.matches("mv-answerbar").count(), 1, "{html}");
@@ -634,7 +629,7 @@ fn an_answer_on_the_answers_branch_waits_to_land() {
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
     assert!(d.contains("it reaches main with the next landing PR") && !d.contains("mv-answerbar"), "{d}");
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("or on maestro/answers"), "{html}");
+    assert!(html.contains("1 answered and in effect, waiting to land on main"), "{html}");
 }
 
 #[test]
@@ -722,18 +717,13 @@ fn no_screen_claims_an_ask_is_unanswered() {
     assert!(d.contains("shows whether it has been answered since"), "{d}");
     assert!(!d.contains("(recommended:") && !d.contains("To answer"), "{d}");
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("Paseo may hold answers in other checkouts, which this screen does not read."), "{html}");
-    assert!(
-        html.contains(
-            "0 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"
-        ),
-        "{html}"
-    );
+    assert!(html.contains("Answers waiting in other checkouts are not counted here."), "{html}");
+    assert!(html.contains("0 answered and in effect, waiting to land on main"), "{html}");
     assert!(!html.contains("waiting to land<"), "{html}");
     // Reading the working tree itself, no landing count is made and the branch is said unread.
     let m = machine();
     let wt = render(&worktree(m.path()), &inbox()).html;
-    assert!(wt.contains("Answers on maestro/answers are not read here."), "{wt}");
+    assert!(wt.contains("Answers waiting to land, here or in other checkouts, are not counted."), "{wt}");
     assert!(!wt.contains("answered, not yet landed"), "{wt}");
 }
 
@@ -823,10 +813,7 @@ fn asks_sharing_a_key_are_unknown_and_their_one_answer_waits_once() {
     // No read failed: the checkout's count is the plugin's batch count, exact, though which of the
     // two asks the answer waits for is not known.
     assert!(html.contains(">at least 2 open<"), "{html}");
-    assert!(
-        html.contains(r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"#),
-        "{html}"
-    );
+    assert!(html.contains(r#"<p class="mv-banner-title">1 answered and in effect, waiting to land on main"#), "{html}");
     assert_eq!(maestro_store::views::snapshot(&store).asks.data.unwrap().unlanded, Some(1));
 }
 
@@ -934,9 +921,7 @@ fn an_answer_to_an_ask_the_tree_does_not_hold_is_counted_for_the_checkout_never_
         let html = render(&store, &spec(json!({ "type": "decisions", "props": { "project": project } }))).html;
         assert!(!html.contains("answered, not yet landed"), "{html}");
         assert!(
-            html.contains(
-                r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"#
-            ),
+            html.contains(r#"<p class="mv-banner-title">1 answered and in effect, waiting to land on main"#),
             "{html}"
         );
         assert!(html.contains("Counted for the whole checkout, not this project alone."), "{html}");

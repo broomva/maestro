@@ -106,7 +106,7 @@ impl Owner {
         };
         owner.recover();
         if Keyring::load(&owner.dir).is_ok_and(|k| k.credentials.is_empty()) {
-            let code = passkey::nonce()[..8].to_ascii_uppercase();
+            let code = setup_code();
             eprintln!("maestro: set up the owner's passkey at {}/owner with the code {code}", owner.party.origin);
             let _ = std::fs::create_dir_all(&owner.dir);
             let _ = std::fs::write(owner.dir.join("setup-code"), format!("{code}\n"));
@@ -324,6 +324,15 @@ pub struct AnswerBegin {
     pub note: String,
 }
 
+/// A setup code a person can read off a log and type on a phone: eight characters from an
+/// alphabet with no look-alikes (no 0, O, 1 or I) and no punctuation.
+fn setup_code() -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).expect("the system's random source");
+    b.iter().map(|x| char::from(ALPHABET[usize::from(x % 32)])).collect()
+}
+
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -492,6 +501,15 @@ mod tests {
         k.credentials[0].rp_id = "old.example".into();
         k.save(&o.dir).unwrap();
         assert_eq!(o.state(), maestro_view::render::Owner::Enroll);
+    }
+
+    #[test]
+    fn a_setup_code_has_no_look_alikes_or_punctuation() {
+        for _ in 0..200 {
+            let c = setup_code();
+            assert_eq!(c.len(), 8);
+            assert!(c.bytes().all(|b| b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(&b)), "{c}");
+        }
     }
 
     #[test]

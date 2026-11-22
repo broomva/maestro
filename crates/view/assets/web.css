@@ -209,25 +209,6 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-note-input::placeholder { color: var(--mv-ink3); }
 .mv-note-input:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 1px; border-color: transparent; }
 .mv-answer-row { display: flex; align-items: center; gap: var(--bv-space-4); flex-wrap: wrap; }
-.mv-go {
-  display: inline-flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 22px;
-  border: 1px solid transparent; border-radius: 999px; cursor: pointer; text-decoration: none;
-  font: inherit; font-size: 16px; font-weight: 500; color: var(--mv-cta-ink);
-  background: linear-gradient(var(--mv-cta), var(--mv-cta)) padding-box, var(--mv-rim) border-box;
-  box-shadow: 0 10px 26px -14px var(--mv-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.6);
-}
-.mv-go:hover:not(:disabled) { filter: brightness(1.04); }
-.mv-go:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 3px; }
-.mv-go:disabled { cursor: not-allowed; opacity: 0.5; box-shadow: none; }
-.mv-go-icon { width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid currentColor; position: relative; flex: none; opacity: 0.85; }
-.mv-go-icon::before, .mv-go-icon::after { content: ""; position: absolute; top: 5px; width: 2px; height: 3px; border-radius: 1px; background: currentColor; }
-.mv-go-icon::before { left: 4px; } .mv-go-icon::after { right: 4px; }
-.mv-answer-how { margin: 0; flex: 1 1 16rem; font-size: 13px; line-height: 1.45; color: var(--mv-ink3); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.mv-answer-status { margin: 0; font-size: 14px; line-height: 1.45; color: var(--mv-ink2); }
-.mv-answer-status:empty { display: none; }
-.mv-answer-status[data-tone="success"] { color: var(--mv-ok); }
-.mv-answer-status[data-tone="danger"] { color: var(--mv-fail); }
-.mv-answer-status[data-tone="info"] { color: var(--mv-tide); }
 .mv-undo-count {
   display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%;
   border: 2px solid var(--mv-tide); font-family: var(--bv-font-mono); font-size: 13px; color: var(--mv-ink);
@@ -253,25 +234,8 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-owner-code input:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 1px; }
 
 /* The decision's chips, its side column, and twin rows in the queue (BRO-4042). */
-.mv-dchips { margin: 0; display: flex; gap: var(--bv-space-4); flex-wrap: wrap; }
-.mv-dchip { display: inline-flex; align-items: center; gap: 7px; font-family: var(--bv-font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mv-ink3); }
-.mv-dchip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mv-tide); }
-.mv-dchip[data-tone="success"]::before { background: var(--mv-ok); }
-.mv-dchip[data-tone="warning"]::before { background: var(--mv-warn); }
-.mv-dchip[data-tone="attention"]::before { background: var(--mv-fail); }
-.mv-tried-none { margin: 0; font-size: 13px; color: var(--mv-ink3); }
-.mv-origin { margin: var(--bv-space-3) 0 0; padding-top: var(--bv-space-3); border-top: 1px solid var(--mv-line); font-size: 12px; line-height: 1.6; color: var(--mv-ink3); overflow-wrap: anywhere; }
-.mv-sign { margin-top: var(--bv-space-4); padding: var(--bv-space-3) var(--bv-space-4); border-radius: 16px; border: 1px solid var(--mv-line2); background: color-mix(in srgb, var(--mv-surface) 55%, transparent); }
-.mv-sign p { margin: 0; }
-.mv-sign-title { font-size: 13px; font-weight: 500; color: var(--mv-ink); margin-bottom: 4px !important; }
-.mv-sign .bv-code { font-size: 12px; line-height: 1.6; color: var(--mv-ink3); overflow-wrap: anywhere; }
-.mv-sign [data-sign] { color: var(--mv-tide); }
-.mv-qrow-handle { font-size: 11px; color: var(--mv-tide); overflow-wrap: anywhere; }
 
 /* An option's words span the card; its badges sit on the label's row (BRO-4042, the Decide frame). */
-.mv-decide-main .mv-dopt { grid-template-columns: minmax(0, 1fr) auto; }
-.mv-decide-main .mv-dopt > .mv-dopt-text { grid-column: 1 / -1; }
-.mv-decide-main .mv-dopt > .mv-chips { white-space: nowrap; }
 /* The header names the tree read; the card need not repeat it in its footer. */
 .mv-decide-main > .mv-card[data-state="ok"] > .mv-source { display: none; }
 .mv-screen:has(.mv-decide) > .mv-foot { display: none; }

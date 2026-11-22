@@ -90,12 +90,12 @@ fn in_tab(e: &Entry, tab: Tab) -> bool {
 /// answers in other checkouts; the banner says so, so its number is never read as a total.
 /// An unread source is said, never shown as none.
 fn banner(cx: &Ctx, waiting: usize, partial: bool, filtered: bool) -> Markup {
-    let elsewhere = "Paseo may hold answers in other checkouts, which this screen does not read.";
+    let elsewhere = "Answers waiting in other checkouts are not counted here.";
     html! {
         @if cx.store.tree.source == maestro_store::TreeSource::WorkingTree {
             div class="mv-banner" data-tone="info" {
                 p class="mv-banner-title" { "Reading this checkout's working tree" }
-                p class="bv-meta" { "Answers on maestro/answers are not read here. " (elsewhere) }
+                p class="bv-meta" { "Answers waiting to land, here or in other checkouts, are not counted." }
             }
         } @else if cx.unlanded().data.is_none() {
             p class="mv-banner" data-tone="danger" {
@@ -104,7 +104,7 @@ fn banner(cx: &Ctx, waiting: usize, partial: bool, filtered: bool) -> Markup {
         } @else {
             div class="mv-banner" data-tone="info" {
                 p class="mv-banner-title" {
-                    (at_least(waiting, partial)) " answered in this checkout or on " (maestro_store::views::ANSWERS_READ) ", not yet on " span class="bv-code" { (cx.snap.tree) }
+                    (at_least(waiting, partial)) " answered and in effect, waiting to land on main"
                 }
                 p class="bv-meta" {
                     @if filtered { "Counted for the whole checkout, not this project alone. " }
