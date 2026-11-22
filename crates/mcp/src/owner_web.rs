@@ -68,10 +68,17 @@ impl Owner {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/state/maestro/answers-checkout"));
-        let t3 = std::env::var_os("MAESTRO_T3_BIN")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| Some(home.join(".t3/bin/t3")).filter(|p| p.exists()));
+        // MAESTRO_T3_BIN, else the CLI of the T3 server running at each wake.
+        let t3 = match std::env::var_os("MAESTRO_T3_BIN").filter(|v| !v.is_empty()) {
+            Some(bin) => answers::T3::Fixed(PathBuf::from(bin)),
+            None => answers::T3::Active(
+                std::env::var_os("T3CODE_HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".t3")),
+            ),
+        };
+        let t3 = Some(t3);
         let remote = std::env::var("MAESTRO_ANSWERS_LOCAL").ok().as_deref() != Some("1");
         let writer = Writer { workspace, asks, checkout, owner_dir: dir.clone(), t3, remote };
         let owner = Self::claim(party, dir, writer)?;
