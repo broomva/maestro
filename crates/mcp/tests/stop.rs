@@ -816,6 +816,45 @@ fn quarantine_failure_fails_open_and_alerts() {
 }
 
 #[test]
+fn repeated_quarantines_are_bounded_and_share_an_alert() {
+    let f = fx();
+    f.begin("d1");
+    refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    let mut alert = None;
+    let mut oldest = None;
+    for n in 0..6 {
+        std::fs::write(&file, format!("broken {n}")).unwrap();
+        let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+        refusal(&out);
+        assert_eq!(out.alerts.len(), 1, "{out:?}");
+        if let Some(id) = &alert {
+            assert_eq!(id, &out.alerts[0]);
+        }
+        alert = Some(out.alerts[0].clone());
+        let count = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains(".corrupt."))
+            .count();
+        assert_eq!(count, (n + 1).min(maestro_flow::kernel::stop::MAX_QUARANTINED), "round {n}");
+        if n == 0 {
+            let path = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.to_string_lossy().contains(".corrupt."))
+                .unwrap();
+            let times = std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH);
+            std::fs::File::open(&path).unwrap().set_times(times).unwrap();
+            oldest = Some(path);
+        }
+        if n == maestro_flow::kernel::stop::MAX_QUARANTINED {
+            assert!(!oldest.as_ref().unwrap().exists(), "oldest quarantine remains");
+        }
+    }
+}
+
+#[test]
 fn release_is_pruned_when_instance_finishes() {
     let f = fx();
     let fi = f.begin("d1");

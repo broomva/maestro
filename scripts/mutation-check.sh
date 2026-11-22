@@ -2438,6 +2438,8 @@ mutate $gt '                    Err(e) => {
                             "refusals_unread",
                             &format!(
                                 "{}: load failed: {load_error}; quarantine failed: {e}",'
+mutate $stp '        prune_quarantines(&dir, &name)?;' ''
+mutate $gt '                        let key = format!("refusals_corrupt\n{session}\n{}", Refusals::path(&me).unwrap_or_default());' '                        let key = format!("refusals_corrupt\n{session}\n{path}");'
 mutate $gt '                        r.prune(&open);' ''
 mutate $gt '            counts.prune(&open);' ''
 mutate $gt '            reason.push_str(&format!(" {recovered}"));' '            let _ = recovered;'

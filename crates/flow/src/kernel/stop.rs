@@ -48,7 +48,8 @@
 //! replaced whole (written aside, then renamed), so a crash leaves the old counts or the new
 //! ones, and a stop with nothing to count writes nothing. An unreadable count file is quarantined
 //! under that lock and recounted from zero; failure to quarantine or recount lets the stop through
-//! with an alert, so a broken count file cannot trap the session.
+//! with an alert, so a broken count file cannot trap the session. At most [`MAX_QUARANTINED`]
+//! quarantines per count file are retained; the oldest are pruned under the same lock.
 //!
 //! # The record
 //!
@@ -490,6 +491,9 @@ pub const REFUSALS_WAIT: Duration = Duration::from_secs(2);
 /// The most bytes of a refusal-count file the gate reads.
 pub const MAX_REFUSALS_FILE: u64 = 1 << 20;
 
+/// Maximum quarantined count files retained for one session.
+pub const MAX_QUARANTINED: usize = 3;
+
 /// How many stops in a row the gate refused over one instance at one log position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Count {
@@ -541,6 +545,31 @@ fn counts_in(root: &Dir, epoch: &str, name: &str) -> Result<BTreeMap<String, Cou
     Ok(if parsed.epoch == epoch { parsed.counts } else { BTreeMap::new() })
 }
 
+/// Prune by modification time through the already-open directory, without following links.
+fn prune_quarantines(dir: &Dir, name: &str) -> Result<(), KernelError> {
+    use rustix::fs::{AtFlags, FileType};
+    let io = |path: std::path::PathBuf, e: rustix::io::Errno| crate::error::FlowError::Io { path, source: e.into() };
+    let entries = rustix::fs::Dir::read_from(&dir.fd).map_err(|e| io(dir.path.clone(), e))?;
+    let mut files = Vec::new();
+    let prefix = format!("{name}.corrupt.");
+    for entry in entries {
+        let entry = entry.map_err(|e| io(dir.path.clone(), e))?;
+        let Ok(n) = entry.file_name().to_str() else { continue };
+        if !n.starts_with(&prefix) {
+            continue;
+        }
+        let st = rustix::fs::statat(&dir.fd, n, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| io(dir.path.join(n), e))?;
+        files.push((st.st_mtime, st.st_mtime_nsec, n.to_owned(), FileType::from_raw_mode(st.st_mode as _)));
+    }
+    files.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    let excess = files.len().saturating_sub(MAX_QUARANTINED);
+    for (_, _, name, kind) in files.into_iter().take(excess) {
+        let flags = if kind == FileType::Directory { AtFlags::REMOVEDIR } else { AtFlags::empty() };
+        rustix::fs::unlinkat(&dir.fd, name.as_str(), flags).map_err(|e| io(dir.path.join(name), e))?;
+    }
+    Ok(())
+}
+
 impl Refusals {
     /// `session`'s counts in the ledger `guard` holds exclusive, or none yet: one load, its tally
     /// and its save are one step under that lock, so two stops never both read one count. A file
@@ -563,6 +592,7 @@ impl Refusals {
             guard.root().dir(STOP_GATE)?.ok_or_else(|| KernelError::Encode(format!("{STOP_GATE}/{name} vanished")))?;
         let aside = format!("{name}.corrupt.{}", crate::ledger::random_epoch()?);
         dir.rename(&name, &dir, &aside)?;
+        prune_quarantines(&dir, &name)?;
         dir.sync();
         Ok(format!("{STOP_GATE}/{name} (saved as {STOP_GATE}/{aside})"))
     }

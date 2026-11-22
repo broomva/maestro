@@ -32,7 +32,8 @@
 //!   the refusal names it; with no work beside it, the stop goes through. No session named, or no
 //!   flow ledger in the workspace, is no Maestro flow at all: the stop goes through with a note and
 //!   no alert. An unreadable refusal-count file is quarantined under the lock, alerted, and counted
-//!   again from zero. If quarantine or the recount fails, the stop goes through with an alert.
+//!   again from zero. Quarantines are pruned per count file, and repeated recovery shares an alert.
+//!   If quarantine or the recount fails, the stop goes through with an alert.
 //! - **The loop bound.** A session refused at one instance's log position
 //!   [`MAX_REFUSALS`](maestro_flow::kernel::stop::MAX_REFUSALS) times in a row is let through the
 //!   next time: the gate appends `StopUnblockable` with reason `no_progress` to each such instance
@@ -578,7 +579,7 @@ impl Run<'_> {
                         recovered_counts = Some(format!(
                             "The refusal count file was unreadable: {path}. It was saved aside and the count restarted; report this file."
                         ));
-                        let key = format!("refusals_corrupt\n{session}\n{path}");
+                        let key = format!("refusals_corrupt\n{session}\n{}", Refusals::path(&me).unwrap_or_default());
                         self.alert(&session, &key, UNCHECKED, &why, &Principal::Unverified);
                         match Refusals::load(&guard, &me) {
                             Ok(c) => c,
