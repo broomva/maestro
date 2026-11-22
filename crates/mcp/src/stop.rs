@@ -570,6 +570,7 @@ impl Run<'_> {
         // The ledger's write lock is held from the load through the save: two stops at once are
         // both counted, and the lock's own checks (host, epoch, root) bind the counts. A lock still
         // held past its wait lets this stop through.
+        let mut recovered_counts = None;
         let tally = {
             let guard = match ledger.lock() {
                 Ok(g) => g,
@@ -584,6 +585,9 @@ impl Run<'_> {
                     Ok(path) => {
                         let why = format!("refusal count file was corrupt: {e}; {path}; counting again from zero");
                         self.note(&why);
+                        recovered_counts = Some(format!(
+                            "The refusal count file was unreadable and corrupt: {path}. It was saved aside and the count restarted; report this file."
+                        ));
                         let key = format!("refusals_corrupt\n{session}\n{path}");
                         self.alert(&session, &key, UNCHECKED, &why, &Principal::Unverified);
                         match Refusals::load(&guard, &me) {
@@ -613,6 +617,9 @@ impl Run<'_> {
         }
         let blocking: Vec<&Assessment> = refusing.into_iter().filter(|a| tally.refused.contains(&a.instance)).collect();
         let mut reason = kstop::block_reason(&blocking, MAX_NAMED);
+        if let Some(recovered) = recovered_counts {
+            reason.push_str(&format!(" {recovered}"));
+        }
         if let Some(list) = &unread {
             reason.push_str(&format!(" Maestro could not read {list}, so the gate could not check it for work."));
         }

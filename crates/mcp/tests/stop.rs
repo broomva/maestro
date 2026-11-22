@@ -749,7 +749,11 @@ fn corrupt_and_truncated_counts_are_quarantined_and_bounded() {
         let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
         std::fs::write(&file, bad).unwrap();
         let out = f.gate_as("d1", Harness::Claude, &claude_stop());
-        refusal(&out);
+        let reason = refusal(&out);
+        assert!(
+            reason.contains("unreadable") && reason.contains("stop-gate/") && reason.contains("saved aside"),
+            "{reason}"
+        );
         assert!(out.notes.iter().any(|n| n.contains("corrupt") && n.contains("saved as")), "{out:?}");
         assert_eq!(out.alerts.len(), 1);
         assert!(
