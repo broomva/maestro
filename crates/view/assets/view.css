@@ -522,6 +522,55 @@ body {
 .mv-tile, .mv-pill { background: var(--mv-sunk); border-color: var(--mv-line); }
 .mv-headline-text { font-family: var(--mv-font-display); font-weight: 300; letter-spacing: -0.03em; }
 
+
+/* The decision as every surface shows it (BRO-4042): the web pages, the MCP App and the snapshot
+   render one markup, so its styles live here, not in web.css. */
+.mv-dchips { margin: 0; display: flex; gap: var(--bv-space-4); flex-wrap: wrap; }
+.mv-dchip { display: inline-flex; align-items: center; gap: 7px; font-family: var(--bv-font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mv-ink3); }
+.mv-dchip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mv-tide); }
+.mv-dchip[data-tone="success"]::before { background: var(--mv-ok); }
+.mv-dchip[data-tone="warning"]::before { background: var(--mv-warn); }
+.mv-dchip[data-tone="attention"]::before { background: var(--mv-fail); }
+.mv-tried-none { margin: 0; font-size: 13px; color: var(--mv-ink3); }
+.mv-origin { margin: var(--bv-space-3) 0 0; padding-top: var(--bv-space-3); border-top: 1px solid var(--mv-line); font-size: 12px; line-height: 1.6; color: var(--mv-ink3); overflow-wrap: anywhere; }
+.mv-sign { margin-top: var(--bv-space-4); padding: var(--bv-space-3) var(--bv-space-4); border-radius: 16px; border: 1px solid var(--mv-line2); background: color-mix(in srgb, var(--mv-surface) 55%, transparent); }
+.mv-sign p { margin: 0; }
+.mv-sign-title { font-size: 13px; font-weight: 500; color: var(--mv-ink); margin-bottom: 4px !important; }
+.mv-sign .bv-code { font-size: 12px; line-height: 1.6; color: var(--mv-ink3); overflow-wrap: anywhere; }
+.mv-sign [data-sign] { color: var(--mv-tide); }
+.mv-qrow-handle { font-size: 11px; color: var(--mv-tide); overflow-wrap: anywhere; }
+.mv-dopt { grid-template-columns: minmax(0, 1fr) auto; }
+.mv-dopt > .mv-dopt-text { grid-column: 1 / -1; }
+.mv-dopt > .mv-chips { white-space: nowrap; }
+/* An option's badges move under its label where a row is narrow (a phone, the App's frame), so
+   the label keeps the full width. */
+@media (max-width: 560px) {
+  .mv-dopt > .mv-chips { grid-column: 1 / -1; grid-row: auto; justify-content: start; white-space: normal; }
+  .mv-dopt .mv-badge:first-child { margin-left: 0; }
+}
+/* The answer button, and outside the web pages the link to them: a control, never sticky. */
+.mv-go {
+  display: inline-flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 22px;
+  border: 1px solid transparent; border-radius: 999px; cursor: pointer; text-decoration: none;
+  font: inherit; font-size: 16px; font-weight: 500; color: var(--mv-cta-ink);
+  background: linear-gradient(var(--mv-cta), var(--mv-cta)) padding-box, var(--mv-rim) border-box;
+  box-shadow: 0 10px 26px -14px var(--mv-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+.mv-go:hover:not(:disabled) { filter: brightness(1.04); }
+.mv-go:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 3px; }
+.mv-go:disabled { cursor: not-allowed; opacity: 0.5; box-shadow: none; }
+.mv-go-icon { width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid currentColor; position: relative; flex: none; opacity: 0.85; }
+.mv-go-icon::before, .mv-go-icon::after { content: ""; position: absolute; top: 5px; width: 2px; height: 3px; border-radius: 1px; background: currentColor; }
+.mv-go-icon::before { left: 4px; } .mv-go-icon::after { right: 4px; }
+.mv-answer-how { margin: 0; flex: 1 1 16rem; font-size: 13px; line-height: 1.45; color: var(--mv-ink3); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mv-answer-status { margin: 0; font-size: 14px; line-height: 1.45; color: var(--mv-ink2); }
+.mv-answer-status:empty { display: none; }
+.mv-answer-status[data-tone="success"] { color: var(--mv-ok); }
+.mv-answer-status[data-tone="danger"] { color: var(--mv-fail); }
+.mv-answer-status[data-tone="info"] { color: var(--mv-tide); }
+.mv-answer-away { position: static; display: flex; flex-direction: column; align-items: flex-start; gap: var(--bv-space-2); padding: var(--bv-space-3); }
+.mv-answer-away .mv-answer-how { flex: none; }
+
 @media (prefers-reduced-transparency: reduce) {
   .mv-card.bv-card { background: var(--mv-surface); backdrop-filter: none; -webkit-backdrop-filter: none; border-color: var(--mv-line2); }
   .mv-control { background: var(--mv-surface); }

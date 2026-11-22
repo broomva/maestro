@@ -1988,7 +1988,10 @@ mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Val
 adopt=crates/flow/src/kernel/adoption.rs
 # BRO-4011: the default is recommended, and refused filings do not reset the stop bound.
 mutate $adopt '"status_quo": true, "recommended": true' '"status_quo": true'
-mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()))' '.find(|_| true)'
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|_| true)'
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|e| e.kind != StopUnblockable::KIND)'
+# The gate's own StopUnblockable record is not progress, or its release re-arms the gate.
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()))'
 
 # Only the approve option exactly; anything else is declined and changes nothing.
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if false {'
@@ -2426,6 +2429,27 @@ mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() &&
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
 mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
 mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+# BRO-4057: preserve an absent release; intervening events re-arm it.
+mutate $stp '        counts.retain(|_, c| c.refusals > MAX_REFUSALS);' '        counts.clear();'
+mutate $stp '            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)' '            true'
+mutate $gt '                Err(load_error) => match Refusals::quarantine(&guard, &me) {' '                Err(load_error) => match Err::<String, KernelError>(KernelError::Encode("disabled".into())) {'
+mutate $gt '                    Err(e) => {
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",' '                    Err(e) => {
+                        self.out.blocked = true;
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",'
+mutate $stp '        prune_quarantines(&dir, &name)?;' ''
+mutate $gt '                        let key = format!("refusals_corrupt\n{session}\n{}", Refusals::path(&me).unwrap_or_default());' '                        let key = format!("refusals_corrupt\n{session}\n{path}");'
+mutate $gt '                        r.prune(&open);' ''
+mutate $gt '            counts.prune(&open);' ''
+mutate $gt '            reason.push_str(&format!(" {recovered}"));' '            let _ = recovered;'
 mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
 mutate $replay '            self.unblockable.push(record);' ''
 mutate $asks '        return AnswerSeen::Landed;' '        return AnswerSeen::Open;'
