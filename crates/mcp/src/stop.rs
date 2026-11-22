@@ -31,11 +31,14 @@
 //!   whatever else the gate decides: beside an instance with work, the stop is still refused, and
 //!   the refusal names it; with no work beside it, the stop goes through. No session named, or no
 //!   flow ledger in the workspace, is no Maestro flow at all: the stop goes through with a note and
-//!   no alert.
+//!   no alert. An unreadable refusal-count file is quarantined under the lock, alerted, and counted
+//!   again from zero. Quarantines are pruned per count file, and repeated recovery shares an alert.
+//!   If quarantine or the recount fails, the stop goes through with an alert.
 //! - **The loop bound.** A session refused at one instance's log position
 //!   [`MAX_REFUSALS`](maestro_flow::kernel::stop::MAX_REFUSALS) times in a row is let through the
 //!   next time: the gate appends `StopUnblockable` with reason `no_progress` to each such instance
-//!   and files the alert (`kernel::stop::Refusals`).
+//!   and files the alert (`kernel::stop::Refusals`). The release persists until a later event
+//!   moves that instance's log, including while it temporarily has no work.
 //! - **A harness that cannot block** (`--cannot-block`, for a turn-end program that cannot refuse):
 //!   the gate appends `StopUnblockable` with reason `harness_cannot_block` to each instance with
 //!   work and files the alert. Claude Code and Codex 0.164 both block (README, harness matrix).
@@ -520,14 +523,14 @@ impl Run<'_> {
         }
         let refusing: Vec<&Assessment> = open.refusing().collect();
         if refusing.is_empty() {
-            // Nothing refused: a count in a row is broken, unread instances beside it or not, so
-            // an instance that reads again later starts its count afresh. Only counts there are
-            // need clearing.
+            // Nothing refused: clear interrupted refusal counts while preserving releases, even
+            // when an instance is temporarily unread.
             if counted {
                 let cleared =
                     self.ledger(&root).map_err(|(code, why)| format!("{code}: {why}")).and_then(|mut ledger| {
                         let guard = ledger.lock().map_err(|e| format!("{}: {e}", busy_code(e.code())))?;
                         let mut r = Refusals::load(&guard, &me).map_err(|e| format!("{}: {e}", busy_code(e.code())))?;
+                        r.prune(&open);
                         r.tally(&[]);
                         r.save(&guard, &me).map_err(|e| format!("{}: {e}", busy_code(e.code())))
                     });
@@ -556,6 +559,7 @@ impl Run<'_> {
         // The ledger's write lock is held from the load through the save: two stops at once are
         // both counted, and the lock's own checks (host, epoch, root) bind the counts. A lock still
         // held past its wait lets this stop through.
+        let mut recovered_counts = None;
         let tally = {
             let guard = match ledger.lock() {
                 Ok(g) => g,
@@ -566,10 +570,41 @@ impl Run<'_> {
             };
             let mut counts = match Refusals::load(&guard, &me) {
                 Ok(c) => c,
-                Err(e) => {
-                    return self.fail_open(Some(&session), "refusals_unread", &format!("{}: {e}", busy_code(e.code())));
-                }
+                Err(load_error) => match Refusals::quarantine(&guard, &me) {
+                    Ok(path) => {
+                        let why = format!(
+                            "refusal count file was corrupt or unreadable: {load_error}; {path}; counting again from zero"
+                        );
+                        self.note(&why);
+                        recovered_counts = Some(format!(
+                            "The refusal count file was unreadable: {path}. It was saved aside and the count restarted; report this file."
+                        ));
+                        let key = format!("refusals_corrupt\n{session}\n{}", Refusals::path(&me).unwrap_or_default());
+                        self.alert(&session, &key, UNCHECKED, &why, &Principal::Unverified);
+                        match Refusals::load(&guard, &me) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                return self.fail_open(
+                                    Some(&session),
+                                    "refusals_unread",
+                                    &format!("{path}: recount failed: {e}"),
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",
+                                Refusals::path(&me).unwrap_or_else(|_| "stop-gate/<unknown>".into())
+                            ),
+                        );
+                    }
+                },
             };
+            counts.prune(&open);
             let tally = counts.tally(&refusing);
             if let Err(e) = counts.save(&guard, &me) {
                 return self.fail_open(Some(&session), "refusals_unwritten", &format!("{}: {e}", busy_code(e.code())));
@@ -587,6 +622,9 @@ impl Run<'_> {
         }
         let blocking: Vec<&Assessment> = refusing.into_iter().filter(|a| tally.refused.contains(&a.instance)).collect();
         let mut reason = kstop::block_reason(&blocking, MAX_NAMED);
+        if let Some(recovered) = recovered_counts {
+            reason.push_str(&format!(" {recovered}"));
+        }
         if let Some(list) = &unread {
             reason.push_str(&format!(" Maestro could not read {list}, so the gate could not check it for work."));
         }
@@ -682,6 +720,19 @@ impl Run<'_> {
             let day = maestro_flow::clock::now().to_string();
             let day = day.get(..10).unwrap_or_default();
             key.push_str(&format!("\nunrecorded\n{session}\n{reason:?}\n{}\n{day}", failed.join("\n")));
+        }
+        if reason == Unblockable::NoProgress && !made.is_empty() {
+            let saved = (|| -> Result<(), KernelError> {
+                let guard = ledger.lock()?;
+                let mut counts = Refusals::load(&guard, me)?;
+                for (instance, seq) in &made {
+                    counts.recorded_release(instance, *seq);
+                }
+                counts.save(&guard, me)
+            })();
+            if let Err(e) = saved {
+                self.note(format!("the release position could not be saved ({}: {e}).", busy_code(e.code())));
+            }
         }
         self.out.recorded.extend(made);
         self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);

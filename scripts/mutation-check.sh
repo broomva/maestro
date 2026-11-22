@@ -2422,6 +2422,30 @@ mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() &&
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
 mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
 mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+# BRO-4057: preserve an absent release; intervening events re-arm it.
+mutate $stp '        counts.retain(|_, c| c.refusals > MAX_REFUSALS);' '        counts.clear();'
+mutate $stp '            && count.seq.checked_add(1) == Some(seq)' '            && true'
+mutate $stp '            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)' '            true'
+mutate $gt '                Err(load_error) => match Refusals::quarantine(&guard, &me) {' '                Err(load_error) => match Err::<String, KernelError>(KernelError::Encode("disabled".into())) {'
+mutate $gt '                    Err(e) => {
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",' '                    Err(e) => {
+                        self.out.blocked = true;
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",'
+mutate $stp '        prune_quarantines(&dir, &name)?;' ''
+mutate $gt '                        let key = format!("refusals_corrupt\n{session}\n{}", Refusals::path(&me).unwrap_or_default());' '                        let key = format!("refusals_corrupt\n{session}\n{path}");'
+mutate $gt '                        r.prune(&open);' ''
+mutate $gt '            counts.prune(&open);' ''
+mutate $gt '            reason.push_str(&format!(" {recovered}"));' '            let _ = recovered;'
+# The gate's own no-progress record carries the release into the next turn.
+mutate $gt '                    counts.recorded_release(instance, *seq);' '                    let _ = (instance, seq);'
 mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
 mutate $replay '            self.unblockable.push(record);' ''
 mutate $asks '        return AnswerSeen::Landed;' '        return AnswerSeen::Open;'

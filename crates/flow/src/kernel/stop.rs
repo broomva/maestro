@@ -33,9 +33,9 @@
 //!
 //! A gate that refuses forever traps a session. [`Refusals`] counts, per session, how many stops in
 //! a row the gate refused over each instance at one log position (its `seq`). The count starts
-//! again whenever the instance's `seq` moves, and an instance the gate no longer refuses over
-//! drops out. Once an instance has been refused [`MAX_REFUSALS`] times at one position, the next
-//! stop over it goes through and the gate records `no_progress` ([`Refusals::tally`]).
+//! again whenever the instance's `seq` moves. Released instances remain released at that
+//! position, even when temporarily absent from the work list. Once an instance has been refused
+//! [`MAX_REFUSALS`] times at one position, the next stop goes through and records `no_progress`.
 //!
 //! The counts are one JSON file per session under the ledger's own root, `stop-gate/<digest>.json`
 //! (named by the digest of the session's `SessionRef` and owner marker, so a replacement starts
@@ -46,7 +46,10 @@
 //! it was taken in, and counts of another epoch are no counts. They move with the root, so
 //! `operator::archive` takes them away and `create_fresh_ledger` starts with none. The file is
 //! replaced whole (written aside, then renamed), so a crash leaves the old counts or the new
-//! ones, and a stop with nothing to count writes nothing.
+//! ones, and a stop with nothing to count writes nothing. An unreadable count file is quarantined
+//! under that lock and recounted from zero; failure to quarantine or recount lets the stop through
+//! with an alert, so a broken count file cannot trap the session. At most [`MAX_QUARANTINED`]
+//! quarantines per count file are retained; the oldest are pruned under the same lock.
 //!
 //! # The record
 //!
@@ -488,6 +491,9 @@ pub const REFUSALS_WAIT: Duration = Duration::from_secs(2);
 /// The most bytes of a refusal-count file the gate reads.
 pub const MAX_REFUSALS_FILE: u64 = 1 << 20;
 
+/// Maximum quarantined count files retained for one session.
+pub const MAX_QUARANTINED: usize = 3;
+
 /// How many stops in a row the gate refused over one instance at one log position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Count {
@@ -539,6 +545,31 @@ fn counts_in(root: &Dir, epoch: &str, name: &str) -> Result<BTreeMap<String, Cou
     Ok(if parsed.epoch == epoch { parsed.counts } else { BTreeMap::new() })
 }
 
+/// Prune by modification time through the already-open directory, without following links.
+fn prune_quarantines(dir: &Dir, name: &str) -> Result<(), KernelError> {
+    use rustix::fs::{AtFlags, FileType};
+    let io = |path: std::path::PathBuf, e: rustix::io::Errno| crate::error::FlowError::Io { path, source: e.into() };
+    let entries = rustix::fs::Dir::read_from(&dir.fd).map_err(|e| io(dir.path.clone(), e))?;
+    let mut files = Vec::new();
+    let prefix = format!("{name}.corrupt.");
+    for entry in entries {
+        let entry = entry.map_err(|e| io(dir.path.clone(), e))?;
+        let Ok(n) = entry.file_name().to_str() else { continue };
+        if !n.starts_with(&prefix) {
+            continue;
+        }
+        let st = rustix::fs::statat(&dir.fd, n, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| io(dir.path.join(n), e))?;
+        files.push((st.st_mtime, st.st_mtime_nsec, n.to_owned(), FileType::from_raw_mode(st.st_mode as _)));
+    }
+    files.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    let excess = files.len().saturating_sub(MAX_QUARANTINED);
+    for (_, _, name, kind) in files.into_iter().take(excess) {
+        let flags = if kind == FileType::Directory { AtFlags::REMOVEDIR } else { AtFlags::empty() };
+        rustix::fs::unlinkat(&dir.fd, name.as_str(), flags).map_err(|e| io(dir.path.join(name), e))?;
+    }
+    Ok(())
+}
+
 impl Refusals {
     /// `session`'s counts in the ledger `guard` holds exclusive, or none yet: one load, its tally
     /// and its save are one step under that lock, so two stops never both read one count. A file
@@ -547,6 +578,23 @@ impl Refusals {
         let name = file_name(session)?;
         let counts = counts_in(guard.root(), guard.epoch(), &name)?;
         Ok(Refusals { name, was_empty: counts.is_empty(), counts })
+    }
+
+    /// The relative path of the session's count file, for diagnostics.
+    pub fn path(session: &VerifiedSession) -> Result<String, KernelError> {
+        Ok(format!("{STOP_GATE}/{}", file_name(session)?))
+    }
+
+    /// Quarantine an unreadable count file under the write lock before recounting from zero.
+    pub fn quarantine(guard: &WriteGuard<'_>, session: &VerifiedSession) -> Result<String, KernelError> {
+        let name = file_name(session)?;
+        let dir =
+            guard.root().dir(STOP_GATE)?.ok_or_else(|| KernelError::Encode(format!("{STOP_GATE}/{name} vanished")))?;
+        let aside = format!("{name}.corrupt.{}", crate::ledger::random_epoch()?);
+        dir.rename(&name, &dir, &aside)?;
+        prune_quarantines(&dir, &name)?;
+        dir.sync();
+        Ok(format!("{STOP_GATE}/{name} (saved as {STOP_GATE}/{aside})"))
     }
 
     /// Whether `session` has counts in the ledger `guard` reads (shared lock): a stop with nothing
@@ -558,15 +606,16 @@ impl Refusals {
 
     /// Counts one more stop over `refusing`, the instances the gate would refuse over now: each
     /// is refused again unless it was refused [`MAX_REFUSALS`] times at its current `seq` already.
-    /// A count at another `seq` starts again, and an instance not in `refusing` drops out.
+    /// A count at another `seq` starts again. Absent instances retain only a released count.
     pub fn tally(&mut self, refusing: &[&Assessment]) -> Tally {
         let mut tally = Tally::default();
-        let mut counts = BTreeMap::new();
+        let mut counts = self.counts.clone();
+        counts.retain(|_, c| c.refusals > MAX_REFUSALS);
         for a in refusing {
             let prior = self.counts.get(&a.instance).filter(|c| c.seq == a.seq).map_or(0, |c| c.refusals);
             let refusals = if prior >= MAX_REFUSALS {
                 tally.spent.push(a.instance.clone());
-                prior
+                MAX_REFUSALS + 1
             } else {
                 tally.refused.push(a.instance.clone());
                 prior + 1
@@ -575,6 +624,25 @@ impl Refusals {
         }
         self.counts = counts;
         tally
+    }
+
+    /// Discard counts for instances known to be terminal, retired, or no longer owned.
+    /// Unread instances must remain because their ownership is unknown.
+    pub fn prune(&mut self, open: &Open) {
+        self.counts.retain(|id, _| {
+            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)
+        });
+    }
+
+    /// Carry a release across the gate's own record, but only when it immediately followed the
+    /// assessed position. Any intervening event must re-arm the gate.
+    pub fn recorded_release(&mut self, instance: &str, seq: u64) {
+        if let Some(count) = self.counts.get_mut(instance)
+            && count.refusals > MAX_REFUSALS
+            && count.seq.checked_add(1) == Some(seq)
+        {
+            count.seq = seq;
+        }
     }
 
     /// Writes the counts, whole, through the root `guard` holds: aside, then renamed over the old
