@@ -114,8 +114,11 @@ def validate(ledger: dict, preauth=None, require_decisions=False, require_decisi
             # As the writer of record (validate_decision_layer): when an ask carries options, of any
             # class, exactly one is recommended; an ask without options is not checked here.
             options = ask.get("options")
-            if isinstance(options, list) and sum(isinstance(o, dict) and o.get("recommended") is True for o in options) != 1:
-                errs.append(f"ask {ask.get('id')}: exactly one option must carry recommended: true")
+            if options is not None:
+                if not isinstance(options, list) or not 2 <= len(options) <= 4:
+                    errs.append(f"ask {ask.get('id')}: options must be a list of 2-4 entries")
+                elif sum(isinstance(o, dict) and o.get("recommended") is True for o in options) != 1:
+                    errs.append(f"ask {ask.get('id')}: exactly one option must carry recommended: true")
             errs.extend(rich_errors(ask, ledger, f"ask {ask.get('id')}"))
     return errs
 
