@@ -685,5 +685,28 @@ python3 scripts/parity-delegation.py --workspace ~/broomva   # the delegation an
 
 Tests run against `fixtures/machine/`, a miniature machine layout, so they never touch real ledgers.
 
+### The legacy folder ratchet
+
+The unified-layout ADR renames a repo's `.control/` folder to `.broomva/`, and until that rename
+every reader must accept both names. `scripts/check_control_readers.py` lists the tracked code files
+(Rust, scripts, workflows, TOML) where a `.control/<name>` reference has no `.broomva/<name>` in the
+same file, and compares the list with `scripts/control_readers_baseline.json`. A file may leave the
+list. A file that joins it fails the check, which prints its path. The match is textual, so a comment
+or a test that names only the legacy folder counts. It runs first in `scripts/ci.sh` and in the
+`control-readers` workflow, on every pull request and on pushes to main, with
+`scripts/test_control_readers_ratchet.py`, which proves on a fixture repository that it fails.
+
+```bash
+python3 scripts/check_control_readers.py                    # exit 1 and the new files, if any
+python3 scripts/test_control_readers_ratchet.py             # the ratchet's own test
+```
+
+To resolve a failure, make the file handle both names: read `.broomva/<name>` when the tree has it
+and `.control/<name>` otherwise, or read through the path registry (`maestro_store::broomva_paths`),
+which does that and names neither folder. Do not add the file to the baseline. The baseline only
+ever shrinks: when a file leaves the list the check passes and prints the lines to delete from the
+baseline, and a change that adds a line to it is refused in review, since the check cannot tell a
+grown baseline from an honest one.
+
 Design system: `DESIGN.md` and `design-system/broomva/` are the Broomva foundation profile. Work-state
 labels in `maestro-core::work::WorkState` are the canonical agentic-work vocabulary, and they are tested.

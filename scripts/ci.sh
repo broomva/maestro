@@ -7,6 +7,9 @@ cd "$(dirname "$0")/.."
 # hook's repository.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 step() { echo "== $*"; "$@"; }
+# The legacy folder reader ratchet (BRO-4083): seconds of Python and git, so it runs first.
+step python3 scripts/test_control_readers_ratchet.py
+step python3 scripts/check_control_readers.py
 step cargo fmt --all --check
 step cargo clippy --workspace --all-targets --locked -- -D warnings
 step cargo test --workspace --locked

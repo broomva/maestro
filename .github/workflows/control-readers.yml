@@ -1,0 +1,30 @@
+# The legacy folder reader ratchet (BRO-4083): the code files that name a repo's legacy state
+# folder without the matching new name may not grow in number (unified-layout ADR). This job is
+# the fast signal, a few seconds of Python and git. The required `ci` check runs the same two
+# commands from scripts/ci.sh, so the ratchet binds a merge even though this job is not required.
+name: control-readers
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: control-readers-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  ratchet:
+    name: control reader ratchet
+    # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
+    runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      # The job runs the PR's scripts: keep the token out of .git/config.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The runner's own python3 and git: both scripts use the standard library only.
+      - name: The ratchet bites (fixture test)
+        run: python3 scripts/test_control_readers_ratchet.py
+      - name: No new reader since the baseline
+        run: python3 scripts/check_control_readers.py
