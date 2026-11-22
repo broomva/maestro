@@ -244,7 +244,7 @@ mutate $decision '        } @else if state == AskState::Archived {' '        } @
 mutate $web 'render_web(&store, &validated, at, owner)' 'render_web(&store, &validated, at, maestro_view::render::Owner::Off(String::new()))'
 # The owner's answer (BRO-4042): only the page itself, only a passkey over the very intent, only
 # the hash the owner saw, an undo that holds only inside its window, an edit that reads back.
-pk=crates/mcp/src/passkey.rs
+pk=crates/store/src/passkey.rs
 ow=crates/mcp/src/owner_web.rs
 ans=crates/mcp/src/answers.rs
 sans=crates/store/src/answer.rs

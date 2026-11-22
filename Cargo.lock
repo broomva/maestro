@@ -1264,8 +1264,11 @@ dependencies = [
 name = "maestro-store"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.4.3",
  "jiff",
  "maestro-core",
+ "p256",
  "rustix",
  "serde",
  "serde_json",
