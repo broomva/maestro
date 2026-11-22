@@ -1987,7 +1987,7 @@ mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Val
 adopt=crates/flow/src/kernel/adoption.rs
 # BRO-4011: the default is recommended, and refused filings do not reset the stop bound.
 mutate $adopt '"status_quo": true, "recommended": true' '"status_quo": true'
-mutate $fk/stop.rs '.find(|e| e.kind != "ProposalPinned" && e.kind != "ProposalWithdrawn")' '.find(|_| true)'
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()))' '.find(|_| true)'
 
 # Only the approve option exactly; anything else is declined and changes nothing.
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if false {'

@@ -287,13 +287,14 @@ pub(crate) fn assess(
         flow: status.flow,
         ir_hash: status.ir_hash,
         seq: status.seq,
-        // A pin must precede the external writer for recovery. A refused filing only adds a
-        // pin and withdrawal, neither of which is progress toward the owner's work.
+        // A pin must precede the external writer for recovery. Proposal bookkeeping (a pin, its
+        // link or its withdrawal, adoption::BOOKKEEPING) changes only the proposal, never the
+        // owner's work, so it is not progress; another session's proposal cannot reset the count.
         progress_seq: log
             .events
             .iter()
             .rev()
-            .find(|e| e.kind != "ProposalPinned" && e.kind != "ProposalWithdrawn")
+            .find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()))
             .map_or(0, |e| e.seq),
         terminal: status.terminal,
         work,

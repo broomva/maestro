@@ -543,6 +543,36 @@ fn a_writer_refusal_withdraws_the_proposal_and_the_next_call_proposes_anew() {
 }
 
 #[test]
+fn a_linked_proposal_does_not_reset_stop_gate_counts() {
+    // A proposal filed and linked (another session's, say) changes only the proposal: the
+    // owner's refusal count keeps running to its release (adoption::BOOKKEEPING).
+    use crate::kernel::stop::{self, MAX_REFUSALS, Refusals};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let assess = |f: &Fx| {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| super::asks::AnswerSeen::Open)
+            .unwrap()
+    };
+    for round in 0..MAX_REFUSALS {
+        let assessment = assess(&f);
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        assert_eq!(counts.tally(&[&assessment]).refused, [fi.to_string()], "round {round}");
+        counts.save(&guard, &me).unwrap();
+        drop(guard);
+        if round == 0 {
+            retire(&mut f, &me, &fi, Some(&proposing())).unwrap();
+            assert_eq!(f.kinds(&fi)[f.kinds(&fi).len() - 2..], ["ProposalPinned", "ProposalLinked"]);
+        }
+    }
+    let assessment = assess(&f);
+    let guard = f.ledger.lock().unwrap();
+    let mut counts = Refusals::load(&guard, &me).unwrap();
+    assert_eq!(counts.tally(&[&assessment]).spent, [fi.to_string()]);
+}
+
+#[test]
 fn refused_proposals_do_not_reset_stop_gate_counts() {
     use crate::kernel::stop::{self, MAX_REFUSALS, Refusals};
     let (mut f, fi, _clock) = started();
