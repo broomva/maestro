@@ -2421,11 +2421,12 @@ mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() &&
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
 mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
 mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.counts.get(&a.instance).filter(|_| true)'
-# BRO-4057: a new log event re-arms a released instance.
-mutate $stp '            let prior = self.counts.get(&a.instance).filter(|c| c.seq == a.seq).map_or(0, |c| c.refusals);' '            let prior = self.counts.get(&a.instance).map_or(0, |c| c.refusals);'
+# BRO-4057: preserve an absent release; intervening events re-arm it.
 mutate $stp '        counts.retain(|_, c| c.refusals > MAX_REFUSALS);' '        counts.clear();'
 mutate $stp '            && count.seq.checked_add(1) == Some(seq)' '            && true'
 mutate $stp '            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)' '            true'
+mutate $gt '                Err(e) if matches!(e, KernelError::Encode(_)) => {' '                Err(e) if false => {'
+mutate $gt '                Err(e) => return self.block_unread_counts(&session, &e.to_string()),' '                Err(e) => return self.fail_open(Some(&session), "refusals_unread", &e.to_string()),'
 # The gate's own no-progress record carries the release into the next turn.
 mutate $gt '                    counts.recorded_release(instance, *seq);' '                    let _ = (instance, seq);'
 mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
