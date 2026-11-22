@@ -96,12 +96,40 @@ pub struct Writer {
     /// The receipts log and passkeys.
     pub owner_dir: PathBuf,
     /// The T3 CLI that wakes a session, if any.
-    pub t3: Option<PathBuf>,
+    pub t3: Option<T3>,
     /// Whether to push and land (off in tests).
     pub remote: bool,
 }
 
 pub const BRANCH: &str = "maestro/answers";
+
+/// Which T3 CLI wakes a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum T3 {
+    /// This one (`MAESTRO_T3_BIN`).
+    Fixed(PathBuf),
+    /// The CLI of the T3 server running now, under this T3 home, resolved at each wake: T3 records
+    /// its version in `runtime/service-state.json`, and only that version's CLI may open the
+    /// database the server owns (`bin/t3` runs the desktop app's, which refuses when they differ).
+    Active(PathBuf),
+}
+
+impl T3 {
+    pub fn resolve(&self) -> Option<PathBuf> {
+        match self {
+            T3::Fixed(p) => Some(p.clone()),
+            T3::Active(home) => {
+                let state: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(home.join("runtime/service-state.json")).ok()?).ok()?;
+                let v = state.get("activeVersion")?.as_str()?;
+                let ok =
+                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+                let cli = home.join("runtime/versions").join(v).join("t3");
+                if ok && cli.exists() { Some(cli) } else { Some(home.join("bin/t3")).filter(|p| p.exists()) }
+            }
+        }
+    }
+}
 
 /// Signed answers by receipt id.
 #[derive(Clone, Default)]
@@ -509,7 +537,18 @@ pub fn wake(t3: Option<&Path>, session: Option<&str>, message: &str) -> String {
     let Some(t3) = t3 else { return "no T3 CLI is configured".into() };
     match Command::new(t3).args(["thread", "send", thread, message]).output() {
         Ok(o) if o.status.success() => format!("told T3 thread {thread}"),
-        Ok(o) => format!("T3 did not take it: {}", String::from_utf8_lossy(&o.stderr).trim()),
+        Ok(o) => {
+            // The CLI may say why on either stream; the last line is the reason.
+            let said = format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            let why = said
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .find(|l| l.contains("Error") || l.contains("error"))
+                .or_else(|| said.lines().map(str::trim).rfind(|l| !l.is_empty()))
+                .unwrap_or("no output");
+            format!("T3 did not take it (exit {:?}): {why}", o.status.code())
+        }
         Err(e) => format!("T3 did not run: {e}"),
     }
 }
@@ -563,7 +602,8 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
             r.commit = Some(commit.clone());
             book.put(r.clone());
             let _ = log(&w.owner_dir, &r);
-            r.woke = Some(wake(w.t3.as_deref(), session, &wake_message(&r, &commit)));
+            let cli = w.t3.as_ref().and_then(T3::resolve);
+            r.woke = Some(wake(cli.as_deref(), session, &wake_message(&r, &commit)));
             book.put(r.clone());
             if w.remote {
                 r.landing = Some(land(w));
@@ -811,6 +851,30 @@ mod tests {
         assert_eq!(pending(d.path()), vec![p]);
         settle(d.path(), "r1AAAAAAAAAAAAAA");
         assert!(pending(d.path()).is_empty());
+    }
+
+    #[test]
+    fn the_active_t3_cli_is_the_running_servers_version() {
+        let home = tempfile::tempdir().unwrap();
+        let rt = home.path().join("runtime");
+        std::fs::create_dir_all(rt.join("versions/0.2.0")).unwrap();
+        std::fs::write(rt.join("versions/0.2.0/t3"), "").unwrap();
+        std::fs::create_dir_all(home.path().join("bin")).unwrap();
+        std::fs::write(home.path().join("bin/t3"), "").unwrap();
+        let active = T3::Active(home.path().into());
+        // No state yet: nothing names a version.
+        assert_eq!(active.resolve(), None);
+        std::fs::write(rt.join("service-state.json"), r#"{"protocol":4,"activeVersion":"0.2.0"}"#).unwrap();
+        assert_eq!(active.resolve(), Some(rt.join("versions/0.2.0/t3")));
+        // A version with no CLI, or one that names another path, falls back to bin/t3, even when
+        // that path holds a t3.
+        std::fs::create_dir_all(rt.join("x")).unwrap();
+        std::fs::write(rt.join("x/t3"), "").unwrap();
+        for v in ["0.3.0", "../x", ""] {
+            std::fs::write(rt.join("service-state.json"), format!(r#"{{"activeVersion":"{v}"}}"#)).unwrap();
+            assert_eq!(active.resolve(), Some(home.path().join("bin/t3")), "{v}");
+        }
+        assert_eq!(T3::Fixed("/x/t3".into()).resolve(), Some("/x/t3".into()));
     }
 
     #[test]

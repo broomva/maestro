@@ -273,6 +273,7 @@ mutate $ow '        let r = self.book.undo(id, now_ms, || answers::mark_undone(&
 mutate $ans '            Stage::Undone => return Ok(r.clone()),' '            Stage::Undone => return Err("again".into()),'
 mutate $ans '        if now_ms >= r.applies_at_ms {' '        if false {'
 mutate $ans '            _ => return Err("it was already written".into()),' '            _ => {}'
+mutate $ans "                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));" '                    true;'
 mutate $ans '        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?;' '        let r = m.get_mut(id)?;'
 mutate $ans '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
 mutate $ans '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''

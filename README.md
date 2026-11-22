@@ -563,7 +563,7 @@ Maestro decides every value on it:
   `https://<mac>.<tailnet>.ts.net` behind `tailscale serve`, or `http://localhost:<port>`), and a
   passkey set up once at `/owner` with the code Maestro prints at start. Passkeys live in
   `MAESTRO_OWNER_DIR` (else `~/.local/state/maestro/owner`), with `receipts.jsonl` beside them.
-  `MAESTRO_T3_BIN` names the T3 CLI (else `~/.t3/bin/t3`); `MAESTRO_ANSWERS_LOCAL=1` writes without
+  `MAESTRO_T3_BIN` names the T3 CLI (else the CLI of the running T3 server, the version `~/.t3/runtime/service-state.json` records, since `~/.t3/bin/t3` runs the desktop app's and refuses a server of another version); `MAESTRO_ANSWERS_LOCAL=1` writes without
   pushing or landing. `view.css` holds the Liquid Dawn and Maestro Midnight tokens
   the App shares; `crates/view/assets/web.css` adds the shell (counts from the same read as the page),
   the queue beside the decision, and the phone pager. "Nothing needs you" shows only on a whole read.
