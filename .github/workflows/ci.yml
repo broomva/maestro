@@ -27,13 +27,14 @@ jobs:
     # Twenty-four ran 44-59 min with the enforced-routing mutants and three timed out on
     # 2026-11-19 (BRO-3828), so there were thirty-two (BRO-3971, owner-approved). Thirty-two ran
     # up to 60 min with the owner answer's guards and one timed out twice on 2026-11-21
-    # (BRO-4042), so there are forty (owner-approved).
+    # (BRO-4042), so there were forty (owner-approved). With the fast-lane guards,
+    # thirty-two of forty timed out on 2026-11-22 (BRO-4093), so there are fifty-six.
     # Add shards by growing the list; the split follows it.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55]
     env:
       CARGO_TERM_COLOR: always
       # Derived from the matrix, so the shards always cover every mutant.
