@@ -223,6 +223,18 @@ impl Run<'_> {
         }
     }
 
+    /// A count file that cannot be read or quarantined must not bypass the gate.
+    fn block_unread_counts(&mut self, session: &SessionRef, why: &str) {
+        let reason = format!(
+            "refusals_unread: the refusal count file is unreadable: {why}. Report and repair this file before stopping."
+        );
+        self.note(&reason);
+        self.out.stdout = self.gate.harness.block(&reason);
+        self.out.blocked = true;
+        let key = format!("refusals_unread\n{session}\n{why}");
+        self.alert(session, &key, UNCHECKED, &reason, &Principal::Unverified);
+    }
+
     /// Notes and alerts the instances that did not read (see `judge`).
     fn report_unread(&mut self, session: &SessionRef, list: &str) {
         self.note(format!("instances_unread: {list} did not read, so the gate could not check it for work."));
@@ -565,9 +577,20 @@ impl Run<'_> {
             };
             let mut counts = match Refusals::load(&guard, &me) {
                 Ok(c) => c,
-                Err(e) => {
-                    return self.fail_open(Some(&session), "refusals_unread", &format!("{}: {e}", busy_code(e.code())));
-                }
+                Err(e) if matches!(e, KernelError::Encode(_)) => match Refusals::quarantine(&guard, &me) {
+                    Ok(path) => {
+                        let why = format!("refusal count file was corrupt: {e}; {path}; counting again from zero");
+                        self.note(&why);
+                        let key = format!("refusals_corrupt\n{session}\n{path}");
+                        self.alert(&session, &key, UNCHECKED, &why, &Principal::Unverified);
+                        match Refusals::load(&guard, &me) {
+                            Ok(c) => c,
+                            Err(e) => return self.block_unread_counts(&session, &e.to_string()),
+                        }
+                    }
+                    Err(e) => return self.block_unread_counts(&session, &e.to_string()),
+                },
+                Err(e) => return self.block_unread_counts(&session, &e.to_string()),
             };
             let tally = counts.tally(&refusing);
             if let Err(e) = counts.save(&guard, &me) {

@@ -395,7 +395,8 @@ fn the_gate_fails_open() {
     std::fs::remove_file(&file).unwrap();
     std::fs::create_dir(&file).unwrap();
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
-    allowed(&out);
+    let reason = refusal(&out);
+    assert!(reason.contains("unreadable") && reason.contains("stop-gate"), "{reason}");
     assert!(out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_unread:")), "{out:?}");
 
     // Refusal counts that cannot be written: their folder takes no new file (the count and its lock
@@ -736,4 +737,27 @@ fn a_shared_lock_held_too_long_fails_open_with_refusals_busy() {
     );
     assert_eq!(out.alerts.len(), 1, "{out:?}");
     assert!(elapsed < std::time::Duration::from_secs(8), "waited {elapsed:?}");
+}
+
+#[test]
+fn corrupt_and_truncated_counts_are_quarantined_and_bounded() {
+    for bad in ["not json", "{\"session\":"] {
+        let f = fx();
+        f.begin("d1");
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+        let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+        let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        std::fs::write(&file, bad).unwrap();
+        let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+        refusal(&out);
+        assert!(out.notes.iter().any(|n| n.contains("corrupt") && n.contains("saved as")), "{out:?}");
+        assert_eq!(out.alerts.len(), 1);
+        assert!(
+            std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(".corrupt."))
+        );
+        for _ in 0..2 {
+            refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+        }
+        allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
 }

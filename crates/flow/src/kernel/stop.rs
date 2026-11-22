@@ -549,6 +549,17 @@ impl Refusals {
         Ok(Refusals { name, was_empty: counts.is_empty(), counts })
     }
 
+    /// Quarantine a malformed count file under the write lock before recounting from zero.
+    pub fn quarantine(guard: &WriteGuard<'_>, session: &VerifiedSession) -> Result<String, KernelError> {
+        let name = file_name(session)?;
+        let dir =
+            guard.root().dir(STOP_GATE)?.ok_or_else(|| KernelError::Encode(format!("{STOP_GATE}/{name} vanished")))?;
+        let aside = format!("{name}.corrupt.{}", crate::ledger::random_epoch()?);
+        dir.rename(&name, &dir, &aside)?;
+        dir.sync();
+        Ok(format!("{STOP_GATE}/{name} (saved as {STOP_GATE}/{aside})"))
+    }
+
     /// Whether `session` has counts in the ledger `guard` reads (shared lock): a stop with nothing
     /// to refuse writes only to clear them.
     pub fn any(guard: &ReadGuard, session: &VerifiedSession) -> Result<bool, KernelError> {
