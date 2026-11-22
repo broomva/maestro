@@ -1753,7 +1753,6 @@ replay=crates/flow/src/kernel/replay.rs
 mutate $asks 'if reason.len() > MAX_AMEND_REASON {' 'if false {'
 mutate $asks 'if serde_json::to_vec(&body).map_or(usize::MAX, |b| b.len()) > MAX_ASK_BODY {' 'if false {'
 mutate $asks 'pin.amends && !current_ask' 'pin.amends && false && !current_ask'
-mutate $asks '.filter(|r| r.linked && seen.prior.is_none())' '.filter(|r| r.linked)'
 mutate $replay 'supersedes.is_some() && !current.is_some_and(|r| r.amends)' 'supersedes.is_some()'
 mutate $mf 'if reason.len() > kernel::MAX_AMEND_REASON {' 'if false {'
 mutate $cli 'if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {' 'if false {'
@@ -1971,7 +1970,9 @@ mutate $replay '                    if (supersedes.is_some() && !current.is_some
                     {
                         human.push(Reason::InputsChanged { supersedes });
                     }' ''
-mutate $replay '        .filter(|r| &r.inputs == inputs)' '        .filter(|_| true)'
+mutate $replay 'Ok(fold.asks.get(&key).filter(|r| &r.inputs == inputs).cloned())' 'Ok(fold.asks.get(&key).cloned())'
+mutate $replay 'Ok(fold.asks.get(&key).filter(|r| &r.inputs == inputs).cloned())' 'Ok(fold.asks.get(&key).filter(|r| &r.inputs == inputs).or_else(|| fold.prior_asks.get(&key)?.iter().rev().find(|r| &r.inputs == inputs)).cloned())'
+mutate $replay 'self.asks.get(&key).filter(|r| same_inputs(&r.inputs, consumed))' 'self.asks.get(&key).filter(|r| same_inputs(&r.inputs, consumed)).or_else(|| self.prior_asks.get(&key)?.iter().rev().find(|r| same_inputs(&r.inputs, consumed)))'
 mutate $replay '    Ok(fold.asks.get(&(id.as_str(), i)).filter(|r| &r.inputs != inputs).cloned())' '    Ok(None)'
 mutate $asks '    if let Some(prev) = &supersedes {
         body.insert("supersedes".into(), Value::String(prev.clone()));
