@@ -33,9 +33,12 @@
 //!
 //! A gate that refuses forever traps a session. [`Refusals`] counts, per session, how many stops in
 //! a row the gate refused over each instance at one log position (its `seq`). The count starts
-//! again whenever the instance's `seq` moves. Released instances remain released at that
-//! position, even when temporarily absent from the work list. Once an instance has been refused
-//! [`MAX_REFUSALS`] times at one position, the next stop goes through and records `no_progress`.
+//! again whenever the instance makes progress: any event but proposal bookkeeping (a pin, its
+//! link or its withdrawal) and the gate's own `StopUnblockable` record, neither of which changes
+//! the owner's work. So the release the gate records does not re-arm it, and any real event does.
+//! Released instances stay released at that position, even when briefly absent from the work
+//! list. Once an instance has been refused [`MAX_REFUSALS`] times at one position, the next stop
+//! over it goes through and the gate records `no_progress` ([`Refusals::tally`]).
 //!
 //! The counts are one JSON file per session under the ledger's own root, `stop-gate/<digest>.json`
 //! (named by the digest of the session's `SessionRef` and owner marker, so a replacement starts
@@ -150,6 +153,8 @@ pub struct Assessment {
     pub flow: String,
     pub ir_hash: String,
     pub seq: u64,
+    #[serde(skip)]
+    pub(crate) progress_seq: u64,
     pub terminal: bool,
     pub work: Vec<Work>,
     pub waiting: Vec<Waiting>,
@@ -288,6 +293,17 @@ pub(crate) fn assess(
         flow: status.flow,
         ir_hash: status.ir_hash,
         seq: status.seq,
+        // A pin must precede the external writer for recovery. Proposal bookkeeping (a pin, its
+        // link or its withdrawal, adoption::BOOKKEEPING) changes only the proposal, never the
+        // owner's work, so it is not progress; another session's proposal cannot reset the count.
+        // Nor is the gate's own StopUnblockable record: counting it would re-arm the gate that
+        // just released, on the record of that release.
+        progress_seq: log
+            .events
+            .iter()
+            .rev()
+            .find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)
+            .map_or(0, |e| e.seq),
         terminal: status.terminal,
         work,
         waiting,
@@ -388,7 +404,10 @@ pub fn record(
     let started = pinned(&log)?;
     check_owner(&log, &started, instance, session)?;
     wall(&log)?;
-    if let Some(last) = log.events.last().filter(|e| e.kind == StopUnblockable::KIND) {
+    // Proposal bookkeeping after a record is not progress, so it does not call for another record
+    // (or another alert): look past it, as the counts do.
+    let last = log.events.iter().rev().find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()));
+    if let Some(last) = last.filter(|e| e.kind == StopUnblockable::KIND) {
         let prior: Option<StopUnblockable> = serde_json::from_value(last.body.clone()).ok();
         if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {
             return Ok(Recorded::Already { seq: last.seq });
@@ -605,14 +624,23 @@ impl Refusals {
     }
 
     /// Counts one more stop over `refusing`, the instances the gate would refuse over now: each
-    /// is refused again unless it was refused [`MAX_REFUSALS`] times at its current `seq` already.
-    /// A count at another `seq` starts again. Absent instances retain only a released count.
+    /// is refused again unless it was refused [`MAX_REFUSALS`] times since its last progress
+    /// already. A count from before that progress starts again. Absent instances retain only a
+    /// released count.
     pub fn tally(&mut self, refusing: &[&Assessment]) -> Tally {
         let mut tally = Tally::default();
         let mut counts = self.counts.clone();
         counts.retain(|_, c| c.refusals > MAX_REFUSALS);
         for a in refusing {
-            let prior = self.counts.get(&a.instance).filter(|c| c.seq == a.seq).map_or(0, |c| c.refusals);
+            // Every event after the last progress event is non-progress (adoption::BOOKKEEPING or
+            // the gate's own record), so a count taken at or after it is a count of this state.
+            // `>=` also keeps the counts a gate before progress_seq saved at a raw seq.
+            let held = self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq);
+            let prior = held.map_or(0, |c| c.refusals);
+            // A count is never moved back: an assessment made before a concurrent stop saved a
+            // newer count (assess and tally take separate locks) must not rewind it, or the next
+            // stop finds it stale and re-arms.
+            let seq = held.map_or(a.progress_seq, |c| c.seq);
             let refusals = if prior >= MAX_REFUSALS {
                 tally.spent.push(a.instance.clone());
                 MAX_REFUSALS + 1
@@ -620,7 +648,7 @@ impl Refusals {
                 tally.refused.push(a.instance.clone());
                 prior + 1
             };
-            counts.insert(a.instance.clone(), Count { seq: a.seq, refusals });
+            counts.insert(a.instance.clone(), Count { seq, refusals });
         }
         self.counts = counts;
         tally
@@ -632,17 +660,6 @@ impl Refusals {
         self.counts.retain(|id, _| {
             open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)
         });
-    }
-
-    /// Carry a release across the gate's own record, but only when it immediately followed the
-    /// assessed position. Any intervening event must re-arm the gate.
-    pub fn recorded_release(&mut self, instance: &str, seq: u64) {
-        if let Some(count) = self.counts.get_mut(instance)
-            && count.refusals > MAX_REFUSALS
-            && count.seq.checked_add(1) == Some(seq)
-        {
-            count.seq = seq;
-        }
     }
 
     /// Writes the counts, whole, through the root `guard` holds: aside, then renamed over the old

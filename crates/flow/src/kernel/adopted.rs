@@ -202,6 +202,7 @@ fn an_approved_adoption_hands_the_instance_to_the_new_owner() {
     }
     let options: Vec<&str> = body["options"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert_eq!((options, &body["default"]), (vec!["adopt", "keep"], &json!("keep")));
+    assert_eq!(body["options"][1]["recommended"], true);
     let log = std::fs::read_to_string(f.flows.join("instances").join(fi.as_str()).join("events.jsonl")).unwrap();
     for marker in ["marker-1", "marker-9"] {
         assert!(!f.ledger_text().contains(marker) && !log.contains(marker), "a marker was written");
@@ -539,6 +540,99 @@ fn a_writer_refusal_withdraws_the_proposal_and_the_next_call_proposes_anew() {
     assert!(f.status(&fi).proposals.is_empty());
     linked(&adopt(&mut f, &other(), &fi, Some(&proposing())).unwrap());
     assert_eq!(f.kinds(&fi)[3..], ["ProposalPinned", "ProposalLinked"]);
+}
+
+#[test]
+fn a_linked_proposal_does_not_reset_stop_gate_counts() {
+    // A proposal filed and linked (another session's, say) changes only the proposal: the
+    // owner's refusal count keeps running to its release (adoption::BOOKKEEPING).
+    use crate::kernel::stop::{self, MAX_REFUSALS, Refusals};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let assess = |f: &Fx| {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| super::asks::AnswerSeen::Open)
+            .unwrap()
+    };
+    for round in 0..MAX_REFUSALS {
+        let assessment = assess(&f);
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        assert_eq!(counts.tally(&[&assessment]).refused, [fi.to_string()], "round {round}");
+        counts.save(&guard, &me).unwrap();
+        drop(guard);
+        if round == 0 {
+            retire(&mut f, &me, &fi, Some(&proposing())).unwrap();
+            assert_eq!(f.kinds(&fi)[f.kinds(&fi).len() - 2..], ["ProposalPinned", "ProposalLinked"]);
+        }
+    }
+    let assessment = assess(&f);
+    let guard = f.ledger.lock().unwrap();
+    let mut counts = Refusals::load(&guard, &me).unwrap();
+    assert_eq!(counts.tally(&[&assessment]).spent, [fi.to_string()]);
+}
+
+/// Proposal bookkeeping before the gate's release and after it: the count runs to its release,
+/// the release holds, and the next stop finds the release already recorded (no second record,
+/// no second alert).
+#[test]
+fn bookkeeping_around_the_gates_release_neither_rearms_nor_repeats_it() {
+    use crate::kernel::events::Unblockable;
+    use crate::kernel::stop::{self, MAX_REFUSALS, Recorded, Refusals};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let tally = |f: &mut Fx| {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        let a = stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| {
+            super::asks::AnswerSeen::Open
+        })
+        .unwrap();
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        let t = counts.tally(&[&a]);
+        counts.save(&guard, &me).unwrap();
+        t
+    };
+    retire(&mut f, &me, &fi, Some(&proposing())).unwrap();
+    for round in 0..MAX_REFUSALS {
+        assert_eq!(tally(&mut f).refused, [fi.to_string()], "round {round}");
+    }
+    assert_eq!(tally(&mut f).spent, [fi.to_string()]);
+    let first = stop::record(&mut f.ledger, &me, &fi, "claude", Unblockable::NoProgress, &[fi.to_string()]).unwrap();
+    let Recorded::Appended(_) = first else { panic!("the release was not recorded: {first:?}") };
+    push_proposal(&mut f.ledger, &fi, "retirement", &me, &other(), 0, "flow-retire-after");
+    assert_eq!(tally(&mut f).spent, [fi.to_string()], "bookkeeping after the release re-armed the gate");
+    let again = stop::record(&mut f.ledger, &me, &fi, "claude", Unblockable::NoProgress, &[fi.to_string()]).unwrap();
+    assert!(matches!(again, Recorded::Already { .. }), "bookkeeping made a second record: {again:?}");
+}
+
+#[test]
+fn refused_proposals_do_not_reset_stop_gate_counts() {
+    use crate::kernel::stop::{self, MAX_REFUSALS, Refusals};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let mut bad = proposing();
+    bad.body.insert("stakes".into(), json!("STUB-INVALID"));
+    for _ in 0..MAX_REFUSALS {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        let assessment = stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| {
+            super::asks::AnswerSeen::Open
+        })
+        .unwrap();
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        assert_eq!(counts.tally(&[&assessment]).refused, [fi.to_string()]);
+        counts.save(&guard, &me).unwrap();
+        drop(guard);
+        assert!(matches!(retire(&mut f, &me, &fi, Some(&bad)).unwrap(), Proposed::Withdrawn { .. }));
+    }
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let assessment =
+        stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| super::asks::AnswerSeen::Open)
+            .unwrap();
+    let guard = f.ledger.lock().unwrap();
+    let mut counts = Refusals::load(&guard, &me).unwrap();
+    assert_eq!(counts.tally(&[&assessment]).spent, [fi.to_string()]);
 }
 
 #[test]

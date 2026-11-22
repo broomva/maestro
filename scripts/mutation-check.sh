@@ -1987,6 +1987,13 @@ mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Val
 # Owner-approved adoption and retirement (BRO-3635; ADR decisions 6 and 7): an agent proposes, the
 # owner decides, the kernel applies only the owner's approve option, read from landed main.
 adopt=crates/flow/src/kernel/adoption.rs
+# BRO-4011: the default is recommended, and refused filings do not reset the stop bound.
+mutate $adopt '"status_quo": true, "recommended": true' '"status_quo": true'
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|_| true)'
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|e| e.kind != StopUnblockable::KIND)'
+# The gate's own StopUnblockable record is not progress, or its release re-arms the gate.
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()))'
+
 # Only the approve option exactly; anything else is declined and changes nothing.
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if false {'
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if answer_option.as_deref().map(str::to_lowercase).as_deref() != Some(proposal.approve_option()) {'
@@ -2422,10 +2429,15 @@ mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| 
 mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
 mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
-mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+# A count saved at a raw seq after the last progress (a gate before progress_seq) still holds.
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq)' 'self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq)'
+# A stale assessment does not rewind a newer count.
+mutate $stp '            let seq = held.map_or(a.progress_seq, |c| c.seq);' '            let seq = a.progress_seq;'
+# Bookkeeping after the gate's record does not make a second record.
+mutate $stp '    let last = log.events.iter().rev().find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()));' '    let last = log.events.last();'
 # BRO-4057: preserve an absent release; intervening events re-arm it.
 mutate $stp '        counts.retain(|_, c| c.refusals > MAX_REFUSALS);' '        counts.clear();'
-mutate $stp '            && count.seq.checked_add(1) == Some(seq)' '            && true'
 mutate $stp '            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)' '            true'
 mutate $gt '                Err(load_error) => match Refusals::quarantine(&guard, &me) {' '                Err(load_error) => match Err::<String, KernelError>(KernelError::Encode("disabled".into())) {'
 mutate $gt '                    Err(e) => {
@@ -2445,8 +2457,6 @@ mutate $gt '                        let key = format!("refusals_corrupt\n{sessio
 mutate $gt '                        r.prune(&open);' ''
 mutate $gt '            counts.prune(&open);' ''
 mutate $gt '            reason.push_str(&format!(" {recovered}"));' '            let _ = recovered;'
-# The gate's own no-progress record carries the release into the next turn.
-mutate $gt '                    counts.recorded_release(instance, *seq);' '                    let _ = (instance, seq);'
 mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
 mutate $replay '            self.unblockable.push(record);' ''
 mutate $asks '        return AnswerSeen::Landed;' '        return AnswerSeen::Open;'

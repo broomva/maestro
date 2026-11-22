@@ -721,19 +721,6 @@ impl Run<'_> {
             let day = day.get(..10).unwrap_or_default();
             key.push_str(&format!("\nunrecorded\n{session}\n{reason:?}\n{}\n{day}", failed.join("\n")));
         }
-        if reason == Unblockable::NoProgress && !made.is_empty() {
-            let saved = (|| -> Result<(), KernelError> {
-                let guard = ledger.lock()?;
-                let mut counts = Refusals::load(&guard, me)?;
-                for (instance, seq) in &made {
-                    counts.recorded_release(instance, *seq);
-                }
-                counts.save(&guard, me)
-            })();
-            if let Err(e) = saved {
-                self.note(format!("the release position could not be saved ({}: {e}).", busy_code(e.code())));
-            }
-        }
         self.out.recorded.extend(made);
         self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);
     }
