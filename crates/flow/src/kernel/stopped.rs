@@ -662,6 +662,22 @@ fn intervening_event_does_not_carry_release() {
     assert_eq!(r.tally(&[&at("fi_a", 6)]).refused, ["fi_a"]);
 }
 
+/// A gate before progress_seq saved its counts at a raw seq, at or after the last progress: they
+/// are counts of the same state. A count from before the last progress is not.
+#[test]
+fn a_count_at_or_after_the_last_progress_still_holds() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    let mut a = at("fi_a", 6);
+    a.progress_seq = 5;
+    r.counts.insert("fi_a".into(), Count { seq: 6, refusals: MAX_REFUSALS + 1 });
+    assert_eq!(r.tally(&[&a]).spent, ["fi_a"], "a raw-seq release after the last progress holds");
+    r.counts.insert("fi_a".into(), Count { seq: 4, refusals: MAX_REFUSALS + 1 });
+    assert_eq!(r.tally(&[&a]).refused, ["fi_a"], "a count from before the last progress is stale");
+}
+
 /// The release the gate records is no progress: the next stop goes through again at the same
 /// position. A real event after it is progress and re-arms the gate (BRO-4057 with BRO-4011).
 #[test]

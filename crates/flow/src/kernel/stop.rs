@@ -404,7 +404,10 @@ pub fn record(
     let started = pinned(&log)?;
     check_owner(&log, &started, instance, session)?;
     wall(&log)?;
-    if let Some(last) = log.events.last().filter(|e| e.kind == StopUnblockable::KIND) {
+    // Proposal bookkeeping after a record is not progress, so it does not call for another record
+    // (or another alert): look past it, as the counts do.
+    let last = log.events.iter().rev().find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()));
+    if let Some(last) = last.filter(|e| e.kind == StopUnblockable::KIND) {
         let prior: Option<StopUnblockable> = serde_json::from_value(last.body.clone()).ok();
         if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {
             return Ok(Recorded::Already { seq: last.seq });
@@ -621,14 +624,18 @@ impl Refusals {
     }
 
     /// Counts one more stop over `refusing`, the instances the gate would refuse over now: each
-    /// is refused again unless it was refused [`MAX_REFUSALS`] times at its current `seq` already.
-    /// A count at another `seq` starts again. Absent instances retain only a released count.
+    /// is refused again unless it was refused [`MAX_REFUSALS`] times since its last progress
+    /// already. A count from before that progress starts again. Absent instances retain only a
+    /// released count.
     pub fn tally(&mut self, refusing: &[&Assessment]) -> Tally {
         let mut tally = Tally::default();
         let mut counts = self.counts.clone();
         counts.retain(|_, c| c.refusals > MAX_REFUSALS);
         for a in refusing {
-            let prior = self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq).map_or(0, |c| c.refusals);
+            // Every event after the last progress event is non-progress (adoption::BOOKKEEPING or
+            // the gate's own record), so a count taken at or after it is a count of this state.
+            // `>=` also keeps the counts a gate before progress_seq saved at a raw seq.
+            let prior = self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq).map_or(0, |c| c.refusals);
             let refusals = if prior >= MAX_REFUSALS {
                 tally.spent.push(a.instance.clone());
                 MAX_REFUSALS + 1

@@ -2428,7 +2428,11 @@ mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| 
 mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
 mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
-mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+# A count saved at a raw seq after the last progress (a gate before progress_seq) still holds.
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq)' 'self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq)'
+# Bookkeeping after the gate's record does not make a second record.
+mutate $stp '    let last = log.events.iter().rev().find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()));' '    let last = log.events.last();'
 # BRO-4057: preserve an absent release; intervening events re-arm it.
 mutate $stp '        counts.retain(|_, c| c.refusals > MAX_REFUSALS);' '        counts.clear();'
 mutate $stp '            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)' '            true'
