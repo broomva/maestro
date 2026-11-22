@@ -1203,12 +1203,14 @@ dependencies = [
 name = "maestro-flow"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "jaq-core",
  "jaq-json",
  "jaq-std",
  "jiff",
  "maestro-core",
  "maestro-store",
+ "p256",
  "rusqlite",
  "rustix",
  "serde",

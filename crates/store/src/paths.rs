@@ -26,6 +26,11 @@ pub struct Paths {
     /// A file holding `provider_manager.py --json usage` (`MAESTRO_USAGE`). Nothing writes one
     /// where Maestro reads by default yet, so unset is the usual case: the economy is then unread.
     pub usage: Option<PathBuf>,
+    /// Maestro's own workspace checkout and owner state, never the workspace working tree.
+    pub ledger_checkout: PathBuf,
+    pub owner_dir: PathBuf,
+    /// Whether this environment opens a hosted landing PR after a push.
+    pub ledger_landing: bool,
 }
 
 /// How work items sit under a work root.
@@ -88,6 +93,10 @@ impl Paths {
             fleet_state,
             ask_locks: crate::locks::ask_lock_root(),
             usage: env_path("MAESTRO_USAGE"),
+            ledger_checkout: env_path("MAESTRO_ANSWERS_CHECKOUT")
+                .unwrap_or_else(|| home().unwrap_or_default().join(".local/state/maestro/answers-checkout")),
+            owner_dir: crate::passkey::owner_dir(),
+            ledger_landing: true,
         })
     }
 
@@ -101,6 +110,9 @@ impl Paths {
             fleet_state: root.join("fleet-reconcile"),
             ask_locks: root.join("control-asks/locks"),
             usage: None,
+            ledger_checkout: root.join("maestro-checkout"),
+            owner_dir: root.join("maestro-owner"),
+            ledger_landing: false,
         }
     }
 

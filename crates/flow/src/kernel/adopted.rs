@@ -45,7 +45,11 @@ fn other() -> VerifiedSession {
 }
 
 fn adopt(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId, filing: Option<&Filing>) -> Result<Proposed, KernelError> {
-    propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false })
+    let result = propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false });
+    if matches!(&result, Ok(Proposed::Waiting { appended: Some(_), .. })) {
+        f.mirror_filed();
+    }
+    result
 }
 
 fn retire(
@@ -54,16 +58,30 @@ fn retire(
     fi: &InstanceId,
     filing: Option<&Filing>,
 ) -> Result<Proposed, KernelError> {
-    propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false })
+    let result = propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false });
+    if matches!(&result, Ok(Proposed::Waiting { appended: Some(_), .. })) {
+        f.mirror_filed();
+    }
+    result
 }
 
 /// Proposes adoption again, with the fixture's filing, in place of a declined or stale proposal.
 fn adopt_again(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId) -> Result<Proposed, KernelError> {
-    propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true })
+    let result =
+        propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true });
+    if matches!(&result, Ok(Proposed::Waiting { appended: Some(_), .. })) {
+        f.mirror_filed();
+    }
+    result
 }
 
 fn retire_again(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId) -> Result<Proposed, KernelError> {
-    propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true })
+    let result =
+        propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true });
+    if matches!(&result, Ok(Proposed::Waiting { appended: Some(_), .. })) {
+        f.mirror_filed();
+    }
+    result
 }
 
 /// The ask id of a linked proposal: the call said waiting and linked it.
@@ -646,11 +664,13 @@ fn the_flows_lock_is_free_while_a_proposal_is_filed() {
         root = f.flows,
     );
     std::fs::write(f.ws.join("scripts/ask_ledger.py"), wrapper(&check)).unwrap();
+    f.commit();
+    git(&f.ws, &["push", "-q", "origin", "main"]);
     linked(&adopt(&mut f, &other(), &fi, Some(&proposing())).unwrap());
-    assert!(f.ws.join("scripts/checked").exists(), "the writer checked the locks");
-    std::fs::remove_file(f.ws.join("scripts/checked")).unwrap();
+    assert!(f.paths.ledger_checkout.join("scripts/checked").exists(), "the writer checked the locks");
+    std::fs::remove_file(f.paths.ledger_checkout.join("scripts/checked")).unwrap();
     linked(&retire(&mut f, &other(), &fi, Some(&proposing())).unwrap());
-    assert!(f.ws.join("scripts/checked").exists(), "the writer checked the locks");
+    assert!(f.paths.ledger_checkout.join("scripts/checked").exists(), "the writer checked the locks");
 }
 
 #[test]
@@ -699,16 +719,18 @@ fn a_proposal_that_changed_while_it_was_filed_records_nothing() {
     // Between filing (flows lock released) and linking, the proposal was withdrawn, or replaced by
     // another of the same session's: nothing is linked to a proposal that no longer stands.
     for replaced in [false, true] {
-        let hold = "open(os.path.join(HERE, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(HERE, 'go')):\n    time.sleep(0.01)";
+        let hold = "P = os.path.dirname(os.path.dirname(HERE))\nopen(os.path.join(P, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(P, 'go')):\n    time.sleep(0.01)";
         let (mut f, fi, _clock) = started();
         std::fs::write(f.ws.join("scripts/ask_ledger.py"), wrapper(hold)).unwrap();
+        f.commit();
+        git(&f.ws, &["push", "-q", "origin", "main"]);
         let (paths, flows, fi2) = (f.paths.clone(), f.flows.clone(), fi.clone());
         let filer = std::thread::spawn(move || {
             let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
             let asking = Proposing { filing: Some(&proposing()), again: false };
             code(propose_adoption(&mut ledger, &paths, &other(), &fi2, asking))
         });
-        let reached = f.ws.join("scripts/reached");
+        let reached = f.tmp.path().join("reached");
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !reached.exists() {
             assert!(std::time::Instant::now() < until, "the writer never ran");
@@ -722,7 +744,7 @@ fn a_proposal_that_changed_while_it_was_filed_records_nothing() {
             again["ask_id"] = json!("flow-adopt-replaced");
             append_raw(&mut f, &fi, "ProposalPinned", again);
         }
-        std::fs::write(f.ws.join("scripts/go"), "").unwrap();
+        std::fs::write(f.tmp.path().join("go"), "").unwrap();
         assert_eq!(filer.join().unwrap(), "proposal_changed", "replaced: {replaced}");
         assert!(!f.kinds(&fi).iter().any(|k| k == "ProposalLinked"), "nothing linked");
     }

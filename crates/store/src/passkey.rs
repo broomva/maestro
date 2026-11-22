@@ -464,6 +464,8 @@ pub(crate) mod tests {
         assert!(load_answer_verifier(d.path()).is_err());
         std::fs::write(d.path().join("web-origin"), party().origin).unwrap();
         assert!(load_answer_verifier(d.path()).is_ok());
+        std::fs::remove_file(Keyring::path(d.path())).unwrap();
+        assert!(load_answer_verifier(d.path()).is_err());
         std::fs::write(Keyring::path(d.path()), "{").unwrap();
         assert!(load_answer_verifier(d.path()).is_err());
     }

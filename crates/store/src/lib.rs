@@ -1,8 +1,8 @@
 //! Readers for the control plane Maestro governs.
 //!
 //! Every reader returns a [`Section`]: what parsed, where it came from, and
-//! every file that failed. Nothing here writes; owner writes stay in the one
-//! process that owns each ledger until Maestro takes that ownership over.
+//! every file that failed. Ledger writes use Maestro's separate checkout and shared lock;
+//! the owner workspace remains untouched.
 
 #[cfg(not(unix))]
 compile_error!("maestro-store reads the Broomva path registry, whose reader is Unix only (BRO-3266)");
@@ -100,6 +100,12 @@ impl Store {
     /// Whether this store reads the working tree itself, not a git revision.
     pub fn reads_worktree(&self) -> bool {
         self.tree.source == TreeSource::WorkingTree
+    }
+
+    /// Whether the workspace has a git marker, including a broken or unreadable one.
+    pub fn has_git_checkout(&self) -> bool {
+        !std::fs::symlink_metadata(self.paths.workspace.join(".git"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
     }
 
     /// The workspace-relative path the registry gives `name` in this store's tree: `.broomva/<path>`
@@ -205,6 +211,62 @@ impl Store {
     /// Ledgers are named as the plugin's `LEDGER` names them (`.yaml` or `.yml`) and read
     /// with [`yaml::parse`], so every value, and so every entry hash, is the plugin's.
     pub fn asks(&self) -> Section<Vec<LedgerFile>> {
+        if self.reads_worktree() && self.has_git_checkout() {
+            return Store::new(self.paths.clone(), TreeSource::GitRev("origin/main".into())).asks();
+        }
+        let mut base = self.asks_at_tree();
+        let main = matches!(&self.tree.source, TreeSource::GitRev(rev) if
+            matches!(rev.as_str(), "main" | "origin/main" | "refs/heads/main" | "refs/remotes/origin/main"));
+        if !main || base.data.is_none() {
+            return base;
+        }
+        // Legacy first, then the current ledger. For each branch the fetched origin ref wins.
+        for (name, label) in
+            [views::ANSWERS_REFS[2], views::ANSWERS_REFS[3], views::ANSWERS_REFS[0], views::ANSWERS_REFS[1]]
+        {
+            let branch = Store::new(self.paths.clone(), TreeSource::GitRev(name.into()));
+            if branch.tree.commit.is_none() {
+                let existence = branch.tree.has_ref(name);
+                match existence {
+                    Ok(false) => continue,
+                    Ok(true) => base.errors.push(SourceError {
+                        at: label.into(),
+                        reason: branch.tree.unresolved.unwrap_or_else(|| "unread".into()),
+                    }),
+                    Err(reason) => base.errors.push(SourceError { at: label.into(), reason }),
+                }
+                base.source.push_str(&format!(" + {label}"));
+                base.data = None;
+                continue;
+            }
+            base.source.push_str(&format!(" + {label}"));
+            let read = branch.asks_at_tree();
+            let Some(ledgers) = read.data else {
+                base.errors.extend(
+                    read.errors.into_iter().map(|e| SourceError { at: format!("{label}:{}", e.at), reason: e.reason }),
+                );
+                base.data = None;
+                continue;
+            };
+            if let Some(current) = &mut base.data {
+                for error in &read.errors {
+                    current.retain(|lf| !views::may_hide(&error.at, &lf.file));
+                }
+                for ledger in ledgers {
+                    current.retain(|lf| lf.file != ledger.file);
+                    current.push(ledger);
+                }
+                current.sort_by(|a, b| a.file.cmp(&b.file));
+            }
+            base.errors.extend(
+                read.errors.into_iter().map(|e| SourceError { at: format!("{label}:{}", e.at), reason: e.reason }),
+            );
+        }
+        base
+    }
+
+    /// Ask ledgers at exactly the selected tree, without a branch overlay.
+    pub fn asks_at_tree(&self) -> Section<Vec<LedgerFile>> {
         let dir = match self.rel(ASKS) {
             Ok(dir) => dir,
             Err(reason) => return Section::unavailable(self.tree.label(ASKS), reason),
@@ -265,6 +327,37 @@ impl Store {
         ask_ledger_of(&rel, &text).map(Some)
     }
 
+    /// One ledger overlaid with the current and legacy branch refs, without listing other ledgers.
+    pub fn ask_ledger_overlay(&self, file: &str) -> Result<Option<AskLedger>, String> {
+        if self.reads_worktree() && self.has_git_checkout() {
+            return Store::new(self.paths.clone(), TreeSource::GitRev("origin/main".into())).ask_ledger_overlay(file);
+        }
+        let mut ledger = self.ask_ledger(file)?;
+        let main = matches!(&self.tree.source, TreeSource::GitRev(rev) if
+            matches!(rev.as_str(), "main" | "origin/main" | "refs/heads/main" | "refs/remotes/origin/main"));
+        if !main {
+            return Ok(ledger);
+        }
+        for (name, label) in
+            [views::ANSWERS_REFS[2], views::ANSWERS_REFS[3], views::ANSWERS_REFS[0], views::ANSWERS_REFS[1]]
+        {
+            let branch = Store::new(self.paths.clone(), TreeSource::GitRev(name.into()));
+            if branch.tree.commit.is_none() {
+                match branch.tree.has_ref(name) {
+                    Ok(false) => continue,
+                    Ok(true) => {
+                        return Err(format!("{label}: {}", branch.tree.unresolved.unwrap_or_else(|| "unread".into())));
+                    }
+                    Err(error) => return Err(format!("{label}: {error}")),
+                }
+            }
+            if let Some(next) = branch.ask_ledger(file).map_err(|error| format!("{label}: {error}"))? {
+                ledger = Some(next);
+            }
+        }
+        Ok(ledger)
+    }
+
     /// [`Store::ask_ledger`] at `commit`, every object on the way checked against its id
     /// ([`tree::read_verified`]), so nothing planted in the object store reads as the ledger. The
     /// folder is the registry's at this store's tree (as [`Store::rel`] gives it). `Ok(None)` when
@@ -278,7 +371,13 @@ impl Store {
         if !requests::ledger_name_ok(file) {
             return Err(format!("`{file}` is not a ledger name"));
         }
-        let rel = format!("{}/{file}", self.rel(ASKS)?);
+        let current = tree::directory_verified(self.tree.root(), commit, ".broomva/asks", timeout)?;
+        let legacy = tree::directory_verified(self.tree.root(), commit, ".control/asks", timeout)?;
+        if current && legacy {
+            return Err("both .broomva/asks and .control/asks exist at the verified commit".into());
+        }
+        let dir = if current { ".broomva/asks" } else { ".control/asks" };
+        let rel = format!("{dir}/{file}");
         match tree::read_verified(self.tree.root(), commit, &rel, LEDGER_LIMIT, timeout)? {
             Some(text) => ask_ledger_of(&rel, &text).map(Some),
             None => Ok(None),

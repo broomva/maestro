@@ -338,10 +338,15 @@ fn answered_at_ref(store: &Store, name: &str, label: &str) -> (Option<Answered>,
 /// [`ANSWERS_BRANCH`]. Empty when the store already reads the working tree. The section's
 /// errors are those two reads' failures: an unreadable ledger there may hide answers waiting to
 /// land, so the rows are then the ones seen, and `data` is `None` when either read failed whole.
-pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
+pub fn unlanded(store: &Store, _at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
     if store.reads_worktree() {
         return Section::ok("worktree", Vec::new());
     }
+    // Compare the branch with the underlying tree, before its overlay is applied.
+    let base = store.asks_at_tree();
+    let Some(at_rev) = base.data.as_deref() else {
+        return Section { source: base.source, data: None, errors: base.errors };
+    };
     // `None` once a read failed whole: what waits to land is then unknown, never none.
     let (mut answered, mut errors) = answered_on_branch(store);
     // The plugin's `unlandedAnswers`: an answer waits when the first ask at the read tree with its
@@ -374,7 +379,7 @@ pub fn unlanded(store: &Store, at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
             if std::fs::symlink_metadata(&local_dir).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
                 (format!("worktree:{rel}"), Some(Answered::new()))
             } else {
-                let read = local.asks();
+                let read = local.asks_at_tree();
                 errors.extend(read.errors.iter().map(|e| SourceError {
                     at: if e.at.starts_with("worktree:") { e.at.clone() } else { format!("worktree:{}", e.at) },
                     reason: e.reason.clone(),

@@ -146,6 +146,7 @@ fn group(cx: &Ctx, g: &Group) -> Markup {
                                     @if e.ask.blocking { " · " span data-tone="attention" { "blocking" } }
                                 }
                                 span class="mv-irow-title" { (e.ask.title()) }
+                                @if cx.filed(e.lf, e.ask) { span class="mv-irow-rec" { "Filed and waiting to land" } }
                                 @match e.landing {
                                     Landing::Waiting => span class="mv-irow-rec" data-tone="success" { "Waiting to land" },
                                     Landing::Unknown => span class="mv-irow-rec" data-tone="warning" { "Not offered here: whether it is answered, or answerable, is not known" },

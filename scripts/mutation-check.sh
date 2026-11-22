@@ -260,7 +260,7 @@ mutate crates/store/src/views.rs '    ("refs/heads/maestro/ledger", ANSWERS_BRAN
 mutate crates/store/src/views.rs '    ("refs/remotes/origin/maestro/ledger", "origin/maestro/ledger"),' '    ("refs/remotes/origin/maestro/answers", "origin/maestro/ledger"),'
 mutate crates/store/src/views.rs '    ("refs/heads/maestro/answers", "maestro/answers"),' '    ("refs/heads/maestro/ledger", "maestro/answers"),'
 mutate crates/store/src/views.rs '    ("refs/remotes/origin/maestro/answers", "origin/maestro/answers"),' '    ("refs/remotes/origin/maestro/ledger", "origin/maestro/answers"),'
-mutate crates/store/src/tree.rs '    check(format.trim(), "commit", commit, &body)?;' '    let _ = (format, commit, &body);'
+mutate crates/store/src/tree.rs '    check(format.trim(), "commit", commit, &body)?;' '    let _ = (&format, commit, &body);'
 mutate crates/store/src/tree.rs '    if parents
         .iter()
         .any(|id| id.len() != width || !id.bytes().all(|b| b.is_ascii_digit() || (b'"'"'a'"'"'..=b'"'"'f'"'"').contains(&b)))' '    if false && parents
@@ -268,6 +268,8 @@ mutate crates/store/src/tree.rs '    if parents
         .any(|id| id.len() != width || !id.bytes().all(|b| b.is_ascii_digit() || (b'"'"'a'"'"'..=b'"'"'f'"'"').contains(&b)))'
 mutate $pk '    if !trailers.lines().all(|line| {' '    if false && !trailers.lines().all(|line| {'
 mutate $pk '    if proofs.next().is_some() {' '    if false {'
+mutate $pk '    let bytes = std::fs::read(Keyring::path(dir)).map_err(|e| format!("passkeys.json: {e}"))?;' '    let bytes = std::fs::read(Keyring::path(dir)).unwrap_or_else(|_| br#"{"credentials":[]}"#.to_vec());'
+mutate $pk '    let origin = std::fs::read_to_string(dir.join("web-origin")).map_err(|e| format!("web-origin: {e}"))?;' '    let origin = std::fs::read_to_string(dir.join("web-origin")).unwrap_or_else(|_| "https://example.test".into());'
 mutate $pk '    if intent.verb != "ask.answer" {' '    if false {'
 mutate $pk '    if intent.ledger != ledger {' '    if false {'
 mutate $pk '    if intent.handle != row.id && row.uid.as_deref() != Some(intent.handle.as_str()) {' '    if false {'
@@ -1767,6 +1769,67 @@ mutate $cli '    if v["ok"] == json!(true) {
     }
     if v["code"] == "definition_mismatch" {'
 
+# Resolve ledger paths against committed trees, and compare landing counts with the base tree.
+mutate crates/mcp/src/lib.rs '    let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::GitRev("origin/main".into()));' '    let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);'
+mutate crates/flow/src/kernel/asks.rs '    let here = Store::new(paths.clone(), TreeSource::GitRev("origin/main".into()));' '    let here = Store::new(paths.clone(), TreeSource::WorkingTree);'
+mutate crates/store/src/lib.rs '        let dir = if current { ".broomva/asks" } else { ".control/asks" };' '        let dir = ".control/asks";'
+mutate crates/store/src/lib.rs '        if current && legacy {' '        if false {'
+mutate crates/store/src/tree.rs $'    check(&format, "commit", commit, &body)?;\n    let mut id = String::from_utf8_lossy(&body)' $'    let mut id = String::from_utf8_lossy(&body)'
+mutate crates/store/src/tree.rs '            Some(_) => return Err(format!("{rel} is not a directory")),' '            Some(_) => return Ok(false),'
+mutate crates/store/src/tree.rs $'        check(&format, "tree", &id, &body)?;\n        match tree_entry(&body, part, &format)? {' $'        match tree_entry(&body, part, &format)? {'
+mutate crates/store/src/views.rs '    let base = store.asks_at_tree();' '    let base = store.asks();'
+
+# Ledger fast lane: the checkout is separate, every branch read is visible, and branch answers
+# count only after the signed row proof and verified history walk.
+mutate $ledger '    if checkout.starts_with(&workspace) || workspace.starts_with(&checkout) {' '    if false {'
+mutate $ledger '    let checkout = checkout_target(&w.checkout).map_err(|e| format!("checkout: {e}"))?;' '    let checkout = std::path::absolute(&w.checkout).map_err(|e| e.to_string())?;'
+mutate $ledger '    if common(&w.checkout)? != common(&w.workspace)? {' '    if false {'
+mutate $ledger '    if !registered {' '    if false {'
+mutate $ledger '    if actual != checkout {' '    if false {'
+mutate $ledger '        if name.to_string_lossy().starts_with("GIT_") {' '        if false {'
+mutate $ledger '    let mut command = Command::new(crate::tree::git());' '    let mut command = Command::new("git");'
+mutate $ledger '    command.env_remove("GH_REPO").env_remove("GH_HOST").current_dir(dir);' '    command.env_remove("GH_HOST").current_dir(dir);'
+mutate $ledger '    command.env_remove("GH_REPO").env_remove("GH_HOST").current_dir(dir);' '    command.env_remove("GH_REPO").current_dir(dir);'
+mutate $ledger '    if changed != rel || committed != bytes {' '    if false {'
+mutate $store '        if !main || base.data.is_none() {' '        if true {'
+mutate $store '    pub fn asks(&self) -> Section<Vec<LedgerFile>> {
+        if self.reads_worktree() && self.has_git_checkout() {' '    pub fn asks(&self) -> Section<Vec<LedgerFile>> {
+        if false {'
+mutate $store '    pub fn ask_ledger_overlay(&self, file: &str) -> Result<Option<AskLedger>, String> {
+        if self.reads_worktree() && self.has_git_checkout() {' '    pub fn ask_ledger_overlay(&self, file: &str) -> Result<Option<AskLedger>, String> {
+        if false {'
+mutate $store '        !std::fs::symlink_metadata(self.paths.workspace.join(".git"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)' '        self.paths.workspace.join(".git").exists()'
+mutate $store '                let existence = branch.tree.has_ref(name);' '                let existence = Ok::<bool, String>(false);'
+mutate $store '        if !main {
+            return Ok(ledger);' '        if true {
+            return Ok(ledger);'
+mutate $store '                match branch.tree.has_ref(name) {' '                match Ok::<bool, String>(false) {'
+mutate $requests '    compose_ask(ask)?;
+    if !ledger_name_ok(ledger) {' '    compose_ask(ask)?;
+    if false {'
+mutate $requests '    let relative =
+        asks_dir.strip_prefix(&paths.workspace).map_err(|_| refused("the asks folder is outside the workspace"))?;' '    let relative = asks_dir.strip_prefix(&paths.workspace).unwrap_or(Path::new("outside"));'
+mutate $requests '    if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {' '    if false {'
+mutate $requests '    if ledger.contains(['"'"'\n'"'"', '"'"'\r'"'"']) {' '    if false {'
+mutate $requests '    if filed.id.contains(['"'"'\n'"'"', '"'"'\r'"'"']) {' '    if false {'
+mutate $requests '    let dir = writer.checkout.join(relative);' '    let dir = paths.workspace.join(relative);'
+mutate $requests '    let guard = crate::ledger::exclusive(&writer).map_err(failure)?;' '    let guard = ();'
+mutate crates/flow/src/kernel/asks.rs '    for branch in ["refs/heads/maestro/ledger", "refs/heads/maestro/answers"] {' '    for branch in ["refs/heads/maestro/answers", "refs/heads/maestro/answers"] {'
+mutate crates/flow/src/kernel/asks.rs '    for branch in ["refs/heads/maestro/ledger", "refs/heads/maestro/answers"] {' '    for branch in ["refs/heads/maestro/ledger", "refs/heads/maestro/ledger"] {'
+mutate crates/flow/src/kernel/asks.rs '        let cmd = maestro_store::tree::ls_remote_command(&remote, branch, ANSWERS_GIT_CONFIG);
+        let Some(tip) = maestro_store::tree::remote_ref(cmd, branch, REMOTE_TIMEOUT).map_err(unread)? else { continue };' '        let Some(tip) = maestro_store::tree::local_commit(&paths.workspace, branch, READ_TIMEOUT).map_err(unread)? else { continue };'
+mutate crates/flow/src/kernel/asks.rs '                Found::Row(previous) if previous.row == row.row =>' '                Found::Row(previous) if false && previous.row == row.row =>'
+mutate crates/flow/src/kernel/asks.rs '                Found::Ambiguous => return Err("an ancestor has an ambiguous ask".into()),' '                Found::Ambiguous => {}'
+mutate crates/flow/src/kernel/asks.rs '    for _ in 0..10_000 {' '    for _ in 0..1 {'
+mutate crates/flow/src/kernel/asks.rs '        maestro_store::passkey::verify_answer_proof(&message, &rec.ledger, &row, &keys, &party).map_err(|e| {
+            Refusal::AnswerUnproven { ask_id: rec.ask_id.clone(), at: source.clone(), detail: clip(&e) }
+        })?;' '        let _ = maestro_store::passkey::verify_answer_proof(&message, &rec.ledger, &row, &keys, &party);'
+mutate crates/flow/src/kernel/asks.rs '    // A crash may leave an already-pushed amendment unlinked. Recover it from the remote tip
+    // before invoking the writer again, so a completed supersede is never repeated.
+    if rec.amends {' '    // A crash may leave an already-pushed amendment unlinked. Recover it from the remote tip
+    // before invoking the writer again, so a completed supersede is never repeated.
+    if false {'
 # Human steps (BRO-3635; BRO-3624 items 1 and 7): a flow's ask, pinned, filed, linked, answered.
 asks=crates/flow/src/kernel/asks.rs
 replay=crates/flow/src/kernel/replay.rs
@@ -1778,14 +1841,8 @@ mutate $replay 'supersedes.is_some() && !current.is_some_and(|r| r.amends)' 'sup
 mutate $mf 'if reason.len() > kernel::MAX_AMEND_REASON {' 'if false {'
 mutate $cli 'if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {' 'if false {'
 mutate $asks '    if rec.amends {
-        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {' '    if false {
-        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {'
-mutate $asks '            Found::Ambiguous => {
-                let at = format!("worktree:{}", rec.ledger);
-                return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
-            }
-            Found::None => {}' '            Found::Ambiguous => return Err(unconfirmed("ambiguous".into()).into()),
-            Found::None => {}'
+        confirm_amend(&committed, &rec)?;' '    if false {
+        confirm_amend(&committed, &rec)?;'
 # An amendment refuses an answered predecessor and confirms the old row names the replacement.
 mutate $asks '            AskState::Answered => return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into()),' '            AskState::Answered => {}'
 mutate $asks '    if answered_on_answers_refs(paths, rec)? {
@@ -1817,13 +1874,16 @@ mutate $asks '    body.insert("asked_at".into(), Value::String(clock::now().strf
 mutate $asks 'const KERNEL_KEYS: [&str; 4] = ["id", "uid", "ask", "asked_at"];' 'const KERNEL_KEYS: [&str; 4] = ["id", "uid", "ask", "ask"];'
 mutate $asks 'map.retain(|k, _| !requests::refused_key(k));' 'map.retain(|_, _| true);'
 # The working tree's row with that id and hash links, after a filing and after a duplicate.
-mutate $asks 'let row = match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {' 'let row = match (if outcome.is_ok() { find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? } else { Found::None }) {'
+mutate $asks '    let row = match committed
+        .ask_ledger_verified(&rec.ledger, &revision, READ_TIMEOUT)
+        .and_then(|ledger| rows(ledger, &rec.ask_id))
+        .map_err(unconfirmed)?' '    let row = match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)?'
 # A hash miss is ask_refused.
 mutate $asks '    if found != rec.body_hash {
         return Err(Refusal::AskRefused {' '    if false {
         return Err(Refusal::AskRefused {'
-# Confirmation reads the working tree, not origin/main.
-mutate $asks 'let here = Store::new(paths.clone(), TreeSource::WorkingTree);' 'let here = Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into()));'
+# Confirmation reads the commit the writer pushed, not main.
+mutate $asks '        Ok(filed) => (filed.commit, None),' '        Ok(_) => ("refs/remotes/origin/main".into(), None),'
 # A busy ask ledger is retried by the kernel against its own clock, until its deadline, then refused.
 mutate $asks 'if clock::now() >= deadline {' 'if true {'
 mutate $asks 'if clock::now() >= deadline {' 'if false {'
@@ -1854,9 +1914,8 @@ mutate $asks 'if size > MAX_ASK_BODY {' 'if false {'
 mutate $asks 'if nesting(&given) + 2 >= MAX_NESTING {' 'if false {'
 mutate $asks 'return Err(unread("there is no such ledger in the asks folder".into()).into());' 'return Ok(BTreeSet::new());'
 mutate $asks 'for _ in 0..MINT_TRIES {' 'for _ in 0..MINT_TRIES + 1 {'
-mutate $asks '            Err(FileError::Refused(reason)) => {' '            Err(FileError::Refused(reason)) if false => {'
-mutate $asks '            Err(FileError::Refused(reason)) => {' '            _ => {
-                let reason = String::from("withdrawn whatever the writer said");'
+mutate $asks '        Err(FileError::Refused(reason)) => {' '        Err(FileError::Refused(reason)) if false => {'
+mutate $asks '        Err(e) => return Err(unconfirmed(e.to_string()).into()),' '        Err(e) => return then(ledger, Confirmed::NotFiled { reason: e.to_string() }),'
 mutate $asks '        _ => Found::Ambiguous,' '        (Some(a), _) => Found::Row(Box::new(a)),'
 mutate $asks '    if found != rec.body_hash {
         return Err(Refusal::AnswerMismatch {' '    if false {
@@ -1887,8 +1946,8 @@ mutate $asks ', "credential.https://github.com.helper=!gh auth git-credential"]'
 # P20 round 3: git does not check an object's hash when it reads it; the answer read checks each
 # object against its id, step by step. The system git by absolute path on a fixed PATH; no GIT_*
 # environment redirects a store read; the ls-remote reader stops at its bound.
-mutate $tree '    check(&format, "commit", commit, &body)?;' ''
-mutate $tree '        check(&format, "tree", &id, &body)?;' ''
+mutate $tree $'    check(&format, "commit", commit, &body)?;\n    let tree = String::from_utf8_lossy(&body)' $'    let tree = String::from_utf8_lossy(&body)'
+mutate $tree $'        check(&format, "tree", &id, &body)?;\n        let last = i + 1 == parts.len();' $'        let last = i + 1 == parts.len();'
 mutate $tree '    check(&format, "blob", &id, &blob)?;' ''
 mutate $tree '    if hex != id {' '    if false {'
 mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev(sha.clone())), &rec.ledger, &rec.ask_id) {'
@@ -1917,8 +1976,12 @@ mutate $tree '        if meta.is_symlink {' '        if false {'
 mutate $tree '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, timeout)?;' '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, Duration::from_secs(3600))?;'
 mutate $asks '    trusted_git().map_err(|e| unread(format!("the git Maestro runs is not root'"'"'s alone: {e}")))?;' ''
 mutate $tree '    cmd.env("xcrun_nocache", "1");' ''
-mutate $tree '    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;' '    let body = git_bytes(root, &["cat-file", "commit", commit], 4 * MAX_OBJECT, timeout)?;'
-mutate $tree '        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;' '        let body = git_bytes(root, &["cat-file", "tree", &id], 4 * MAX_OBJECT, timeout)?;'
+mutate $tree '    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;
+    check(&format, "commit", commit, &body)?;
+    let tree = String::from_utf8_lossy(&body)' '    let body = git_bytes(root, &["cat-file", "commit", commit], 4 * MAX_OBJECT, timeout)?;
+    check(&format, "commit", commit, &body)?;
+    let tree = String::from_utf8_lossy(&body)'
+mutate $tree $'        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;\n        check(&format, "tree", &id, &body)?;\n        let last = i + 1 == parts.len();' $'        let body = git_bytes(root, &["cat-file", "tree", &id], 4 * MAX_OBJECT, timeout)?;\n        check(&format, "tree", &id, &body)?;\n        let last = i + 1 == parts.len();'
 mutate $tree '    let blob = git_bytes(root, &["cat-file", "blob", &id], limit, timeout)?;' '    let blob = git_bytes(root, &["cat-file", "blob", &id], MAX_OBJECT, timeout)?;'
 mutate $tree '    if out.len() > limit {
         return Err(format!("{what} said more than' '    if false {

@@ -35,6 +35,7 @@ fn machine(root: &Path, files: &[(&str, &str)]) -> Paths {
     git(&paths.workspace, &["init", "-q", "-b", "main"]);
     git(&paths.workspace, &["add", "-A"]);
     git(&paths.workspace, &["commit", "-q", "--allow-empty", "-m", "fixture"]);
+    git(&paths.workspace, &["update-ref", "refs/remotes/origin/main", "refs/heads/main"]);
     paths
 }
 

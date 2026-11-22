@@ -35,6 +35,10 @@ fn machine() -> Machine {
     std::fs::create_dir_all(root.join("workspace/.broomva")).unwrap();
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::write(root.join("bin/gh"), "#!/bin/sh\nexit 1\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(root.join("bin/gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(root.join("decide.yaml"), DECIDE).unwrap();
     let registry = json!([{ "id": "d1", "cwd": work, "token": "tok-1", "liveness": "live" }]);
     std::fs::write(root.join("direct.json"), registry.to_string()).unwrap();
@@ -42,15 +46,41 @@ fn machine() -> Machine {
 }
 
 impl Machine {
+    fn git(&self, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(self.root.join("workspace"))
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn init_ledger(&self) {
+        self.git(&["init", "-q", "-b", "main"]);
+        self.git(&["add", "."]);
+        self.git(&["commit", "-qm", "seed"]);
+        let origin = self.root.join("origin.git");
+        let out = Command::new("git").args(["init", "-q", "--bare", "-b", "main"]).arg(&origin).output().unwrap();
+        assert!(out.status.success());
+        self.git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        self.git(&["push", "-q", "origin", "main"]);
+        self.git(&["fetch", "-q", "origin"]);
+    }
+
     /// The binary with a clean environment: no session, no registry, no caller claim.
     fn bare(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_maestro"));
         cmd.env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", format!("{}:{}", self.root.join("bin").display(), std::env::var("PATH").unwrap_or_default()))
             .env("HOME", self.root.join("home"))
             .env("BROOMVA_WORKSPACE", self.root.join("workspace"))
             .env("BROOMVA_HOME", self.root.join("broomva-home"))
             .env("MAESTRO_FLEET_STATE", self.root.join("fleet"))
+            .env("MAESTRO_ANSWERS_CHECKOUT", self.root.join("maestro-checkout"))
+            .env("MAESTRO_OWNER_DIR", self.root.join("maestro-owner"))
             .env("MAESTRO_TREE", "worktree")
             .env("MAESTRO_SESSION", "direct:-/d1");
         cmd
@@ -398,6 +428,7 @@ fn an_ask_is_filed_through_the_cli() {
     std::fs::create_dir_all(ws.join("scripts")).unwrap();
     std::fs::copy(fixtures.join("ledger.yaml"), ws.join(".control/asks/ledger.yaml")).unwrap();
     std::fs::copy(fixtures.join("ask_ledger_stub.py"), ws.join("scripts/ask_ledger.py")).unwrap();
+    m.init_ledger();
     std::fs::write(
         m.root.join("gate.yaml"),
         "flow: gate\nversion: 1\nnodes:\n  owner: {class: human, ask: Ship it?}\n",
@@ -442,7 +473,8 @@ fn an_ask_is_filed_through_the_cli() {
     let v = ok(cli().args(ask).arg(body.to_string()));
     assert_eq!(v["state"], "waiting", "{v}");
     let id = v["ask_id"].as_str().unwrap();
-    let text = std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap();
+    assert!(!std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap().contains(&format!("id: \"{id}\"")));
+    let text = m.git(&["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
     assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "filed once");
     let status = ok(m.bare().args(["flow", "status", "--instance", &fi]));
     assert_eq!(status["relay"][0]["state"], "owner", "{status}");
@@ -460,6 +492,7 @@ fn a_proposal_is_filed_through_the_cli() {
     std::fs::create_dir_all(ws.join("scripts")).unwrap();
     std::fs::copy(fixtures.join("ledger.yaml"), ws.join(".control/asks/ledger.yaml")).unwrap();
     std::fs::copy(fixtures.join("ask_ledger_stub.py"), ws.join("scripts/ask_ledger.py")).unwrap();
+    m.init_ledger();
     let registry = json!([
         { "id": "d1", "cwd": m.work, "token": "tok-1", "liveness": "live" },
         { "id": "d2", "cwd": m.work, "token": "tok-2", "liveness": "live" },
@@ -484,7 +517,8 @@ fn a_proposal_is_filed_through_the_cli() {
     assert_eq!((&v["state"], &v["proposal"]), (&json!("waiting"), &json!("adoption")), "{v}");
     let id = v["ask_id"].as_str().unwrap();
     assert!(id.starts_with("flow-adopt-"), "{id}");
-    let text = std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap();
+    assert!(!std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap().contains(&format!("id: \"{id}\"")));
+    let text = m.git(&["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
     assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "filed once");
     let status = ok(m.bare().args(["flow", "status", "--instance", &fi]));
     assert_eq!(status["status"]["owner"], json!({ "surface": "direct", "id": "d1" }), "{status}");
@@ -503,6 +537,7 @@ fn proposals_file_through_the_real_workspace_writer() {
     std::fs::create_dir_all(ws.join("scripts")).unwrap();
     std::fs::copy(fixtures.join("ledger.yaml"), ws.join(".control/asks/ledger.yaml")).unwrap();
     std::fs::copy(fixtures.join("ask_ledger_real.py"), ws.join("scripts/ask_ledger.py")).unwrap();
+    m.init_ledger();
     let registry = json!([
         { "id": "d1", "cwd": m.work, "token": "tok-1", "liveness": "live" },
         { "id": "d2", "cwd": m.work, "token": "tok-2", "liveness": "live" },
@@ -527,7 +562,8 @@ fn proposals_file_through_the_real_workspace_writer() {
     assert_eq!((&v["state"], &v["proposal"]), (&json!("waiting"), &json!("adoption")), "{v}");
     let id = v["ask_id"].as_str().unwrap();
     assert!(id.starts_with("flow-adopt-"), "{id}");
-    let text = std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap();
+    assert!(!std::fs::read_to_string(ws.join(".control/asks/ledger.yaml")).unwrap().contains(&format!("id: \"{id}\"")));
+    let text = m.git(&["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
     assert_eq!(text.matches(&format!("id: \"{id}\"")).count(), 1, "filed once");
     let mut retire = m.verified();
     retire.env("PYTHONUSERBASE", &user_base).env("MAESTRO_PASEO_ASK_LOCKS", m.root.join("locks"));

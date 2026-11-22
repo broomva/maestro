@@ -12,14 +12,30 @@ pub struct Writer {
     pub remote: bool,
 }
 
+fn clean_git_env(command: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+}
+
+fn git_command(dir: &Path) -> Command {
+    let mut command = Command::new(crate::tree::git());
+    clean_git_env(&mut command);
+    command.arg("-C").arg(dir).env("GIT_TERMINAL_PROMPT", "0");
+    command
+}
+
+fn gh_command(dir: &Path) -> Command {
+    let mut command = Command::new("gh");
+    clean_git_env(&mut command);
+    command.env_remove("GH_REPO").env_remove("GH_HOST").current_dir(dir);
+    command
+}
+
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
+    let out = git_command(dir).args(args).output().map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -29,8 +45,7 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 /// The open landing PR's number, if one is open.
 fn landing_pr(dir: &Path) -> Result<Option<String>, String> {
-    let out = Command::new("gh")
-        .current_dir(dir)
+    let out = gh_command(dir)
         .args([
             "pr",
             "list",
@@ -54,16 +69,54 @@ fn landing_pr(dir: &Path) -> Result<Option<String>, String> {
     Ok((!n.is_empty()).then_some(n))
 }
 
+/// Resolve existing ancestors too, so a new checkout cannot enter the workspace through a symlink.
+fn checkout_target(path: &Path) -> Result<PathBuf, String> {
+    let absolute = crate::views::lexical(&std::path::absolute(path).map_err(|e| e.to_string())?);
+    let mut ancestor = absolute.as_path();
+    while !ancestor.exists() {
+        ancestor = ancestor.parent().ok_or("checkout has no existing ancestor")?;
+    }
+    let resolved = ancestor.canonicalize().map_err(|e| e.to_string())?;
+    Ok(resolved.join(absolute.strip_prefix(ancestor).map_err(|e| e.to_string())?))
+}
+
 /// Maestro's checkout, made if missing, reset to a clean tree (nothing staged, nothing untracked)
 /// at the base the answer goes on: `maestro/ledger` with main merged in when the branch exists,
 /// so an answer it holds that main lacks is kept, never pushed over; else main itself. Returns
 /// the branch's tip when it exists.
 pub fn prepare(w: &Writer) -> Result<Option<String>, String> {
+    let workspace = w.workspace.canonicalize().map_err(|e| format!("workspace: {e}"))?;
+    let checkout = checkout_target(&w.checkout).map_err(|e| format!("checkout: {e}"))?;
+    if checkout.starts_with(&workspace) || workspace.starts_with(&checkout) {
+        return Err("Maestro's checkout must be separate from the workspace".into());
+    }
     if !w.checkout.join(".git").exists() {
         if let Some(parent) = w.checkout.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         git(&w.workspace, &["worktree", "add", "--detach", &w.checkout.to_string_lossy(), "HEAD"])?;
+    }
+    let common = |root: &Path| -> Result<PathBuf, String> {
+        let path = PathBuf::from(git(root, &["rev-parse", "--git-common-dir"])?);
+        let path = if path.is_absolute() { path } else { root.join(path) };
+        path.canonicalize().map_err(|e| format!("git common directory: {e}"))
+    };
+    if common(&w.checkout)? != common(&w.workspace)? {
+        return Err("Maestro's checkout belongs to another repository".into());
+    }
+    let listed = git(&w.workspace, &["worktree", "list", "--porcelain", "-z"])?;
+    let registered = listed
+        .split('\0')
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .filter_map(|path| Path::new(path).canonicalize().ok())
+        .any(|path| path == checkout);
+    if !registered {
+        return Err("Maestro's checkout is not a registered worktree".into());
+    }
+    let actual = PathBuf::from(git(&w.checkout, &["rev-parse", "--show-toplevel"])?);
+    let actual = actual.canonicalize().map_err(|e| format!("checkout root: {e}"))?;
+    if actual != checkout {
+        return Err("Maestro's checkout resolves to another working tree".into());
     }
     // Whatever another process left here, staged or not, is dropped before anything is written.
     let _ = git(&w.checkout, &["merge", "--abort"]);
@@ -148,9 +201,7 @@ pub fn commit_and_push(w: &Writer, rel: &str, message: &str, bytes: &[u8]) -> Re
     )?;
     // The commit holds exactly the signed edit: one file, these bytes.
     let changed = git(&w.checkout, &["diff", "--name-only", "HEAD~1", "HEAD"])?;
-    let committed = Command::new("git")
-        .arg("-C")
-        .arg(&w.checkout)
+    let committed = git_command(&w.checkout)
         .args(["cat-file", "blob", &format!("HEAD:{rel}")])
         .output()
         .map_err(|e| format!("git cat-file: {e}"))?
@@ -179,8 +230,7 @@ pub fn land(w: &Writer) -> String {
     let number = match landing_pr(dir) {
         Ok(Some(n)) => n,
         Ok(None) => {
-            let out = Command::new("gh")
-                .current_dir(dir)
+            let out = gh_command(dir)
                 .args([
                     "pr",
                     "create",
@@ -204,7 +254,7 @@ pub fn land(w: &Writer) -> String {
         }
         Err(e) => return format!("no landing PR: {e}"),
     };
-    let merged = Command::new("gh").current_dir(dir).args(["pr", "merge", &number, "--auto", "--squash"]).output();
+    let merged = gh_command(dir).args(["pr", "merge", &number, "--auto", "--squash"]).output();
     match merged {
         Ok(o) if o.status.success() => format!("landing PR #{number}, set to merge when its checks pass"),
         Ok(o) => format!("landing PR #{number}; auto-merge not set: {}", String::from_utf8_lossy(&o.stderr).trim()),
