@@ -248,12 +248,32 @@ pk=crates/store/src/passkey.rs
 ow=crates/mcp/src/owner_web.rs
 ans=crates/mcp/src/answers.rs
 sans=crates/store/src/answer.rs
+ledger=crates/store/src/ledger.rs
 mutate $web '    let origin_ok = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) == Some(owner.party.origin.as_str());' '    let origin_ok = true;'
 mutate $web '    let json_ok = !json_body' '    let json_ok = true || !json_body'
 mutate $web '        Ok(o) if request_authority(headers, &o.party).is_some_and(|a| a != o.party.authority) => {' '        Ok(o) if false => {'
 mutate $web '    if !admitted(uri, headers, &web.hosts) {
         return Err(refused());' '    if false {
         return Err(refused());'
+# An answer proof must bind every part of the signed intent to the row.
+mutate crates/store/src/views.rs '    ("refs/heads/maestro/ledger", ANSWERS_BRANCH),' '    ("refs/heads/maestro/answers", ANSWERS_BRANCH),'
+mutate crates/store/src/views.rs '    ("refs/remotes/origin/maestro/ledger", "origin/maestro/ledger"),' '    ("refs/remotes/origin/maestro/answers", "origin/maestro/ledger"),'
+mutate crates/store/src/views.rs '    ("refs/heads/maestro/answers", "maestro/answers"),' '    ("refs/heads/maestro/ledger", "maestro/answers"),'
+mutate crates/store/src/views.rs '    ("refs/remotes/origin/maestro/answers", "origin/maestro/answers"),' '    ("refs/remotes/origin/maestro/ledger", "origin/maestro/answers"),'
+mutate crates/store/src/tree.rs '    check(format.trim(), "commit", commit, &body)?;' '    let _ = (format, commit, &body);'
+mutate crates/store/src/tree.rs '    if parents
+        .iter()
+        .any(|id| id.len() != width || !id.bytes().all(|b| b.is_ascii_digit() || (b'"'"'a'"'"'..=b'"'"'f'"'"').contains(&b)))' '    if false && parents
+        .iter()
+        .any(|id| id.len() != width || !id.bytes().all(|b| b.is_ascii_digit() || (b'"'"'a'"'"'..=b'"'"'f'"'"').contains(&b)))'
+mutate $pk '    if !trailers.lines().all(|line| {' '    if false && !trailers.lines().all(|line| {'
+mutate $pk '    if proofs.next().is_some() {' '    if false {'
+mutate $pk '    if intent.verb != "ask.answer" {' '    if false {'
+mutate $pk '    if intent.ledger != ledger {' '    if false {'
+mutate $pk '    if intent.handle != row.id && row.uid.as_deref() != Some(intent.handle.as_str()) {' '    if false {'
+mutate $pk '    if row.answer_option.as_deref() != Some(intent.option.as_str()) {' '    if false {'
+mutate $pk '    if row.answer_note != intent.note {' '    if false {'
+mutate $pk '    verify(party, keyring, &challenge(&proof.intent, &proof.nonce), &proof.assertion)?;' '    let _ = verify(party, keyring, &challenge(&proof.intent, &proof.nonce), &proof.assertion);'
 mutate $pk '    if cd.kind != kind {' '    if false {'
 mutate $pk "    if cd.challenge.trim_end_matches('=') != challenge {" '    if false {'
 mutate $pk '    if cd.origin != party.origin || cd.cross_origin {' '    if false {'
@@ -275,8 +295,8 @@ mutate $ans '        if now_ms >= r.applies_at_ms {' '        if false {'
 mutate $ans '            _ => return Err("it was already written".into()),' '            _ => {}'
 mutate $ans "                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));" '                    true;'
 mutate $ans '        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?;' '        let r = m.get_mut(id)?;'
-mutate $ans '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
-mutate $ans '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''
+mutate $ledger '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
+mutate $ledger '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''
 mutate $ans '    if !new.is_empty() {
         let _ = std::fs::write(&path, &source);' '    if false {
         let _ = std::fs::write(&path, &source);'

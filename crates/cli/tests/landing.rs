@@ -49,7 +49,7 @@ fn a_count_that_could_not_be_read_says_not_known_never_null() {
     });
     assert!(
         line.contains(
-            "answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched): not known"
+            "answered in this checkout or on maestro/ledger and maestro/answers (this clone or origin as last fetched): not known"
         ),
         "{line}"
     );
@@ -72,7 +72,7 @@ fn a_waiting_answer_is_counted_exactly() {
         git(ws, &["commit", "-q", "-am", "answer"]);
         git(ws, &["checkout", "-q", "main"]);
     });
-    assert!(line.contains(", 1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet landed"), "{line}");
+    assert!(line.contains(", 1 answered in this checkout or on maestro/ledger and maestro/answers (this clone or origin as last fetched), not yet landed"), "{line}");
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn a_count_from_a_partial_read_is_not_known() {
     // A ledger that did not read may hold an answer: the count is not known, never a bound.
     assert!(
         line.contains(
-            "answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched): not known"
+            "answered in this checkout or on maestro/ledger and maestro/answers (this clone or origin as last fetched): not known"
         ),
         "{line}"
     );

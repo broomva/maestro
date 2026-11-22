@@ -191,9 +191,8 @@ pub struct AskCounts {
     pub unlanded: Option<usize>,
 }
 
-/// The branch Paseo's Maestro plugin lands owner answers on before their batch PR merges
-/// (spec row R2). An answer there is waiting to land as much as one in the working tree.
-pub const ANSWERS_BRANCH: &str = "maestro/answers";
+/// Maestro's ledger branch; the legacy answers branch remains a reader source.
+pub const ANSWERS_BRANCH: &str = "maestro/ledger";
 
 /// Answered asks by ledger and the plugin's key: `u:<uid>`, else `i:<id>` for an ask without a
 /// uid (`answers-landing.ts`), so a uid and a uid-less id that share their text never match.
@@ -270,15 +269,18 @@ fn closed_in(asks: &[LedgerFile], closed: impl Fn(AskState) -> bool) -> Answered
         .collect()
 }
 
-/// Where [`ANSWERS_BRANCH`] is read: this clone's own branch, and origin's as this clone last
-/// fetched it (the plugin merges origin's batch in before landing, `answers-landing.ts`). Origin
-/// itself is never asked: an answer pushed there since the last fetch is not seen.
+/// The current and legacy ledger refs in this clone and as last fetched from origin.
+/// Origin itself is not asked here, so a push since the last fetch is not seen.
 /// Each is `(ref, label)`; a read error there is labelled `<label>:`.
-pub const ANSWERS_REFS: [(&str, &str); 2] =
-    [("refs/heads/maestro/answers", ANSWERS_BRANCH), ("refs/remotes/origin/maestro/answers", "origin/maestro/answers")];
+pub const ANSWERS_REFS: [(&str, &str); 4] = [
+    ("refs/heads/maestro/ledger", ANSWERS_BRANCH),
+    ("refs/remotes/origin/maestro/ledger", "origin/maestro/ledger"),
+    ("refs/heads/maestro/answers", "maestro/answers"),
+    ("refs/remotes/origin/maestro/answers", "origin/maestro/answers"),
+];
 
 /// How screens and the CLI name what [`ANSWERS_REFS`] read.
-pub const ANSWERS_READ: &str = "maestro/answers (this clone's, or origin's as last fetched)";
+pub const ANSWERS_READ: &str = "maestro/ledger and maestro/answers (this clone or origin as last fetched)";
 
 /// Answers on [`ANSWERS_BRANCH`]: the union over [`ANSWERS_REFS`]. A ref that is not there holds
 /// none; one that exists but does not read at all makes the whole `None` with its errors: its

@@ -262,6 +262,74 @@ pub fn verify<'k>(
     Ok(cred)
 }
 
+/// The answer intent carried by a signed owner proof.
+#[derive(Debug, Deserialize)]
+struct AnswerIntent {
+    verb: String,
+    ledger: String,
+    handle: String,
+    #[serde(rename = "hash")]
+    _hash: String,
+    option: String,
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnswerProof {
+    intent: String,
+    nonce: String,
+    assertion: Assertion,
+}
+
+/// Load the verifier's configuration. Unlike enrollment, a missing keyring is unread.
+pub fn load_answer_verifier(dir: &Path) -> Result<(Keyring, Party), String> {
+    let bytes = std::fs::read(Keyring::path(dir)).map_err(|e| format!("passkeys.json: {e}"))?;
+    let keyring = serde_json::from_slice(&bytes).map_err(|e| format!("passkeys.json: {e}"))?;
+    let origin = std::fs::read_to_string(dir.join("web-origin")).map_err(|e| format!("web-origin: {e}"))?;
+    Ok((keyring, Party::parse(origin.trim())?))
+}
+
+/// Verify that a commit's owner proof signed the answer present in the addressed row.
+pub fn verify_answer_proof(
+    message: &str,
+    ledger: &str,
+    row: &maestro_core::ask::Ask,
+    keyring: &Keyring,
+    party: &Party,
+) -> Result<(), String> {
+    let (_, trailers) = message.trim_end().rsplit_once("\n\n").ok_or("the owner proof is missing")?;
+    if !trailers.lines().all(|line| {
+        line.split_once(':')
+            .is_some_and(|(key, _)| !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    }) {
+        return Err("the owner proof is not in a trailer block".into());
+    }
+    let mut proofs = trailers.lines().filter_map(|line| line.strip_prefix("Maestro-Owner-Proof: "));
+    let proof = proofs.next().ok_or("the owner proof is missing")?;
+    if proofs.next().is_some() {
+        return Err("the owner proof is ambiguous".into());
+    }
+    let proof: AnswerProof = serde_json::from_str(proof).map_err(|_| "the owner proof does not read")?;
+    let intent: AnswerIntent = serde_json::from_str(&proof.intent).map_err(|_| "the owner intent does not read")?;
+    if intent.verb != "ask.answer" {
+        return Err("the proof is not an answer".into());
+    }
+    if intent.ledger != ledger {
+        return Err("the proof names another ledger".into());
+    }
+    if intent.handle != row.id && row.uid.as_deref() != Some(intent.handle.as_str()) {
+        return Err("the proof names another ask".into());
+    }
+    if row.answer_option.as_deref() != Some(intent.option.as_str()) {
+        return Err("the proof names another option".into());
+    }
+    if row.answer_note != intent.note {
+        return Err("the proof names another note".into());
+    }
+    verify(party, keyring, &challenge(&proof.intent, &proof.nonce), &proof.assertion)?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -332,6 +400,72 @@ pub(crate) mod tests {
 
     pub(crate) fn sign(challenge: &str) -> Assertion {
         sign_with(challenge, 0x05, &party().origin, &party())
+    }
+
+    fn answered_row() -> maestro_core::ask::Ask {
+        maestro_core::ask::Ask::from_row(
+            serde_json::json!({
+                "id": "a", "uid": "uid-a", "answer_option": "yes", "answer_note": "note"
+            })
+            .into(),
+        )
+        .unwrap()
+    }
+
+    fn proof_message(verb: &str, ledger: &str, handle: &str, option: &str, note: Option<&str>) -> String {
+        let intent = serde_json::json!({
+            "verb": verb, "ledger": ledger, "handle": handle, "hash": "hash",
+            "option": option, "note": note
+        })
+        .to_string();
+        let assertion = sign(&challenge(&intent, "nonce"));
+        format!(
+            "answer\n\nMaestro-Owner-Proof: {}\n",
+            serde_json::json!({
+                "intent": intent, "nonce": "nonce", "assertion": assertion
+            })
+        )
+    }
+
+    #[test]
+    fn answer_proof_binds_the_signed_intent_to_the_row() {
+        let row = answered_row();
+        let p = party();
+        let k = keyring();
+        let valid = proof_message("ask.answer", "l.yaml", "uid-a", "yes", Some("note"));
+        assert!(verify_answer_proof(&valid, "l.yaml", &row, &k, &p).is_ok());
+        for invalid in [
+            "answer".to_string(),
+            format!("{valid}Maestro-Owner-Proof: {{}}\n"),
+            format!("{valid}\nunrelated body"),
+            valid.replace("answer\n\n", "answer\n\nbody text\n"),
+            proof_message("other", "l.yaml", "uid-a", "yes", Some("note")),
+            proof_message("ask.answer", "other.yaml", "uid-a", "yes", Some("note")),
+            proof_message("ask.answer", "l.yaml", "other", "yes", Some("note")),
+            proof_message("ask.answer", "l.yaml", "uid-a", "no", Some("note")),
+            proof_message("ask.answer", "l.yaml", "uid-a", "yes", Some("other")),
+        ] {
+            assert!(verify_answer_proof(&invalid, "l.yaml", &row, &k, &p).is_err());
+        }
+        assert!(verify_answer_proof(&valid, "l.yaml", &row, &Keyring::default(), &p).is_err());
+        assert!(
+            verify_answer_proof(&valid, "l.yaml", &row, &k, &Party::parse("https://evil.example").unwrap()).is_err()
+        );
+        let forged = valid.replace("\"nonce\":\"nonce\"", "\"nonce\":\"other\"");
+        assert_ne!(forged, valid);
+        assert!(verify_answer_proof(&forged, "l.yaml", &row, &k, &p).is_err());
+    }
+
+    #[test]
+    fn answer_verifier_requires_both_owner_files() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(load_answer_verifier(d.path()).is_err());
+        keyring().save(d.path()).unwrap();
+        assert!(load_answer_verifier(d.path()).is_err());
+        std::fs::write(d.path().join("web-origin"), party().origin).unwrap();
+        assert!(load_answer_verifier(d.path()).is_ok());
+        std::fs::write(Keyring::path(d.path()), "{").unwrap();
+        assert!(load_answer_verifier(d.path()).is_err());
     }
 
     #[test]

@@ -559,6 +559,37 @@ pub fn read_verified(
     String::from_utf8(blob).map(Some).map_err(|_| format!("{rel} is not valid UTF-8"))
 }
 
+/// A commit whose complete object hashes to its id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCommit {
+    pub parents: Vec<String>,
+    pub message: String,
+}
+
+/// Read a commit's parent ids and message only after verifying its object hash.
+pub fn verified_commit(root: &Path, commit: &str, timeout: Duration) -> Result<VerifiedCommit, String> {
+    let format = git_bytes(root, &["rev-parse", "--show-object-format"], 64, timeout)?;
+    let format = String::from_utf8(format).map_err(|_| "the object format is not UTF-8")?;
+    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;
+    check(format.trim(), "commit", commit, &body)?;
+    let body = String::from_utf8(body).map_err(|_| "the commit is not UTF-8")?;
+    let (headers, message) = body.split_once("\n\n").ok_or("the commit has no message separator")?;
+    let parents: Vec<String> =
+        headers.lines().filter_map(|line| line.strip_prefix("parent ")).map(str::to_string).collect();
+    let width = match format.trim() {
+        "sha1" => 40,
+        "sha256" => 64,
+        _ => return Err("the object format is not supported".into()),
+    };
+    if parents
+        .iter()
+        .any(|id| id.len() != width || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    {
+        return Err("the commit has an invalid parent id".into());
+    }
+    Ok(VerifiedCommit { parents, message: message.to_string() })
+}
+
 /// Whether the object store of the repository at `root` holds an object under `id`
 /// (`cat-file -e`): present, never trusted ([`read_verified`] checks what it holds). Given
 /// `timeout` ([`run_bounded`]: a FIFO planted where git looks, such as the alternates file,

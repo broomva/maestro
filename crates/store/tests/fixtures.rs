@@ -658,3 +658,26 @@ fn an_unreadable_origin_branch_makes_the_count_unknown() {
     assert!(w.errors.iter().any(|e| e.at.starts_with("origin/maestro/answers:")), "{:?}", w.errors);
     assert_eq!(views::snapshot(&s).asks.data.unwrap().unlanded, None);
 }
+
+#[test]
+fn ledger_and_legacy_refs_are_read_and_unread_refs_are_reported() {
+    for reference in [
+        "refs/heads/maestro/ledger",
+        "refs/remotes/origin/maestro/ledger",
+        "refs/heads/maestro/answers",
+        "refs/remotes/origin/maestro/answers",
+    ] {
+        let (_tmp, ws, s) = origin_fixture();
+        let sha = answer(&ws, "a");
+        git(&ws, &["update-ref", reference, &sha]);
+        assert_eq!(waiting_ids(&s), ["a"], "{reference}");
+        git(&ws, &["update-ref", "-d", reference]);
+        let path = ws.join(".git").join(reference);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{}\n", "1".repeat(40))).unwrap();
+        let asks = s.asks();
+        let waiting = views::unlanded(&s, asks.data.as_deref().unwrap());
+        assert!(waiting.data.is_none(), "{reference}");
+        assert!(!waiting.errors.is_empty(), "{reference}");
+    }
+}

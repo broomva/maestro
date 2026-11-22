@@ -145,3 +145,27 @@ fn a_fifo_where_git_looks_cannot_hang_the_ref_resolution() {
     assert!(e.contains("git rev-parse did not answer within 1s"), "{e}");
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
 }
+
+#[test]
+fn verified_commit_reads_the_exact_message_and_parent() {
+    let (_tmp, root, parent) = repo("x");
+    std::fs::write(root.join("f"), "y").unwrap();
+    git(&root, &["commit", "-qam", "answer\n\nMaestro-Owner-Proof: {}"]);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let commit = maestro_store::tree::verified_commit(&root, &head, T).unwrap();
+    assert_eq!(commit.parents, [parent]);
+    assert!(commit.message.contains("Maestro-Owner-Proof: {}"));
+    let forged = "1".repeat(40);
+    let objects = root.join(".git/objects");
+    let from = objects.join(&head[..2]).join(&head[2..]);
+    let to = objects.join(&forged[..2]).join(&forged[2..]);
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    std::fs::copy(from, to).unwrap();
+    let error = maestro_store::tree::verified_commit(&root, &forged, T).unwrap_err();
+    assert!(error.contains("does not hash to its id"), "{error}");
+    let malformed = root.join("bad-commit");
+    let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
+    std::fs::write(&malformed, format!("tree {tree}\nparent --bad\n\nmessage\n")).unwrap();
+    let bad = git(&root, &["hash-object", "--literally", "-t", "commit", "-w", malformed.to_str().unwrap()]);
+    assert!(maestro_store::tree::verified_commit(&root, &bad, T).unwrap_err().contains("invalid parent"));
+}
