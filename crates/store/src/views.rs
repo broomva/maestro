@@ -707,6 +707,54 @@ mod tests {
     use super::*;
     use maestro_core::loops::LoopSpec;
 
+    fn branch_with_asks(whole_directory_broken: bool) -> (tempfile::TempDir, Store) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        let asks = ws.join(".control/asks");
+        std::fs::create_dir_all(&asks).unwrap();
+        std::fs::write(asks.join("a.yaml"), "asks: []\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new(crate::tree::git())
+                .current_dir(&ws)
+                .args(["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "main"]);
+        git(&["checkout", "-qb", "maestro/answers"]);
+        if whole_directory_broken {
+            std::fs::remove_dir_all(&asks).unwrap();
+            std::fs::write(&asks, "not a directory").unwrap();
+        } else {
+            std::fs::write(asks.join("a.yaml"), "asks: [broken\n").unwrap();
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "broken"]);
+        git(&["checkout", "-q", "main"]);
+        let store = Store::new(crate::Paths::under(tmp.path().to_path_buf()), crate::TreeSource::GitRev("main".into()));
+        (tmp, store)
+    }
+
+    #[test]
+    fn unread_branch_directory_has_no_answer_set() {
+        let (_tmp, store) = branch_with_asks(true);
+        let (answers, errors) = answered_at_ref(&store, "refs/heads/maestro/answers", "maestro/answers");
+        assert!(answers.is_none());
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn branch_ledger_errors_name_the_branch() {
+        let (_tmp, store) = branch_with_asks(false);
+        let (answers, errors) = answered_at_ref(&store, "refs/heads/maestro/answers", "maestro/answers");
+        assert!(answers.is_some());
+        assert!(errors.iter().any(|e| e.at.starts_with("maestro/answers:.control/asks/a.yaml")), "{errors:?}");
+    }
+
     fn tick(started_at: &str) -> Tick {
         Tick {
             loop_id: "l".into(),

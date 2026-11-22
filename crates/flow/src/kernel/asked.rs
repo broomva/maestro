@@ -2301,16 +2301,28 @@ fn rejected_amend_pin_is_never_filed() {
     let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
     let before = f.ledger_text();
     let marker = f.ws.join("writer-invoked");
-    std::fs::write(
-        f.ws.join("scripts/ask_ledger.py"),
-        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(2)\n", marker.to_str().unwrap()),
-    )
-    .unwrap();
+    f.edit_branch("scripts/ask_ledger.py", |_| {
+        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(2)\n", marker.to_str().unwrap())
+    });
     seams::REJECT_AMEND_PIN.with(|c| c.set(true));
     assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_changed");
     assert_eq!(f.ledger_text(), before);
     assert!(!marker.exists(), "rejected pin reached the writer");
     assert!(f.row(&old).unwrap().row.get("archived_at").is_none());
+}
+
+#[test]
+fn a_new_amendment_must_confirm_its_predecessor_before_linking() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    f.edit_branch("scripts/ask_ledger.py", |script| {
+        let before = "\"superseded_by\": entry.get(\"uid\", entry[\"id\"])";
+        assert!(script.contains(before));
+        script.replace(before, "\"superseded_by\": \"wrong-replacement\"")
+    });
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_unconfirmed");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned"]);
 }
 
 #[test]

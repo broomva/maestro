@@ -58,6 +58,15 @@ fn a_worktree_without_remote_main_is_unread() {
 }
 
 #[test]
+fn a_readable_worktree_does_not_claim_a_landing_count() {
+    let line = asks_line("worktree", |ws| {
+        git(ws, &["update-ref", "refs/remotes/origin/main", "refs/heads/main"]);
+    });
+    assert!(line.contains("1 open"), "{line}");
+    assert!(!line.contains("answered in this checkout"), "{line}");
+}
+
+#[test]
 fn a_waiting_answer_is_counted_exactly() {
     let line = asks_line("main", |ws| {
         git(ws, &["checkout", "-q", "-b", "maestro/answers"]);
