@@ -765,3 +765,24 @@ fn corrupt_and_truncated_counts_are_quarantined_and_bounded() {
         allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
     }
 }
+
+#[test]
+fn release_is_pruned_when_instance_finishes() {
+    let f = fx();
+    let fi = f.begin("d1");
+    for _ in 0..3 {
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    assert!(std::fs::read_to_string(&file).unwrap().contains(&fi));
+    std::fs::write(f.work.join("ok"), "").unwrap();
+    for node in ["one", "two"] {
+        let c = f.call(CLAIM, f.as_("d1", json!({ "instance": fi, "node_id": node })));
+        let done = f.call(COMPLETE, f.as_("d1", json!({ "claim_token": c["claim_token"] })));
+        assert_eq!(done["ok"], true, "{done}");
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert!(!std::fs::read_to_string(&file).unwrap().contains(&fi));
+}

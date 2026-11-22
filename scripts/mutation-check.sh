@@ -2431,6 +2431,7 @@ mutate $gt '                },
             };' '                },
                 Err(e) => return self.fail_open(Some(&session), "refusals_unread", &e.to_string()),
             };'
+mutate $gt '                        r.prune(&open);' ''
 # The gate's own no-progress record carries the release into the next turn.
 mutate $gt '                    counts.recorded_release(instance, *seq);' '                    let _ = (instance, seq);'
 mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
