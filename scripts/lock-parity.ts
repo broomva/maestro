@@ -8,8 +8,8 @@
 //   1. the plugin holds the ledger's lock: `maestro ask file` waits for it, and lands after release;
 //   2. the writer holds it (a slow filing): the plugin's acquireLock is refused (stub only);
 //   3. a dead holder's lock, old enough, made as the plugin's grammar says, is reclaimed;
-//   4. 20 parallel `maestro ask file` while the plugin answers the five seeded asks: 25 entries,
-//      every filed id once, every answer in, the ledger reads (nothing lost, nothing torn).
+//   4. The plugin answers five seeded asks and commits them to the scratch ledger branch; 20
+//      parallel filings retain all five answers and add each new id once, with plugin lock holds.
 // The journal: Maestro's own port (crates/store/src/locks.rs) guards the requests journal. Checks 5-8
 // put the plugin's acquireLock against it on the journal's key:
 //   5. the plugin holds it: `maestro queue` waits and writes after the release;
@@ -37,12 +37,31 @@ const fail = (what: string): never => {
 let round = 0;
 function machine() {
   const root = join(work, `m${round++}`);
+  const ws = join(root, "ws");
+  const checkout = join(root, "ledger-checkout");
+  const origin = join(root, "origin.git");
   mkdirSync(join(root, "ws/.control/asks"), { recursive: true });
   mkdirSync(join(root, "ws/scripts"), { recursive: true });
   copyFileSync(join(fixtures, "ledger.yaml"), join(root, "ws/.control/asks/ledger.yaml"));
   copyFileSync(join(fixtures, "ask_ledger_stub.py"), join(root, "ws/scripts/ask_ledger.py"));
   mkdirSync(join(root, "broomva-home/ledger/requests"), { recursive: true });
-  return { root, ledger: join(root, "ws/.control/asks/ledger.yaml"), locks: join(root, "locks") };
+  mkdirSync(join(root, "bin"), { recursive: true });
+  writeFileSync(join(root, "bin/gh"), "#!/bin/sh\nprintf '1\\n'\n", { mode: 0o755 });
+  const git = (cwd: string, ...args: string[]) => {
+    const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+    if (result.exitCode !== 0) fail(`git ${args.join(" ")}: ${result.stderr.toString()}`);
+  };
+  git(root, "init", "-q", "--bare", "-b", "main", origin);
+  git(ws, "init", "-q", "-b", "main");
+  git(ws, "config", "user.name", "Lock parity");
+  git(ws, "config", "user.email", "lock-parity@example.invalid");
+  git(ws, "config", "commit.gpgsign", "false");
+  git(ws, "add", ".");
+  git(ws, "commit", "-qm", "Seed ledger");
+  git(ws, "remote", "add", "origin", origin);
+  git(ws, "push", "-qu", "origin", "main");
+  git(ws, "worktree", "add", "-q", "--detach", checkout, "main");
+  return { root, ws, checkout, git, ledger: join(checkout, ".control/asks/ledger.yaml"), locks: join(root, "locks") };
 }
 
 const writer = process.env.LOCK_PARITY_WRITER;
@@ -60,13 +79,15 @@ async function run(root: string, args: string[], env: Record<string, string> = {
     [maestro, ...args],
     {
       env: {
-        PATH: process.env.PATH ?? "",
+        PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
         PYTHONUSERBASE: process.env.PYTHONUSERBASE ?? "",
         HOME: join(root, "home"),
         BROOMVA_WORKSPACE: join(root, "ws"),
         BROOMVA_HOME: join(root, "broomva-home"),
         MAESTRO_PASEO_ASK_LOCKS: join(root, "locks"),
         MAESTRO_FLEET_STATE: join(root, "fleet"),
+        MAESTRO_ANSWERS_CHECKOUT: join(root, "ledger-checkout"),
+        MAESTRO_OWNER_DIR: join(root, "owner"),
         MAESTRO_TREE: "worktree",
         ...(writer ? { MAESTRO_ASK_LEDGER: writer } : {}),
         ...env,
@@ -130,22 +151,29 @@ else {
   console.log("lock-parity 3 ok: maestro reclaimed a dead holder's 200 s old lock");
 }
 
-// 4. Twenty filers and the plugin's answers, together.
+// 4. Plugin answers on the branch, followed by twenty filers and plugin lock holds.
 {
   const m = machine();
+  for (let n = 1; n <= 5; n++) {
+    await answerDecision(
+      m.ledger,
+      { uid: null, id: `seed-${n}`, hash: null, option: "close", note: "" },
+      { lockRoot: m.locks, receipts: join(m.root, "receipts.jsonl"), waitMs: 30_000 },
+    );
+  }
+  m.git(m.checkout, "add", "--", ".control/asks/ledger.yaml");
+  m.git(m.checkout, "commit", "-qm", "Plugin answers");
+  m.git(m.checkout, "push", "-q", "origin", "HEAD:refs/heads/maestro/ledger");
   const filers = Array.from({ length: 20 }, (_, i) => file(m.root, `par-${i}`));
-  const answers = (async () => {
-    for (let n = 1; n <= 5; n++) {
-      await answerDecision(
-        m.ledger,
-        { uid: null, id: `seed-${n}`, hash: null, option: "close", note: "" },
-        { lockRoot: m.locks, receipts: join(m.root, "receipts.jsonl"), waitMs: 30_000 },
-      );
+  const holds = (async () => {
+    for (let n = 0; n < 5; n++) {
+      const lock = await acquireLock(m.ledger, m.locks, { waitMs: 30_000 });
       await sleep(30);
+      await releaseLock(lock);
     }
   })();
   const results = await Promise.all(filers);
-  await answers;
+  await holds;
   for (const [i, r] of results.entries()) if (r.code !== 0) fail(`filer par-${i}: ${r.stderr}`);
   const asks = decisionsOf(readFileSync(m.ledger, "utf8"), "ledger.yaml");
   if (asks.length !== 25) fail(`${asks.length} entries, want 25`);
@@ -155,7 +183,7 @@ else {
   }
   const answered = asks.filter((a) => a.id.startsWith("seed-") && a.state !== "open").length;
   if (answered !== 5) fail(`${answered} of 5 plugin answers survived`);
-  console.log("lock-parity 4 ok: 20 parallel filings and 5 plugin answers, 25 entries, 0 lost, 0 torn");
+  console.log("lock-parity 4 ok: 20 parallel filings retained 5 committed plugin answers, 25 entries, 0 lost, 0 torn");
 }
 
 // The journal, under Maestro's own lock port.
