@@ -33,9 +33,9 @@
 //!
 //! A gate that refuses forever traps a session. [`Refusals`] counts, per session, how many stops in
 //! a row the gate refused over each instance at one log position (its `seq`). The count starts
-//! again whenever the instance's `seq` moves, and an instance the gate no longer refuses over
-//! drops out. Once an instance has been refused [`MAX_REFUSALS`] times at one position, the next
-//! stop over it goes through and the gate records `no_progress` ([`Refusals::tally`]).
+//! again whenever the instance's `seq` moves. Released instances remain released at that
+//! position, even when temporarily absent from the work list. Once an instance has been refused
+//! [`MAX_REFUSALS`] times at one position, the next stop goes through and records `no_progress`.
 //!
 //! The counts are one JSON file per session under the ledger's own root, `stop-gate/<digest>.json`
 //! (named by the digest of the session's `SessionRef` and owner marker, so a replacement starts
@@ -558,15 +558,16 @@ impl Refusals {
 
     /// Counts one more stop over `refusing`, the instances the gate would refuse over now: each
     /// is refused again unless it was refused [`MAX_REFUSALS`] times at its current `seq` already.
-    /// A count at another `seq` starts again, and an instance not in `refusing` drops out.
+    /// A count at another `seq` starts again. Absent instances retain only a released count.
     pub fn tally(&mut self, refusing: &[&Assessment]) -> Tally {
         let mut tally = Tally::default();
-        let mut counts = BTreeMap::new();
+        let mut counts = self.counts.clone();
+        counts.retain(|_, c| c.refusals > MAX_REFUSALS);
         for a in refusing {
             let prior = self.counts.get(&a.instance).filter(|c| c.seq == a.seq).map_or(0, |c| c.refusals);
             let refusals = if prior >= MAX_REFUSALS {
                 tally.spent.push(a.instance.clone());
-                prior
+                MAX_REFUSALS + 1
             } else {
                 tally.refused.push(a.instance.clone());
                 prior + 1
@@ -575,6 +576,17 @@ impl Refusals {
         }
         self.counts = counts;
         tally
+    }
+
+    /// Carry a release across the gate's own record, but only when it immediately followed the
+    /// assessed position. Any intervening event must re-arm the gate.
+    pub fn recorded_release(&mut self, instance: &str, seq: u64) {
+        if let Some(count) = self.counts.get_mut(instance)
+            && count.refusals > MAX_REFUSALS
+            && count.seq.checked_add(1) == Some(seq)
+        {
+            count.seq = seq;
+        }
     }
 
     /// Writes the counts, whole, through the root `guard` holds: aside, then renamed over the old

@@ -520,9 +520,8 @@ impl Run<'_> {
         }
         let refusing: Vec<&Assessment> = open.refusing().collect();
         if refusing.is_empty() {
-            // Nothing refused: a count in a row is broken, unread instances beside it or not, so
-            // an instance that reads again later starts its count afresh. Only counts there are
-            // need clearing.
+            // Nothing refused: clear interrupted refusal counts while preserving releases, even
+            // when an instance is temporarily unread.
             if counted {
                 let cleared =
                     self.ledger(&root).map_err(|(code, why)| format!("{code}: {why}")).and_then(|mut ledger| {
@@ -682,6 +681,19 @@ impl Run<'_> {
             let day = maestro_flow::clock::now().to_string();
             let day = day.get(..10).unwrap_or_default();
             key.push_str(&format!("\nunrecorded\n{session}\n{reason:?}\n{}\n{day}", failed.join("\n")));
+        }
+        if reason == Unblockable::NoProgress && !made.is_empty() {
+            let saved = (|| -> Result<(), KernelError> {
+                let guard = ledger.lock()?;
+                let mut counts = Refusals::load(&guard, me)?;
+                for (instance, seq) in &made {
+                    counts.recorded_release(instance, *seq);
+                }
+                counts.save(&guard, me)
+            })();
+            if let Err(e) = saved {
+                self.note(format!("the release position could not be saved ({}: {e}).", busy_code(e.code())));
+            }
         }
         self.out.recorded.extend(made);
         self.alert(&session, &key, LEFT_WORK, &words, &Principal::Unverified);

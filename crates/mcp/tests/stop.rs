@@ -224,8 +224,39 @@ fn the_fourth_stop_at_one_position_goes_through_recorded_and_alerted() {
     // `status` reports it.
     let status = f.call(STATUS, json!({ "instance": fi }));
     assert_eq!(status["status"]["stop_unblockable"].as_array().unwrap().len(), 1, "{status}");
-    // The record moved the instance, so the count starts again: refused anew.
-    assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked);
+    // The gate's own record does not re-arm it.
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert_eq!(f.events(&fi).len(), 2);
+}
+
+#[test]
+fn released_instance_stays_released_and_other_work_is_reported() {
+    let f = fx();
+    let first = f.begin("d1");
+    for _ in 0..3 {
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let second = f.begin("d1");
+    let reason = refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert!(reason.contains(&second), "{reason}");
+    assert!(!reason.contains(&first), "{reason}");
+}
+
+#[test]
+fn released_instance_rearms_after_a_new_event() {
+    let f = fx();
+    let fi = f.begin("d1");
+    for _ in 0..3 {
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let claim = f.call(CLAIM, f.as_("d1", json!({ "instance": fi, "node_id": "one" })));
+    assert_eq!(claim["ok"], true, "{claim}");
+    let reason = refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert!(reason.contains(&fi), "{reason}");
 }
 
 #[test]

@@ -2421,6 +2421,10 @@ mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() &&
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
 mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
 mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+# BRO-4057: a new log event re-arms a released instance.
+mutate $stp '            let prior = self.counts.get(&a.instance).filter(|c| c.seq == a.seq).map_or(0, |c| c.refusals);' '            let prior = self.counts.get(&a.instance).map_or(0, |c| c.refusals);'
+# The gate's own no-progress record carries the release into the next turn.
+mutate $gt '                    counts.recorded_release(instance, *seq);' '                    let _ = (instance, seq);'
 mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
 mutate $replay '            self.unblockable.push(record);' ''
 mutate $asks '        return AnswerSeen::Landed;' '        return AnswerSeen::Open;'
