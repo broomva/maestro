@@ -639,3 +639,26 @@ fn open_shows_a_re_ask_with_inputs_changed() {
         }]
     );
 }
+
+#[test]
+fn released_count_survives_absence_from_work() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    r.counts.insert("fi_a".into(), Count { seq: 4, refusals: MAX_REFUSALS + 1 });
+    r.tally(&[]);
+    assert_eq!(r.tally(&[&at("fi_a", 4)]).spent, ["fi_a"]);
+}
+
+#[test]
+fn intervening_event_does_not_carry_release() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    r.counts.insert("fi_a".into(), Count { seq: 4, refusals: MAX_REFUSALS + 1 });
+    r.recorded_release("fi_a", 6);
+    assert_eq!(r.tally(&[&at("fi_a", 6)]).refused, ["fi_a"]);
+}
+
