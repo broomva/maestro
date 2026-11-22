@@ -439,7 +439,11 @@ pub(crate) fn next_of(log: &Log, started: &Started, now: Timestamp) -> Result<Ne
 /// judges (`stop::assess`).
 pub(crate) fn read_both(log: &Log, started: &Started, now: Timestamp) -> Result<(Status, Next), KernelError> {
     let fold = Fold::replay(log, started)?;
-    let (status, stale) = fold.read(log, started, now);
+    let (mut status, stale) = fold.read(log, started, now);
+    if fold.abandoned {
+        status.nodes.clear();
+        status.repeats.clear();
+    }
     let whole = status.clone();
     let mut enabled = Vec::new();
     let mut pending = BTreeMap::new();
@@ -457,7 +461,7 @@ pub(crate) fn read_both(log: &Log, started: &Started, now: Timestamp) -> Result<
                 class: s.class,
                 iteration: s.iteration,
             });
-        } else if s.state != State::Done {
+        } else if !fold.abandoned && s.state != State::Done {
             pending.insert(id, s);
         }
     }
@@ -700,6 +704,7 @@ struct Fold<'a> {
     unblockable: Vec<StopRecord>,
     /// First log position at which the event-time projection became terminal.
     latched_at: Option<u64>,
+    abandoned: bool,
 }
 
 /// A human node's ask as the log has it: pinned (`AskPinned`), and linked once confirmed
@@ -793,6 +798,7 @@ impl<'a> Fold<'a> {
             owners: adoption::owners(log, started)?,
             unblockable: Vec::new(),
             latched_at: None,
+            abandoned: false,
         };
         let first = &log.events[0];
         let at: Timestamp =
@@ -863,6 +869,11 @@ impl<'a> Fold<'a> {
 
     /// Applies one event if it fits; the inner error is why it was set aside.
     fn accept(&mut self, log: &Log, e: &Event, at: Timestamp) -> Result<Result<Change, &'static str>, KernelError> {
+        if e.kind == super::events::Abandoned::KIND {
+            let _: super::events::Abandoned = body(log, e)?;
+            self.abandoned = true;
+            return Ok(Ok(Change::Inert));
+        }
         if e.kind == Guarded::KIND {
             let g: Guarded = body(log, e)?;
             return Ok(self.guarded(g, at).map(|()| Change::State));
@@ -1196,7 +1207,7 @@ impl<'a> Fold<'a> {
 
     /// Evaluate terminality without constructing the status report or copying its event lists.
     fn terminal_at(&self, now: Timestamp) -> bool {
-        if self.latched_at.is_some() {
+        if self.abandoned || self.latched_at.is_some() {
             return true;
         }
         let mut eval = Eval::new(self, now);

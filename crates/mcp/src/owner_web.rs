@@ -266,6 +266,35 @@ impl Owner {
         Ok(serde_json::json!({ "nonce": nonce, "challenge": challenge, "rp_id": self.party.id, "credentials": ids }))
     }
 
+    /// Bind an abandonment to the instance and reason the owner will sign.
+    pub fn abandon_begin(&self, req: &AbandonBegin) -> Result<serde_json::Value, String> {
+        let keyring = Keyring::load(&self.dir)?;
+        let ids: Vec<&str> =
+            keyring.credentials.iter().filter(|c| c.rp_id == self.party.id).map(|c| c.id.as_str()).collect();
+        if ids.is_empty() {
+            return Err("no passkey is set up for this address".into());
+        }
+        maestro_flow::InstanceId::new(&req.instance).map_err(|e| e.to_string())?;
+        let reason = req.reason.trim();
+        if reason.is_empty() || reason.chars().count() > 2000 {
+            return Err("a reason of at most 2000 characters is required".into());
+        }
+        let intent = Intent::abandon(&req.instance, reason);
+        let nonce = passkey::nonce();
+        let challenge = passkey::challenge(&intent.canonical(), &nonce);
+        self.keep(
+            &nonce,
+            Pending::Answer {
+                intent,
+                label: "Abandon this flow instance".into(),
+                session: None,
+                challenge: challenge.clone(),
+                at: Instant::now(),
+            },
+        );
+        Ok(serde_json::json!({ "nonce": nonce, "challenge": challenge, "rp_id": self.party.id, "credentials": ids }))
+    }
+
     /// Finish an answer: the assertion must verify over the challenge. The answer is then held for
     /// the undo window and written by a background task.
     pub fn answer_finish(&self, nonce: &str, a: &Assertion, now: jiff::Timestamp) -> Result<Receipt, String> {
@@ -313,6 +342,12 @@ impl Owner {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AbandonBegin {
+    pub instance: String,
+    pub reason: String,
+}
+
 /// What the page sends to start an answer.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AnswerBegin {
@@ -354,6 +389,58 @@ mod tests {
             remote: false,
         };
         Owner::new(party(), dir.join("owner"), writer)
+    }
+
+    #[tokio::test]
+    async fn signed_abandonment_waits_for_undo_and_undo_appends_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let o = owner(d.path());
+        keyring().save(&o.dir).unwrap();
+        std::fs::create_dir_all(o.writer.workspace.join(".broomva")).unwrap();
+        let root = crate::flow::flows_root(&o.writer.workspace).unwrap();
+        let host = crate::flow::host_id().unwrap();
+        let mut ledger = maestro_flow::Ledger::open(&root, &host, maestro_flow::Options::default()).unwrap();
+        let me = maestro_core::session::VerifiedSession::new(
+            "t3:-/test".parse().unwrap(),
+            d.path().to_string_lossy(),
+            None,
+            None,
+            vec![],
+        )
+        .with_owner_marker("owner-marker");
+        let flow = maestro_flow::kernel::compile(
+            "flow: example\nversion: 1\nnodes:\n  step: {class: work, verify: ['true']}\n",
+        )
+        .unwrap();
+        let first = maestro_flow::kernel::start(&mut ledger, &me, &flow, serde_json::json!({})).unwrap().instance;
+        let second = maestro_flow::kernel::start(&mut ledger, &me, &flow, serde_json::json!({})).unwrap().instance;
+        drop(ledger);
+        let signed = |instance: &maestro_flow::InstanceId| {
+            let begin = o
+                .abandon_begin(&AbandonBegin { instance: instance.to_string(), reason: "finished elsewhere".into() })
+                .unwrap();
+            let nonce = begin["nonce"].as_str().unwrap();
+            let challenge = begin["challenge"].as_str().unwrap();
+            o.answer_finish(nonce, &sign(challenge), jiff::Timestamp::now()).unwrap()
+        };
+        let undone = signed(&first);
+        let applied = signed(&second);
+        o.undo(&undone.id, jiff::Timestamp::now().as_millisecond()).unwrap();
+        let read = || maestro_flow::Reader::new(&root, maestro_flow::Options::default()).unwrap();
+        assert_eq!(read().lock().unwrap().log(&second).unwrap().events.len(), 1);
+        tokio::time::sleep(answers::UNDO + Duration::from_millis(500)).await;
+        assert_eq!(read().lock().unwrap().log(&first).unwrap().events.len(), 1);
+        let log = read().lock().unwrap().log(&second).unwrap();
+        assert_eq!(log.events.len(), 2);
+        assert_eq!(log.events[1].kind, "Abandoned");
+        let by = log.events[1].body["by"].as_str().unwrap();
+        assert!(by.starts_with("owner (passkey "));
+        assert_eq!(o.receipt(&applied.id).unwrap().stage, Stage::Written);
+        // Recovery retries the same signed receipt if the daemon stopped after append.
+        o.book.put(applied.clone());
+        answers::apply(&o.writer, &o.book, &applied.id, &sign("unused"), "unused", by, None);
+        assert_eq!(o.receipt(&applied.id).unwrap().stage, Stage::Written);
+        assert_eq!(read().lock().unwrap().log(&second).unwrap().events.len(), 2);
     }
 
     #[test]

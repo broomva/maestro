@@ -68,6 +68,8 @@ pub fn router_with(server: MaestroServer, local: SocketAddr, owner: Result<crate
         .route("/owner", get(owner_page))
         .route("/owner/enroll/begin", post(enroll_begin))
         .route("/owner/enroll/finish", post(enroll_finish))
+        .route("/owner/flow/abandon/begin", post(abandon_begin))
+        .route("/owner/flow/abandon/finish", post(answer_finish))
         .route("/owner/answer/begin", post(answer_begin))
         .route("/owner/answer/finish", post(answer_finish))
         .route("/owner/answer/undo", post(answer_undo))
@@ -350,6 +352,21 @@ async fn enroll_finish(State(web): State<Web>, uri: Uri, headers: HeaderMap, bod
     match owner.enroll_finish(&req.nonce, &req.registration, &at) {
         Ok(()) => json_reply(StatusCode::OK, json!({ "enrolled": true })),
         Err(e) => refusal(StatusCode::FORBIDDEN, e),
+    }
+}
+
+async fn abandon_begin(State(web): State<Web>, uri: Uri, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let owner = match owner_admitted(&web, &uri, &headers, true) {
+        Ok(o) => o,
+        Err(r) => return r,
+    };
+    let req: crate::owner_web::AbandonBegin = match body_of(&body) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    match owner.abandon_begin(&req) {
+        Ok(v) => json_reply(StatusCode::OK, v),
+        Err(e) => refusal(StatusCode::CONFLICT, e),
     }
 }
 

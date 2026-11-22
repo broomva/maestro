@@ -639,3 +639,59 @@ fn open_shows_a_re_ask_with_inputs_changed() {
         }]
     );
 }
+
+#[test]
+fn abandonment_replays_stably_and_old_logs_remain_unchanged() {
+    let (mut f, fi) = with(RELAY);
+    let before = {
+        let guard = f.ledger.lock().unwrap();
+        guard.log(&fi).unwrap()
+    };
+    let old_status = {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        let guard = reader.lock().unwrap();
+        status(&guard, &fi, clock::now()).unwrap()
+    };
+    let principal = maestro_core::authority::Principal::Owner { via: "owner (passkey fixture)".into() };
+    abandon(&mut f.ledger, &principal, &fi, "no longer needed", "stable-action").unwrap();
+    let guard = f.ledger.lock().unwrap();
+    let after = guard.log(&fi).unwrap();
+    assert_eq!(&after.events[..before.events.len()], &before.events);
+    let started = super::replay::pinned(&after).unwrap();
+    let at = clock::now();
+    assert_eq!(
+        super::replay::read_both(&after, &started, at).unwrap(),
+        super::replay::read_both(&after, &started, at).unwrap()
+    );
+    let old_started = super::replay::pinned(&before).unwrap();
+    assert_eq!(super::replay::read_both(&before, &old_started, at).unwrap().0, old_status);
+}
+
+#[test]
+fn agent_cannot_abandon_and_appends_nothing() {
+    let (mut f, fi) = with(RELAY);
+    let before = f.ledger.lock().unwrap().log(&fi).unwrap().seq();
+    let principal = maestro_core::authority::Principal::Agent { session: "t3:-/agent".parse().unwrap() };
+    assert_eq!(
+        abandon(&mut f.ledger, &principal, &fi, "no longer needed", "agent-attempt").unwrap_err().code(),
+        "owner_action_required"
+    );
+    assert_eq!(f.ledger.lock().unwrap().log(&fi).unwrap().seq(), before);
+}
+
+#[test]
+fn abandonment_is_terminal_and_not_reported_by_stop_gate() {
+    let (mut f, fi) = with(RELAY);
+    let principal = maestro_core::authority::Principal::Owner { via: "owner (passkey fixture)".into() };
+    abandon(&mut f.ledger, &principal, &fi, "no longer needed", "signed-action").unwrap();
+    assert!(abandon(&mut f.ledger, &principal, &fi, "no longer needed", "signed-action").unwrap().is_none());
+    let a = judge(&f, &fi);
+    assert!(a.terminal && a.work.is_empty() && a.waiting.is_empty());
+    assert!(open_for(&f, &f.me).instances.is_empty());
+    let me = f.me.clone();
+    assert_eq!(claim(&mut f.ledger, &me, &fi, "one").unwrap_err().code(), "instance_terminal");
+    let guard = f.ledger.lock().unwrap();
+    let log = guard.log(&fi).unwrap();
+    assert_eq!(log.events.last().unwrap().body["by"], "owner (passkey fixture)");
+    assert!(super::replay::latched(&log, &super::replay::pinned(&log).unwrap()).unwrap());
+}

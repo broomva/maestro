@@ -94,6 +94,9 @@ pub enum KernelError {
 /// is a normal result: the code says why, and the caller decides what to do next.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
+    /// Only an owner principal may abandon an instance.
+    #[error("Only the owner may abandon a flow instance.")]
+    OwnerActionRequired,
     /// A terminal instance takes no further writes.
     #[error("Instance {instance} is terminal, so nothing was recorded.")]
     InstanceTerminal { instance: String },
@@ -246,6 +249,7 @@ pub enum Refusal {
 impl Refusal {
     pub fn code(&self) -> &'static str {
         match self {
+            Refusal::OwnerActionRequired => "owner_action_required",
             Refusal::InstanceTerminal { .. } => "instance_terminal",
             Refusal::NoOwnerMarker => "no_owner_marker",
             Refusal::NoOwner { .. } => "no_owner",

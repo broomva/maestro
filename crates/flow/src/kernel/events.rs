@@ -503,3 +503,16 @@ pub fn receipt_digest(outputs: &Value, value: Option<&str>) -> String {
 pub fn performer_receipt_digest(outputs: &Value, value: Option<&str>, performer: &Value) -> String {
     digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer }))
 }
+
+/// An owner ended an instance before its flow completed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Abandoned {
+    pub reason: String,
+    pub by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
+}
+
+impl KernelEvent for Abandoned {
+    const KIND: &'static str = "Abandoned";
+}

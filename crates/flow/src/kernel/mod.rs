@@ -85,5 +85,5 @@ pub use replay::{
 pub use spine::{DefinitionMismatch, Difference, Side, Spine, SpineRecord, compare, definition_mismatch, spine};
 pub use write::{
     Beat, Choosing, Claim, Completion, DEFAULT_LEASE_SECS, MAX_ARGV, MAX_LEASE_SECS, MAX_OUTPUTS, MAX_TOKEN, PROVIDERS,
-    Verdict, choose, claim, claim_as, complete, complete_as, heartbeat, provider_of,
+    Verdict, abandon, choose, claim, claim_as, complete, complete_as, heartbeat, provider_of,
 };

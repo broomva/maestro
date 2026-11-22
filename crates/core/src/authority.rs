@@ -57,6 +57,8 @@ impl Principal {
 pub enum OwnerVerb {
     #[serde(rename = "ask.answer")]
     AskAnswer,
+    #[serde(rename = "flow.abandon")]
+    AbandonFlow,
     #[serde(rename = "approval.decide")]
     ApprovalDecide,
     #[serde(rename = "work.verdict")]
@@ -74,8 +76,9 @@ pub enum OwnerVerb {
 }
 
 impl OwnerVerb {
-    pub const ALL: [OwnerVerb; 8] = [
+    pub const ALL: [OwnerVerb; 9] = [
         Self::AskAnswer,
+        Self::AbandonFlow,
         Self::ApprovalDecide,
         Self::WorkVerdict,
         Self::WorkDispatch,

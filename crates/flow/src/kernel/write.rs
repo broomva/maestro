@@ -1301,6 +1301,35 @@ pub(super) fn record(
     Ok(Some(append_writable(guard, &log.instance, log.seq(), verdict.to_event()?)?))
 }
 
+/// End an instance on an authenticated owner action. No agent session may take this verb.
+pub fn abandon(
+    ledger: &mut Ledger,
+    principal: &maestro_core::authority::Principal,
+    instance: &InstanceId,
+    reason: &str,
+    action_id: &str,
+) -> Result<Option<Appended>, KernelError> {
+    if !principal.permits(maestro_core::authority::Authority::OwnerAction) {
+        return Err(Refusal::OwnerActionRequired.into());
+    }
+    let via = match principal {
+        maestro_core::authority::Principal::Owner { via } => via.clone(),
+        _ => String::new(),
+    };
+    let mut guard = ledger.lock()?;
+    let log = guard.log(instance)?;
+    let event =
+        super::events::Abandoned { reason: reason.to_string(), by: via, action_id: Some(action_id.to_string()) };
+    if let Some(last) = log.events.last().filter(|e| e.kind == super::events::Abandoned::KIND) {
+        let previous: super::events::Abandoned = super::replay::body(&log, last)?;
+        if previous == event {
+            return Ok(None);
+        }
+    }
+    check_writable(&log, &pinned(&log)?)?;
+    append_writable(&mut guard, instance, log.seq(), event.to_event()?).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
