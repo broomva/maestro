@@ -589,6 +589,14 @@ impl Refusals {
         tally
     }
 
+    /// Discard counts for instances known to be terminal, retired, or no longer owned.
+    /// Unread instances must remain because their ownership is unknown.
+    pub fn prune(&mut self, open: &Open) {
+        self.counts.retain(|id, _| {
+            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)
+        });
+    }
+
     /// Carry a release across the gate's own record, but only when it immediately followed the
     /// assessed position. Any intervening event must re-arm the gate.
     pub fn recorded_release(&mut self, instance: &str, seq: u64) {

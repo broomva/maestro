@@ -662,3 +662,22 @@ fn intervening_event_does_not_carry_release() {
     assert_eq!(r.tally(&[&at("fi_a", 6)]).refused, ["fi_a"]);
 }
 
+#[test]
+fn prune_drops_gone_releases_but_keeps_open_and_unread() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    for id in ["fi_gone", "fi_open", "fi_unread"] {
+        r.counts.insert(id.into(), Count { seq: 4, refusals: MAX_REFUSALS + 1 });
+    }
+    let open = stop::Open {
+        session: "owner".into(),
+        instances: vec![at("fi_open", 4)],
+        unread: vec![stop::Unread { instance: "fi_unread".into(), code: "broken".into(), reason: "broken".into() }],
+    };
+    r.prune(&open);
+    assert!(!r.counts.contains_key("fi_gone"));
+    assert!(r.counts.contains_key("fi_open"));
+    assert!(r.counts.contains_key("fi_unread"));
+}

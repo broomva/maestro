@@ -539,6 +539,7 @@ impl Run<'_> {
                     self.ledger(&root).map_err(|(code, why)| format!("{code}: {why}")).and_then(|mut ledger| {
                         let guard = ledger.lock().map_err(|e| format!("{}: {e}", busy_code(e.code())))?;
                         let mut r = Refusals::load(&guard, &me).map_err(|e| format!("{}: {e}", busy_code(e.code())))?;
+                        r.prune(&open);
                         r.tally(&[]);
                         r.save(&guard, &me).map_err(|e| format!("{}: {e}", busy_code(e.code())))
                     });
@@ -592,6 +593,7 @@ impl Run<'_> {
                 },
                 Err(e) => return self.block_unread_counts(&session, &e.to_string()),
             };
+            counts.prune(&open);
             let tally = counts.tally(&refusing);
             if let Err(e) = counts.save(&guard, &me) {
                 return self.fail_open(Some(&session), "refusals_unwritten", &format!("{}: {e}", busy_code(e.code())));
