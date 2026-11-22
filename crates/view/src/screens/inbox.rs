@@ -104,7 +104,9 @@ fn banner(cx: &Ctx, waiting: usize, partial: bool, filtered: bool) -> Markup {
         } @else {
             div class="mv-banner" data-tone="info" {
                 p class="mv-banner-title" {
-                    (at_least(waiting, partial)) " answered and in effect, waiting to land on main"
+                    (at_least(waiting, partial)) " answered and in effect, not yet on "
+                    // The count's baseline is the tree read, named as the header names it.
+                    span class="bv-code" { (crate::page::Shell { tree: cx.snap.tree.clone(), ..Default::default() }.tree_short()) }
                 }
                 p class="bv-meta" {
                     @if filtered { "Counted for the whole checkout, not this project alone. " }
