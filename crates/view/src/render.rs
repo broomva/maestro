@@ -74,14 +74,7 @@ pub(crate) struct Ctx<'a> {
 impl Ctx<'_> {
     /// Whether the open row exists only on the ledger branch.
     pub(crate) fn filed(&self, lf: &maestro_store::LedgerFile, ask: &maestro_core::ask::Ask) -> bool {
-        let main = self.main_asks.get_or_init(|| {
-            if self.store.reads_worktree() && self.store.has_git_checkout() {
-                Store::new(self.store.paths.clone(), maestro_store::TreeSource::GitRev("origin/main".into()))
-                    .asks_at_tree()
-            } else {
-                self.store.asks_at_tree()
-            }
-        });
+        let main = self.main_asks();
         main.data.as_ref().is_some_and(|ledgers| {
             !main.errors.iter().any(|e| views::may_hide(&e.at, &lf.file))
                 && !ledgers
@@ -89,6 +82,17 @@ impl Ctx<'_> {
                     .filter(|l| l.file == lf.file)
                     .flat_map(|l| &l.ledger.asks)
                     .any(|a| a.id == ask.id && a.uid == ask.uid)
+        })
+    }
+
+    pub(crate) fn main_asks(&self) -> &Section<Vec<maestro_store::LedgerFile>> {
+        self.main_asks.get_or_init(|| {
+            if self.store.reads_worktree() && self.store.has_git_checkout() {
+                Store::new(self.store.paths.clone(), maestro_store::TreeSource::GitRev("origin/main".into()))
+                    .asks_at_tree()
+            } else {
+                self.store.asks_at_tree()
+            }
         })
     }
 
@@ -155,6 +159,7 @@ pub fn render_web(store: &Store, v: &Validated, at: jiff::Timestamp, owner: Owne
     let cx = Ctx::new(store, at, None, Some(owner), None);
     let screen = match &v.root.block {
         Block::Today(_) => crate::screens::web_today::today(&cx, &v.root.id),
+        Block::Health(_) => crate::screens::health::web(&cx, &v.root.id),
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
         Block::Decision(p) => crate::screens::web::decide(&cx, &v.root.id, &p.ledger, &p.id),
         _ => node(&cx, &v.root),
@@ -172,7 +177,8 @@ impl<'a> Ctx<'a> {
         answer_origin: Option<String>,
     ) -> Self {
         let reads = Reads::of(store);
-        let snap = views::snapshot_of(store, &reads, at);
+        let waiting = views::unlanded(store, reads.asks.data.as_deref().unwrap_or_default());
+        let snap = views::snapshot_with_waiting(store, &reads, at, &waiting);
         Ctx {
             store,
             reads,
@@ -181,7 +187,7 @@ impl<'a> Ctx<'a> {
             answer_thread: answer_thread.cloned(),
             web,
             answer_origin,
-            unlanded: std::cell::OnceCell::new(),
+            unlanded: std::cell::OnceCell::from(waiting),
             main_asks: std::cell::OnceCell::new(),
             ids: std::cell::Cell::new(0),
             plans: std::cell::OnceCell::new(),

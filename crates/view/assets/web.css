@@ -35,13 +35,27 @@ body.mv-web { padding: 0; min-height: 100vh; }
   padding: 8px 18px; border: 0; border-radius: 999px;
   font-size: var(--bv-text-sm); font-weight: 500; color: var(--mv-ink2); text-decoration: none;
 }
-.mv-web-nav .mv-tab:hover { color: var(--mv-ink); }
+@media (hover: hover) { .mv-web-nav .mv-tab:hover { color: var(--mv-ink); } }
 .mv-web-nav .mv-tab[aria-current="page"] {
   background: var(--mv-surface); color: var(--mv-ink);
   box-shadow: 0 1px 2px var(--mv-shadow), inset 0 0 0 1px var(--mv-line);
 }
 .mv-web-nav .mv-tab:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 2px; }
 .mv-nav-count { font-family: var(--bv-font-mono); font-size: 11px; color: var(--mv-tide); margin-left: 4px; }
+.mv-web-nav .mv-tab[data-pending] { box-shadow: inset 0 -2px var(--mv-tide); }
+.mv-navigation-status { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); margin: 0; padding: 8px 16px; border: 1px solid var(--mv-line2); border-radius: 12px; background: var(--mv-surface); color: var(--mv-ink2); font-size: 14px; z-index: 5; }
+.mv-navigation-status:empty { display: none; }
+#maestro-root[aria-busy="true"] { opacity: .65; }
+#maestro-root:focus { outline: none; }
+.mv-health-heading { margin-bottom: 24px; }
+.mv-health-heading h1 { margin: 8px 0; font: 400 28px/1.25 var(--bv-font-sans); letter-spacing: -.02em; }
+.mv-health-heading p { margin: 0; max-width: 65ch; color: var(--mv-ink2); }
+.mv-health-plans { min-width: 0; }
+.mv-health-plans > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-height: 44px; cursor: pointer; color: var(--mv-tide); padding: 12px 4px; }
+.mv-health-plans > summary::before { content: "+"; font-size: 18px; }
+.mv-health-plans[open] > summary::before { content: "−"; }
+.mv-health-plans > summary span { color: var(--mv-ink3); font-size: 12px; }
+.mv-health-plans > summary:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 2px; }
 .mv-web-tree { margin: 0; justify-self: end; display: flex; align-items: center; gap: 6px; white-space: nowrap; font-family: var(--bv-font-mono); font-size: 12px; color: var(--mv-ink3); }
 .mv-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--mv-ok); flex: none; }
 
@@ -146,6 +160,8 @@ body.mv-web { padding: 0; min-height: 100vh; }
 
 /* The phone: one column. The capsule sits at the top and the queue becomes a pager. */
 @media (max-width: 760px) {
+  .mv-web-nav .mv-tab, .mv-tabs .mv-tab { min-height: 44px; display: inline-flex; align-items: center; gap: 4px; }
+  .mv-note-input { font-size: 16px; }
   .mv-web-head { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: calc(var(--bv-space-4) + env(safe-area-inset-top)) var(--bv-space-4) var(--bv-space-3); gap: var(--bv-space-3); }
   .mv-web-tree, .mv-wordmark { display: none; }
   /* The summary stays when it says something the page may not: a failed or partial read, or a hold. */
@@ -241,7 +257,7 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-screen:has(.mv-decide) > .mv-foot { display: none; }
 @media (max-width: 760px) {
   .mv-decide-main .mv-decision .mv-answer { bottom: calc(var(--bv-space-2) + env(safe-area-inset-bottom)); padding: var(--bv-space-2); gap: var(--bv-space-2); }
-  .mv-note-input { min-height: 40px; padding: var(--bv-space-2) var(--bv-space-3); font-size: 14px; }
+  .mv-note-input { min-height: 40px; padding: var(--bv-space-2) var(--bv-space-3); font-size: 16px; }
   .mv-go { min-height: 44px; font-size: 15px; }
   .mv-answer-how { flex-basis: 100%; font-size: 12px; }
 }

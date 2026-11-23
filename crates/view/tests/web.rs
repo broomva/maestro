@@ -452,7 +452,10 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
         page::web_csp().contains(&format!("script-src 'sha256-{}'", page::script_hash(emitted))),
         "the hash of the emitted script"
     );
-    assert!(!doc.to_ascii_lowercase().contains("url("), "the web page fetches no asset");
+    for style in doc.split("<style>").skip(1) {
+        assert!(!style.split("</style>").next().unwrap().to_ascii_lowercase().contains("url("), "no remote CSS asset");
+    }
+    assert!(!doc.contains("<script src="), "the script stays inline and pinned");
 }
 
 #[test]
@@ -471,4 +474,64 @@ fn today_shows_answer_progress_and_unavailable_sources() {
     let (r, _) = web(&worktree(empty.path()), json!({ "type": "today" }));
     assert!(r.html.contains("Answers are unavailable"), "{}", r.html);
     assert!(!r.html.contains("No answers found today"), "{}", r.html);
+}
+
+#[test]
+fn today_does_not_mark_an_overlaid_answer_as_landed_on_main() {
+    let m = all_answered(false);
+    let workspace = m.path().join("workspace");
+    let ledger = workspace.join(".control/asks/done.yaml");
+    let answered = std::fs::read_to_string(&ledger).unwrap().replace("2026-10-02T00:00:00Z", "2026-10-23T10:00:00Z");
+    let open = answered
+        .replace("    answer: \"yes\"\n", "")
+        .replace("    answered_at: \"2026-10-23T10:00:00Z\"\n", "")
+        .replace("status: resolved", "status: open");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&workspace)
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    std::fs::write(&ledger, open).unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "open"]);
+    git(&["checkout", "-qb", "maestro/ledger"]);
+    std::fs::write(&ledger, answered).unwrap();
+    git(&["commit", "-qam", "answer"]);
+    git(&["checkout", "-q", "main"]);
+    let store = || Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let (r, _) = web(&store(), json!({ "type": "today" }));
+    assert!(r.html.contains("You chose yes"), "{}", r.html);
+    assert!(r.html.contains("On main · not yet known"), "an overlay is not main: {}", r.html);
+    assert!(r.html.contains("1 answers seen waiting to land"), "{}", r.html);
+    git(&["merge", "--ff-only", "maestro/ledger"]);
+    let (r, _) = web(&store(), json!({ "type": "today" }));
+    assert!(!r.html.contains("On main · not yet known"), "the answer landed: {}", r.html);
+    assert!(!r.html.contains("answers seen waiting to land"), "{}", r.html);
+}
+
+#[test]
+fn today_names_other_owner_holds_and_does_not_offer_a_zero_decision_action() {
+    let m = all_answered(false);
+    let work = m.path().join("work/held-for-you");
+    copy_tree(&fixture().join("work/held-for-you"), &work);
+    let (r, _) = web(&worktree(m.path()), json!({ "type": "today" }));
+    assert!(r.html.contains("No decisions waiting"), "{}", r.html);
+    assert!(r.html.contains("View decisions and holds"), "{}", r.html);
+    assert!(!r.html.contains("Decide now"), "{}", r.html);
+    let need = worktree(m.path()).work().data.unwrap().into_iter().find(|w| w.owner_step()).unwrap();
+    assert!(r.html.contains(&need.title), "the same owner hold as the header: {}", r.html);
+}
+
+#[test]
+fn web_health_puts_signals_before_collapsed_reference_plans() {
+    let m = machine();
+    let (r, _) = web(&worktree(m.path()), json!({ "type": "health" }));
+    assert!(r.html.contains("<h1>Health</h1>"));
+    assert!(r.html.find("Loop heartbeats").unwrap() < r.html.find("Linked plans").unwrap());
+    assert!(r.html.contains("<details class=\"mv-health-plans\"><summary>"));
 }

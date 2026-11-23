@@ -936,9 +936,14 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
     // Abandoned lock directory from a killed/dead PID + pre-existing `.lock.d.reclaim.d` is reclaimed
     // immediately without waiting 10s or spinning!
     let reclaim_dir = root.join("generations.json.lock.d.reclaim.d");
+    // Use a real, reaped PID. 4194303 is outside macOS's PID range, so ps rejects
+    // the query and the reader correctly treats its liveness as unknown, not dead.
+    let mut dead_child = std::process::Command::new("/bin/sh").args(["-c", "exit 0"]).spawn().unwrap();
+    let dead_pid = format!("{} 1\n", dead_child.id());
+    dead_child.wait().unwrap();
     fs::create_dir_all(&lock_dir).unwrap();
     fs::create_dir_all(&reclaim_dir).unwrap();
-    fs::write(lock_dir.join("pid"), "4194303 1\n").unwrap();
+    fs::write(lock_dir.join("pid"), &dead_pid).unwrap();
     fs::write(lock_dir.join("token"), "dead-holder-token\n").unwrap();
     let t0 = std::time::Instant::now();
     let after_reclaim = restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap();
@@ -950,7 +955,7 @@ fn bridge_credentials_node_binding_id_reuse_and_disconnect_fail_closed() {
     // so `remove_dir` fails with ENOTEMPTY), `acquire_generation_lock` fails fast with RegistryDisconnected
     // without spinning and releases the OS `.flock`!
     fs::create_dir_all(lock_dir.join("unexpected-subdir")).unwrap();
-    fs::write(lock_dir.join("pid"), "4194303 1\n").unwrap();
+    fs::write(lock_dir.join("pid"), &dead_pid).unwrap();
     fs::write(lock_dir.join("token"), "dead-holder-token\n").unwrap();
     let t_fail = std::time::Instant::now();
     let fail_reclaim_err = restarted_registry.try_bump_generation(&Surface::T3, thread_id).unwrap_err();

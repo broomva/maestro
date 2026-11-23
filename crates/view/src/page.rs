@@ -98,7 +98,7 @@ pub const ICON_192_PNG: &[u8] = include_bytes!("../assets/icon-192.png");
 pub const ICON_512_PNG: &[u8] = include_bytes!("../assets/icon-512.png");
 
 /// The owner script (BRO-4042): the one script the web pages run, named in their policy by hash.
-pub const OWNER_JS: &str = include_str!("../assets/owner.js");
+pub const OWNER_JS: &str = concat!(include_str!("../assets/owner.js"), "\n", include_str!("../assets/navigation.js"));
 
 /// The web pages' policy (BRO-3588, BRO-4042): no form may post, no page may frame them, only
 /// the same origin's manifest may load, and the one script that runs is the owner script,
@@ -214,7 +214,8 @@ pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String 
         (DOCTYPE)
         html lang="en" {
             head {
-                (head(&format!("{title} · Maestro"), web_csp()))
+                // frame-ancestors is enforced by the HTTP header, not supported in a meta policy.
+                (head(&format!("{title} · Maestro"), &web_csp().replace("; frame-ancestors 'none'", "")))
                 meta name="theme-color" content="#f7f6f1" media="(prefers-color-scheme: light)";
                 meta name="theme-color" content="#0b1622" media="(prefers-color-scheme: dark)";
                 meta name="mobile-web-app-capable" content="yes";
