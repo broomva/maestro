@@ -735,6 +735,7 @@ mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 # Today and the health rail (BRO-3270).
 mutate crates/view/src/screens/web_today.rs 'asks.data.is_none() { p { "Answers are unavailable." } }' 'false { p { "Answers are unavailable." } }'
 mutate crates/view/src/screens/web_today.rs '("Acted", false)' '("Acted", true)'
+mutate crates/store/src/health.rs '                Err(e) => errors.push(SourceError { at: format!("{}:{}", source, index + 1), reason: e.to_string() }),' '                Err(_) => { let _ = index; },'
 td=crates/view/src/screens/today.rs
 hl=crates/view/src/screens/health.rs
 mutate $td 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, Some(WorkState::Running)).len())' 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, None).len())'
@@ -2938,6 +2939,15 @@ mutate $hlb '        if performer.canonical(host) != resolved.session().canonica
 # Dogfood: a ledger-branch answer is not proof that the same answer landed on main.
 mutate crates/view/src/screens/web_today.rs 'base.hash() == ask.hash()' 'true'
 mutate crates/view/src/screens/web_today.rs '@else if uncertain { "Decision status incomplete" }' '@else if false { "Decision status incomplete" }'
+# BRO-4042: inconsistent dispatch evidence is not presented as measured counts.
+mutate crates/view/src/screens/health_web.rs '            *total >= *denied && *denied >= *followed && *followed >= 0.0) {' '            true) {'
+# BRO-4042: a reset or unread sample ends the evidence for a burn-rate projection.
+mutate crates/view/src/screens/health_web.rs '        let Some(value) = value else { break };' '        let Some(value) = value else { continue };'
+mutate crates/view/src/screens/health_web.rs '        if value > first.1 {' '        if false {'
+mutate crates/view/src/screens/health_web.rs '        Some(age) if age > cadence => Some(format!("! Stale, read {} minutes ago", age / 60)),' '        Some(age) if false => Some(format!("! Stale, read {} minutes ago", age / 60)),'
+mutate crates/view/src/screens/health_web.rs '    if now - last_at > 1800 {' '    if false {'
+mutate crates/view/src/screens/health_web.rs '    if points.iter().all(|(_, value)| value.is_none()) {' '    if false {'
+mutate crates/view/src/screens/health_web.rs '    } else if points.iter().any(|(_, value)| value.is_none()) {' '    } else if false {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

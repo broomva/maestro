@@ -9,6 +9,7 @@
 
 mod decision;
 pub(crate) mod health;
+pub(crate) mod health_web;
 mod inbox;
 mod rich;
 mod sources;

@@ -123,6 +123,7 @@ pub fn web_csp() -> &'static str {
 /// The web pages' styles (BRO-3783): the shell, the three-column decision and the phone layout.
 /// Only on the web pages, so the App's stylesheet holds only what the App places.
 const WEB_CSS: &str = concat!(include_str!("../assets/web.css"), include_str!("../assets/today.css"));
+const HEALTH_CSS: &str = include_str!("../assets/health.css");
 
 /// One place in the web pages' navigation: its path and its label.
 pub const WEB_NAV: [(&str, &str); 3] = [("/decisions", "Decisions"), ("/today", "Today"), ("/health", "Health")];
@@ -226,6 +227,7 @@ pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String 
                 link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png";
                 link rel="manifest" href="/manifest.webmanifest";
                 style { (PreEscaped(WEB_CSS)) }
+                style { (PreEscaped(HEALTH_CSS)) }
             }
             body class="mv-web" {
                 header class="mv-web-head" {

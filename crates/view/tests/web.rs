@@ -540,3 +540,19 @@ fn web_health_puts_signals_before_collapsed_reference_plans() {
     assert!(r.html.find("Loop heartbeats").unwrap() < r.html.find("Linked plans").unwrap());
     assert!(r.html.contains("<details class=\"mv-health-plans\"><summary>"));
 }
+
+#[test]
+fn health_web_distinguishes_unread_and_measured_sources() {
+    let m = machine();
+    let mut paths = Paths::under(m.path());
+    paths.fleet_meta = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/health");
+    let store = Store::new(paths, TreeSource::WorkingTree);
+    let (r, _) = web(&store, json!({ "type": "health" }));
+    assert!(r.html.contains("2 of 4 sessions"));
+    assert!(r.html.contains("25% used"));
+    assert!(r.html.contains("not measured"));
+    assert!(r.html.contains("Needs a look"));
+    let (unread, _) = web(&worktree(m.path()), json!({ "type": "health" }));
+    assert!(unread.html.contains("Host information is unavailable"));
+    assert!(unread.html.contains("Token capacity is unavailable"));
+}

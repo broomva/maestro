@@ -162,6 +162,7 @@ pub fn render_web(store: &Store, v: &Validated, at: jiff::Timestamp, owner: Owne
         Block::Health(_) => crate::screens::health::web(&cx, &v.root.id),
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
         Block::Decision(p) => crate::screens::web::decide(&cx, &v.root.id, &p.ledger, &p.id),
+        Block::Health(_) => crate::screens::health_web::health(&cx, &v.root.id),
         _ => node(&cx, &v.root),
     };
     let rendered = finish(&cx, v, screen);

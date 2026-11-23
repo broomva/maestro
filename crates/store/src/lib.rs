@@ -11,6 +11,7 @@ pub mod answer;
 pub mod broomva_paths;
 pub mod doctor;
 pub mod ledger;
+pub mod health;
 pub mod locks;
 pub mod passkey;
 pub mod paths;
