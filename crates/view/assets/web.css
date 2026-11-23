@@ -3,7 +3,7 @@
    761 px, one at 760 px and below with a pager in place of the queue. No script, no fetch. */
 
 body.mv-web { padding: 0; min-height: 100vh; }
-#maestro-root[data-web="true"] { max-width: 1280px; padding: 0 var(--bv-space-8) var(--bv-space-8); }
+#maestro-root[data-web="true"] { max-width: 1280px; padding: 0 var(--bv-space-8) calc(var(--bv-space-8) + env(safe-area-inset-bottom)); }
 
 /* The shell: wordmark and summary, the capsule, the tree read. */
 .mv-web-head {
@@ -13,7 +13,7 @@ body.mv-web { padding: 0; min-height: 100vh; }
   gap: var(--bv-space-4);
   max-width: 1280px;
   margin: 0 auto;
-  padding: var(--bv-space-6) var(--bv-space-8) var(--bv-space-5);
+  padding: calc(var(--bv-space-6) + env(safe-area-inset-top)) var(--bv-space-8) var(--bv-space-5);
 }
 .mv-brand { margin: 0; display: flex; align-items: baseline; gap: var(--bv-space-3); min-width: 0; }
 .mv-wordmark {
@@ -146,13 +146,13 @@ body.mv-web { padding: 0; min-height: 100vh; }
 
 /* The phone: one column. The capsule sits at the top and the queue becomes a pager. */
 @media (max-width: 760px) {
-  .mv-web-head { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: var(--bv-space-4) var(--bv-space-4) var(--bv-space-3); gap: var(--bv-space-3); }
+  .mv-web-head { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: calc(var(--bv-space-4) + env(safe-area-inset-top)) var(--bv-space-4) var(--bv-space-3); gap: var(--bv-space-3); }
   .mv-web-tree, .mv-wordmark { display: none; }
   /* The summary stays when it says something the page may not: a failed or partial read, or a hold. */
   .mv-brand:has(.mv-brand-sub[data-state="calm"]), .mv-brand:has(.mv-brand-sub[data-state="open"]) { display: none; }
   .mv-brand-sub { white-space: normal; text-align: center; }
   .mv-pager-read { display: block; }
-  #maestro-root[data-web="true"] { padding: 0 var(--bv-space-4) var(--bv-space-6); }
+  #maestro-root[data-web="true"] { padding: 0 var(--bv-space-4) calc(var(--bv-space-6) + env(safe-area-inset-bottom)); }
   .mv-decide { grid-template-columns: minmax(0, 1fr); }
   .mv-queue { display: none; }
   .mv-pager { display: flex; justify-content: space-between; align-items: center; gap: var(--bv-space-3); padding: 0 var(--bv-space-1); }
@@ -198,7 +198,7 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-dopt:has(.mv-opt-input:disabled):not(:has(.mv-opt-input:checked)) { opacity: 0.55; }
 
 /* The answer bar: a note on glass, then the answer button that names the choice. */
-.mv-decide-main .mv-decision .mv-answer { position: sticky; bottom: var(--bv-space-3); z-index: 2; display: flex; flex-direction: column; gap: var(--bv-space-3); padding: var(--bv-space-3); margin-top: var(--bv-space-2); }
+.mv-decide-main .mv-decision .mv-answer { position: sticky; bottom: calc(var(--bv-space-3) + env(safe-area-inset-bottom)); z-index: 2; display: flex; flex-direction: column; gap: var(--bv-space-3); padding: var(--bv-space-3); margin-top: var(--bv-space-2); }
 .mv-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .mv-note { display: block; }
 .mv-note-input {
@@ -240,7 +240,7 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-decide-main > .mv-card[data-state="ok"] > .mv-source { display: none; }
 .mv-screen:has(.mv-decide) > .mv-foot { display: none; }
 @media (max-width: 760px) {
-  .mv-decide-main .mv-decision .mv-answer { bottom: var(--bv-space-2); padding: var(--bv-space-2); gap: var(--bv-space-2); }
+  .mv-decide-main .mv-decision .mv-answer { bottom: calc(var(--bv-space-2) + env(safe-area-inset-bottom)); padding: var(--bv-space-2); gap: var(--bv-space-2); }
   .mv-note-input { min-height: 40px; padding: var(--bv-space-2) var(--bv-space-3); font-size: 14px; }
   .mv-go { min-height: 44px; font-size: 15px; }
   .mv-answer-how { flex-basis: 100%; font-size: 12px; }
