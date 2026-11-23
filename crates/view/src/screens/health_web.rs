@@ -78,6 +78,15 @@ fn hosts(c: &Census) -> Vec<String> {
     });
     ordered
 }
+fn provider_scope_complete(c: &Census) -> bool {
+    let registered = hosts(c);
+    !registered.is_empty()
+        && registered.iter().all(|host| {
+            c.connections.get(host).and_then(Value::as_object).is_some_and(|connections| {
+                !connections.is_empty() && connections.values().all(|v| state(word(v, "state")).0 != "unknown")
+            })
+        })
+}
 fn host_fresh(c: &Census, host: &str, now: i64) -> bool {
     sampled(c.host_last_observed.get(host).and_then(|v| v.get("at")).and_then(Value::as_str), now, 600).0
 }
@@ -420,11 +429,7 @@ pub(crate) fn health(cx: &Ctx, id: &str) -> Markup {
         || census.data.as_ref().is_some_and(|c| {
             !c.coverage_gaps.is_empty()
                 || hosts(c).is_empty()
-                || c.connections.as_object().is_none()
-                || c.connections.as_object().into_iter().flat_map(|m| m.values()).any(|v| {
-                    v.as_object()
-                        .is_none_or(|m| m.is_empty() || m.values().any(|v| state(word(v, "state")).0 == "unknown"))
-                })
+                || !provider_scope_complete(c)
                 || hosts(c).iter().any(|h| host_state(c, h, host_fresh(c, h, now)) == "unknown")
                 || has_values(&c.errors)
                 || has_values(&c.sensor_errors)
@@ -576,6 +581,11 @@ mod tests {
         );
         assert!(projection(&[(now - 3600, Some(20.0)), (now - 1801, Some(40.0))], Some(&reset), now).is_none());
         assert!(projection(&[(now - 1800, Some(20.0)), (now, Some(40.0))], None, now).is_none());
+        assert!(
+            projection(&[(now - 1800, Some(90.0)), (now - 900, Some(10.0)), (now, Some(20.0))], Some(&reset), now)
+                .is_some(),
+            "a new continuous window after reset can project without using the old counter"
+        );
         let soon = jiff::Timestamp::from_second(now + 100).unwrap().to_string();
         assert!(
             projection(&[(now - 1800, Some(20.0)), (now, Some(40.0))], Some(&soon), now)

@@ -576,3 +576,39 @@ fn health_uses_producer_freshness_and_all_registered_hosts() {
     assert!(old.html.contains("90% used · stale reading"));
     assert!(!old.html.contains("data-state=\"ok\""));
 }
+
+#[test]
+fn missing_provider_measurements_cannot_certify_fleet() {
+    let m = machine();
+    let paths = Paths::under(m.path());
+    std::fs::create_dir_all(&paths.fleet_meta).unwrap();
+    let at = "2026-10-23T12:00:00Z";
+    let mut census = json!({"observed_at":at,"host_load":{"mac":{"live":1,"cpus":8,"load_per_cpu":0.2,"mem_avail_pct":40},"nuc":{"live":0,"cpus":8,"load_per_cpu":0.1,"mem_avail_pct":80}},"host_caps":{"mac":8,"nuc":3},"host_last_observed":{"mac":{"at":at},"nuc":{"at":at}},"reachable_hosts":["mac","nuc"],"connections":{}});
+    let capacity = json!({"generated_at":at,"ttl_seconds":1800,"host":{},"lanes":[{"provider":"codex","account":"fixture","used":20,"state":"green"}],"routing":[]});
+    let loops = json!({"evaluated_at":at,"loops":{"census":{"status":"ok","why":"fixture"}}});
+    for (name, value) in [("capacity.json", capacity), ("loop-health.json", loops)] {
+        std::fs::write(paths.fleet_meta.join(name), value.to_string()).unwrap();
+    }
+    for name in ["capacity-history.jsonl", "capacity.log", "signals.jsonl", "usage-watch.jsonl"] {
+        std::fs::write(paths.fleet_meta.join(name), "").unwrap();
+    }
+    for connections in [
+        json!({}),
+        json!({"mac":{"codex":{"state":"up"}}}),
+        json!({"mac":{"codex":{"state":"up"}},"nuc":{}}),
+        json!({"mac":{"codex":{"state":"up"}},"nuc":{"codex":{"state":"unknown"}}}),
+    ] {
+        census["connections"] = connections;
+        std::fs::write(paths.fleet_meta.join("fleet-snapshot.json"), census.to_string()).unwrap();
+        let (r, _) = web(&Store::new(paths.clone(), TreeSource::WorkingTree), json!({"type":"health"}));
+        assert!(r.html.contains("Fleet status is incomplete."), "unmeasured providers must remain incomplete");
+        assert!(!r.html.contains("No problems reported in current readings."));
+    }
+    census["connections"] = json!({"mac":{"codex":{"state":"up"}},"nuc":{"codex":{"state":"idle"}}});
+    std::fs::write(paths.fleet_meta.join("fleet-snapshot.json"), census.to_string()).unwrap();
+    let (r, _) = web(&Store::new(paths, TreeSource::WorkingTree), json!({"type":"health"}));
+    assert!(
+        r.html.contains("No problems reported in current readings."),
+        "readable complete scope must not always be incomplete"
+    );
+}

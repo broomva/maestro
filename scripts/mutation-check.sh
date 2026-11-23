@@ -2977,6 +2977,8 @@ mutate crates/view/src/screens/web_today.rs 'section.errors.iter().take(8)' 'sec
 mutate crates/view/src/screens/web_today.rs 'section.data.iter().flatten().take(8)' 'section.data.iter().flatten()'
 mutate crates/view/src/screens/health_web.rs '== Some(true)' '== Some(false)'
 mutate crates/view/src/screens/health_web.rs 'percent(lane, "used").is_some_and(|n| n >= 80.0)' 'false'
+mutate crates/view/src/screens/health_web.rs '|| !provider_scope_complete(c)' '|| false'
+mutate crates/store/src/health.rs 'errors.push(SourceError { at: format!("{}:record {} in tail", text.source, index + 1), reason })' 'let _ = reason;'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed
