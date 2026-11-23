@@ -381,6 +381,11 @@ fn an_ask_whose_handle_is_shared_is_never_opened_or_linked() {
         assert!(!html.contains("/decisions/0dup.yaml/same"), "a shared handle is never a link: {html}");
         assert!(html.contains("shares its handle"), "{html}");
     }
+    std::fs::remove_file(asks.join("a.yaml")).unwrap();
+    let (today, _) = web(&worktree(m.path()), json!({ "type": "today" }));
+    assert!(today.html.contains("Decision status incomplete"), "{}", today.html);
+    assert!(!today.html.contains("No decisions waiting"), "unknown rows are not zero: {}", today.html);
+    assert!(today.html.contains("First") && today.html.contains("Second"), "{}", today.html);
 }
 
 #[test]

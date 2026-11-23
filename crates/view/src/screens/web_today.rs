@@ -57,7 +57,8 @@ pub(crate) fn today(cx: &Ctx, id: &str) -> Markup {
     let answered_all = all.iter().filter(|a| a.state() == AskState::Answered).count();
     let groups = super::queue(cx, None);
     let waiting: Vec<_> =
-        groups.iter().flat_map(|g| &g.rows).filter(|e| e.landing == super::Landing::NotSeen).collect();
+        groups.iter().flat_map(|g| &g.rows).filter(|e| e.landing != super::Landing::Waiting).collect();
+    let uncertain = waiting.iter().any(|e| e.landing == super::Landing::Unknown);
     let joined = super::joined(cx, None);
     let reading_main = matches!(&cx.store.tree.source, TreeSource::GitRev(r) if r == "main" || r == "origin/main")
         && cx.store.tree.commit.is_some();
@@ -124,10 +125,12 @@ pub(crate) fn today(cx: &Ctx, id: &str) -> Markup {
           section class="today-waiting" {
             h2 {
                 @if joined.data.is_none() { "Decision status unavailable" }
+                @else if uncertain { "Decision status incomplete" }
                 @else if waiting.is_empty() && joined.errors.is_empty() { "No decisions waiting" }
                 @else { (count(&joined, Some(waiting.len()))) " decisions waiting" }
             }
             @if joined.data.is_none() { p { "Decisions are unavailable." } }
+            @if uncertain { p class="today-notice" { "Some decision states could not be confirmed." } }
             @if let Some(needs) = &cx.snap.needs.data {
                 @for need in needs.iter().filter(|n| n.kind == maestro_core::need::NeedKind::OwnerStep) {
                     p class="today-waiting-row" { (need.title) }
@@ -137,7 +140,7 @@ pub(crate) fn today(cx: &Ctx, id: &str) -> Markup {
             @if let Some(landed) = cx.unlanded().data.as_ref() { @if !landed.is_empty() { p { (landed.len()) " answers seen waiting to land." } } }
             @if !cx.unlanded().errors.is_empty() { p class="today-notice" { "Answers waiting to land are partially available." } }
             @for entry in waiting.iter().take(3) { p class="today-waiting-row" { (entry.ask.title()) } }
-            a class="today-action" href="/decisions" { @if waiting.is_empty() { "View decisions and holds" } @else { "Decide now" } }
+            a class="today-action" href="/decisions" { @if waiting.is_empty() { "View decisions and holds" } @else if uncertain { "Review decisions" } @else { "Decide now" } }
           }
           div class="today-stats" {
             @for (value, label) in [(today_count.clone(), "answered today"), (count(asks, asks.data.as_ref().map(|_| answered_all)), "answered, all time"), (count(work, reviews), "work items in review"), (count(work, blocked), "blocked")] {

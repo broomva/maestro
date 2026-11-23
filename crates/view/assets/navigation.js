@@ -11,6 +11,13 @@
   status.className = "mv-navigation-status";
   status.setAttribute("role", "status");
   document.body.append(status);
+  const clearLoading = () => {
+    const main = document.querySelector("#maestro-root");
+    main?.removeAttribute("aria-busy");
+    if (main) main.inert = false;
+    document.querySelectorAll(".mv-web-nav [data-pending]").forEach(a => a.removeAttribute("data-pending"));
+    status.textContent = "";
+  };
   history.replaceState({ ...history.state, maestro: true }, "");
   const destination = (event) => {
     const link = event.target.closest?.("a[href]");
@@ -75,7 +82,12 @@
       status.textContent = "";
       document.dispatchEvent(new Event("maestro:page"));
     } catch {
-      if (pending === request) location.assign(url.href);
+      if (pending === request) {
+        // A native fallback can put this document in the browser's back/forward cache.
+        // Never leave the restored document inert or showing a loading destination.
+        clearLoading();
+        location.assign(url.href);
+      }
     }
   };
   document.addEventListener("click", (event) => {
@@ -89,4 +101,5 @@
     if (!event.state?.maestro || !routes.has(location.pathname)) { location.reload(); return; }
     navigate(new URL(location.href), true);
   });
+  window.addEventListener("pageshow", () => { pending = null; clearLoading(); });
 })();
