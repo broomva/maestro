@@ -141,14 +141,16 @@ pub fn render_with(
     at: jiff::Timestamp,
     answer_thread: Option<&crate::handoff::AnswerThread>,
 ) -> Rendered {
-    let cx = Ctx::new(store, at, answer_thread, None, None);
+    let store = store.read_scope();
+    let cx = Ctx::new(&store, at, answer_thread, None, None);
     finish(&cx, v, node(&cx, &v.root))
 }
 
 /// Render for the MCP App and the snapshot (BRO-4042): every open decision links to the secure web
 /// page at `answer_origin`, where it is answered with the owner's passkey.
 pub fn render_app(store: &Store, v: &Validated, at: jiff::Timestamp, answer_origin: Option<&str>) -> Rendered {
-    let cx = Ctx::new(store, at, None, None, answer_origin.map(str::to_string));
+    let store = store.read_scope();
+    let cx = Ctx::new(&store, at, None, None, answer_origin.map(str::to_string));
     finish(&cx, v, node(&cx, &v.root))
 }
 
@@ -156,10 +158,10 @@ pub fn render_app(store: &Store, v: &Validated, at: jiff::Timestamp, answer_orig
 /// with the header's [`Shell`](crate::page::Shell) read in the same render, so the header and
 /// the page never disagree. Every other block renders as [`render_with`] renders it.
 pub fn render_web(store: &Store, v: &Validated, at: jiff::Timestamp, owner: Owner) -> (Rendered, crate::page::Shell) {
-    let cx = Ctx::new(store, at, None, Some(owner), None);
+    let store = store.read_scope();
+    let cx = Ctx::new(&store, at, None, Some(owner), None);
     let screen = match &v.root.block {
         Block::Today(_) => crate::screens::web_today::today(&cx, &v.root.id),
-        Block::Health(_) => crate::screens::health::web(&cx, &v.root.id),
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
         Block::Decision(p) => crate::screens::web::decide(&cx, &v.root.id, &p.ledger, &p.id),
         Block::Health(_) => crate::screens::health_web::health(&cx, &v.root.id),
@@ -203,12 +205,67 @@ fn finish(cx: &Ctx, v: &Validated, screen: Markup) -> Rendered {
     let body = html! {
         div class="mv-screen" {
             (screen)
-            footer class="mv-foot bv-meta" { "Read from " span class="bv-code" { (cx.snap.tree) } }
+            @if cx.web.is_some() { (provenance(cx)) }
+            @else { footer class="mv-foot bv-meta" { "Read from " span class="bv-code" { (cx.snap.tree) } } }
         }
     };
     let html = body.into_string();
     let revision = hex(&Sha256::digest(html.as_bytes()));
     Rendered { html, revision, tree: cx.snap.tree.clone(), drops: v.drops.clone(), spec: v.kept.clone() }
+}
+
+/// Request observation time and source scope are separate from the producers' own timestamps.
+fn provenance(cx: &Ctx) -> Markup {
+    let local = cx.at.to_zoned(jiff::tz::TimeZone::system());
+    let state = |has_data: bool, partial: bool| {
+        if !has_data {
+            "unavailable"
+        } else if partial {
+            "partial"
+        } else {
+            "read"
+        }
+    };
+    let reads = &cx.reads;
+    let unlanded = cx.unlanded();
+    let sources = [
+        ("Decisions", reads.asks.source.as_str(), reads.asks.data.is_some(), reads.asks.errors.as_slice()),
+        ("Answers waiting to land", unlanded.source.as_str(), unlanded.data.is_some(), unlanded.errors.as_slice()),
+        ("Work", reads.work.source.as_str(), reads.work.data.is_some(), reads.work.errors.as_slice()),
+        ("Loop definitions", reads.loops.source.as_str(), reads.loops.data.is_some(), reads.loops.errors.as_slice()),
+        ("Tick receipts", reads.ticks.source.as_str(), reads.ticks.data.is_some(), reads.ticks.errors.as_slice()),
+        (
+            "Initiatives",
+            reads.initiatives.source.as_str(),
+            reads.initiatives.data.is_some(),
+            reads.initiatives.errors.as_slice(),
+        ),
+        ("Fleet reports", reads.fleet.source.as_str(), reads.fleet.data.is_some(), reads.fleet.errors.as_slice()),
+    ];
+    html! {
+        details class="mv-provenance" {
+            summary {
+                "Data sources"
+                span { "Read at " time datetime=(cx.at) { (local.strftime("%H:%M:%S %Z")) } }
+            }
+            div class="mv-provenance-body" {
+                p { "Read time is when Maestro loaded these sources. It does not establish when each producer last updated them." }
+                p { "Workspace revision: " code { (cx.snap.tree) } }
+                @if let Ok(Some(committed)) = cx.committed() {
+                    p { "Revision committed: " time datetime=(committed) { (committed) } ". This is the commit date, not the age of live data." }
+                }
+                ul class="mv-list" {
+                    @for (name, source, has_data, errors) in sources {
+                        li data-source-state=(state(has_data, !errors.is_empty())) {
+                            strong { (name) } " · " (state(has_data, !errors.is_empty()))
+                            code { (source) }
+                            @for error in errors { p class="mv-source-error" { (error.at) ": " (error.reason) } }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -365,7 +422,13 @@ pub(crate) fn needs(cx: &Ctx, id: &str, project: Option<&str>, limit: usize) -> 
             ul class="mv-list" {
                 @for n in list.iter().take(limit) {
                     li class="mv-row" data-key=(n.key) {
-                        span class="mv-row-title" { (n.title) }
+                        @let work: Vec<_> = cx.reads.work.data.iter().flatten().filter(|w| n.key == format!("work:{}", w.front.id)).collect();
+                        @if n.kind == maestro_core::need::NeedKind::OwnerStep && work.len() == 1 {
+                            (work_details(work[0]))
+                        } @else {
+                            span class="mv-row-title" { (n.title) }
+                            @if n.kind == maestro_core::need::NeedKind::OwnerStep { p class="mv-note" { "Work details could not be identified uniquely." } }
+                        }
                         span class="mv-row-meta bv-meta" {
                             (label(&n.kind))
                             @if let Some(p) = &n.project { " · " (p) }
@@ -378,6 +441,29 @@ pub(crate) fn needs(cx: &Ctx, id: &str, project: Option<&str>, limit: usize) -> 
         }
     };
     card(id, "needs", "Needs you", section, section.data.as_ref().map(|_| list.len()), body)
+}
+
+/// Read-only context for a recorded work item. Work lifecycle stays with its existing writer.
+pub(crate) fn work_details(w: &maestro_core::work::WorkItem) -> Markup {
+    html! {
+        details class="mv-work-context" {
+            summary { span class="mv-row-title" { (w.title) } span class="mv-work-state" { (w.work_state.label()) } }
+            div class="mv-work-context-body" {
+                @if let Some(reason) = w.flag.as_ref().and_then(|f| f.reason.as_deref()) { p { strong { "Recorded hold: " } (reason) } }
+                @if w.owner_step() { p { "Start or retry this work through its existing work controller. Maestro shows the recorded hold and does not change work state here." } }
+                dl {
+                    dt { "Work" } dd { code { (w.slug) } }
+                    dt { "Identifier" } dd { code { (w.front.id) } }
+                    @if let Some(owner) = &w.front.owner { dt { "Owner" } dd { (owner) } }
+                    @if let Some(repo) = &w.front.repo { dt { "Repository" } dd { (repo) } }
+                    @if let Some(provider) = &w.front.provider { dt { "Provider" } dd { (provider) } }
+                    @if let Some(initiative) = &w.filed_under { dt { "Initiative" } dd { (initiative) } }
+                    @if let Some(at) = &w.last_event_at { dt { "Last recorded event" } dd { time datetime=(at) { (at) } } }
+                    @else { dt { "Last recorded event" } dd { "Not recorded" } }
+                }
+            }
+        }
+    }
 }
 
 fn ask_matches(filter: AskFilter, state: AskState) -> bool {

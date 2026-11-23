@@ -734,8 +734,6 @@ mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 
 # Today and the health rail (BRO-3270).
 mutate crates/view/src/screens/web_today.rs 'asks.data.is_none() { p { "Answers are unavailable." } }' 'false { p { "Answers are unavailable." } }'
-mutate crates/view/src/screens/web_today.rs '("Acted", false)' '("Acted", true)'
-mutate crates/store/src/health.rs '                Err(e) => errors.push(SourceError { at: format!("{}:{}", source, index + 1), reason: e.to_string() }),' '                Err(_) => { let _ = index; },'
 td=crates/view/src/screens/today.rs
 hl=crates/view/src/screens/health.rs
 mutate $td 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, Some(WorkState::Running)).len())' 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, None).len())'
@@ -1794,9 +1792,9 @@ mutate $ledger '    command.env_remove("GH_REPO").env_remove("GH_HOST").current_
 mutate $ledger '    command.env_remove("GH_REPO").env_remove("GH_HOST").current_dir(dir);' '    command.env_remove("GH_REPO").current_dir(dir);'
 mutate $ledger '    if changed != rel || committed != bytes {' '    if false {'
 mutate $store '        if !main || base.data.is_none() {' '        if true {'
-mutate $store '    pub fn asks(&self) -> Section<Vec<LedgerFile>> {
-        if self.reads_worktree() && self.has_git_checkout() {' '    pub fn asks(&self) -> Section<Vec<LedgerFile>> {
-        if false {'
+mutate $store '        if self.reads_worktree() && self.has_git_checkout() {
+            return Store::new(self.paths.clone(), TreeSource::GitRev("origin/main".into())).asks();' '        if false {
+            return Store::new(self.paths.clone(), TreeSource::GitRev("origin/main".into())).asks();'
 mutate $store '    pub fn ask_ledger_overlay(&self, file: &str) -> Result<Option<AskLedger>, String> {
         if self.reads_worktree() && self.has_git_checkout() {' '    pub fn ask_ledger_overlay(&self, file: &str) -> Result<Option<AskLedger>, String> {
         if false {'
@@ -2940,14 +2938,45 @@ mutate $hlb '        if performer.canonical(host) != resolved.session().canonica
 mutate crates/view/src/screens/web_today.rs 'base.hash() == ask.hash()' 'true'
 mutate crates/view/src/screens/web_today.rs '@else if uncertain { "Decision status incomplete" }' '@else if false { "Decision status incomplete" }'
 # BRO-4042: inconsistent dispatch evidence is not presented as measured counts.
-mutate crates/view/src/screens/health_web.rs '            *total >= *denied && *denied >= *followed && *followed >= 0.0) {' '            true) {'
 # BRO-4042: a reset or unread sample ends the evidence for a burn-rate projection.
-mutate crates/view/src/screens/health_web.rs '        let Some(value) = value else { break };' '        let Some(value) = value else { continue };'
-mutate crates/view/src/screens/health_web.rs '        if value > first.1 {' '        if false {'
-mutate crates/view/src/screens/health_web.rs '        Some(age) if age > cadence => Some(format!("! Stale, read {} minutes ago", age / 60)),' '        Some(age) if false => Some(format!("! Stale, read {} minutes ago", age / 60)),'
+# Dogfood completion: unknown outcome, unique links and work identity remain explicit.
+mutate crates/view/src/screens/web_today.rs '"Agent outcome not reported"' '"Agent completed the work"'
+mutate crates/view/src/screens/web_today.rs '@if unique {' '@if true {'
+mutate crates/view/src/render.rs '&& work.len() == 1' '&& !work.is_empty()'
+# Telemetry: producer age, valid ranges, read gaps, bounded previews and partial input.
+mutate crates/view/src/screens/health_web.rs 't <= now + 60 && now.saturating_sub(t) <= cadence as i64' 'true'
+mutate crates/view/src/screens/health_web.rs '    if !fresh {
+        return "unknown";
+    }
+    if !c.reachable_hosts' '    if false {
+        return "unknown";
+    }
+    if !c.reachable_hosts'
+mutate crates/view/src/screens/health_web.rs '    if !c.reachable_hosts.iter().any(|h| h == host) {' '    if false {'
+mutate crates/view/src/screens/health_web.rs 'number(v, key).filter(|n| *n <= 100.0)' 'number(v, key)'
 mutate crates/view/src/screens/health_web.rs '    if now - last_at > 1800 {' '    if false {'
-mutate crates/view/src/screens/health_web.rs '    if points.iter().all(|(_, value)| value.is_none()) {' '    if false {'
-mutate crates/view/src/screens/health_web.rs '    } else if points.iter().any(|(_, value)| value.is_none()) {' '    } else if false {'
+mutate crates/view/src/screens/health_web.rs '        if value > first.1 || first.0 - at > 1800 {' '        if false {'
+mutate crates/view/src/screens/health_web.rs '        let Some(value) = value else {
+            break;
+        };' '        let Some(value) = value else {
+            continue;
+        };'
+mutate crates/view/src/screens/health_web.rs '    if points.iter().all(|(_, v)| v.is_none()) {' '    if false {'
+mutate crates/view/src/screens/health_web.rs '    } else if points.iter().any(|(_, v)| v.is_none()) {' '    } else if false {'
+mutate crates/view/src/screens/health_web.rs '*total>=*denied && *denied>=*followed && *followed>=0.0 && [*total,*denied,*followed].iter().all(|n| n.fract()==0.0)' 'true'
+mutate crates/view/src/screens/health_web.rs '.rev().take(12) { li' '.rev() { li'
+mutate crates/view/src/screens/health_web.rs 'errors.iter().take(8)' 'errors.iter()'
+mutate crates/store/src/health.rs 'at.parse::<jiff::Timestamp>().map_err(|_| "invalid sample timestamp")?;' 'let _ = at;'
+mutate crates/store/src/health.rs '            let start = size.saturating_sub(TAIL_BYTES);' '            let start = 0;'
+# Recorded delivery is not evidence that an agent executed the answer.
+mutate crates/store/src/delivery.rs 'self.stage == Stage::Written' 'true'
+mutate crates/store/src/delivery.rs 'latest.remove(id);' 'let _ = id;'
+mutate crates/store/src/delivery.rs '|| receipt.intent.verb != "ask.answer"' '|| false'
+mutate crates/store/src/delivery.rs '|| receipt.signed_at.parse::<jiff::Timestamp>().is_err()' '|| false'
+mutate crates/view/src/screens/web_today.rs 'section.errors.iter().take(8)' 'section.errors.iter()'
+mutate crates/view/src/screens/web_today.rs 'section.data.iter().flatten().take(8)' 'section.data.iter().flatten()'
+mutate crates/view/src/screens/health_web.rs '== Some(true)' '== Some(false)'
+mutate crates/view/src/screens/health_web.rs 'percent(lane, "used").is_some_and(|n| n >= 80.0)' 'false'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

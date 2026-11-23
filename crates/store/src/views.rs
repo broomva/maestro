@@ -288,8 +288,8 @@ pub const ANSWERS_READ: &str = "maestro/ledger and maestro/answers (this clone o
 fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
     let mut union = Some(Answered::new());
     let mut errors = Vec::new();
-    for (name, label) in ANSWERS_REFS {
-        let (read, errs) = answered_at_ref(store, name, label);
+    for (name, label, branch) in store.answer_branches() {
+        let (read, errs) = answered_at_ref(branch, name, label);
         errors.extend(errs);
         match (&mut union, read) {
             (Some(union), Some(at_ref)) => union.extend(at_ref),
@@ -300,8 +300,7 @@ fn answered_on_branch(store: &Store) -> (Option<Answered>, Vec<SourceError>) {
 }
 
 /// Answers at one of [`ANSWERS_REFS`].
-fn answered_at_ref(store: &Store, name: &str, label: &str) -> (Option<Answered>, Vec<SourceError>) {
-    let branch = Store::new(store.paths.clone(), crate::TreeSource::GitRev(name.to_string()));
+fn answered_at_ref(branch: &Store, name: &str, label: &str) -> (Option<Answered>, Vec<SourceError>) {
     if branch.tree.unresolved.is_some() {
         // Only a ref that is not there holds no answers; one that does not resolve is unread.
         return match branch.tree.has_ref(name) {
@@ -339,6 +338,9 @@ fn answered_at_ref(store: &Store, name: &str, label: &str) -> (Option<Answered>,
 /// errors are those two reads' failures: an unreadable ledger there may hide answers waiting to
 /// land, so the rows are then the ones seen, and `data` is `None` when either read failed whole.
 pub fn unlanded(store: &Store, _at_rev: &[LedgerFile]) -> Section<Vec<Waiting>> {
+    if !store.cache_asks {
+        return unlanded(&store.read_scope(), _at_rev);
+    }
     if store.reads_worktree() {
         return Section::ok("worktree", Vec::new());
     }
@@ -757,7 +759,8 @@ mod tests {
     #[test]
     fn unread_branch_directory_has_no_answer_set() {
         let (_tmp, store) = branch_with_asks(true);
-        let (answers, errors) = answered_at_ref(&store, "refs/heads/maestro/answers", "maestro/answers");
+        let branch = &store.answer_branches()[2].2;
+        let (answers, errors) = answered_at_ref(branch, "refs/heads/maestro/answers", "maestro/answers");
         assert!(answers.is_none());
         assert!(!errors.is_empty());
     }
@@ -765,7 +768,8 @@ mod tests {
     #[test]
     fn branch_ledger_errors_name_the_branch() {
         let (_tmp, store) = branch_with_asks(false);
-        let (answers, errors) = answered_at_ref(&store, "refs/heads/maestro/answers", "maestro/answers");
+        let branch = &store.answer_branches()[2].2;
+        let (answers, errors) = answered_at_ref(branch, "refs/heads/maestro/answers", "maestro/answers");
         assert!(answers.is_some());
         assert!(errors.iter().any(|e| e.at.starts_with("maestro/answers:.control/asks/a.yaml")), "{errors:?}");
     }

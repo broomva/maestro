@@ -682,3 +682,17 @@ fn ledger_and_legacy_refs_are_read_and_unread_refs_are_reported() {
         assert!(!waiting.errors.is_empty(), "{reference}");
     }
 }
+
+#[test]
+fn a_request_pins_overlay_answers_and_the_next_request_sees_new_ones() {
+    let (_tmp, ws, store) = origin_fixture();
+    let first = answer(&ws, "a");
+    let second = answer(&ws, "b");
+    git(&ws, &["update-ref", "refs/heads/maestro/ledger", &first]);
+    let request = store.read_scope();
+    assert_eq!(waiting_ids(&request), ["a"]);
+    assert_eq!(request.asks().data.unwrap()[0].ledger.asks[0].state(), maestro_core::ask::AskState::Answered);
+    git(&ws, &["update-ref", "refs/heads/maestro/ledger", &second]);
+    assert_eq!(waiting_ids(&request), ["a"], "a render must not mix a moved overlay with its initial asks");
+    assert_eq!(waiting_ids(&store.read_scope()), ["b"], "next request must not reuse stale answers");
+}

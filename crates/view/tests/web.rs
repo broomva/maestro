@@ -473,7 +473,7 @@ fn today_shows_answer_progress_and_unavailable_sources() {
     assert!(r.html.contains("Ship it?"), "{}", r.html);
     assert!(r.html.contains("You chose yes"), "{}", r.html);
     assert!(r.html.contains("On main · not yet known"), "{}", r.html);
-    assert!(r.html.contains("Acted · not yet known"), "{}", r.html);
+    assert!(r.html.contains("Agent outcome not reported"), "{}", r.html);
     assert!(r.html.contains("href=\"/decisions\""), "{}", r.html);
     let empty = tempfile::tempdir().unwrap();
     let (r, _) = web(&worktree(empty.path()), json!({ "type": "today" }));
@@ -533,15 +533,6 @@ fn today_names_other_owner_holds_and_does_not_offer_a_zero_decision_action() {
 }
 
 #[test]
-fn web_health_puts_signals_before_collapsed_reference_plans() {
-    let m = machine();
-    let (r, _) = web(&worktree(m.path()), json!({ "type": "health" }));
-    assert!(r.html.contains("<h1>Health</h1>"));
-    assert!(r.html.find("Loop heartbeats").unwrap() < r.html.find("Linked plans").unwrap());
-    assert!(r.html.contains("<details class=\"mv-health-plans\"><summary>"));
-}
-
-#[test]
 fn health_web_distinguishes_unread_and_measured_sources() {
     let m = machine();
     let mut paths = Paths::under(m.path());
@@ -551,8 +542,37 @@ fn health_web_distinguishes_unread_and_measured_sources() {
     assert!(r.html.contains("2 of 4 sessions"));
     assert!(r.html.contains("25% used"));
     assert!(r.html.contains("not measured"));
-    assert!(r.html.contains("Needs a look"));
+    assert!(r.html.contains("fleet needs attention"));
     let (unread, _) = web(&worktree(m.path()), json!({ "type": "health" }));
     assert!(unread.html.contains("Host information is unavailable"));
     assert!(unread.html.contains("Token capacity is unavailable"));
+}
+
+#[test]
+fn health_uses_producer_freshness_and_all_registered_hosts() {
+    let m = machine();
+    let mut paths = Paths::under(m.path());
+    paths.fleet_meta = m.path().join("telemetry");
+    std::fs::create_dir_all(&paths.fleet_meta).unwrap();
+    let at = "2026-10-02T01:00:00Z";
+    let census = json!({"observed_at":at,"host_load":{"mac":{"live":1,"cpus":8,"load_per_cpu":0.2,"mem_avail_pct":40},"gcp-1":{"live":0}},"host_caps":{"mac":8,"gcp-1":2},"host_last_observed":{"mac":{"at":at},"gcp-1":{"at":at}},"reachable_hosts":["mac"],"connections":{"mac":{"codex":{"state":"down"}}},"coverage_gaps":["unmeasured lane"]});
+    let capacity = json!({"generated_at":at,"ttl_seconds":1800,"host":{},"lanes":[{"provider":"codex","account":"example","used":90,"state":"red"}],"routing":[]});
+    let loops = json!({"evaluated_at":at,"loops":{"census":{"status":"breach","why":"missing host"}}});
+    for (name, value) in [("fleet-snapshot.json", census), ("capacity.json", capacity), ("loop-health.json", loops)] {
+        std::fs::write(paths.fleet_meta.join(name), value.to_string()).unwrap();
+    }
+    let store = Store::new(paths.clone(), TreeSource::WorkingTree);
+    let v = validate(&spec(json!({"type":"health"}))).unwrap();
+    let (r, _) = render_web(&store, &v, at.parse().unwrap(), maestro_view::render::Owner::Ready);
+    assert!(r.html.contains("gcp-1"));
+    assert!(r.html.contains("fleet needs attention"));
+    assert!(r.html.contains("1 account and host coverage gaps"));
+    assert!(r.html.contains("data-state=\"fail\""));
+    assert!(r.html.contains("90% used"));
+    assert!(r.html.contains("Incident history is incomplete"));
+    // Rewriting the files refreshes mtime but never makes their producer readings fresh.
+    let (old, _) = render_web(&store, &v, "2026-10-03T01:00:00Z".parse().unwrap(), maestro_view::render::Owner::Ready);
+    assert!(old.html.contains("Stale · sampled"));
+    assert!(old.html.contains("90% used · stale reading"));
+    assert!(!old.html.contains("data-state=\"ok\""));
 }

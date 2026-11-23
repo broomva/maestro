@@ -1,6 +1,6 @@
 /* Today: the owner's answers and the work that followed. */
 .today-page { display:grid; grid-template-columns:minmax(0,1fr) 330px; gap:24px; align-items:start; }
-.today-heading h1 { margin: 8px 0; font: 300 34px/1.2 var(--mv-font-display); letter-spacing:-.035em; }
+.today-heading h1 { margin: 8px 0; font: 400 28px/1.25 var(--bv-font-sans); letter-spacing:-.01em; }
 .today-heading p { margin:0 0 18px; color:var(--mv-ink2); }
 .today-answers, .today-waiting { border:1px solid transparent; border-radius:26px; background:linear-gradient(var(--mv-glass-heavy),var(--mv-glass-heavy)) padding-box,var(--mv-rim) border-box; box-shadow:0 22px 48px -30px var(--mv-shadow); padding:8px 24px; }
 .today-answer { display:grid; grid-template-columns:44px minmax(0,1fr) auto; gap:12px; padding:18px 0; align-items:center; border-bottom:1px solid var(--mv-line); }
@@ -9,12 +9,13 @@
 .today-answer strong { font-size:15px; font-weight:500; }
 .today-answer-copy, .today-event > span { min-width:0; overflow-wrap:anywhere; }
 .today-answer p { margin:2px 0 0; color:var(--mv-ink2); font-size:14px; }
-.today-stages { display:flex; gap:12px; }
+.today-stages { display:flex; flex-wrap:wrap; gap:12px; justify-content:flex-end; max-width:220px; }
 .today-stage { display:flex; flex-direction:column; text-align:center; font:12px var(--bv-font-mono); color:var(--mv-ink3); max-width:78px; }
 .today-stage span { color:var(--mv-ok); font-size:12px; }
 .today-stage[data-known="false"] span { color:var(--mv-ink3); opacity:.4; }
+.today-outcome { width:100%; font-size:12px; color:var(--mv-ink3); text-align:right; }
 .today-overnight { margin-top:24px; }
-.today-overnight h2 { margin:0; padding:0 4px 10px; font:11px var(--bv-font-mono); letter-spacing:.12em; text-transform:uppercase; color:var(--mv-ink3); }
+.today-overnight h2 { margin:0; padding:0 4px 12px; font:500 18px/1.5 var(--bv-font-sans); color:var(--mv-ink2); }
 .today-event { display:grid; grid-template-columns:58px minmax(0,1fr) auto; gap:12px; border-top:1px solid var(--mv-line); padding:10px 4px; font-size:14px; }
 .today-event a { color:var(--mv-tide); }
 .today-event .today-done { font-size:12px; color:var(--mv-ink3); }
@@ -25,18 +26,26 @@
 .today-action { display:inline-flex; align-items:center; min-height:44px; margin-top:12px; padding:10px 22px; border-radius:999px; background:var(--mv-ink); color:var(--mv-surface); text-decoration:none; font-size:14px; }
 .today-action:focus-visible,.today-event a:focus-visible { outline:2px solid var(--mv-tide); outline-offset:3px; }
 .today-stats { display:grid; grid-template-columns:1fr 1fr; gap:20px; padding:24px 6px; }
-.today-stats div { display:flex; flex-direction:column; gap:4px; }
-.today-stats strong { font:300 30px var(--mv-font-display); }
-.today-stats span,.today-notice { font-size:12px; color:var(--mv-ink3); }
+.today-stat > summary, .today-stat-link { display:flex; flex-direction:column; gap:4px; min-height:64px; padding:8px 0; color:inherit; cursor:pointer; text-decoration:none; }
+.today-stat > summary { list-style:none; }
+.today-stat > summary::-webkit-details-marker { display:none; }
+.today-stat > summary > span::after { content:" +"; color:var(--mv-tide); }
+.today-stat[open] > summary > span::after { content:" −"; }
+.today-stat[open] { grid-column:1/-1; }
+.today-stat-body { padding-top:8px; }
+.today-stat-body > .mv-work-context, .today-stat-body li { padding:8px 0; border-top:1px solid var(--mv-line); }
+.today-stat-body a { color:var(--mv-tide); font-size:14px; overflow-wrap:anywhere; }
+.today-stat > summary:focus-visible, .today-stat-link:focus-visible, .today-stat-body a:focus-visible { outline:2px solid var(--mv-tide); outline-offset:3px; border-radius:4px; }
+.today-stat > summary > strong, .today-stat-link > strong { font:300 28px var(--mv-font-display); }
+.today-stat > summary > span, .today-stat-link > span, .today-notice { font-size:12px; color:var(--mv-ink3); }
 @media(max-width:760px) {
  .today-page { display:flex; flex-direction:column; gap:12px; }
  .today-primary,.today-side { width:100%; }
  .today-heading h1 { font-size:28px; }
  .today-answers { padding:0; border:0; border-radius:0; background:none; box-shadow:none; }
  .today-answer { grid-template-columns:36px minmax(0,1fr); gap:8px 12px; }
- .today-stages { grid-column:2; flex-wrap:wrap; gap:8px; }
+ .today-stages { grid-column:2; flex-wrap:wrap; gap:8px; justify-content:flex-start; max-width:none; }
  .today-stage { max-width:none; flex-direction:row; gap:3px; }
+ .today-outcome { text-align:left; }
  .today-waiting { padding:16px; }
 }
-
-.mv-screen:has(.today-page) > .mv-foot { display:none; }

@@ -51,7 +51,31 @@ expression: "portable(&r.html, &root)"
 <span class="mv-row-meta bv-meta">ask · demo · since 2026-10-01T10:00Z</span>
 </li>
 <li class="mv-row" data-key="work:22222222-0000-0000-0000-000000000000">
+<details class="mv-work-context">
+<summary>
 <span class="mv-row-title">Held for you</span>
+<span class="mv-work-state">Queued</span>
+</summary>
+<div class="mv-work-context-body">
+<p>
+<strong>Recorded hold: </strong>filed from your answer</p>
+<p>Start or retry this work through its existing work controller. Maestro shows the recorded hold and does not change work state here.</p>
+<dl>
+<dt>Work</dt>
+<dd>
+<code>held-for-you</code>
+</dd>
+<dt>Identifier</dt>
+<dd>
+<code>22222222-0000-0000-0000-000000000000</code>
+</dd>
+<dt>Last recorded event</dt>
+<dd>
+<time datetime="2026-10-03T01:00:00Z">2026-10-03T01:00:00Z</time>
+</dd>
+</dl>
+</div>
+</details>
 <span class="mv-row-meta bv-meta">owner step · since 2026-10-03T01:00:00Z</span>
 </li>
 </ul>
