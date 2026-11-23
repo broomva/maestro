@@ -99,7 +99,7 @@
           const lines = [
             `Answered: ${r.label}. Written by Maestro, signed by you.`,
             r.woke ? `The agent: ${r.woke}.` : "",
-            r.landing ? `Main: ${r.landing}.` : "Main: the landing PR is being opened.",
+            r.landing ? `Main: ${r.landing}.` : "Main: no landing result recorded.",
           ].filter(Boolean);
           say(lines.join(" "), "success");
           const next = document.querySelector("a.mv-pager-link[rel=next], .mv-qrow a:not([aria-current])");

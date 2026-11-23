@@ -21,27 +21,6 @@ pub(crate) fn health(cx: &Ctx, id: &str) -> Markup {
     html! { div class="mv-rail" data-block=(id) data-type="health" { (rail(cx)) } }
 }
 
-/// The full web page puts operating signals before the plan's reference material.
-pub(crate) fn web(cx: &Ctx, id: &str) -> Markup {
-    html! {
-        div class="mv-health-page" data-block=(id) data-type="health" {
-            header class="mv-health-heading" {
-                h1 { "Health" }
-                p { "Loop activity, recent receipts and usage. Each section names its source and any missing data." }
-            }
-            div class="mv-rail" {
-                (heartbeats(cx))
-                (receipts(cx))
-                (economy(cx))
-                details class="mv-health-plans" {
-                    summary { "Linked plans" span { "Reference only; live node status is unavailable" } }
-                    (plan(cx))
-                }
-            }
-        }
-    }
-}
-
 pub(crate) fn rail(cx: &Ctx) -> Markup {
     html! {
         (plan(cx))

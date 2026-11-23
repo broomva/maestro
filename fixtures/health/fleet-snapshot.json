@@ -1,0 +1,1 @@
+{"host_load":{"mac":{"cpus":8,"load_per_cpu":0.5,"mem_avail_pct":40,"live":2}},"host_caps":{"mac":4},"connections":{"mac":{"codex":{"state":"down","why":"failed"}}},"active_signals":[{"host":"mac","instance":"codex"}]}

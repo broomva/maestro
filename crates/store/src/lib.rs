@@ -9,7 +9,9 @@ compile_error!("maestro-store reads the Broomva path registry, whose reader is U
 
 pub mod answer;
 pub mod broomva_paths;
+pub mod delivery;
 pub mod doctor;
+pub mod health;
 pub mod ledger;
 pub mod locks;
 pub mod passkey;
@@ -83,6 +85,10 @@ pub struct Store {
     pub tree: Tree,
     /// What the registry's rule needs to know about this store's tree, read once.
     layout: OnceLock<Result<Layout, String>>,
+    /// Immutable git ledgers and overlay refs are pinned for this Store/request. Filesystem reads stay live.
+    pub(crate) cache_asks: bool,
+    ask_tree: OnceLock<Section<Vec<LedgerFile>>>,
+    answer_branches: OnceLock<Vec<(&'static str, &'static str, Store)>>,
 }
 
 impl Store {
@@ -94,7 +100,27 @@ impl Store {
             paths.workspace = views::lexical(&abs);
         }
         let tree = Tree::resolved(paths.workspace.clone(), source);
-        Self { paths, tree, layout: OnceLock::new() }
+        Self {
+            paths,
+            tree,
+            layout: OnceLock::new(),
+            cache_asks: false,
+            ask_tree: OnceLock::new(),
+            answer_branches: OnceLock::new(),
+        }
+    }
+
+    /// A single read request pins overlay refs and reuses immutable git ledgers.
+    /// Construct a fresh scope for every request; ordinary Store calls continue to see new answers.
+    pub fn read_scope(&self) -> Self {
+        Self {
+            paths: self.paths.clone(),
+            tree: self.tree.clone(),
+            layout: OnceLock::new(),
+            cache_asks: true,
+            ask_tree: OnceLock::new(),
+            answer_branches: OnceLock::new(),
+        }
     }
 
     /// Whether this store reads the working tree itself, not a git revision.
@@ -211,6 +237,9 @@ impl Store {
     /// Ledgers are named as the plugin's `LEDGER` names them (`.yaml` or `.yml`) and read
     /// with [`yaml::parse`], so every value, and so every entry hash, is the plugin's.
     pub fn asks(&self) -> Section<Vec<LedgerFile>> {
+        if !self.cache_asks {
+            return self.read_scope().asks();
+        }
         if self.reads_worktree() && self.has_git_checkout() {
             return Store::new(self.paths.clone(), TreeSource::GitRev("origin/main".into())).asks();
         }
@@ -221,19 +250,17 @@ impl Store {
             return base;
         }
         // Legacy first, then the current ledger. For each branch the fetched origin ref wins.
-        for (name, label) in
-            [views::ANSWERS_REFS[2], views::ANSWERS_REFS[3], views::ANSWERS_REFS[0], views::ANSWERS_REFS[1]]
-        {
-            let branch = Store::new(self.paths.clone(), TreeSource::GitRev(name.into()));
+        for index in [2, 3, 0, 1] {
+            let (name, label, branch) = &self.answer_branches()[index];
             if branch.tree.commit.is_none() {
                 let existence = branch.tree.has_ref(name);
                 match existence {
                     Ok(false) => continue,
                     Ok(true) => base.errors.push(SourceError {
-                        at: label.into(),
-                        reason: branch.tree.unresolved.unwrap_or_else(|| "unread".into()),
+                        at: (*label).into(),
+                        reason: branch.tree.unresolved.clone().unwrap_or_else(|| "unread".into()),
                     }),
-                    Err(reason) => base.errors.push(SourceError { at: label.into(), reason }),
+                    Err(reason) => base.errors.push(SourceError { at: (*label).into(), reason }),
                 }
                 base.source.push_str(&format!(" + {label}"));
                 base.data = None;
@@ -267,6 +294,24 @@ impl Store {
 
     /// Ask ledgers at exactly the selected tree, without a branch overlay.
     pub fn asks_at_tree(&self) -> Section<Vec<LedgerFile>> {
+        if self.cache_asks && !self.reads_worktree() {
+            return self.ask_tree.get_or_init(|| self.read_asks_at_tree()).clone();
+        }
+        self.read_asks_at_tree()
+    }
+
+    pub(crate) fn answer_branches(&self) -> &[(&'static str, &'static str, Store)] {
+        self.answer_branches.get_or_init(|| {
+            views::ANSWERS_REFS
+                .into_iter()
+                .map(|(name, label)| {
+                    (name, label, Store::new(self.paths.clone(), TreeSource::GitRev(name.into())).read_scope())
+                })
+                .collect()
+        })
+    }
+
+    fn read_asks_at_tree(&self) -> Section<Vec<LedgerFile>> {
         let dir = match self.rel(ASKS) {
             Ok(dir) => dir,
             Err(reason) => return Section::unavailable(self.tree.label(ASKS), reason),

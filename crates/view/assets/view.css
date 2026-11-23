@@ -581,3 +581,17 @@ body {
   :root:not([data-theme="light"]), :root[data-theme="light"], [data-theme] { --mv-line: var(--mv-line2); --mv-ink3: var(--mv-ink2); }
   .mv-card.bv-card { background: var(--mv-surface); border-color: var(--mv-ink3); }
 }
+
+/* Read-only work context is shared by web pages and MCP blocks. */
+.mv-work-context { min-width: 0; }
+.mv-work-context > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 44px; cursor: pointer; }
+.mv-work-context > summary .mv-row-title { flex: 1 1 12ch; min-width: 0; overflow-wrap: anywhere; }
+.mv-work-state { font-size: 12px; color: var(--mv-ink3); }
+.mv-work-context-body { padding: 4px 0 12px; font-size: 14px; color: var(--mv-ink2); overflow-wrap: anywhere; }
+.mv-work-context-body p { margin: 0 0 12px; }
+.mv-work-context-body dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 8px 12px; margin: 0; font-size: 12px; }
+.mv-work-context-body dt { color: var(--mv-ink3); }
+.mv-work-context-body dd { margin: 0; overflow-wrap: anywhere; }
+.mv-work-context > summary::before { content: "›"; font-size: 18px; line-height: 1; }
+.mv-work-context[open] > summary::before { transform: rotate(90deg); }
+.mv-work-context > summary:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 2px; border-radius: 4px; }
