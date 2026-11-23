@@ -212,6 +212,7 @@ mutate $http ', local.ip().to_string()];' '];'
 # Web pages (BRO-3588): only the bound host, no cross-site request, the policy on every page.
 web=crates/mcp/src/web.rs
 page=crates/view/src/page.rs
+mutate $web $'fn icon(web: &Web, uri: &Uri, headers: &HeaderMap, bytes: &\'static [u8]) -> Response {\n    if !admitted(uri, headers, &web.hosts) {' $'fn icon(web: &Web, uri: &Uri, headers: &HeaderMap, bytes: &\'static [u8]) -> Response {\n    if false {'
 mutate $web 'if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {' 'if false {'
 mutate $web '        (Some(site), None) => matches!(site.to_str(), Ok("same-origin" | "none")),' '        (Some(_), None) => true,'
 mutate $web '        (Some(_), Some(_)) => false,' '        (Some(_), Some(_)) => true,'

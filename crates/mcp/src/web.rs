@@ -77,6 +77,9 @@ pub fn router_with(server: MaestroServer, local: SocketAddr, owner: Result<crate
         .route("/today", get(today))
         .route("/health", get(health))
         .route("/manifest.webmanifest", get(manifest))
+        .route("/apple-touch-icon.png", get(icon_180))
+        .route("/icon-192.png", get(icon_192))
+        .route("/icon-512.png", get(icon_512))
         .with_state(web)
 }
 
@@ -237,6 +240,25 @@ async fn manifest(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Respo
         return refused();
     }
     with_headers(page::web_manifest().into_response(), "application/manifest+json")
+}
+
+fn icon(web: &Web, uri: &Uri, headers: &HeaderMap, bytes: &'static [u8]) -> Response {
+    if !admitted(uri, headers, &web.hosts) {
+        return refused();
+    }
+    with_headers(bytes.into_response(), "image/png")
+}
+
+async fn icon_180(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    icon(&web, &uri, &headers, page::ICON_180_PNG)
+}
+
+async fn icon_192(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    icon(&web, &uri, &headers, page::ICON_192_PNG)
+}
+
+async fn icon_512(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    icon(&web, &uri, &headers, page::ICON_512_PNG)
 }
 
 /// A JSON reply.

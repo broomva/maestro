@@ -435,7 +435,15 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
     assert!(doc.contains(r#"<a class="mv-tab" href="/today" aria-current="page">Today</a>"#), "{doc}");
     assert!(doc.contains(r#"<span class="mv-nav-count">3</span>"#), "{doc}");
     assert!(doc.contains("main 0123456</span> · committed 2 h ago"), "{doc}");
-    // One script, the owner script its policy names by hash (BRO-4042), and no fetched asset.
+    for tag in [r#"rel="manifest""#, r#"rel="apple-touch-icon""#, r#"name="apple-mobile-web-app-capable""#] {
+        assert!(doc.contains(tag), "missing {tag}");
+    }
+    for icon in [page::ICON_180_PNG, page::ICON_192_PNG, page::ICON_512_PNG] {
+        assert!(icon.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+    assert!(page::web_csp().contains("img-src 'self' data:"));
+    assert!(doc.contains("env(safe-area-inset-top)") && doc.contains("env(safe-area-inset-bottom)"));
+    // One script, the owner script its policy names by hash (BRO-4042).
     assert_eq!(doc.matches("<script").count(), 1, "one script");
     assert!(doc.contains(&format!("<script>{}</script>", page::OWNER_JS)), "the pinned owner script");
     // The policy names exactly the script the page emits.
