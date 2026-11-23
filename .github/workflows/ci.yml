@@ -69,9 +69,11 @@ jobs:
           echo "mutants: $MUTANTS"
           test "$MUTANTS" = success
       # The job runs build scripts and the plugin's code (parity): keep the token out of .git/config.
+      # Full history: scripts/ci.sh compares the reader baseline with origin/<base> on a PR.
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

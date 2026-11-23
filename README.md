@@ -691,13 +691,29 @@ The unified-layout ADR renames a repo's `.control/` folder to `.broomva/`, and u
 every reader must accept both names. `scripts/check_control_readers.py` lists the tracked code files
 (Rust, scripts, workflows, TOML) where a `.control/<name>` reference has no `.broomva/<name>` in the
 same file, and compares the list with `scripts/control_readers_baseline.json`. A file may leave the
-list. A file that joins it fails the check, which prints its path. The match is textual, so a comment
-or a test that names only the legacy folder counts. It runs first in `scripts/ci.sh` and in the
-`control-readers` workflow, on every pull request and on pushes to main, with
+list. A file that joins it fails the check, which prints its path. It runs first in `scripts/ci.sh`
+and in the `control-readers` workflow, on every pull request and on pushes to main, with
 `scripts/test_control_readers_ratchet.py`, which proves on a fixture repository that it fails.
+
+On a pull request the check is given `--base-ref origin/<base>` and also compares the PR's baseline
+with the base branch's. A path the base's baseline does not list fails, so a PR cannot add a reader
+and regenerate the baseline to match. The exception is a rename: the new path passes when the same
+PR removes the old path from the baseline and `git diff -M` reports the file as renamed. On a push
+to main, in a local run, or when the base has no baseline yet, that comparison is skipped and the
+check prints a note.
+
+What it catches and what it does not. It finds literal `.control` references in code files. It is a
+ratchet against drift, not a defence against someone evading it:
+
+- A path assembled from pieces, such as `format!("{}{}", ".", "control/asks")` or a chain of
+  `.join` calls on separate segments, is not found. A textual scan cannot be made complete, and the
+  check does not try to parse Rust. Review covers constructed paths.
+- A comment counts. A code file whose comment names only the legacy folder is listed as a reader,
+  as in the workspace's checker. Mention both names in the comment, or reword it.
 
 ```bash
 python3 scripts/check_control_readers.py                    # exit 1 and the new files, if any
+python3 scripts/check_control_readers.py --base-ref origin/main   # also: the baseline did not grow
 python3 scripts/test_control_readers_ratchet.py             # the ratchet's own test
 ```
 
@@ -705,8 +721,8 @@ To resolve a failure, make the file handle both names: read `.broomva/<name>` wh
 and `.control/<name>` otherwise, or read through the path registry (`maestro_store::broomva_paths`),
 which does that and names neither folder. Do not add the file to the baseline. The baseline only
 ever shrinks: when a file leaves the list the check passes and prints the lines to delete from the
-baseline, and a change that adds a line to it is refused in review, since the check cannot tell a
-grown baseline from an honest one.
+baseline. A change that adds a line to it fails on a pull request, unless the line is a renamed
+file's new path.
 
 Design system: `DESIGN.md` and `design-system/broomva/` are the Broomva foundation profile. Work-state
 labels in `maestro-core::work::WorkState` are the canonical agentic-work vocabulary, and they are tested.

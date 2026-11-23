@@ -22,12 +22,26 @@ the home directory, the loops folder or a launchd label. So:
     loops folder under it, which is not a renamed path;
   - a bare legacy name (the directory itself) pairs with a bare new name.
 
-Only code is counted (by extension), from the tracked files of the checkout. The match is textual,
-so a comment or a test that names the legacy folder counts as a reader. Prose, snapshots, event
-logs, JSON and YAML fixtures and ledgers are not readers.
+Only code is counted (by extension), from the tracked files of the checkout. Prose, snapshots,
+event logs, JSON and YAML fixtures and ledgers are not readers.
+
+The baseline can only shrink. Given `--base-ref REF` (CI passes the pull request's base branch),
+the check also reads the baseline at REF (`git show REF:scripts/control_readers_baseline.json`)
+and fails when this checkout's baseline lists a path the base's does not. The one exception is a
+rename: an added path passes when the same change removes a path from the baseline and git reports
+the added file as a rename of the removed one (`git diff --name-status -M REF...HEAD`). Without
+`--base-ref`, or when REF has no baseline yet, that comparison is skipped and a note says so.
+
+What this check does not do. It is a ratchet against drift, not a defence against evasion:
+  - It finds literal references only. A path assembled from pieces, such as
+    `format!("{}{}", ".", "control/asks")` or a chain of `.join` calls on separate segments, is
+    not found, and a textual scan cannot be made to find every one. Review covers those.
+  - A comment counts. A code file whose comment names only the legacy folder is listed like a
+    reader, as in the workspace's checker. Mention both names in the comment, or reword it.
 
 Usage:
   python3 scripts/check_control_readers.py                     compare the checkout with the baseline
+  python3 scripts/check_control_readers.py --base-ref REF      also compare the baseline with REF's
   python3 scripts/check_control_readers.py --selftest          the classifier's controls
   python3 scripts/check_control_readers.py --print-baseline    the checkout's list, as a baseline
   --root DIR                                                   scan DIR in place of this checkout
@@ -129,14 +143,76 @@ def as_baseline(found: set[str]) -> str:
     return json.dumps({"count": len(found), "readers": sorted(found)}, indent=2) + "\n"
 
 
-def check(root: Path) -> int:
-    baseline = json.loads(BASELINE.read_text())
-    expected = set(baseline["readers"])
-    if len(expected) != baseline["count"]:
+def load_baseline(text: str) -> set[str]:
+    baseline = json.loads(text)
+    listed = set(baseline["readers"])
+    if len(listed) != baseline["count"]:
         raise ValueError("baseline count does not match its reader list")
+    return listed
+
+
+def git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(root), *args],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def renames(root: Path, base_ref: str) -> set[tuple[str, str]]:
+    """(old, new) for every file git reports as renamed between the merge base and HEAD."""
+    result = git(root, "diff", "--name-status", "-M", f"{base_ref}...HEAD")
+    if result.returncode != 0:
+        raise RuntimeError(f"git diff against {base_ref} failed: {result.stderr.strip()}")
+    pairs = set()
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if fields[0].startswith("R") and len(fields) == 3:
+            pairs.add((fields[1], fields[2]))
+    return pairs
+
+
+def compare_with_base(root: Path, listed: set[str], base_ref: str) -> int:
+    """Fail when this checkout's baseline lists a path the base's baseline does not, unless the
+    path is a git rename of one the same change removed."""
+    if git(root, "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}").returncode != 0:
+        raise RuntimeError(f"base ref {base_ref} is not a commit here; fetch it first")
+    rel = f"scripts/{BASELINE.name}"
+    shown = git(root, "show", f"{base_ref}:{rel}")
+    if shown.returncode != 0:
+        print(f"Note: {base_ref} has no {rel}; the baseline comparison is skipped.")
+        return 0
+    base = load_baseline(shown.stdout)
+    added = sorted(listed - base)
+    removed = base - listed
+    if not added:
+        print(f"Baseline: no path added since {base_ref}.")
+        return 0
+    moved = renames(root, base_ref)
+    refused = []
+    for path in added:
+        source = next((old for old, new in moved if new == path and old in removed), None)
+        if source is None:
+            refused.append(path)
+        else:
+            removed.discard(source)
+            print(f"Baseline: {path} replaces {source}, a git rename.")
+    if refused:
+        print(f"Paths added to the baseline since {base_ref}:")
+        for path in refused:
+            print(f"  {path}")
+        print("The baseline only shrinks. Make each file read both names instead of listing it.")
+        return 1
+    return 0
+
+
+def check(root: Path, base_ref: str | None = None) -> int:
+    expected = load_baseline(BASELINE.read_text())
+    if base_ref is None:
+        print("Note: no --base-ref; the baseline comparison is skipped.")
+        grown = 0
+    else:
+        grown = compare_with_base(root, expected, base_ref)
     current = readers(root)
     count = len(current)
-    limit = baseline["count"]
+    limit = len(expected)
     print(f"Unpaired readers: {count}; baseline: {limit}")
     # The ratchet is on the set, not the number: a reader may leave, none may be added. Comparing
     # counts alone would let a new reader in whenever an old one was removed in the same change.
@@ -147,12 +223,15 @@ def check(root: Path) -> int:
             print(f"  {path}")
         print(f"Each file above names the legacy {LEGACY} folder without the matching {CURRENT} name.")
         print("Make it read both names, or read through the path registry. Do not add it to the baseline.")
+        print(f"The check finds literal {LEGACY} references in code files, comments included: a comment")
+        print("that names only the legacy folder counts, so mention both names or reword it. It does not")
+        print("find a path assembled from pieces; review covers those.")
         return 1
     if count < limit:
         print(f"Reader count fell to {count}; tighten the baseline. Remove:")
         for path in sorted(expected - current):
             print(f"  {path}")
-    return 0
+    return grown
 
 
 def controls() -> tuple[tuple[str, str], ...]:
@@ -197,13 +276,15 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=ROOT, help="the checkout to scan (default: this one)")
     parser.add_argument("--selftest", action="store_true", help="run the classifier's controls")
     parser.add_argument("--print-baseline", action="store_true", help="print the checkout's list as a baseline")
+    parser.add_argument("--base-ref", metavar="REF",
+                        help="also fail when the baseline lists a path REF's baseline does not")
     args = parser.parse_args()
     if args.selftest:
         return selftest()
     if args.print_baseline:
         sys.stdout.write(as_baseline(readers(args.root)))
         return 0
-    return check(args.root)
+    return check(args.root, args.base_ref)
 
 
 if __name__ == "__main__":
