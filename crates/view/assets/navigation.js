@@ -27,16 +27,20 @@
     return url;
   };
   const read = async (url) => {
-    const response = await fetch(url, { credentials: "same-origin", cache: "no-store", redirect: "error" });
-    if (!response.ok || !response.headers.get("content-type")?.startsWith("text/html")) throw new Error("page unavailable");
-    const doc = new DOMParser().parseFromString(await response.text(), "text/html");
-    if (!doc.querySelector("#maestro-root[data-web]") || !doc.querySelector(".mv-web-head")) throw new Error("incomplete page");
-    // Owner forms keep native navigation and browser form/history restoration throughout.
-    if (doc.querySelector("[data-answer-bar], [data-enroll]")) throw new Error("owner form requires native navigation");
-    // A deployment may change styles or scripts between clicks. Load that document normally.
-    if (doc.querySelector("script")?.textContent !== document.querySelector("script")?.textContent ||
-        [...doc.querySelectorAll("style")].map(e => e.textContent).join("") !== [...document.querySelectorAll("style")].map(e => e.textContent).join("")) throw new Error("new application version");
-    return doc;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch(url, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (!response.ok || !response.headers.get("content-type")?.startsWith("text/html")) throw new Error("page unavailable");
+      const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+      if (!doc.querySelector("#maestro-root[data-web]") || !doc.querySelector(".mv-web-head")) throw new Error("incomplete page");
+      // Owner forms keep native navigation and browser form/history restoration throughout.
+      if (doc.querySelector("[data-answer-bar], [data-enroll]")) throw new Error("owner form requires native navigation");
+      // A deployment may change styles or scripts between clicks. Load that document normally.
+      if (doc.querySelector("script")?.textContent !== document.querySelector("script")?.textContent ||
+          [...doc.querySelectorAll("style")].map(e => e.textContent).join("") !== [...document.querySelectorAll("style")].map(e => e.textContent).join("")) throw new Error("new application version");
+      return doc;
+    } finally { clearTimeout(timeout); }
   };
   const prefetch = (event) => {
     const url = destination(event);
