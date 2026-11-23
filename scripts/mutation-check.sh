@@ -2935,6 +2935,9 @@ mutate $ht '        if thread.parent_id.as_deref() != Some(owner.session().id.as
 mutate $ht '        if thread.liveness() == SessionLiveness::Closed {' '        if false {'
 mutate $hlb '        if session.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'
 mutate $hlb '        if performer.canonical(host) != resolved.session().canonical(host) {' '        if false {'
+# Dogfood: a ledger-branch answer is not proof that the same answer landed on main.
+mutate crates/view/src/screens/web_today.rs 'base.hash() == ask.hash()' 'true'
+mutate crates/view/src/screens/web_today.rs '@else if uncertain { "Decision status incomplete" }' '@else if false { "Decision status incomplete" }'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

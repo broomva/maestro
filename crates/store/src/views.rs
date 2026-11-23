@@ -484,15 +484,18 @@ pub struct Snapshot {
 }
 
 /// Ask counts, with the working tree's read errors joined in: with any read error the unlanded count is not known.
-fn asks_with_unlanded(store: &Store, asks: &Section<Vec<LedgerFile>>) -> Section<AskCounts> {
+fn asks_with_unlanded(
+    store: &Store,
+    asks: &Section<Vec<LedgerFile>>,
+    waiting: &Section<Vec<Waiting>>,
+) -> Section<AskCounts> {
     let whole_tree = asks.errors.is_empty();
     let mut section = asks.as_ref().map(|a| {
-        let waiting = unlanded(store, a);
         // The plugin's batch count, known only when every read was whole: an entry that did not
         // read may hold an answer, or shadow one by its key. Never a bound that may be false.
         let whole = whole_tree && waiting.errors.is_empty();
         let count = waiting.data.as_ref().map(Vec::len).filter(|_| whole && !store.reads_worktree());
-        (AskCounts { unlanded: count, ..ask_counts(a) }, waiting.errors)
+        (AskCounts { unlanded: count, ..ask_counts(a) }, waiting.errors.clone())
     });
     let local_errors = section.data.as_mut().map(|(_, e)| std::mem::take(e)).unwrap_or_default();
     section.errors.extend(local_errors);
@@ -504,12 +507,24 @@ pub fn snapshot(store: &Store) -> Snapshot {
 }
 
 pub fn snapshot_of(store: &Store, reads: &Reads, at: jiff::Timestamp) -> Snapshot {
+    let waiting = unlanded(store, reads.asks.data.as_deref().unwrap_or_default());
+    snapshot_with_waiting(store, reads, at, &waiting)
+}
+
+/// Build a snapshot using the same unlanded-answer read as its containing render. This keeps
+/// the header, counts and decision rows coherent without caching live data across requests.
+pub fn snapshot_with_waiting(
+    store: &Store,
+    reads: &Reads,
+    at: jiff::Timestamp,
+    waiting: &Section<Vec<Waiting>>,
+) -> Snapshot {
     Snapshot {
         generated_at: at.to_string(),
         workspace: store.paths.workspace.display().to_string(),
         tree: store.tree.label("").trim_end_matches(':').to_string(),
         needs: reads.needs(),
-        asks: asks_with_unlanded(store, &reads.asks),
+        asks: asks_with_unlanded(store, &reads.asks, waiting),
         work: reads.work.as_ref().map(|w| work_counts(w)),
         loops: reads.loop_rows(at),
         initiatives: reads.initiatives.as_ref().map(|v| v.iter().filter(|i| i.status.is_live()).cloned().collect()),

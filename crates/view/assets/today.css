@@ -7,9 +7,10 @@
 .today-answer:last-child { border:0; }
 .today-answer time,.today-event time { font:12px var(--bv-font-mono); color:var(--mv-ink3); }
 .today-answer strong { font-size:15px; font-weight:500; }
+.today-answer-copy, .today-event > span { min-width:0; overflow-wrap:anywhere; }
 .today-answer p { margin:2px 0 0; color:var(--mv-ink2); font-size:14px; }
 .today-stages { display:flex; gap:12px; }
-.today-stage { display:flex; flex-direction:column; text-align:center; font:10px var(--bv-font-mono); color:var(--mv-ink3); max-width:65px; }
+.today-stage { display:flex; flex-direction:column; text-align:center; font:12px var(--bv-font-mono); color:var(--mv-ink3); max-width:78px; }
 .today-stage span { color:var(--mv-ok); font-size:12px; }
 .today-stage[data-known="false"] span { color:var(--mv-ink3); opacity:.4; }
 .today-overnight { margin-top:24px; }
@@ -21,7 +22,7 @@
 .today-waiting { padding:20px; }
 .today-waiting h2 { margin:0 0 16px; font:400 22px var(--mv-font-display); }
 .today-waiting-row { border-top:1px solid var(--mv-line); padding:12px 0; margin:0; font-size:14px; }
-.today-action { display:inline-block; margin-top:12px; padding:10px 22px; border-radius:999px; background:var(--mv-ink); color:var(--mv-surface); text-decoration:none; font-size:14px; }
+.today-action { display:inline-flex; align-items:center; min-height:44px; margin-top:12px; padding:10px 22px; border-radius:999px; background:var(--mv-ink); color:var(--mv-surface); text-decoration:none; font-size:14px; }
 .today-action:focus-visible,.today-event a:focus-visible { outline:2px solid var(--mv-tide); outline-offset:3px; }
 .today-stats { display:grid; grid-template-columns:1fr 1fr; gap:20px; padding:24px 6px; }
 .today-stats div { display:flex; flex-direction:column; gap:4px; }

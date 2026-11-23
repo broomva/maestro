@@ -8,7 +8,7 @@
 //! plugin is still the one writer, and these screens say so where the answer would go.
 
 mod decision;
-mod health;
+pub(crate) mod health;
 mod inbox;
 mod rich;
 mod sources;
