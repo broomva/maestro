@@ -482,7 +482,7 @@ pub(crate) fn health(cx: &Ctx, id: &str) -> Markup {
                             @let fresh=census_fresh && host_fresh(c,&host,now);
                             @let limited:Vec<_>=connections.iter().filter(|(_,value)|!fresh || matches!(state(word(value,"state")).0,"warn"|"fail"|"unknown")).collect();
                             @let other:Vec<_>=connections.iter().filter(|(_,value)|fresh && matches!(state(word(value,"state")).0,"ok"|"idle")).collect();
-                            @if limited.is_empty() { p class="mh-note" { "No impaired connections reported." } }
+                            @if limited.is_empty() && !connections.is_empty() { p class="mh-note" { "No impaired connections reported." } }
                             ul { @for (name,value) in limited { li { strong { (name) } (chip(if fresh { word(value,"state") } else { "unknown" })) } } }
                             @if !other.is_empty() { details { summary { (other.len()) " other connections" }
                                 ul { @for (name,value) in other { li { strong { (name) } (chip(word(value,"state"))) } } }

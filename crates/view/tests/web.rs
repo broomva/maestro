@@ -603,6 +603,9 @@ fn missing_provider_measurements_cannot_certify_fleet() {
         let (r, _) = web(&Store::new(paths.clone(), TreeSource::WorkingTree), json!({"type":"health"}));
         assert!(r.html.contains("Fleet status is incomplete."), "unmeasured providers must remain incomplete");
         assert!(!r.html.contains("No problems reported in current readings."));
+        if census["connections"].as_object().unwrap().is_empty() {
+            assert!(!r.html.contains("No impaired connections reported."));
+        }
     }
     census["connections"] = json!({"mac":{"codex":{"state":"up"}},"nuc":{"codex":{"state":"idle"}}});
     std::fs::write(paths.fleet_meta.join("fleet-snapshot.json"), census.to_string()).unwrap();
