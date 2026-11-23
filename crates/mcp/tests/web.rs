@@ -29,6 +29,7 @@ struct Reply {
     status: u16,
     headers: Vec<(String, String)>,
     body: String,
+    body_bytes: Vec<u8>,
 }
 
 impl Reply {
@@ -53,6 +54,8 @@ async fn send(addr: SocketAddr, method: &str, path: &str, host: &str, extra: &[(
     stream.write_all(req.as_bytes()).await.unwrap();
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).await.unwrap();
+    let body_at = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let body_bytes = raw[body_at..].to_vec();
     let text = String::from_utf8_lossy(&raw).into_owned();
     let (head, body) = text.split_once("\r\n\r\n").expect("a response head");
     let mut lines = head.lines();
@@ -61,7 +64,7 @@ async fn send(addr: SocketAddr, method: &str, path: &str, host: &str, extra: &[(
         .filter_map(|l| l.split_once(':'))
         .map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string()))
         .collect();
-    Reply { status, headers, body: body.to_string() }
+    Reply { status, headers, body: body.to_string(), body_bytes }
 }
 
 fn assert_page(r: &Reply, what: &str, current: &str) {
@@ -122,6 +125,16 @@ async fn the_root_redirects_to_decisions_and_the_manifest_starts_there() {
     assert_eq!(r.header("content-type"), Some("application/manifest+json"));
     let m: serde_json::Value = serde_json::from_str(&r.body).unwrap();
     assert_eq!(m["start_url"], "/decisions");
+    assert_eq!(m["id"], "/decisions");
+    assert_eq!(m["icons"][0]["sizes"], "192x192");
+    assert_eq!(m["icons"][1]["sizes"], "512x512");
+    assert_eq!(m["icons"][1]["purpose"], "any maskable");
+    for path in ["/apple-touch-icon.png", "/icon-192.png", "/icon-512.png"] {
+        let icon = send(addr, "GET", path, &host, &[]).await;
+        assert_eq!(icon.status, 200, "{path}");
+        assert_eq!(icon.header("content-type"), Some("image/png"));
+        assert!(icon.body_bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path}");
+    }
     cancel.cancel();
 }
 
@@ -129,8 +142,17 @@ async fn the_root_redirects_to_decisions_and_the_manifest_starts_there() {
 async fn a_foreign_host_or_a_cross_site_request_is_refused() {
     let (addr, cancel) = start(fixture()).await;
     let host = addr.to_string();
-    for path in ["/", "/decisions", "/today", "/health", "/manifest.webmanifest", "/decisions/demo-arc.yaml/merge-now"]
-    {
+    for path in [
+        "/",
+        "/decisions",
+        "/today",
+        "/health",
+        "/manifest.webmanifest",
+        "/apple-touch-icon.png",
+        "/icon-192.png",
+        "/icon-512.png",
+        "/decisions/demo-arc.yaml/merge-now",
+    ] {
         let r = send(addr, "GET", path, "evil.example", &[]).await;
         assert_eq!(r.status, 403, "{path} with a foreign Host");
         let r = send(addr, "GET", path, &host, &[("Sec-Fetch-Site", "cross-site")]).await;

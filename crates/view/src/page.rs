@@ -92,8 +92,13 @@ pub fn app() -> String {
     .into_string()
 }
 
+/// Home Screen and manifest icons.
+pub const ICON_180_PNG: &[u8] = include_bytes!("../assets/icon-180.png");
+pub const ICON_192_PNG: &[u8] = include_bytes!("../assets/icon-192.png");
+pub const ICON_512_PNG: &[u8] = include_bytes!("../assets/icon-512.png");
+
 /// The owner script (BRO-4042): the one script the web pages run, named in their policy by hash.
-pub const OWNER_JS: &str = include_str!("../assets/owner.js");
+pub const OWNER_JS: &str = concat!(include_str!("../assets/owner.js"), "\n", include_str!("../assets/navigation.js"));
 
 /// The web pages' policy (BRO-3588, BRO-4042): no form may post, no page may frame them, only
 /// the same origin's manifest may load, and the one script that runs is the owner script,
@@ -106,7 +111,7 @@ pub fn script_hash(text: &str) -> String {
 static WEB_CSP: LazyLock<String> = LazyLock::new(|| {
     let hash = script_hash(OWNER_JS);
     format!(
-        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; manifest-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; script-src 'sha256-{hash}'; connect-src 'self'"
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; manifest-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; script-src 'sha256-{hash}'; connect-src 'self'"
     )
 });
 
@@ -118,6 +123,7 @@ pub fn web_csp() -> &'static str {
 /// The web pages' styles (BRO-3783): the shell, the three-column decision and the phone layout.
 /// Only on the web pages, so the App's stylesheet holds only what the App places.
 const WEB_CSS: &str = concat!(include_str!("../assets/web.css"), include_str!("../assets/today.css"));
+const HEALTH_CSS: &str = include_str!("../assets/health.css");
 
 /// One place in the web pages' navigation: its path and its label.
 pub const WEB_NAV: [(&str, &str); 3] = [("/decisions", "Decisions"), ("/today", "Today"), ("/health", "Health")];
@@ -209,11 +215,19 @@ pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String 
         (DOCTYPE)
         html lang="en" {
             head {
-                (head(&format!("{title} · Maestro"), web_csp()))
+                // frame-ancestors is enforced by the HTTP header, not supported in a meta policy.
+                (head(&format!("{title} · Maestro"), &web_csp().replace("; frame-ancestors 'none'", "")))
                 meta name="theme-color" content="#f7f6f1" media="(prefers-color-scheme: light)";
                 meta name="theme-color" content="#0b1622" media="(prefers-color-scheme: dark)";
+                meta name="mobile-web-app-capable" content="yes";
+                meta name="apple-mobile-web-app-capable" content="yes";
+                meta name="apple-mobile-web-app-title" content="Maestro";
+                meta name="apple-mobile-web-app-status-bar-style" content="black-translucent";
+                link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png";
+                link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png";
                 link rel="manifest" href="/manifest.webmanifest";
                 style { (PreEscaped(WEB_CSS)) }
+                style { (PreEscaped(HEALTH_CSS)) }
             }
             body class="mv-web" {
                 header class="mv-web-head" {
@@ -293,9 +307,15 @@ pub enum OwnerPage {
     Enrolled(Vec<String>),
 }
 
-/// The web app manifest: a name and the start page, no icons a browser would fetch.
+/// The web app manifest and its Home Screen icons.
 pub fn web_manifest() -> String {
     serde_json::json!({
+        "id": "/decisions",
+        "description": "Decisions, today and health for your workspace.",
+        "icons": [
+            { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+        ],
         "name": "Maestro",
         "short_name": "Maestro",
         "start_url": "/decisions",

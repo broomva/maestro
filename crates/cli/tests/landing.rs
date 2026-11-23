@@ -47,20 +47,23 @@ fn a_count_that_could_not_be_read_says_not_known_never_null() {
         std::fs::create_dir_all(ws.join(".git/refs/heads/maestro")).unwrap();
         std::fs::write(ws.join(".git/refs/heads/maestro/answers"), format!("{}\n", "1".repeat(40))).unwrap();
     });
-    assert!(
-        line.contains(
-            "answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched): not known"
-        ),
-        "{line}"
-    );
+    assert!(line.contains("unreadable") && line.contains("unavailable"), "{line}");
     assert!(!line.contains("null") && !line.contains("0 answered in this checkout"), "{line}");
 }
 
 #[test]
-fn the_working_tree_makes_no_landing_count() {
+fn a_worktree_without_remote_main_is_unread() {
     let line = asks_line("worktree", |_| {});
+    assert!(line.contains("unreadable") && line.contains("unavailable"), "{line}");
+}
+
+#[test]
+fn a_readable_worktree_does_not_claim_a_landing_count() {
+    let line = asks_line("worktree", |ws| {
+        git(ws, &["update-ref", "refs/remotes/origin/main", "refs/heads/main"]);
+    });
     assert!(line.contains("1 open"), "{line}");
-    assert!(!line.contains("maestro/answers") && !line.contains("not yet landed"), "{line}");
+    assert!(!line.contains("answered in this checkout"), "{line}");
 }
 
 #[test]
@@ -72,7 +75,7 @@ fn a_waiting_answer_is_counted_exactly() {
         git(ws, &["commit", "-q", "-am", "answer"]);
         git(ws, &["checkout", "-q", "main"]);
     });
-    assert!(line.contains(", 1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet landed"), "{line}");
+    assert!(line.contains("0 open") && line.contains("1 answered"), "{line}");
 }
 
 #[test]
@@ -87,7 +90,7 @@ fn a_count_from_a_partial_read_is_not_known() {
     // A ledger that did not read may hold an answer: the count is not known, never a bound.
     assert!(
         line.contains(
-            "answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched): not known"
+            "answered in this checkout or on maestro/ledger and maestro/answers (this clone or origin as last fetched): not known"
         ),
         "{line}"
     );

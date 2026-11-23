@@ -96,7 +96,7 @@ pub(crate) fn body() -> Map<String, Value> {
         "headline": "Ship the release?",
         "stakes": "Nothing is blocked; a fixture.",
         "why_you": "Only the owner answers asks.",
-        "options": [{ "id": "ship", "label": "Ship" }, { "id": "hold", "label": "Hold" }],
+        "options": [{ "id": "ship", "label": "Ship" }, { "id": "hold", "label": "Hold", "recommended": true }],
         "blocking": false,
         "default": "hold",
         "preanswerable": false,
@@ -123,7 +123,29 @@ impl Fx {
     }
 
     pub(crate) fn ask(&mut self, fi: &InstanceId, filing: Option<&Filing>) -> Result<Asked, KernelError> {
-        ask(&mut self.ledger, &self.paths, &self.me, fi, "owner", filing)
+        let result = ask(&mut self.ledger, &self.paths, &self.me, fi, "owner", filing);
+        // Older tests use this scratch working tree to simulate a subsequent main landing.
+        // Mirror the just-filed branch only in the fixture, never in the kernel.
+        if matches!(&result, Ok(Asked::Waiting { appended: Some(_), .. })) {
+            self.mirror_filed();
+        }
+        result
+    }
+
+    pub(crate) fn mirror_filed(&self) {
+        let branch = git(&self.ws, &["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
+        std::fs::write(self.ws.join(".control/asks/ledger.yaml"), branch).unwrap();
+    }
+
+    /// Edit and push the scratch ledger branch to model a concurrent ledger writer in a test.
+    pub(crate) fn edit_branch(&self, rel: &str, edit: impl FnOnce(String) -> String) {
+        let checkout = &self.paths.ledger_checkout;
+        let path = checkout.join(rel);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, edit(text)).unwrap();
+        git(checkout, &["add", "--", rel]);
+        git(checkout, &["commit", "-qm", "fixture branch change"]);
+        git(checkout, &["push", "-q", "origin", "HEAD:refs/heads/maestro/ledger"]);
     }
 
     pub(crate) fn events(&self, fi: &InstanceId) -> Vec<Value> {
@@ -147,7 +169,12 @@ impl Fx {
     /// The working tree's row with `id`, as the store reads it.
     pub(crate) fn row(&self, id: &str) -> Option<Ask> {
         let tree = Store::new(self.paths.clone(), TreeSource::WorkingTree);
-        tree.ask_ledger("ledger.yaml").unwrap().unwrap().asks.into_iter().find(|a| a.id == id)
+        let row = tree.ask_ledger("ledger.yaml").unwrap().unwrap().asks.into_iter().find(|a| a.id == id);
+        row.or_else(|| {
+            let branch =
+                Store::new(self.paths.clone(), TreeSource::GitRev("refs/remotes/origin/maestro/ledger".into()));
+            branch.ask_ledger("ledger.yaml").ok().flatten()?.asks.into_iter().find(|a| a.id == id)
+        })
     }
 
     pub(crate) fn status(&self, fi: &InstanceId) -> crate::kernel::Status {
@@ -162,8 +189,11 @@ impl Fx {
 
     /// Adds `lines` (YAML keys at the row's indent) to the working tree's row `id`.
     pub(crate) fn add_to_row(&self, id: &str, lines: &str) {
-        let text = self.ledger_text();
+        let mut text = self.ledger_text();
         let line = format!("  - id: \"{id}\"\n");
+        if !text.contains(&line) {
+            text = git(&self.ws, &["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
+        }
         assert!(text.contains(&line), "{text}");
         std::fs::write(self.ws.join(".control/asks/ledger.yaml"), text.replace(&line, &format!("{line}{lines}")))
             .unwrap();
@@ -189,7 +219,22 @@ impl Fx {
 
     /// Commits the working tree, pushes it to origin's main and fetches: the answer has landed.
     pub(crate) fn land_on_main(&self) {
-        self.commit();
+        let file = self.ws.join(".control/asks/ledger.yaml");
+        let text = std::fs::read(&file).unwrap();
+        let branch = Command::new("git")
+            .arg("-C")
+            .arg(&self.ws)
+            .args(["show-ref", "--verify", "--quiet", "refs/remotes/origin/maestro/ledger"])
+            .status()
+            .unwrap()
+            .success();
+        if branch {
+            git(&self.ws, &["checkout", "-q", "HEAD", "--", ".control/asks/ledger.yaml"]);
+            git(&self.ws, &["merge", "-q", "--no-edit", "refs/remotes/origin/maestro/ledger"]);
+            std::fs::write(&file, text).unwrap();
+        }
+        git(&self.ws, &["add", "-A"]);
+        git(&self.ws, &["commit", "-q", "--allow-empty", "-m", "land"]);
         git(&self.ws, &["push", "-q", "origin", "main"]);
         git(&self.ws, &["fetch", "-q", "origin"]);
     }
@@ -309,26 +354,25 @@ fn a_hash_miss_is_ask_refused() {
 }
 
 #[test]
-fn confirmation_reads_the_working_tree_not_origin_main() {
-    // BRO-3624 item 7: the writer writes the working tree, and origin/main does not have the row
-    // until it lands; the link is made from the working tree.
+fn confirmation_reads_the_pushed_branch_not_the_working_tree_or_main() {
     let mut f = fx(None, "");
     let fi = f.begin();
-    let asked = f.ask(&fi, Some(&filing())).unwrap();
+    let asked = ask(&mut f.ledger, &f.paths, &f.me, &fi, "owner", Some(&filing())).unwrap();
     let (id, linked) = waiting(&asked);
     assert!(linked);
     let at_main = git(&f.ws, &["show", "refs/remotes/origin/main:.control/asks/ledger.yaml"]);
-    assert!(!at_main.contains(id) && f.ledger_text().contains(id));
+    let branch = git(&f.ws, &["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
+    assert!(!at_main.contains(id) && !f.ledger_text().contains(id) && branch.contains(id));
 }
 
 #[test]
 fn a_busy_ask_ledger_is_retried_until_the_kernels_deadline_then_refused() {
     // BRO-3624 item 7: the ask ledger's lock busy is the kernel's timed retry, against its own
     // clock, then `ask_refused_busy`; never the owner's wait. The writer is busy for five tries.
-    let count = "C = os.path.join(HERE, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nif n < 6:\n    sys.stdin.read()\n    print('error: held by pid 1', file=sys.stderr)\n    sys.exit(75)";
+    let count = "C = os.path.join(os.path.dirname(os.path.dirname(HERE)), 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nif n < 6:\n    sys.stdin.read()\n    print('error: held by pid 1', file=sys.stderr)\n    sys.exit(75)";
     let mut f = fx(Some(&wrapper(count)), "");
     let fi = f.begin();
-    let tries = f.ws.join("scripts/tries");
+    let tries = f.tmp.path().join("tries");
     let read = |p: &Path| std::fs::read_to_string(p).ok().and_then(|t| t.parse::<u32>().ok()).unwrap_or(0);
     let clock = TestClock::install();
     let mover = {
@@ -381,10 +425,12 @@ fn the_flows_lock_is_free_while_an_ask_is_filed() {
         root = f.flows,
     );
     std::fs::write(f.ws.join("scripts/ask_ledger.py"), wrapper(&check)).unwrap();
+    f.commit();
+    git(&f.ws, &["push", "-q", "origin", "main"]);
     let fi = f.begin();
     let asked = f.ask(&fi, Some(&filing())).unwrap();
     assert!(waiting(&asked).1, "{asked:?}");
-    assert!(f.ws.join("scripts/checked").exists(), "the writer checked the locks");
+    assert!(f.paths.ledger_checkout.join("scripts/checked").exists(), "the writer checked the locks");
     // The check is live: with the flows lock held by this process, the writer refuses.
     let held = f.ledger.lock().unwrap();
     let out = Command::new("python3")
@@ -557,6 +603,8 @@ fn a_writer_that_says_filed_with_no_row_is_ask_unconfirmed_and_withdraws_nothing
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned"], "the pin stands, not withdrawn");
     // The same pin, filed by the real writer, links.
     std::fs::copy(fixtures().join("ask_ledger_stub.py"), f.ws.join("scripts/ask_ledger.py")).unwrap();
+    f.commit();
+    git(&f.ws, &["push", "-q", "origin", "main"]);
     assert!(waiting(&f.ask(&fi, None).unwrap()).1);
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
 }
@@ -570,7 +618,12 @@ fn two_rows_addressed_by_the_pinned_id_are_ask_ambiguous() {
     seams::CRASH_AFTER_FILE.with(|c| c.set(true));
     assert_eq!(code(f.ask(&fi, Some(&filing()))), "encode", "the simulated crash");
     let id = f.pinned(&fi)["id"].as_str().unwrap().to_string();
-    f.add_entry(&format!("\n  - id: other-2\n    uid: \"{id}\"\n    ask: \"Addressed as the flow's ask\"\n"));
+    f.edit_branch(".control/asks/ledger.yaml", |text| {
+        text.replace(
+            "\ndecisions: []",
+            &format!("\n  - id: other-2\n    uid: \"{id}\"\n    ask: \"Addressed as the flow's ask\"\ndecisions: []"),
+        )
+    });
     assert_eq!(code(f.ask(&fi, None)), "ask_ambiguous");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned"], "nothing linked");
 }
@@ -621,7 +674,7 @@ fn an_answer_over_the_outputs_bound_is_answer_too_large() {
 fn an_ask_that_changed_while_it_was_filed_is_ask_changed() {
     // `ask_changed`: between filing (flows lock released) and linking, another write of the
     // owner's withdrew the pin. Nothing is linked to a pin that no longer stands.
-    let hold = "open(os.path.join(HERE, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(HERE, 'go')):\n    time.sleep(0.01)";
+    let hold = "P = os.path.dirname(os.path.dirname(HERE))\nopen(os.path.join(P, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(P, 'go')):\n    time.sleep(0.01)";
     let mut f = fx(Some(&wrapper(hold)), "");
     let fi = f.begin();
     let (paths, me, flows, fi2) = (f.paths.clone(), f.me.clone(), f.flows.clone(), fi.clone());
@@ -629,7 +682,7 @@ fn an_ask_that_changed_while_it_was_filed_is_ask_changed() {
         let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
         code(ask(&mut ledger, &paths, &me, &fi2, "owner", Some(&filing())))
     });
-    let reached = f.ws.join("scripts/reached");
+    let reached = f.tmp.path().join("reached");
     let until = std::time::Instant::now() + Duration::from_secs(20);
     while !reached.exists() {
         assert!(std::time::Instant::now() < until, "the writer never ran");
@@ -642,7 +695,7 @@ fn an_ask_that_changed_while_it_was_filed_is_ask_changed() {
         let body = serde_json::json!({ "node": "owner", "iteration": {}, "ask_id": id, "code": "x", "reason": "x" });
         guard.append(&fi, seq, crate::NewEvent::new("AskWithdrawn", body)).unwrap();
     }
-    std::fs::write(f.ws.join("scripts/go"), "").unwrap();
+    std::fs::write(f.tmp.path().join("go"), "").unwrap();
     assert_eq!(filer.join().unwrap(), "ask_changed");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskWithdrawn"], "nothing linked");
 }
@@ -686,10 +739,10 @@ fn the_busy_deadline_runs_from_the_first_try_not_from_each() {
     // Each try takes 60 s by the kernel's clock (the mover shifts it while the writer runs, as the
     // real writer's 30 s wait would). From the first try, the 90 s deadline passes on the second;
     // a deadline taken afresh per try would never pass.
-    let hold = "C = os.path.join(HERE, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nimport time\nwhile not os.path.exists(os.path.join(HERE, 'go-%d' % n)):\n    time.sleep(0.005)\nif n < 6:\n    sys.stdin.read()\n    print('error: held by pid 1', file=sys.stderr)\n    sys.exit(75)";
+    let hold = "P = os.path.dirname(os.path.dirname(HERE))\nC = os.path.join(P, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nimport time\nwhile not os.path.exists(os.path.join(P, 'go-%d' % n)):\n    time.sleep(0.005)\nif n < 6:\n    sys.stdin.read()\n    print('error: held by pid 1', file=sys.stderr)\n    sys.exit(75)";
     let mut f = fx(Some(&wrapper(hold)), "");
     let fi = f.begin();
-    let scripts = f.ws.join("scripts");
+    let scripts = f.tmp.path().to_path_buf();
     let clock = TestClock::install();
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mover = {
@@ -745,7 +798,8 @@ fn a_pin_is_appended_only_at_the_sequence_it_was_minted_at() {
     });
     assert_eq!(code(f.ask(&fi, Some(&filing()))), "stale_seq");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked"]);
-    assert_eq!(f.ledger_text().matches("id: \"flow-owner-").count(), 1, "filed once");
+    let branch = git(&f.ws, &["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
+    assert_eq!(branch.matches("id: \"flow-owner-").count(), 1, "filed once");
 }
 
 #[test]
@@ -919,12 +973,12 @@ fn text_a_refusal_echoes_is_bounded() {
 #[test]
 fn the_writers_words_in_a_busy_refusal_are_bounded() {
     // The first try waits for the clock; after five busy tries the stub files instead of hanging.
-    let loud = "import time\nC = os.path.join(HERE, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nif n == 1:\n    open(os.path.join(HERE, 'ready'), 'w').close()\n    until = time.monotonic() + 30\n    while not os.path.exists(os.path.join(HERE, 'release')) and time.monotonic() < until:\n        time.sleep(0.01)\nif n < 6:\n    sys.stdin.read()\n    print('error: ' + 'w' * 100000, file=sys.stderr)\n    sys.exit(75)";
+    let loud = "import time\nP = os.path.dirname(os.path.dirname(HERE))\nC = os.path.join(P, 'tries')\nn = int(open(C).read()) + 1 if os.path.exists(C) else 1\nopen(C, 'w').write(str(n))\nif n == 1:\n    open(os.path.join(P, 'ready'), 'w').close()\n    until = time.monotonic() + 30\n    while not os.path.exists(os.path.join(P, 'release')) and time.monotonic() < until:\n        time.sleep(0.01)\nif n < 6:\n    sys.stdin.read()\n    print('error: ' + 'w' * 100000, file=sys.stderr)\n    sys.exit(75)";
     let mut f = fx(Some(&wrapper(loud)), "");
     let fi = f.begin();
     let clock = TestClock::install();
-    let ready = f.ws.join("scripts/ready");
-    let release = f.ws.join("scripts/release");
+    let ready = f.tmp.path().join("ready");
+    let release = f.tmp.path().join("release");
     let mover = std::thread::spawn(move || {
         let until = std::time::Instant::now() + Duration::from_secs(30);
         while !ready.exists() && std::time::Instant::now() < until {
@@ -951,11 +1005,190 @@ fn landed_unanswered() -> (Fx, InstanceId, String, String, String) {
     let mut f = fx(None, "");
     let fi = f.begin();
     let id = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
+    let filed = git(&f.ws, &["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
+    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), filed).unwrap();
     f.land_on_main();
     let main = git(&f.ws, &["rev-parse", "HEAD"]).trim().to_string();
     f.answer_in_worktree(&id);
     let forged = f.forge();
     (f, fi, id, main, forged)
+}
+
+#[test]
+fn ask_confirms_the_pushed_branch_without_editing_the_working_tree() {
+    let mut f = fx(None, "");
+    let before = f.ledger_text();
+    std::fs::create_dir_all(f.ws.join(".broomva/asks")).unwrap();
+    let fi = f.begin();
+    let result = ask(&mut f.ledger, &f.paths, &f.me, &fi, "owner", Some(&filing())).unwrap();
+    let id = waiting(&result).0.to_string();
+    assert_eq!(f.ledger_text(), before);
+    let branch = git(&f.ws, &["show", "refs/remotes/origin/maestro/ledger:.control/asks/ledger.yaml"]);
+    assert!(branch.contains(&format!("id: \"{id}\"")));
+    assert!(f.kinds(&fi).iter().any(|kind| kind == "AskLinked"));
+}
+
+/// Build a signed answer against a local bare origin; no network or owner's files are used.
+fn branch_answer_fixture(case: &str, branch: &str) -> (Fx, InstanceId) {
+    use base64::{
+        Engine,
+        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    };
+    use p256::{
+        ecdsa::{SigningKey, signature::Signer},
+        pkcs8::EncodePublicKey,
+    };
+    use sha2::{Digest, Sha256};
+
+    let (f, fi, id, _, _) = landed_unanswered();
+    f.answer_in_worktree(&id);
+    f.add_to_row(&id, "    answer_note: \"approved\"\n");
+    let owner = f.tmp.path().join("owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let party = maestro_store::passkey::Party::parse("https://owner.example").unwrap();
+    let key = SigningKey::from_slice(&[7; 32]).unwrap();
+    let signing_key = if case == "forged" { SigningKey::from_slice(&[8; 32]).unwrap() } else { key.clone() };
+    let credential = maestro_store::passkey::Credential {
+        id: "Y3JlZA".into(),
+        public_key: STANDARD.encode(
+            p256::PublicKey::from_sec1_bytes(key.verifying_key().to_encoded_point(false).as_bytes())
+                .unwrap()
+                .to_public_key_der()
+                .unwrap()
+                .as_bytes(),
+        ),
+        enrolled_at: "t".into(),
+        rp_id: party.id.clone(),
+    };
+    let ring =
+        maestro_store::passkey::Keyring { credentials: if case == "unenrolled" { vec![] } else { vec![credential] } };
+    ring.save(&owner).unwrap();
+    std::fs::write(owner.join("web-origin"), if case == "party" { "https://other.example" } else { &party.origin })
+        .unwrap();
+    seams::OWNER_DIR.with(|d| *d.borrow_mut() = Some(owner));
+    let intent = serde_json::json!({
+        "verb":"ask.answer", "ledger":"ledger.yaml", "handle": id, "hash":"original",
+        "option": if case == "option" { "hold" } else { "ship" },
+        "note": if case == "note" { "wrong" } else { "approved" },
+    })
+    .to_string();
+    let challenge = maestro_store::passkey::challenge(&intent, "nonce");
+    let client =
+        serde_json::json!({"type":"webauthn.get", "challenge":challenge, "origin":party.origin, "crossOrigin":false})
+            .to_string();
+    let mut auth = Sha256::digest(party.id.as_bytes()).to_vec();
+    auth.push(0x05);
+    auth.extend_from_slice(&[0, 0, 0, 1]);
+    let mut signed = auth.clone();
+    signed.extend_from_slice(&Sha256::digest(client.as_bytes()));
+    let signature: p256::ecdsa::Signature = signing_key.sign(&signed);
+    let assertion = maestro_store::passkey::Assertion {
+        credential: "Y3JlZA".into(),
+        client_data: URL_SAFE_NO_PAD.encode(client),
+        authenticator_data: URL_SAFE_NO_PAD.encode(auth),
+        signature: URL_SAFE_NO_PAD.encode(signature.to_der().as_bytes()),
+    };
+    let proof = serde_json::json!({"intent":intent, "nonce":"nonce", "assertion":assertion});
+    let message =
+        if case == "unsigned" { "answer".to_string() } else { format!("answer\n\nMaestro-Owner-Proof: {proof}") };
+    git(&f.ws, &["add", "-A"]);
+    let tree = git(&f.ws, &["write-tree"]).trim().to_string();
+    let parent = if branch == "maestro/ledger" { "refs/remotes/origin/maestro/ledger" } else { "HEAD" };
+    let commit = git(&f.ws, &["commit-tree", &tree, "-p", parent, "-m", &message]).trim().to_string();
+    git(&f.ws, &["reset", "-q", "--hard", "HEAD"]);
+    git(&f.ws, &["push", "-q", "origin", &format!("{commit}:refs/heads/{branch}")]);
+    (f, fi)
+}
+
+#[test]
+fn remote_branch_answer_needs_a_proof_for_its_row_and_owner() {
+    for case in ["valid", "unsigned", "forged", "option", "note", "party", "unenrolled"] {
+        let (mut f, fi) = branch_answer_fixture(case, "maestro/ledger");
+        let result = f.ask(&fi, None);
+        if case == "valid" {
+            assert!(matches!(result, Ok(Asked::Answered { .. })), "{case}: {result:?}");
+        } else {
+            assert_eq!(result.unwrap_err().code(), "answer_unproven", "{case}");
+        }
+    }
+    let (mut f, fi) = branch_answer_fixture("valid", "maestro/answers");
+    assert!(matches!(f.ask(&fi, None), Ok(Asked::Answered { .. })));
+}
+
+#[test]
+fn a_branch_answer_with_missing_owner_configuration_is_unread() {
+    let (mut f, fi) = branch_answer_fixture("valid", "maestro/ledger");
+    std::fs::remove_file(f.tmp.path().join("owner/passkeys.json")).unwrap();
+    assert_eq!(f.ask(&fi, None).unwrap_err().code(), "answers_unread");
+}
+
+#[test]
+fn proof_follows_the_last_row_change_across_later_commits() {
+    for change in [false, true] {
+        let (mut f, fi) = branch_answer_fixture("valid", "maestro/ledger");
+        git(&f.ws, &["fetch", "-q", "origin", "maestro/ledger"]);
+        git(&f.ws, &["checkout", "-q", "--detach", "FETCH_HEAD"]);
+        if change {
+            let path = f.ws.join(".control/asks/ledger.yaml");
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(&path, text.replace("approved", "modified")).unwrap();
+            git(&f.ws, &["commit", "-qam", "unsigned row change"]);
+        } else {
+            git(&f.ws, &["commit", "-q", "--allow-empty", "-m", "unrelated change"]);
+        }
+        git(&f.ws, &["push", "-q", "origin", "HEAD:refs/heads/maestro/ledger"]);
+        git(&f.ws, &["checkout", "-q", "main"]);
+        let result = f.ask(&fi, None);
+        if change {
+            assert_eq!(result.unwrap_err().code(), "answer_unproven");
+        } else {
+            assert!(matches!(result, Ok(Asked::Answered { .. })));
+        }
+    }
+}
+
+#[test]
+fn ambiguous_ancestor_in_answer_history_is_unread() {
+    let (mut f, fi) = branch_answer_fixture("valid", "maestro/ledger");
+    let id = f.events(&fi).into_iter().find(|e| e["kind"] == "AskPinned").unwrap()["body"]["ask_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    git(&f.ws, &["fetch", "-q", "origin", "maestro/ledger"]);
+    git(&f.ws, &["checkout", "-q", "--detach", "FETCH_HEAD"]);
+    let path = f.ws.join(".control/asks/ledger.yaml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let duplicate = original.replace(
+        "\ndecisions: []",
+        &format!("\n  - id: duplicate\n    uid: \"{id}\"\n    ask: Duplicate\ndecisions: []"),
+    );
+    std::fs::write(&path, duplicate).unwrap();
+    git(&f.ws, &["commit", "-qam", "duplicate"]);
+    std::fs::write(&path, original).unwrap();
+    git(&f.ws, &["commit", "-qam", "remove duplicate"]);
+    git(&f.ws, &["push", "-q", "origin", "HEAD:refs/heads/maestro/ledger"]);
+    git(&f.ws, &["checkout", "-q", "main"]);
+    assert_eq!(f.ask(&fi, None).unwrap_err().code(), "answers_unread");
+}
+
+#[test]
+fn the_remote_ledger_tip_wins_over_a_forged_local_branch() {
+    let (mut f, fi) = branch_answer_fixture("valid", "maestro/ledger");
+    let main = git(&f.ws, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&f.ws, &["update-ref", "refs/heads/maestro/ledger", &main]);
+    // A shadow asks folder in the owner's working tree cannot redirect the remote read.
+    std::fs::create_dir_all(f.ws.join(".broomva/asks")).unwrap();
+    assert!(matches!(f.ask(&fi, None), Ok(Asked::Answered { .. })));
+}
+
+#[test]
+fn a_remote_branch_tip_missing_from_the_clone_is_unread() {
+    let (mut f, fi) = branch_answer_fixture("valid", "maestro/ledger");
+    let tip = git(&f.ws, &["ls-remote", "origin", "refs/heads/maestro/ledger"]);
+    let tip = tip.split_whitespace().next().unwrap();
+    let object = f.ws.join(".git/objects").join(&tip[..2]).join(&tip[2..]);
+    std::fs::remove_file(object).unwrap();
+    assert_eq!(f.ask(&fi, None).unwrap_err().code(), "answers_unread");
 }
 
 /// What `git show <rev>:<ledger>` reads with `env` and no other change: the attack's control.
@@ -1110,7 +1343,9 @@ fn clipped_text_is_marked_and_a_long_ledger_error_is_clipped() {
     let mut f = fx(None, "");
     let fi = f.begin();
     let name = format!("{}.yaml", "l".repeat(250));
-    std::fs::create_dir(f.ws.join(".control/asks").join(&name)).unwrap();
+    std::os::unix::fs::symlink("ledger.yaml", f.ws.join(".control/asks").join(&name)).unwrap();
+    f.commit();
+    git(&f.ws, &["push", "-q", "origin", "main"]);
     let e = f.ask(&fi, Some(&Filing { ledger: name, body: body() })).unwrap_err();
     assert_eq!(e.code(), "ask_ledger_unread");
     let crate::kernel::KernelError::Refused(Refusal::AskLedgerUnread { detail, .. }) = e else { panic!() };
@@ -1758,14 +1993,13 @@ fn amend_recovers_after_supersede_before_link() {
         .as_str()
         .unwrap()
         .to_string();
+    f.mirror_filed();
     assert!(f.row(&replacement).is_some());
     assert_eq!(text(f.row(&old).unwrap().row.get("superseded_by")).as_deref(), Some(replacement.as_str()));
     let marker = f.ws.join("writer-invoked");
-    std::fs::write(
-        f.ws.join("scripts/ask_ledger.py"),
-        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(99)\n", marker.to_str().unwrap()),
-    )
-    .unwrap();
+    f.edit_branch("scripts/ask_ledger.py", |_| {
+        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(99)\n", marker.to_str().unwrap())
+    });
     assert_eq!(waiting(&f.ask(&fi, None).unwrap()).0, replacement);
     assert!(!marker.exists());
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned", "AskLinked"]);
@@ -1776,9 +2010,12 @@ fn amend_writer_refusal_restores_old_ask() {
     let mut f = fx(None, "");
     let fi = f.begin();
     let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
-    f.answer_in_worktree(&old);
+    f.edit_branch("scripts/ask_ledger.py", |_| {
+        "import sys\nsys.stdin.read()\nprint('error: refused', file=sys.stderr)\nsys.exit(2)\n".into()
+    });
     let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").unwrap();
     assert!(matches!(result, Asked::Withdrawn { code: ASK_NOT_FILED, .. }));
+    f.answer_in_worktree(&old);
     f.land_on_main();
     assert!(matches!(f.ask(&fi, None).unwrap(), Asked::Answered { ask_id, .. } if ask_id == old));
 }
@@ -1794,9 +2031,10 @@ fn amend_requires_old_row_to_point_to_replacement() {
         .as_str()
         .unwrap()
         .to_string();
-    let path = f.ws.join(".control/asks/ledger.yaml");
-    let contents = f.ledger_text().replace(&format!("    superseded_by: \"{replacement}\"\n"), "");
-    std::fs::write(path, contents).unwrap();
+    f.edit_branch(".control/asks/ledger.yaml", |text| {
+        text.replace(&format!("    superseded_by: \"{replacement}\"\n"), "")
+    });
+    f.mirror_filed();
     assert!(f.row(&old).is_some());
     assert_eq!(code(f.ask(&fi, None)), "ask_unconfirmed");
     assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned"]);
@@ -1857,13 +2095,13 @@ fn recovery_does_not_link_while_the_old_row_is_open() {
     let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
     seams::CRASH_AFTER_FILE.with(|c| c.set(true));
     assert!(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify").is_err());
-    let text = f.ledger_text();
-    let reopened: String = text
-        .lines()
-        .filter(|l| !["archived_at:", "archived_reason:", "status:"].iter().any(|k| l.trim_start().starts_with(k)))
-        .map(|l| format!("{l}\n"))
-        .collect();
-    std::fs::write(f.ws.join(".control/asks/ledger.yaml"), reopened).unwrap();
+    f.edit_branch(".control/asks/ledger.yaml", |text| {
+        text.lines()
+            .filter(|l| !["archived_at:", "archived_reason:", "status:"].iter().any(|k| l.trim_start().starts_with(k)))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    });
+    f.mirror_filed();
     assert_eq!(f.row(&old).unwrap().state(), maestro_core::ask::AskState::Open);
     let before = f.kinds(&fi);
     assert_eq!(code(f.ask(&fi, None)), "ask_unconfirmed");
@@ -1960,6 +2198,16 @@ fn amend_refuses_an_ask_closed_on_main() {
 }
 
 #[test]
+fn amendment_uses_the_committed_asks_directory() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    std::fs::create_dir_all(f.ws.join(".broomva/asks")).unwrap();
+    let result = amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify");
+    assert!(matches!(result, Ok(Asked::Waiting { .. })), "{result:?}");
+}
+
+#[test]
 fn amend_then_answer_replacement() {
     let mut f = fx(None, "");
     let fi = f.begin();
@@ -2053,16 +2301,28 @@ fn rejected_amend_pin_is_never_filed() {
     let old = waiting(&f.ask(&fi, Some(&filing())).unwrap()).0.to_string();
     let before = f.ledger_text();
     let marker = f.ws.join("writer-invoked");
-    std::fs::write(
-        f.ws.join("scripts/ask_ledger.py"),
-        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(2)\n", marker.to_str().unwrap()),
-    )
-    .unwrap();
+    f.edit_branch("scripts/ask_ledger.py", |_| {
+        format!("from pathlib import Path\nPath({:?}).touch()\nraise SystemExit(2)\n", marker.to_str().unwrap())
+    });
     seams::REJECT_AMEND_PIN.with(|c| c.set(true));
     assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_changed");
     assert_eq!(f.ledger_text(), before);
     assert!(!marker.exists(), "rejected pin reached the writer");
     assert!(f.row(&old).unwrap().row.get("archived_at").is_none());
+}
+
+#[test]
+fn a_new_amendment_must_confirm_its_predecessor_before_linking() {
+    let mut f = fx(None, "");
+    let fi = f.begin();
+    f.ask(&fi, Some(&filing())).unwrap();
+    f.edit_branch("scripts/ask_ledger.py", |script| {
+        let before = "\"superseded_by\": entry.get(\"uid\", entry[\"id\"])";
+        assert!(script.contains(before));
+        script.replace(before, "\"superseded_by\": \"wrong-replacement\"")
+    });
+    assert_eq!(code(amend(&mut f.ledger, &f.paths, &f.me, &fi, "owner", &body(), "clarify")), "ask_unconfirmed");
+    assert_eq!(f.kinds(&fi), ["Started", "AskPinned", "AskLinked", "AskPinned"]);
 }
 
 #[test]
@@ -2076,6 +2336,8 @@ fn ambiguous_recovered_amend_is_reported_as_ambiguous() {
         .as_str()
         .unwrap()
         .to_string();
-    f.add_entry(&format!("\n  - id: \"{replacement}\"\n    ask: duplicate\n"));
+    f.edit_branch(".control/asks/ledger.yaml", |text| {
+        text.replace("\ndecisions: []", &format!("\n  - id: \"{replacement}\"\n    ask: duplicate\ndecisions: []"))
+    });
     assert_eq!(code(f.ask(&fi, None)), "ask_ambiguous");
 }

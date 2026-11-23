@@ -333,6 +333,7 @@ fn at(instance: &str, seq: u64) -> Assessment {
         flow: "relay@1".into(),
         ir_hash: "sha256:x".into(),
         seq,
+        progress_seq: seq,
         terminal: false,
         work: vec![Work::Node {
             node: "one".into(),
@@ -638,4 +639,102 @@ fn open_shows_a_re_ask_with_inputs_changed() {
             reason: Some("inputs_changed".into()),
         }]
     );
+}
+
+#[test]
+fn released_count_survives_absence_from_work() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    r.counts.insert("fi_a".into(), Count { seq: 4, refusals: MAX_REFUSALS + 1 });
+    r.tally(&[]);
+    assert_eq!(r.tally(&[&at("fi_a", 4)]).spent, ["fi_a"]);
+}
+
+#[test]
+fn intervening_event_does_not_carry_release() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    r.counts.insert("fi_a".into(), Count { seq: 4, refusals: MAX_REFUSALS + 1 });
+    assert_eq!(r.tally(&[&at("fi_a", 6)]).refused, ["fi_a"]);
+}
+
+/// A gate before progress_seq saved its counts at a raw seq, at or after the last progress: they
+/// are counts of the same state. A count from before the last progress is not.
+#[test]
+fn a_count_at_or_after_the_last_progress_still_holds() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    let mut a = at("fi_a", 6);
+    a.progress_seq = 5;
+    r.counts.insert("fi_a".into(), Count { seq: 6, refusals: MAX_REFUSALS + 1 });
+    assert_eq!(r.tally(&[&a]).spent, ["fi_a"], "a raw-seq release after the last progress holds");
+    r.counts.insert("fi_a".into(), Count { seq: 4, refusals: MAX_REFUSALS + 1 });
+    assert_eq!(r.tally(&[&a]).refused, ["fi_a"], "a count from before the last progress is stale");
+}
+
+/// Two stops at once: one assessed before a real event, the other saved its count after it. The
+/// stale one may use the newer count, but must not rewind it, or the next stop re-arms.
+#[test]
+fn a_stale_assessment_does_not_rewind_a_newer_count() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    r.counts.insert("fi_a".into(), Count { seq: 6, refusals: MAX_REFUSALS });
+    assert_eq!(r.tally(&[&at("fi_a", 5)]).spent, ["fi_a"]);
+    assert_eq!(r.counts["fi_a"].seq, 6, "the stale assessment rewound the count");
+    assert_eq!(r.tally(&[&at("fi_a", 6)]).spent, ["fi_a"], "the next stop re-armed");
+}
+
+/// The release the gate records is no progress: the next stop goes through again at the same
+/// position. A real event after it is progress and re-arms the gate (BRO-4057 with BRO-4011).
+#[test]
+fn the_gates_own_record_keeps_its_release_and_a_real_event_rearms_it() {
+    let (mut f, fi) = with(RELAY);
+    let me = f.me.clone();
+    let tally = |f: &mut Fx| {
+        let a = judge(f, &fi);
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        let t = counts.tally(&[&a]);
+        counts.save(&guard, &me).unwrap();
+        (a.seq, a.progress_seq, t)
+    };
+    for round in 0..MAX_REFUSALS {
+        assert_eq!(tally(&mut f).2.refused, [fi.to_string()], "round {round}");
+    }
+    let (seq, progress, t) = tally(&mut f);
+    assert_eq!(t.spent, [fi.to_string()]);
+    record(&mut f, &me, &fi, Unblockable::NoProgress).unwrap();
+    let (after, still, t) = tally(&mut f);
+    assert_eq!((after, still), (seq + 1, progress), "the record moves seq, not progress");
+    assert_eq!(t.spent, [fi.to_string()], "the gate's own record re-armed it");
+    done(&mut f, &fi, "one");
+    assert_eq!(tally(&mut f).2.refused, [fi.to_string()], "a real event must re-arm the gate");
+}
+
+#[test]
+fn prune_drops_gone_releases_but_keeps_open_and_unread() {
+    let mut f = fx(None, "");
+    let me = f.me.clone();
+    let guard = f.ledger.lock().unwrap();
+    let mut r = Refusals::load(&guard, &me).unwrap();
+    for id in ["fi_gone", "fi_open", "fi_unread"] {
+        r.counts.insert(id.into(), Count { seq: 4, refusals: MAX_REFUSALS + 1 });
+    }
+    let open = stop::Open {
+        session: "owner".into(),
+        instances: vec![at("fi_open", 4)],
+        unread: vec![stop::Unread { instance: "fi_unread".into(), code: "broken".into(), reason: "broken".into() }],
+    };
+    r.prune(&open);
+    assert!(!r.counts.contains_key("fi_gone"));
+    assert!(r.counts.contains_key("fi_open"));
+    assert!(r.counts.contains_key("fi_unread"));
 }

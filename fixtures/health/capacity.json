@@ -1,0 +1,1 @@
+{"host":{"swap_used_mb":100,"swap_total_mb":200},"lanes":[{"provider":"codex","account":"example","used":25,"state":"green"}],"routing":[{"provider":"codex","account":"example","live":1,"max_concurrent":4}]}

@@ -3,7 +3,7 @@
 //! An answer is signed with the owner's passkey ([`crate::passkey`]), held for an undo window
 //! ([`UNDO`]), then written: the ledger edit [`maestro_store::answer::answered`] makes, in
 //! Maestro's own checkout of the workspace, committed with the signature in its trailers and
-//! pushed to `maestro/answers`. The answer takes effect there, on its signature. Then the
+//! pushed to `maestro/ledger`. The answer takes effect there, on its signature. Then the
 //! session that filed the ask (the ask's `origin.session`) is woken with the answer, and a
 //! landing PR into main is opened and set to merge when its checks pass: bookkeeping that
 //! nothing waits on.
@@ -61,7 +61,7 @@ pub enum Stage {
     Applying,
     /// Undone inside the window: nothing was written.
     Undone,
-    /// Written to `maestro/answers`: in effect.
+    /// Written to `maestro/ledger`: in effect.
     Written,
     /// Refused or failed: nothing was written.
     Failed,
@@ -96,12 +96,53 @@ pub struct Writer {
     /// The receipts log and passkeys.
     pub owner_dir: PathBuf,
     /// The T3 CLI that wakes a session, if any.
-    pub t3: Option<PathBuf>,
+    pub t3: Option<T3>,
     /// Whether to push and land (off in tests).
     pub remote: bool,
 }
 
-pub const BRANCH: &str = "maestro/answers";
+pub const BRANCH: &str = maestro_store::ledger::BRANCH;
+
+impl Writer {
+    fn shared(&self) -> maestro_store::ledger::Writer {
+        maestro_store::ledger::Writer {
+            workspace: self.workspace.clone(),
+            checkout: self.checkout.clone(),
+            owner_dir: self.owner_dir.clone(),
+            remote: self.remote,
+        }
+    }
+}
+
+use maestro_store::ledger::git;
+
+/// Which T3 CLI wakes a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum T3 {
+    /// This one (`MAESTRO_T3_BIN`).
+    Fixed(PathBuf),
+    /// The CLI of the T3 server running now, under this T3 home, resolved at each wake: T3 records
+    /// its version in `runtime/service-state.json`, and only that version's CLI may open the
+    /// database the server owns (`bin/t3` runs the desktop app's, which refuses when they differ).
+    Active(PathBuf),
+}
+
+impl T3 {
+    pub fn resolve(&self) -> Option<PathBuf> {
+        match self {
+            T3::Fixed(p) => Some(p.clone()),
+            T3::Active(home) => {
+                let state: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(home.join("runtime/service-state.json")).ok()?).ok()?;
+                let v = state.get("activeVersion")?.as_str()?;
+                let ok =
+                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+                let cli = home.join("runtime/versions").join(v).join("t3");
+                if ok && cli.exists() { Some(cli) } else { Some(home.join("bin/t3")).filter(|p| p.exists()) }
+            }
+        }
+    }
+}
 
 /// Signed answers by receipt id.
 #[derive(Clone, Default)]
@@ -253,128 +294,14 @@ pub fn pending(owner_dir: &Path) -> Vec<Pending> {
         .collect()
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
-    }
-}
-
-/// The open landing PR's number, if one is open.
-fn landing_pr(dir: &Path) -> Result<Option<String>, String> {
-    let out = Command::new("gh")
-        .current_dir(dir)
-        .args([
-            "pr",
-            "list",
-            "--head",
-            BRANCH,
-            "--base",
-            "main",
-            "--state",
-            "open",
-            "--json",
-            "number",
-            "--jq",
-            ".[0].number // empty",
-        ])
-        .output()
-        .map_err(|e| format!("gh: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("gh pr list: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let n = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok((!n.is_empty()).then_some(n))
-}
-
-/// Maestro's checkout, made if missing, reset to a clean tree (nothing staged, nothing untracked)
-/// at the base the answer goes on: `maestro/answers` with main merged in when the branch exists,
-/// so an answer it holds that main lacks is kept, never pushed over; else main itself. Returns
-/// the branch's tip when it exists.
-fn prepare(w: &Writer) -> Result<Option<String>, String> {
-    if !w.checkout.join(".git").exists() {
-        if let Some(parent) = w.checkout.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        git(&w.workspace, &["worktree", "add", "--detach", &w.checkout.to_string_lossy(), "HEAD"])?;
-    }
-    // Whatever another process left here, staged or not, is dropped before anything is written.
-    let _ = git(&w.checkout, &["merge", "--abort"]);
-    git(&w.checkout, &["reset", "-q", "--hard"])?;
-    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;
-    let tip = if w.remote {
-        git(&w.checkout, &["fetch", "-q", "origin", "main"])?;
-        if git(&w.checkout, &["ls-remote", "--heads", "origin", BRANCH])?.is_empty() {
-            None
-        } else {
-            git(
-                &w.checkout,
-                &["fetch", "-q", "origin", &format!("+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")],
-            )?;
-            Some(git(&w.checkout, &["rev-parse", &format!("refs/remotes/origin/{BRANCH}")])?)
-        }
-    } else {
-        None
-    };
-    let main = if w.remote { "refs/remotes/origin/main" } else { "HEAD" };
-    match &tip {
-        Some(tip) => {
-            git(&w.checkout, &["checkout", "-q", "--detach", tip])?;
-            let merged = git(
-                &w.checkout,
-                &[
-                    "-c",
-                    "user.name=Maestro",
-                    "-c",
-                    "user.email=maestro@broomva.local",
-                    "merge",
-                    "-q",
-                    "--no-edit",
-                    main,
-                ],
-            );
-            if let Err(e) = merged {
-                let _ = git(&w.checkout, &["merge", "--abort"]);
-                return Err(format!("main does not merge into {BRANCH}: {e}"));
-            }
-        }
-        None => {
-            let at = git(&w.checkout, &["rev-parse", main])?;
-            git(&w.checkout, &["checkout", "-q", "--detach", &at])?;
-        }
-    }
-    Ok(tip)
-}
-
-/// One write at a time across every Maestro process: an exclusive lock on a file beside the checkout.
-fn exclusive(w: &Writer) -> Result<std::fs::File, String> {
-    std::fs::create_dir_all(&w.owner_dir).map_err(|e| e.to_string())?;
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(w.owner_dir.join("write.lock"))
-        .map_err(|e| format!("write lock: {e}"))?;
-    f.lock().map_err(|e| format!("write lock: {e}"))?;
-    Ok(f)
-}
-
 /// Write one signed answer: the ledger edit, a commit carrying the proof and nothing else, the push.
 pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &str) -> Result<String, String> {
-    let _lock = exclusive(w)?;
+    let _lock = maestro_store::ledger::exclusive(&w.shared())?;
     // An undo recorded on disk, by this daemon or before a restart, wins over the write.
     if undone(&w.owner_dir, &r.id) {
         return Err(UNDONE.into());
     }
-    let tip = prepare(w)?;
+    maestro_store::ledger::prepare(&w.shared())?;
     // Written already (a restart after the push, before the pending record was settled): the
     // commit whose trailer line is exactly this answer's id is the outcome, and nothing is
     // written twice. Ids are base64url, so they carry no regular-expression character.
@@ -426,49 +353,7 @@ pub fn write(w: &Writer, r: &Receipt, assertion: &Assertion, nonce: &str, by: &s
         r.id,
         serde_json::to_string(&proof).unwrap_or_default()
     );
-    git(&w.checkout, &["add", "--", &rel])?;
-    // A pathspec commit takes this one file whatever else is staged.
-    git(
-        &w.checkout,
-        &[
-            "-c",
-            "user.name=Maestro",
-            "-c",
-            "user.email=maestro@broomva.local",
-            "commit",
-            "-q",
-            "-m",
-            &message,
-            "--",
-            &rel,
-        ],
-    )?;
-    // The commit holds exactly the signed edit: one file, these bytes.
-    let changed = git(&w.checkout, &["diff", "--name-only", "HEAD~1", "HEAD"])?;
-    let committed = Command::new("git")
-        .arg("-C")
-        .arg(&w.checkout)
-        .args(["cat-file", "blob", &format!("HEAD:{rel}")])
-        .output()
-        .map_err(|e| format!("git cat-file: {e}"))?
-        .stdout;
-    if changed != rel || committed != edited.as_bytes() {
-        return Err(format!("the commit is not exactly the signed answer ({changed}); nothing was pushed"));
-    }
-    let commit = git(&w.checkout, &["rev-parse", "HEAD"])?;
-    if w.remote {
-        // A fast-forward only: the base holds the branch's tip, so nothing on it is pushed over.
-        let _ = tip;
-        if let Err(e) = git(&w.checkout, &["push", "-q", "origin", &format!("HEAD:refs/heads/{BRANCH}")]) {
-            // The remote may have taken it before the reply was lost: its tip decides.
-            let remote =
-                git(&w.checkout, &["ls-remote", "origin", &format!("refs/heads/{BRANCH}")]).unwrap_or_default();
-            if remote.split_whitespace().next() != Some(commit.as_str()) {
-                return Err(e);
-            }
-        }
-    }
-    Ok(commit)
+    maestro_store::ledger::commit_and_push(&w.shared(), &rel, &message, edited.as_bytes())
 }
 
 /// The validator's verdict, read strictly: its `ERROR` records, which must be exactly the count
@@ -509,48 +394,25 @@ pub fn wake(t3: Option<&Path>, session: Option<&str>, message: &str) -> String {
     let Some(t3) = t3 else { return "no T3 CLI is configured".into() };
     match Command::new(t3).args(["thread", "send", thread, message]).output() {
         Ok(o) if o.status.success() => format!("told T3 thread {thread}"),
-        Ok(o) => format!("T3 did not take it: {}", String::from_utf8_lossy(&o.stderr).trim()),
+        Ok(o) => {
+            // The CLI may say why on either stream; the last line is the reason.
+            let said = format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            let why = said
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .find(|l| l.contains("Error") || l.contains("error"))
+                .or_else(|| said.lines().map(str::trim).rfind(|l| !l.is_empty()))
+                .unwrap_or("no output");
+            format!("T3 did not take it (exit {:?}): {why}", o.status.code())
+        }
         Err(e) => format!("T3 did not run: {e}"),
     }
 }
 
-/// Open the landing PR if none is open, and set it to merge when its checks pass.
+/// Open or keep the ledger landing PR.
 pub fn land(w: &Writer) -> String {
-    let dir = &w.checkout;
-    let number = match landing_pr(dir) {
-        Ok(Some(n)) => n,
-        Ok(None) => {
-            let out = Command::new("gh")
-                .current_dir(dir)
-                .args([
-                    "pr",
-                    "create",
-                    "--head",
-                    BRANCH,
-                    "--base",
-                    "main",
-                    "--title",
-                    "answers: the owner's passkey-signed answers",
-                    "--body",
-                    "Answers the owner signed with a passkey on Maestro's Decisions page, written by Maestro (BRO-4042). Each commit carries its proof in a `Maestro-Owner-Proof` trailer. The answers took effect when signed; this PR only brings them to main.",
-                ])
-                .output();
-            match out {
-                Ok(o) if o.status.success() => {
-                    String::from_utf8_lossy(&o.stdout).trim().rsplit('/').next().unwrap_or("").to_string()
-                }
-                Ok(o) => return format!("no landing PR: {}", String::from_utf8_lossy(&o.stderr).trim()),
-                Err(e) => return format!("no landing PR: {e}"),
-            }
-        }
-        Err(e) => return format!("no landing PR: {e}"),
-    };
-    let merged = Command::new("gh").current_dir(dir).args(["pr", "merge", &number, "--auto", "--squash"]).output();
-    match merged {
-        Ok(o) if o.status.success() => format!("landing PR #{number}, set to merge when its checks pass"),
-        Ok(o) => format!("landing PR #{number}; auto-merge not set: {}", String::from_utf8_lossy(&o.stderr).trim()),
-        Err(e) => format!("landing PR #{number}; auto-merge not set: {e}"),
-    }
+    maestro_store::ledger::land(&w.shared())
 }
 
 /// After the window: write, wake, land, logging each stage. Runs on a blocking thread. The pending
@@ -563,7 +425,8 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
             r.commit = Some(commit.clone());
             book.put(r.clone());
             let _ = log(&w.owner_dir, &r);
-            r.woke = Some(wake(w.t3.as_deref(), session, &wake_message(&r, &commit)));
+            let cli = w.t3.as_ref().and_then(T3::resolve);
+            r.woke = Some(wake(cli.as_deref(), session, &wake_message(&r, &commit)));
             book.put(r.clone());
             if w.remote {
                 r.landing = Some(land(w));
@@ -811,6 +674,30 @@ mod tests {
         assert_eq!(pending(d.path()), vec![p]);
         settle(d.path(), "r1AAAAAAAAAAAAAA");
         assert!(pending(d.path()).is_empty());
+    }
+
+    #[test]
+    fn the_active_t3_cli_is_the_running_servers_version() {
+        let home = tempfile::tempdir().unwrap();
+        let rt = home.path().join("runtime");
+        std::fs::create_dir_all(rt.join("versions/0.2.0")).unwrap();
+        std::fs::write(rt.join("versions/0.2.0/t3"), "").unwrap();
+        std::fs::create_dir_all(home.path().join("bin")).unwrap();
+        std::fs::write(home.path().join("bin/t3"), "").unwrap();
+        let active = T3::Active(home.path().into());
+        // No state yet: nothing names a version.
+        assert_eq!(active.resolve(), None);
+        std::fs::write(rt.join("service-state.json"), r#"{"protocol":4,"activeVersion":"0.2.0"}"#).unwrap();
+        assert_eq!(active.resolve(), Some(rt.join("versions/0.2.0/t3")));
+        // A version with no CLI, or one that names another path, falls back to bin/t3, even when
+        // that path holds a t3.
+        std::fs::create_dir_all(rt.join("x")).unwrap();
+        std::fs::write(rt.join("x/t3"), "").unwrap();
+        for v in ["0.3.0", "../x", ""] {
+            std::fs::write(rt.join("service-state.json"), format!(r#"{{"activeVersion":"{v}"}}"#)).unwrap();
+            assert_eq!(active.resolve(), Some(home.path().join("bin/t3")), "{v}");
+        }
+        assert_eq!(T3::Fixed("/x/t3".into()).resolve(), Some("/x/t3".into()));
     }
 
     #[test]

@@ -116,6 +116,9 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                 @else { span class="mv-dchip" data-tone="warning" { "Not blocking" } }
             }
             p class="mv-dtitle" { (a.title()) }
+            @if state == AskState::Open && cx.filed(lf, a) {
+                p class="mv-callout" { "Filed and waiting to land on main." }
+            }
             @if a.blocking && !a.gates.is_empty() {
                 p class="mv-gates bv-meta" { "Blocks " @for (i, g) in a.gates.iter().enumerate() { @if i > 0 { ", " } span class="bv-code" { bdi { (g) } } } }
             }

@@ -222,6 +222,7 @@ fn qrow(cx: &Ctx, e: &Entry, twin: bool) -> Markup {
             bdi { (e.project()) } " · " (kind(e.ask))
             @if let Some(a) = e.asked().and_then(|t| age(t, cx.at)) { " · " (a) }
             @if e.ask.blocking { " · " span data-tone="attention" { "blocking" } }
+            @if cx.filed(e.lf, e.ask) { " · " span { "filed and waiting to land" } }
             @match e.landing {
                 Landing::Waiting => { " · " span data-tone="success" { "waiting to land" } },
                 Landing::Unknown => { " · " span data-tone="warning" { "state not known" } },

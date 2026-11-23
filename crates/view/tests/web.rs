@@ -381,6 +381,11 @@ fn an_ask_whose_handle_is_shared_is_never_opened_or_linked() {
         assert!(!html.contains("/decisions/0dup.yaml/same"), "a shared handle is never a link: {html}");
         assert!(html.contains("shares its handle"), "{html}");
     }
+    std::fs::remove_file(asks.join("a.yaml")).unwrap();
+    let (today, _) = web(&worktree(m.path()), json!({ "type": "today" }));
+    assert!(today.html.contains("Decision status incomplete"), "{}", today.html);
+    assert!(!today.html.contains("No decisions waiting"), "unknown rows are not zero: {}", today.html);
+    assert!(today.html.contains("First") && today.html.contains("Second"), "{}", today.html);
 }
 
 #[test]
@@ -435,7 +440,15 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
     assert!(doc.contains(r#"<a class="mv-tab" href="/today" aria-current="page">Today</a>"#), "{doc}");
     assert!(doc.contains(r#"<span class="mv-nav-count">3</span>"#), "{doc}");
     assert!(doc.contains("main 0123456</span> · committed 2 h ago"), "{doc}");
-    // One script, the owner script its policy names by hash (BRO-4042), and no fetched asset.
+    for tag in [r#"rel="manifest""#, r#"rel="apple-touch-icon""#, r#"name="apple-mobile-web-app-capable""#] {
+        assert!(doc.contains(tag), "missing {tag}");
+    }
+    for icon in [page::ICON_180_PNG, page::ICON_192_PNG, page::ICON_512_PNG] {
+        assert!(icon.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+    assert!(page::web_csp().contains("img-src 'self' data:"));
+    assert!(doc.contains("env(safe-area-inset-top)") && doc.contains("env(safe-area-inset-bottom)"));
+    // One script, the owner script its policy names by hash (BRO-4042).
     assert_eq!(doc.matches("<script").count(), 1, "one script");
     assert!(doc.contains(&format!("<script>{}</script>", page::OWNER_JS)), "the pinned owner script");
     // The policy names exactly the script the page emits.
@@ -444,7 +457,10 @@ fn the_shell_names_the_tree_short_and_marks_the_current_page() {
         page::web_csp().contains(&format!("script-src 'sha256-{}'", page::script_hash(emitted))),
         "the hash of the emitted script"
     );
-    assert!(!doc.to_ascii_lowercase().contains("url("), "the web page fetches no asset");
+    for style in doc.split("<style>").skip(1) {
+        assert!(!style.split("</style>").next().unwrap().to_ascii_lowercase().contains("url("), "no remote CSS asset");
+    }
+    assert!(!doc.contains("<script src="), "the script stays inline and pinned");
 }
 
 #[test]
@@ -457,10 +473,145 @@ fn today_shows_answer_progress_and_unavailable_sources() {
     assert!(r.html.contains("Ship it?"), "{}", r.html);
     assert!(r.html.contains("You chose yes"), "{}", r.html);
     assert!(r.html.contains("On main · not yet known"), "{}", r.html);
-    assert!(r.html.contains("Acted · not yet known"), "{}", r.html);
+    assert!(r.html.contains("Agent outcome not reported"), "{}", r.html);
     assert!(r.html.contains("href=\"/decisions\""), "{}", r.html);
     let empty = tempfile::tempdir().unwrap();
     let (r, _) = web(&worktree(empty.path()), json!({ "type": "today" }));
     assert!(r.html.contains("Answers are unavailable"), "{}", r.html);
     assert!(!r.html.contains("No answers found today"), "{}", r.html);
+}
+
+#[test]
+fn today_does_not_mark_an_overlaid_answer_as_landed_on_main() {
+    let m = all_answered(false);
+    let workspace = m.path().join("workspace");
+    let ledger = workspace.join(".control/asks/done.yaml");
+    let answered = std::fs::read_to_string(&ledger).unwrap().replace("2026-10-02T00:00:00Z", "2026-10-23T10:00:00Z");
+    let open = answered
+        .replace("    answer: \"yes\"\n", "")
+        .replace("    answered_at: \"2026-10-23T10:00:00Z\"\n", "")
+        .replace("status: resolved", "status: open");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&workspace)
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    std::fs::write(&ledger, open).unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "open"]);
+    git(&["checkout", "-qb", "maestro/ledger"]);
+    std::fs::write(&ledger, answered).unwrap();
+    git(&["commit", "-qam", "answer"]);
+    git(&["checkout", "-q", "main"]);
+    let store = || Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
+    let (r, _) = web(&store(), json!({ "type": "today" }));
+    assert!(r.html.contains("You chose yes"), "{}", r.html);
+    assert!(r.html.contains("On main · not yet known"), "an overlay is not main: {}", r.html);
+    assert!(r.html.contains("1 answers seen waiting to land"), "{}", r.html);
+    git(&["merge", "--ff-only", "maestro/ledger"]);
+    let (r, _) = web(&store(), json!({ "type": "today" }));
+    assert!(!r.html.contains("On main · not yet known"), "the answer landed: {}", r.html);
+    assert!(!r.html.contains("answers seen waiting to land"), "{}", r.html);
+}
+
+#[test]
+fn today_names_other_owner_holds_and_does_not_offer_a_zero_decision_action() {
+    let m = all_answered(false);
+    let work = m.path().join("work/held-for-you");
+    copy_tree(&fixture().join("work/held-for-you"), &work);
+    let (r, _) = web(&worktree(m.path()), json!({ "type": "today" }));
+    assert!(r.html.contains("No decisions waiting"), "{}", r.html);
+    assert!(r.html.contains("View decisions and holds"), "{}", r.html);
+    assert!(!r.html.contains("Decide now"), "{}", r.html);
+    let need = worktree(m.path()).work().data.unwrap().into_iter().find(|w| w.owner_step()).unwrap();
+    assert!(r.html.contains(&need.title), "the same owner hold as the header: {}", r.html);
+}
+
+#[test]
+fn health_web_distinguishes_unread_and_measured_sources() {
+    let m = machine();
+    let mut paths = Paths::under(m.path());
+    paths.fleet_meta = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/health");
+    let store = Store::new(paths, TreeSource::WorkingTree);
+    let (r, _) = web(&store, json!({ "type": "health" }));
+    assert!(r.html.contains("2 of 4 sessions"));
+    assert!(r.html.contains("25% used"));
+    assert!(r.html.contains("not measured"));
+    assert!(r.html.contains("fleet needs attention"));
+    let (unread, _) = web(&worktree(m.path()), json!({ "type": "health" }));
+    assert!(unread.html.contains("Host information is unavailable"));
+    assert!(unread.html.contains("Token capacity is unavailable"));
+}
+
+#[test]
+fn health_uses_producer_freshness_and_all_registered_hosts() {
+    let m = machine();
+    let mut paths = Paths::under(m.path());
+    paths.fleet_meta = m.path().join("telemetry");
+    std::fs::create_dir_all(&paths.fleet_meta).unwrap();
+    let at = "2026-10-02T01:00:00Z";
+    let census = json!({"observed_at":at,"host_load":{"mac":{"live":1,"cpus":8,"load_per_cpu":0.2,"mem_avail_pct":40},"gcp-1":{"live":0}},"host_caps":{"mac":8,"gcp-1":2},"host_last_observed":{"mac":{"at":at},"gcp-1":{"at":at}},"reachable_hosts":["mac"],"connections":{"mac":{"codex":{"state":"down"}}},"coverage_gaps":["unmeasured lane"]});
+    let capacity = json!({"generated_at":at,"ttl_seconds":1800,"host":{},"lanes":[{"provider":"codex","account":"example","used":90,"state":"red"}],"routing":[]});
+    let loops = json!({"evaluated_at":at,"loops":{"census":{"status":"breach","why":"missing host"}}});
+    for (name, value) in [("fleet-snapshot.json", census), ("capacity.json", capacity), ("loop-health.json", loops)] {
+        std::fs::write(paths.fleet_meta.join(name), value.to_string()).unwrap();
+    }
+    let store = Store::new(paths.clone(), TreeSource::WorkingTree);
+    let v = validate(&spec(json!({"type":"health"}))).unwrap();
+    let (r, _) = render_web(&store, &v, at.parse().unwrap(), maestro_view::render::Owner::Ready);
+    assert!(r.html.contains("gcp-1"));
+    assert!(r.html.contains("fleet needs attention"));
+    assert!(r.html.contains("1 account and host coverage gaps"));
+    assert!(r.html.contains("data-state=\"fail\""));
+    assert!(r.html.contains("90% used"));
+    assert!(r.html.contains("Incident history is incomplete"));
+    // Rewriting the files refreshes mtime but never makes their producer readings fresh.
+    let (old, _) = render_web(&store, &v, "2026-10-03T01:00:00Z".parse().unwrap(), maestro_view::render::Owner::Ready);
+    assert!(old.html.contains("Stale · sampled"));
+    assert!(old.html.contains("90% used · stale reading"));
+    assert!(!old.html.contains("data-state=\"ok\""));
+}
+
+#[test]
+fn missing_provider_measurements_cannot_certify_fleet() {
+    let m = machine();
+    let paths = Paths::under(m.path());
+    std::fs::create_dir_all(&paths.fleet_meta).unwrap();
+    let at = "2026-10-23T12:00:00Z";
+    let mut census = json!({"observed_at":at,"host_load":{"mac":{"live":1,"cpus":8,"load_per_cpu":0.2,"mem_avail_pct":40},"nuc":{"live":0,"cpus":8,"load_per_cpu":0.1,"mem_avail_pct":80}},"host_caps":{"mac":8,"nuc":3},"host_last_observed":{"mac":{"at":at},"nuc":{"at":at}},"reachable_hosts":["mac","nuc"],"connections":{}});
+    let capacity = json!({"generated_at":at,"ttl_seconds":1800,"host":{},"lanes":[{"provider":"codex","account":"fixture","used":20,"state":"green"}],"routing":[]});
+    let loops = json!({"evaluated_at":at,"loops":{"census":{"status":"ok","why":"fixture"}}});
+    for (name, value) in [("capacity.json", capacity), ("loop-health.json", loops)] {
+        std::fs::write(paths.fleet_meta.join(name), value.to_string()).unwrap();
+    }
+    for name in ["capacity-history.jsonl", "capacity.log", "signals.jsonl", "usage-watch.jsonl"] {
+        std::fs::write(paths.fleet_meta.join(name), "").unwrap();
+    }
+    for connections in [
+        json!({}),
+        json!({"mac":{"codex":{"state":"up"}}}),
+        json!({"mac":{"codex":{"state":"up"}},"nuc":{}}),
+        json!({"mac":{"codex":{"state":"up"}},"nuc":{"codex":{"state":"unknown"}}}),
+    ] {
+        census["connections"] = connections;
+        std::fs::write(paths.fleet_meta.join("fleet-snapshot.json"), census.to_string()).unwrap();
+        let (r, _) = web(&Store::new(paths.clone(), TreeSource::WorkingTree), json!({"type":"health"}));
+        assert!(r.html.contains("Fleet status is incomplete."), "unmeasured providers must remain incomplete");
+        assert!(!r.html.contains("No problems reported in current readings."));
+        if census["connections"].as_object().unwrap().is_empty() {
+            assert!(!r.html.contains("No impaired connections reported."));
+        }
+    }
+    census["connections"] = json!({"mac":{"codex":{"state":"up"}},"nuc":{"codex":{"state":"idle"}}});
+    std::fs::write(paths.fleet_meta.join("fleet-snapshot.json"), census.to_string()).unwrap();
+    let (r, _) = web(&Store::new(paths, TreeSource::WorkingTree), json!({"type":"health"}));
+    assert!(
+        r.html.contains("No problems reported in current readings."),
+        "readable complete scope must not always be incomplete"
+    );
 }

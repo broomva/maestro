@@ -212,6 +212,7 @@ mutate $http ', local.ip().to_string()];' '];'
 # Web pages (BRO-3588): only the bound host, no cross-site request, the policy on every page.
 web=crates/mcp/src/web.rs
 page=crates/view/src/page.rs
+mutate $web $'fn icon(web: &Web, uri: &Uri, headers: &HeaderMap, bytes: &\'static [u8]) -> Response {\n    if !admitted(uri, headers, &web.hosts) {' $'fn icon(web: &Web, uri: &Uri, headers: &HeaderMap, bytes: &\'static [u8]) -> Response {\n    if false {'
 mutate $web 'if !hosts.iter().any(|h| h.eq_ignore_ascii_case(name)) {' 'if false {'
 mutate $web '        (Some(site), None) => matches!(site.to_str(), Ok("same-origin" | "none")),' '        (Some(_), None) => true,'
 mutate $web '        (Some(_), Some(_)) => false,' '        (Some(_), Some(_)) => true,'
@@ -244,16 +245,38 @@ mutate $decision '        } @else if state == AskState::Archived {' '        } @
 mutate $web 'render_web(&store, &validated, at, owner)' 'render_web(&store, &validated, at, maestro_view::render::Owner::Off(String::new()))'
 # The owner's answer (BRO-4042): only the page itself, only a passkey over the very intent, only
 # the hash the owner saw, an undo that holds only inside its window, an edit that reads back.
-pk=crates/mcp/src/passkey.rs
+pk=crates/store/src/passkey.rs
 ow=crates/mcp/src/owner_web.rs
 ans=crates/mcp/src/answers.rs
 sans=crates/store/src/answer.rs
+ledger=crates/store/src/ledger.rs
 mutate $web '    let origin_ok = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) == Some(owner.party.origin.as_str());' '    let origin_ok = true;'
 mutate $web '    let json_ok = !json_body' '    let json_ok = true || !json_body'
 mutate $web '        Ok(o) if request_authority(headers, &o.party).is_some_and(|a| a != o.party.authority) => {' '        Ok(o) if false => {'
 mutate $web '    if !admitted(uri, headers, &web.hosts) {
         return Err(refused());' '    if false {
         return Err(refused());'
+# An answer proof must bind every part of the signed intent to the row.
+mutate crates/store/src/views.rs '    ("refs/heads/maestro/ledger", ANSWERS_BRANCH),' '    ("refs/heads/maestro/answers", ANSWERS_BRANCH),'
+mutate crates/store/src/views.rs '    ("refs/remotes/origin/maestro/ledger", "origin/maestro/ledger"),' '    ("refs/remotes/origin/maestro/answers", "origin/maestro/ledger"),'
+mutate crates/store/src/views.rs '    ("refs/heads/maestro/answers", "maestro/answers"),' '    ("refs/heads/maestro/ledger", "maestro/answers"),'
+mutate crates/store/src/views.rs '    ("refs/remotes/origin/maestro/answers", "origin/maestro/answers"),' '    ("refs/remotes/origin/maestro/ledger", "origin/maestro/answers"),'
+mutate crates/store/src/tree.rs '    check(format.trim(), "commit", commit, &body)?;' '    let _ = (&format, commit, &body);'
+mutate crates/store/src/tree.rs '    if parents
+        .iter()
+        .any(|id| id.len() != width || !id.bytes().all(|b| b.is_ascii_digit() || (b'"'"'a'"'"'..=b'"'"'f'"'"').contains(&b)))' '    if false && parents
+        .iter()
+        .any(|id| id.len() != width || !id.bytes().all(|b| b.is_ascii_digit() || (b'"'"'a'"'"'..=b'"'"'f'"'"').contains(&b)))'
+mutate $pk '    if !trailers.lines().all(|line| {' '    if false && !trailers.lines().all(|line| {'
+mutate $pk '    if proofs.next().is_some() {' '    if false {'
+mutate $pk '    let bytes = std::fs::read(Keyring::path(dir)).map_err(|e| format!("passkeys.json: {e}"))?;' '    let bytes = std::fs::read(Keyring::path(dir)).unwrap_or_else(|_| br#"{"credentials":[]}"#.to_vec());'
+mutate $pk '    let origin = std::fs::read_to_string(dir.join("web-origin")).map_err(|e| format!("web-origin: {e}"))?;' '    let origin = std::fs::read_to_string(dir.join("web-origin")).unwrap_or_else(|_| "https://example.test".into());'
+mutate $pk '    if intent.verb != "ask.answer" {' '    if false {'
+mutate $pk '    if intent.ledger != ledger {' '    if false {'
+mutate $pk '    if intent.handle != row.id && row.uid.as_deref() != Some(intent.handle.as_str()) {' '    if false {'
+mutate $pk '    if row.answer_option.as_deref() != Some(intent.option.as_str()) {' '    if false {'
+mutate $pk '    if row.answer_note != intent.note {' '    if false {'
+mutate $pk '    verify(party, keyring, &challenge(&proof.intent, &proof.nonce), &proof.assertion)?;' '    let _ = verify(party, keyring, &challenge(&proof.intent, &proof.nonce), &proof.assertion);'
 mutate $pk '    if cd.kind != kind {' '    if false {'
 mutate $pk "    if cd.challenge.trim_end_matches('=') != challenge {" '    if false {'
 mutate $pk '    if cd.origin != party.origin || cd.cross_origin {' '    if false {'
@@ -273,9 +296,10 @@ mutate $ow '        let r = self.book.undo(id, now_ms, || answers::mark_undone(&
 mutate $ans '            Stage::Undone => return Ok(r.clone()),' '            Stage::Undone => return Err("again".into()),'
 mutate $ans '        if now_ms >= r.applies_at_ms {' '        if false {'
 mutate $ans '            _ => return Err("it was already written".into()),' '            _ => {}'
+mutate $ans "                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));" '                    true;'
 mutate $ans '        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?;' '        let r = m.get_mut(id)?;'
-mutate $ans '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
-mutate $ans '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''
+mutate $ledger '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
+mutate $ledger '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''
 mutate $ans '    if !new.is_empty() {
         let _ = std::fs::write(&path, &source);' '    if false {
         let _ = std::fs::write(&path, &source);'
@@ -710,7 +734,6 @@ mutate $scr/decision.rs '            @if ambiguous {' '            @if false {'
 
 # Today and the health rail (BRO-3270).
 mutate crates/view/src/screens/web_today.rs 'asks.data.is_none() { p { "Answers are unavailable." } }' 'false { p { "Answers are unavailable." } }'
-mutate crates/view/src/screens/web_today.rs '("Acted", false)' '("Acted", true)'
 td=crates/view/src/screens/today.rs
 hl=crates/view/src/screens/health.rs
 mutate $td 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, Some(WorkState::Running)).len())' 'cx.reads.work.data.as_deref().map(|w| maestro_store::views::work_by_state(w, None).len())'
@@ -1746,6 +1769,67 @@ mutate $cli '    if v["ok"] == json!(true) {
     }
     if v["code"] == "definition_mismatch" {'
 
+# Resolve ledger paths against committed trees, and compare landing counts with the base tree.
+mutate crates/mcp/src/lib.rs '    let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::GitRev("origin/main".into()));' '    let disk = Store::new(store.paths.clone(), maestro_store::TreeSource::WorkingTree);'
+mutate crates/flow/src/kernel/asks.rs '    let here = Store::new(paths.clone(), TreeSource::GitRev("origin/main".into()));' '    let here = Store::new(paths.clone(), TreeSource::WorkingTree);'
+mutate crates/store/src/lib.rs '        let dir = if current { ".broomva/asks" } else { ".control/asks" };' '        let dir = ".control/asks";'
+mutate crates/store/src/lib.rs '        if current && legacy {' '        if false {'
+mutate crates/store/src/tree.rs $'    check(&format, "commit", commit, &body)?;\n    let mut id = String::from_utf8_lossy(&body)' $'    let mut id = String::from_utf8_lossy(&body)'
+mutate crates/store/src/tree.rs '            Some(_) => return Err(format!("{rel} is not a directory")),' '            Some(_) => return Ok(false),'
+mutate crates/store/src/tree.rs $'        check(&format, "tree", &id, &body)?;\n        match tree_entry(&body, part, &format)? {' $'        match tree_entry(&body, part, &format)? {'
+mutate crates/store/src/views.rs '    let base = store.asks_at_tree();' '    let base = store.asks();'
+
+# Ledger fast lane: the checkout is separate, every branch read is visible, and branch answers
+# count only after the signed row proof and verified history walk.
+mutate $ledger '    if checkout.starts_with(&workspace) || workspace.starts_with(&checkout) {' '    if false {'
+mutate $ledger '    let checkout = checkout_target(&w.checkout).map_err(|e| format!("checkout: {e}"))?;' '    let checkout = std::path::absolute(&w.checkout).map_err(|e| e.to_string())?;'
+mutate $ledger '    if common(&w.checkout)? != common(&w.workspace)? {' '    if false {'
+mutate $ledger '    if !registered {' '    if false {'
+mutate $ledger '    if actual != checkout {' '    if false {'
+mutate $ledger '        if name.to_string_lossy().starts_with("GIT_") {' '        if false {'
+mutate $ledger '    let mut command = Command::new(crate::tree::git());' '    let mut command = Command::new("git");'
+mutate $ledger '    command.env_remove("GH_REPO").env_remove("GH_HOST").current_dir(dir);' '    command.env_remove("GH_HOST").current_dir(dir);'
+mutate $ledger '    command.env_remove("GH_REPO").env_remove("GH_HOST").current_dir(dir);' '    command.env_remove("GH_REPO").current_dir(dir);'
+mutate $ledger '    if changed != rel || committed != bytes {' '    if false {'
+mutate $store '        if !main || base.data.is_none() {' '        if true {'
+mutate $store '        if self.reads_worktree() && self.has_git_checkout() {
+            return Store::new(self.paths.clone(), TreeSource::GitRev("origin/main".into())).asks();' '        if false {
+            return Store::new(self.paths.clone(), TreeSource::GitRev("origin/main".into())).asks();'
+mutate $store '    pub fn ask_ledger_overlay(&self, file: &str) -> Result<Option<AskLedger>, String> {
+        if self.reads_worktree() && self.has_git_checkout() {' '    pub fn ask_ledger_overlay(&self, file: &str) -> Result<Option<AskLedger>, String> {
+        if false {'
+mutate $store '        !std::fs::symlink_metadata(self.paths.workspace.join(".git"))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)' '        self.paths.workspace.join(".git").exists()'
+mutate $store '                let existence = branch.tree.has_ref(name);' '                let existence = Ok::<bool, String>(false);'
+mutate $store '        if !main {
+            return Ok(ledger);' '        if true {
+            return Ok(ledger);'
+mutate $store '                match branch.tree.has_ref(name) {' '                match Ok::<bool, String>(false) {'
+mutate $requests '    compose_ask(ask)?;
+    if !ledger_name_ok(ledger) {' '    compose_ask(ask)?;
+    if false {'
+mutate $requests '    let relative =
+        asks_dir.strip_prefix(&paths.workspace).map_err(|_| refused("the asks folder is outside the workspace"))?;' '    let relative = asks_dir.strip_prefix(&paths.workspace).unwrap_or(Path::new("outside"));'
+mutate $requests '    if relative.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {' '    if false {'
+mutate $requests '    if ledger.contains(['"'"'\n'"'"', '"'"'\r'"'"']) {' '    if false {'
+mutate $requests '    if filed.id.contains(['"'"'\n'"'"', '"'"'\r'"'"']) {' '    if false {'
+mutate $requests '    let dir = writer.checkout.join(relative);' '    let dir = paths.workspace.join(relative);'
+mutate $requests '    let guard = crate::ledger::exclusive(&writer).map_err(failure)?;' '    let guard = ();'
+mutate crates/flow/src/kernel/asks.rs '    for branch in ["refs/heads/maestro/ledger", "refs/heads/maestro/answers"] {' '    for branch in ["refs/heads/maestro/answers", "refs/heads/maestro/answers"] {'
+mutate crates/flow/src/kernel/asks.rs '    for branch in ["refs/heads/maestro/ledger", "refs/heads/maestro/answers"] {' '    for branch in ["refs/heads/maestro/ledger", "refs/heads/maestro/ledger"] {'
+mutate crates/flow/src/kernel/asks.rs '        let cmd = maestro_store::tree::ls_remote_command(&remote, branch, ANSWERS_GIT_CONFIG);
+        let Some(tip) = maestro_store::tree::remote_ref(cmd, branch, REMOTE_TIMEOUT).map_err(unread)? else { continue };' '        let Some(tip) = maestro_store::tree::local_commit(&paths.workspace, branch, READ_TIMEOUT).map_err(unread)? else { continue };'
+mutate crates/flow/src/kernel/asks.rs '                Found::Row(previous) if previous.row == row.row =>' '                Found::Row(previous) if false && previous.row == row.row =>'
+mutate crates/flow/src/kernel/asks.rs '                Found::Ambiguous => return Err("an ancestor has an ambiguous ask".into()),' '                Found::Ambiguous => {}'
+mutate crates/flow/src/kernel/asks.rs '    for _ in 0..10_000 {' '    for _ in 0..1 {'
+mutate crates/flow/src/kernel/asks.rs '        maestro_store::passkey::verify_answer_proof(&message, &rec.ledger, &row, &keys, &party).map_err(|e| {
+            Refusal::AnswerUnproven { ask_id: rec.ask_id.clone(), at: source.clone(), detail: clip(&e) }
+        })?;' '        let _ = maestro_store::passkey::verify_answer_proof(&message, &rec.ledger, &row, &keys, &party);'
+mutate crates/flow/src/kernel/asks.rs '    // A crash may leave an already-pushed amendment unlinked. Recover it from the remote tip
+    // before invoking the writer again, so a completed supersede is never repeated.
+    if rec.amends {' '    // A crash may leave an already-pushed amendment unlinked. Recover it from the remote tip
+    // before invoking the writer again, so a completed supersede is never repeated.
+    if false {'
 # Human steps (BRO-3635; BRO-3624 items 1 and 7): a flow's ask, pinned, filed, linked, answered.
 asks=crates/flow/src/kernel/asks.rs
 replay=crates/flow/src/kernel/replay.rs
@@ -1757,14 +1841,8 @@ mutate $replay 'supersedes.is_some() && !current.is_some_and(|r| r.amends)' 'sup
 mutate $mf 'if reason.len() > kernel::MAX_AMEND_REASON {' 'if false {'
 mutate $cli 'if value.len() > maestro_flow::kernel::MAX_AMEND_REASON {' 'if false {'
 mutate $asks '    if rec.amends {
-        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {' '    if false {
-        match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {'
-mutate $asks '            Found::Ambiguous => {
-                let at = format!("worktree:{}", rec.ledger);
-                return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
-            }
-            Found::None => {}' '            Found::Ambiguous => return Err(unconfirmed("ambiguous".into()).into()),
-            Found::None => {}'
+        confirm_amend(&committed, &rec)?;' '    if false {
+        confirm_amend(&committed, &rec)?;'
 # An amendment refuses an answered predecessor and confirms the old row names the replacement.
 mutate $asks '            AskState::Answered => return Err(Refusal::AskAmendAnswered { ask_id: rec.ask_id.clone() }.into()),' '            AskState::Answered => {}'
 mutate $asks '    if answered_on_answers_refs(paths, rec)? {
@@ -1796,13 +1874,16 @@ mutate $asks '    body.insert("asked_at".into(), Value::String(clock::now().strf
 mutate $asks 'const KERNEL_KEYS: [&str; 4] = ["id", "uid", "ask", "asked_at"];' 'const KERNEL_KEYS: [&str; 4] = ["id", "uid", "ask", "ask"];'
 mutate $asks 'map.retain(|k, _| !requests::refused_key(k));' 'map.retain(|_, _| true);'
 # The working tree's row with that id and hash links, after a filing and after a duplicate.
-mutate $asks 'let row = match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? {' 'let row = match (if outcome.is_ok() { find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)? } else { Found::None }) {'
+mutate $asks '    let row = match committed
+        .ask_ledger_verified(&rec.ledger, &revision, READ_TIMEOUT)
+        .and_then(|ledger| rows(ledger, &rec.ask_id))
+        .map_err(unconfirmed)?' '    let row = match find(&here, &rec.ledger, &rec.ask_id).map_err(unconfirmed)?'
 # A hash miss is ask_refused.
 mutate $asks '    if found != rec.body_hash {
         return Err(Refusal::AskRefused {' '    if false {
         return Err(Refusal::AskRefused {'
-# Confirmation reads the working tree, not origin/main.
-mutate $asks 'let here = Store::new(paths.clone(), TreeSource::WorkingTree);' 'let here = Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into()));'
+# Confirmation reads the commit the writer pushed, not main.
+mutate $asks '        Ok(filed) => (filed.commit, None),' '        Ok(_) => ("refs/remotes/origin/main".into(), None),'
 # A busy ask ledger is retried by the kernel against its own clock, until its deadline, then refused.
 mutate $asks 'if clock::now() >= deadline {' 'if true {'
 mutate $asks 'if clock::now() >= deadline {' 'if false {'
@@ -1833,9 +1914,8 @@ mutate $asks 'if size > MAX_ASK_BODY {' 'if false {'
 mutate $asks 'if nesting(&given) + 2 >= MAX_NESTING {' 'if false {'
 mutate $asks 'return Err(unread("there is no such ledger in the asks folder".into()).into());' 'return Ok(BTreeSet::new());'
 mutate $asks 'for _ in 0..MINT_TRIES {' 'for _ in 0..MINT_TRIES + 1 {'
-mutate $asks '            Err(FileError::Refused(reason)) => {' '            Err(FileError::Refused(reason)) if false => {'
-mutate $asks '            Err(FileError::Refused(reason)) => {' '            _ => {
-                let reason = String::from("withdrawn whatever the writer said");'
+mutate $asks '        Err(FileError::Refused(reason)) => {' '        Err(FileError::Refused(reason)) if false => {'
+mutate $asks '        Err(e) => return Err(unconfirmed(e.to_string()).into()),' '        Err(e) => return then(ledger, Confirmed::NotFiled { reason: e.to_string() }),'
 mutate $asks '        _ => Found::Ambiguous,' '        (Some(a), _) => Found::Row(Box::new(a)),'
 mutate $asks '    if found != rec.body_hash {
         return Err(Refusal::AnswerMismatch {' '    if false {
@@ -1866,8 +1946,8 @@ mutate $asks ', "credential.https://github.com.helper=!gh auth git-credential"]'
 # P20 round 3: git does not check an object's hash when it reads it; the answer read checks each
 # object against its id, step by step. The system git by absolute path on a fixed PATH; no GIT_*
 # environment redirects a store read; the ls-remote reader stops at its bound.
-mutate $tree '    check(&format, "commit", commit, &body)?;' ''
-mutate $tree '        check(&format, "tree", &id, &body)?;' ''
+mutate $tree $'    check(&format, "commit", commit, &body)?;\n    let tree = String::from_utf8_lossy(&body)' $'    let tree = String::from_utf8_lossy(&body)'
+mutate $tree $'        check(&format, "tree", &id, &body)?;\n        let last = i + 1 == parts.len();' $'        let last = i + 1 == parts.len();'
 mutate $tree '    check(&format, "blob", &id, &blob)?;' ''
 mutate $tree '    if hex != id {' '    if false {'
 mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev(sha.clone())), &rec.ledger, &rec.ask_id) {'
@@ -1896,8 +1976,12 @@ mutate $tree '        if meta.is_symlink {' '        if false {'
 mutate $tree '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, timeout)?;' '    let (status, _, _) = run_bounded(cmd, "git cat-file -e", 64, Duration::from_secs(3600))?;'
 mutate $asks '    trusted_git().map_err(|e| unread(format!("the git Maestro runs is not root'"'"'s alone: {e}")))?;' ''
 mutate $tree '    cmd.env("xcrun_nocache", "1");' ''
-mutate $tree '    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;' '    let body = git_bytes(root, &["cat-file", "commit", commit], 4 * MAX_OBJECT, timeout)?;'
-mutate $tree '        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;' '        let body = git_bytes(root, &["cat-file", "tree", &id], 4 * MAX_OBJECT, timeout)?;'
+mutate $tree '    let body = git_bytes(root, &["cat-file", "commit", commit], MAX_OBJECT, timeout)?;
+    check(&format, "commit", commit, &body)?;
+    let tree = String::from_utf8_lossy(&body)' '    let body = git_bytes(root, &["cat-file", "commit", commit], 4 * MAX_OBJECT, timeout)?;
+    check(&format, "commit", commit, &body)?;
+    let tree = String::from_utf8_lossy(&body)'
+mutate $tree $'        let body = git_bytes(root, &["cat-file", "tree", &id], MAX_OBJECT, timeout)?;\n        check(&format, "tree", &id, &body)?;\n        let last = i + 1 == parts.len();' $'        let body = git_bytes(root, &["cat-file", "tree", &id], 4 * MAX_OBJECT, timeout)?;\n        check(&format, "tree", &id, &body)?;\n        let last = i + 1 == parts.len();'
 mutate $tree '    let blob = git_bytes(root, &["cat-file", "blob", &id], limit, timeout)?;' '    let blob = git_bytes(root, &["cat-file", "blob", &id], MAX_OBJECT, timeout)?;'
 mutate $tree '    if out.len() > limit {
         return Err(format!("{what} said more than' '    if false {
@@ -1986,6 +2070,13 @@ mutate $cli 'let ask = json_arg("--ask", ask.as_deref())?;' 'let ask: Option<Val
 # Owner-approved adoption and retirement (BRO-3635; ADR decisions 6 and 7): an agent proposes, the
 # owner decides, the kernel applies only the owner's approve option, read from landed main.
 adopt=crates/flow/src/kernel/adoption.rs
+# BRO-4011: the default is recommended, and refused filings do not reset the stop bound.
+mutate $adopt '"status_quo": true, "recommended": true' '"status_quo": true'
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|_| true)'
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|e| e.kind != StopUnblockable::KIND)'
+# The gate's own StopUnblockable record is not progress, or its release re-arms the gate.
+mutate $fk/stop.rs '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()) && e.kind != StopUnblockable::KIND)' '.find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()))'
+
 # Only the approve option exactly; anything else is declined and changes nothing.
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if false {'
 mutate $adopt '    if answer_option.as_deref() != Some(proposal.approve_option()) {' '    if answer_option.as_deref().map(str::to_lowercase).as_deref() != Some(proposal.approve_option()) {'
@@ -2421,7 +2512,34 @@ mutate $stp '            Ok(Some(assess(&log, &started, now, seen)?).filter(|a| 
 mutate $stp '        if prior.is_some_and(|p| p.session == *session.session() && p.reason == reason) {' '        if false {'
 mutate $stp '    check_owner(&log, &started, instance, session)?;' ''
 mutate $stp '            let refusals = if prior >= MAX_REFUSALS {' '            let refusals = if prior > MAX_REFUSALS {'
-mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq == a.seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq)' 'self.counts.get(&a.instance).filter(|_| true)'
+# A count saved at a raw seq after the last progress (a gate before progress_seq) still holds.
+mutate $stp 'self.counts.get(&a.instance).filter(|c| c.seq >= a.progress_seq)' 'self.counts.get(&a.instance).filter(|c| c.seq == a.progress_seq)'
+# A stale assessment does not rewind a newer count.
+mutate $stp '            let seq = held.map_or(a.progress_seq, |c| c.seq);' '            let seq = a.progress_seq;'
+# Bookkeeping after the gate's record does not make a second record.
+mutate $stp '    let last = log.events.iter().rev().find(|e| !super::adoption::BOOKKEEPING.contains(&e.kind.as_str()));' '    let last = log.events.last();'
+# BRO-4057: preserve an absent release; intervening events re-arm it.
+mutate $stp '        counts.retain(|_, c| c.refusals > MAX_REFUSALS);' '        counts.clear();'
+mutate $stp '            open.instances.iter().any(|a| &a.instance == id) || open.unread.iter().any(|a| &a.instance == id)' '            true'
+mutate $gt '                Err(load_error) => match Refusals::quarantine(&guard, &me) {' '                Err(load_error) => match Err::<String, KernelError>(KernelError::Encode("disabled".into())) {'
+mutate $gt '                    Err(e) => {
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",' '                    Err(e) => {
+                        self.out.blocked = true;
+                        return self.fail_open(
+                            Some(&session),
+                            "refusals_unread",
+                            &format!(
+                                "{}: load failed: {load_error}; quarantine failed: {e}",'
+mutate $stp '        prune_quarantines(&dir, &name)?;' ''
+mutate $gt '                        let key = format!("refusals_corrupt\n{session}\n{}", Refusals::path(&me).unwrap_or_default());' '                        let key = format!("refusals_corrupt\n{session}\n{path}");'
+mutate $gt '                        r.prune(&open);' ''
+mutate $gt '            counts.prune(&open);' ''
+mutate $gt '            reason.push_str(&format!(" {recovered}"));' '            let _ = recovered;'
 mutate $replay '        if e.kind == StopUnblockable::KIND {' '        if false {'
 mutate $replay '            self.unblockable.push(record);' ''
 mutate $asks '        return AnswerSeen::Landed;' '        return AnswerSeen::Open;'
@@ -2816,6 +2934,51 @@ mutate $ht '        if thread.parent_id.as_deref() != Some(owner.session().id.as
 mutate $ht '        if thread.liveness() == SessionLiveness::Closed {' '        if false {'
 mutate $hlb '        if session.parent_id.as_deref() != Some(owner.session().id.as_str()) {' '        if false {'
 mutate $hlb '        if performer.canonical(host) != resolved.session().canonical(host) {' '        if false {'
+# Dogfood: a ledger-branch answer is not proof that the same answer landed on main.
+mutate crates/view/src/screens/web_today.rs 'base.hash() == ask.hash()' 'true'
+mutate crates/view/src/screens/web_today.rs '@else if uncertain { "Decision status incomplete" }' '@else if false { "Decision status incomplete" }'
+# BRO-4042: inconsistent dispatch evidence is not presented as measured counts.
+# BRO-4042: a reset or unread sample ends the evidence for a burn-rate projection.
+# Dogfood completion: unknown outcome, unique links and work identity remain explicit.
+mutate crates/view/src/screens/web_today.rs '"Agent outcome not reported"' '"Agent completed the work"'
+mutate crates/view/src/screens/web_today.rs '@if unique {' '@if true {'
+mutate crates/view/src/render.rs '&& work.len() == 1' '&& !work.is_empty()'
+# Telemetry: producer age, valid ranges, read gaps, bounded previews and partial input.
+mutate crates/view/src/screens/health_web.rs 't <= now + 60 && now.saturating_sub(t) <= cadence as i64' 'true'
+mutate crates/view/src/screens/health_web.rs '    if !fresh {
+        return "unknown";
+    }
+    if !c.reachable_hosts' '    if false {
+        return "unknown";
+    }
+    if !c.reachable_hosts'
+mutate crates/view/src/screens/health_web.rs '    if !c.reachable_hosts.iter().any(|h| h == host) {' '    if false {'
+mutate crates/view/src/screens/health_web.rs 'number(v, key).filter(|n| *n <= 100.0)' 'number(v, key)'
+mutate crates/view/src/screens/health_web.rs '    if now - last_at > 1800 {' '    if false {'
+mutate crates/view/src/screens/health_web.rs '        if value > first.1 || first.0 - at > 1800 {' '        if false {'
+mutate crates/view/src/screens/health_web.rs '        let Some(value) = value else {
+            break;
+        };' '        let Some(value) = value else {
+            continue;
+        };'
+mutate crates/view/src/screens/health_web.rs '    if points.iter().all(|(_, v)| v.is_none()) {' '    if false {'
+mutate crates/view/src/screens/health_web.rs '    } else if points.iter().any(|(_, v)| v.is_none()) {' '    } else if false {'
+mutate crates/view/src/screens/health_web.rs '*total>=*denied && *denied>=*followed && *followed>=0.0 && [*total,*denied,*followed].iter().all(|n| n.fract()==0.0)' 'true'
+mutate crates/view/src/screens/health_web.rs '.rev().take(12) { li' '.rev() { li'
+mutate crates/view/src/screens/health_web.rs 'errors.iter().take(8)' 'errors.iter()'
+mutate crates/store/src/health.rs 'at.parse::<jiff::Timestamp>().map_err(|_| "invalid sample timestamp")?;' 'let _ = at;'
+mutate crates/store/src/health.rs '            let start = size.saturating_sub(TAIL_BYTES);' '            let start = 0;'
+# Recorded delivery is not evidence that an agent executed the answer.
+mutate crates/store/src/delivery.rs 'self.stage == Stage::Written' 'true'
+mutate crates/store/src/delivery.rs 'latest.remove(id);' 'let _ = id;'
+mutate crates/store/src/delivery.rs '|| receipt.intent.verb != "ask.answer"' '|| false'
+mutate crates/store/src/delivery.rs '|| receipt.signed_at.parse::<jiff::Timestamp>().is_err()' '|| false'
+mutate crates/view/src/screens/web_today.rs 'section.errors.iter().take(8)' 'section.errors.iter()'
+mutate crates/view/src/screens/web_today.rs 'section.data.iter().flatten().take(8)' 'section.data.iter().flatten()'
+mutate crates/view/src/screens/health_web.rs '== Some(true)' '== Some(false)'
+mutate crates/view/src/screens/health_web.rs 'percent(lane, "used").is_some_and(|n| n >= 80.0)' 'false'
+mutate crates/view/src/screens/health_web.rs '|| !provider_scope_complete(c)' '|| false'
+mutate crates/store/src/health.rs 'errors.push(SourceError { at: format!("{}:record {} in tail", text.source, index + 1), reason })' 'let _ = reason;'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

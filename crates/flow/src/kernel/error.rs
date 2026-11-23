@@ -193,6 +193,9 @@ pub enum Refusal {
     /// An answers source that exists could not be read, and none that was read holds the answer.
     #[error("The answers ledger could not be read at {at} ({detail}), so the ask's answer is unknown.")]
     AnswersUnread { at: String, detail: String },
+    /// A branch answer lacks a valid owner proof.
+    #[error("The answer to {ask_id} at {at} has no valid owner proof ({detail}).")]
+    AnswerUnproven { ask_id: String, at: String, detail: String },
     /// An answer already exists or is waiting to land.
     #[error("The ask {ask_id} has an answer and cannot be amended.")]
     AskAmendAnswered { ask_id: String },
@@ -276,6 +279,7 @@ impl Refusal {
             Refusal::AskUnconfirmed { .. } => "ask_unconfirmed",
             Refusal::AskAmbiguous { .. } => "ask_ambiguous",
             Refusal::AnswersUnread { .. } => "answers_unread",
+            Refusal::AnswerUnproven { .. } => "answer_unproven",
             Refusal::AskAmendAnswered { .. } => "ask_amend_answered",
             Refusal::AskAmendUnread { .. } => "ask_amend_unread",
             Refusal::AskAmendClosed { .. } => "ask_amend_closed",

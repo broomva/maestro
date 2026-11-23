@@ -68,10 +68,17 @@ impl Owner {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/state/maestro/answers-checkout"));
-        let t3 = std::env::var_os("MAESTRO_T3_BIN")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| Some(home.join(".t3/bin/t3")).filter(|p| p.exists()));
+        // MAESTRO_T3_BIN, else the CLI of the T3 server running at each wake.
+        let t3 = match std::env::var_os("MAESTRO_T3_BIN").filter(|v| !v.is_empty()) {
+            Some(bin) => answers::T3::Fixed(PathBuf::from(bin)),
+            None => answers::T3::Active(
+                std::env::var_os("T3CODE_HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".t3")),
+            ),
+        };
+        let t3 = Some(t3);
         let remote = std::env::var("MAESTRO_ANSWERS_LOCAL").ok().as_deref() != Some("1");
         let writer = Writer { workspace, asks, checkout, owner_dir: dir.clone(), t3, remote };
         let owner = Self::claim(party, dir, writer)?;
@@ -106,7 +113,7 @@ impl Owner {
         };
         owner.recover();
         if Keyring::load(&owner.dir).is_ok_and(|k| k.credentials.is_empty()) {
-            let code = passkey::nonce()[..8].to_ascii_uppercase();
+            let code = setup_code();
             eprintln!("maestro: set up the owner's passkey at {}/owner with the code {code}", owner.party.origin);
             let _ = std::fs::create_dir_all(&owner.dir);
             let _ = std::fs::write(owner.dir.join("setup-code"), format!("{code}\n"));
@@ -234,7 +241,7 @@ impl Owner {
         if keyring.credentials.is_empty() {
             return Err("no passkey is set up yet".into());
         }
-        let ledger = store.ask_ledger(&req.ledger)?.ok_or("no such ledger")?;
+        let ledger = store.ask_ledger_overlay(&req.ledger)?.ok_or("no such ledger")?;
         let ask = maestro_store::answer::find(&ledger, &maestro_store::answer::Select { handle: &req.handle })
             .map_err(|e| e.to_string())?;
         if ask.hash() != req.hash {
@@ -324,6 +331,15 @@ pub struct AnswerBegin {
     pub note: String,
 }
 
+/// A setup code a person can read off a log and type on a phone: eight characters from an
+/// alphabet with no look-alikes (no 0, O, 1 or I) and no punctuation.
+fn setup_code() -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut b = [0u8; 8];
+    getrandom::fill(&mut b).expect("the system's random source");
+    b.iter().map(|x| char::from(ALPHABET[usize::from(x % 32)])).collect()
+}
+
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -395,6 +411,51 @@ mod tests {
         assert!(o.answer_finish(&nonce, &sign(&challenge), now).is_err(), "a spent request");
         // A nonce never issued is refused.
         assert!(o.answer_finish("never", &sign(&challenge), now).is_err());
+    }
+
+    #[test]
+    fn answer_begin_accepts_an_open_ask_on_the_ledger_branch() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(ws.join(".control/asks")).unwrap();
+        std::fs::write(ws.join(".control/asks/main.yaml"), "asks: []\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&ws)
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "main"]);
+        git(&["checkout", "-qb", "maestro/ledger"]);
+        std::fs::write(
+            ws.join(".control/asks/branch.yaml"),
+            "asks:\n  - id: a\n    ask: Go?\n    options:\n      - id: yes\n        label: Yes\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "file"]);
+        git(&["checkout", "-q", "main"]);
+        let mut paths = maestro_store::Paths::under(d.path());
+        paths.workspace = ws;
+        let store = maestro_store::Store::new(paths, maestro_store::TreeSource::GitRev("main".into()));
+        let row =
+            store.asks().data.unwrap().into_iter().find(|l| l.file == "branch.yaml").unwrap().ledger.asks.remove(0);
+        let o = owner(d.path());
+        keyring().save(&o.dir).unwrap();
+        let req = AnswerBegin {
+            ledger: "branch.yaml".into(),
+            handle: "a".into(),
+            hash: row.hash(),
+            option: "yes".into(),
+            note: String::new(),
+        };
+        assert!(o.answer_begin(&store, &req).is_ok());
     }
 
     #[test]
@@ -492,6 +553,15 @@ mod tests {
         k.credentials[0].rp_id = "old.example".into();
         k.save(&o.dir).unwrap();
         assert_eq!(o.state(), maestro_view::render::Owner::Enroll);
+    }
+
+    #[test]
+    fn a_setup_code_has_no_look_alikes_or_punctuation() {
+        for _ in 0..200 {
+            let c = setup_code();
+            assert_eq!(c.len(), 8);
+            assert!(c.bytes().all(|b| b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(&b)), "{c}");
+        }
     }
 
     #[test]

@@ -271,7 +271,7 @@ fn an_answer_in_the_working_tree_waits_to_land() {
     assert!(html.contains("at least 7 open · at least 1 answered, not yet landed"), "{html}");
     assert!(
         html.contains(
-            r#"<p class="mv-banner-title">at least 1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"#
+            r#"<p class="mv-banner-title">at least 1 answered and in effect, not yet on <span class="bv-code">"#
         ),
         "{html}"
     );
@@ -562,7 +562,7 @@ fn a_waiting_answer_is_placed_by_the_plugins_key_not_its_text() {
     // One project's open count stands alone; the checkout's count is the banner's, and it says so.
     assert!(html.contains(">2 open<"), "{html}");
     assert!(
-        html.contains(r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"#),
+        html.contains(r#"<p class="mv-banner-title">1 answered and in effect, not yet on <span class="bv-code">"#),
         "{html}"
     );
     assert!(html.contains("Counted for the whole checkout, not this project alone."), "{html}");
@@ -614,6 +614,8 @@ fn an_answer_on_the_answers_branch_waits_to_land() {
     // Paseo's plugin lands an answer on maestro/answers before its batch PR merges (spec R2).
     let m = machine();
     let ws = m.path().join("workspace");
+    std::fs::remove_file(ws.join(".control/asks/broken.yaml")).unwrap();
+    std::fs::remove_file(ws.join(".control/asks/alt-key.yaml")).unwrap();
     git(&ws, &["init", "-q", "-b", "main"]);
     git(&ws, &["add", "."]);
     git(&ws, &["commit", "-q", "-m", "seed"]);
@@ -632,9 +634,9 @@ fn an_answer_on_the_answers_branch_waits_to_land() {
     git(&ws, &["checkout", "-q", "main"]);
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
-    assert!(d.contains("it reaches main with the next landing PR") && !d.contains("mv-answerbar"), "{d}");
+    assert!(d.contains("Answered:") && !d.contains("mv-answerbar"), "{d}");
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("or on maestro/answers"), "{html}");
+    assert!(html.contains("1 answered and in effect, not yet on <span class=\"bv-code\">"), "{html}");
 }
 
 #[test]
@@ -678,15 +680,10 @@ fn an_answers_branch_that_does_not_read_is_unavailable_never_none() {
     // No local asks directory either: the branch was the only place answers could wait.
     std::fs::remove_dir_all(m.path().join("workspace/.control/asks")).unwrap();
     let html = render(&store, &inbox()).html;
-    assert!(html.contains(r#"answered, not yet landed: <span class="mv-unavailable">unavailable</span>"#), "{html}");
-    assert!(
-        html.contains("Answers given and not yet landed could not be read. This is not the same as none."),
-        "{html}"
-    );
+    assert!(html.contains(r#"data-state="unavailable""#), "{html}");
+    assert!(html.contains("Could not be read. This is not the same as none."), "{html}");
     assert!(!html.contains("mv-answerbar"), "{html}");
     let d = render(&store, &detail("decisions.yaml", "fleet-cost-1")).html;
-    assert!(d.contains(r#"data-state="partial""#), "{d}");
-    assert!(d.contains("Maestro cannot tell for sure whether this ask is answered"), "{d}");
     assert!(!d.contains("mv-answerbar"), "{d}");
 }
 
@@ -696,7 +693,7 @@ fn a_broken_ledger_on_the_answers_branch_makes_only_its_asks_unknown() {
         std::fs::write(asks.join("decisions.yaml"), "asks: [unclosed\n").unwrap();
     });
     let html = render(&store, &inbox()).html;
-    assert_eq!(html.matches("Not offered here").count(), 4, "decisions.yaml's open asks: {html}");
+    assert!(!html.contains("data-ask=\"decisions.yaml#fleet-cost-1\""), "{html}");
     let demo = render(&store, &detail("demo-arc.yaml", "merge-now")).html;
     assert!(demo.contains("mv-answerbar"), "{demo}");
     // The branch's error is labelled with the branch, never as the tree read's own.
@@ -722,18 +719,13 @@ fn no_screen_claims_an_ask_is_unanswered() {
     assert!(d.contains("shows whether it has been answered since"), "{d}");
     assert!(!d.contains("(recommended:") && !d.contains("To answer"), "{d}");
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("Paseo may hold answers in other checkouts, which this screen does not read."), "{html}");
-    assert!(
-        html.contains(
-            "0 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"
-        ),
-        "{html}"
-    );
+    assert!(html.contains("Answers waiting in other checkouts are not counted here."), "{html}");
+    assert!(html.contains("0 answered and in effect, not yet on <span class=\"bv-code\">"), "{html}");
     assert!(!html.contains("waiting to land<"), "{html}");
     // Reading the working tree itself, no landing count is made and the branch is said unread.
     let m = machine();
     let wt = render(&worktree(m.path()), &inbox()).html;
-    assert!(wt.contains("Answers on maestro/answers are not read here."), "{wt}");
+    assert!(wt.contains("Answers waiting to land, here or in other checkouts, are not counted."), "{wt}");
     assert!(!wt.contains("answered, not yet landed"), "{wt}");
 }
 
@@ -778,10 +770,10 @@ fn an_answers_branch_that_does_not_resolve_is_unread_never_absent() {
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let snap = maestro_store::views::snapshot(&store);
     let asks = snap.asks;
-    assert_eq!(asks.data.unwrap().unlanded, None);
-    assert!(asks.errors.iter().any(|e| e.at.starts_with("maestro/answers:")), "{:?}", asks.errors);
+    assert!(asks.data.is_none());
+    assert!(asks.errors.iter().any(|e| e.at.starts_with("maestro/answers")), "{:?}", asks.errors);
     let html = render(&store, &inbox()).html;
-    assert!(html.contains(r#"answered, not yet landed: <span class="mv-unavailable">unavailable</span>"#), "{html}");
+    assert!(html.contains(r#"data-state="unavailable""#), "{html}");
 }
 
 #[test]
@@ -794,8 +786,8 @@ fn a_broken_branch_ref_over_a_packed_one_is_unread_never_absent() {
     std::fs::write(ws.join(".git/refs/heads/maestro/answers"), "").unwrap();
     let store = Store::new(Paths::under(m.path().to_path_buf()), TreeSource::GitRev("main".into()));
     let asks = maestro_store::views::snapshot(&store).asks;
-    assert_eq!(asks.data.unwrap().unlanded, None);
-    assert!(asks.errors.iter().any(|e| e.at.starts_with("maestro/answers:")), "{:?}", asks.errors);
+    assert!(asks.data.is_none());
+    assert!(asks.errors.iter().any(|e| e.at.starts_with("maestro/answers")), "{:?}", asks.errors);
 }
 
 #[test]
@@ -824,7 +816,7 @@ fn asks_sharing_a_key_are_unknown_and_their_one_answer_waits_once() {
     // two asks the answer waits for is not known.
     assert!(html.contains(">at least 2 open<"), "{html}");
     assert!(
-        html.contains(r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"#),
+        html.contains(r#"<p class="mv-banner-title">1 answered and in effect, not yet on <span class="bv-code">"#),
         "{html}"
     );
     assert_eq!(maestro_store::views::snapshot(&store).asks.data.unwrap().unlanded, Some(1));
@@ -881,7 +873,7 @@ fn an_unread_waiting_count_is_none_never_zero() {
         std::fs::write(asks, "not a directory").unwrap();
     });
     let snap = maestro_store::views::snapshot(&store);
-    assert_eq!(snap.asks.data.unwrap().unlanded, None);
+    assert!(snap.asks.data.is_none());
 }
 
 #[test]
@@ -901,7 +893,7 @@ fn a_branch_answer_waits_even_with_no_local_asks_directory() {
     });
     std::fs::remove_dir_all(m.path().join("workspace/.control/asks")).unwrap();
     let html = render(&store, &inbox()).html;
-    assert!(html.contains("Waiting to land</span>"), "{html}");
+    assert!(html.contains("1 answered and in effect, not yet on"), "{html}");
 }
 
 #[test]
@@ -934,9 +926,7 @@ fn an_answer_to_an_ask_the_tree_does_not_hold_is_counted_for_the_checkout_never_
         let html = render(&store, &spec(json!({ "type": "decisions", "props": { "project": project } }))).html;
         assert!(!html.contains("answered, not yet landed"), "{html}");
         assert!(
-            html.contains(
-                r#"<p class="mv-banner-title">1 answered in this checkout or on maestro/answers (this clone's, or origin's as last fetched), not yet on"#
-            ),
+            html.contains(r#"<p class="mv-banner-title">1 answered and in effect, not yet on <span class="bv-code">"#),
             "{html}"
         );
         assert!(html.contains("Counted for the whole checkout, not this project alone."), "{html}");
@@ -998,4 +988,40 @@ fn outside_the_web_pages_an_open_decision_links_to_the_answer_page() {
     let v = validate(&detail("demo-arc.yaml", "old-one")).unwrap();
     let html = maestro_view::render_app(&store, &v, at(), Some("https://mac.example.ts.net:7443")).html;
     assert!(!html.contains("data-open-link"), "{html}");
+}
+
+#[test]
+fn a_branch_only_ask_is_open_and_says_it_is_filed() {
+    let m = machine();
+    let ws = m.path().join("workspace");
+    git(&ws, &["init", "-q", "-b", "main"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-qm", "main"]);
+    git(&ws, &["checkout", "-qb", "maestro/ledger"]);
+    std::fs::write(ws.join(".control/asks/branch.yaml"), "arc: branch\nasks:\n  - id: waiting\n    ask: Ship?\n    class: decision\n    options:\n      - id: yes\n        label: Yes\n").unwrap();
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-qm", "file"]);
+    git(&ws, &["checkout", "-q", "main"]);
+    let store = Store::new(Paths::under(m.path()), TreeSource::GitRev("main".into()));
+    let inbox = render(&store, &inbox());
+    assert!(inbox.html.contains("Filed and waiting to land"), "{}", inbox.html);
+    let decision = render(&store, &detail("branch.yaml", "waiting"));
+    assert!(decision.html.contains("Filed and waiting to land on main."), "{}", decision.html);
+    assert!(!decision.html.contains("The answer is in effect"));
+    git(&ws, &["checkout", "-q", "maestro/ledger"]);
+    let path = ws.join(".control/asks/branch.yaml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        original.replace(
+            "    ask: Ship?",
+            "    answer: Yes\n    answer_option: yes\n    answered_at: 2026-11-22T00:00:00Z\n    ask: Ship?",
+        ),
+    )
+    .unwrap();
+    git(&ws, &["commit", "-qam", "answer"]);
+    git(&ws, &["checkout", "-q", "main"]);
+    let answered = render(&store, &detail("branch.yaml", "waiting"));
+    assert!(answered.html.contains("Answered"), "{}", answered.html);
+    assert!(!answered.html.contains("Filed and waiting to land"));
 }

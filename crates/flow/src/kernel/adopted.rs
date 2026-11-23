@@ -45,7 +45,11 @@ fn other() -> VerifiedSession {
 }
 
 fn adopt(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId, filing: Option<&Filing>) -> Result<Proposed, KernelError> {
-    propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false })
+    let result = propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false });
+    if matches!(&result, Ok(Proposed::Waiting { appended: Some(_), .. })) {
+        f.mirror_filed();
+    }
+    result
 }
 
 fn retire(
@@ -54,16 +58,30 @@ fn retire(
     fi: &InstanceId,
     filing: Option<&Filing>,
 ) -> Result<Proposed, KernelError> {
-    propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false })
+    let result = propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing, again: false });
+    if matches!(&result, Ok(Proposed::Waiting { appended: Some(_), .. })) {
+        f.mirror_filed();
+    }
+    result
 }
 
 /// Proposes adoption again, with the fixture's filing, in place of a declined or stale proposal.
 fn adopt_again(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId) -> Result<Proposed, KernelError> {
-    propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true })
+    let result =
+        propose_adoption(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true });
+    if matches!(&result, Ok(Proposed::Waiting { appended: Some(_), .. })) {
+        f.mirror_filed();
+    }
+    result
 }
 
 fn retire_again(f: &mut Fx, who: &VerifiedSession, fi: &InstanceId) -> Result<Proposed, KernelError> {
-    propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true })
+    let result =
+        propose_retirement(&mut f.ledger, &f.paths, who, fi, Proposing { filing: Some(&proposing()), again: true });
+    if matches!(&result, Ok(Proposed::Waiting { appended: Some(_), .. })) {
+        f.mirror_filed();
+    }
+    result
 }
 
 /// The ask id of a linked proposal: the call said waiting and linked it.
@@ -202,6 +220,7 @@ fn an_approved_adoption_hands_the_instance_to_the_new_owner() {
     }
     let options: Vec<&str> = body["options"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert_eq!((options, &body["default"]), (vec!["adopt", "keep"], &json!("keep")));
+    assert_eq!(body["options"][1]["recommended"], true);
     let log = std::fs::read_to_string(f.flows.join("instances").join(fi.as_str()).join("events.jsonl")).unwrap();
     for marker in ["marker-1", "marker-9"] {
         assert!(!f.ledger_text().contains(marker) && !log.contains(marker), "a marker was written");
@@ -542,6 +561,99 @@ fn a_writer_refusal_withdraws_the_proposal_and_the_next_call_proposes_anew() {
 }
 
 #[test]
+fn a_linked_proposal_does_not_reset_stop_gate_counts() {
+    // A proposal filed and linked (another session's, say) changes only the proposal: the
+    // owner's refusal count keeps running to its release (adoption::BOOKKEEPING).
+    use crate::kernel::stop::{self, MAX_REFUSALS, Refusals};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let assess = |f: &Fx| {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| super::asks::AnswerSeen::Open)
+            .unwrap()
+    };
+    for round in 0..MAX_REFUSALS {
+        let assessment = assess(&f);
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        assert_eq!(counts.tally(&[&assessment]).refused, [fi.to_string()], "round {round}");
+        counts.save(&guard, &me).unwrap();
+        drop(guard);
+        if round == 0 {
+            retire(&mut f, &me, &fi, Some(&proposing())).unwrap();
+            assert_eq!(f.kinds(&fi)[f.kinds(&fi).len() - 2..], ["ProposalPinned", "ProposalLinked"]);
+        }
+    }
+    let assessment = assess(&f);
+    let guard = f.ledger.lock().unwrap();
+    let mut counts = Refusals::load(&guard, &me).unwrap();
+    assert_eq!(counts.tally(&[&assessment]).spent, [fi.to_string()]);
+}
+
+/// Proposal bookkeeping before the gate's release and after it: the count runs to its release,
+/// the release holds, and the next stop finds the release already recorded (no second record,
+/// no second alert).
+#[test]
+fn bookkeeping_around_the_gates_release_neither_rearms_nor_repeats_it() {
+    use crate::kernel::events::Unblockable;
+    use crate::kernel::stop::{self, MAX_REFUSALS, Recorded, Refusals};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let tally = |f: &mut Fx| {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        let a = stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| {
+            super::asks::AnswerSeen::Open
+        })
+        .unwrap();
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        let t = counts.tally(&[&a]);
+        counts.save(&guard, &me).unwrap();
+        t
+    };
+    retire(&mut f, &me, &fi, Some(&proposing())).unwrap();
+    for round in 0..MAX_REFUSALS {
+        assert_eq!(tally(&mut f).refused, [fi.to_string()], "round {round}");
+    }
+    assert_eq!(tally(&mut f).spent, [fi.to_string()]);
+    let first = stop::record(&mut f.ledger, &me, &fi, "claude", Unblockable::NoProgress, &[fi.to_string()]).unwrap();
+    let Recorded::Appended(_) = first else { panic!("the release was not recorded: {first:?}") };
+    push_proposal(&mut f.ledger, &fi, "retirement", &me, &other(), 0, "flow-retire-after");
+    assert_eq!(tally(&mut f).spent, [fi.to_string()], "bookkeeping after the release re-armed the gate");
+    let again = stop::record(&mut f.ledger, &me, &fi, "claude", Unblockable::NoProgress, &[fi.to_string()]).unwrap();
+    assert!(matches!(again, Recorded::Already { .. }), "bookkeeping made a second record: {again:?}");
+}
+
+#[test]
+fn refused_proposals_do_not_reset_stop_gate_counts() {
+    use crate::kernel::stop::{self, MAX_REFUSALS, Refusals};
+    let (mut f, fi, _clock) = started();
+    let me = f.me.clone();
+    let mut bad = proposing();
+    bad.body.insert("stakes".into(), json!("STUB-INVALID"));
+    for _ in 0..MAX_REFUSALS {
+        let reader = Reader::new(&f.flows, Options::default()).unwrap();
+        let assessment = stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| {
+            super::asks::AnswerSeen::Open
+        })
+        .unwrap();
+        let guard = f.ledger.lock().unwrap();
+        let mut counts = Refusals::load(&guard, &me).unwrap();
+        assert_eq!(counts.tally(&[&assessment]).refused, [fi.to_string()]);
+        counts.save(&guard, &me).unwrap();
+        drop(guard);
+        assert!(matches!(retire(&mut f, &me, &fi, Some(&bad)).unwrap(), Proposed::Withdrawn { .. }));
+    }
+    let reader = Reader::new(&f.flows, Options::default()).unwrap();
+    let assessment =
+        stop::assess_instance(&reader.lock().unwrap(), &fi, crate::clock::now(), &|_, _| super::asks::AnswerSeen::Open)
+            .unwrap();
+    let guard = f.ledger.lock().unwrap();
+    let mut counts = Refusals::load(&guard, &me).unwrap();
+    assert_eq!(counts.tally(&[&assessment]).spent, [fi.to_string()]);
+}
+
+#[test]
 fn the_flows_lock_is_free_while_a_proposal_is_filed() {
     // BRO-3624 item 1: the writer of record checks, while it runs, that it can take both OS locks
     // a flows writer holds.
@@ -552,11 +664,13 @@ fn the_flows_lock_is_free_while_a_proposal_is_filed() {
         root = f.flows,
     );
     std::fs::write(f.ws.join("scripts/ask_ledger.py"), wrapper(&check)).unwrap();
+    f.commit();
+    git(&f.ws, &["push", "-q", "origin", "main"]);
     linked(&adopt(&mut f, &other(), &fi, Some(&proposing())).unwrap());
-    assert!(f.ws.join("scripts/checked").exists(), "the writer checked the locks");
-    std::fs::remove_file(f.ws.join("scripts/checked")).unwrap();
+    assert!(f.paths.ledger_checkout.join("scripts/checked").exists(), "the writer checked the locks");
+    std::fs::remove_file(f.paths.ledger_checkout.join("scripts/checked")).unwrap();
     linked(&retire(&mut f, &other(), &fi, Some(&proposing())).unwrap());
-    assert!(f.ws.join("scripts/checked").exists(), "the writer checked the locks");
+    assert!(f.paths.ledger_checkout.join("scripts/checked").exists(), "the writer checked the locks");
 }
 
 #[test]
@@ -605,16 +719,18 @@ fn a_proposal_that_changed_while_it_was_filed_records_nothing() {
     // Between filing (flows lock released) and linking, the proposal was withdrawn, or replaced by
     // another of the same session's: nothing is linked to a proposal that no longer stands.
     for replaced in [false, true] {
-        let hold = "open(os.path.join(HERE, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(HERE, 'go')):\n    time.sleep(0.01)";
+        let hold = "P = os.path.dirname(os.path.dirname(HERE))\nopen(os.path.join(P, 'reached'), 'w').write('1')\nimport time\nwhile not os.path.exists(os.path.join(P, 'go')):\n    time.sleep(0.01)";
         let (mut f, fi, _clock) = started();
         std::fs::write(f.ws.join("scripts/ask_ledger.py"), wrapper(hold)).unwrap();
+        f.commit();
+        git(&f.ws, &["push", "-q", "origin", "main"]);
         let (paths, flows, fi2) = (f.paths.clone(), f.flows.clone(), fi.clone());
         let filer = std::thread::spawn(move || {
             let mut ledger = Ledger::open(&flows, &host("mac"), Options::default()).unwrap();
             let asking = Proposing { filing: Some(&proposing()), again: false };
             code(propose_adoption(&mut ledger, &paths, &other(), &fi2, asking))
         });
-        let reached = f.ws.join("scripts/reached");
+        let reached = f.tmp.path().join("reached");
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !reached.exists() {
             assert!(std::time::Instant::now() < until, "the writer never ran");
@@ -628,7 +744,7 @@ fn a_proposal_that_changed_while_it_was_filed_records_nothing() {
             again["ask_id"] = json!("flow-adopt-replaced");
             append_raw(&mut f, &fi, "ProposalPinned", again);
         }
-        std::fs::write(f.ws.join("scripts/go"), "").unwrap();
+        std::fs::write(f.tmp.path().join("go"), "").unwrap();
         assert_eq!(filer.join().unwrap(), "proposal_changed", "replaced: {replaced}");
         assert!(!f.kinds(&fi).iter().any(|k| k == "ProposalLinked"), "nothing linked");
     }

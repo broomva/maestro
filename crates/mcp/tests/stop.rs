@@ -32,6 +32,25 @@ nodes:
   two: {class: pure, run: ['true'], needs: [one]}
 "#;
 
+fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
 /// A scratch machine: a workspace with `.broomva/` and an asks ledger whose writer of record is
 /// the stub, a work folder, and a Direct registry with two live sessions there.
 struct Fx {
@@ -53,6 +72,15 @@ fn fx() -> Fx {
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/requests");
     std::fs::copy(fixtures.join("ledger.yaml"), ws.join(".broomva/asks/ledger.yaml")).unwrap();
     std::fs::copy(fixtures.join("ask_ledger_stub.py"), ws.join("scripts/ask_ledger.py")).unwrap();
+    for args in [&["init", "-q", "-b", "main"][..], &["add", "."][..], &["commit", "-qm", "seed"][..]] {
+        let out = git(&ws, args);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let origin = root.join("origin.git");
+    assert!(git(&root, &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]).status.success());
+    assert!(git(&ws, &["remote", "add", "origin", origin.to_str().unwrap()]).status.success());
+    assert!(git(&ws, &["push", "-q", "origin", "main"]).status.success());
+    assert!(git(&ws, &["fetch", "-q", "origin"]).status.success());
     let work = root.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let direct = DirectRegistry::new();
@@ -136,7 +164,13 @@ impl Fx {
     }
 
     fn ledger(&self) -> String {
-        std::fs::read_to_string(self.root.join("workspace/.broomva/asks/ledger.yaml")).unwrap()
+        let ws = self.root.join("workspace");
+        let result = git(&ws, &["show", "refs/remotes/origin/maestro/ledger:.broomva/asks/ledger.yaml"]);
+        if result.status.success() {
+            String::from_utf8(result.stdout).unwrap()
+        } else {
+            std::fs::read_to_string(ws.join(".broomva/asks/ledger.yaml")).unwrap()
+        }
     }
 }
 
@@ -224,8 +258,39 @@ fn the_fourth_stop_at_one_position_goes_through_recorded_and_alerted() {
     // `status` reports it.
     let status = f.call(STATUS, json!({ "instance": fi }));
     assert_eq!(status["status"]["stop_unblockable"].as_array().unwrap().len(), 1, "{status}");
-    // The record moved the instance, so the count starts again: refused anew.
-    assert!(f.gate_as("d1", Harness::Claude, &claude_stop()).blocked);
+    // The gate's own record does not re-arm it.
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert_eq!(f.events(&fi).len(), 2);
+}
+
+#[test]
+fn released_instance_stays_released_and_other_work_is_reported() {
+    let f = fx();
+    let first = f.begin("d1");
+    for _ in 0..3 {
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let second = f.begin("d1");
+    let reason = refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert!(reason.contains(&second), "{reason}");
+    assert!(!reason.contains(&first), "{reason}");
+}
+
+#[test]
+fn released_instance_rearms_after_a_new_event() {
+    let f = fx();
+    let fi = f.begin("d1");
+    for _ in 0..3 {
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let claim = f.call(CLAIM, f.as_("d1", json!({ "instance": fi, "node_id": "one" })));
+    assert_eq!(claim["ok"], true, "{claim}");
+    let reason = refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert!(reason.contains(&fi), "{reason}");
 }
 
 #[test]
@@ -364,8 +429,9 @@ fn the_gate_fails_open() {
     std::fs::remove_file(&file).unwrap();
     std::fs::create_dir(&file).unwrap();
     let out = f.gate_as("d1", Harness::Claude, &claude_stop());
-    allowed(&out);
-    assert!(out.notes.iter().any(|n| n.starts_with("maestro stop-gate: refusals_unread:")), "{out:?}");
+    let reason = refusal(&out);
+    assert!(reason.contains("unreadable") && reason.contains("stop-gate"), "{reason}");
+    assert!(out.notes.iter().any(|n| n.contains("saved as")), "{out:?}");
 
     // Refusal counts that cannot be written: their folder takes no new file (the count and its lock
     // were made by a first stop, so they still open).
@@ -705,4 +771,163 @@ fn a_shared_lock_held_too_long_fails_open_with_refusals_busy() {
     );
     assert_eq!(out.alerts.len(), 1, "{out:?}");
     assert!(elapsed < std::time::Duration::from_secs(8), "waited {elapsed:?}");
+}
+
+#[test]
+fn corrupt_and_truncated_counts_are_quarantined_and_bounded() {
+    for bad in ["not json", "{\"session\":"] {
+        let f = fx();
+        f.begin("d1");
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+        let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+        let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        std::fs::write(&file, bad).unwrap();
+        let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+        let reason = refusal(&out);
+        assert!(
+            reason.contains("unreadable") && reason.contains("stop-gate/") && reason.contains("saved aside"),
+            "{reason}"
+        );
+        assert!(out.notes.iter().any(|n| n.contains("corrupt") && n.contains("saved as")), "{out:?}");
+        assert_eq!(out.alerts.len(), 1);
+        assert!(
+            std::fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(".corrupt."))
+        );
+        for _ in 0..2 {
+            refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+        }
+        allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+}
+
+#[test]
+fn unreadable_count_variants_are_quarantined_and_bounded() {
+    for kind in ["directory", "symlink", "too_large"] {
+        let f = fx();
+        f.begin("d1");
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+        let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+        let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        std::fs::remove_file(&file).unwrap();
+        match kind {
+            "directory" => std::fs::create_dir(&file).unwrap(),
+            "symlink" => std::os::unix::fs::symlink("missing", &file).unwrap(),
+            _ => std::fs::write(&file, vec![b'x'; (1 << 20) + 1]).unwrap(),
+        }
+        let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+        assert!(refusal(&out).contains("saved aside"), "{kind}: {out:?}");
+        assert_eq!(out.alerts.len(), 1, "{kind}");
+        for _ in 0..2 {
+            refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+        }
+        allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+}
+
+#[test]
+fn quarantine_failure_fails_open_and_alerts() {
+    use std::os::unix::fs::PermissionsExt;
+    if std::process::Command::new("id").arg("-u").output().unwrap().stdout == b"0\n" {
+        return;
+    }
+    let f = fx();
+    f.begin("d1");
+    refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(&file, "broken").unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    allowed(&out);
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.contains("quarantine failed") && n.contains(file.file_name().unwrap().to_str().unwrap())),
+        "{out:?}"
+    );
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+#[test]
+fn repeated_quarantines_are_bounded_and_share_an_alert() {
+    let f = fx();
+    f.begin("d1");
+    refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    let mut alert = None;
+    let mut oldest = None;
+    for n in 0..6 {
+        std::fs::write(&file, format!("broken {n}")).unwrap();
+        let out = f.gate_as("d1", Harness::Claude, &claude_stop());
+        refusal(&out);
+        assert_eq!(out.alerts.len(), 1, "{out:?}");
+        if let Some(id) = &alert {
+            assert_eq!(id, &out.alerts[0]);
+        }
+        alert = Some(out.alerts[0].clone());
+        let count = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains(".corrupt."))
+            .count();
+        assert_eq!(count, (n + 1).min(maestro_flow::kernel::stop::MAX_QUARANTINED), "round {n}");
+        if n == 0 {
+            let path = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.to_string_lossy().contains(".corrupt."))
+                .unwrap();
+            let times = std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH);
+            std::fs::File::open(&path).unwrap().set_times(times).unwrap();
+            oldest = Some(path);
+        }
+        if n == maestro_flow::kernel::stop::MAX_QUARANTINED {
+            assert!(!oldest.as_ref().unwrap().exists(), "oldest quarantine remains");
+        }
+    }
+}
+
+#[test]
+fn release_is_pruned_when_instance_finishes() {
+    let f = fx();
+    let fi = f.begin("d1");
+    for _ in 0..3 {
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    assert!(std::fs::read_to_string(&file).unwrap().contains(&fi));
+    std::fs::write(f.work.join("ok"), "").unwrap();
+    for node in ["one", "two"] {
+        let c = f.call(CLAIM, f.as_("d1", json!({ "instance": fi, "node_id": node })));
+        let done = f.call(COMPLETE, f.as_("d1", json!({ "claim_token": c["claim_token"] })));
+        assert_eq!(done["ok"], true, "{done}");
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert!(!std::fs::read_to_string(&file).unwrap().contains(&fi));
+}
+
+#[test]
+fn release_is_pruned_while_other_work_remains() {
+    let f = fx();
+    let fi = f.begin("d1");
+    for _ in 0..3 {
+        refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    }
+    allowed(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    let dir = f.root.join("workspace/.broomva/flows/stop-gate");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(f.work.join("ok"), "").unwrap();
+    for node in ["one", "two"] {
+        let c = f.call(CLAIM, f.as_("d1", json!({ "instance": fi, "node_id": node })));
+        let done = f.call(COMPLETE, f.as_("d1", json!({ "claim_token": c["claim_token"] })));
+        assert_eq!(done["ok"], true, "{done}");
+    }
+    let other = f.begin("d1");
+    let reason = refusal(&f.gate_as("d1", Harness::Claude, &claude_stop()));
+    assert!(reason.contains(&other));
+    let counts = std::fs::read_to_string(&file).unwrap();
+    assert!(!counts.contains(&fi) && counts.contains(&other), "{counts}");
 }
